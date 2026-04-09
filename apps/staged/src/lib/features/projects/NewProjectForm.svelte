@@ -40,6 +40,7 @@
   let branchName = $state('');
   let isNewBranch = $state(false);
   let matchedPr = $state<PullRequest | null>(null);
+  let defaultBranch = $state<string | null>(null);
 
   let saving = $state(false);
   let error = $state<string | null>(null);
@@ -90,7 +91,8 @@
         selectedRepo ?? undefined,
         normalizedSubpath,
         normalizedBranch,
-        prNumber
+        prNumber,
+        defaultBranch ?? undefined
       );
       onCreated(project);
     } catch (e) {
@@ -192,6 +194,7 @@
     bind:branchName
     bind:isNewBranch
     bind:matchedPr
+    bind:defaultBranch
     bind:api={repoConfigApi}
     disabled={saving}
     repoRequired={location === 'remote'}

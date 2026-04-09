@@ -29,6 +29,8 @@
     branchName?: string;
     isNewBranch?: boolean;
     matchedPr?: PullRequest | null;
+    /** Pre-fetched default branch for the selected repo (avoids slow API call during project creation). */
+    defaultBranch?: string | null;
 
     // Config
     disabled?: boolean;
@@ -54,6 +56,7 @@
     branchName = $bindable(''),
     isNewBranch = $bindable(false),
     matchedPr = $bindable(null),
+    defaultBranch = $bindable(null),
     disabled = false,
     excludeRepos,
     autofocus = false,
@@ -114,10 +117,21 @@
   $effect(() => {
     if (selectedRepo) {
       checkIfMonorepo(selectedRepo);
+      prefetchDefaultBranch(selectedRepo);
     } else {
       isMonorepo = false;
+      defaultBranch = null;
     }
   });
+
+  async function prefetchDefaultBranch(repo: string) {
+    try {
+      const branch = await commands.detectDefaultBranch(repo);
+      if (selectedRepo === repo) defaultBranch = branch;
+    } catch {
+      if (selectedRepo === repo) defaultBranch = null;
+    }
+  }
 
   // Expose validation API to parent
   $effect(() => {

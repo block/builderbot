@@ -42,6 +42,7 @@
   import { subscribeDragDrop } from '../branches/dragDrop';
   import { isImageFile } from '../branches/branchCardHelpers';
   import { createImage, createImageFromData, deleteImage, getImageData } from '../../api/commands';
+  import { formatRelativeTime, minuteNow } from '../../shared/relativeTime.svelte';
 
   interface Props {
     project: Project;
@@ -302,7 +303,7 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
       e.preventDefault();
       handleSubmitPrompt();
     }
@@ -340,27 +341,12 @@
       const aIsGenerating = !a.title.trim() && !a.content.trim();
       const bIsGenerating = !b.title.trim() && !b.content.trim();
       if (aIsGenerating !== bIsGenerating) return aIsGenerating ? 1 : -1;
-      return a.createdAt - b.createdAt;
+      return (a.completedAt ?? a.createdAt) - (b.completedAt ?? b.createdAt);
     })
   );
 
   let openNote = $state<{ title: string; content: string; sessionId?: string } | null>(null);
   let openSessionId = $state<string | null>(null);
-
-  function formatRelativeTime(timestampMs: number): string {
-    const date = new Date(timestampMs);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffMins = Math.floor(diffMs / 60000);
-    const diffHours = Math.floor(diffMins / 60);
-    const diffDays = Math.floor(diffHours / 24);
-
-    if (diffMins < 1) return 'just now';
-    if (diffMins < 60) return `${diffMins}m ago`;
-    if (diffHours < 24) return `${diffHours}h ago`;
-    if (diffDays < 7) return `${diffDays}d ago`;
-    return date.toLocaleDateString();
-  }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -563,6 +549,7 @@
 
   <!-- Project notes -->
   {#if projectNotes.length > 0}
+    {@const nowMs = minuteNow.now()}
     <div class="project-notes">
       <div class="notes-header">
         <FileText size={13} />
@@ -580,7 +567,9 @@
               : isFailed
                 ? 'Session finished — no note created'
                 : note.title || 'Untitled note'}
-            secondaryMeta={isRunning || isFailed ? undefined : formatRelativeTime(note.createdAt)}
+            secondaryMeta={isRunning || isFailed
+              ? undefined
+              : formatRelativeTime(note.completedAt ?? note.createdAt, nowMs)}
             deleting={deletingNoteIds.has(note.id)}
             isLast={index === timelineNotes.length - 1}
             sessionId={note.sessionId ?? undefined}

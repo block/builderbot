@@ -157,7 +157,7 @@ describe('computeLineDiff', () => {
       expect(result.modifiedPairs).toHaveLength(1);
       const pair = result.modifiedPairs[0];
 
-      // "1;" -> "2;" are the changed tokens
+      // "1" -> "2" are the changed tokens
       expect(pair.beforeHighlights.length).toBeGreaterThan(0);
       expect(pair.afterHighlights.length).toBeGreaterThan(0);
     });
@@ -410,6 +410,65 @@ describe('computeLineDiff', () => {
       expect(result.afterLines[1]).toBe('added');
       expect(result.afterLines[2]).toBe('added');
       expect(result.modifiedPairs).toHaveLength(0);
+    });
+
+    it('highlights only the trailing comma when value is otherwise identical', () => {
+      const before = ['    "dmg:publish": "node scripts/publish-dmg-to-github-release.mjs"'];
+      const after = ['    "release:dmg:publish": "node scripts/publish-dmg-to-github-release.mjs",'];
+      const result = computeLineDiff(before, after);
+
+      expect(result.modifiedPairs).toHaveLength(1);
+      const pair = result.modifiedPairs[0];
+
+      // Only "release:" prefix and trailing "," should be highlighted on the after side,
+      // NOT the entire value string.
+      const afterHighlightedText = pair.afterHighlights.map(h =>
+        after[0].slice(h.start, h.end),
+      );
+      expect(afterHighlightedText).toContain(',');
+      expect(afterHighlightedText.join('')).toContain('release');
+
+      // The shared value portion should NOT be highlighted
+      const totalHighlighted = pair.afterHighlights.reduce((sum, h) => sum + (h.end - h.start), 0);
+      expect(totalHighlighted).toBeLessThan(after[0].length / 2);
+    });
+
+    it('highlights only the changed accented word', () => {
+      const before = ['le café est bon'];
+      const after = ['le thé est bon'];
+      const result = computeLineDiff(before, after);
+
+      expect(result.modifiedPairs).toHaveLength(1);
+      const pair = result.modifiedPairs[0];
+
+      const beforeHighlightedText = pair.beforeHighlights.map(h =>
+        before[0].slice(h.start, h.end),
+      );
+      expect(beforeHighlightedText).toEqual(['café']);
+
+      const afterHighlightedText = pair.afterHighlights.map(h =>
+        after[0].slice(h.start, h.end),
+      );
+      expect(afterHighlightedText).toEqual(['thé']);
+    });
+
+    it('highlights only the changed emoji', () => {
+      const before = ['status: 🎉 done'];
+      const after = ['status: 🚀 done'];
+      const result = computeLineDiff(before, after);
+
+      expect(result.modifiedPairs).toHaveLength(1);
+      const pair = result.modifiedPairs[0];
+
+      const beforeHighlightedText = pair.beforeHighlights.map(h =>
+        before[0].slice(h.start, h.end),
+      );
+      expect(beforeHighlightedText).toEqual(['🎉']);
+
+      const afterHighlightedText = pair.afterHighlights.map(h =>
+        after[0].slice(h.start, h.end),
+      );
+      expect(afterHighlightedText).toEqual(['🚀']);
     });
 
     it('handles interleaved unchanged and changed lines', () => {

@@ -82,6 +82,7 @@
   // PR status polling state
   let prStatusPollTimer: ReturnType<typeof setInterval> | null = null;
   let prStatusRefreshing = $state(false);
+  let lastImmediateRefreshPrNumber = $state<number | null>(null);
 
   // PR status fields (local state, updated via events)
   let prStatusState = $state<string | null>(null);
@@ -248,7 +249,18 @@
         }
         try {
           prStatusRefreshing = true;
-          await commands.refreshPrStatus(branch.id);
+          let timeoutId: ReturnType<typeof setTimeout>;
+          const timeout = new Promise<never>((_, reject) => {
+            timeoutId = setTimeout(
+              () => reject(new Error('refreshPrStatus timed out after 60s')),
+              60_000
+            );
+          });
+          try {
+            await Promise.race([commands.refreshPrStatus(branch.id), timeout]);
+          } finally {
+            clearTimeout(timeoutId!);
+          }
         } catch (e) {
           console.error(`[BranchCardPrButton] Poll refresh failed for branch=${branch.id}:`, e);
         } finally {
@@ -270,6 +282,26 @@
     };
   });
 
+  // Kick off an immediate refresh whenever this branch gains a PR number.
+  // This covers branches hydrated after mount, such as project/repo creation from an existing PR.
+  $effect(() => {
+    const prNumber = branch.prNumber;
+
+    if (!prNumber) {
+      lastImmediateRefreshPrNumber = null;
+      return;
+    }
+
+    if (!isWindowFocused || prStatusRefreshing || lastImmediateRefreshPrNumber === prNumber) {
+      return;
+    }
+
+    lastImmediateRefreshPrNumber = prNumber;
+    commands
+      .refreshPrStatus(branch.id)
+      .catch((e) => console.error('Failed to fetch initial PR status:', e));
+  });
+
   onMount(() => {
     window.addEventListener('keydown', handleOptionDown);
     window.addEventListener('keyup', handleOptionUp);
@@ -287,12 +319,6 @@
     };
     window.addEventListener('focus', handleFocus);
     window.addEventListener('blur', handleBlur);
-
-    if (branch.prNumber) {
-      commands
-        .refreshPrStatus(branch.id)
-        .catch((e) => console.error('Failed to fetch initial PR status:', e));
-    }
   });
 
   onDestroy(() => {

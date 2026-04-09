@@ -27,7 +27,9 @@ pub mod util_commands;
 
 use serde::Serialize;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use store::Store;
 use tauri::{Emitter, Manager};
 
@@ -42,6 +44,11 @@ use tauri::{Emitter, Manager};
 struct DbState {
     db_path: PathBuf,
     needs_reset: Mutex<Option<StoreIncompatibility>>,
+}
+
+#[derive(Default)]
+struct ShutdownState {
+    quit_in_progress: AtomicBool,
 }
 
 pub(crate) fn preferences_store_path_buf() -> Option<PathBuf> {
@@ -117,6 +124,7 @@ pub struct CommitTimelineItem {
     pub order: i64,
     pub session_id: Option<String>,
     pub session_status: Option<String>,
+    pub completion_reason: Option<String>,
 }
 
 /// Note with session status resolved.
@@ -128,8 +136,12 @@ pub struct NoteTimelineItem {
     pub content: String,
     pub session_id: Option<String>,
     pub session_status: Option<String>,
+    pub completion_reason: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub completed_at: Option<i64>,
+    pub suggested_next_commit_step: Option<String>,
+    pub suggested_next_note_step: Option<String>,
 }
 
 /// Review with session status resolved.
@@ -141,10 +153,12 @@ pub struct ReviewTimelineItem {
     pub scope: String,
     pub session_id: Option<String>,
     pub session_status: Option<String>,
+    pub completion_reason: Option<String>,
     pub title: Option<String>,
     pub comment_count: usize,
     pub created_at: i64,
     pub updated_at: i64,
+    pub completed_at: Option<i64>,
 }
 
 /// Image with session status resolved.
@@ -157,6 +171,7 @@ pub struct ImageTimelineItem {
     pub size_bytes: i64,
     pub session_id: Option<String>,
     pub session_status: Option<String>,
+    pub completion_reason: Option<String>,
     pub created_at: i64,
 }
 
@@ -199,6 +214,29 @@ fn emit_setup_progress(
             detail,
         },
     );
+}
+
+fn stop_actions_for_app_shutdown(app_handle: &tauri::AppHandle) {
+    let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
+    let registry = app_handle.state::<Arc<actions::ActionRegistry>>();
+    let stopped_execution_ids = actions::commands::stop_all_actions(
+        &executor,
+        &registry,
+        actions::StopOptions {
+            force_kill_after: Some(Duration::from_secs(1)),
+        },
+    );
+
+    if stopped_execution_ids.is_empty() {
+        return;
+    }
+
+    if !executor.wait_for_executions(&stopped_execution_ids, Duration::from_secs(2)) {
+        log::warn!(
+            "Timed out waiting for {} action(s) to stop during app shutdown",
+            stopped_execution_ids.len()
+        );
+    }
 }
 
 // =============================================================================
@@ -314,18 +352,16 @@ fn create_project(
     subpath: Option<String>,
     branch_name: Option<String>,
     pr_number: Option<u64>,
+    default_branch: Option<String>,
 ) -> Result<store::Project, String> {
     let store = get_store(&store)?;
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err("Project name is required".to_string());
     }
-    // Validate that the subpath exists as a directory in the repo before
-    // creating anything. This prevents projects being created with invalid
-    // subpaths that would fail later during worktree setup.
-    if let (Some(repo), Some(sub)) = (&github_repo, &subpath) {
-        git::validate_subpath_in_repo(repo, sub).map_err(|e| e.to_string())?;
-    }
+    // Subpath validation is handled by the frontend before submission
+    // (SubpathInput.waitForValidation). Skipping the redundant backend
+    // re-validation here removes a ~500ms-2s GitHub API round-trip.
 
     let project_location = match location.as_deref() {
         Some("remote") => store::ProjectLocation::Remote,
@@ -375,13 +411,9 @@ fn create_project(
 
         // Create the initial branch record for the first repo so each new
         // project starts with exactly one branch tracked for that repository.
-        let detected_base =
-            git::detect_default_branch_for_repo(&repo).unwrap_or_else(|_| "main".to_string());
-        let effective_base = if detected_base.starts_with("origin/") {
-            detected_base
-        } else {
-            format!("origin/{detected_base}")
-        };
+        // Use the frontend-prefetched default branch when available to avoid
+        // a ~500ms-2s GitHub API round-trip during project creation.
+        let effective_base = git::resolve_default_branch(default_branch, &repo);
 
         let (branch_id, is_local) = match project.location {
             store::ProjectLocation::Local => {
@@ -418,7 +450,6 @@ fn create_project(
         };
 
         if is_local {
-            // Spawn background worktree setup + prerun actions for local branches.
             let project_id = project.id.clone();
             let store_bg = Arc::clone(&store);
             tauri::async_runtime::spawn(async move {
@@ -547,6 +578,7 @@ async fn add_project_repo(
     subpath: Option<String>,
     set_as_primary: Option<bool>,
     pr_number: Option<u64>,
+    default_branch: Option<String>,
 ) -> Result<store::ProjectRepo, String> {
     let store = get_store(&store)?;
     let repo = project_commands::add_project_repo_impl(
@@ -558,10 +590,16 @@ async fn add_project_repo(
         set_as_primary,
         None,
         pr_number,
+        default_branch,
     )
     .await?;
 
     // Spawn background worktree + prerun-actions setup — fire and forget.
+    log::info!(
+        "[add_project_repo] spawning background setup for repo {} in project {}",
+        repo.id,
+        project_id
+    );
     tauri::async_runtime::spawn({
         let repo_id = repo.id.clone();
         async move {
@@ -1571,16 +1609,18 @@ pub fn run() {
             // Check compatibility *before* creating the store.
             let compat = store::check_db_compatibility(&db_path)
                 .map_err(|e| format!("Cannot check database: {e}"))?;
+            let session_registry = Arc::new(session_runner::SessionRegistry::new());
 
             let (store_slot, reset_info) = match compat {
                 store::DbCompatibility::Ok => {
                     let s =
                         Store::new(&db_path).map_err(|e| format!("Failed to open store: {e}"))?;
                     let store_arc = Arc::new(s);
-                    // Cancel sessions whose owner process is dead; leave sessions
+                    // Recover sessions whose owner process is dead; leave sessions
                     // owned by other live Staged instances untouched.
-                    session_runner::cancel_dead_sessions(
+                    session_runner::recover_dead_sessions(
                         Arc::clone(&store_arc),
+                        Arc::clone(&session_registry),
                         app.handle().clone(),
                     );
                     // Clean up images left in "pending" state from compose
@@ -1621,9 +1661,10 @@ pub fn run() {
             };
 
             app.manage(store_slot);
-            app.manage(Arc::new(session_runner::SessionRegistry::new()));
+            app.manage(session_registry);
             app.manage(Arc::new(actions::ActionExecutor::new()));
             app.manage(Arc::new(actions::ActionRegistry::new()));
+            app.manage(ShutdownState::default());
             app.manage(DbState {
                 db_path,
                 needs_reset: Mutex::new(reset_info),
@@ -1797,13 +1838,15 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app_handle, event| {
-            if let tauri::RunEvent::Exit = event {
-                // Stop all running actions on quit (fire-and-forget).
-                let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
-                let registry = app_handle.state::<Arc<actions::ActionRegistry>>();
-                actions::commands::stop_all_actions(&executor, &registry);
-                // Brief grace period for processes to receive SIGTERM.
-                std::thread::sleep(std::time::Duration::from_secs(1));
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                let shutdown = app_handle.state::<ShutdownState>();
+                if shutdown.quit_in_progress.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+
+                api.prevent_exit();
+                stop_actions_for_app_shutdown(app_handle);
+                app_handle.exit(0);
             }
         });
 }

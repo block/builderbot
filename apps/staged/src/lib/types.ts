@@ -101,6 +101,7 @@ export interface CommitTimelineItem {
   order: number;
   sessionId: string | null;
   sessionStatus: string | null;
+  completionReason: string | null;
 }
 
 export interface NoteTimelineItem {
@@ -109,8 +110,12 @@ export interface NoteTimelineItem {
   content: string;
   sessionId: string | null;
   sessionStatus: string | null;
+  completionReason: string | null;
   createdAt: number;
   updatedAt: number;
+  completedAt: number | null;
+  suggestedNextCommitStep: string | null;
+  suggestedNextNoteStep: string | null;
 }
 
 export interface ReviewTimelineItem {
@@ -119,11 +124,13 @@ export interface ReviewTimelineItem {
   scope: string;
   sessionId: string | null;
   sessionStatus: string | null;
+  completionReason: string | null;
   title: string | null;
   commentCount: number;
   isAuto?: boolean;
   createdAt: number;
   updatedAt: number;
+  completedAt: number | null;
 }
 
 export interface ImageTimelineItem {
@@ -133,6 +140,7 @@ export interface ImageTimelineItem {
   sizeBytes: number;
   sessionId: string | null;
   sessionStatus: string | null;
+  completionReason: string | null;
   createdAt: number;
 }
 
@@ -203,6 +211,9 @@ export interface ProjectNote {
   content: string;
   createdAt: number;
   updatedAt: number;
+  completedAt: number | null;
+  suggestedNextCommitStep: string | null;
+  suggestedNextNoteStep: string | null;
 }
 
 export interface ProjectSessionResponse {
@@ -216,12 +227,15 @@ export interface ProjectSessionResponse {
 
 export type SessionStatus = 'queued' | 'running' | 'completed' | 'error' | 'cancelled';
 
+export type CompletionReason = 'turn_complete' | 'interrupted' | 'crashed' | 'app_quit' | 'unknown';
+
 export interface Session {
   id: string;
   prompt: string;
   status: SessionStatus;
   agentId: string | null;
   errorMessage: string | null;
+  completionReason: CompletionReason | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -244,6 +258,13 @@ export interface SessionMessage {
 
 export type BranchSessionType = 'note' | 'commit' | 'review';
 
+export interface BranchSessionLaunchContext {
+  source: 'diff_viewer';
+  scope: 'branch' | 'commit';
+  commitSha: string;
+  reviewId?: string | null;
+}
+
 export interface BranchSessionResponse {
   sessionId: string;
   artifactId: string;
@@ -258,6 +279,7 @@ export interface SessionStatusPayload {
   sessionId: string;
   status: string;
   errorMessage?: string | null;
+  completionReason?: string | null;
   branchId?: string;
   projectId?: string;
   sessionType?: string;

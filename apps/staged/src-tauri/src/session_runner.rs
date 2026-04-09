@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio_util::sync::CancellationToken;
 
@@ -46,7 +46,9 @@ use acp_client::{McpServer, McpServerHttp};
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::agent::{AcpDriver, AgentDriver, MessageWriter};
 use crate::git::Span;
-use crate::store::{Comment, CommentAuthor, CommentType, MessageRole, SessionStatus, Store};
+use crate::store::{
+    Comment, CommentAuthor, CommentType, CompletionReason, MessageRole, SessionStatus, Store,
+};
 
 // =============================================================================
 // Event types
@@ -59,6 +61,7 @@ pub struct SessionStatusEvent {
     pub session_id: String,
     pub status: String,
     pub error_message: Option<String>,
+    pub completion_reason: Option<String>,
     /// Set on `"running"` events emitted when an MCP tool starts a repo session,
     /// so the frontend can register the session and refresh the branch timeline.
     pub branch_id: Option<String>,
@@ -249,7 +252,6 @@ pub fn start_session(
                     config.action_executor.clone(),
                     config.action_registry.clone(),
                     cancel_token.clone(),
-                    config.workspace_name.clone(),
                 )
                 .await
                 {
@@ -349,18 +351,20 @@ pub fn start_session(
         //
         // If the session was cancelled and then deleted, these DB writes
         // are harmless no-ops — see module-level docs on the race.
-        let (new_status, error_msg) = match result {
-            Ok(()) if cancel_token.is_cancelled() => ("cancelled", None),
-            Ok(()) => ("completed", None),
+        let (new_status, error_msg, completion_reason) = match result {
+            Ok(()) if cancel_token.is_cancelled() => {
+                ("cancelled", None, CompletionReason::Interrupted)
+            }
+            Ok(()) => ("completed", None, CompletionReason::TurnComplete),
             Err(ref e) if cancel_token.is_cancelled() => {
                 log::info!(
                     "Session {session_id_for_status} cancelled (error during teardown: {e})"
                 );
-                ("cancelled", None)
+                ("cancelled", None, CompletionReason::Interrupted)
             }
             Err(ref e) => {
                 log::error!("Session {session_id_for_status} failed: {e}");
-                ("error", Some(e.clone()))
+                ("error", Some(e.clone()), CompletionReason::Crashed)
             }
         };
 
@@ -381,46 +385,75 @@ pub fn start_session(
 
         let status_enum = SessionStatus::parse(new_status).unwrap();
         let transitioned = store_for_status
-            .transition_from_running(&session_id_for_status, status_enum, error_msg.as_deref())
+            .transition_from_running(
+                &session_id_for_status,
+                status_enum,
+                error_msg.as_deref(),
+                Some(&completion_reason),
+            )
             .unwrap_or(false);
 
         if transitioned {
-            emit_status(&app_handle, &session_id_for_status, new_status, error_msg);
-        }
+            emit_status(
+                &app_handle,
+                &session_id_for_status,
+                new_status,
+                error_msg,
+                Some(&completion_reason),
+            );
 
-        // Trigger auto review when a commit session completes successfully,
-        // but only if there are no queued sessions waiting for this branch.
-        // Queued sessions take priority — the next one will be drained instead.
-        if let Some(branch_id) = committed_branch_id {
-            let has_queued = store_for_status
-                .get_queued_sessions_for_branch(&branch_id)
-                .map(|q| !q.is_empty())
-                .unwrap_or(false);
+            let branch_id = store_for_status
+                .get_branch_id_for_session(&session_id_for_status)
+                .ok()
+                .flatten();
+            let auto_review_branch_id = committed_branch_id.clone();
 
-            if !has_queued {
-                let store_for_auto = Arc::clone(&store_for_status);
-                let registry_for_auto = Arc::clone(&registry);
-                let app_handle_for_auto = app_handle.clone();
+            if let Some(branch_id) = branch_id {
+                let store_for_follow_up = Arc::clone(&store_for_status);
+                let registry_for_follow_up = Arc::clone(&registry);
+                let app_handle_for_follow_up = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    match crate::session_commands::trigger_auto_review(
-                        store_for_auto,
-                        registry_for_auto,
-                        app_handle_for_auto,
+                    match crate::session_commands::drain_queued_sessions_for_branch(
+                        Arc::clone(&store_for_follow_up),
+                        Arc::clone(&registry_for_follow_up),
+                        app_handle_for_follow_up.clone(),
                         branch_id.clone(),
                         None,
                     )
                     .await
                     {
-                        Ok(resp) => {
-                            log::info!(
-                                "Auto review triggered for branch {branch_id}: session={}, review={}",
-                                resp.session_id,
-                                resp.artifact_id,
-                            );
+                        Ok(true) => {
+                            log::info!("Drained next queued session for branch {branch_id}");
+                        }
+                        Ok(false) => {
+                            if let Some(auto_review_branch_id) = auto_review_branch_id {
+                                match crate::session_commands::trigger_auto_review(
+                                    store_for_follow_up,
+                                    registry_for_follow_up,
+                                    app_handle_for_follow_up,
+                                    auto_review_branch_id.clone(),
+                                    None,
+                                )
+                                .await
+                                {
+                                    Ok(resp) => {
+                                        log::info!(
+                                            "Auto review triggered for branch {auto_review_branch_id}: session={}, review={}",
+                                            resp.session_id,
+                                            resp.artifact_id,
+                                        );
+                                    }
+                                    Err(e) => {
+                                        log::error!(
+                                            "Failed to trigger auto review for branch {auto_review_branch_id}: {e}"
+                                        );
+                                    }
+                                }
+                            }
                         }
                         Err(e) => {
                             log::error!(
-                                "Failed to trigger auto review for branch {branch_id}: {e}"
+                                "Failed to drain queued sessions for branch {branch_id}: {e}"
                             );
                         }
                     }
@@ -433,19 +466,24 @@ pub fn start_session(
 }
 
 // =============================================================================
-// Orphaned session cleanup
+// Orphaned session recovery
 // =============================================================================
 
-/// On startup, cancel any sessions whose owner process is no longer alive.
+/// On startup, recover any sessions whose owner process is no longer alive.
 ///
 /// Each session records the PID of the Staged process that started it
 /// (`owner_pid`). On startup we check each running session:
 /// - `owner_pid` is our own PID → shouldn't happen at startup, skip.
 /// - `owner_pid` belongs to a live process → another Staged instance owns
 ///   it; leave it alone.
-/// - `owner_pid` is dead (or NULL for pre-migration rows) → cancel and emit
-///   `session-status-changed` so the frontend learns the outcome.
-pub fn cancel_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
+/// - `owner_pid` is dead (or NULL for pre-migration rows) → transition to
+///   error with `AppQuit` reason and emit `session-status-changed` so the
+///   frontend learns the outcome.
+pub fn recover_dead_sessions(
+    store: Arc<Store>,
+    registry: Arc<SessionRegistry>,
+    app_handle: AppHandle,
+) {
     let sessions = match store.get_running_sessions() {
         Ok(s) => s,
         Err(e) => {
@@ -464,10 +502,51 @@ pub fn cancel_dead_sessions(store: Arc<Store>, app_handle: AppHandle) {
 
         if should_cancel {
             let transitioned = store
-                .transition_from_running(&session.id, SessionStatus::Cancelled, None)
+                .transition_from_running(
+                    &session.id,
+                    SessionStatus::Error,
+                    None,
+                    Some(&CompletionReason::AppQuit),
+                )
                 .unwrap_or(false);
             if transitioned {
-                emit_status(&app_handle, &session.id, "cancelled", None);
+                emit_status(
+                    &app_handle,
+                    &session.id,
+                    "error",
+                    None,
+                    Some(&CompletionReason::AppQuit),
+                );
+
+                let branch_id = store.get_branch_id_for_session(&session.id).ok().flatten();
+                if let Some(branch_id) = branch_id {
+                    let store_for_follow_up = Arc::clone(&store);
+                    let registry_for_follow_up = Arc::clone(&registry);
+                    let app_handle_for_follow_up = app_handle.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match crate::session_commands::drain_queued_sessions_for_branch(
+                            store_for_follow_up,
+                            registry_for_follow_up,
+                            app_handle_for_follow_up,
+                            branch_id.clone(),
+                            None,
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                log::info!(
+                                    "Drained next queued session after orphan recovery for branch {branch_id}"
+                                );
+                            }
+                            Ok(false) => {}
+                            Err(e) => {
+                                log::error!(
+                                    "Failed to drain queued sessions after orphan recovery for branch {branch_id}: {e}"
+                                );
+                            }
+                        }
+                    });
+                }
             }
         }
     }
@@ -616,6 +695,21 @@ fn run_post_completion_hooks(
                 .filter(|m| m.role == MessageRole::Assistant)
                 .find_map(|m| extract_note_content(&m.content));
 
+            // Search assistant messages in reverse so the *last* message
+            // containing the fenced block wins (mirrors extract_note_content).
+            let suggested_next_steps = messages
+                .iter()
+                .rev()
+                .filter(|m| m.role == MessageRole::Assistant)
+                .find_map(|m| extract_suggested_next_steps(&m.content));
+            if let Some(ref steps) = suggested_next_steps {
+                log::info!(
+                    "Session {session_id}: extracted suggested next steps — commit: {:?}, note: {:?}",
+                    steps.suggested_next_commit_step,
+                    steps.suggested_next_note_step,
+                );
+            }
+
             for target in &note_targets {
                 let label = match target.kind {
                     NoteKind::Repo => "note",
@@ -632,14 +726,26 @@ fn run_post_completion_hooks(
                             "extracted"
                         }
                     );
+                    let sncs = suggested_next_steps
+                        .as_ref()
+                        .and_then(|s| s.suggested_next_commit_step.as_deref());
+                    let snns = suggested_next_steps
+                        .as_ref()
+                        .and_then(|s| s.suggested_next_note_step.as_deref());
                     let result = match target.kind {
-                        NoteKind::Repo => {
-                            store.update_note_title_and_content(&target.id, &final_title, &body)
-                        }
+                        NoteKind::Repo => store.update_note_title_and_content(
+                            &target.id,
+                            &final_title,
+                            &body,
+                            sncs,
+                            snns,
+                        ),
                         NoteKind::Project => store.update_project_note_title_and_content(
                             &target.id,
                             &final_title,
                             &body,
+                            sncs,
+                            snns,
                         ),
                     };
                     if let Err(e) = result {
@@ -647,6 +753,13 @@ fn run_post_completion_hooks(
                     }
                 } else {
                     log::warn!("Session {session_id}: {label} session completed but no --- found in assistant output");
+                    let result = match target.kind {
+                        NoteKind::Repo => store.mark_note_completed(&target.id),
+                        NoteKind::Project => store.mark_project_note_completed(&target.id),
+                    };
+                    if let Err(e) = result {
+                        log::error!("Failed to mark {label} completed: {e}");
+                    }
                 }
             }
         }
@@ -671,6 +784,11 @@ fn run_post_completion_hooks(
                     }
                 } else {
                     log::warn!("Session {session_id}: review session completed but no review-title block found");
+                    // Still mark the review as completed so completed_at is set
+                    // for timeline sorting, even without a title.
+                    if let Err(e) = store.mark_review_completed(&review.id) {
+                        log::error!("Failed to mark review completed: {e}");
+                    }
                 }
             }
 
@@ -981,6 +1099,35 @@ fn extract_review_title(text: &str) -> Option<String> {
     }
 }
 
+/// Structured representation of the suggested next steps extracted from a
+/// `suggested-next-steps` fenced block.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SuggestedNextSteps {
+    suggested_next_commit_step: Option<String>,
+    suggested_next_note_step: Option<String>,
+}
+
+/// Extract suggested next steps from assistant output.
+///
+/// Looks for a ```suggested-next-steps fenced block and parses the JSON object
+/// inside.  Returns `None` if the block is missing or cannot be parsed.
+fn extract_suggested_next_steps(text: &str) -> Option<SuggestedNextSteps> {
+    let marker = "```suggested-next-steps";
+    let start_pos = find_opening_fence(text, marker)?;
+    let block_start = start_pos + marker.len();
+    let content_start = block_start + text[block_start..].find('\n')? + 1;
+    let end_pos = find_closing_fence(&text[content_start..])?;
+    let json_str = text[content_start..content_start + end_pos].trim();
+    match serde_json::from_str::<SuggestedNextSteps>(json_str) {
+        Ok(steps) => Some(steps),
+        Err(e) => {
+            log::warn!("Failed to parse suggested-next-steps JSON: {e}");
+            None
+        }
+    }
+}
+
 /// Find an opening fence marker (e.g. ` ```review-title `) that appears at the
 /// start of a line (position 0 or immediately after `\n`).  Returns the byte
 /// offset of the marker within `text`, or `None` if no line-start match exists.
@@ -1035,11 +1182,18 @@ fn find_closing_fence(text: &str) -> Option<usize> {
     None
 }
 
-fn emit_status(app_handle: &AppHandle, session_id: &str, status: &str, error: Option<String>) {
+fn emit_status(
+    app_handle: &AppHandle,
+    session_id: &str,
+    status: &str,
+    error: Option<String>,
+    completion_reason: Option<&CompletionReason>,
+) {
     let event = SessionStatusEvent {
         session_id: session_id.to_string(),
         status: status.to_string(),
         error_message: error,
+        completion_reason: completion_reason.map(|r| r.as_str().to_string()),
         branch_id: None,
         project_id: None,
         session_type: None,
@@ -1065,6 +1219,7 @@ pub fn emit_session_running(
         session_id: session_id.to_string(),
         status: "running".to_string(),
         error_message: None,
+        completion_reason: None,
         branch_id: Some(branch_id.to_string()),
         project_id: Some(project_id.to_string()),
         session_type: Some(session_type.to_string()),
@@ -1535,5 +1690,61 @@ Second batch:
             strip_action_wrapper(input),
             "leftover</action>\nreal prompt"
         );
+    }
+
+    // ── extract_suggested_next_steps ────────────────────────────────────
+
+    #[test]
+    fn extract_steps_valid_both_fields() {
+        let text = r#"Here are the notes.
+
+```suggested-next-steps
+{"suggestedNextCommitStep": "Implement the plan", "suggestedNextNoteStep": "Research alternatives"}
+```
+
+---
+# Title
+Body
+"#;
+        let steps = extract_suggested_next_steps(text).unwrap();
+        assert_eq!(
+            steps.suggested_next_commit_step.as_deref(),
+            Some("Implement the plan")
+        );
+        assert_eq!(
+            steps.suggested_next_note_step.as_deref(),
+            Some("Research alternatives")
+        );
+    }
+
+    #[test]
+    fn extract_steps_null_fields() {
+        let text = "```suggested-next-steps\n{\"suggestedNextCommitStep\": null, \"suggestedNextNoteStep\": null}\n```\n";
+        let steps = extract_suggested_next_steps(text).unwrap();
+        assert_eq!(steps.suggested_next_commit_step, None);
+        assert_eq!(steps.suggested_next_note_step, None);
+    }
+
+    #[test]
+    fn extract_steps_partial_fields() {
+        let text = "```suggested-next-steps\n{\"suggestedNextCommitStep\": \"Fix the bug\", \"suggestedNextNoteStep\": null}\n```\n";
+        let steps = extract_suggested_next_steps(text).unwrap();
+        assert_eq!(
+            steps.suggested_next_commit_step.as_deref(),
+            Some("Fix the bug")
+        );
+        assert_eq!(steps.suggested_next_note_step, None);
+    }
+
+    #[test]
+    fn extract_steps_missing_block() {
+        let text = "Just a normal assistant message with no fenced blocks.";
+        assert!(extract_suggested_next_steps(text).is_none());
+    }
+
+    #[test]
+    fn extract_steps_malformed_json() {
+        let text = "```suggested-next-steps\n{not valid json}\n```\n";
+        assert!(extract_suggested_next_steps(text).is_none());
     }
 }

@@ -178,18 +178,74 @@ fn find_gh() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Run a gh command in the context of a local repo directory
-fn run_gh(repo: &Path, args: &[&str]) -> Result<String, GitError> {
-    let gh_path = find_gh().ok_or_else(|| {
-        GitError::CommandFailed("GitHub CLI not found. Install with: brew install gh".to_string())
-    })?;
-
-    let output = Command::new(&gh_path)
-        .current_dir(repo)
-        .args(args)
-        .output()
+/// Spawn a gh command, drain its pipes concurrently, and enforce a 60s timeout.
+fn spawn_gh_with_timeout(cmd: &mut Command) -> Result<std::process::Output, GitError> {
+    let mut child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| GitError::CommandFailed(format!("Failed to run gh: {e}")))?;
 
+    // Drain stdout/stderr in background threads to avoid deadlock when the
+    // child fills the OS pipe buffer before exiting.
+    let stdout_thread = child.stdout.take().map(|mut s| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut s, &mut buf).unwrap_or_default();
+            buf
+        })
+    });
+    let stderr_thread = child.stderr.take().map(|mut s| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut s, &mut buf).unwrap_or_default();
+            buf
+        })
+    });
+
+    let timeout = Duration::from_secs(60);
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // Join drain threads so they don't leak — pipe close
+                    // from kill makes them terminate quickly.
+                    if let Some(t) = stdout_thread {
+                        let _ = t.join();
+                    }
+                    if let Some(t) = stderr_thread {
+                        let _ = t.join();
+                    }
+                    return Err(GitError::CommandFailed(
+                        "gh command timed out after 60s".to_string(),
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                return Err(GitError::CommandFailed(format!(
+                    "Failed to wait for gh: {e}"
+                )));
+            }
+        }
+    };
+
+    let stdout = stdout_thread.map_or_else(Vec::new, |t| t.join().unwrap_or_default());
+    let stderr = stderr_thread.map_or_else(Vec::new, |t| t.join().unwrap_or_default());
+
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Check the output of a gh command and return stdout as a string.
+fn check_gh_output(output: std::process::Output) -> Result<String, GitError> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("not logged in") || stderr.contains("no oauth token") {
@@ -203,28 +259,24 @@ fn run_gh(repo: &Path, args: &[&str]) -> Result<String, GitError> {
     String::from_utf8(output.stdout).map_err(|_| GitError::InvalidUtf8)
 }
 
+/// Run a gh command in the context of a local repo directory
+fn run_gh(repo: &Path, args: &[&str]) -> Result<String, GitError> {
+    let gh_path = find_gh().ok_or_else(|| {
+        GitError::CommandFailed("GitHub CLI not found. Install with: brew install gh".to_string())
+    })?;
+
+    let output = spawn_gh_with_timeout(Command::new(&gh_path).current_dir(repo).args(args))?;
+    check_gh_output(output)
+}
+
 /// Run a gh command without needing a local directory (uses `-R owner/repo` or global commands).
 fn run_gh_global(args: &[&str]) -> Result<String, GitError> {
     let gh_path = find_gh().ok_or_else(|| {
         GitError::CommandFailed("GitHub CLI not found. Install with: brew install gh".to_string())
     })?;
 
-    let output = Command::new(&gh_path)
-        .args(args)
-        .output()
-        .map_err(|e| GitError::CommandFailed(format!("Failed to run gh: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("not logged in") || stderr.contains("no oauth token") {
-            return Err(GitError::CommandFailed(
-                "Not authenticated with GitHub CLI. Run: gh auth login".to_string(),
-            ));
-        }
-        return Err(GitError::CommandFailed(stderr.into_owned()));
-    }
-
-    String::from_utf8(output.stdout).map_err(|_| GitError::InvalidUtf8)
+    let output = spawn_gh_with_timeout(Command::new(&gh_path).args(args))?;
+    check_gh_output(output)
 }
 
 // =============================================================================
@@ -545,6 +597,24 @@ pub fn detect_default_branch_for_repo(github_repo: &str) -> Result<String, GitEr
         serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
 
     Ok(view.default_branch_ref.name)
+}
+
+/// Resolve the default branch for a repo, using a prefetched value when available
+/// and falling back to the GitHub API. Returns an `origin/`-prefixed ref.
+pub fn resolve_default_branch(prefetched: Option<String>, github_repo: &str) -> String {
+    let detected = prefetched
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| {
+            detect_default_branch_for_repo(github_repo).unwrap_or_else(|_| "main".to_string())
+        });
+    if detected.starts_with("origin/") {
+        detected
+    } else {
+        format!("origin/{detected}")
+    }
 }
 
 /// A git branch reference from the GitHub API.

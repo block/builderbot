@@ -8,8 +8,16 @@ export interface ToolDisplay {
   detail: string;
 }
 
+/** Pattern matching XML-tagged context blocks embedded in prompts/messages. */
+const XML_BLOCK_PATTERN = /<(action|branch-history|launch-context)>[\s\S]*?<\/\1>/g;
+
 export function hasXmlBlocks(content: string): boolean {
-  return /<(action|branch-history)>/.test(content);
+  return /<(action|branch-history|launch-context)>/.test(content);
+}
+
+/** Strip XML-tagged context blocks (action, branch-history, launch-context) from display text. */
+export function stripXmlTags(text: string): string {
+  return text.replace(XML_BLOCK_PATTERN, '').trim();
 }
 
 export function parseToolCall(content: string): ParsedToolCall | null {
@@ -64,11 +72,45 @@ const TOOL_VERBS: Record<string, [past: string, present: string]> = {
   Grep: ['Searched', 'Searching'],
   Search: ['Searched', 'Searching'],
   Glob: ['Listed', 'Listing'],
+  Edit: ['Edited', 'Editing'],
   StrReplace: ['Edited', 'Editing'],
   Delete: ['Deleted', 'Deleting'],
   EditNotebook: ['Edited', 'Editing'],
   SemanticSearch: ['Searched', 'Searching'],
 };
+
+/** Pick the single most useful display value from structured tool args. */
+function primaryArg(toolName: string, args: Record<string, unknown>): string {
+  const str = (key: string) => {
+    const v = args[key];
+    return typeof v === 'string' ? v : undefined;
+  };
+  switch (toolName) {
+    case 'Read':
+    case 'ReadFile':
+    case 'Write':
+    case 'WriteFile':
+    case 'Edit':
+    case 'Delete':
+    case 'EditNotebook':
+    case 'StrReplace':
+      return str('file_path') || str('path') || '';
+    case 'Run':
+    case 'Shell':
+    case 'Bash':
+      return str('command') || str('cmd') || '';
+    case 'Grep':
+    case 'Search':
+    case 'SemanticSearch':
+      return str('pattern') || str('query') || '';
+    case 'Glob':
+      return str('pattern') || str('glob') || '';
+    default: {
+      const formatted = formatArgs(args);
+      return formatted.length > 200 ? formatted.slice(0, 200) + '…' : formatted;
+    }
+  }
+}
 
 const TITLE_VERBS = new Set([
   'Add',
@@ -211,19 +253,51 @@ export function formatToolDisplay(
   const tenseIdx = pending ? 1 : 0;
   const parsed = parseToolCall(content);
   if (parsed) {
-    const entry = TOOL_VERBS[parsed.name];
-    const verb = entry ? entry[tenseIdx] : parsed.name;
-    return { verb, detail: makePathsRelative(formatArgs(parsed.args), repoDir) };
+    // parsed.name may be a bare tool name ("Read") or a full ACP title
+    // ("Read /path/to/file"). Try exact match first, then first-word match.
+    let toolName = parsed.name;
+    let entry = TOOL_VERBS[toolName];
+    if (!entry) {
+      const spaceIdx = parsed.name.indexOf(' ');
+      if (spaceIdx > 0) {
+        const firstWord = parsed.name.slice(0, spaceIdx);
+        if (TOOL_VERBS[firstWord]) {
+          toolName = firstWord;
+          entry = TOOL_VERBS[firstWord];
+        }
+      }
+    }
+    if (entry) {
+      const verb = entry[tenseIdx];
+      const detail = makePathsRelative(primaryArg(toolName, parsed.args), repoDir);
+      return { verb, detail };
+    }
+    // Unrecognized tool name — fall through to treat parsed.name as plain text
+    content = parsed.name;
   }
 
+  // Plain-text content: check TOOL_VERBS first (handles "Shell", "Bash ls", etc.)
   const spaceIdx = content.indexOf(' ');
   if (spaceIdx > 0) {
     const firstWord = content.slice(0, spaceIdx);
+    const tvEntry = TOOL_VERBS[firstWord];
+    if (tvEntry) {
+      return {
+        verb: tvEntry[tenseIdx],
+        detail: makePathsRelative(content.slice(spaceIdx + 1), repoDir),
+      };
+    }
     if (TITLE_VERBS.has(firstWord)) {
       return { verb: firstWord, detail: makePathsRelative(content.slice(spaceIdx + 1), repoDir) };
     }
-  } else if (TITLE_VERBS.has(content)) {
-    return { verb: content, detail: '' };
+  } else {
+    const tvEntry = TOOL_VERBS[content];
+    if (tvEntry) {
+      return { verb: tvEntry[tenseIdx], detail: '' };
+    }
+    if (TITLE_VERBS.has(content)) {
+      return { verb: content, detail: '' };
+    }
   }
 
   return { verb: pending ? 'Running' : 'Ran', detail: makePathsRelative(content, repoDir) };

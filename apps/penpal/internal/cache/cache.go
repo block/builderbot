@@ -342,6 +342,13 @@ func (c *Cache) FindFile(projectName, filePath string) *FileInfo {
 	return nil
 }
 
+// IsProjectScanned returns whether a project has had a full file scan.
+func (c *Cache) IsProjectScanned(projectName string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.projectScanned[projectName]
+}
+
 // EnsureProjectScanned triggers a full file scan for a project if it hasn't
 // been scanned yet. Returns true if a scan was actually performed (first call
 // for this project). This is the lazy-scan entry point — called when a user
@@ -388,15 +395,18 @@ func (c *Cache) RefreshProject(projectName string) {
 	}
 }
 
-// RefreshAllProjects rescans all projects' files and updates metadata
-// E-PENPAL-CACHE: parallel refresh with no concurrency limit.
+// RefreshAllProjects rescans all projects' files and updates metadata.
+// E-PENPAL-CACHE: parallel refresh with concurrency limit of 4.
 func (c *Cache) RefreshAllProjects() {
 	projects := c.Projects()
 	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4)
 	for _, p := range projects {
 		wg.Add(1)
 		go func(qn string) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			c.RefreshProject(qn)
 		}(p.QualifiedName())
 	}
@@ -410,14 +420,17 @@ var errFoundMarkdown = errors.New("found markdown")
 // CheckAllProjectsHasFiles does a cheap per-project check to set HasFiles
 // without doing a full file scan. For each project, it walks the project
 // root and stops as soon as it finds any .md file.
-// E-PENPAL-SCAN: lightweight startup check — no file list is built.
+// E-PENPAL-SCAN: lightweight startup check with concurrency limit of 4.
 func (c *Cache) CheckAllProjectsHasFiles() {
 	projects := c.Projects()
 	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4)
 	for _, p := range projects {
 		wg.Add(1)
 		go func(p discovery.Project) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			found := projectHasAnyMarkdown(p.Path)
 			c.mu.Lock()
 			for i := range c.projects {
@@ -433,13 +446,12 @@ func (c *Cache) CheckAllProjectsHasFiles() {
 }
 
 // projectHasAnyMarkdown walks the directory tree and returns true as soon as
-// it finds any .md file. Aligns skip behavior with scanProjectSources: skips
-// .git, node_modules, .hg, .svn, nested worktrees/submodules, and gitignored dirs.
-// E-PENPAL-SCAN: lightweight startup check consistent with full scan filtering.
+// it finds any .md file. Skips .git, node_modules, .hg, .svn, and nested
+// worktrees/submodules. Does NOT use git check-ignore — a false positive
+// from a .md file in a gitignored directory is harmless since the full scan
+// on first access applies proper filtering.
+// E-PENPAL-SCAN: lightweight startup check — no subprocess spawned.
 func projectHasAnyMarkdown(projectPath string) bool {
-	gitChecker := newGitIgnoreChecker(projectPath)
-	defer gitChecker.Close()
-
 	err := filepath.WalkDir(projectPath, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -455,10 +467,6 @@ func projectHasAnyMarkdown(projectPath string) bool {
 				if fi, err := os.Lstat(gitEntry); err == nil && !fi.IsDir() {
 					return filepath.SkipDir
 				}
-			}
-			// E-PENPAL-SRC-GITIGNORE: skip gitignored directories.
-			if path != projectPath && gitChecker.IsIgnored(path) {
-				return filepath.SkipDir
 			}
 			return nil
 		}
@@ -520,22 +528,107 @@ func (c *Cache) RefreshProjectGitInfo(name string) {
 // preserving existing git info for known projects.
 // E-PENPAL-CACHE: replaces the project list while preserving git enrichment.
 func (c *Cache) RescanWith(projects []discovery.Project) {
-	// Preserve enrichment data (git info) for projects we already know about
+	// Snapshot current state before replacing
 	c.mu.RLock()
 	existing := make(map[string]discovery.Project)
+	existingScanned := make(map[string]bool)
+	existingFiles := make(map[string][]FileInfo)
 	for _, p := range c.projects {
-		existing[p.QualifiedName()] = p
+		qn := p.QualifiedName()
+		existing[qn] = p
+		existingScanned[qn] = c.projectScanned[qn]
+		if files, ok := c.projectFiles[qn]; ok {
+			existingFiles[qn] = files
+		}
 	}
 	c.mu.RUnlock()
 
+	// Preserve git enrichment only when the project path hasn't changed.
+	// If the path changed, Git metadata would be stale and enrichGitInfo
+	// needs to re-discover it (it skips projects where Git != nil).
 	for i := range projects {
-		if prev, ok := existing[projects[i].QualifiedName()]; ok {
+		if prev, ok := existing[projects[i].QualifiedName()]; ok && prev.Path == projects[i].Path {
 			projects[i].Git = prev.Git
 		}
 	}
 
 	c.SetProjects(projects)
-	c.RefreshAllProjects()
+
+	// Determine which projects need scanning
+	var toScan []string
+	newNames := make(map[string]bool, len(projects))
+	for _, p := range projects {
+		qn := p.QualifiedName()
+		newNames[qn] = true
+
+		prev, existed := existing[qn]
+		if !existed {
+			// New project: needs scan
+			toScan = append(toScan, qn)
+		} else if !existingScanned[qn] {
+			// Existed but never scanned: needs scan
+			toScan = append(toScan, qn)
+		} else if SourcesChanged(prev.Sources, p.Sources) {
+			// Sources changed: needs rescan
+			toScan = append(toScan, qn)
+		} else {
+			// Unchanged: preserve cached files
+			c.mu.Lock()
+			c.projectFiles[qn] = existingFiles[qn]
+			c.projectScanned[qn] = true
+			c.updateProjectMetadataLocked(qn, existingFiles[qn])
+			c.mu.Unlock()
+		}
+	}
+
+	// Clean up removed projects
+	c.mu.Lock()
+	for name := range existingFiles {
+		if !newNames[name] {
+			delete(c.projectFiles, name)
+			delete(c.projectScanned, name)
+		}
+	}
+	c.mu.Unlock()
+
+	// Scan only the projects that need it, with concurrency limit
+	if len(toScan) > 0 {
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, 4)
+		for _, qn := range toScan {
+			wg.Add(1)
+			go func(qn string) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				c.RefreshProject(qn)
+			}(qn)
+		}
+		wg.Wait()
+	}
+}
+
+// SourcesChanged returns true if two source lists differ materially.
+// E-PENPAL-CACHE: used by RescanWith to detect which projects need rescanning.
+func SourcesChanged(a, b []discovery.FileSource) bool {
+	if len(a) != len(b) {
+		return true
+	}
+	for i := range a {
+		if a[i].Name != b[i].Name || a[i].Type != b[i].Type ||
+			a[i].RootPath != b[i].RootPath || a[i].SourceTypeName != b[i].SourceTypeName {
+			return true
+		}
+		if len(a[i].Files) != len(b[i].Files) {
+			return true
+		}
+		for j := range a[i].Files {
+			if a[i].Files[j] != b[i].Files[j] {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // EnrichTitles fills in missing Title fields for files in the given project.
@@ -584,6 +677,325 @@ func extractTitle(path string) string {
 		}
 	}
 	return ""
+}
+
+// ResolveFileInfo resolves source membership for a single absolute .md file path
+// within a project. It applies the same source-priority, SkipDirs, RequireSibling,
+// and ClassifyFile rules as scanProjectSources but without walking the filesystem
+// or spawning a git check-ignore process. Returns FileInfo entries for each source
+// that claims the file (typically one typed source + __all_markdown__). Returns nil
+// if no source claims the file.
+// E-PENPAL-SCAN: single-file source resolution for incremental cache updates.
+// ResolveFileInfo resolves source membership for a single absolute .md file path
+// without a filesystem walk. It applies the same exclusion rules as
+// scanProjectSources: nested git worktree/submodule detection, gitignore
+// ancestor-directory checks (P-PENPAL-SRC-GITIGNORE), SkipDirs filtering, and
+// RequireSibling validation.
+func ResolveFileInfo(project *discovery.Project, absPath string) []FileInfo {
+	if !strings.HasSuffix(absPath, ".md") {
+		return nil
+	}
+
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return nil
+	}
+	if info.IsDir() {
+		return nil
+	}
+
+	relToProject, err := filepath.Rel(project.Path, absPath)
+	if err != nil || strings.HasPrefix(relToProject, "..") {
+		return nil
+	}
+
+	title := extractTitle(absPath)
+	var results []FileInfo
+	typedClaimed := false
+
+	for _, source := range project.Sources {
+		isAllMarkdown := source.Name == "__all_markdown__"
+
+		if source.Type == "thoughts" || source.Type == "tree" {
+			rootPath := source.RootPath
+			if rootPath == "" {
+				continue
+			}
+
+			// Check containment
+			if !strings.HasPrefix(absPath, rootPath+"/") && absPath != rootPath {
+				continue
+			}
+
+			// Skip files under nested git worktrees/submodules.
+			if isUnderNestedGitRepo(absPath, rootPath) {
+				continue
+			}
+
+			// P-PENPAL-SRC-GITIGNORE: skip files whose ancestor directory
+			// is gitignored (source root itself is exempt).
+			if isAncestorDirGitIgnored(absPath, rootPath, project.Path) {
+				continue
+			}
+
+			relToSource, err := filepath.Rel(rootPath, absPath)
+			if err != nil {
+				continue
+			}
+
+			// Check SkipDirs against each path component
+			stName := source.SourceTypeName
+			if stName == "" {
+				stName = source.Name
+			}
+			st := discovery.GetSourceType(stName)
+
+			if !isAllMarkdown && typedClaimed {
+				continue // already claimed by an earlier typed source
+			}
+
+			if hasSkippedDir(relToSource, st) {
+				continue
+			}
+
+			// RequireSibling check
+			if st != nil && st.RequireSibling != "" {
+				siblingPath := filepath.Join(filepath.Dir(absPath), st.RequireSibling)
+				if _, err := os.Stat(siblingPath); err != nil {
+					continue
+				}
+			}
+
+			// ClassifyFile
+			fileType := "other"
+			if st != nil && st.ClassifyFile != nil {
+				fileType = st.ClassifyFile(relToSource)
+				if fileType == "" {
+					continue // skip this file for this source
+				}
+			} else {
+				if strings.Contains(relToSource, "research") {
+					fileType = "research"
+				} else if strings.Contains(relToSource, "plan") {
+					fileType = "plan"
+				}
+			}
+
+			if !isAllMarkdown {
+				typedClaimed = true
+			}
+
+			results = append(results, FileInfo{
+				Project:     project.QualifiedName(),
+				Workspace:   project.WorkspaceName,
+				ProjectPath: project.Path,
+				Source:      source.Name,
+				SourceType:  source.Type,
+				SourceAuto:  source.Auto,
+				Path:        relToSource,
+				FullPath:    relToProject,
+				Name:        filepath.Base(absPath),
+				Title:       title,
+				ModTime:     info.ModTime(),
+				FileType:    fileType,
+			})
+
+		} else if source.Type == "files" {
+			if !isAllMarkdown && typedClaimed {
+				continue
+			}
+			found := false
+			for _, f := range source.Files {
+				if f == absPath {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+
+			fileType := "other"
+			lower := strings.ToLower(filepath.Base(absPath))
+			if strings.Contains(lower, "research") {
+				fileType = "research"
+			} else if strings.Contains(lower, "plan") {
+				fileType = "plan"
+			}
+
+			if !isAllMarkdown {
+				typedClaimed = true
+			}
+
+			results = append(results, FileInfo{
+				Project:     project.QualifiedName(),
+				Workspace:   project.WorkspaceName,
+				ProjectPath: project.Path,
+				Source:      source.Name,
+				SourceType:  source.Type,
+				SourceAuto:  source.Auto,
+				Path:        filepath.Base(absPath),
+				FullPath:    relToProject,
+				Name:        filepath.Base(absPath),
+				Title:       title,
+				ModTime:     info.ModTime(),
+				FileType:    fileType,
+			})
+		}
+	}
+
+	return results
+}
+
+// hasSkippedDir checks whether any directory component between the source root
+// and the file matches the source type's SkipDirs.
+func hasSkippedDir(relToSource string, st *discovery.SourceType) bool {
+	if st == nil || len(st.SkipDirs) == 0 {
+		return false
+	}
+	dir := filepath.Dir(relToSource)
+	if dir == "." {
+		return false
+	}
+	for _, component := range strings.Split(dir, string(filepath.Separator)) {
+		if st.SkipDirs[component] {
+			return true
+		}
+	}
+	return false
+}
+
+// isUnderNestedGitRepo walks parent directories from absPath up to (but not
+// including) rootPath, returning true if any intermediate directory contains a
+// .git file (not directory), indicating a nested git worktree or submodule.
+// This mirrors the nested-repo check in scanProjectSources without spawning
+// a subprocess.
+func isUnderNestedGitRepo(absPath, rootPath string) bool {
+	dir := filepath.Dir(absPath)
+	for dir != rootPath && strings.HasPrefix(dir, rootPath+"/") {
+		gitEntry := filepath.Join(dir, ".git")
+		if fi, err := os.Lstat(gitEntry); err == nil && !fi.IsDir() {
+			return true
+		}
+		dir = filepath.Dir(dir)
+	}
+	return false
+}
+
+// isAncestorDirGitIgnored walks parent directories from absPath up to (but not
+// including) rootPath, running a one-shot `git check-ignore -q` on each.
+// Returns true if any ancestor directory is gitignored.
+// P-PENPAL-SRC-GITIGNORE: the source root itself is exempt (always scanned).
+func isAncestorDirGitIgnored(absPath, rootPath, projectPath string) bool {
+	dir := filepath.Dir(absPath)
+	for dir != rootPath && strings.HasPrefix(dir, rootPath+"/") {
+		cmd := exec.Command("git", "-C", projectPath, "check-ignore", "-q", dir)
+		if cmd.Run() == nil {
+			return true // exit code 0 means ignored
+		}
+		dir = filepath.Dir(dir)
+	}
+	return false
+}
+
+// UpsertFile adds or updates file entries in the cache for the given absolute path.
+// For existing entries (matched by FullPath), re-stats for ModTime and re-extracts
+// Title. For new files, resolves source membership and inserts.
+// E-PENPAL-CACHE: incremental cache mutation without filesystem walk.
+func (c *Cache) UpsertFile(projectName string, project *discovery.Project, absPath string) bool {
+	// Perform all filesystem and git I/O outside the lock.
+	relToProject, err := filepath.Rel(project.Path, absPath)
+	if err != nil {
+		return false
+	}
+
+	info, err := os.Stat(absPath)
+	if err != nil {
+		return false
+	}
+
+	title := extractTitle(absPath)
+	resolved := ResolveFileInfo(project, absPath)
+
+	// Acquire lock only for the short critical section that mutates the cache.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	files := c.projectFiles[projectName]
+
+	// Check if any entries already exist for this path
+	updated := false
+	for i := range files {
+		if files[i].FullPath == relToProject {
+			files[i].ModTime = info.ModTime()
+			files[i].Title = title
+			updated = true
+		}
+	}
+
+	if updated {
+		sort.Slice(files, func(i, j int) bool {
+			return files[i].ModTime.After(files[j].ModTime)
+		})
+		c.projectFiles[projectName] = files
+		c.updateProjectMetadataLocked(projectName, files)
+		return true
+	}
+
+	// New file — use pre-resolved source membership
+	if len(resolved) == 0 {
+		return false
+	}
+
+	files = append(files, resolved...)
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].ModTime.After(files[j].ModTime)
+	})
+	c.projectFiles[projectName] = files
+	c.updateProjectMetadataLocked(projectName, files)
+	return true
+}
+
+// RemoveFile removes all cache entries with the given project-relative path.
+// E-PENPAL-CACHE: incremental cache mutation without filesystem walk.
+func (c *Cache) RemoveFile(projectName, fullPath string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	files := c.projectFiles[projectName]
+	if files == nil {
+		return false
+	}
+
+	n := 0
+	for _, f := range files {
+		if f.FullPath != fullPath {
+			files[n] = f
+			n++
+		}
+	}
+	if n == len(files) {
+		return false // nothing removed
+	}
+
+	files = files[:n]
+	c.projectFiles[projectName] = files
+	c.updateProjectMetadataLocked(projectName, files)
+	return true
+}
+
+// updateProjectMetadataLocked updates HasFiles and LastModified for a project.
+// Must be called with c.mu held for writing.
+func (c *Cache) updateProjectMetadataLocked(projectName string, files []FileInfo) {
+	for i := range c.projects {
+		if c.projects[i].QualifiedName() == projectName {
+			c.projects[i].HasFiles = len(files) > 0
+			if len(files) > 0 {
+				c.projects[i].LastModified = files[0].ModTime
+			}
+			break
+		}
+	}
 }
 
 // ScanProjectSourcesForWorktree scans a project's sources remapped to a worktree path.

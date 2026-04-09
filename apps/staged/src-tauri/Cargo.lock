@@ -4,7 +4,7 @@ version = 3
 
 [[package]]
 name = "Staged"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "acp-client",
  "anyhow",
@@ -14,6 +14,7 @@ dependencies = [
  "blox-cli",
  "builderbot-actions",
  "dirs",
+ "doctor",
  "git-diff",
  "include_dir",
  "log",
@@ -1188,6 +1189,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "doctor"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tokio",
 ]
 
 [[package]]

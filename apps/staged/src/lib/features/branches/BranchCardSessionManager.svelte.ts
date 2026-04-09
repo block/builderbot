@@ -76,6 +76,21 @@ export default class BranchCardSessionManager {
   /** True when new session actions (new commit, note, review) should be disabled. */
   isNewSessionDisabled = $derived(this.showNewSession || this.isSessionStartPending);
 
+  /** True when a commit session is pending, queued, or actively running. */
+  hasCommitSessionInProgress = $derived.by(() => {
+    if (
+      this.pendingSessionItems.some(
+        (item) => item.type === 'pending-commit' || item.type === 'queued-commit'
+      )
+    ) {
+      return true;
+    }
+    const tl = this.getTimeline();
+    return (
+      !!tl && tl.commits.some((c) => c.sessionStatus === 'running' || c.sessionStatus === 'queued')
+    );
+  });
+
   constructor(opts: {
     getBranch: () => Branch;
     getIsRemote: () => boolean;
@@ -163,6 +178,8 @@ export default class BranchCardSessionManager {
   }
 
   async tryAdoptAutoReview(): Promise<boolean> {
+    if (this.hasCommitSessionInProgress) return false;
+
     const branch = this.getBranch();
 
     try {
@@ -195,7 +212,7 @@ export default class BranchCardSessionManager {
     const branch = this.getBranch();
     const isRemote = this.getIsRemote();
 
-    if (this.autoReviewSessionId && mode !== 'review') {
+    if (this.autoReviewSessionId && mode !== 'note') {
       this.cancelAutoReview();
     }
 
@@ -253,7 +270,7 @@ export default class BranchCardSessionManager {
     const branch = this.getBranch();
     const isRemote = this.getIsRemote();
 
-    if (this.autoReviewSessionId && mode !== 'review') {
+    if (this.autoReviewSessionId && mode !== 'note') {
       this.cancelAutoReview();
     }
 
@@ -363,10 +380,6 @@ export default class BranchCardSessionManager {
         data.imageIds
       );
       return;
-    }
-
-    if (data.mode === 'review' && this.autoReviewSessionId) {
-      this.cancelAutoReview();
     }
 
     const prompt =

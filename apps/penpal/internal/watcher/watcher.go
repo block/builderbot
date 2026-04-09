@@ -73,6 +73,13 @@ type Watcher struct {
 
 	// Serializes rediscoverProjects calls from concurrent debounce timers.
 	rediscoverMu sync.Mutex
+
+	// E-PENPAL-WATCHER: accumulating debounce for incremental file updates.
+	// Collects per-file paths and ops during the debounce window, then applies
+	// incremental cache mutations instead of full project walks.
+	filePending   map[string]map[string]fsnotify.Op // projectName → absPath → accumulated op
+	filePendingMu sync.Mutex
+	fileTimers    map[string]*time.Timer // projectName → debounce timer
 }
 
 // New creates a new watcher
@@ -90,9 +97,11 @@ func New(c *cache.Cache, act *activity.Tracker) (*Watcher, error) {
 		done:           make(chan struct{}),
 		subs:           make(map[chan Event]struct{}),
 		debounce:       make(map[string]*time.Timer),
-		windowFocuses:     make(map[string]focusTarget),
-		baseWatched:       make(map[string]struct{}),
-		dynamicWatched:    make(map[string]struct{}),
+		windowFocuses:  make(map[string]focusTarget),
+		baseWatched:    make(map[string]struct{}),
+		dynamicWatched: make(map[string]struct{}),
+		filePending:    make(map[string]map[string]fsnotify.Op),
+		fileTimers:     make(map[string]*time.Timer),
 	}
 
 	return w, nil
@@ -585,9 +594,24 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		return
 	}
 
-	// Only care about .md files for file list updates. Directory creation
-	// events are handled above by the source-detection and dynamic-watch paths.
+	// E-PENPAL-WATCHER: only .md file events trigger cache updates. Non-.md
+	// Create events (e.g., scanner temp files, backup artifacts) are ignored.
+	// However, directory Create/Rename events may contain .md files that need
+	// to be discovered, so we walk those directories before returning.
 	if !strings.HasSuffix(path, ".md") {
+		if event.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
+			if info, err := os.Stat(path); err == nil && info.IsDir() {
+				filepath.Walk(path, func(p string, fi os.FileInfo, err error) error {
+					if err != nil {
+						return nil
+					}
+					if !fi.IsDir() && strings.HasSuffix(p, ".md") {
+						w.debounceFileEvent(projectName, p, fsnotify.Create)
+					}
+					return nil
+				})
+			}
+		}
 		return
 	}
 
@@ -604,11 +628,8 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		}
 	}
 
-	w.debounceRefresh(projectName, func() {
-		w.cache.RefreshProject(projectName)
-		w.cache.RefreshProjectGitInfo(projectName)
-		w.Broadcast(Event{Type: EventFilesChanged, Project: projectName})
-	})
+	// E-PENPAL-WATCHER: accumulate file event for incremental cache update.
+	w.debounceFileEvent(projectName, path, event.Op)
 }
 
 // findProjectForPath finds which project a path belongs to by checking
@@ -661,4 +682,64 @@ func (w *Watcher) debounceRefresh(key string, fn func()) {
 		w.debounceMu.Unlock()
 		fn()
 	})
+}
+
+// debounceFileEvent accumulates a file event for a project and schedules
+// an incremental cache update after the debounce window (100ms).
+// E-PENPAL-WATCHER: accumulating debounce for incremental file updates.
+func (w *Watcher) debounceFileEvent(projectName, absPath string, op fsnotify.Op) {
+	w.filePendingMu.Lock()
+	defer w.filePendingMu.Unlock()
+
+	if w.filePending[projectName] == nil {
+		w.filePending[projectName] = make(map[string]fsnotify.Op)
+	}
+	w.filePending[projectName][absPath] |= op
+
+	if timer, ok := w.fileTimers[projectName]; ok {
+		timer.Stop()
+	}
+
+	w.fileTimers[projectName] = time.AfterFunc(100*time.Millisecond, func() {
+		w.flushFileEvents(projectName)
+	})
+}
+
+// flushFileEvents drains accumulated file events for a project and applies
+// incremental cache mutations. Falls back to a full RefreshProject if the
+// project hasn't been scanned yet.
+// E-PENPAL-WATCHER: incremental cache update from accumulated file events.
+func (w *Watcher) flushFileEvents(projectName string) {
+	w.filePendingMu.Lock()
+	events := w.filePending[projectName]
+	delete(w.filePending, projectName)
+	delete(w.fileTimers, projectName)
+	w.filePendingMu.Unlock()
+
+	if len(events) == 0 {
+		return
+	}
+
+	project := w.cache.FindProject(projectName)
+	if project == nil {
+		return
+	}
+
+	// Apply incremental updates regardless of scan state. For unscanned
+	// projects this adds files to a partial cache; the lazy scan on first
+	// access will reconcile with a full walk.
+	for absPath, op := range events {
+		if op&(fsnotify.Remove|fsnotify.Rename) != 0 {
+			relPath, err := filepath.Rel(project.Path, absPath)
+			if err == nil {
+				w.cache.RemoveFile(projectName, relPath)
+			}
+		}
+		if op&(fsnotify.Create|fsnotify.Write) != 0 {
+			w.cache.UpsertFile(projectName, project, absPath)
+		}
+	}
+
+	w.cache.RefreshProjectGitInfo(projectName)
+	w.Broadcast(Event{Type: EventFilesChanged, Project: projectName})
 }

@@ -70,6 +70,66 @@ fn test_list_projects() {
 }
 
 #[test]
+fn test_project_note_sets_completed_at_when_created_with_content() {
+    let note = ProjectNote::new("project-1", "Title", "Body");
+    assert_eq!(note.completed_at, Some(note.created_at));
+}
+
+#[test]
+fn test_project_note_completion_is_write_once() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+
+    let note = ProjectNote::new(&project.id, "", "");
+    store.create_project_note(&note).unwrap();
+
+    let before = store.get_project_note(&note.id).unwrap().unwrap();
+    assert!(before.completed_at.is_none());
+
+    store
+        .update_project_note_title_and_content(&note.id, "First", "Initial content", None, None)
+        .unwrap();
+    let completed = store.get_project_note(&note.id).unwrap().unwrap();
+    let first_completed_at = completed.completed_at.unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    store
+        .update_project_note_title_and_content(&note.id, "Second", "Updated content", None, None)
+        .unwrap();
+    let updated = store.get_project_note(&note.id).unwrap().unwrap();
+
+    assert_eq!(updated.completed_at, Some(first_completed_at));
+    assert!(updated.updated_at >= completed.updated_at);
+}
+
+#[test]
+fn test_list_project_notes_orders_by_completion_time() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+
+    let older = ProjectNote::new(&project.id, "", "").with_session("session-older");
+    store.create_project_note(&older).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+
+    let newer = ProjectNote::new(&project.id, "", "").with_session("session-newer");
+    store.create_project_note(&newer).unwrap();
+
+    store
+        .update_project_note_title_and_content(&newer.id, "Newer", "Completed first", None, None)
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    store
+        .update_project_note_title_and_content(&older.id, "Older", "Completed second", None, None)
+        .unwrap();
+
+    let notes = store.list_project_notes(&project.id).unwrap();
+    let ordered_ids: Vec<_> = notes.iter().map(|note| note.id.as_str()).collect();
+    assert_eq!(ordered_ids, vec![older.id.as_str(), newer.id.as_str()]);
+}
+
+#[test]
 fn test_delete_project_cascades() {
     let store = Store::in_memory().unwrap();
     let project = Project::new("test-owner/test-repo");
@@ -213,7 +273,7 @@ fn test_session_lifecycle() {
 
     // Complete
     store
-        .update_session_status(&session.id, SessionStatus::Completed, None)
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
         .unwrap();
     let completed = store.get_session(&session.id).unwrap().unwrap();
     assert_eq!(completed.status, SessionStatus::Completed);
@@ -228,7 +288,7 @@ fn test_session_error() {
     store.create_session(&session).unwrap();
 
     store
-        .update_session_status(&session.id, SessionStatus::Error, Some("boom"))
+        .update_session_status(&session.id, SessionStatus::Error, Some("boom"), None)
         .unwrap();
     let failed = store.get_session(&session.id).unwrap().unwrap();
     assert_eq!(failed.status, SessionStatus::Error);
@@ -248,6 +308,7 @@ fn test_session_error_message_ignored_for_non_error() {
             &session.id,
             SessionStatus::Completed,
             Some("should be ignored"),
+            None,
         )
         .unwrap();
     let completed = store.get_session(&session.id).unwrap().unwrap();
@@ -264,14 +325,14 @@ fn test_transition_from_running() {
 
     // Simulate: cancel_session sets status to cancelled via direct update
     store
-        .update_session_status(&session.id, SessionStatus::Cancelled, None)
+        .update_session_status(&session.id, SessionStatus::Cancelled, None, None)
         .unwrap();
     let after_cancel = store.get_session(&session.id).unwrap().unwrap();
     assert_eq!(after_cancel.status, SessionStatus::Cancelled);
 
     // Simulate: background thread tries to set completed — should be a no-op
     let transitioned = store
-        .transition_from_running(&session.id, SessionStatus::Completed, None)
+        .transition_from_running(&session.id, SessionStatus::Completed, None, None)
         .unwrap();
     assert!(!transitioned);
 
@@ -289,12 +350,73 @@ fn test_transition_from_running_succeeds_when_running() {
 
     // No concurrent cancel — transition should succeed
     let transitioned = store
-        .transition_from_running(&session.id, SessionStatus::Completed, None)
+        .transition_from_running(&session.id, SessionStatus::Completed, None, None)
         .unwrap();
     assert!(transitioned);
 
     let final_state = store.get_session(&session.id).unwrap().unwrap();
     assert_eq!(final_state.status, SessionStatus::Completed);
+}
+
+#[test]
+fn test_transition_from_active_succeeds_when_queued() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_queued("queued");
+    store.create_session(&session).unwrap();
+
+    let transitioned = store
+        .transition_from_active(&session.id, SessionStatus::Cancelled, None, None)
+        .unwrap();
+    assert!(transitioned);
+
+    let final_state = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(final_state.status, SessionStatus::Cancelled);
+}
+
+#[test]
+fn test_transition_from_active_does_not_overwrite_completed_session() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("completed first", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    store
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
+        .unwrap();
+
+    let transitioned = store
+        .transition_from_active(&session.id, SessionStatus::Cancelled, None, None)
+        .unwrap();
+    assert!(!transitioned);
+
+    let final_state = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(final_state.status, SessionStatus::Completed);
+}
+
+#[test]
+fn test_completion_reason_round_trips() {
+    let store = Store::in_memory().unwrap();
+
+    for reason in [
+        CompletionReason::TurnComplete,
+        CompletionReason::Interrupted,
+        CompletionReason::Crashed,
+        CompletionReason::AppQuit,
+        CompletionReason::Unknown,
+    ] {
+        let session = Session::new_running("test reason", Path::new("/tmp"));
+        store.create_session(&session).unwrap();
+        store
+            .update_session_status(&session.id, SessionStatus::Completed, None, Some(&reason))
+            .unwrap();
+        let fetched = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(
+            fetched.completion_reason.as_ref(),
+            Some(&reason),
+            "round-trip failed for {:?}",
+            reason
+        );
+    }
 }
 
 #[test]
@@ -590,7 +712,7 @@ fn test_completed_session_cleaned_up_on_branch_delete() {
     let session = Session::new_running("make changes", Path::new("/tmp"));
     store.create_session(&session).unwrap();
     store
-        .update_session_status(&session.id, SessionStatus::Completed, None)
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
         .unwrap();
 
     let commit = Commit::new_with_sha(&branch.id, "abc").with_session(&session.id);
@@ -617,7 +739,7 @@ fn test_session_not_cleaned_up_if_still_referenced() {
     let session = Session::new_running("shared work", Path::new("/tmp"));
     store.create_session(&session).unwrap();
     store
-        .update_session_status(&session.id, SessionStatus::Completed, None)
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
         .unwrap();
 
     let commit_a = Commit::new_with_sha(&branch_a.id, "aaa").with_session(&session.id);
@@ -666,7 +788,7 @@ fn test_session_cleaned_up_via_note_delete() {
     let session = Session::new_running("write notes", Path::new("/tmp"));
     store.create_session(&session).unwrap();
     store
-        .update_session_status(&session.id, SessionStatus::Completed, None)
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
         .unwrap();
 
     let note = Note::new(&branch.id, "Design", "content").with_session(&session.id);
@@ -689,7 +811,7 @@ fn test_session_cleaned_up_via_review_delete() {
     let session = Session::new_running("review code", Path::new("/tmp"));
     store.create_session(&session).unwrap();
     store
-        .update_session_status(&session.id, SessionStatus::Completed, None)
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
         .unwrap();
 
     let review = Review::new(&branch.id, "abc123", ReviewScope::Commit).with_session(&session.id);
@@ -718,7 +840,7 @@ fn test_session_messages_cascade_from_session_cleanup() {
         .add_session_message(&session.id, MessageRole::Assistant, "hi")
         .unwrap();
     store
-        .update_session_status(&session.id, SessionStatus::Completed, None)
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
         .unwrap();
 
     let commit = Commit::new_with_sha(&branch.id, "abc").with_session(&session.id);
@@ -750,6 +872,34 @@ fn test_notes() {
     let notes = store.list_notes_for_branch(&branch.id).unwrap();
     assert_eq!(notes.len(), 1);
     assert!(notes[0].content.contains("Design"));
+}
+
+#[test]
+fn test_list_notes_for_branch_orders_by_completion_time() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let older = Note::new(&branch.id, "", "").with_session("session-older");
+    store.create_note(&older).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+
+    let newer = Note::new(&branch.id, "", "").with_session("session-newer");
+    store.create_note(&newer).unwrap();
+
+    store
+        .update_note_title_and_content(&newer.id, "Newer", "Completed first", None, None)
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    store
+        .update_note_title_and_content(&older.id, "Older", "Completed second", None, None)
+        .unwrap();
+
+    let notes = store.list_notes_for_branch(&branch.id).unwrap();
+    let ordered_ids: Vec<_> = notes.iter().map(|note| note.id.as_str()).collect();
+    assert_eq!(ordered_ids, vec![older.id.as_str(), newer.id.as_str()]);
 }
 
 // =============================================================================
@@ -923,6 +1073,49 @@ fn test_review_with_comments_and_files() {
         .unwrap();
     let after_remove = store.get_review(&review.id).unwrap().unwrap();
     assert!(after_remove.reference_files.is_empty());
+}
+
+#[test]
+fn test_set_review_auto_restamps_completed_at_when_made_visible() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let review = Review::new(&branch.id, "abc123", ReviewScope::Branch).with_auto();
+    store.create_review(&review).unwrap();
+    store
+        .update_review_title(&review.id, "Auto review")
+        .unwrap();
+
+    let auto_review = store.get_review(&review.id).unwrap().unwrap();
+    let original_completed_at = auto_review.completed_at.unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    store.set_review_auto(&review.id, false).unwrap();
+
+    let visible_review = store.get_review(&review.id).unwrap().unwrap();
+    assert!(!visible_review.is_auto);
+    assert!(visible_review.completed_at.unwrap() > original_completed_at);
+}
+
+#[test]
+fn test_set_review_auto_leaves_incomplete_review_uncompleted() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let review = Review::new(&branch.id, "abc123", ReviewScope::Branch).with_auto();
+    store.create_review(&review).unwrap();
+
+    store.set_review_auto(&review.id, false).unwrap();
+
+    let visible_review = store.get_review(&review.id).unwrap().unwrap();
+    assert!(!visible_review.is_auto);
+    assert!(visible_review.completed_at.is_none());
 }
 
 #[test]

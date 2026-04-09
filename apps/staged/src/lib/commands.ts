@@ -13,6 +13,7 @@ import type {
   Branch,
   BranchTimeline,
   BranchRef,
+  BranchSessionLaunchContext,
   BranchSessionType,
   BranchSessionResponse,
   StoreIncompatibility,
@@ -59,7 +60,8 @@ export function createProject(
   githubRepo?: string,
   subpath?: string,
   branchName?: string,
-  prNumber?: number
+  prNumber?: number,
+  defaultBranch?: string
 ): Promise<Project> {
   return invoke('create_project', {
     name,
@@ -68,6 +70,7 @@ export function createProject(
     subpath,
     branchName: branchName ?? null,
     prNumber: prNumber ?? null,
+    defaultBranch: defaultBranch ?? null,
   });
 }
 
@@ -89,7 +92,8 @@ export function addProjectRepo(
   branchName?: string,
   subpath?: string,
   setAsPrimary?: boolean,
-  prNumber?: number
+  prNumber?: number,
+  defaultBranch?: string
 ): Promise<ProjectRepo> {
   return invoke('add_project_repo', {
     projectId,
@@ -98,6 +102,7 @@ export function addProjectRepo(
     subpath: subpath ?? null,
     setAsPrimary: setAsPrimary ?? null,
     prNumber: prNumber ?? null,
+    defaultBranch: defaultBranch ?? null,
   });
 }
 
@@ -553,7 +558,8 @@ export function startBranchSession(
   prompt: string,
   sessionType: BranchSessionType,
   provider?: string,
-  imageIds?: string[]
+  imageIds?: string[],
+  launchContext?: BranchSessionLaunchContext
 ): Promise<BranchSessionResponse> {
   return invoke('start_branch_session', {
     branchId,
@@ -561,6 +567,7 @@ export function startBranchSession(
     sessionType,
     provider: provider ?? null,
     imageIds: imageIds ?? null,
+    launchContext: launchContext ?? null,
   });
 }
 
@@ -570,7 +577,8 @@ export function queueBranchSession(
   prompt: string,
   sessionType: BranchSessionType,
   provider?: string,
-  imageIds?: string[]
+  imageIds?: string[],
+  launchContext?: BranchSessionLaunchContext
 ): Promise<BranchSessionResponse> {
   return invoke('queue_branch_session', {
     branchId,
@@ -578,6 +586,7 @@ export function queueBranchSession(
     sessionType,
     provider: provider ?? null,
     imageIds: imageIds ?? null,
+    launchContext: launchContext ?? null,
   });
 }
 
@@ -839,6 +848,7 @@ export interface DoctorCheck {
   message: string;
   fixUrl: string | null;
   fixCommand: string | null;
+  fixType: 'command' | 'bridge' | null;
   path: string | null;
   bridgePath: string | null;
   rawOutput: string | null;
@@ -853,9 +863,9 @@ export function runDoctor(): Promise<DoctorReport> {
   return invoke('run_doctor');
 }
 
-/** Run a fix command from a doctor check. */
-export function runDoctorFix(command: string): Promise<void> {
-  return invoke('run_doctor_fix', { command });
+/** Run a fix for a doctor check, identified by check ID and fix type. */
+export function runDoctorFix(checkId: string, fixType: 'command' | 'bridge'): Promise<void> {
+  return invoke('run_doctor_fix', { checkId, fixType });
 }
 
 // =============================================================================

@@ -17,8 +17,8 @@ use agent_client_protocol::{
     Agent, ClientSideConnection, ContentBlock as AcpContentBlock, ImageContent, Implementation,
     InitializeRequest, LoadSessionRequest, McpServer, NewSessionRequest, PermissionOptionId,
     PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionNotification, SessionUpdate,
-    TextContent,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigOption, SessionInfoUpdate,
+    SessionModelState, SessionNotification, SessionUpdate, TextContent,
 };
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -27,7 +27,9 @@ use tokio::sync::Mutex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(unix)]
 use nix::sys::signal::{self, Signal};
+#[cfg(unix)]
 use nix::unistd::Pid;
 
 use crate::types::blox_acp_command;
@@ -48,14 +50,43 @@ pub trait MessageWriter: Send + Sync {
     /// Flush all buffered text and close the current message block.
     async fn finalize(&self);
 
-    /// Record a tool call with its ID and title.
-    async fn record_tool_call(&self, tool_call_id: &str, title: &str);
+    /// Record a tool call with its ID, title, and optional raw input parameters.
+    async fn record_tool_call(
+        &self,
+        tool_call_id: &str,
+        title: &str,
+        raw_input: Option<&serde_json::Value>,
+    );
 
-    /// Update a previously recorded tool call's title.
-    async fn update_tool_call_title(&self, tool_call_id: &str, title: &str);
+    /// Update a previously recorded tool call's title and/or raw input.
+    ///
+    /// When `title` is `None`, the implementation should preserve the
+    /// existing title while updating only `raw_input`.
+    async fn update_tool_call_title(
+        &self,
+        tool_call_id: &str,
+        title: Option<&str>,
+        raw_input: Option<&serde_json::Value>,
+    );
 
     /// Record the result/output of a tool call.
     async fn record_tool_result(&self, content: &str);
+
+    /// Called when session info is updated (title, timestamps, etc.).
+    ///
+    /// Delivered via `SessionUpdate::SessionInfoUpdate` notifications during a
+    /// session, or extracted from setup responses.
+    async fn on_session_info_update(&self, _info: &SessionInfoUpdate) {}
+
+    /// Called when model state is received from session setup responses.
+    ///
+    /// `SessionModelState` is only delivered in `NewSessionResponse` and
+    /// `LoadSessionResponse`. Mid-session model changes are surfaced through
+    /// `on_config_option_update` via `ConfigOptionUpdate` with category `Model`.
+    async fn on_model_state_update(&self, _state: &SessionModelState) {}
+
+    /// Called when session configuration options change.
+    async fn on_config_option_update(&self, _options: &[SessionConfigOption]) {}
 }
 
 /// Storage interface for persisting agent session data.
@@ -293,6 +324,7 @@ impl AgentDriver for AcpDriver {
         // which breaks zsh's job-control / precmd hooks — the shell either
         // hangs or exits immediately without running `exec`.
         if self.is_remote {
+            #[cfg(unix)]
             cmd.process_group(0);
         }
         // For local shells extra_env is set on the clean environment; for
@@ -433,6 +465,7 @@ impl AgentDriver for AcpDriver {
 ///
 /// For local agents (no separate process group), kills immediately.
 async fn graceful_stop(child: &mut tokio::process::Child, is_remote: bool) {
+    #[cfg(unix)]
     if is_remote {
         let Some(pid) = child.id() else {
             return;
@@ -830,6 +863,21 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
         &self,
         notification: SessionNotification,
     ) -> agent_client_protocol::Result<()> {
+        // Session metadata events are forwarded regardless of phase.
+        match &notification.update {
+            SessionUpdate::SessionInfoUpdate(info) => {
+                self.writer.on_session_info_update(info).await;
+                return Ok(());
+            }
+            SessionUpdate::ConfigOptionUpdate(update) => {
+                self.writer
+                    .on_config_option_update(&update.config_options)
+                    .await;
+                return Ok(());
+            }
+            _ => {}
+        }
+
         // Determine the action to take under the lock, then drop the lock
         // before calling into the writer to avoid holding it across await points.
         enum LiveAction {
@@ -837,10 +885,12 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
             RecordToolCall {
                 id: String,
                 title: String,
+                raw_input: Option<serde_json::Value>,
             },
             ToolCallUpdate {
                 id: String,
                 title: Option<String>,
+                raw_input: Option<serde_json::Value>,
                 result: Option<String>,
             },
             Ignore,
@@ -946,19 +996,22 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
                         SessionUpdate::ToolCall(tool_call) => LiveAction::RecordToolCall {
                             id: tool_call.tool_call_id.0.to_string(),
                             title: tool_call.title.clone(),
+                            raw_input: tool_call.raw_input.clone(),
                         },
                         SessionUpdate::ToolCallUpdate(update) => {
                             let tc_id = update.tool_call_id.0.to_string();
                             let title = update.fields.title.clone();
+                            let raw_input = update.fields.raw_input.clone();
                             let result = update
                                 .fields
                                 .content
                                 .as_ref()
                                 .and_then(|c| extract_content_preview(c));
-                            if title.is_some() || result.is_some() {
+                            if title.is_some() || raw_input.is_some() || result.is_some() {
                                 LiveAction::ToolCallUpdate {
                                     id: tc_id,
                                     title,
+                                    raw_input,
                                     result,
                                 }
                             } else {
@@ -977,12 +1030,25 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
             LiveAction::AppendText(text) => {
                 self.writer.append_text(&text).await;
             }
-            LiveAction::RecordToolCall { id, title } => {
-                self.writer.record_tool_call(&id, &title).await;
+            LiveAction::RecordToolCall {
+                id,
+                title,
+                raw_input,
+            } => {
+                self.writer
+                    .record_tool_call(&id, &title, raw_input.as_ref())
+                    .await;
             }
-            LiveAction::ToolCallUpdate { id, title, result } => {
-                if let Some(title) = title {
-                    self.writer.update_tool_call_title(&id, &title).await;
+            LiveAction::ToolCallUpdate {
+                id,
+                title,
+                raw_input,
+                result,
+            } => {
+                if title.is_some() || raw_input.is_some() {
+                    self.writer
+                        .update_tool_call_title(&id, title.as_deref(), raw_input.as_ref())
+                        .await;
                 }
                 if let Some(preview) = result {
                     self.writer.record_tool_result(&preview).await;
@@ -1028,6 +1094,7 @@ async fn run_acp_protocol(
             connection,
             working_dir,
             store,
+            &handler.writer,
             our_session_id,
             acp_session_id,
             mcp_servers,
@@ -1088,6 +1155,7 @@ async fn setup_acp_session(
     connection: &ClientSideConnection,
     working_dir: &Path,
     store: &Arc<dyn Store>,
+    writer: &Arc<dyn MessageWriter>,
     our_session_id: &str,
     acp_session_id: Option<&str>,
     mcp_servers: &[McpServer],
@@ -1132,13 +1200,20 @@ async fn setup_acp_session(
                 "Resuming ACP session {existing_id} via load_session for session {our_session_id}"
             );
 
-            connection
+            let load_response = connection
                 .load_session(
                     LoadSessionRequest::new(existing_id.to_string(), working_dir.to_path_buf())
                         .mcp_servers(mcp_servers.to_vec()),
                 )
                 .await
                 .map_err(|e| format!("Failed to load ACP session: {e:?}"))?;
+
+            if let Some(ref models) = load_response.models {
+                writer.on_model_state_update(models).await;
+            }
+            if let Some(ref options) = load_response.config_options {
+                writer.on_config_option_update(options).await;
+            }
 
             Ok(existing_id.to_string())
         }
@@ -1154,6 +1229,14 @@ async fn setup_acp_session(
             store
                 .set_agent_session_id(our_session_id, &new_id)
                 .map_err(|e| format!("Failed to save agent session ID: {e}"))?;
+
+            if let Some(ref models) = session_response.models {
+                writer.on_model_state_update(models).await;
+            }
+            if let Some(ref options) = session_response.config_options {
+                writer.on_config_option_update(options).await;
+            }
+
             Ok(new_id)
         }
     }
@@ -1251,12 +1334,22 @@ impl MessageWriter for BasicMessageWriter {
         // Nothing to do for basic implementation
     }
 
-    async fn record_tool_call(&self, _tool_call_id: &str, title: &str) {
+    async fn record_tool_call(
+        &self,
+        _tool_call_id: &str,
+        title: &str,
+        _raw_input: Option<&serde_json::Value>,
+    ) {
         let mut current = self.text.lock().await;
         current.push_str(&format!("\n[Tool: {}]\n", title));
     }
 
-    async fn update_tool_call_title(&self, _tool_call_id: &str, _title: &str) {
+    async fn update_tool_call_title(
+        &self,
+        _tool_call_id: &str,
+        _title: Option<&str>,
+        _raw_input: Option<&serde_json::Value>,
+    ) {
         // Nothing to do for basic implementation
     }
 

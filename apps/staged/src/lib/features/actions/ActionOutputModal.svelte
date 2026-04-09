@@ -28,6 +28,7 @@
     XCircle,
     Check,
     StickyNote,
+    RotateCw,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import Convert from 'ansi-to-html';
@@ -42,6 +43,7 @@
     listenToActionOutput,
     listenToActionStatus,
   } from './actions';
+  import { processChunksToLines, type TerminalLine } from './processOutput';
 
   interface Props {
     executionId: string;
@@ -51,6 +53,7 @@
     onClose: () => void;
     onRemove?: (executionId: string) => void;
     onNoteCreated?: () => void;
+    onRunAgain?: () => void;
   }
 
   let {
@@ -61,17 +64,12 @@
     onClose,
     onRemove,
     onNoteCreated,
+    onRunAgain,
   }: Props = $props();
 
   // =========================================================================
   // State
   // =========================================================================
-
-  /** A processed terminal line ready for display. */
-  interface TerminalLine {
-    text: string;
-    stream: 'stdout' | 'stderr';
-  }
 
   let status = $state<ActionStatus>('running');
   let exitCode = $state<number | null>(null);
@@ -151,60 +149,6 @@
     }
   }
 
-  /**
-   * Process raw output chunks into terminal lines, handling carriage returns.
-   *
-   * Terminal programs use \r (carriage return without newline) to overwrite the
-   * current line in-place — e.g. for progress bars. This function simulates
-   * that behavior:
-   *   - \n finalizes the current line and starts a new one
-   *   - \r (not followed by \n) resets the cursor to the start of the current
-   *     line so subsequent text overwrites it
-   */
-  function processChunksToLines(chunks: OutputChunk[]): TerminalLine[] {
-    const lines: TerminalLine[] = [];
-    let currentText = '';
-    let currentStream: 'stdout' | 'stderr' = 'stdout';
-
-    for (const chunk of chunks) {
-      const raw = chunk.chunk;
-      const stream = chunk.stream;
-
-      for (let i = 0; i < raw.length; i++) {
-        const ch = raw[i];
-
-        if (ch === '\n') {
-          // Newline: finalize the current line and start a new one
-          lines.push({ text: currentText, stream: currentStream });
-          currentText = '';
-          currentStream = stream;
-        } else if (ch === '\r') {
-          // Carriage return: check if it's \r\n (treat as plain newline)
-          if (i + 1 < raw.length && raw[i + 1] === '\n') {
-            lines.push({ text: currentText, stream: currentStream });
-            currentText = '';
-            currentStream = stream;
-            i++; // skip the \n
-          } else {
-            // Bare \r: reset cursor to start of current line (overwrite)
-            currentText = '';
-            currentStream = stream;
-          }
-        } else {
-          currentText += ch;
-          currentStream = stream;
-        }
-      }
-    }
-
-    // Don't forget the last in-progress line
-    if (currentText.length > 0) {
-      lines.push({ text: currentText, stream: currentStream });
-    }
-
-    return lines;
-  }
-
   /** Derived display lines — recomputed whenever outputChunks changes. */
   let displayLines = $derived(processChunksToLines(outputChunks));
 
@@ -212,18 +156,33 @@
   // Lifecycle
   // =========================================================================
 
-  onMount(async () => {
+  onMount(() => {
     document.addEventListener('selectionchange', handleSelectionChange);
-    await loadBufferedOutput();
-    await setupListeners();
-    // Scroll to bottom after initial load
-    tick().then(() => scrollToBottom());
   });
 
   onDestroy(() => {
     document.removeEventListener('selectionchange', handleSelectionChange);
     if (saveTimeout) clearTimeout(saveTimeout);
     cleanup();
+  });
+
+  // React to executionId changes (e.g. when "Run again" switches to a new execution)
+  $effect(() => {
+    void executionId; // subscribe to executionId changes
+    // Reset state for the new execution
+    status = 'running';
+    exitCode = null;
+    outputChunks = [];
+    loading = true;
+    error = null;
+    shouldAutoScroll = true;
+    cleanup();
+
+    (async () => {
+      await loadBufferedOutput();
+      await setupListeners();
+      tick().then(() => scrollToBottom());
+    })();
   });
 
   // =========================================================================
@@ -478,6 +437,11 @@
             <CircleStop size={14} />
             <span>{isCurrentlyStopping ? 'Stopping…' : 'Stop'}</span>
           </button>
+        {:else if onRunAgain}
+          <button class="run-again-btn" onclick={onRunAgain} title="Run again">
+            <RotateCw size={14} />
+            <span>Run again</span>
+          </button>
         {/if}
         {#if status === 'failed' && onRemove}
           <button class="remove-btn" onclick={handleRemove} title="Remove this failed run">
@@ -636,6 +600,26 @@
   .stop-btn:disabled {
     opacity: 0.6;
     cursor: not-allowed;
+  }
+
+  .run-again-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    background: rgba(59, 130, 246, 0.1);
+    color: #3b82f6;
+    border: 1px solid rgba(59, 130, 246, 0.2);
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .run-again-btn:hover {
+    background: rgba(59, 130, 246, 0.15);
+    border-color: rgba(59, 130, 246, 0.3);
   }
 
   .remove-btn {

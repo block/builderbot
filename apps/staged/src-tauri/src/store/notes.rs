@@ -9,8 +9,8 @@ impl Store {
     pub fn create_note(&self, note: &Note) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO notes (id, branch_id, session_id, title, content, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO notes (id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 note.id,
                 note.branch_id,
@@ -19,6 +19,9 @@ impl Store {
                 note.content,
                 note.created_at,
                 note.updated_at,
+                note.completed_at,
+                note.suggested_next_commit_step,
+                note.suggested_next_note_step,
             ],
         )?;
         Ok(())
@@ -27,7 +30,7 @@ impl Store {
     pub fn get_note(&self, id: &str) -> Result<Option<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
              FROM notes WHERE id = ?1",
             params![id],
             Self::row_to_note,
@@ -39,8 +42,9 @@ impl Store {
     pub fn list_notes_for_branch(&self, branch_id: &str) -> Result<Vec<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at
-             FROM notes WHERE branch_id = ?1 ORDER BY created_at DESC",
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
+             FROM notes WHERE branch_id = ?1
+             ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC",
         )?;
         let rows = stmt.query_map(params![branch_id], Self::row_to_note)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
@@ -50,7 +54,7 @@ impl Store {
     pub fn get_note_by_session(&self, session_id: &str) -> Result<Option<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
              FROM notes WHERE session_id = ?1",
             params![session_id],
             Self::row_to_note,
@@ -63,7 +67,7 @@ impl Store {
     pub fn get_empty_note_by_session(&self, session_id: &str) -> Result<Option<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
              FROM notes WHERE session_id = ?1 AND content = ''",
             params![session_id],
             Self::row_to_note,
@@ -72,26 +76,40 @@ impl Store {
         .map_err(Into::into)
     }
 
-    /// Update a note's title and content.
+    /// Update a note's title, content, and optional suggested next steps.
     pub fn update_note_title_and_content(
         &self,
         id: &str,
         title: &str,
         content: &str,
+        suggested_next_commit_step: Option<&str>,
+        suggested_next_note_step: Option<&str>,
     ) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        let now = now_timestamp();
         conn.execute(
-            "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3 WHERE id = ?4",
-            params![title, content, now_timestamp(), id],
+            "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3, completed_at = COALESCE(completed_at, ?4), suggested_next_commit_step = ?5, suggested_next_note_step = ?6 WHERE id = ?7",
+            params![title, content, now, now, suggested_next_commit_step, suggested_next_note_step, id],
         )?;
         Ok(())
     }
 
     pub fn update_note_content(&self, id: &str, content: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        let now = now_timestamp();
         conn.execute(
-            "UPDATE notes SET content = ?1, updated_at = ?2 WHERE id = ?3",
-            params![content, now_timestamp(), id],
+            "UPDATE notes SET content = ?1, updated_at = ?2, completed_at = COALESCE(completed_at, ?3) WHERE id = ?4",
+            params![content, now, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn mark_note_completed(&self, id: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_timestamp();
+        conn.execute(
+            "UPDATE notes SET completed_at = COALESCE(completed_at, ?1) WHERE id = ?2",
+            params![now, id],
         )?;
         Ok(())
     }
@@ -111,6 +129,9 @@ impl Store {
             content: row.get(4)?,
             created_at: row.get(5)?,
             updated_at: row.get(6)?,
+            completed_at: row.get(7)?,
+            suggested_next_commit_step: row.get(8)?,
+            suggested_next_note_step: row.get(9)?,
         })
     }
 }

@@ -29,6 +29,7 @@
   import {
     X,
     AlertCircle,
+    Info,
     CircleStop,
     Send,
     Copy,
@@ -66,6 +67,7 @@
     verbGroupSummary,
     hasXmlBlocks,
     stripCodeFences,
+    stripXmlTags,
   } from './sessionModalHelpers';
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
@@ -474,7 +476,7 @@
   // =========================================================================
 
   function handleInputKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
       e.preventDefault();
       handleSend();
     }
@@ -593,7 +595,7 @@
     const segments: ContentSegment[] = [];
     let remaining = content;
 
-    const tagPattern = /<(action|branch-history)>([\s\S]*?)<\/\1>/g;
+    const tagPattern = /<(action|branch-history|launch-context)>([\s\S]*?)<\/\1>/g;
     let lastIndex = 0;
     let match: RegExpExecArray | null;
 
@@ -605,7 +607,12 @@
       }
 
       const tag = match[1];
-      const label = tag === 'action' ? 'Action instructions' : 'Branch history';
+      const label =
+        tag === 'action'
+          ? 'Action instructions'
+          : tag === 'branch-history'
+            ? 'Branch history'
+            : 'Launch context';
       const icon = tag === 'action' ? Zap : GitBranch;
       segments.push({ type: 'xml-block', tag, label, content: match[2].trim(), icon });
 
@@ -839,10 +846,7 @@
     <header class="modal-header">
       <div class="header-content">
         <span class="header-title">
-          {session?.prompt
-            ? session.prompt.replace(/<(action|branch-history)>[\s\S]*?<\/\1>/g, '').trim() ||
-              'Session'
-            : 'Session'}
+          {session?.prompt ? stripXmlTags(session.prompt) || 'Session' : 'Session'}
         </span>
       </div>
       <InContentSearch
@@ -1118,6 +1122,31 @@
           <AlertCircle size={14} />
           <span>{session.errorMessage}</span>
         </div>
+      {:else if session && session.status !== 'running' && session.status !== 'queued'}
+        {#if session.completionReason === 'crashed' || session.completionReason === 'app_quit' || session.completionReason === 'interrupted'}
+          <div
+            class="session-end-banner"
+            class:warning={session.completionReason === 'crashed' ||
+              session.completionReason === 'app_quit'}
+            class:neutral={session.completionReason === 'interrupted'}
+          >
+            <Info size={14} />
+            <span>
+              {session.completionReason === 'crashed'
+                ? 'This session ended unexpectedly.'
+                : session.completionReason === 'app_quit'
+                  ? 'This session was interrupted when Staged closed.'
+                  : 'You stopped this session.'}
+            </span>
+            <button
+              class="resume-btn"
+              onclick={() => sendMessage('Continue where you left off.')}
+              disabled={sending}
+            >
+              Resume
+            </button>
+          </div>
+        {/if}
       {/if}
     </div>
 
@@ -1754,6 +1783,51 @@
     border-radius: 8px;
     font-size: var(--size-xs);
     line-height: 1.4;
+  }
+
+  /* Session end banners — softer than error for non-error conditions */
+  .session-end-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: var(--size-xs);
+    line-height: 1.4;
+  }
+
+  .session-end-banner.warning {
+    background: var(--ui-warning-bg);
+    color: var(--ui-warning);
+  }
+
+  .resume-btn {
+    margin-left: auto;
+    padding: 4px 12px;
+    border: 1px solid currentColor;
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    font-size: var(--size-xs);
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s;
+  }
+
+  .resume-btn:hover {
+    background: color-mix(in srgb, currentColor 10%, transparent);
+  }
+
+  .resume-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .session-end-banner.neutral {
+    background: rgba(127, 127, 127, 0.1);
+    color: var(--text-muted);
   }
 
   /* ----- Input wrapper + queue popover ----------------------------------- */

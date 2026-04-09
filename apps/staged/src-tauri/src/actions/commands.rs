@@ -3,7 +3,7 @@
 use anyhow::Result;
 use builderbot_actions::{
     ActionDetector, ActionExecutor, ActionMetadata, ActionType, FileExplorationMode,
-    RunDetectionMode, SuggestedAction,
+    RunDetectionMode, StopOptions, SuggestedAction,
 };
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, State};
@@ -437,14 +437,24 @@ pub fn stop_actions_for_branches(
 }
 
 /// Stop all running actions across all branches (best-effort).
-pub fn stop_all_actions(executor: &ActionExecutor, registry: &ActionRegistry) {
+pub fn stop_all_actions(
+    executor: &ActionExecutor,
+    registry: &ActionRegistry,
+    stop_options: StopOptions,
+) -> Vec<String> {
+    let mut stopped_execution_ids = Vec::new();
+
     for info in registry.get_all_running() {
         if executor.is_running(&info.execution_id) {
-            if let Err(e) = executor.stop(&info.execution_id) {
+            if let Err(e) = executor.stop_with_options(&info.execution_id, stop_options) {
                 log::warn!("Failed to stop action {}: {e}", info.execution_id);
+            } else {
+                stopped_execution_ids.push(info.execution_id);
             }
         }
     }
+
+    stopped_execution_ids
 }
 
 /// Get all currently running actions for a branch
@@ -528,9 +538,18 @@ pub async fn run_prerun_actions(
             },
         );
 
-        let detected = detect_actions_for_repo_context(&github_repo, subpath.as_deref())
-            .await
-            .unwrap_or_default();
+        let detected = match detect_actions_for_repo_context(&github_repo, subpath.as_deref()).await
+        {
+            Ok(actions) => actions,
+            Err(e) => {
+                log::warn!(
+                    "[run_prerun_actions] action detection failed for repo {} (subpath: {:?}): {e}",
+                    github_repo,
+                    subpath
+                );
+                Vec::new()
+            }
+        };
 
         let existing_actions = store
             .list_repo_actions(&context.id)

@@ -182,7 +182,7 @@ Global views aggregate content across all projects. They appear as top-level ite
 
 - <a id="P-PENPAL-GLOBAL-IN-REVIEW"></a>**P-PENPAL-GLOBAL-IN-REVIEW**: The global In Review view shows all files with open comment threads across all projects. The sidebar shows a breadcrumb (⌂ / In Review) and a flat list of two-line file rows. Each row shows the filename on the first line and workspace / project / source path context on the second line.
 
-- <a id="P-PENPAL-GLOBAL-RECENT"></a>**P-PENPAL-GLOBAL-RECENT**: The global Recent view shows up to 50 recently active files across all projects, sorted by most recent activity first. The sidebar shows a breadcrumb (⌂ / Recent) and two-line file rows with filename, context path, and relative timestamp. Each entry shows an activity type label (viewed, modified, created, comment, published).
+- <a id="P-PENPAL-GLOBAL-RECENT"></a>**P-PENPAL-GLOBAL-RECENT**: The global Recent view shows up to 50 recently active files across all projects, sorted by most recent activity first. The sidebar shows a breadcrumb (⌂ / Recent) and two-line file rows with filename, context path, and relative timestamp. Each entry shows an activity type label (viewed, modified, created, comment, published). Activity history persists across app launches so that recent files are not lost when the server restarts.
 
 - <a id="P-PENPAL-GLOBAL-ROW-NAVIGATE"></a>**P-PENPAL-GLOBAL-ROW-NAVIGATE**: Clicking a file in a global view navigates the current tab to that file and switches the sidebar to the file's project context. Cmd+Click opens in a new tab.
 
@@ -329,6 +329,16 @@ Global views aggregate content across all projects. They appear as top-level ite
 - <a id="P-PENPAL-EXTERNAL-LINKS"></a>**P-PENPAL-EXTERNAL-LINKS**: In the desktop app, external HTTP links open in the system browser.
 
 - <a id="P-PENPAL-FILE-HANDLER"></a>**P-PENPAL-FILE-HANDLER**: The macOS app registers as an alternate handler for markdown files (`.md`, `.markdown`). Penpal appears in Finder's "Open With" menu and can be selected via `open -a Penpal file.md`. Opening a markdown file this way behaves identically to `penpal open <path>` — the file is shown in the app, auto-added to its project if applicable, or opened as a standalone file.
+
+---
+
+## Session Persistence
+
+- <a id="P-PENPAL-PERSIST-TABS"></a>**P-PENPAL-PERSIST-TABS**: When the user quits and relaunches Penpal, all previously open windows reappear with the same tabs (paths, titles, and per-tab back/forward history) they had when the app was closed.
+
+- <a id="P-PENPAL-PERSIST-GEO"></a>**P-PENPAL-PERSIST-GEO**: Each window's position and size are restored on relaunch, so the user's multi-window layout is preserved.
+
+- <a id="P-PENPAL-PERSIST-FALLBACK"></a>**P-PENPAL-PERSIST-FALLBACK**: If the saved session is missing or corrupt, the app launches a single default window (1200×800, centered) with one tab on Home — the same behavior as a fresh install.
 
 ---
 

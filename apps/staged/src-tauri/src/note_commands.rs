@@ -21,8 +21,12 @@ pub fn create_note(
         content: note.content,
         session_id: None,
         session_status: None,
+        completion_reason: None,
         created_at: note.created_at,
         updated_at: note.updated_at,
+        completed_at: note.completed_at,
+        suggested_next_commit_step: None,
+        suggested_next_note_step: None,
     })
 }
 

@@ -1,6 +1,6 @@
 [package]
 name = "Staged"
-version = "0.1.7"
+version = "0.1.8"
 description = "AI-powered development workspace"
 authors = ["baxen"]
 license = "MIT"
@@ -46,6 +46,7 @@ tauri-plugin-updater = "2"
 
 # Shared crates
 git-diff = { path = "../../../crates/git-diff" }
+doctor = { path = "../../../crates/doctor" }
 
 # Actions framework
 builderbot-actions = { path = "../../../crates/builderbot-actions" }

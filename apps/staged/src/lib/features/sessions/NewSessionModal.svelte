@@ -37,6 +37,8 @@
     prefilled?: boolean;
     /** Commit-mode prefill text — used when switching to commit mode with no user draft. */
     commitPrefill?: string;
+    /** Note-mode prefill text — used when switching to note mode with no user draft. */
+    notePrefill?: string;
     remote?: boolean;
     /** When true, the session will be queued rather than started immediately. */
     willQueue?: boolean;
@@ -52,6 +54,7 @@
     initialImageIds = [],
     prefilled = false,
     commitPrefill = '',
+    notePrefill = '',
     remote = false,
     willQueue = false,
     onClose,
@@ -138,16 +141,19 @@
     if (newMode === currentMode) return;
 
     // Replicate the close-and-reopen prefill behaviour:
-    // If the prompt is still the commit prefill (user didn't type anything custom),
+    // If the prompt is still a prefill (user didn't type anything custom),
     // treat it as empty so prefill can be reconsidered for the new mode.
-    const isPromptPrefill = commitPrefill && prompt === commitPrefill;
+    const isPromptPrefill =
+      (commitPrefill && prompt === commitPrefill) || (notePrefill && prompt === notePrefill);
     const userDraft = isPromptPrefill ? '' : prompt;
 
     currentMode = newMode;
 
-    // Apply commit prefill when switching to commit with no user draft
-    if (newMode === 'commit' && !userDraft && commitPrefill) {
-      prompt = commitPrefill;
+    // Apply prefill when switching to commit or note mode with no user draft
+    const modePrefill =
+      newMode === 'commit' ? commitPrefill : newMode === 'note' ? notePrefill : '';
+    if (modePrefill && !userDraft) {
+      prompt = modePrefill;
       // Select all so typing replaces the suggestion
       tick().then(() => {
         if (textareaEl && textareaEl.value.length > 0) {
@@ -371,7 +377,7 @@
       />
 
       <div class="form-actions">
-        <AgentSelector disabled={starting} {remote} />
+        <AgentSelector disabled={starting} {remote} dropUp />
         <div class="form-actions-right">
           <button type="button" class="cancel-btn" onclick={handleClose} disabled={starting}>
             Cancel

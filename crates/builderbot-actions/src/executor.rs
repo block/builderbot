@@ -11,11 +11,85 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
 use crate::git::{auto_commit_if_changes, auto_commit_if_changes_remote};
 use crate::models::{ActionStatus, ExecutionEvent, OutputChunk};
+
+// =============================================================================
+// PTY support (unix only)
+// =============================================================================
+
+#[cfg(unix)]
+mod pty {
+    use std::os::fd::RawFd;
+
+    // openpty is not exposed by the libc crate on all platforms, so we
+    // declare the extern ourselves. It is available on macOS (<util.h>)
+    // and Linux (<pty.h>).
+    extern "C" {
+        fn openpty(
+            amaster: *mut RawFd,
+            aslave: *mut RawFd,
+            name: *mut libc::c_char,
+            termp: *const libc::termios,
+            winp: *const libc::winsize,
+        ) -> libc::c_int;
+    }
+
+    /// Open a PTY pair and return `(master_fd, slave_fd)`.
+    pub fn open() -> std::io::Result<(RawFd, RawFd)> {
+        let mut master: RawFd = -1;
+        let mut slave: RawFd = -1;
+
+        // SAFETY: openpty writes into the provided pointers and returns 0
+        // on success, -1 on failure. The NULL pointers for name/termp/winp
+        // are explicitly allowed by the API.
+        let ret = unsafe {
+            openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        if ret != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok((master, slave))
+    }
+
+    /// Configure the PTY master: disable echo (so piped stdin commands don't
+    /// appear in the output) and set a reasonable terminal size.
+    pub fn configure(master_fd: RawFd) -> std::io::Result<()> {
+        // Disable echo so commands written to stdin are not reflected in output.
+        // SAFETY: tcgetattr/tcsetattr operate on a valid fd returned by openpty.
+        unsafe {
+            let mut termios: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(master_fd, &mut termios) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            termios.c_lflag &= !(libc::ECHO | libc::ECHOE | libc::ECHOK | libc::ECHONL);
+            if libc::tcsetattr(master_fd, libc::TCSANOW, &termios) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+
+        // Set a wide terminal size so progress bars don't wrap.
+        // SAFETY: ioctl with TIOCSWINSZ writes the winsize struct to the tty.
+        unsafe {
+            let mut ws: libc::winsize = std::mem::zeroed();
+            ws.ws_col = 200;
+            ws.ws_row = 50;
+            libc::ioctl(master_fd, libc::TIOCSWINSZ, &ws);
+        }
+
+        Ok(())
+    }
+}
 
 /// Trait for receiving execution events
 #[async_trait]
@@ -30,6 +104,19 @@ pub struct ActionMetadata {
     pub action_id: String,
     pub action_name: String,
     pub auto_commit: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct StopOptions {
+    pub force_kill_after: Option<Duration>,
+}
+
+impl Default for StopOptions {
+    fn default() -> Self {
+        Self {
+            force_kill_after: Some(Duration::from_secs(5)),
+        }
+    }
 }
 
 /// Internal state for a running action
@@ -109,6 +196,9 @@ fn spawn_stream_reader(
                             .await;
                     });
                 }
+                // PTY master returns EIO (not EOF) when the slave side is
+                // closed, which is the normal shutdown path. Treat all read
+                // errors as end-of-stream.
                 Err(_) => break,
             }
         }
@@ -131,12 +221,17 @@ impl ActionExecutor {
     ///
     /// If `auto_commit_ctx` is `Some`, auto-commit will be attempted after a
     /// successful execution (local only).
+    ///
+    /// If `pty_reader` is `Some`, it is used as the single output stream
+    /// (tagged as `"stdout"`) instead of the child's piped stdout/stderr.
+    /// This is used for local execution where a PTY merges both streams.
     async fn manage_child_process(
         &self,
         mut child: Child,
         metadata: ActionMetadata,
         listener: Arc<dyn ExecutionListener>,
         auto_commit_ctx: Option<AutoCommitContext>,
+        pty_reader: Option<std::fs::File>,
     ) -> Result<(String, oneshot::Receiver<()>)> {
         let execution_id = uuid::Uuid::new_v4().to_string();
         let (completion_tx, completion_rx) = oneshot::channel();
@@ -172,27 +267,43 @@ impl ActionExecutor {
         // command handler), so `Handle::current()` is guaranteed to succeed.
         let handle = Handle::current();
 
-        // Spawn threads to read stdout and stderr
-        if let Some(stdout) = child.stdout.take() {
+        // Spawn threads to read output.
+        //
+        // When a PTY reader is provided (local execution), we use it as the
+        // single output stream — the PTY merges stdout and stderr, matching
+        // real terminal behavior. Otherwise (remote execution), we read from
+        // the child's piped stdout and stderr separately.
+        if let Some(pty_master) = pty_reader {
             spawn_stream_reader(
-                stdout,
+                pty_master,
                 "stdout",
                 execution_id.clone(),
                 listener.clone(),
                 output_buffer.clone(),
                 handle.clone(),
             );
-        }
+        } else {
+            if let Some(stdout) = child.stdout.take() {
+                spawn_stream_reader(
+                    stdout,
+                    "stdout",
+                    execution_id.clone(),
+                    listener.clone(),
+                    output_buffer.clone(),
+                    handle.clone(),
+                );
+            }
 
-        if let Some(stderr) = child.stderr.take() {
-            spawn_stream_reader(
-                stderr,
-                "stderr",
-                execution_id.clone(),
-                listener.clone(),
-                output_buffer.clone(),
-                handle.clone(),
-            );
+            if let Some(stderr) = child.stderr.take() {
+                spawn_stream_reader(
+                    stderr,
+                    "stderr",
+                    execution_id.clone(),
+                    listener.clone(),
+                    output_buffer.clone(),
+                    handle.clone(),
+                );
+            }
         }
 
         // Spawn thread to wait for completion
@@ -311,6 +422,16 @@ impl ActionExecutor {
         // When using -c, the command runs immediately before hooks can activate Hermit.
         let commands = format!("{}\nexit\n", command);
 
+        // ---- PTY setup (unix) -------------------------------------------------
+        // Open a PTY so child processes see a real terminal and use \r for
+        // progress bars instead of falling back to \n-separated output.
+        #[cfg(unix)]
+        let (pty_master_fd, pty_slave_fd) = pty::open().context("Failed to open PTY")?;
+        #[cfg(unix)]
+        {
+            pty::configure(pty_master_fd).context("Failed to configure PTY")?;
+        }
+
         // Use interactive (-i) + login (-l) + stdin (-s) with stdin piping to ensure:
         // 1. Interactive mode triggers directory-based hooks (like Hermit's chpwd/precmd)
         // 2. Login shell loads the full environment
@@ -325,29 +446,74 @@ impl ActionExecutor {
             .arg("-i") // Interactive shell to trigger hooks like chpwd for Hermit
             .arg("-l") // Login shell to load profile
             .arg("-s") // Force shell to read commands from stdin (required for non-TTY)
-            .stdin(Stdio::piped()) // Pipe stdin to send commands after initialization
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stdin(Stdio::piped()); // Pipe stdin to send commands after initialization
 
-        // Create a new process group so we can kill the shell AND all its children.
-        // Without this, SIGTERM only reaches the shell process, leaving child
-        // processes (e.g. `npm run build`, `cargo build`) running as orphans.
+        // On unix, redirect stdout/stderr to the PTY slave in the child process.
+        // On other platforms, fall back to piped stdout/stderr.
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
-            // SAFETY: `setsid()` is an async-signal-safe function that creates a new
-            // session and process group. It is safe to call in a pre_exec hook.
+
+            // stdout/stderr will be overridden by dup2 in pre_exec, so use null
+            // as a placeholder (the child never writes to these fds directly).
+            cmd.stdout(Stdio::null()).stderr(Stdio::null());
+
+            // SAFETY: All functions called here are async-signal-safe:
+            // - setsid(): creates new session/process group
+            // - ioctl(TIOCSCTTY): sets controlling terminal
+            // - dup2(): duplicates file descriptors
+            // - close(): closes file descriptor
             unsafe {
-                cmd.pre_exec(|| {
+                cmd.pre_exec(move || {
                     // Create a new session (and process group) for this child.
                     // All processes spawned by the shell will inherit this group.
                     libc::setsid();
+
+                    // Make the PTY slave the controlling terminal for the session.
+                    libc::ioctl(pty_slave_fd, libc::TIOCSCTTY as _, 0);
+
+                    // Redirect stdout and stderr to the PTY slave so child
+                    // processes see a real terminal (isatty() returns true).
+                    libc::dup2(pty_slave_fd, libc::STDOUT_FILENO);
+                    libc::dup2(pty_slave_fd, libc::STDERR_FILENO);
+
+                    // Close the original slave fd (it has been duplicated above).
+                    if pty_slave_fd > libc::STDERR_FILENO {
+                        libc::close(pty_slave_fd);
+                    }
+
                     Ok(())
                 });
             }
         }
 
+        #[cfg(not(unix))]
+        {
+            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        }
+
         let mut child = cmd.spawn().context("Failed to spawn action process")?;
+
+        // Close the slave fd in the parent — the child inherited it via fork.
+        #[cfg(unix)]
+        {
+            // SAFETY: close() on a valid fd returned by openpty is safe.
+            // The fd is no longer needed in the parent process.
+            unsafe {
+                libc::close(pty_slave_fd);
+            }
+        }
+
+        // Wrap the PTY master fd in a File for reading.
+        #[cfg(unix)]
+        let pty_reader = {
+            use std::os::fd::FromRawFd;
+            // SAFETY: master_fd is a valid fd returned by openpty. Wrapping it
+            // in a File transfers ownership — File will close it on drop.
+            Some(unsafe { std::fs::File::from_raw_fd(pty_master_fd) })
+        };
+        #[cfg(not(unix))]
+        let pty_reader: Option<std::fs::File> = None;
 
         // Write commands to stdin, flush, and close it
         if let Some(mut stdin) = child.stdin.take() {
@@ -368,7 +534,7 @@ impl ActionExecutor {
 
         let auto_commit_ctx = AutoCommitContext::Local { working_dir };
 
-        self.manage_child_process(child, metadata, listener, Some(auto_commit_ctx))
+        self.manage_child_process(child, metadata, listener, Some(auto_commit_ctx), pty_reader)
             .await
     }
 
@@ -463,7 +629,7 @@ impl ActionExecutor {
         });
 
         let (execution_id, _completion_rx) = self
-            .manage_child_process(child, metadata, listener, auto_commit_ctx)
+            .manage_child_process(child, metadata, listener, auto_commit_ctx, None)
             .await?;
         Ok(execution_id)
     }
@@ -474,6 +640,11 @@ impl ActionExecutor {
     /// group. The completion thread will see the stopped flag and emit a
     /// `Stopped` status event once the process actually exits.
     pub fn stop(&self, execution_id: &str) -> Result<()> {
+        self.stop_with_options(execution_id, StopOptions::default())
+    }
+
+    /// Stop a running action with configurable shutdown timing.
+    pub fn stop_with_options(&self, execution_id: &str, options: StopOptions) -> Result<()> {
         // Mark as stopped BEFORE sending the signal so the completion thread
         // knows this was an intentional stop (not a crash/failure).
         {
@@ -508,20 +679,22 @@ impl ActionExecutor {
                     libc::kill(-(pid as i32), libc::SIGTERM);
                 }
 
-                // Escalate to SIGKILL after a short grace period in case the
-                // process group ignores SIGTERM (e.g. a process traps the signal).
-                thread::spawn(move || {
-                    thread::sleep(std::time::Duration::from_secs(5));
-                    // SAFETY: Same considerations as above. If the process group
-                    // already exited, kill() harmlessly returns ESRCH.
-                    unsafe {
-                        // Check if the process group still exists before sending SIGKILL
-                        let ret = libc::kill(-(pid as i32), 0);
-                        if ret == 0 {
-                            libc::kill(-(pid as i32), libc::SIGKILL);
+                if let Some(force_kill_after) = options.force_kill_after {
+                    // Escalate to SIGKILL after a short grace period in case the
+                    // process group ignores SIGTERM (e.g. a process traps the signal).
+                    thread::spawn(move || {
+                        thread::sleep(force_kill_after);
+                        // SAFETY: Same considerations as above. If the process group
+                        // already exited, kill() harmlessly returns ESRCH.
+                        unsafe {
+                            // Check if the process group still exists before sending SIGKILL
+                            let ret = libc::kill(-(pid as i32), 0);
+                            if ret == 0 {
+                                libc::kill(-(pid as i32), libc::SIGKILL);
+                            }
                         }
-                    }
-                });
+                    });
+                }
             }
 
             #[cfg(windows)]
@@ -534,6 +707,32 @@ impl ActionExecutor {
         }
 
         Ok(())
+    }
+
+    /// Wait until all listed executions are no longer running, or until the timeout elapses.
+    ///
+    /// Returns `true` if every execution completed before the timeout.
+    pub fn wait_for_executions(&self, execution_ids: &[String], timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+
+        loop {
+            let all_stopped = {
+                let running = self.running.lock().unwrap();
+                execution_ids
+                    .iter()
+                    .all(|execution_id| !running.contains_key(execution_id))
+            };
+
+            if all_stopped {
+                return true;
+            }
+
+            if Instant::now() >= deadline {
+                return false;
+            }
+
+            thread::sleep(Duration::from_millis(25));
+        }
     }
 
     /// Get buffered output for an execution

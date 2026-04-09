@@ -101,10 +101,10 @@ see-also:
 
 ## Cache
 
-- <a id="E-PENPAL-CACHE"></a>**E-PENPAL-CACHE**: An in-memory cache (`sync.RWMutex`-protected) holds the full project list and per-project file lists. `RefreshProject()` walks the filesystem; `RefreshAllProjects()` runs in parallel with no concurrency limit. `RescanWith()` replaces the project list while preserving git enrichment.
+- <a id="E-PENPAL-CACHE"></a>**E-PENPAL-CACHE**: An in-memory cache (`sync.RWMutex`-protected) holds the full project list and per-project file lists. `RefreshProject()` walks the filesystem for full rescans; `RefreshAllProjects()` runs in parallel with a concurrency limit of 4. `RescanWith()` replaces the project list while preserving git enrichment and cached file data for unchanged projects — only new or source-changed projects are rescanned. Incremental mutations (`UpsertFile`, `RemoveFile`) update individual cache entries without walking the filesystem.
   ← [P-PENPAL-PROJECT-FILE-TREE](PRODUCT.md#P-PENPAL-PROJECT-FILE-TREE)
 
-- <a id="E-PENPAL-SCAN"></a>**E-PENPAL-SCAN**: `scanProjectSources()` walks `RootPath` recursively for tree sources, skipping `.git`-file directories (nested worktrees), gitignored directories (via `git check-ignore`), source-type `SkipDirs`, and non-`.md` files. Gitignore checking is initialized once per scan via `newGitIgnoreChecker(projectPath)`, which detects whether the project is a git repo; non-git projects skip the gitignore check gracefully. On write or read failure (partial 4-field response), the checker disables itself (`isGitRepo=false`) to prevent permanent stream desync. The source's own `rootPath` is never checked against gitignore (the `path != rootPath` guard ensures registered sources always scan). Files returning `""` from `ClassifyFile()` are hidden. Files are de-duplicated by project-relative path (first source wins) and sorted by `ModTime` descending. `EnsureProjectScanned()` is the lazy-scan entry point — it uses write-lock gating (`projectScanned` set under `mu.Lock` before scanning) to prevent concurrent requests from triggering duplicate filesystem walks. `projectHasAnyMarkdown()` performs a cheap startup check that aligns with the full scan: it uses the same gitignore checking, skips `.git`, `node_modules`, `.hg`, `.svn`, and nested worktree directories, and stops at the first `.md` file found.
+- <a id="E-PENPAL-SCAN"></a>**E-PENPAL-SCAN**: `scanProjectSources()` walks `RootPath` recursively for tree sources, skipping `.git`-file directories (nested worktrees), gitignored directories (via `git check-ignore`), source-type `SkipDirs`, and non-`.md` files. Gitignore checking is initialized once per scan via `newGitIgnoreChecker(projectPath)`, which detects whether the project is a git repo; non-git projects skip the gitignore check gracefully. On write or read failure (partial 4-field response), the checker disables itself (`isGitRepo=false`) to prevent permanent stream desync. The source's own `rootPath` is never checked against gitignore (the `path != rootPath` guard ensures registered sources always scan). Files returning `""` from `ClassifyFile()` are hidden. Files are de-duplicated by project-relative path (first source wins) and sorted by `ModTime` descending. `EnsureProjectScanned()` is the lazy-scan entry point — it uses write-lock gating (`projectScanned` set under `mu.Lock` before scanning) to prevent concurrent requests from triggering duplicate filesystem walks. `projectHasAnyMarkdown()` performs a cheap startup check that aligns with the full scan: it uses the same gitignore checking, skips `.git`, `node_modules`, `.hg`, `.svn`, and nested worktree directories, and stops at the first `.md` file found. `CheckAllProjectsHasFiles()` runs with a concurrency limit of 4 to cap subprocess spawning. `ResolveFileInfo()` resolves source membership for a single absolute path without spawning a git check-ignore process — it applies the same source-priority, SkipDirs, RequireSibling, and ClassifyFile rules as the full walk.
   ← [P-PENPAL-PROJECT-FILE-TREE](PRODUCT.md#P-PENPAL-PROJECT-FILE-TREE), [P-PENPAL-FILE-TYPES](PRODUCT.md#P-PENPAL-FILE-TYPES), [P-PENPAL-SRC-DEDUP](PRODUCT.md#P-PENPAL-SRC-DEDUP), [P-PENPAL-SRC-GITIGNORE](PRODUCT.md#P-PENPAL-SRC-GITIGNORE)
 
 - <a id="E-PENPAL-TITLE-EXTRACT"></a>**E-PENPAL-TITLE-EXTRACT**: `EnrichTitles()` reads the first 20 lines of each file to extract H1 headings. Titles are cached and shown as the primary display name when present.
@@ -242,7 +242,7 @@ see-also:
 - <a id="E-PENPAL-SSE"></a>**E-PENPAL-SSE**: `GET /events` is a long-lived SSE stream using `event: change` messages. Event types: `projects`, `files`, `comments`, `agents`, `navigate`. Each event carries optional `project`, `path`, `worktree` fields.
   ← [P-PENPAL-REALTIME](PRODUCT.md#P-PENPAL-REALTIME)
 
-- <a id="E-PENPAL-WATCHER"></a>**E-PENPAL-WATCHER**: The file watcher bridges `fsnotify` to SSE. Two-tier watch strategy: base (shallow workspace + project root directories) and dynamic (deep, per-focus). Debounce at 100ms per event key.
+- <a id="E-PENPAL-WATCHER"></a>**E-PENPAL-WATCHER**: The file watcher bridges `fsnotify` to SSE. Two-tier watch strategy: base (shallow workspace + project root directories) and dynamic (deep, per-focus). Debounce at 100ms per event key. File events use an accumulating debounce that collects per-file paths and ops during the debounce window, then applies incremental cache mutations (`UpsertFile`/`RemoveFile`) instead of full project walks. Only `.md` file events trigger cache updates — non-`.md` Create events (e.g., scanner temp files) are filtered out. Structural events (workspace changes, source auto-detect) still use the original debounce with full discovery.
   ← [P-PENPAL-REALTIME](PRODUCT.md#P-PENPAL-REALTIME), [P-PENPAL-LIVE-UPDATE](PRODUCT.md#P-PENPAL-LIVE-UPDATE)
 
 - <a id="E-PENPAL-FOCUS"></a>**E-PENPAL-FOCUS**: `windowFocuses map[string]focusTarget` (one entry per browser window) drives dynamic watches. Union of all window focuses determines the watched set. File focus watches only the file's parent directory. Project focus watches all source directories + `.penpal/comments/`.
@@ -383,6 +383,9 @@ see-also:
 - <a id="E-PENPAL-ACTIVITY"></a>**E-PENPAL-ACTIVITY**: In-memory `activity.Tracker` stores one event per file (keyed by project + path). Event types: `viewed`, `modified`, `created`, `comment`, `published`. `Record()` always overwrites; `RecordAt()` (for seeding from mtime) does not overwrite. Activity is seeded per-project when `EnsureProjectScanned()` performs the first lazy scan — each file's `ModTime` is recorded via `RecordAt()`, excluding `__all_markdown__` duplicates. This populates `/api/recent` progressively as projects are opened.
   ← [P-PENPAL-GLOBAL-RECENT](PRODUCT.md#P-PENPAL-GLOBAL-RECENT), [P-PENPAL-PROJECT-RECENT](PRODUCT.md#P-PENPAL-PROJECT-RECENT)
 
+- <a id="E-PENPAL-ACTIVITY-PERSIST"></a>**E-PENPAL-ACTIVITY-PERSIST**: Activity state is persisted to `~/.config/penpal/activity.json` as a JSON array of `FileActivity` entries. `Save(path)` writes atomically (tmp + rename). `Load(path)` reads entries and populates the tracker via `RecordAt()` so that runtime events always take priority. The server loads on startup and saves on shutdown. `Record()` and `RecordAt()` accept an optional save callback; the server debounces saves (5s) so frequent events don't thrash disk.
+  ← [P-PENPAL-GLOBAL-RECENT](PRODUCT.md#P-PENPAL-GLOBAL-RECENT)
+
 - <a id="E-PENPAL-RECENT-PAGE"></a>**E-PENPAL-RECENT-PAGE**: `GET /api/recent` returns up to 50 recently active files across all projects, sorted by most recent activity. Frontend `RecentPage` renders two-line file rows with filename, workspace / project context, and relative timestamp. Clicking navigates the current tab to the file.
   ← [P-PENPAL-GLOBAL-RECENT](PRODUCT.md#P-PENPAL-GLOBAL-RECENT), [P-PENPAL-GLOBAL-ROW-NAVIGATE](PRODUCT.md#P-PENPAL-GLOBAL-ROW-NAVIGATE)
 
@@ -450,6 +453,25 @@ see-also:
 
 - <a id="E-PENPAL-FILE-HANDLER-EVENT"></a>**E-PENPAL-FILE-HANDLER-EVENT**: In the Tauri `.run()` callback, handle `tauri::RunEvent::Opened { urls }`. For each URL with `file://` scheme, extract the path and POST it to `http://127.0.0.1:{port}/api/open` (same as the CLI `openPaths` flow). HTTP requests are dispatched on `tauri::async_runtime::spawn` to avoid blocking the main thread. Ensure a window exists before dispatching (create one if all windows are closed). The Go server's existing `handleAPIOpen` resolves the file to its project and triggers SSE navigation.
   ← [P-PENPAL-FILE-HANDLER](PRODUCT.md#P-PENPAL-FILE-HANDLER)
+
+---
+
+## Session Persistence
+
+- <a id="E-PENPAL-SESSION-FILE"></a>**E-PENPAL-SESSION-FILE**: A Rust-managed session file at `~/.config/penpal/window-state.json` stores the window registry: an array of `{label, x, y, width, height, activePath}` objects. Written atomically (temp + rename). Version field enables future migrations. Tauri reads this file on startup to restore windows; writes on window move/resize/close and on app quit.
+  ← [P-PENPAL-PERSIST-GEO](PRODUCT.md#P-PENPAL-PERSIST-GEO), [P-PENPAL-PERSIST-TABS](PRODUCT.md#P-PENPAL-PERSIST-TABS)
+
+- <a id="E-PENPAL-PROGRAMMATIC-WINDOWS"></a>**E-PENPAL-PROGRAMMATIC-WINDOWS**: The `tauri.conf.json` `windows` array is empty — no auto-created window. All windows are created programmatically in `setup` via a shared `create_penpal_window(app, label, url, x, y, w, h)` helper. On startup: if a session file exists, each saved window is created with its saved geometry and `activePath` as the URL; otherwise a single default `main` window is created at 1200×800. The same helper is used for Cmd+N, dock reopen, and file-open events.
+  ← [P-PENPAL-PERSIST-GEO](PRODUCT.md#P-PENPAL-PERSIST-GEO), [P-PENPAL-PERSIST-FALLBACK](PRODUCT.md#P-PENPAL-PERSIST-FALLBACK)
+
+- <a id="E-PENPAL-GEO-TRACK"></a>**E-PENPAL-GEO-TRACK**: An in-memory `HashMap<String, WindowGeometry>` (mutex-protected) tracks each window's current position and size. Updated on `WindowEvent::Moved` and `WindowEvent::Resized`. On window close, the entry is removed and the session file is rewritten. On app quit (`RunEvent::Exit`), the full map is flushed to the session file.
+  ← [P-PENPAL-PERSIST-GEO](PRODUCT.md#P-PENPAL-PERSIST-GEO)
+
+- <a id="E-PENPAL-TAB-PERSIST"></a>**E-PENPAL-TAB-PERSIST**: Each window's tab state (tabs array with path, title, history, historyIndex; activeTabId) is persisted to `localStorage` under key `penpal:tabs:{windowLabel}`. `useTabs` saves on every tab mutation and restores from the key matching the current Tauri window label on mount. Tab IDs use `crypto.randomUUID()` to avoid collisions across sessions.
+  ← [P-PENPAL-PERSIST-TABS](PRODUCT.md#P-PENPAL-PERSIST-TABS)
+
+- <a id="E-PENPAL-SESSION-FALLBACK"></a>**E-PENPAL-SESSION-FALLBACK**: If the session file is missing, unreadable, or has an unknown version, startup falls back to a single `main` window at 1200×800 with URL `/`. If a window's `localStorage` tab key is missing or corrupt, `useTabs` falls back to a single tab at the current URL.
+  ← [P-PENPAL-PERSIST-FALLBACK](PRODUCT.md#P-PENPAL-PERSIST-FALLBACK)
 
 ---
 

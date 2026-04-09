@@ -25,9 +25,10 @@
     disabled?: boolean;
     remote?: boolean;
     projectId?: string | null;
+    dropUp?: boolean;
   }
 
-  let { disabled = false, remote = false, projectId = null }: Props = $props();
+  let { disabled = false, remote = false, projectId = null, dropUp = false }: Props = $props();
 
   let showDropdown = $state(false);
 
@@ -86,7 +87,7 @@
       {/if}
     </button>
     {#if showDropdown}
-      <div class="selector-dropdown">
+      <div class="selector-dropdown" class:drop-up={dropUp}>
         {#each agents as provider (provider.id)}
           <button
             type="button"
@@ -153,6 +154,13 @@
     overflow: hidden;
     z-index: 1001;
     min-width: 140px;
+  }
+
+  .selector-dropdown.drop-up {
+    top: auto;
+    bottom: 100%;
+    margin-top: 0;
+    margin-bottom: 4px;
   }
 
   .selector-option {

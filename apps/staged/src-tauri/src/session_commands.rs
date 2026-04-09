@@ -130,7 +130,7 @@ pub fn get_session_messages_since(
 /// in the background, and messages stream into the DB in real-time.
 /// Returns the Session record (status will be "running").
 #[tauri::command]
-pub fn start_session(
+pub async fn start_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     app_handle: tauri::AppHandle,
@@ -207,11 +207,14 @@ pub async fn resume_session(
 
     // Check if this session is linked to a project note — if so, we need
     // to start the MCP server so the agent has access to project tools.
-    let mcp_project_id = store
+    let project_note = store
         .get_project_note_by_session(&session_id)
         .ok()
-        .flatten()
-        .map(|note| note.project_id);
+        .flatten();
+    let mcp_project_id = project_note.as_ref().map(|note| note.project_id.clone());
+    let linked_commit = store.get_commit_by_session(&session_id).ok().flatten();
+    let linked_note = store.get_note_by_session(&session_id).ok().flatten();
+    let linked_review = store.get_review_by_session(&session_id).ok().flatten();
 
     // If a branch_id is provided, look up the branch to get workspace_name
     // and resolve remote_working_dir. This takes priority over the
@@ -220,34 +223,61 @@ pub async fn resume_session(
         .as_deref()
         .and_then(|bid| store.get_branch(bid).ok().flatten());
 
-    // If this session is linked to a commit, capture the current HEAD so we
-    // can detect new or amended commits when the session completes.
-    // This applies both when the commit already has a SHA (amend case) and
-    // when it's still pending (no SHA — the previous run didn't produce a
-    // commit, so we need to detect if this resumed run does).
-    let (pre_head_sha, workspace_name) = {
-        // Determine the branch to use: explicit branch_id takes priority,
-        // otherwise fall back to the commit-linked branch.
-        let branch = if branch_from_id.is_some() {
-            branch_from_id.clone()
-        } else {
-            store
-                .get_commit_by_session(&session_id)
-                .ok()
-                .flatten()
-                .and_then(|commit| store.get_branch(&commit.branch_id).ok().flatten())
-        };
+    let linked_branch = if branch_from_id.is_some() {
+        branch_from_id.clone()
+    } else if let Some(commit) = &linked_commit {
+        store.get_branch(&commit.branch_id).ok().flatten()
+    } else if let Some(note) = &linked_note {
+        store.get_branch(&note.branch_id).ok().flatten()
+    } else if let Some(review) = &linked_review {
+        store.get_branch(&review.branch_id).ok().flatten()
+    } else {
+        None
+    };
 
-        if let Some(ref branch) = branch {
+    let session_type = if project_note.is_some() {
+        // Project notes and branch notes intentionally share the "note"
+        // session type because the frontend only needs a single "note work is
+        // running" signal for project-level activity indicators.
+        Some("note".to_string())
+    } else if linked_commit.is_some() {
+        Some("commit".to_string())
+    } else if linked_note.is_some() {
+        Some("note".to_string())
+    } else if linked_review.is_some() {
+        Some("review".to_string())
+    } else {
+        infer_branch_resume_session_type(&session.prompt).map(str::to_string)
+    };
+    let event_branch_id = linked_branch.as_ref().map(|branch| branch.id.clone());
+    let event_project_id = if let Some(note) = &project_note {
+        Some(note.project_id.clone())
+    } else {
+        linked_branch
+            .as_ref()
+            .map(|branch| branch.project_id.clone())
+    };
+
+    // Only resumed commit sessions need a pre-run HEAD snapshot. The
+    // completion hook ignores non-commit sessions anyway, but keeping this
+    // narrow makes the intent explicit and avoids unnecessary git lookups.
+    let (pre_head_sha, workspace_name) = {
+        if let Some(ref branch) = linked_branch {
             let ws_name = branch.workspace_name.clone();
-            let head = if let Some(ref ws) = ws_name {
-                let ws = ws.clone();
-                run_blox_blocking(move || crate::blox::ws_exec(&ws, &["git", "rev-parse", "HEAD"]))
+            let head = if linked_commit.is_some() {
+                if let Some(ref ws) = ws_name {
+                    let ws = ws.clone();
+                    run_blox_blocking(move || {
+                        crate::blox::ws_exec(&ws, &["git", "rev-parse", "HEAD"])
+                    })
                     .await
                     .map(|s| s.trim().to_string())
                     .ok()
+                } else {
+                    crate::git::get_head_sha(&working_dir).ok()
+                }
             } else {
-                crate::git::get_head_sha(&working_dir).ok()
+                None
             };
             (head, ws_name)
         } else {
@@ -298,9 +328,10 @@ pub async fn resume_session(
             session_id: session_id.clone(),
             status: "running".to_string(),
             error_message: None,
-            branch_id: None,
-            project_id: mcp_project_id.clone(),
-            session_type: None,
+            completion_reason: None,
+            branch_id: event_branch_id,
+            project_id: event_project_id.or(mcp_project_id.clone()),
+            session_type,
             is_auto_review: false,
         },
     );
@@ -337,6 +368,21 @@ pub async fn resume_session(
     Ok(())
 }
 
+fn infer_branch_resume_session_type(prompt: &str) -> Option<&'static str> {
+    // Keep these checks aligned with the action prompts built in `prs.rs`.
+    if prompt.contains("Create a draft pull request for the current branch.")
+        || prompt.contains("Create a pull request for the current branch.")
+    {
+        Some("pr")
+    } else if prompt.contains("Push the current branch to the remote using force-with-lease.")
+        || prompt.contains("Push the current branch to the remote.")
+    {
+        Some("push")
+    } else {
+        None
+    }
+}
+
 #[tauri::command]
 pub fn cancel_session(
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
@@ -351,14 +397,19 @@ pub fn cancel_session(
             if session.status == store::SessionStatus::Running
                 || session.status == store::SessionStatus::Queued
             {
-                let _ =
-                    store.update_session_status(&session_id, store::SessionStatus::Cancelled, None);
+                let _ = store.update_session_status(
+                    &session_id,
+                    store::SessionStatus::Cancelled,
+                    None,
+                    Some(&store::CompletionReason::Interrupted),
+                );
                 let _ = app_handle.emit(
                     "session-status-changed",
                     session_runner::SessionStatusEvent {
                         session_id: session_id.clone(),
                         status: "cancelled".to_string(),
                         error_message: None,
+                        completion_reason: Some("interrupted".to_string()),
                         branch_id: None,
                         project_id: None,
                         session_type: None,
@@ -395,6 +446,15 @@ pub enum BranchSessionType {
     Note,
     Commit,
     Review,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchSessionLaunchContext {
+    pub source: String,
+    pub scope: String,
+    pub commit_sha: String,
+    pub review_id: Option<String>,
 }
 
 /// Response from starting a branch session.
@@ -461,16 +521,26 @@ This is a remote-workspace project. Use the project MCP tools to orchestrate wor
 
     let start_repo_session_desc = if is_remote {
         "- start_repo_session: Use this to make changes or run tasks in one of the project's \
-repositories. Use `expected_outcome=\"note_in_repo\"` for repo notes and \
-`expected_outcome=\"commit\"` for code changes/commits. For remote branches this subagent \
-runs on the remote workspace, where file access, notes, and commits must happen."
+repositories. It enqueues work and returns a `repo_session_id` immediately. Use \
+`expected_outcome=\"note_in_repo\"` for repo notes and `expected_outcome=\"commit\"` for \
+code changes/commits. For remote branches this subagent runs on the remote workspace, where \
+file access, notes, and commits must happen.\n\
+- wait_for_repo_session: Use this to wait on a previously started repo session by passing the \
+`repo_session_id`. It returns the queue state (`queued`, `running`, `completed`, `cancelled`, \
+or `failed`) and any available artifacts.\n\
+- cancel_repo_session: Use this to cancel a queued or running repo session by `repo_session_id`."
     } else {
         "- start_repo_session: Use this to make changes or run tasks in one of the project's \
-repositories. Use `expected_outcome=\"note_in_repo\"` for repo notes and \
-`expected_outcome=\"commit\"` for code changes/commits. Do not ask for both a note and a \
-commit in a single start_repo_session request — choose one outcome per call. All reasoning \
-specific to a repo must be done within a repo session rather than in this project-wide context. \
-You MUST NOT write files directly — all file writes MUST go through start_repo_session with expected_outcome=\"commit\"."
+repositories. It enqueues work and returns a `repo_session_id` immediately. Use \
+`expected_outcome=\"note_in_repo\"` for repo notes and `expected_outcome=\"commit\"` for \
+code changes/commits. Do not ask for both a note and a commit in a single start_repo_session \
+request — choose one outcome per call. All reasoning specific to a repo must be done within a \
+repo session rather than in this project-wide context. You MUST NOT write files directly — all \
+file writes MUST go through start_repo_session with expected_outcome=\"commit\".\n\
+- wait_for_repo_session: Use this to wait on a previously started repo session by passing the \
+`repo_session_id`. It returns the queue state (`queued`, `running`, `completed`, `cancelled`, \
+or `failed`) and any available artifacts.\n\
+- cancel_repo_session: Use this to cancel a queued or running repo session by `repo_session_id`."
     };
 
     let coordinator_reminder = if is_remote {
@@ -572,8 +642,16 @@ pub async fn start_branch_session(
     session_type: BranchSessionType,
     provider: Option<String>,
     image_ids: Option<Vec<String>>,
+    launch_context: Option<BranchSessionLaunchContext>,
 ) -> Result<BranchSessionResponse, String> {
     let store = get_store(&store)?;
+
+    if matches!(
+        session_type,
+        BranchSessionType::Commit | BranchSessionType::Review
+    ) {
+        cancel_in_flight_auto_review_for_branch(&store, &registry, &branch_id)?;
+    }
 
     // Resolve branch → project
     let branch = store
@@ -653,6 +731,7 @@ pub async fn start_branch_session(
         &project_information,
         &branch_context,
         &session_type,
+        launch_context.as_ref(),
     );
 
     // Create the session
@@ -782,15 +861,25 @@ pub async fn start_branch_session(
 /// (commit or note), but does NOT resolve working directory, git context,
 /// or spawn an agent. The session will be started later via `drain_queued_sessions`.
 #[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
 pub fn queue_branch_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     branch_id: String,
     prompt: String,
     session_type: BranchSessionType,
     provider: Option<String>,
     image_ids: Option<Vec<String>>,
+    launch_context: Option<BranchSessionLaunchContext>,
 ) -> Result<BranchSessionResponse, String> {
     let store = get_store(&store)?;
+
+    if matches!(
+        session_type,
+        BranchSessionType::Commit | BranchSessionType::Review
+    ) {
+        cancel_in_flight_auto_review_for_branch(&store, &registry, &branch_id)?;
+    }
 
     // Validate that the branch exists.
     let _branch = store
@@ -800,7 +889,8 @@ pub fn queue_branch_session(
 
     // Create the queued session — prompt is stored raw (not enriched with
     // context) since context will be built when the session is drained.
-    let mut session = store::Session::new_queued(&prompt);
+    let queued_prompt = embed_launch_context(&prompt, launch_context.as_ref())?;
+    let mut session = store::Session::new_queued(&queued_prompt);
     if let Some(ref p) = provider {
         session = session.with_provider(p);
     }
@@ -853,7 +943,27 @@ pub async fn drain_queued_sessions(
     provider: Option<String>,
 ) -> Result<bool, String> {
     let store = get_store(&store)?;
+    drain_queued_sessions_for_branch(
+        store,
+        Arc::clone(&registry),
+        app_handle,
+        branch_id,
+        provider,
+    )
+    .await
+}
 
+/// Start the oldest queued branch session if one exists and the branch is idle.
+///
+/// This is shared by the Tauri command and backend lifecycle hooks so queue
+/// progression remains owned by the backend.
+pub async fn drain_queued_sessions_for_branch(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    provider: Option<String>,
+) -> Result<bool, String> {
     // Bail out if the branch already has a running session to prevent
     // concurrent sessions on the same branch.
     if store
@@ -889,7 +999,7 @@ pub async fn drain_queued_sessions(
         };
 
     // Use the original prompt from the queued session.
-    let prompt = session.prompt.clone();
+    let (prompt, launch_context) = extract_launch_context(&session.prompt)?;
     let session_id = session.id.clone();
 
     // Resolve branch → project (same as start_branch_session).
@@ -964,6 +1074,7 @@ pub async fn drain_queued_sessions(
         &project_information,
         &branch_context,
         &session_type,
+        launch_context.as_ref(),
     );
 
     // Atomically transition session from queued to running.
@@ -1069,6 +1180,7 @@ pub async fn drain_queued_sessions(
             session_id: session_id.clone(),
             status: "running".to_string(),
             error_message: None,
+            completion_reason: None,
             branch_id: Some(branch_id.clone()),
             project_id: Some(branch.project_id.clone()),
             session_type: Some(session_type_str.to_string()),
@@ -1203,6 +1315,7 @@ pub async fn trigger_auto_review(
         &project_information,
         &branch_context,
         &BranchSessionType::Review,
+        None,
     );
 
     // Create the session
@@ -1225,6 +1338,7 @@ pub async fn trigger_auto_review(
             session_id: session.id.clone(),
             status: "running".to_string(),
             error_message: None,
+            completion_reason: None,
             branch_id: Some(branch_id.clone()),
             project_id: Some(branch.project_id.clone()),
             session_type: Some("review".to_string()),
@@ -1310,6 +1424,59 @@ fn latest_git_commit_ms(store: &Arc<Store>, branch_id: &str) -> i64 {
     };
     // CommitInfo.timestamp is in seconds; convert to milliseconds.
     commits.iter().map(|c| c.timestamp).max().unwrap_or(0) * 1000
+}
+
+fn cancel_in_flight_auto_review_for_branch(
+    store: &Arc<Store>,
+    registry: &session_runner::SessionRegistry,
+    branch_id: &str,
+) -> Result<bool, String> {
+    let git_ts = latest_git_commit_ms(store, branch_id);
+    let Some(review) = store
+        .find_fresh_auto_review(branch_id, git_ts)
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(false);
+    };
+
+    let Some(session_id) = review.session_id.as_deref() else {
+        return Ok(false);
+    };
+
+    let Some(session) = store.get_session(session_id).map_err(|e| e.to_string())? else {
+        return Ok(false);
+    };
+
+    if !matches!(
+        session.status,
+        store::SessionStatus::Running | store::SessionStatus::Queued
+    ) {
+        return Ok(false);
+    }
+
+    registry.cancel(session_id);
+    let cancelled = store
+        .transition_from_active(
+            session_id,
+            store::SessionStatus::Cancelled,
+            None,
+            Some(&store::CompletionReason::Interrupted),
+        )
+        .map_err(|e| e.to_string())?;
+    if !cancelled {
+        let current = store.get_session(session_id).map_err(|e| e.to_string())?;
+        return match current.map(|session| session.status) {
+            None => Ok(true),
+            Some(store::SessionStatus::Cancelled) => {
+                store.delete_review(&review.id).map_err(|e| e.to_string())?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        };
+    }
+    store.delete_review(&review.id).map_err(|e| e.to_string())?;
+
+    Ok(true)
 }
 
 /// Find an auto review created after all commits on a branch.
@@ -1974,7 +2141,7 @@ fn note_timeline_entries(
             format_note_for_context(&note.id, &note.title, &note.content, workspace_name)
         {
             entries.push(TimelineEntry {
-                timestamp: note.created_at / 1000,
+                timestamp: note.completed_at.unwrap_or(note.created_at) / 1000,
                 order: 0,
                 content,
             });
@@ -2017,7 +2184,7 @@ fn project_note_timeline_entries(
         let content =
             format_project_note_for_context(&note.id, &note.title, &note.content, workspace_name);
         entries.push(TimelineEntry {
-            timestamp: note.created_at / 1000,
+            timestamp: note.completed_at.unwrap_or(note.created_at) / 1000,
             order: 0,
             content,
         });
@@ -2096,8 +2263,8 @@ fn review_timeline_entries(
             continue;
         }
         let short_sha = &review.commit_sha[..review.commit_sha.len().min(7)];
-        let review_ts_secs = review.created_at / 1000;
-        let is_old = max_commit_ts.is_some_and(|ts| review_ts_secs < ts);
+        let review_ts_secs = review.completed_at.unwrap_or(review.created_at) / 1000;
+        let is_old = max_commit_ts.is_some_and(|ts| review.created_at / 1000 < ts);
 
         let heading_title = match review.title.as_deref() {
             Some(title) => format!("Code review: {} — {}", title, short_sha),
@@ -2177,6 +2344,7 @@ fn build_full_prompt(
     project_information: &str,
     branch_context: &str,
     session_type: &BranchSessionType,
+    launch_context: Option<&BranchSessionLaunchContext>,
 ) -> String {
     let action_instructions = match session_type {
         BranchSessionType::Note => {
@@ -2185,13 +2353,39 @@ fn build_full_prompt(
 You may use any tools needed to research and gather information, but do NOT create \
 any commits.
 
-To return the note, your final response must include this exact structure:
+To return the note, your final response must include the structure shown below. \
+Before the `---` separator, emit a `suggested-next-steps` fenced block that suggests \
+what the user might want to do next. The block must contain a single JSON object with \
+two nullable string fields:
+
+```suggested-next-steps
+{\"suggestedNextCommitStep\": \"Fix the null pointer bug in parser.rs\", \"suggestedNextNoteStep\": \"Make a plan to fix the null pointer bug\"}
+```
+
+Guidelines for suggested next steps:
+- Keep suggestions very concise (a few words). They are shown alongside the note title, \
+so you can assume the user has already read the title for context. \
+Do NOT repeat information from the title.
+- If the note is a plan, suggest a commit to implement it: \
+{\"suggestedNextCommitStep\": \"Implement this plan\", \"suggestedNextNoteStep\": null}
+- If the note is a plan with multiple options, pick the best option: \
+{\"suggestedNextCommitStep\": \"Implement option 2: use Redis cache\", \"suggestedNextNoteStep\": null}
+- If the note is bug research, suggest both a fix and a deeper plan: \
+{\"suggestedNextCommitStep\": \"Fix this bug\", \"suggestedNextNoteStep\": \"Plan a fix for this bug\"}
+- If the note is pure research or informational with no clear next action: \
+{\"suggestedNextCommitStep\": null, \"suggestedNextNoteStep\": null}
+
+Then, after the suggested-next-steps block, include the note itself:
 
 ---
 # <Title>
 <Body>
 
 Formatting requirements:
+- The opening fence line for suggested-next-steps must be exactly: ```suggested-next-steps
+- The closing fence line must be exactly: ```
+- Put only the JSON object inside the suggested-next-steps block (no prose or markdown).
+- Do not wrap the block in any additional code fences.
 - `---` must be on its own line, with a newline immediately before and after it.
 - The note content must start immediately after `---` with a markdown H1 (`# Title`).
 - Do not wrap the note in code fences."
@@ -2291,19 +2485,165 @@ Rules:
     let action_tag = format!(
         "<action>\n{action_instructions}\n\nProject information:\n{project_information}\n</action>"
     );
+    let branch_history = render_branch_history(branch_context, launch_context);
 
     format!(
         "{action_tag}\n\n\
          <branch-history>\n\
-         {branch_context}\n\
+         {branch_history}\n\
          </branch-history>\n\n\
          {user_prompt}"
     )
 }
 
+fn render_branch_history(
+    branch_context: &str,
+    launch_context: Option<&BranchSessionLaunchContext>,
+) -> String {
+    let mut parts = Vec::new();
+    if !branch_context.trim().is_empty() {
+        parts.push(branch_context.trim_end().to_string());
+    }
+    if let Some(entry) = render_launch_context_entry(launch_context) {
+        parts.push(entry);
+    }
+    parts.join("\n\n")
+}
+
+fn render_launch_context_entry(
+    launch_context: Option<&BranchSessionLaunchContext>,
+) -> Option<String> {
+    let context = launch_context?;
+    if context.source != "diff_viewer" {
+        return None;
+    }
+
+    let scope_suffix = match context.scope.as_str() {
+        "branch" => String::new(),
+        _ => format!(" (scope: {})", context.scope),
+    };
+
+    let mut entry = format!(
+        "Viewed diff before starting this session: commit {}{}.",
+        context.commit_sha, scope_suffix
+    );
+    if let Some(review_id) = context.review_id.as_deref() {
+        entry = format!(
+            "Viewed diff before starting this session: review {} on commit {}{}.",
+            review_id, context.commit_sha, scope_suffix
+        );
+    }
+    Some(entry)
+}
+
+fn embed_launch_context(
+    prompt: &str,
+    launch_context: Option<&BranchSessionLaunchContext>,
+) -> Result<String, String> {
+    let Some(context) = launch_context else {
+        return Ok(prompt.to_string());
+    };
+    let json = serde_json::to_string(context).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "<launch-context>{json}</launch-context>\n\n{}",
+        prompt.trim_start()
+    ))
+}
+
+fn extract_launch_context(
+    prompt: &str,
+) -> Result<(String, Option<BranchSessionLaunchContext>), String> {
+    const OPEN: &str = "<launch-context>";
+    const CLOSE: &str = "</launch-context>";
+
+    let Some(rest) = prompt.strip_prefix(OPEN) else {
+        return Ok((prompt.to_string(), None));
+    };
+    let Some((json, remainder)) = rest.split_once(CLOSE) else {
+        return Err("Queued session prompt had malformed launch context".to_string());
+    };
+    let context =
+        serde_json::from_str::<BranchSessionLaunchContext>(json).map_err(|e| e.to_string())?;
+    Ok((remainder.trim_start().to_string(), Some(context)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    fn setup_branch_store() -> (Arc<Store>, store::Branch) {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let project = store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = store::Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+        (store, branch)
+    }
+
+    fn create_auto_review(
+        store: &Arc<Store>,
+        branch_id: &str,
+        status: store::SessionStatus,
+    ) -> (store::Session, store::Review) {
+        let session = match status {
+            store::SessionStatus::Running => {
+                store::Session::new_running("auto review", Path::new("/tmp"))
+            }
+            store::SessionStatus::Queued => store::Session::new_queued("auto review"),
+            store::SessionStatus::Completed => {
+                store::Session::new_running("auto review", Path::new("/tmp"))
+            }
+            other => panic!("unsupported auto review test status: {}", other.as_str()),
+        };
+        store.create_session(&session).unwrap();
+        if status != store::SessionStatus::Running && status != store::SessionStatus::Queued {
+            store
+                .update_session_status(&session.id, status, None, None)
+                .unwrap();
+        }
+
+        let review = store::Review::new(branch_id, "abc123", store::ReviewScope::Branch)
+            .with_session(&session.id)
+            .with_auto();
+        store.create_review(&review).unwrap();
+        (session, review)
+    }
+
+    #[test]
+    fn infer_branch_resume_session_type_detects_pr_prompts() {
+        assert_eq!(
+            infer_branch_resume_session_type("Create a pull request for the current branch."),
+            Some("pr")
+        );
+        assert_eq!(
+            infer_branch_resume_session_type("Create a draft pull request for the current branch."),
+            Some("pr")
+        );
+    }
+
+    #[test]
+    fn infer_branch_resume_session_type_detects_push_prompts() {
+        assert_eq!(
+            infer_branch_resume_session_type("Push the current branch to the remote."),
+            Some("push")
+        );
+        assert_eq!(
+            infer_branch_resume_session_type(
+                "Push the current branch to the remote using force-with-lease."
+            ),
+            Some("push")
+        );
+    }
+
+    #[test]
+    fn infer_branch_resume_session_type_ignores_other_prompts() {
+        assert_eq!(
+            infer_branch_resume_session_type("Write a project note."),
+            None
+        );
+    }
 
     #[test]
     fn review_prompt_requires_strict_fence_lines() {
@@ -2312,6 +2652,7 @@ mod tests {
             "project info",
             "branch context",
             &BranchSessionType::Review,
+            None,
         );
 
         assert!(
@@ -2326,5 +2667,118 @@ mod tests {
             "Put only the JSON array inside the review-comments block (no prose or markdown)."
         ));
         assert!(prompt.contains("do not output any preamble, commentary, or thinking before it"));
+    }
+
+    #[test]
+    fn cancel_in_flight_auto_review_cancels_running_review() {
+        let (store, branch) = setup_branch_store();
+        let (session, review) =
+            create_auto_review(&store, &branch.id, store::SessionStatus::Running);
+        let registry = session_runner::SessionRegistry::new();
+
+        let cancelled =
+            cancel_in_flight_auto_review_for_branch(&store, &registry, &branch.id).unwrap();
+
+        assert!(cancelled);
+        assert!(store.get_session(&session.id).unwrap().is_none());
+        assert!(store.get_review(&review.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn cancel_in_flight_auto_review_cancels_queued_review() {
+        let (store, branch) = setup_branch_store();
+        let (session, review) =
+            create_auto_review(&store, &branch.id, store::SessionStatus::Queued);
+        let registry = session_runner::SessionRegistry::new();
+
+        let cancelled =
+            cancel_in_flight_auto_review_for_branch(&store, &registry, &branch.id).unwrap();
+
+        assert!(cancelled);
+        assert!(store.get_session(&session.id).unwrap().is_none());
+        assert!(store.get_review(&review.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn cancel_in_flight_auto_review_leaves_completed_review_available_for_adoption() {
+        let (store, branch) = setup_branch_store();
+        let (session, review) =
+            create_auto_review(&store, &branch.id, store::SessionStatus::Completed);
+        let registry = session_runner::SessionRegistry::new();
+
+        let cancelled =
+            cancel_in_flight_auto_review_for_branch(&store, &registry, &branch.id).unwrap();
+
+        assert!(!cancelled);
+        let session = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(session.status, store::SessionStatus::Completed);
+        let review = store.get_review(&review.id).unwrap().unwrap();
+        assert!(review.is_auto);
+    }
+
+    #[test]
+    fn commit_prompt_appends_diff_viewer_context_to_branch_history() {
+        let prompt = build_full_prompt(
+            "user prompt",
+            "project info",
+            "branch context",
+            &BranchSessionType::Commit,
+            Some(&BranchSessionLaunchContext {
+                source: "diff_viewer".to_string(),
+                scope: "commit".to_string(),
+                commit_sha: "abc123".to_string(),
+                review_id: Some("review-42".to_string()),
+            }),
+        );
+
+        assert!(prompt.contains(
+            "Viewed diff before starting this session: review review-42 on commit abc123 (scope: commit)."
+        ));
+    }
+
+    #[test]
+    fn commit_prompt_omits_branch_scope_from_diff_viewer_context() {
+        let prompt = build_full_prompt(
+            "user prompt",
+            "project info",
+            "branch context",
+            &BranchSessionType::Commit,
+            Some(&BranchSessionLaunchContext {
+                source: "diff_viewer".to_string(),
+                scope: "branch".to_string(),
+                commit_sha: "abc123".to_string(),
+                review_id: None,
+            }),
+        );
+
+        assert!(prompt.contains("Viewed diff before starting this session: commit abc123."));
+        assert!(!prompt.contains("(scope: branch)"));
+    }
+
+    #[test]
+    fn queued_prompt_round_trips_launch_context() {
+        let prompt = embed_launch_context(
+            "Implement plan",
+            Some(&BranchSessionLaunchContext {
+                source: "diff_viewer".to_string(),
+                scope: "branch".to_string(),
+                commit_sha: "deadbeef".to_string(),
+                review_id: None,
+            }),
+        )
+        .unwrap();
+
+        let (decoded_prompt, launch_context) = extract_launch_context(&prompt).unwrap();
+
+        assert_eq!(decoded_prompt, "Implement plan");
+        assert_eq!(
+            launch_context,
+            Some(BranchSessionLaunchContext {
+                source: "diff_viewer".to_string(),
+                scope: "branch".to_string(),
+                commit_sha: "deadbeef".to_string(),
+                review_id: None,
+            })
+        );
     }
 }

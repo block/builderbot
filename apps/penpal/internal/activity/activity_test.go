@@ -1,7 +1,11 @@
 package activity
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -170,4 +174,204 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+// E-PENPAL-ACTIVITY-PERSIST: verifies Save writes and Load restores activity
+// including nested paths where FileName must be recomputed from FilePath.
+func TestSaveAndLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "activity.json")
+
+	tr := New()
+	ts := time.Date(2025, 6, 15, 10, 0, 0, 0, time.UTC)
+	tr.RecordAt(FileViewed, "proj", "thoughts/plans/roadmap.md", ts)
+	tr.Record(Comment, "proj", "deep/nested/dir/notes.md")
+
+	if err := tr.Save(path); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	// Verify file was created
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("activity.json not created: %v", err)
+	}
+
+	// Load into a fresh tracker
+	tr2 := New()
+	if err := tr2.Load(path); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	files := tr2.RecentFiles(10)
+	if len(files) != 2 {
+		t.Fatalf("expected 2 files after load, got %d", len(files))
+	}
+
+	fa := tr2.Lookup("proj", "thoughts/plans/roadmap.md")
+	if fa == nil {
+		t.Fatal("expected roadmap.md activity after load")
+	}
+	if fa.Type != FileViewed {
+		t.Errorf("expected type %q, got %q", FileViewed, fa.Type)
+	}
+	if !fa.Timestamp.Equal(ts) {
+		t.Errorf("expected timestamp %v, got %v", ts, fa.Timestamp)
+	}
+	if fa.FileName != "roadmap.md" {
+		t.Errorf("expected FileName %q after round-trip, got %q", "roadmap.md", fa.FileName)
+	}
+
+	fb := tr2.Lookup("proj", "deep/nested/dir/notes.md")
+	if fb == nil {
+		t.Fatal("expected notes.md activity after load")
+	}
+	if fb.Type != Comment {
+		t.Errorf("expected type %q, got %q", Comment, fb.Type)
+	}
+	if fb.FileName != "notes.md" {
+		t.Errorf("expected FileName %q after round-trip, got %q", "notes.md", fb.FileName)
+	}
+}
+
+// E-PENPAL-ACTIVITY-PERSIST: verifies Load is a no-op when the file doesn't exist.
+func TestLoadMissingFileIsNoOp(t *testing.T) {
+	tr := New()
+	err := tr.Load(filepath.Join(t.TempDir(), "nonexistent.json"))
+	if err != nil {
+		t.Fatalf("Load of missing file should return nil, got: %v", err)
+	}
+	if len(tr.RecentFiles(10)) != 0 {
+		t.Error("expected empty tracker after loading missing file")
+	}
+}
+
+// E-PENPAL-ACTIVITY-PERSIST: verifies Load uses RecordAt semantics (doesn't overwrite runtime events).
+func TestLoadDoesNotOverwriteRuntimeEvents(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "activity.json")
+
+	// Save a "viewed" event
+	tr := New()
+	old := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	tr.RecordAt(FileViewed, "p1", "a.md", old)
+	if err := tr.Save(path); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	// New tracker with a runtime event for the same file
+	tr2 := New()
+	tr2.Record(Comment, "p1", "a.md")
+
+	// Load should not overwrite the runtime event
+	if err := tr2.Load(path); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	fa := tr2.Lookup("p1", "a.md")
+	if fa.Type != Comment {
+		t.Errorf("expected runtime event %q preserved, got %q", Comment, fa.Type)
+	}
+}
+
+// E-PENPAL-ACTIVITY-PERSIST: verifies Save is atomic (no partial writes).
+func TestSaveIsAtomic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "activity.json")
+
+	tr := New()
+	tr.Record(FileModified, "p1", "a.md")
+	if err := tr.Save(path); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	// Verify no .tmp file left behind
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Error("expected .tmp file to be cleaned up after save")
+	}
+}
+
+// E-PENPAL-ACTIVITY-PERSIST: verifies Load returns error on corrupt JSON without panicking.
+func TestLoadCorruptJSON(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "activity.json")
+	os.WriteFile(path, []byte(`{not valid json`), 0644)
+
+	tr := New()
+	err := tr.Load(path)
+	if err == nil {
+		t.Fatal("expected error from corrupt JSON, got nil")
+	}
+	// Tracker should remain empty — no partial state
+	if len(tr.RecentFiles(10)) != 0 {
+		t.Error("expected empty tracker after corrupt load")
+	}
+}
+
+// E-PENPAL-ACTIVITY-PERSIST: verifies Save prunes to maxPersistedEntries.
+func TestSavePrunesOldEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "activity.json")
+
+	tr := New()
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < maxPersistedEntries+100; i++ {
+		tr.RecordAt(FileModified, "p1", filepath.Join("dir", fmt.Sprintf("file%d.md", i)), base.Add(time.Duration(i)*time.Second))
+	}
+
+	if err := tr.Save(path); err != nil {
+		t.Fatalf("Save failed: %v", err)
+	}
+
+	tr2 := New()
+	if err := tr2.Load(path); err != nil {
+		t.Fatalf("Load failed: %v", err)
+	}
+
+	files := tr2.RecentFiles(0)
+	if len(files) != maxPersistedEntries {
+		t.Errorf("expected %d entries after pruned save, got %d", maxPersistedEntries, len(files))
+	}
+}
+
+// E-PENPAL-ACTIVITY-PERSIST: verifies Save creates parent directories.
+func TestSaveCreatesParentDir(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sub", "deep", "activity.json")
+
+	tr := New()
+	tr.Record(FileViewed, "p1", "a.md")
+
+	if err := tr.Save(path); err != nil {
+		t.Fatalf("Save should create parent dirs, got: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("file not created: %v", err)
+	}
+}
+
+// E-PENPAL-ACTIVITY-PERSIST: verifies SetOnChange callback fires on Record().
+func TestOnChangeCalledOnRecord(t *testing.T) {
+	tr := New()
+	var count atomic.Int32
+	tr.SetOnChange(func() { count.Add(1) })
+
+	tr.Record(FileViewed, "p1", "a.md")
+	tr.Record(FileModified, "p1", "b.md")
+
+	if got := count.Load(); got != 2 {
+		t.Errorf("expected onChange called 2 times, got %d", got)
+	}
+}
+
+// E-PENPAL-ACTIVITY-PERSIST: verifies RecordAt does NOT fire onChange (seed-only).
+func TestOnChangeNotCalledOnRecordAt(t *testing.T) {
+	tr := New()
+	var count atomic.Int32
+	tr.SetOnChange(func() { count.Add(1) })
+
+	tr.RecordAt(FileModified, "p1", "a.md", time.Now())
+
+	if got := count.Load(); got != 0 {
+		t.Errorf("expected onChange not called for RecordAt, got %d calls", got)
+	}
 }

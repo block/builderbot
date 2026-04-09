@@ -57,7 +57,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             if parts.len() >= 5 {
                 let sha = parts[0].to_string();
                 let our_commit = store.get_commit_by_sha(branch_id, &sha).unwrap_or(None);
-                let (session_id, session_status) = store.resolve_session_status(
+                let (session_id, session_status, completion_reason) = store.resolve_session_status(
                     our_commit.as_ref().and_then(|c| c.session_id.as_deref()),
                 );
 
@@ -71,6 +71,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                     order: 0, // placeholder, assigned below
                     session_id,
                     session_status,
+                    completion_reason,
                 });
             }
         }
@@ -88,7 +89,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             // For each git commit, look up our metadata (session linkage)
             for gc in git_commits {
                 let our_commit = store.get_commit_by_sha(branch_id, &gc.sha).unwrap_or(None);
-                let (session_id, session_status) = store.resolve_session_status(
+                let (session_id, session_status, completion_reason) = store.resolve_session_status(
                     our_commit.as_ref().and_then(|c| c.session_id.as_deref()),
                 );
 
@@ -102,6 +103,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                     order: gc.order,
                     session_id,
                     session_status,
+                    completion_reason,
                 });
             }
         }
@@ -113,7 +115,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         .map_err(|e| e.to_string())?;
     for dc in db_commits {
         if dc.sha.is_none() {
-            let (session_id, session_status) =
+            let (session_id, session_status, completion_reason) =
                 store.resolve_session_status(dc.session_id.as_deref());
 
             commits.push(CommitTimelineItem {
@@ -135,6 +137,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 order: 0, // created_at is ms divided by 1000, so two pending commits in the same second could tie; rare in practice since they're created one at a time
                 session_id,
                 session_status,
+                completion_reason,
             });
         }
     }
@@ -146,7 +149,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
     let notes: Vec<NoteTimelineItem> = db_notes
         .into_iter()
         .map(|n| {
-            let (session_id, session_status) =
+            let (session_id, session_status, completion_reason) =
                 store.resolve_session_status(n.session_id.as_deref());
             NoteTimelineItem {
                 id: n.id,
@@ -154,8 +157,12 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 content: n.content,
                 session_id,
                 session_status,
+                completion_reason,
                 created_at: n.created_at,
                 updated_at: n.updated_at,
+                completed_at: n.completed_at,
+                suggested_next_commit_step: n.suggested_next_commit_step,
+                suggested_next_note_step: n.suggested_next_note_step,
             }
         })
         .collect();
@@ -168,7 +175,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         .into_iter()
         .filter(|r| !r.is_auto)
         .map(|r| {
-            let (session_id, session_status) =
+            let (session_id, session_status, completion_reason) =
                 store.resolve_session_status(r.session_id.as_deref());
             let comment_count = r.comments.len();
             ReviewTimelineItem {
@@ -177,10 +184,12 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 scope: r.scope.as_str().to_string(),
                 session_id,
                 session_status,
+                completion_reason,
                 title: r.title,
                 comment_count,
                 created_at: r.created_at,
                 updated_at: r.updated_at,
+                completed_at: r.completed_at,
             }
         })
         .collect();
@@ -192,7 +201,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
     let images: Vec<ImageTimelineItem> = db_images
         .into_iter()
         .map(|img| {
-            let (session_id, session_status) =
+            let (session_id, session_status, completion_reason) =
                 store.resolve_session_status(img.session_id.as_deref());
             ImageTimelineItem {
                 id: img.id,
@@ -201,6 +210,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 size_bytes: img.size_bytes,
                 session_id,
                 session_status,
+                completion_reason,
                 created_at: img.created_at,
             }
         })

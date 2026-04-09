@@ -12,8 +12,8 @@ impl Store {
     pub fn create_review(&self, review: &Review) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO reviews (id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO reviews (id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 review.id,
                 review.branch_id,
@@ -24,6 +24,7 @@ impl Store {
                 review.is_auto,
                 review.created_at,
                 review.updated_at,
+                review.completed_at,
             ],
         )?;
         Ok(())
@@ -49,7 +50,7 @@ impl Store {
         // when multiple reviews share the same (branch, commit, scope) triple.
         let existing: Option<Review> = conn
             .query_row(
-                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
+                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at, completed_at
                  FROM reviews
                  WHERE branch_id = ?1 AND commit_sha = ?2 AND scope = ?3 AND is_auto = 0
                  ORDER BY created_at DESC LIMIT 1",
@@ -66,8 +67,8 @@ impl Store {
         // Create new
         let review = Review::new(branch_id, commit_sha, scope);
         conn.execute(
-            "INSERT INTO reviews (id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO reviews (id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 review.id,
                 review.branch_id,
@@ -78,6 +79,7 @@ impl Store {
                 review.is_auto,
                 review.created_at,
                 review.updated_at,
+                review.completed_at,
             ],
         )?;
         Ok(review)
@@ -100,7 +102,7 @@ impl Store {
         // find_fresh_auto_review and should not be returned here.
         let existing: Option<Review> = conn
             .query_row(
-                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
+                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at, completed_at
                  FROM reviews
                  WHERE branch_id = ?1 AND commit_sha = ?2 AND scope = ?3 AND is_auto = 0
                  ORDER BY created_at DESC LIMIT 1",
@@ -123,7 +125,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let review = conn
             .query_row(
-                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
+                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at, completed_at
                  FROM reviews WHERE id = ?1",
                 params![id],
                 Self::row_to_review_header,
@@ -143,7 +145,7 @@ impl Store {
     pub fn list_reviews_for_branch(&self, branch_id: &str) -> Result<Vec<Review>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
+            "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at, completed_at
              FROM reviews WHERE branch_id = ?1 ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map(params![branch_id], Self::row_to_review_header)?;
@@ -264,7 +266,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let review = conn
             .query_row(
-                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
+                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at, completed_at
                  FROM reviews WHERE session_id = ?1",
                 params![session_id],
                 Self::row_to_review_header,
@@ -297,7 +299,7 @@ impl Store {
     ) -> Result<Vec<Review>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
+            "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at, completed_at
              FROM reviews
              WHERE branch_id = ?1 AND created_at >= ?2
              ORDER BY created_at ASC",
@@ -306,12 +308,25 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Mark a review as completed without changing the title.
+    /// Used when the review session finishes but title extraction fails.
+    pub fn mark_review_completed(&self, id: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_timestamp();
+        conn.execute(
+            "UPDATE reviews SET completed_at = COALESCE(completed_at, ?1) WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
     /// Update the title of a review.
     pub fn update_review_title(&self, id: &str, title: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        let now = now_timestamp();
         conn.execute(
-            "UPDATE reviews SET title = ?1, updated_at = ?2 WHERE id = ?3",
-            params![title, now_timestamp(), id],
+            "UPDATE reviews SET title = ?1, updated_at = ?2, completed_at = COALESCE(completed_at, ?3) WHERE id = ?4",
+            params![title, now, now, id],
         )?;
         Ok(())
     }
@@ -319,9 +334,10 @@ impl Store {
     /// Update the `commit_sha` of a review.
     pub fn update_review_commit_sha(&self, id: &str, commit_sha: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        let now = now_timestamp();
         conn.execute(
             "UPDATE reviews SET commit_sha = ?1, updated_at = ?2 WHERE id = ?3",
-            params![commit_sha, now_timestamp(), id],
+            params![commit_sha, now, id],
         )?;
         Ok(())
     }
@@ -329,9 +345,17 @@ impl Store {
     /// Update the `is_auto` flag on a review.
     pub fn set_review_auto(&self, id: &str, is_auto: bool) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        let now = now_timestamp();
         conn.execute(
-            "UPDATE reviews SET is_auto = ?1, updated_at = ?2 WHERE id = ?3",
-            params![is_auto, now_timestamp(), id],
+            "UPDATE reviews
+             SET is_auto = ?1,
+                 updated_at = ?2,
+                 completed_at = CASE
+                     WHEN is_auto = 1 AND ?1 = 0 AND completed_at IS NOT NULL THEN ?2
+                     ELSE completed_at
+                 END
+             WHERE id = ?3",
+            params![is_auto, now, id],
         )?;
         Ok(())
     }
@@ -355,7 +379,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let review: Option<Review> = conn
             .query_row(
-                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at
+                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at, completed_at
                  FROM reviews
                  WHERE branch_id = ?1 AND is_auto = 1
                    AND created_at >= MAX(
@@ -405,6 +429,7 @@ impl Store {
             reference_files: Vec::new(),
             created_at: row.get(7)?,
             updated_at: row.get(8)?,
+            completed_at: row.get(9)?,
         })
     }
 

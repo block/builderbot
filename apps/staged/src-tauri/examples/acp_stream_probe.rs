@@ -68,7 +68,12 @@ impl MessageWriter for ProbeWriter {
         println!("[probe] finalize");
     }
 
-    async fn record_tool_call(&self, tool_call_id: &str, title: &str) {
+    async fn record_tool_call(
+        &self,
+        tool_call_id: &str,
+        title: &str,
+        _raw_input: Option<&serde_json::Value>,
+    ) {
         let mut state = self.state.lock().expect("probe state lock poisoned");
         state.total_tool_calls += 1;
         let count_for_id = *state
@@ -85,9 +90,15 @@ impl MessageWriter for ProbeWriter {
         );
     }
 
-    async fn update_tool_call_title(&self, tool_call_id: &str, title: &str) {
+    async fn update_tool_call_title(
+        &self,
+        tool_call_id: &str,
+        title: Option<&str>,
+        _raw_input: Option<&serde_json::Value>,
+    ) {
         let mut state = self.state.lock().expect("probe state lock poisoned");
         state.total_tool_title_updates += 1;
+        let title = title.unwrap_or("<none>");
         println!(
             "[probe] tool_call_update #{} id={} title={}",
             state.total_tool_title_updates,

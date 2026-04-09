@@ -12,7 +12,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { Plus, X, CheckCircle, AlertCircle, Ban, Eye, Trash2 } from 'lucide-svelte';
-  import type { Session, SessionStatus } from '../../types';
+  import type { Session, SessionStatus, SessionStatusPayload } from '../../types';
   import { startSession, deleteSession } from '../../api/commands';
   import SessionModal from './SessionModal.svelte';
   import Spinner from '../../shared/Spinner.svelte';
@@ -47,11 +47,7 @@
   // =========================================================================
 
   onMount(async () => {
-    unlistenStatus = await listen<{
-      sessionId: string;
-      status: string;
-      errorMessage: string | null;
-    }>('session-status-changed', (event) => {
+    unlistenStatus = await listen<SessionStatusPayload>('session-status-changed', (event) => {
       const { sessionId, status, errorMessage } = event.payload;
       sessions = sessions.map((s) => {
         if (s.id === sessionId) {
@@ -154,7 +150,7 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
       e.preventDefault();
       handleCreate();
     }

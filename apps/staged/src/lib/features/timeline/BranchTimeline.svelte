@@ -14,11 +14,18 @@
   import TimelineRow from './TimelineRow.svelte';
   import type { TimelineItemType, TimelineBadge } from './TimelineRow.svelte';
   import {
+    formatRelativeTime,
+    formatRelativeTimeSeconds,
+    minuteNow,
+  } from '../../shared/relativeTime.svelte';
+  import {
     collectRunningSessionIds,
     createLiveSessionHints,
     fallbackHintForPendingType,
     type PendingHintItemType,
   } from './liveSessionHints';
+  import { isEmptyFailedReview } from './reviewState';
+  import { stripXmlTags } from '../sessions/sessionModalHelpers';
 
   type PendingItem = {
     key: string;
@@ -132,6 +139,29 @@
     return slide(node, { duration: 200 });
   }
 
+  const artifactNoun: Record<string, string> = {
+    commit: 'commit',
+    note: 'note',
+    review: 'comments',
+  };
+
+  function failedSubtitle(
+    completionReason: string | null | undefined,
+    kind: 'commit' | 'note' | 'review'
+  ): string {
+    const noun = artifactNoun[kind];
+    switch (completionReason) {
+      case 'crashed':
+        return `Session crashed — no ${noun} created`;
+      case 'app_quit':
+        return `Session interrupted — no ${noun} created`;
+      case 'interrupted':
+        return `Session stopped — no ${noun} created`;
+      default:
+        return `Session finished — no ${noun} created`;
+    }
+  }
+
   let liveSessionHints = $state<Record<string, string>>({});
   const liveSessionHintPoller = createLiveSessionHints(
     (nextHints) => {
@@ -165,11 +195,6 @@
     deleteDisabledReason?: string;
   };
 
-  /** Strip XML-tagged context blocks (action, branch-history) from display text. */
-  function stripXmlTags(text: string): string {
-    return text.replace(/<(action|branch-history)>[\s\S]*?<\/\1>/g, '').trim();
-  }
-
   let runningSessionIds = $derived.by(() => collectRunningSessionIds(timeline, pendingItems));
 
   /** True when there is at least one non-queued active session (running in timeline or pending-but-not-queued). */
@@ -199,6 +224,7 @@
 
   // Merge commits, notes, and reviews into a single sorted list
   let items = $derived.by(() => {
+    const nowMs = minuteNow.now();
     const all: DisplayItem[] = [];
     const deletingCommitIds = new Set(
       deletingItems.filter((item) => item.type === 'commit').map((item) => item.id)
@@ -228,7 +254,7 @@
 
       if (isFailed) {
         type = 'failed-commit';
-        secondaryMeta = 'Session finished — no commit created';
+        secondaryMeta = failedSubtitle(commit.completionReason, 'commit');
       } else if (isQueued) {
         type = 'queued-commit';
         secondaryMeta = 'Queued';
@@ -237,7 +263,7 @@
         secondaryMeta = liveHint ?? 'Generating commit';
       } else {
         type = 'commit';
-        secondaryMeta = formatRelativeTime(commit.timestamp);
+        secondaryMeta = formatRelativeTimeSeconds(commit.timestamp, nowMs);
       }
 
       all.push({
@@ -268,7 +294,7 @@
 
       if (isFailed) {
         type = 'failed-note';
-        secondaryMeta = 'Session finished — no note created';
+        secondaryMeta = failedSubtitle(note.completionReason, 'note');
       } else if (isQueued) {
         type = 'queued-note';
         secondaryMeta = 'Queued';
@@ -277,7 +303,7 @@
         secondaryMeta = liveHint ?? 'Generating note';
       } else {
         type = 'note';
-        secondaryMeta = formatRelativeTimeMs(note.createdAt);
+        secondaryMeta = formatRelativeTime(note.completedAt ?? note.createdAt, nowMs);
       }
 
       all.push({
@@ -286,8 +312,8 @@
         title: stripXmlTags(note.title),
         secondaryMeta: isDeleting ? 'Deleting...' : secondaryMeta,
         deleting: isDeleting,
-        // Note timestamps are in milliseconds, convert to seconds for sorting
-        timestamp: Math.floor(note.createdAt / 1000),
+        // Use completedAt so completed notes sort by completion time, not queue time
+        timestamp: Math.floor((note.completedAt ?? note.createdAt) / 1000),
         order: 0,
         sessionId: note.sessionId ?? undefined,
         noteId: note.id,
@@ -304,7 +330,12 @@
       const totalCount = commentCount + annotationCount;
       const isRunning = review.sessionStatus === 'running';
       const isQueued = review.sessionStatus === 'queued';
-      const isFailed = !isRunning && !isQueued && !!review.sessionId && totalCount === 0;
+      const isFailed = isEmptyFailedReview({
+        sessionStatus: review.sessionStatus,
+        sessionId: review.sessionId,
+        title: review.title,
+        totalCount,
+      });
       const isDeleting = deletingReviewIds.has(review.id);
       const liveHint = review.sessionId ? liveSessionHints[review.sessionId] : undefined;
 
@@ -325,7 +356,7 @@
 
       if (isFailed) {
         type = 'failed-review';
-        meta = 'Session finished — no comments created';
+        meta = failedSubtitle(review.completionReason, 'review');
       } else if (isQueued) {
         type = 'queued-review';
         meta = 'Queued';
@@ -334,7 +365,7 @@
         meta = liveHint ?? 'Generating review';
       } else {
         type = 'review';
-        meta = formatRelativeTimeMs(review.createdAt);
+        meta = formatRelativeTime(review.completedAt ?? review.createdAt, nowMs);
       }
 
       all.push({
@@ -344,7 +375,8 @@
         meta: isDeleting ? 'Deleting...' : meta,
         badges: badges.length > 0 ? badges : undefined,
         deleting: isDeleting,
-        timestamp: Math.floor(review.createdAt / 1000),
+        // Use completedAt so completed reviews sort by completion time, not queue time
+        timestamp: Math.floor((review.completedAt ?? review.createdAt) / 1000),
         order: 0,
         sessionId: review.sessionId ?? undefined,
         reviewId: review.id,
@@ -359,7 +391,7 @@
         key: `image-${image.id}`,
         type: 'image' as TimelineItemType,
         title: image.filename,
-        secondaryMeta: isDeleting ? 'Deleting...' : formatRelativeTimeMs(image.createdAt),
+        secondaryMeta: isDeleting ? 'Deleting...' : formatRelativeTime(image.createdAt, nowMs),
         deleting: isDeleting,
         timestamp: Math.floor(image.createdAt / 1000),
         order: 0,
@@ -472,25 +504,6 @@
     } else if (item.type === 'image' && item.imageId && onDeleteImage) {
       onDeleteImage(item.imageId);
     }
-  }
-
-  function formatRelativeTime(timestamp: number): string {
-    const date = new Date(timestamp * 1000);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffMins = Math.floor(diffMs / 60000);
-    const diffHours = Math.floor(diffMins / 60);
-    const diffDays = Math.floor(diffHours / 24);
-
-    if (diffMins < 1) return 'just now';
-    if (diffMins < 60) return `${diffMins}m ago`;
-    if (diffHours < 24) return `${diffHours}h ago`;
-    if (diffDays < 7) return `${diffDays}d ago`;
-    return date.toLocaleDateString();
-  }
-
-  function formatRelativeTimeMs(timestamp: number): string {
-    return formatRelativeTime(Math.floor(timestamp / 1000));
   }
 </script>
 

@@ -1,6 +1,6 @@
 import * as commands from '../../api/commands';
 import type { BranchTimeline, SessionMessage } from '../../types';
-import { makePathsRelative } from '../sessions/sessionModalHelpers';
+import { formatToolDisplay, stripXmlTags } from '../sessions/sessionModalHelpers';
 
 const HINT_POLL_INTERVAL_MS = 750;
 const MAX_HINT_LENGTH = 72;
@@ -17,11 +17,6 @@ export type PendingHintItem = {
   type: PendingHintItemType;
   sessionId?: string;
 };
-
-/** Strip XML-tagged context blocks (action, branch-history) from display text. */
-function stripXmlTags(text: string): string {
-  return text.replace(/<(action|branch-history)>[\s\S]*?<\/\1>/g, '').trim();
-}
 
 function normalizeHintText(text: string): string | undefined {
   const cleaned = stripXmlTags(text)
@@ -45,23 +40,9 @@ function withTrailingEllipsis(text: string): string {
 }
 
 function formatToolCallHint(content: string, repoDir?: string | null): string | undefined {
-  const normalized = normalizeHintText(makePathsRelative(content, repoDir));
-  if (!normalized) return undefined;
-
-  const withProgressVerb = normalized
-    .replace(/^Run\s+/i, 'Running ')
-    .replace(/^Read\s+/i, 'Reading ')
-    .replace(/^Write\s+/i, 'Writing ')
-    .replace(/^Open\s+/i, 'Opening ')
-    .replace(/^Search\s+/i, 'Searching ')
-    .replace(/^List\s+/i, 'Listing ')
-    .replace(/^Create\s+/i, 'Creating ')
-    .replace(/^Update\s+/i, 'Updating ')
-    .replace(/^Delete\s+/i, 'Deleting ')
-    .replace(/^Fetch\s+/i, 'Fetching ')
-    .replace(/^Draft\s+/i, 'Drafting ');
-
-  return normalizeHintText(withTrailingEllipsis(withProgressVerb));
+  const { verb, detail } = formatToolDisplay(content, repoDir, true);
+  const text = detail ? `${verb} ${detail}` : verb;
+  return normalizeHintText(withTrailingEllipsis(text));
 }
 
 function formatAssistantHint(content: string): string | undefined {

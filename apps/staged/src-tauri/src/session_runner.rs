@@ -728,14 +728,26 @@ fn run_post_completion_hooks(
                             "extracted"
                         }
                     );
+                    let sncs = suggested_next_steps
+                        .as_ref()
+                        .and_then(|s| s.suggested_next_commit_step.as_deref());
+                    let snns = suggested_next_steps
+                        .as_ref()
+                        .and_then(|s| s.suggested_next_note_step.as_deref());
                     let result = match target.kind {
-                        NoteKind::Repo => {
-                            store.update_note_title_and_content(&target.id, &final_title, &body)
-                        }
+                        NoteKind::Repo => store.update_note_title_and_content(
+                            &target.id,
+                            &final_title,
+                            &body,
+                            sncs,
+                            snns,
+                        ),
                         NoteKind::Project => store.update_project_note_title_and_content(
                             &target.id,
                             &final_title,
                             &body,
+                            sncs,
+                            snns,
                         ),
                     };
                     if let Err(e) = result {

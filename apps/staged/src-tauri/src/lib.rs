@@ -140,6 +140,8 @@ pub struct NoteTimelineItem {
     pub created_at: i64,
     pub updated_at: i64,
     pub completed_at: Option<i64>,
+    pub suggested_next_commit_step: Option<String>,
+    pub suggested_next_note_step: Option<String>,
 }
 
 /// Review with session status resolved.

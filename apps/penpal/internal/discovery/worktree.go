@@ -7,6 +7,48 @@ import (
 	"strings"
 )
 
+// gitCommonDirFS resolves the shared .git directory using only filesystem
+// reads — no subprocess. For a main worktree .git is a directory; for a
+// linked worktree .git is a file containing "gitdir: <path>" and the
+// referenced gitdir contains a "commondir" file pointing back to the
+// shared .git.
+func gitCommonDirFS(projectPath string) string {
+	gitPath := filepath.Join(projectPath, ".git")
+	info, err := os.Lstat(gitPath)
+	if err != nil {
+		return ""
+	}
+	// Main worktree: .git is a directory — it IS the common dir.
+	if info.IsDir() {
+		return gitPath
+	}
+	// Linked worktree: .git is a file with "gitdir: <path>".
+	data, err := os.ReadFile(gitPath)
+	if err != nil {
+		return ""
+	}
+	line := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(line, "gitdir: ") {
+		return ""
+	}
+	gitDir := strings.TrimPrefix(line, "gitdir: ")
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(projectPath, gitDir)
+	}
+	gitDir = filepath.Clean(gitDir)
+	// Read commondir file to find the shared .git directory.
+	cdPath := filepath.Join(gitDir, "commondir")
+	cdData, err := os.ReadFile(cdPath)
+	if err != nil {
+		return ""
+	}
+	commonDir := strings.TrimSpace(string(cdData))
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(gitDir, commonDir)
+	}
+	return filepath.Clean(commonDir)
+}
+
 // Worktree represents a git worktree associated with a project.
 type Worktree struct {
 	Name   string `json:"name"`   // directory name (e.g., "fancy-name")
@@ -82,32 +124,11 @@ func parseWorktreeList(projectPath string, output string) []Worktree {
 	return worktrees
 }
 
-// GitCommonDir returns the shared .git directory for the repository at
-// projectPath (e.g. "/repo/.git"). Returns "" for non-git directories.
-// Works for both main worktrees and linked worktrees.
-// E-PENPAL-WORKTREE-WATCH: resolves the git common dir for fs watching.
-func GitCommonDir(projectPath string) string {
-	cmd := exec.Command("git", "-C", projectPath, "rev-parse", "--git-common-dir")
-	out, err := cmd.Output()
-	if err != nil {
-		return ""
-	}
-	commonDir := strings.TrimSpace(string(out))
-	if commonDir == "" || commonDir == "." {
-		return ""
-	}
-	// --git-common-dir output is relative to the -C directory
-	if !filepath.IsAbs(commonDir) {
-		commonDir = filepath.Join(projectPath, commonDir)
-	}
-	return filepath.Clean(commonDir)
-}
-
-// GitWorktreesDir returns the path to the .git/worktrees/ directory for the
+// gitWorktreesDir returns the path to the .git/worktrees/ directory for the
 // repository that projectPath belongs to, or "" if it doesn't exist.
-// E-PENPAL-WORKTREE-WATCH: resolves the worktrees metadata directory for fs watching.
-func GitWorktreesDir(projectPath string) string {
-	commonDir := GitCommonDir(projectPath)
+// Uses pure filesystem reads via gitCommonDirFS — no subprocess calls.
+func gitWorktreesDir(projectPath string) string {
+	commonDir := gitCommonDirFS(projectPath)
 	if commonDir == "" {
 		return ""
 	}

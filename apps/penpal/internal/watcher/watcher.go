@@ -71,12 +71,8 @@ type Watcher struct {
 	baseWatched    map[string]struct{}
 	dynamicWatched map[string]struct{}
 
-	// E-PENPAL-WORKTREE-WATCH: tracks watched dirs for worktree detection.
-	// worktreeWatchDirs: .git/worktrees/ dirs (projects with existing worktrees)
-	// gitDirWatches: .git/ dirs (projects without worktrees, to detect first add)
-	// Both are read in handleEvent and written in syncBaseWatchesLocked — protected by focusMu.
-	worktreeWatchDirs map[string]struct{}
-	gitDirWatches     map[string]struct{}
+	// Serializes rediscoverProjects calls from concurrent debounce timers.
+	rediscoverMu sync.Mutex
 }
 
 // New creates a new watcher
@@ -97,8 +93,6 @@ func New(c *cache.Cache, act *activity.Tracker) (*Watcher, error) {
 		windowFocuses:     make(map[string]focusTarget),
 		baseWatched:       make(map[string]struct{}),
 		dynamicWatched:    make(map[string]struct{}),
-		worktreeWatchDirs: make(map[string]struct{}),
-		gitDirWatches:     make(map[string]struct{}),
 	}
 
 	return w, nil
@@ -339,29 +333,6 @@ func (w *Watcher) syncBaseWatchesLocked(workspacePaths []string, projects []disc
 		desired[filepath.Clean(p.Path)] = struct{}{}
 	}
 
-	// E-PENPAL-WORKTREE-WATCH: watch .git/worktrees/ for projects with worktrees,
-	// and .git/ for projects without worktrees (to detect the first worktree add).
-	desiredWtDirs := make(map[string]struct{})
-	desiredGitDirs := make(map[string]struct{})
-	for _, p := range projects {
-		if p.Name == "(root)" {
-			continue
-		}
-		if len(p.Worktrees) > 0 {
-			if wtDir := discovery.GitWorktreesDir(p.Path); wtDir != "" {
-				clean := filepath.Clean(wtDir)
-				desiredWtDirs[clean] = struct{}{}
-				desired[clean] = struct{}{}
-			}
-		} else {
-			if gitDir := discovery.GitCommonDir(p.Path); gitDir != "" {
-				clean := filepath.Clean(gitDir)
-				desiredGitDirs[clean] = struct{}{}
-				desired[clean] = struct{}{}
-			}
-		}
-	}
-
 	for path := range w.baseWatched {
 		if _, ok := desired[path]; ok {
 			continue
@@ -388,8 +359,6 @@ func (w *Watcher) syncBaseWatchesLocked(workspacePaths []string, projects []disc
 		w.baseWatched[path] = struct{}{}
 	}
 
-	w.worktreeWatchDirs = desiredWtDirs
-	w.gitDirWatches = desiredGitDirs
 }
 
 func (w *Watcher) syncDynamicWatchesLocked() {
@@ -511,13 +480,18 @@ func (w *Watcher) loop() {
 }
 
 // rediscoverProjects runs full project discovery, updates the cache and watches,
-// and broadcasts a projects-changed SSE event.
+// and broadcasts a projects-changed SSE event. Serialized by rediscoverMu so
+// concurrent debounce timers don't interleave cache updates.
 func (w *Watcher) rediscoverProjects() {
 	if w.discoverFn == nil {
 		return
 	}
+	w.rediscoverMu.Lock()
+	defer w.rediscoverMu.Unlock()
+
 	projects, err := w.discoverFn()
 	if err != nil {
+		log.Printf("Warning: project discovery failed: %v", err)
 		return
 	}
 	w.cache.RescanWith(projects)
@@ -533,24 +507,9 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	path := filepath.Clean(event.Name)
 	parentDir := filepath.Clean(filepath.Dir(path))
 
-	// E-PENPAL-WORKTREE-WATCH: detect worktree add/remove via .git/worktrees/ changes,
-	// or first worktree creation via .git/ directory watch.
-	w.focusMu.Lock()
-	_, isWorktreeDir := w.worktreeWatchDirs[parentDir]
-	_, isGitDir := w.gitDirWatches[parentDir]
-	w.focusMu.Unlock()
-
-	if isWorktreeDir {
-		w.debounceRefresh("worktrees:"+parentDir, w.rediscoverProjects)
-		return
-	}
-	if isGitDir {
-		if filepath.Base(path) == "worktrees" && event.Op&fsnotify.Create != 0 {
-			w.debounceRefresh("worktrees:"+parentDir, w.rediscoverProjects)
-		}
-		// Ignore all other .git/ events (index, FETCH_HEAD, etc.)
-		return
-	}
+	// E-PENPAL-WORKTREE-WATCH: worktree add/remove is detected by the workspace
+	// directory watch — the new worktree directory appears as a sibling project,
+	// triggering the workspace rescan path below.
 
 	// Check if this is a change in a workspace directory (new/removed project)
 	for _, ws := range w.workspacePaths {
@@ -633,7 +592,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	}
 
 	// Record activity for .md file changes before debouncing
-	if strings.HasSuffix(path, ".md") && w.activity != nil {
+	if w.activity != nil {
 		if project := w.cache.FindProject(projectName); project != nil {
 			if relPath, err := filepath.Rel(project.Path, path); err == nil {
 				evtType := activity.FileModified

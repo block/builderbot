@@ -1,8 +1,8 @@
 package watcher
 
 import (
+	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"testing"
@@ -285,206 +285,6 @@ func TestWindowFocusUnionAcrossWindows(t *testing.T) {
 	assertWatched(t, w, thoughtsDir2, true, "window B still keeps proj2 watched")
 }
 
-// E-PENPAL-WORKTREE-WATCH: verifies syncBaseWatchesLocked watches .git/worktrees/ for
-// projects that have worktrees, and that handleEvent triggers re-discovery on changes.
-func TestWorktreeWatchDir(t *testing.T) {
-	// Create a real git repo with a worktree so GitWorktreesDir resolves
-	mainDir := t.TempDir()
-	for _, args := range [][]string{
-		{"init"},
-		{"config", "user.email", "test@test.com"},
-		{"config", "user.name", "Test"},
-		{"commit", "--allow-empty", "-m", "init"},
-	} {
-		cmd := exec.Command("git", append([]string{"-C", mainDir}, args...)...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	wtPath := filepath.Join(t.TempDir(), "wt1")
-	cmd := exec.Command("git", "-C", mainDir, "worktree", "add", "-b", "b1", wtPath)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git worktree add: %v\n%s", err, out)
-	}
-
-	worktrees := discovery.DiscoverWorktrees(mainDir)
-	project := discovery.Project{
-		Name:      "myrepo",
-		Path:      mainDir,
-		Worktrees: worktrees,
-	}
-
-	c := cache.New()
-	c.SetProjects([]discovery.Project{project})
-
-	w, err := New(c, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer w.Stop()
-
-	// Sync base watches with the project
-	w.focusMu.Lock()
-	w.syncBaseWatchesLocked(nil, []discovery.Project{project})
-	w.focusMu.Unlock()
-
-	// The .git/worktrees/ dir should be watched
-	gitWtDir := filepath.Join(mainDir, ".git", "worktrees")
-	assertWatched(t, w, gitWtDir, true, ".git/worktrees/ should be base-watched")
-
-	// Verify it's tracked in worktreeWatchDirs
-	if _, ok := w.worktreeWatchDirs[filepath.Clean(gitWtDir)]; !ok {
-		t.Errorf("expected %s in worktreeWatchDirs", gitWtDir)
-	}
-}
-
-// E-PENPAL-WORKTREE-WATCH: verifies that projects without worktrees get a .git/
-// watch (to detect the first worktree add) but not a .git/worktrees/ watch.
-func TestWorktreeWatchDir_NoWorktrees(t *testing.T) {
-	mainDir := t.TempDir()
-	for _, args := range [][]string{
-		{"init"},
-		{"config", "user.email", "test@test.com"},
-		{"config", "user.name", "Test"},
-		{"commit", "--allow-empty", "-m", "init"},
-	} {
-		cmd := exec.Command("git", append([]string{"-C", mainDir}, args...)...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-
-	project := discovery.Project{
-		Name: "solo",
-		Path: mainDir,
-		// No worktrees
-	}
-
-	c := cache.New()
-	c.SetProjects([]discovery.Project{project})
-
-	w, err := New(c, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer w.Stop()
-
-	w.focusMu.Lock()
-	w.syncBaseWatchesLocked(nil, []discovery.Project{project})
-	w.focusMu.Unlock()
-
-	if len(w.worktreeWatchDirs) != 0 {
-		t.Errorf("expected no worktreeWatchDirs, got %v", w.worktreeWatchDirs)
-	}
-
-	// The .git/ dir should be watched to detect first worktree creation
-	gitDir := filepath.Join(mainDir, ".git")
-	assertWatched(t, w, gitDir, true, ".git/ should be watched for first-worktree detection")
-	if _, ok := w.gitDirWatches[filepath.Clean(gitDir)]; !ok {
-		t.Errorf("expected %s in gitDirWatches", gitDir)
-	}
-}
-
-// E-PENPAL-WORKTREE-WATCH: verifies that an event in .git/worktrees/ triggers re-discovery.
-func TestWorktreeWatchDir_EventTriggersRediscovery(t *testing.T) {
-	// Set up a watcher with a worktreeWatchDir and a discoverFn
-	c := cache.New()
-	c.SetProjects([]discovery.Project{{Name: "proj", Path: "/tmp/proj"}})
-
-	w, err := New(c, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer w.Stop()
-
-	discovered := make(chan struct{}, 1)
-	w.discoverFn = func() ([]discovery.Project, error) {
-		select {
-		case discovered <- struct{}{}:
-		default:
-		}
-		return []discovery.Project{{Name: "proj", Path: "/tmp/proj"}}, nil
-	}
-	w.workspacePaths = nil
-
-	// Manually set a worktree watch dir
-	fakeWtDir := t.TempDir()
-	w.worktreeWatchDirs = map[string]struct{}{
-		filepath.Clean(fakeWtDir): {},
-	}
-
-	// Simulate an event in the worktree watch dir
-	fakeEvent := fsnotify.Event{
-		Name: filepath.Join(fakeWtDir, "new-worktree"),
-		Op:   fsnotify.Create,
-	}
-	w.handleEvent(fakeEvent)
-
-	// The debounce timer fires after 100ms; wait for the discovery callback
-	select {
-	case <-discovered:
-		// success
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("expected discoverFn to be called after worktree dir event")
-	}
-}
-
-// E-PENPAL-WORKTREE-WATCH: verifies that creating a "worktrees" entry in a watched
-// .git/ dir triggers re-discovery (first worktree add scenario).
-func TestWorktreeWatchDir_FirstWorktreeCreation(t *testing.T) {
-	c := cache.New()
-	c.SetProjects([]discovery.Project{{Name: "proj", Path: "/tmp/proj"}})
-
-	w, err := New(c, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer w.Stop()
-
-	discovered := make(chan struct{}, 1)
-	w.discoverFn = func() ([]discovery.Project, error) {
-		select {
-		case discovered <- struct{}{}:
-		default:
-		}
-		return []discovery.Project{{Name: "proj", Path: "/tmp/proj"}}, nil
-	}
-	w.workspacePaths = nil
-
-	fakeGitDir := t.TempDir()
-	w.focusMu.Lock()
-	w.gitDirWatches = map[string]struct{}{
-		filepath.Clean(fakeGitDir): {},
-	}
-	w.focusMu.Unlock()
-
-	// A non-"worktrees" event in .git/ should NOT trigger rediscovery
-	w.handleEvent(fsnotify.Event{
-		Name: filepath.Join(fakeGitDir, "FETCH_HEAD"),
-		Op:   fsnotify.Write,
-	})
-
-	select {
-	case <-discovered:
-		t.Fatal("should not trigger rediscovery for non-worktrees events in .git/")
-	case <-time.After(200 * time.Millisecond):
-		// good
-	}
-
-	// A Create event for "worktrees" in .git/ SHOULD trigger rediscovery
-	w.handleEvent(fsnotify.Event{
-		Name: filepath.Join(fakeGitDir, "worktrees"),
-		Op:   fsnotify.Create,
-	})
-
-	select {
-	case <-discovered:
-		// success
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("expected discoverFn to be called when worktrees dir is created in .git/")
-	}
-}
-
 // E-PENPAL-WORKTREE-WATCH: verifies that rediscoverProjects updates the cache with
 // new project data from discoverFn and broadcasts a projects-changed event.
 func TestRediscoverProjects_UpdatesCache(t *testing.T) {
@@ -572,7 +372,20 @@ func TestEventFilter_NonMdFilesIgnored(t *testing.T) {
 
 	select {
 	case evt := <-events:
-		t.Fatalf("expected no event for .js file, got %v", evt)
+		t.Fatalf("expected no event for .js Create, got %v", evt)
+	case <-time.After(200 * time.Millisecond):
+		// good — no event
+	}
+
+	// Write event for a .js file should also be filtered out
+	w.handleEvent(fsnotify.Event{
+		Name: filepath.Join(thoughtsDir, "script.js"),
+		Op:   fsnotify.Write,
+	})
+
+	select {
+	case evt := <-events:
+		t.Fatalf("expected no event for .js Write, got %v", evt)
 	case <-time.After(200 * time.Millisecond):
 		// good — no event
 	}
@@ -590,6 +403,43 @@ func TestEventFilter_NonMdFilesIgnored(t *testing.T) {
 		}
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("expected files-changed event for .md file")
+	}
+}
+
+// E-PENPAL-WORKTREE-WATCH: verifies that rediscoverProjects does not update the
+// cache or broadcast events when discoverFn returns an error.
+func TestRediscoverProjects_ErrorNoUpdate(t *testing.T) {
+	c := cache.New()
+	original := discovery.Project{Name: "repo", Path: "/tmp/repo"}
+	c.SetProjects([]discovery.Project{original})
+
+	w, err := New(c, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Stop()
+
+	w.discoverFn = func() ([]discovery.Project, error) {
+		return nil, fmt.Errorf("network error")
+	}
+
+	events := w.Subscribe()
+	defer w.Unsubscribe(events)
+
+	w.rediscoverProjects()
+
+	// Cache should still have the original project, not be wiped
+	projects := c.Projects()
+	if len(projects) != 1 || projects[0].Name != "repo" {
+		t.Errorf("expected original project preserved, got %+v", projects)
+	}
+
+	// No event should be broadcast
+	select {
+	case evt := <-events:
+		t.Fatalf("expected no event on error, got %v", evt)
+	case <-time.After(200 * time.Millisecond):
+		// good — no event
 	}
 }
 

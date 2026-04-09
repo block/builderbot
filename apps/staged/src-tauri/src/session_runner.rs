@@ -695,15 +695,13 @@ fn run_post_completion_hooks(
                 .filter(|m| m.role == MessageRole::Assistant)
                 .find_map(|m| extract_note_content(&m.content));
 
-            // Build the full assistant text once for fenced-block extractions.
-            let full_assistant_text: String = messages
+            // Search assistant messages in reverse so the *last* message
+            // containing the fenced block wins (mirrors extract_note_content).
+            let suggested_next_steps = messages
                 .iter()
+                .rev()
                 .filter(|m| m.role == MessageRole::Assistant)
-                .map(|m| m.content.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            let suggested_next_steps = extract_suggested_next_steps(&full_assistant_text);
+                .find_map(|m| extract_suggested_next_steps(&m.content));
             if let Some(ref steps) = suggested_next_steps {
                 log::info!(
                     "Session {session_id}: extracted suggested next steps — commit: {:?}, note: {:?}",

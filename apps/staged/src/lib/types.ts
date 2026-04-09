@@ -254,6 +254,13 @@ export interface SessionMessage {
 
 export type BranchSessionType = 'note' | 'commit' | 'review';
 
+export interface BranchSessionLaunchContext {
+  source: 'diff_viewer';
+  scope: 'branch' | 'commit';
+  commitSha: string;
+  reviewId?: string | null;
+}
+
 export interface BranchSessionResponse {
   sessionId: string;
   artifactId: string;

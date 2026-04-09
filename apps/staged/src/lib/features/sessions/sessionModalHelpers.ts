@@ -8,8 +8,16 @@ export interface ToolDisplay {
   detail: string;
 }
 
+/** Pattern matching XML-tagged context blocks embedded in prompts/messages. */
+const XML_BLOCK_PATTERN = /<(action|branch-history|launch-context)>[\s\S]*?<\/\1>/g;
+
 export function hasXmlBlocks(content: string): boolean {
-  return /<(action|branch-history)>/.test(content);
+  return /<(action|branch-history|launch-context)>/.test(content);
+}
+
+/** Strip XML-tagged context blocks (action, branch-history, launch-context) from display text. */
+export function stripXmlTags(text: string): string {
+  return text.replace(XML_BLOCK_PATTERN, '').trim();
 }
 
 export function parseToolCall(content: string): ParsedToolCall | null {

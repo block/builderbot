@@ -25,6 +25,7 @@
     type PendingHintItemType,
   } from './liveSessionHints';
   import { isEmptyFailedReview } from './reviewState';
+  import { stripXmlTags } from '../sessions/sessionModalHelpers';
 
   type PendingItem = {
     key: string;
@@ -193,11 +194,6 @@
     /** When set, delete button is shown but disabled with this tooltip. */
     deleteDisabledReason?: string;
   };
-
-  /** Strip XML-tagged context blocks (action, branch-history) from display text. */
-  function stripXmlTags(text: string): string {
-    return text.replace(/<(action|branch-history)>[\s\S]*?<\/\1>/g, '').trim();
-  }
 
   let runningSessionIds = $derived.by(() => collectRunningSessionIds(timeline, pendingItems));
 

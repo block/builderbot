@@ -20,6 +20,7 @@
   import { DiffViewer, CrossFileSearchBar } from '@builderbot/diff-viewer/components';
   import DiffCommentsSection from './DiffCommentsSection.svelte';
   import DiffFileTreeSection from './DiffFileTreeSection.svelte';
+  import DiffCommitSessionLauncher from './DiffCommitSessionLauncher.svelte';
   import DiffReferenceSection from './DiffReferenceSection.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import { createDiffViewerState } from './diffViewerState.svelte';
@@ -248,8 +249,9 @@
   let readonlyTree = $derived(compactTree(buildTree(fileEntries)));
   let needsReviewTree = $derived(compactTree(buildTree(needsReview)));
   let reviewedTree = $derived(compactTree(buildTree(reviewed)));
-
   /** Flatten tree nodes depth-first to get the visual file order in the sidebar. */
+  let revealedAnnotations = $derived(annotationsRevealed ? currentAnnotations : []);
+
   function flattenTreeFiles(nodes: TreeNode[]): FileEntry[] {
     const result: FileEntry[] = [];
     for (const node of nodes) {
@@ -543,7 +545,7 @@
           loading={diffViewer.state.loadingFile !== null}
           {beforeLabel}
           {afterLabel}
-          annotations={currentAnnotations}
+          annotations={revealedAnnotations}
           {annotationsRevealed}
           searchState={searchState.state}
           onAddComment={readonly ? undefined : handleAddComment}
@@ -569,49 +571,62 @@
           </div>
         {:else}
           <div class="sidebar-content">
-            <!-- Search bar -->
-            <CrossFileSearchBar
-              files={diffViewer.state.files}
-              loadFileDiff={loadFileDiffForSearch}
-              {searchState}
-            />
-
-            <DiffFileTreeSection
-              {readonly}
-              {fileEntries}
-              {needsReview}
-              {reviewed}
-              {readonlyTree}
-              {needsReviewTree}
-              {reviewedTree}
-              selectedFile={diffViewer.state.selectedFile}
-              {isCollapsed}
-              onToggleDir={toggleDir}
-              onSelectFile={selectFile}
-              onToggleReviewed={toggleReviewed}
-              onJumpToLine={handleJumpToLine}
-              {searchState}
-              diffViewerState={diffViewer}
-            />
-            {#if !readonly}
-              <DiffReferenceSection
-                referenceFiles={reviewHandle?.state.referenceFiles ?? []}
-                selectedFile={diffViewer.state.selectedFile}
-                onSelectFile={(path) => {
-                  selectedCommentId = null;
-                  diffViewer.selectFile(path);
-                }}
-                onRemoveReferenceFile={handleRemoveReferenceFile}
+            <div class="sidebar-scroll">
+              <!-- Search bar -->
+              <CrossFileSearchBar
+                files={diffViewer.state.files}
+                loadFileDiff={loadFileDiffForSearch}
+                {searchState}
               />
 
-              <DiffCommentsSection
-                comments={currentComments}
-                {selectedCommentId}
-                {copiedFeedback}
-                onSelectComment={handleSelectComment}
-                onCopyAll={handleCopyComments}
-                onDeleteAll={handleDeleteAllComments}
-                onDeleteComment={handleDeleteComment}
+              <DiffFileTreeSection
+                {readonly}
+                {fileEntries}
+                {needsReview}
+                {reviewed}
+                {readonlyTree}
+                {needsReviewTree}
+                {reviewedTree}
+                selectedFile={diffViewer.state.selectedFile}
+                {isCollapsed}
+                onToggleDir={toggleDir}
+                onSelectFile={selectFile}
+                onToggleReviewed={toggleReviewed}
+                onJumpToLine={handleJumpToLine}
+                {searchState}
+                diffViewerState={diffViewer}
+              />
+              {#if !readonly}
+                <DiffReferenceSection
+                  referenceFiles={reviewHandle?.state.referenceFiles ?? []}
+                  selectedFile={diffViewer.state.selectedFile}
+                  onSelectFile={(path) => {
+                    selectedCommentId = null;
+                    diffViewer.selectFile(path);
+                  }}
+                  onRemoveReferenceFile={handleRemoveReferenceFile}
+                />
+
+                <DiffCommentsSection
+                  comments={currentComments}
+                  {selectedCommentId}
+                  {copiedFeedback}
+                  onSelectComment={handleSelectComment}
+                  onCopyAll={handleCopyComments}
+                  onDeleteAll={handleDeleteAllComments}
+                  onDeleteComment={handleDeleteComment}
+                />
+              {/if}
+            </div>
+
+            {#if !readonly && diffViewer.state.commitSha}
+              <DiffCommitSessionLauncher
+                {branchId}
+                commitSha={diffViewer.state.commitSha}
+                {scope}
+                {reviewId}
+                visibleCommentCount={currentComments.length}
+                onStarted={onClose}
               />
             {/if}
           </div>
@@ -761,14 +776,21 @@
     width: 240px;
     flex-shrink: 0;
     border-left: none;
-    overflow-y: auto;
-    overflow-x: hidden;
+    overflow: hidden;
   }
 
   .sidebar-content {
     display: flex;
     flex-direction: column;
+    height: 100%;
     padding: 0;
+  }
+
+  .sidebar-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
   }
 
   .sidebar-loading,

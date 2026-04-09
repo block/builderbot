@@ -38,6 +38,7 @@
   import ReasonBanner from './ReasonBanner.svelte';
   import RemoteWorkspaceStatusBadge from './RemoteWorkspaceStatusBadge.svelte';
   import RemoteWorkspaceStatusView from './RemoteWorkspaceStatusView.svelte';
+  import { getCommitPrefillFromReviewComments } from './commitSessionPrefill';
   import { alerts } from '../../shared/alerts.svelte';
 
   interface Props {
@@ -236,7 +237,7 @@
     const latest = all[0];
 
     if (latest.kind === 'review' && latest.commentCount > 0) {
-      return 'Resolve code review comments';
+      return getCommitPrefillFromReviewComments(latest.commentCount);
     }
     if (latest.kind === 'note' && latest.title.toLowerCase().includes('plan')) {
       return 'Implement plan';

@@ -68,8 +68,6 @@ func runServe(port int, rootOverride string) {
 			saveTimer.Stop()
 		}
 		saveTimer = time.AfterFunc(5*time.Second, func() {
-			saveMu.Lock()
-			defer saveMu.Unlock()
 			if err := act.Save(activityPath); err != nil {
 				log.Printf("Warning: could not save activity: %v", err)
 			}

@@ -125,24 +125,23 @@ export function useTabs(): TabsState {
   locationRef.current = location;
   const windowLabelRef = useRef<string | null>(resolveWindowLabelSync());
 
-  const [tabs, setTabs] = useState<Tab[]>(() => {
-    // E-PENPAL-TAB-PERSIST: try to restore from localStorage synchronously.
-    // In browser mode the label is available immediately. In desktop mode
-    // the label may not be available yet — the async useEffect handles that.
+  // E-PENPAL-TAB-PERSIST: try to restore from localStorage synchronously.
+  // In browser mode the label is available immediately. In desktop mode
+  // the label may not be available yet — the async useEffect handles that.
+  // Parse once to avoid inconsistent state from double localStorage reads.
+  const initialPersisted = (() => {
     const label = windowLabelRef.current;
-    if (label) {
-      const persisted = loadPersistedTabs(label);
-      if (persisted) return persisted.tabs;
-    }
+    if (label) return loadPersistedTabs(label);
+    return null;
+  })();
+
+  const [tabs, setTabs] = useState<Tab[]>(() => {
+    if (initialPersisted) return initialPersisted.tabs;
     const path = location.pathname + location.search;
     return [{ id: nextTabId(), path, title: deriveTitleFromPath(path), history: [path], historyIndex: 0 }];
   });
   const [activeTabId, setActiveTabId] = useState<string>(() => {
-    const label = windowLabelRef.current;
-    if (label) {
-      const persisted = loadPersistedTabs(label);
-      if (persisted) return persisted.activeTabId;
-    }
+    if (initialPersisted) return initialPersisted.activeTabId;
     return tabs[0].id;
   });
   const tabsRef = useRef(tabs);

@@ -2,12 +2,9 @@ package cache
 
 import (
 	"bufio"
-	"bytes"
 	"errors"
-	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -15,96 +12,16 @@ import (
 	"time"
 
 	"github.com/loganj/penpal/internal/discovery"
+	"github.com/loganj/penpal/internal/gitignore"
 )
 
-// gitIgnoreChecker uses a persistent `git check-ignore --stdin` process to
-// test whether paths are gitignored. A single subprocess handles all queries,
-// avoiding per-directory process spawn overhead.
-// E-PENPAL-SCAN: gitignore-aware directory skipping.
-type gitIgnoreChecker struct {
-	isGitRepo bool
-	stdin     io.WriteCloser
-	scanner   *bufio.Scanner
-	cmd       *exec.Cmd
-}
-
-func newGitIgnoreChecker(projectPath string) *gitIgnoreChecker {
-	g := &gitIgnoreChecker{}
-	if exec.Command("git", "-C", projectPath, "rev-parse", "--git-dir").Run() != nil {
-		return g
-	}
-	g.isGitRepo = true
-	// Start a persistent check-ignore process. With -v -n -z, every input
-	// path produces exactly 4 NUL-delimited fields: source, linenum, pattern,
-	// pathname. For non-ignored paths, source is empty.
-	g.cmd = exec.Command("git", "-C", projectPath, "check-ignore", "--stdin", "-z", "-v", "-n")
-	stdin, err := g.cmd.StdinPipe()
-	if err != nil {
-		g.isGitRepo = false
-		return g
-	}
-	stdout, err := g.cmd.StdoutPipe()
-	if err != nil {
-		g.isGitRepo = false
-		return g
-	}
-	if err := g.cmd.Start(); err != nil {
-		g.isGitRepo = false
-		return g
-	}
-	g.stdin = stdin
-	g.scanner = bufio.NewScanner(stdout)
-	g.scanner.Split(scanNul)
-	return g
-}
-
-func (g *gitIgnoreChecker) IsIgnored(path string) bool {
-	if !g.isGitRepo {
-		return false
-	}
-	// Write path + NUL to the persistent process.
-	if _, err := g.stdin.Write(append([]byte(path), 0)); err != nil {
-		// E-PENPAL-SCAN: disable checker on write failure to prevent desync.
-		g.isGitRepo = false
-		return false
-	}
-	// Read 4 NUL-terminated fields: source, linenum, pattern, pathname.
-	var source string
-	for i := 0; i < 4; i++ {
-		if !g.scanner.Scan() {
-			// E-PENPAL-SCAN: partial read leaves stream out of sync; disable.
-			g.isGitRepo = false
-			return false
-		}
-		if i == 0 {
-			source = g.scanner.Text()
-		}
-	}
-	// Non-empty source means a gitignore rule matched.
-	return source != ""
-}
-
-func (g *gitIgnoreChecker) Close() {
-	if g.stdin != nil {
-		g.stdin.Close()
-	}
-	if g.cmd != nil {
-		g.cmd.Wait()
-	}
-}
-
-// scanNul is a bufio.SplitFunc that splits on NUL bytes.
-func scanNul(data []byte, atEOF bool) (advance int, token []byte, err error) {
-	if atEOF && len(data) == 0 {
-		return 0, nil, nil
-	}
-	if i := bytes.IndexByte(data, 0); i >= 0 {
-		return i + 1, data[:i], nil
-	}
-	if atEOF {
-		return len(data), data, nil
-	}
-	return 0, nil, nil
+// newGitIgnoreMatcher creates a pure-Go gitignore matcher for the given
+// project path. Returns nil if the project is not inside a git repo
+// (non-git directories are handled gracefully — no paths are reported
+// as ignored).
+// E-PENPAL-SCAN: gitignore-aware directory skipping — zero subprocess overhead.
+func newGitIgnoreMatcher(projectPath string) *gitignore.Matcher {
+	return gitignore.New(projectPath)
 }
 
 // FileInfo represents a cached file
@@ -133,6 +50,10 @@ type Cache struct {
 	projectFiles map[string][]FileInfo
 	// projectScanned tracks which projects have had a full file scan
 	projectScanned map[string]bool
+	// matcherCache caches gitignore matchers by project path to avoid
+	// re-parsing .gitignore files on every file event.
+	// E-PENPAL-SCAN: caches gitignore matchers for hot-path performance.
+	matcherCache map[string]*gitignore.Matcher
 }
 
 // New creates a new cache
@@ -140,7 +61,28 @@ func New() *Cache {
 	return &Cache{
 		projectFiles:   make(map[string][]FileInfo),
 		projectScanned: make(map[string]bool),
+		matcherCache:   make(map[string]*gitignore.Matcher),
 	}
+}
+
+// getOrCreateMatcher returns a cached gitignore matcher for the project path,
+// creating one if needed. Thread-safe.
+// E-PENPAL-SCAN: caches gitignore matchers to avoid re-parsing on every file event.
+func (c *Cache) getOrCreateMatcher(projectPath string) *gitignore.Matcher {
+	c.mu.RLock()
+	if m, ok := c.matcherCache[projectPath]; ok {
+		c.mu.RUnlock()
+		return m
+	}
+	c.mu.RUnlock()
+
+	m := gitignore.New(projectPath)
+
+	c.mu.Lock()
+	c.matcherCache[projectPath] = m
+	c.mu.Unlock()
+
+	return m
 }
 
 // SetProjects updates the projects list
@@ -581,7 +523,7 @@ func (c *Cache) RescanWith(projects []discovery.Project) {
 		}
 	}
 
-	// Clean up removed projects
+	// Clean up removed projects and invalidate matcher cache
 	c.mu.Lock()
 	for name := range existingFiles {
 		if !newNames[name] {
@@ -589,6 +531,8 @@ func (c *Cache) RescanWith(projects []discovery.Project) {
 			delete(c.projectScanned, name)
 		}
 	}
+	// Clear matcher cache so rescanned projects pick up any .gitignore changes.
+	c.matcherCache = make(map[string]*gitignore.Matcher)
 	c.mu.Unlock()
 
 	// Scan only the projects that need it, with concurrency limit
@@ -680,18 +624,12 @@ func extractTitle(path string) string {
 }
 
 // ResolveFileInfo resolves source membership for a single absolute .md file path
-// within a project. It applies the same source-priority, SkipDirs, RequireSibling,
-// and ClassifyFile rules as scanProjectSources but without walking the filesystem
-// or spawning a git check-ignore process. Returns FileInfo entries for each source
-// that claims the file (typically one typed source + __all_markdown__). Returns nil
-// if no source claims the file.
-// E-PENPAL-SCAN: single-file source resolution for incremental cache updates.
-// ResolveFileInfo resolves source membership for a single absolute .md file path
 // without a filesystem walk. It applies the same exclusion rules as
 // scanProjectSources: nested git worktree/submodule detection, gitignore
 // ancestor-directory checks (P-PENPAL-SRC-GITIGNORE), SkipDirs filtering, and
-// RequireSibling validation.
-func ResolveFileInfo(project *discovery.Project, absPath string) []FileInfo {
+// RequireSibling validation. Uses a pure-Go gitignore matcher — no subprocesses.
+// E-PENPAL-SCAN: single-file source resolution for incremental cache updates.
+func ResolveFileInfo(project *discovery.Project, absPath string, matcher *gitignore.Matcher) []FileInfo {
 	if !strings.HasSuffix(absPath, ".md") {
 		return nil
 	}
@@ -734,7 +672,7 @@ func ResolveFileInfo(project *discovery.Project, absPath string) []FileInfo {
 
 			// P-PENPAL-SRC-GITIGNORE: skip files whose ancestor directory
 			// is gitignored (source root itself is exempt).
-			if isAncestorDirGitIgnored(absPath, rootPath, project.Path) {
+			if isAncestorDirGitIgnored(matcher, absPath, rootPath) {
 				continue
 			}
 
@@ -883,15 +821,14 @@ func isUnderNestedGitRepo(absPath, rootPath string) bool {
 }
 
 // isAncestorDirGitIgnored walks parent directories from absPath up to (but not
-// including) rootPath, running a one-shot `git check-ignore -q` on each.
+// including) rootPath, checking each against the gitignore matcher.
 // Returns true if any ancestor directory is gitignored.
 // P-PENPAL-SRC-GITIGNORE: the source root itself is exempt (always scanned).
-func isAncestorDirGitIgnored(absPath, rootPath, projectPath string) bool {
+func isAncestorDirGitIgnored(m *gitignore.Matcher, absPath, rootPath string) bool {
 	dir := filepath.Dir(absPath)
 	for dir != rootPath && strings.HasPrefix(dir, rootPath+"/") {
-		cmd := exec.Command("git", "-C", projectPath, "check-ignore", "-q", dir)
-		if cmd.Run() == nil {
-			return true // exit code 0 means ignored
+		if m.IsIgnoredDir(dir) {
+			return true
 		}
 		dir = filepath.Dir(dir)
 	}
@@ -915,7 +852,8 @@ func (c *Cache) UpsertFile(projectName string, project *discovery.Project, absPa
 	}
 
 	title := extractTitle(absPath)
-	resolved := filterManualFileInfos(project, ResolveFileInfo(project, absPath))
+	matcher := c.getOrCreateMatcher(project.Path)
+	resolved := filterManualFileInfos(project, ResolveFileInfo(project, absPath, matcher))
 
 	// Acquire lock only for the short critical section that mutates the cache.
 	c.mu.Lock()
@@ -1072,8 +1010,7 @@ func ScanProjectSourcesForWorktree(project *discovery.Project, worktreePath stri
 func scanProjectSources(project *discovery.Project) []FileInfo {
 	var files []FileInfo
 	seen := make(map[string]bool) // project-relative paths already claimed
-	gitChecker := newGitIgnoreChecker(project.Path)
-	defer gitChecker.Close()
+	matcher := newGitIgnoreMatcher(project.Path)
 
 	for _, source := range project.Sources {
 		if source.Type == "thoughts" || source.Type == "tree" {
@@ -1107,7 +1044,7 @@ func scanProjectSources(project *discovery.Project) []FileInfo {
 					}
 					// P-PENPAL-SRC-GITIGNORE: registered source roots are
 					// always scanned even if gitignored.
-					if path != rootPath && gitChecker.IsIgnored(path) {
+					if path != rootPath && matcher.IsIgnoredDir(path) {
 						return filepath.SkipDir
 					}
 					if st != nil && st.SkipDirs[d.Name()] {

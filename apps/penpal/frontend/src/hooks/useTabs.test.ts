@@ -165,6 +165,24 @@ describe('useTabs persistence', () => {
     expect(ids[1]).toMatch(/^tab-/);
   });
 
+  // E-PENPAL-TAB-PERSIST: restores valid persisted tabs from localStorage.
+  it('restores persisted tabs from localStorage', () => {
+    const persistedTabs = [
+      { id: 'tab-aaa', path: '/recent', title: 'Recent', history: ['/recent'], historyIndex: 0 },
+      { id: 'tab-bbb', path: '/in-review', title: 'In Review', history: ['/in-review'], historyIndex: 0 },
+    ];
+    localStorage.setItem('penpal:tabs:browser', JSON.stringify({ version: 1, activeTabId: 'tab-bbb', tabs: persistedTabs }));
+    const reviewWrapper = ({ children }: { children: ReactNode }) =>
+      createElement(MemoryRouter, { initialEntries: ['/in-review'] }, children);
+    const { result } = renderHook(() => useTabs(), { wrapper: reviewWrapper });
+    expect(result.current.tabs).toHaveLength(2);
+    expect(result.current.tabs[0].path).toBe('/recent');
+    expect(result.current.tabs[0].title).toBe('Recent');
+    expect(result.current.tabs[1].path).toBe('/in-review');
+    expect(result.current.tabs[1].title).toBe('In Review');
+    expect(result.current.activeTabId).toBe('tab-bbb');
+  });
+
   // E-PENPAL-SESSION-FALLBACK: corrupt localStorage gracefully falls back.
   it('falls back to default tab when localStorage is corrupt', () => {
     localStorage.setItem('penpal:tabs:browser', 'not-json');

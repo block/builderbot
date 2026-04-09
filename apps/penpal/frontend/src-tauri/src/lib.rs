@@ -39,6 +39,29 @@ struct SessionState {
 /// In-memory geometry registry, updated on move/resize events.
 struct GeoRegistry(Mutex<HashMap<String, WindowGeometry>>);
 
+// E-PENPAL-GEO-TRACK: ensure a geometry entry exists for the given window label,
+// inserting a new one from the current window state if absent.
+fn ensure_geo_entry<'a>(
+    map: &'a mut HashMap<String, WindowGeometry>,
+    label: &str,
+    app: &tauri::AppHandle,
+) -> Option<&'a mut WindowGeometry> {
+    if !map.contains_key(label) {
+        let win = app.get_webview_window(label)?;
+        let pos = win.outer_position().unwrap_or(tauri::PhysicalPosition { x: 0, y: 0 });
+        let size = win.outer_size().unwrap_or(tauri::PhysicalSize { width: 1200, height: 800 });
+        map.insert(label.to_string(), WindowGeometry {
+            label: label.to_string(),
+            x: pos.x,
+            y: pos.y,
+            width: size.width,
+            height: size.height,
+            active_path: String::new(),
+        });
+    }
+    map.get_mut(label)
+}
+
 fn session_file_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
     std::path::Path::new(&home).join(".config/penpal/window-state.json")
@@ -300,37 +323,17 @@ pub fn run() {
                 match win_event {
                     tauri::WindowEvent::Moved(pos) => {
                         if let Ok(mut map) = app_handle.state::<GeoRegistry>().0.lock() {
-                            if let Some(entry) = map.get_mut(label) {
+                            if let Some(entry) = ensure_geo_entry(&mut map, label, app_handle) {
                                 entry.x = pos.x;
                                 entry.y = pos.y;
-                            } else if let Some(win) = app_handle.get_webview_window(label) {
-                                let size = win.outer_size().unwrap_or(tauri::PhysicalSize { width: 1200, height: 800 });
-                                map.insert(label.to_string(), WindowGeometry {
-                                    label: label.to_string(),
-                                    x: pos.x,
-                                    y: pos.y,
-                                    width: size.width,
-                                    height: size.height,
-                                    active_path: String::new(),
-                                });
                             }
                         }
                     }
                     tauri::WindowEvent::Resized(size) => {
                         if let Ok(mut map) = app_handle.state::<GeoRegistry>().0.lock() {
-                            if let Some(entry) = map.get_mut(label) {
+                            if let Some(entry) = ensure_geo_entry(&mut map, label, app_handle) {
                                 entry.width = size.width;
                                 entry.height = size.height;
-                            } else if let Some(win) = app_handle.get_webview_window(label) {
-                                let pos = win.outer_position().unwrap_or(tauri::PhysicalPosition { x: 0, y: 0 });
-                                map.insert(label.to_string(), WindowGeometry {
-                                    label: label.to_string(),
-                                    x: pos.x,
-                                    y: pos.y,
-                                    width: size.width,
-                                    height: size.height,
-                                    active_path: String::new(),
-                                });
                             }
                         }
                     }
@@ -343,14 +346,11 @@ pub fn run() {
                 ..
             } = &event
             {
-                // Remove from geometry registry so closed windows aren't persisted.
-                // On non-macOS, the last window close triggers Exit immediately after
-                // Destroyed, so save the session while the registry still has this entry.
+                // E-PENPAL-SESSION-FILE: save session before removing this window so the
+                // Exit handler always has a recent snapshot even if the map is partially drained.
                 if let Ok(mut map) = app_handle.state::<GeoRegistry>().0.lock() {
-                    if map.len() == 1 && map.contains_key(label) {
-                        let windows: Vec<WindowGeometry> = map.values().cloned().collect();
-                        save_session(&windows);
-                    }
+                    let windows: Vec<WindowGeometry> = map.values().cloned().collect();
+                    save_session(&windows);
                     map.remove(label);
                 }
                 #[cfg(target_os = "macos")]

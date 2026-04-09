@@ -383,7 +383,7 @@ func TestScanProjectSources_SkipsNestedWorktrees(t *testing.T) {
 func TestScanProjectSources_SkipsGitignored(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Initialise a git repo so git check-ignore works.
+	// Initialise a git repo so gitignore matching works.
 	runGit(t, tmpDir, "init")
 	runGit(t, tmpDir, "config", "user.email", "test@test.com")
 	runGit(t, tmpDir, "config", "user.name", "test")
@@ -473,13 +473,14 @@ func TestScanProjectSources_GitignoreDoesNotSkipSourceRoot(t *testing.T) {
 }
 
 // E-PENPAL-SCAN: non-git directories work without errors.
-func TestGitIgnoreChecker_NonGitDir(t *testing.T) {
+func TestGitIgnoreMatcher_NonGitDir(t *testing.T) {
 	tmpDir := t.TempDir()
-	checker := newGitIgnoreChecker(tmpDir)
-	if checker.isGitRepo {
-		t.Fatal("expected non-git dir to be detected")
+	matcher := newGitIgnoreMatcher(tmpDir)
+	if matcher != nil {
+		t.Fatal("expected nil matcher for non-git dir")
 	}
-	if checker.IsIgnored(filepath.Join(tmpDir, "anything")) {
+	// nil matcher should never report paths as ignored (safe to call).
+	if matcher.IsIgnoredDir(filepath.Join(tmpDir, "anything")) {
 		t.Error("non-git dir should never report paths as ignored")
 	}
 }
@@ -716,7 +717,8 @@ func TestResolveFileInfo_ThoughtsSource(t *testing.T) {
 		},
 	}
 
-	results := ResolveFileInfo(project, filePath)
+	matcher := newGitIgnoreMatcher(tmpDir)
+	results := ResolveFileInfo(project, filePath, matcher)
 	if len(results) != 2 {
 		t.Fatalf("expected 2 results (thoughts + __all_markdown__), got %d", len(results))
 	}
@@ -756,7 +758,8 @@ func TestResolveFileInfo_SkipDirs(t *testing.T) {
 		},
 	}
 
-	results := ResolveFileInfo(project, filePath)
+	matcher := newGitIgnoreMatcher(tmpDir)
+	results := ResolveFileInfo(project, filePath, matcher)
 	// __all_markdown__ has SkipDirs for node_modules
 	if len(results) != 0 {
 		t.Fatalf("expected 0 results (node_modules is in SkipDirs), got %d", len(results))
@@ -786,14 +789,16 @@ func TestResolveFileInfo_RequireSibling(t *testing.T) {
 		},
 	}
 
+	matcher := newGitIgnoreMatcher(tmpDir)
+
 	// File with sibling should be included
-	results := ResolveFileInfo(project, filepath.Join(withSibling, "PRODUCT.md"))
+	results := ResolveFileInfo(project, filepath.Join(withSibling, "PRODUCT.md"), matcher)
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result for file with ANCHORS.md sibling, got %d", len(results))
 	}
 
 	// File without sibling should be excluded
-	results = ResolveFileInfo(project, filepath.Join(withoutSibling, "PRODUCT.md"))
+	results = ResolveFileInfo(project, filepath.Join(withoutSibling, "PRODUCT.md"), matcher)
 	if len(results) != 0 {
 		t.Fatalf("expected 0 results for file without ANCHORS.md sibling, got %d", len(results))
 	}
@@ -813,7 +818,8 @@ func TestResolveFileInfo_NonMdFile(t *testing.T) {
 		},
 	}
 
-	results := ResolveFileInfo(project, filePath)
+	matcher := newGitIgnoreMatcher(tmpDir)
+	results := ResolveFileInfo(project, filePath, matcher)
 	if len(results) != 0 {
 		t.Fatalf("expected 0 results for non-.md file, got %d", len(results))
 	}
@@ -838,7 +844,8 @@ func TestResolveFileInfo_SourcePriority(t *testing.T) {
 		},
 	}
 
-	results := ResolveFileInfo(project, filePath)
+	matcher := newGitIgnoreMatcher(tmpDir)
+	results := ResolveFileInfo(project, filePath, matcher)
 	// Should get 2: first typed source (thoughts) + __all_markdown__
 	// The second typed source (manual) should be skipped
 	if len(results) != 2 {
@@ -1175,5 +1182,45 @@ func TestRescanWith_RemovesOldProjects(t *testing.T) {
 	filesKeep := c.ProjectFiles("keep")
 	if len(filesKeep) != 1 {
 		t.Errorf("expected kept project to preserve 1 cached file, got %d", len(filesKeep))
+	}
+}
+
+// E-PENPAL-SCAN, P-PENPAL-SRC-GITIGNORE: verifies ResolveFileInfo skips gitignored ancestor dirs.
+func TestResolveFileInfo_SkipsGitignored(t *testing.T) {
+	tmpDir := t.TempDir()
+	runGit(t, tmpDir, "init")
+	runGit(t, tmpDir, "config", "user.email", "test@test.com")
+	runGit(t, tmpDir, "config", "user.name", "test")
+
+	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("build/\n"), 0644)
+
+	// Create a .md file inside a gitignored directory.
+	os.MkdirAll(filepath.Join(tmpDir, "build", "docs"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "build", "docs", "api.md"), []byte("# API"), 0644)
+
+	// Create a .md file outside gitignored directory.
+	os.MkdirAll(filepath.Join(tmpDir, "docs"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "docs", "readme.md"), []byte("# Readme"), 0644)
+
+	project := &discovery.Project{
+		Name: "test",
+		Path: tmpDir,
+		Sources: []discovery.FileSource{
+			{Name: "all", Type: "tree", RootPath: tmpDir},
+		},
+	}
+
+	matcher := newGitIgnoreMatcher(tmpDir)
+
+	// File in gitignored dir should return nil.
+	results := ResolveFileInfo(project, filepath.Join(tmpDir, "build", "docs", "api.md"), matcher)
+	if len(results) != 0 {
+		t.Errorf("expected no results for gitignored file, got %d", len(results))
+	}
+
+	// File outside gitignored dir should return results.
+	results = ResolveFileInfo(project, filepath.Join(tmpDir, "docs", "readme.md"), matcher)
+	if len(results) == 0 {
+		t.Error("expected results for non-gitignored file")
 	}
 }

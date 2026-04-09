@@ -709,8 +709,7 @@
   }
 
   .filter-chip.repo-filter.active {
-    outline: 2px solid var(--repo-fg, var(--ui-accent));
-    outline-offset: -1px;
+    box-shadow: 0 0 0 2px var(--repo-fg, var(--ui-accent));
     background: var(--repo-bg, var(--ui-accent));
     color: var(--repo-fg, white);
     border-color: transparent;
@@ -744,7 +743,7 @@
 
   .projects-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(240px, 300px));
     grid-auto-rows: 1fr;
     gap: 12px;
   }

@@ -5,23 +5,17 @@ export interface TopbarProps {
   canGoForward: boolean;
   goBack: () => void;
   goForward: () => void;
-  searchQuery: string;
-  onSearchQueryChange: (query: string) => void;
-  onSearchSubmit: (e: React.FormEvent) => void;
   theme: string;
   onToggleTheme: () => void;
   isDesktopApp: boolean;
 }
 
-// E-PENPAL-EXTERNAL-LINKS: top bar with logo, back/forward nav, search, and theme toggle.
+// E-PENPAL-EXTERNAL-LINKS: top bar with logo, back/forward nav, and theme toggle.
 export default function Topbar({
   canGoBack,
   canGoForward,
   goBack,
   goForward,
-  searchQuery,
-  onSearchQueryChange,
-  onSearchSubmit,
   theme,
   onToggleTheme,
   isDesktopApp,
@@ -36,15 +30,6 @@ export default function Topbar({
       <Link to="/" className="topbar-logo">
         Penpal
       </Link>
-      <form className="topbar-search" onSubmit={onSearchSubmit}>
-        <input
-          type="search"
-          name="q"
-          placeholder="Search all thoughts..."
-          value={searchQuery}
-          onChange={(e) => onSearchQueryChange(e.target.value)}
-        />
-      </form>
       <button className="theme-toggle" onClick={onToggleTheme} aria-label="Toggle dark mode" title="Toggle dark mode">
         {theme === 'dark' ? '☾' : '☀'}
       </button>

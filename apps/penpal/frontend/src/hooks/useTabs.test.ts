@@ -21,14 +21,6 @@ describe('deriveTitleFromPath', () => {
     expect(deriveTitleFromPath('/workspace/MyWorkspace')).toBe('MyWorkspace');
   });
 
-  it('derives title from search path', () => {
-    expect(deriveTitleFromPath('/search?q=foo')).toBe('Search: foo');
-  });
-
-  it('derives title for search without query', () => {
-    expect(deriveTitleFromPath('/search')).toBe('Search');
-  });
-
   it('derives title for recent', () => {
     expect(deriveTitleFromPath('/recent')).toBe('Recent');
   });
@@ -92,9 +84,9 @@ describe('useTabs', () => {
 
   it('updateActiveTab syncs path and title', () => {
     const { result } = renderHook(() => useTabs(), { wrapper });
-    act(() => result.current.updateActiveTab('/search?q=test', 'Search: test'));
-    expect(result.current.tabs[0].path).toBe('/search?q=test');
-    expect(result.current.tabs[0].title).toBe('Search: test');
+    act(() => result.current.updateActiveTab('/in-review', 'In Review'));
+    expect(result.current.tabs[0].path).toBe('/in-review');
+    expect(result.current.tabs[0].title).toBe('In Review');
   });
 
   it('initializes tab with history', () => {

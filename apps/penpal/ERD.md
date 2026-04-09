@@ -358,13 +358,6 @@ see-also:
 
 ---
 
-## Search
-
-- <a id="E-PENPAL-SEARCH"></a>**E-PENPAL-SEARCH**: `GET /api/search?q=` handled by `handleAPISearch()`. Iterates `s.cache.Projects()`, doing substring match on project names for the "Projects" section (`matchingProjects`). For file matches, walks each source's `RootPath` via `filepath.Walk`, skipping `.git` directories, nested worktree/submodule directories (`.git` file), `SkipDirs`, and non-`.md` files. Filenames checked via `strings.Contains(ToLower(...), query)` (flagged `nameMatch: true`); content checked via `bufio.Scanner` line-by-line (stops at first match). Files returning `""` from `ClassifyFile()` are excluded. Results per project sorted name-matches-first then alphabetical; capped at 100 total files with early `break` on project iteration. Response struct: `apiSearchResponse{Query, MatchingProjects, ProjectResults, TotalFiles}`. Frontend `SearchPage` component at route `/search` calls `api.search(query)` and renders project cards, grouped file rows with `FileTypeBadge`, and a "name" `<span class="match-type">` badge for name matches.
-  ← [P-PENPAL-SEARCH](PRODUCT.md#P-PENPAL-SEARCH)
-
----
-
 ## Review Workflow
 
 - <a id="E-PENPAL-IN-REVIEW-PAGE"></a>**E-PENPAL-IN-REVIEW-PAGE**: `GET /api/in-review` calls `listAllReviewGroups()` which groups files with open threads by `{project QN, source name}`. Each group includes workspace, project name, source badge data (from registered `SourceType`), agent active status (from `agents.Status(qn).Running`), working thread count, and per-file metadata from cache. Frontend `InReviewPage` renders two-line file rows with filename, context path (workspace / project / source), and working indicator.

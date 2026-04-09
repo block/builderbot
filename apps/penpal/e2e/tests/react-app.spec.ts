@@ -10,13 +10,6 @@ test.describe('React app', () => {
     await expect(page.getByTestId('app-layout')).toBeVisible();
   });
 
-  // E-PENPAL-SEARCH: verifies the search input is rendered in the topbar.
-  test('renders topbar with logo and search', async ({ page }) => {
-    await page.goto('/');
-    await expect(page.getByText('Penpal', { exact: true })).toBeVisible();
-    await expect(page.getByPlaceholder('Search all thoughts...')).toBeVisible();
-  });
-
   // E-PENPAL-HOME-SIDEBAR: verifies sidebar renders Recent and In Review navigation links.
   test('renders sidebar with navigation links', async ({ page }) => {
     await page.goto('/');
@@ -42,12 +35,5 @@ test.describe('React app', () => {
   test('SPA routing works for in-review', async ({ page }) => {
     await page.goto('/in-review');
     await expect(page.getByTestId('in-review-page')).toBeVisible();
-  });
-
-  // E-PENPAL-SPA-SERVE: verifies client-side routing serves the search page with query params.
-  test('SPA routing works for search', async ({ page }) => {
-    await page.goto('/search?q=test');
-    await expect(page.getByTestId('search-page')).toBeVisible();
-    await expect(page.getByText('Results for: test')).toBeVisible();
   });
 });

@@ -294,12 +294,6 @@ Global views aggregate content across all projects. They appear as top-level ite
 
 ---
 
-## Search
-
-- <a id="P-PENPAL-SEARCH"></a>**P-PENPAL-SEARCH**: A search bar searches across all projects' markdown files as the user types, matching project names, filenames, and file content (case-insensitive). Results are capped at 100 files; when more matches exist, a message indicates results are truncated. Matching projects appear in a separate "Projects" section. Files that matched by name show a "name" badge distinct from content matches.
-
----
-
 ## CLI
 
 - <a id="P-PENPAL-CLI-OPEN"></a>**P-PENPAL-CLI-OPEN**: The `penpal open <path>...` command opens one or more files or directories in the Penpal app, launching the app if it's not running. Directories are resolved to their project; `.md` files are auto-added to their containing project if not already tracked (or a new standalone project is created). Non-`.md` files are rejected.

@@ -89,7 +89,6 @@ see-also:
 | Review Workflow (P-PENPAL-IN-REVIEW) | — | InReviewPage.test.tsx | api_projects_test.go (TestAPIInReview) | — |
 | Publishing (P-PENPAL-PUBLISH) | blockcell_test.go, render_test.go, state_test.go | — | — | — |
 | Tabs (P-PENPAL-TABS) | — | useTabs.test.ts, Layout.test.tsx | — | tab-navigation.spec.ts |
-| Search (P-PENPAL-SEARCH) | — | SearchPage.test.tsx | — | react-app.spec.ts |
 | Recent Files (P-PENPAL-RECENT, E-PENPAL-ACTIVITY-PERSIST) | activity_test.go | RecentPage.test.tsx | integration_test.go | — |
 | CLI Open (P-PENPAL-CLI-OPEN) | — | — | api_manage_test.go | cli-open.spec.ts |
 | Source Management (P-PENPAL-ADD-SOURCE, REMOVE-SOURCE) | — | — | api_manage_test.go (TestAPISources_AddFileNotBlockedByAllMarkdown) | — |

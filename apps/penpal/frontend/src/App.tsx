@@ -2,7 +2,6 @@ import { createBrowserRouter, RouterProvider } from 'react-router-dom';
 import Layout from './components/Layout';
 import ProjectPage from './pages/ProjectPage';
 import FilePage from './pages/FilePage';
-import SearchPage from './pages/SearchPage';
 import RecentPage from './pages/RecentPage';
 import InReviewPage from './pages/InReviewPage';
 
@@ -12,7 +11,6 @@ function HomePage() {
     <div className="welcome-screen">
       <h2>Penpal</h2>
       <p>Select a project from the sidebar to browse its files.</p>
-      <p><kbd>⌘P</kbd> to search all thoughts</p>
     </div>
   );
 }
@@ -28,7 +26,6 @@ const router = createBrowserRouter([
       { path: '/', element: <HomePage /> },
       { path: '/project/*', element: <ProjectPage /> },
       { path: '/file/*', element: <FilePage /> },
-      { path: '/search', element: <SearchPage /> },
       { path: '/recent', element: <RecentPage /> },
       { path: '/in-review', element: <InReviewPage /> },
     ],

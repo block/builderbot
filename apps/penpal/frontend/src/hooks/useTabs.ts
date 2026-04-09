@@ -35,10 +35,6 @@ export function deriveTitleFromPath(path: string): string {
   if (path.startsWith('/workspace/')) {
     return decodeURIComponent(path.replace('/workspace/', '')) || 'Workspace';
   }
-  if (path.startsWith('/search')) {
-    const q = new URLSearchParams(path.split('?')[1] || '').get('q');
-    return q ? `Search: ${q}` : 'Search';
-  }
   if (path === '/recent' || path === '/recent/') return 'Recent';
   if (path === '/in-review' || path === '/in-review/') return 'In Review';
   if (path === '/' || path === '') return 'Home';

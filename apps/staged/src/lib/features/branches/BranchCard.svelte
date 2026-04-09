@@ -1042,8 +1042,7 @@
     }}
     onStartSession={(mode, prefill) => {
       openNote = null;
-      sessionMgr.draftPrompt = prefill;
-      sessionMgr.openNewSession(mode);
+      void sessionMgr.startOrQueueSession(mode, prefill);
     }}
   />
 {/if}

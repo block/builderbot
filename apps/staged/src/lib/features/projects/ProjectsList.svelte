@@ -33,7 +33,10 @@
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import RepoBadge from '../../shared/RepoBadge.svelte';
   import { setProjects } from './projectsSidebarState.svelte';
+  import { darkMode } from '../../stores/isDark.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
+
+  type FilterKind = 'unread' | 'running' | { repo: string; subpath: string };
 
   let projects = $state<Project[]>([]);
   let projectBranches = $state<Map<string, Branch[]>>(new Map());
@@ -44,6 +47,7 @@
   let deletingProjectNames = $state<Map<string, string>>(new Map());
   let reposByProject = $state<Map<string, ProjectRepo[]>>(new Map());
   let repoLoadGeneration = 0;
+  let activeFilter = $state<FilterKind | null>(null);
 
   let repoCountsByProject = $derived(
     new Map(
@@ -53,6 +57,104 @@
       })
     )
   );
+
+  /** Unique repo+subpath entries sorted by project count descending */
+  let repoFilters = $derived.by(() => {
+    const counts = new Map<string, { repo: string; subpath: string; count: number }>();
+    for (const project of projects) {
+      const repos = reposByProject.get(project.id) ?? [];
+      if (repos.length > 0) {
+        for (const r of repos) {
+          const key = `${r.githubRepo}:${r.subpath ?? ''}`;
+          const entry = counts.get(key);
+          if (entry) {
+            entry.count++;
+          } else {
+            counts.set(key, { repo: r.githubRepo, subpath: r.subpath ?? '', count: 1 });
+          }
+        }
+      } else if (project.githubRepo) {
+        const key = `${project.githubRepo}:${project.subpath ?? ''}`;
+        const entry = counts.get(key);
+        if (entry) {
+          entry.count++;
+        } else {
+          counts.set(key, { repo: project.githubRepo, subpath: project.subpath ?? '', count: 1 });
+        }
+      }
+    }
+    return [...counts.values()].sort((a, b) => b.count - a.count);
+  });
+
+  let unreadCount = $derived(projects.filter((p) => projectStateStore.isUnread(p.id)).length);
+
+  let runningCount = $derived(
+    projects.filter((p) => {
+      const status = getProjectStatus(p.id, deletingProjectNames, projectBranches.get(p.id) || []);
+      return status.kind === 'running' || status.kind === 'runAction';
+    }).length
+  );
+
+  let filteredProjects = $derived.by(() => {
+    if (!activeFilter) return projects;
+    if (activeFilter === 'unread') {
+      return projects.filter((p) => projectStateStore.isUnread(p.id));
+    }
+    if (activeFilter === 'running') {
+      return projects.filter((p) => {
+        const status = getProjectStatus(
+          p.id,
+          deletingProjectNames,
+          projectBranches.get(p.id) || []
+        );
+        return status.kind === 'running' || status.kind === 'runAction';
+      });
+    }
+    // Repo filter
+    const { repo, subpath } = activeFilter;
+    return projects.filter((p) => {
+      const repos = reposByProject.get(p.id) ?? [];
+      if (repos.length > 0) {
+        return repos.some((r) => r.githubRepo === repo && (r.subpath ?? '') === subpath);
+      }
+      return p.githubRepo === repo && (p.subpath ?? '') === subpath;
+    });
+  });
+
+  function toggleFilter(filter: FilterKind) {
+    if (activeFilter === filter) {
+      activeFilter = null;
+    } else if (
+      typeof activeFilter === 'object' &&
+      activeFilter !== null &&
+      typeof filter === 'object' &&
+      filter !== null &&
+      'repo' in activeFilter &&
+      'repo' in filter &&
+      activeFilter.repo === filter.repo &&
+      activeFilter.subpath === filter.subpath
+    ) {
+      activeFilter = null;
+    } else {
+      activeFilter = filter;
+    }
+  }
+
+  function isFilterActive(filter: FilterKind): boolean {
+    if (!activeFilter) return false;
+    if (activeFilter === filter) return true;
+    if (
+      typeof activeFilter === 'object' &&
+      activeFilter !== null &&
+      typeof filter === 'object' &&
+      filter !== null &&
+      'repo' in activeFilter &&
+      'repo' in filter
+    ) {
+      return activeFilter.repo === filter.repo && activeFilter.subpath === filter.subpath;
+    }
+    return false;
+  }
 
   onMount(() => {
     loadProjects();
@@ -319,8 +421,46 @@
             New project
           </button>
         </div>
+        {#if projects.length > 0}
+          <div class="filter-bar">
+            <button
+              class="filter-chip"
+              class:active={isFilterActive('unread')}
+              onclick={() => toggleFilter('unread')}
+              disabled={unreadCount === 0 && !isFilterActive('unread')}
+            >
+              Unread
+              <span class="filter-count">{unreadCount}</span>
+            </button>
+            <button
+              class="filter-chip"
+              class:active={isFilterActive('running')}
+              onclick={() => toggleFilter('running')}
+              disabled={runningCount === 0 && !isFilterActive('running')}
+            >
+              Running
+              <span class="filter-count">{runningCount}</span>
+            </button>
+            {#each repoFilters as rf}
+              {@const badge = repoBadgeStore.lookup(rf.repo, rf.subpath || undefined)}
+              {@const filter = { repo: rf.repo, subpath: rf.subpath }}
+              {@const active = isFilterActive(filter)}
+              <button
+                class="filter-chip repo-filter"
+                class:active
+                onclick={() => toggleFilter(filter)}
+                style={badge
+                  ? `--repo-bg: ${darkMode.value ? `hsl(${badge.hue} 35% 22%)` : `hsl(${badge.hue} 50% 92%)`}; --repo-fg: ${darkMode.value ? `hsl(${badge.hue} 50% 75%)` : `hsl(${badge.hue} 55% 35%)`}; --repo-bg-hover: ${darkMode.value ? `hsl(${badge.hue} 35% 28%)` : `hsl(${badge.hue} 50% 88%)`}`
+                  : ''}
+              >
+                {badge?.shortName ?? rf.repo.split('/').pop()}
+                <span class="filter-count">{rf.count}</span>
+              </button>
+            {/each}
+          </div>
+        {/if}
         <div class="projects-grid">
-          {#each projects as project, index (project.id)}
+          {#each filteredProjects as project, index (project.id)}
             {@const status = getProjectStatus(
               project.id,
               deletingProjectNames,
@@ -514,6 +654,92 @@
   .new-project-btn:hover {
     color: var(--text-primary);
     background-color: var(--bg-hover);
+  }
+
+  .filter-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 14px;
+  }
+
+  .filter-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border: 1px solid var(--border-muted);
+    border-radius: 999px;
+    background: var(--bg-elevated);
+    color: var(--text-secondary);
+    font-size: var(--size-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    white-space: nowrap;
+  }
+
+  .filter-chip:hover:not(:disabled) {
+    background: var(--bg-hover);
+    border-color: var(--border-emphasis);
+  }
+
+  .filter-chip:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+
+  .filter-chip.active {
+    background: var(--ui-accent);
+    border-color: var(--ui-accent);
+    color: white;
+  }
+
+  .filter-chip.repo-filter {
+    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+    font-size: 11px;
+    font-weight: 600;
+    background: var(--repo-bg, var(--bg-elevated));
+    color: var(--repo-fg, var(--text-secondary));
+    border-color: transparent;
+  }
+
+  .filter-chip.repo-filter:hover:not(:disabled) {
+    background: var(--repo-bg-hover, var(--bg-hover));
+  }
+
+  .filter-chip.repo-filter.active {
+    outline: 2px solid var(--repo-fg, var(--ui-accent));
+    outline-offset: -1px;
+    background: var(--repo-bg, var(--ui-accent));
+    color: var(--repo-fg, white);
+    border-color: transparent;
+  }
+
+  .filter-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: rgba(128, 128, 128, 0.15);
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1;
+  }
+
+  .filter-chip.active .filter-count {
+    background: rgba(255, 255, 255, 0.25);
+  }
+
+  .filter-chip.repo-filter .filter-count {
+    background: rgba(128, 128, 128, 0.15);
+  }
+
+  .filter-chip.repo-filter.active .filter-count {
+    background: rgba(128, 128, 128, 0.2);
   }
 
   .projects-grid {

@@ -689,7 +689,7 @@ impl ProjectToolsHandler {
                 // Atomically claim setup ownership before running prerun actions.
                 match self.store.mark_branch_setup_complete(&branch.id) {
                     Ok(true) => {
-                        log::debug!(
+                        log::info!(
                             "[project_mcp] add_project_repo: running prerun actions for branch {}",
                             branch.id
                         );
@@ -703,7 +703,7 @@ impl ProjectToolsHandler {
                         .await
                         {
                             Ok(count) => {
-                                log::debug!(
+                                log::info!(
                                     "[project_mcp] add_project_repo: ran {count} prerun actions for branch {}",
                                     branch.id
                                 );
@@ -720,7 +720,7 @@ impl ProjectToolsHandler {
                         }
                     }
                     Ok(false) => {
-                        log::debug!(
+                        log::info!(
                             "[project_mcp] add_project_repo: branch {} already setup complete, skipping prerun",
                             branch.id
                         );

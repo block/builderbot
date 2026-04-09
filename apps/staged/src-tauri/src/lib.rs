@@ -449,6 +449,10 @@ fn create_project(
 
         if is_local {
             // Spawn background worktree setup + prerun actions for local branches.
+            log::info!(
+                "[create_project] spawning background setup for local branch {}",
+                branch_id
+            );
             let project_id = project.id.clone();
             let store_bg = Arc::clone(&store);
             tauri::async_runtime::spawn(async move {
@@ -594,6 +598,11 @@ async fn add_project_repo(
     .await?;
 
     // Spawn background worktree + prerun-actions setup — fire and forget.
+    log::info!(
+        "[add_project_repo] spawning background setup for repo {} in project {}",
+        repo.id,
+        project_id
+    );
     tauri::async_runtime::spawn({
         let repo_id = repo.id.clone();
         async move {

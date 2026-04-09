@@ -38,7 +38,6 @@
   import ReasonBanner from './ReasonBanner.svelte';
   import RemoteWorkspaceStatusBadge from './RemoteWorkspaceStatusBadge.svelte';
   import RemoteWorkspaceStatusView from './RemoteWorkspaceStatusView.svelte';
-  import { getCommitPrefillFromReviewComments } from './commitSessionPrefill';
   import { alerts } from '../../shared/alerts.svelte';
 
   interface Props {
@@ -198,15 +197,30 @@
   /** True when the branch has at least one finalized commit (code changes vs base). */
   let hasCodeChanges = $derived(timeline?.commits.some((c) => c.sha) ?? false);
 
-  // Compute a suggested commit prompt from the latest visible timeline entry.
+  // Compute suggested prefill prompts from the latest visible timeline entry.
   // Only used when the user hasn't typed a draft yet.
-  let commitPrefill = $derived.by(() => {
-    if (!timeline) return '';
+  let suggestedPrefill = $derived.by(() => {
+    const empty = { commit: '', note: '' };
+    if (!timeline) return empty;
+
+    // Don't prefill when there are visible queued sessions — the user should wait
+    // for those to complete before starting new work.
+    const hasQueuedSessions =
+      timeline.commits.some((c) => c.sessionStatus === 'queued') ||
+      timeline.notes.some((n) => n.sessionStatus === 'queued') ||
+      timeline.reviews.some((r) => r.sessionStatus === 'queued');
+    if (hasQueuedSessions) return empty;
 
     // Find the latest completed item across commits, notes, and reviews
     type Candidate =
       | { kind: 'review'; commentCount: number; timestamp: number }
-      | { kind: 'note'; title: string; timestamp: number };
+      | {
+          kind: 'note';
+          title: string;
+          timestamp: number;
+          suggestedNextCommitStep: string | null;
+          suggestedNextNoteStep: string | null;
+        };
 
     const candidates: Candidate[] = [];
 
@@ -219,7 +233,13 @@
     for (const note of timeline.notes) {
       if (note.sessionStatus === 'running') continue;
       const ts = Math.floor((note.completedAt ?? note.createdAt) / 1000);
-      candidates.push({ kind: 'note', title: note.title, timestamp: ts });
+      candidates.push({
+        kind: 'note',
+        title: note.title,
+        timestamp: ts,
+        suggestedNextCommitStep: note.suggestedNextCommitStep,
+        suggestedNextNoteStep: note.suggestedNextNoteStep,
+      });
     }
 
     // We also need commits so we can tell if the latest item overall is a commit
@@ -231,22 +251,34 @@
       all.push({ kind: 'commit', timestamp: commit.timestamp });
     }
 
-    if (all.length === 0) return '';
+    if (all.length === 0) return empty;
 
     all.sort((a, b) => b.timestamp - a.timestamp);
     const latest = all[0];
 
-    if (latest.kind === 'review' && latest.commentCount > 0) {
-      return getCommitPrefillFromReviewComments(latest.commentCount);
-    }
-    if (latest.kind === 'note' && latest.title.toLowerCase().includes('plan')) {
-      return 'Implement plan';
-    }
-    if (latest.kind === 'note' && latest.title.toLowerCase().endsWith(' log')) {
-      return 'Read the latest note which contains logs. Look for any issues.';
+    // If latest item is a note with suggested next steps, use them
+    if (
+      latest.kind === 'note' &&
+      (latest.suggestedNextCommitStep || latest.suggestedNextNoteStep)
+    ) {
+      return {
+        commit: latest.suggestedNextCommitStep ?? '',
+        note: latest.suggestedNextNoteStep ?? '',
+      };
     }
 
-    return '';
+    // Fallback to existing heuristics for reviews and notes without suggestions
+    if (latest.kind === 'review' && latest.commentCount > 0) {
+      return { commit: 'Resolve code review comments', note: '' };
+    }
+    if (latest.kind === 'note' && latest.title.toLowerCase().includes('plan')) {
+      return { commit: 'Implement plan', note: '' };
+    }
+    if (latest.kind === 'note' && latest.title.toLowerCase().endsWith(' log')) {
+      return { commit: 'Read the latest note which contains logs. Look for any issues.', note: '' };
+    }
+
+    return empty;
   });
 
   // Commit diff modal (opened by clicking a commit in the timeline)
@@ -982,22 +1014,29 @@
 {/if}
 
 {#if sessionMgr.showNewSession}
+  {@const commitPrefill = suggestedPrefill.commit}
+  {@const notePrefill = suggestedPrefill.note}
   {@const usePrefill =
-    sessionMgr.newSessionMode === 'commit' && !sessionMgr.draftPrompt && !!commitPrefill}
+    !sessionMgr.draftPrompt &&
+    ((sessionMgr.newSessionMode === 'commit' && !!commitPrefill) ||
+      (sessionMgr.newSessionMode === 'note' && !!notePrefill))}
+  {@const prefillText = sessionMgr.newSessionMode === 'note' ? notePrefill : commitPrefill}
   <NewSessionModal
     {branch}
     mode={sessionMgr.newSessionMode}
     {repoLabel}
-    initialPrompt={usePrefill ? commitPrefill : sessionMgr.draftPrompt}
+    initialPrompt={usePrefill ? prefillText : sessionMgr.draftPrompt}
     initialImageIds={sessionMgr.draftImageIds}
     prefilled={usePrefill}
     {commitPrefill}
+    {notePrefill}
     remote={isRemote}
     willQueue={sessionMgr.willQueue}
     onClose={(draft) => {
       // Don't persist prefilled text as a draft — it should be re-evaluated
       // each time the dialog opens based on the current timeline state.
-      const prompt = draft.prompt === commitPrefill ? '' : draft.prompt;
+      const prompt =
+        draft.prompt === commitPrefill || draft.prompt === notePrefill ? '' : draft.prompt;
       sessionMgr.handleNewSessionClose({ ...draft, prompt });
     }}
     onSubmit={(data) => sessionMgr.handleNewSessionSubmit(data)}

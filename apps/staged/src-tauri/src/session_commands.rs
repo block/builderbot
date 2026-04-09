@@ -2353,13 +2353,36 @@ fn build_full_prompt(
 You may use any tools needed to research and gather information, but do NOT create \
 any commits.
 
-To return the note, your final response must include this exact structure:
+To return the note, your final response must include the structure shown below. \
+Before the `---` separator, emit a `suggested-next-steps` fenced block that suggests \
+what the user might want to do next. The block must contain a single JSON object with \
+two nullable string fields:
+
+```suggested-next-steps
+{\"suggestedNextCommitStep\": \"Fix the null pointer bug in parser.rs\", \"suggestedNextNoteStep\": \"Make a plan to fix the null pointer bug\"}
+```
+
+Guidelines for suggested next steps:
+- If the note is a plan, suggest a commit to implement it: \
+{\"suggestedNextCommitStep\": \"Implement this plan\", \"suggestedNextNoteStep\": null}
+- If the note is a plan with multiple options, pick the best option: \
+{\"suggestedNextCommitStep\": \"Implement plan with option 2: use Redis cache\", \"suggestedNextNoteStep\": null}
+- If the note is bug research, suggest both a fix and a deeper plan: \
+{\"suggestedNextCommitStep\": \"Fix this bug\", \"suggestedNextNoteStep\": \"Make a plan to fix this bug\"}
+- If the note is pure research or informational with no clear next action: \
+{\"suggestedNextCommitStep\": null, \"suggestedNextNoteStep\": null}
+
+Then, after the suggested-next-steps block, include the note itself:
 
 ---
 # <Title>
 <Body>
 
 Formatting requirements:
+- The opening fence line for suggested-next-steps must be exactly: ```suggested-next-steps
+- The closing fence line must be exactly: ```
+- Put only the JSON object inside the suggested-next-steps block (no prose or markdown).
+- Do not wrap the block in any additional code fences.
 - `---` must be on its own line, with a newline immediately before and after it.
 - The note content must start immediately after `---` with a markdown H1 (`# Title`).
 - Do not wrap the note in code fences."

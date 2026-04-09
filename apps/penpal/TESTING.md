@@ -63,13 +63,14 @@ see-also:
 | Source Types — rp1 (P-PENPAL-SRC-RP1, SRC-RP1-CLASSIFY, SRC-RP1-GROUP) | discovery_test.go (TestClassifyRP1File, TestGroupRP1Paths) | — | grouping_test.go (TestBuildFileGroups_RP1Grouped) | — |
 | Source Types — anchors (P-PENPAL-SRC-ANCHORS, SRC-ANCHORS-GROUP, SRC-ANCHORS-NESTED) | discovery_test.go (TestClassifyAnchorsFile, TestGroupAnchorsPaths, TestGroupAnchorsPaths_MarkerOnlyModule, TestAnchorsFileOrder, TestAnchorsRequireSibling) | — | — | — |
 | Source Types — claude-plans (P-PENPAL-SRC-CLAUDE-PLANS) | — | — | — | — |
-| Source Types — manual (P-PENPAL-SRC-MANUAL) | — | — | grouping_test.go (TestBuildFileGroups_ManualSourceDirHeadings) | — |
+| Source Types — manual (E-PENPAL-SRC-MANUAL) | — | — | grouping_test.go (TestBuildFileGroups_ManualSourceDirHeadings) | — |
+| Favorites (P-PENPAL-FAVORITES, P-PENPAL-FAVORITE-ACTIONS, E-PENPAL-FAVORITES) | api_favorites_test.go (TestBuildFavoriteEntries_TreeFallsBackWithoutAllMarkdown) | — | api_favorites_test.go (TestAPIFavorites_ListExistingManualSources, TestAPIFavorites_AddAndRemove) | — |
 | Cache & File Scanning (E-PENPAL-CACHE, SCAN) | cache_test.go (TestCheckAllProjectsHasFiles, TestProjectHasAnyMarkdown_IgnoresGitignore, TestProjectHasAnyMarkdown_SkipsVCSDirs, TestAllFiles_DeduplicatesAllMarkdown, TestEnsureProjectScanned_NoDuplicateScans, TestResolveFileInfo, TestUpsertFile, TestRemoveFile, TestRescanWith_PreservesUnchangedProjects, TestSourcesChanged) | — | — | — |
 | Worktree Support (P-PENPAL-WORKTREE) | discovery/worktree_test.go, cache/worktree_test.go | Layout.test.tsx | worktree_test.go (API + MCP) | — |
 | Worktree Watch (E-PENPAL-WORKTREE-WATCH) | watcher_test.go | — | — | — |
 | Worktree Dropdown (P-PENPAL-PROJECT-WORKTREE-DROPDOWN) | — | Layout.test.tsx | — | — |
 | Git Integration (P-PENPAL-GIT-INFO) | — | — | — | — |
-| File List & Grouping (P-PENPAL-FILE-LIST) | — | ProjectPage.test.tsx | grouping_test.go, integration_test.go | — |
+| File List & Grouping (P-PENPAL-PROJECT-SOURCES, P-PENPAL-PROJECT-FILE-TREE) | — | ProjectPage.test.tsx | grouping_test.go, integration_test.go | — |
 | Markdown Rendering (P-PENPAL-GFM, MERMAID) | — | MarkdownViewer.test.tsx | — | mermaid-comments.spec.ts |
 | Stable Components (E-PENPAL-MD-STABLE-COMPONENTS) | — | MarkdownViewer.test.tsx | — | — |
 | Text Selection & Anchors (P-PENPAL-SELECT-COMMENT, ANCHOR) | — | SelectionToolbar.test.tsx | — | review-workflow.spec.ts |
@@ -87,12 +88,13 @@ see-also:
 | Wait for Changes (P-PENPAL-WAIT-CHANGES) | — | — | tools_test.go (TestWaitForChanges_Triggered) | — |
 | Agent Management (P-PENPAL-AGENT-LAUNCH, STATUS) | stream_test.go | FilePage.test.tsx (auto-start) | api_agents_test.go | — |
 | Agent Detection (P-PENPAL-AGENT-PRESENCE) | — | — | — | — |
-| Review Workflow (P-PENPAL-IN-REVIEW) | — | InReviewPage.test.tsx | api_projects_test.go (TestAPIInReview) | — |
+| Review Workflow (P-PENPAL-PROJECT-IN-REVIEW, P-PENPAL-GLOBAL-IN-REVIEW) | — | InReviewPage.test.tsx | api_projects_test.go (TestAPIInReview) | — |
 | Publishing (P-PENPAL-PUBLISH) | blockcell_test.go, render_test.go, state_test.go | — | — | — |
 | Tabs (P-PENPAL-TABS) | — | useTabs.test.ts, Layout.test.tsx | — | tab-navigation.spec.ts |
-| Recent Files (P-PENPAL-RECENT, E-PENPAL-ACTIVITY-PERSIST) | activity_test.go | RecentPage.test.tsx | integration_test.go | — |
+| Search (P-PENPAL-SEARCH) | — | SearchPage.test.tsx | — | react-app.spec.ts |
+| Recent Files (P-PENPAL-PROJECT-RECENT, P-PENPAL-GLOBAL-RECENT, E-PENPAL-ACTIVITY-PERSIST) | activity_test.go | RecentPage.test.tsx | integration_test.go | — |
 | CLI Open (P-PENPAL-CLI-OPEN) | — | — | api_manage_test.go | cli-open.spec.ts |
-| Source Management (P-PENPAL-ADD-SOURCE, REMOVE-SOURCE) | — | — | api_manage_test.go (TestAPISources_AddFileNotBlockedByAllMarkdown) | — |
+| Manual Source Management (E-PENPAL-SRC-MANUAL, E-PENPAL-SRC-ALL-MD) | — | — | api_manage_test.go (TestAPISources_AddFileNotBlockedByAllMarkdown) | — |
 | Real-Time Updates (P-PENPAL-REALTIME, FOCUS) | watcher_test.go | useSSE.test.ts | api_focus_test.go | — |
 | Config & Migration (E-PENPAL-CONFIG) | config_test.go, migrate_test.go | — | — | — |
 | Install Tools (P-PENPAL-INSTALL) | — | InstallStartup.test.tsx, InstallToolsModal.test.tsx | install_test.go | — |
@@ -101,7 +103,8 @@ see-also:
 | SPA Serving (E-PENPAL-SPA-SERVE) | — | — | spa_test.go | react-app.spec.ts |
 | Path Traversal (E-PENPAL-PATH-TRAVERSAL) | — | — | pathutil_test.go, spa_test.go | — |
 | View Tracking (E-PENPAL-ACTIVITY) | — | — | — | view-tracking.spec.ts |
-| File Handler (P-PENPAL-FILE-HANDLER) | — | — | api_manage_test.go | — |
+| Desktop Shell (E-PENPAL-TAURI) | — | src-tauri/src/lib.rs (ready probe request test) | — | — |
+| File Handler (P-PENPAL-FILE-HANDLER, E-PENPAL-FILE-HANDLER-PLIST, E-PENPAL-FILE-HANDLER-EVENT) | api_manage_test.go (TestMacOSInfoPlist_FileHandlerRegistration) | src-tauri/src/lib.rs (open request test) | api_manage_test.go (TestAPIOpen_StandaloneMarkdownFile, TestAPIOpen_RejectsNonMarkdown) | — |
 | Source Disambiguation (P-PENPAL-SRC-DISAMBIG) | — | Layout.test.tsx | — | — |
 | Home Label (P-PENPAL-HOME-LABEL) | — | Layout.test.tsx | — | — |
 | Session Persistence — Tabs (P-PENPAL-PERSIST-TABS) | — | useTabs.test.ts | — | — |

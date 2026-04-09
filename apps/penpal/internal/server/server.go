@@ -274,6 +274,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/delete-file", s.handleDeleteFile)
 	// Workspace and project management
 	s.mux.HandleFunc("/api/workspaces", s.handleAPIWorkspaces)
+	s.mux.HandleFunc("/api/favorites", s.handleAPIFavorites)
 	s.mux.HandleFunc("/api/sources", s.handleAPISources)
 	s.mux.HandleFunc("/api/open", s.handleAPIOpen)
 	s.mux.HandleFunc("/api/navigate", s.handleAPINavigate)
@@ -747,6 +748,7 @@ type APIFile struct {
 	Name         string `json:"name"`
 	Title        string `json:"title,omitempty"`
 	Path         string `json:"path"`
+	DisplayPath  string `json:"displayPath,omitempty"`
 	Dir          string `json:"dir,omitempty"`
 	Source       string `json:"source,omitempty"`
 	SourceType   string `json:"sourceType,omitempty"`
@@ -813,6 +815,22 @@ func (s *Server) handleAPIProjectFiles(w http.ResponseWriter, r *http.Request) {
 		cachedFiles = s.cache.ProjectFiles(qualifiedName)
 	}
 	fileGroups := buildFileGroups(project, cachedFiles)
+	manualSources := make(map[string]bool)
+	for _, src := range project.Sources {
+		if src.SourceTypeName == "manual" {
+			manualSources[src.Name] = true
+		}
+	}
+	if len(manualSources) > 0 {
+		filtered := make([]FileGroupView, 0, len(fileGroups))
+		for _, group := range fileGroups {
+			if manualSources[group.Source] {
+				continue
+			}
+			filtered = append(filtered, group)
+		}
+		fileGroups = filtered
+	}
 
 	result := make([]APIFileGroupView, 0, len(fileGroups))
 	for _, g := range fileGroups {

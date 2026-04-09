@@ -1,6 +1,6 @@
 import * as commands from '../../api/commands';
 import type { BranchTimeline, SessionMessage } from '../../types';
-import { formatToolDisplay } from '../sessions/sessionModalHelpers';
+import { formatToolDisplay, stripXmlTags } from '../sessions/sessionModalHelpers';
 
 const HINT_POLL_INTERVAL_MS = 750;
 const MAX_HINT_LENGTH = 72;
@@ -17,11 +17,6 @@ export type PendingHintItem = {
   type: PendingHintItemType;
   sessionId?: string;
 };
-
-/** Strip XML-tagged context blocks (action, branch-history) from display text. */
-function stripXmlTags(text: string): string {
-  return text.replace(/<(action|branch-history)>[\s\S]*?<\/\1>/g, '').trim();
-}
 
 function normalizeHintText(text: string): string | undefined {
   const cleaned = stripXmlTags(text)

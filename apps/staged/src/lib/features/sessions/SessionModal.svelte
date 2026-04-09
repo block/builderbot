@@ -67,6 +67,7 @@
     verbGroupSummary,
     hasXmlBlocks,
     stripCodeFences,
+    stripXmlTags,
   } from './sessionModalHelpers';
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
@@ -594,7 +595,7 @@
     const segments: ContentSegment[] = [];
     let remaining = content;
 
-    const tagPattern = /<(action|branch-history)>([\s\S]*?)<\/\1>/g;
+    const tagPattern = /<(action|branch-history|launch-context)>([\s\S]*?)<\/\1>/g;
     let lastIndex = 0;
     let match: RegExpExecArray | null;
 
@@ -606,7 +607,12 @@
       }
 
       const tag = match[1];
-      const label = tag === 'action' ? 'Action instructions' : 'Branch history';
+      const label =
+        tag === 'action'
+          ? 'Action instructions'
+          : tag === 'branch-history'
+            ? 'Branch history'
+            : 'Launch context';
       const icon = tag === 'action' ? Zap : GitBranch;
       segments.push({ type: 'xml-block', tag, label, content: match[2].trim(), icon });
 
@@ -840,10 +846,7 @@
     <header class="modal-header">
       <div class="header-content">
         <span class="header-title">
-          {session?.prompt
-            ? session.prompt.replace(/<(action|branch-history)>[\s\S]*?<\/\1>/g, '').trim() ||
-              'Session'
-            : 'Session'}
+          {session?.prompt ? stripXmlTags(session.prompt) || 'Session' : 'Session'}
         </span>
       </div>
       <InContentSearch

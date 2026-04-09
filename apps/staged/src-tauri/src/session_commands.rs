@@ -448,6 +448,15 @@ pub enum BranchSessionType {
     Review,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchSessionLaunchContext {
+    pub source: String,
+    pub scope: String,
+    pub commit_sha: String,
+    pub review_id: Option<String>,
+}
+
 /// Response from starting a branch session.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -623,6 +632,7 @@ pub async fn start_branch_session(
     session_type: BranchSessionType,
     provider: Option<String>,
     image_ids: Option<Vec<String>>,
+    launch_context: Option<BranchSessionLaunchContext>,
 ) -> Result<BranchSessionResponse, String> {
     let store = get_store(&store)?;
 
@@ -711,6 +721,7 @@ pub async fn start_branch_session(
         &project_information,
         &branch_context,
         &session_type,
+        launch_context.as_ref(),
     );
 
     // Create the session
@@ -840,6 +851,7 @@ pub async fn start_branch_session(
 /// (commit or note), but does NOT resolve working directory, git context,
 /// or spawn an agent. The session will be started later via `drain_queued_sessions`.
 #[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
 pub fn queue_branch_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
@@ -848,6 +860,7 @@ pub fn queue_branch_session(
     session_type: BranchSessionType,
     provider: Option<String>,
     image_ids: Option<Vec<String>>,
+    launch_context: Option<BranchSessionLaunchContext>,
 ) -> Result<BranchSessionResponse, String> {
     let store = get_store(&store)?;
 
@@ -866,7 +879,8 @@ pub fn queue_branch_session(
 
     // Create the queued session — prompt is stored raw (not enriched with
     // context) since context will be built when the session is drained.
-    let mut session = store::Session::new_queued(&prompt);
+    let queued_prompt = embed_launch_context(&prompt, launch_context.as_ref())?;
+    let mut session = store::Session::new_queued(&queued_prompt);
     if let Some(ref p) = provider {
         session = session.with_provider(p);
     }
@@ -975,7 +989,7 @@ pub async fn drain_queued_sessions_for_branch(
         };
 
     // Use the original prompt from the queued session.
-    let prompt = session.prompt.clone();
+    let (prompt, launch_context) = extract_launch_context(&session.prompt)?;
     let session_id = session.id.clone();
 
     // Resolve branch → project (same as start_branch_session).
@@ -1050,6 +1064,7 @@ pub async fn drain_queued_sessions_for_branch(
         &project_information,
         &branch_context,
         &session_type,
+        launch_context.as_ref(),
     );
 
     // Atomically transition session from queued to running.
@@ -1290,6 +1305,7 @@ pub async fn trigger_auto_review(
         &project_information,
         &branch_context,
         &BranchSessionType::Review,
+        None,
     );
 
     // Create the session
@@ -2318,6 +2334,7 @@ fn build_full_prompt(
     project_information: &str,
     branch_context: &str,
     session_type: &BranchSessionType,
+    launch_context: Option<&BranchSessionLaunchContext>,
 ) -> String {
     let action_instructions = match session_type {
         BranchSessionType::Note => {
@@ -2432,14 +2449,86 @@ Rules:
     let action_tag = format!(
         "<action>\n{action_instructions}\n\nProject information:\n{project_information}\n</action>"
     );
+    let branch_history = render_branch_history(branch_context, launch_context);
 
     format!(
         "{action_tag}\n\n\
          <branch-history>\n\
-         {branch_context}\n\
+         {branch_history}\n\
          </branch-history>\n\n\
          {user_prompt}"
     )
+}
+
+fn render_branch_history(
+    branch_context: &str,
+    launch_context: Option<&BranchSessionLaunchContext>,
+) -> String {
+    let mut parts = Vec::new();
+    if !branch_context.trim().is_empty() {
+        parts.push(branch_context.trim_end().to_string());
+    }
+    if let Some(entry) = render_launch_context_entry(launch_context) {
+        parts.push(entry);
+    }
+    parts.join("\n\n")
+}
+
+fn render_launch_context_entry(
+    launch_context: Option<&BranchSessionLaunchContext>,
+) -> Option<String> {
+    let context = launch_context?;
+    if context.source != "diff_viewer" {
+        return None;
+    }
+
+    let scope_suffix = match context.scope.as_str() {
+        "branch" => String::new(),
+        _ => format!(" (scope: {})", context.scope),
+    };
+
+    let mut entry = format!(
+        "Viewed diff before starting this session: commit {}{}.",
+        context.commit_sha, scope_suffix
+    );
+    if let Some(review_id) = context.review_id.as_deref() {
+        entry = format!(
+            "Viewed diff before starting this session: review {} on commit {}{}.",
+            review_id, context.commit_sha, scope_suffix
+        );
+    }
+    Some(entry)
+}
+
+fn embed_launch_context(
+    prompt: &str,
+    launch_context: Option<&BranchSessionLaunchContext>,
+) -> Result<String, String> {
+    let Some(context) = launch_context else {
+        return Ok(prompt.to_string());
+    };
+    let json = serde_json::to_string(context).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "<launch-context>{json}</launch-context>\n\n{}",
+        prompt.trim_start()
+    ))
+}
+
+fn extract_launch_context(
+    prompt: &str,
+) -> Result<(String, Option<BranchSessionLaunchContext>), String> {
+    const OPEN: &str = "<launch-context>";
+    const CLOSE: &str = "</launch-context>";
+
+    let Some(rest) = prompt.strip_prefix(OPEN) else {
+        return Ok((prompt.to_string(), None));
+    };
+    let Some((json, remainder)) = rest.split_once(CLOSE) else {
+        return Err("Queued session prompt had malformed launch context".to_string());
+    };
+    let context =
+        serde_json::from_str::<BranchSessionLaunchContext>(json).map_err(|e| e.to_string())?;
+    Ok((remainder.trim_start().to_string(), Some(context)))
 }
 
 #[cfg(test)]
@@ -2527,6 +2616,7 @@ mod tests {
             "project info",
             "branch context",
             &BranchSessionType::Review,
+            None,
         );
 
         assert!(
@@ -2588,5 +2678,71 @@ mod tests {
         assert_eq!(session.status, store::SessionStatus::Completed);
         let review = store.get_review(&review.id).unwrap().unwrap();
         assert!(review.is_auto);
+    }
+
+    #[test]
+    fn commit_prompt_appends_diff_viewer_context_to_branch_history() {
+        let prompt = build_full_prompt(
+            "user prompt",
+            "project info",
+            "branch context",
+            &BranchSessionType::Commit,
+            Some(&BranchSessionLaunchContext {
+                source: "diff_viewer".to_string(),
+                scope: "commit".to_string(),
+                commit_sha: "abc123".to_string(),
+                review_id: Some("review-42".to_string()),
+            }),
+        );
+
+        assert!(prompt.contains(
+            "Viewed diff before starting this session: review review-42 on commit abc123 (scope: commit)."
+        ));
+    }
+
+    #[test]
+    fn commit_prompt_omits_branch_scope_from_diff_viewer_context() {
+        let prompt = build_full_prompt(
+            "user prompt",
+            "project info",
+            "branch context",
+            &BranchSessionType::Commit,
+            Some(&BranchSessionLaunchContext {
+                source: "diff_viewer".to_string(),
+                scope: "branch".to_string(),
+                commit_sha: "abc123".to_string(),
+                review_id: None,
+            }),
+        );
+
+        assert!(prompt.contains("Viewed diff before starting this session: commit abc123."));
+        assert!(!prompt.contains("(scope: branch)"));
+    }
+
+    #[test]
+    fn queued_prompt_round_trips_launch_context() {
+        let prompt = embed_launch_context(
+            "Implement plan",
+            Some(&BranchSessionLaunchContext {
+                source: "diff_viewer".to_string(),
+                scope: "branch".to_string(),
+                commit_sha: "deadbeef".to_string(),
+                review_id: None,
+            }),
+        )
+        .unwrap();
+
+        let (decoded_prompt, launch_context) = extract_launch_context(&prompt).unwrap();
+
+        assert_eq!(decoded_prompt, "Implement plan");
+        assert_eq!(
+            launch_context,
+            Some(BranchSessionLaunchContext {
+                source: "diff_viewer".to_string(),
+                scope: "branch".to_string(),
+                commit_sha: "deadbeef".to_string(),
+                review_id: None,
+            })
+        );
     }
 }

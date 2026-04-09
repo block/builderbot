@@ -13,6 +13,7 @@ import type {
   Branch,
   BranchTimeline,
   BranchRef,
+  BranchSessionLaunchContext,
   BranchSessionType,
   BranchSessionResponse,
   StoreIncompatibility,
@@ -557,7 +558,8 @@ export function startBranchSession(
   prompt: string,
   sessionType: BranchSessionType,
   provider?: string,
-  imageIds?: string[]
+  imageIds?: string[],
+  launchContext?: BranchSessionLaunchContext
 ): Promise<BranchSessionResponse> {
   return invoke('start_branch_session', {
     branchId,
@@ -565,6 +567,7 @@ export function startBranchSession(
     sessionType,
     provider: provider ?? null,
     imageIds: imageIds ?? null,
+    launchContext: launchContext ?? null,
   });
 }
 
@@ -574,7 +577,8 @@ export function queueBranchSession(
   prompt: string,
   sessionType: BranchSessionType,
   provider?: string,
-  imageIds?: string[]
+  imageIds?: string[],
+  launchContext?: BranchSessionLaunchContext
 ): Promise<BranchSessionResponse> {
   return invoke('queue_branch_session', {
     branchId,
@@ -582,6 +586,7 @@ export function queueBranchSession(
     sessionType,
     provider: provider ?? null,
     imageIds: imageIds ?? null,
+    launchContext: launchContext ?? null,
   });
 }
 

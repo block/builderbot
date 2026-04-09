@@ -38,12 +38,6 @@ pub(crate) async fn detect_actions_for_repo_context(
     github_repo: &str,
     subpath: Option<&str>,
 ) -> Result<Vec<SuggestedAction>, String> {
-    log::info!(
-        "[detect_actions_for_repo_context] starting detection for repo={} subpath={:?}",
-        github_repo,
-        subpath
-    );
-
     // Check whether a local clone already exists on disk.
     let local_clone = crate::paths::repos_dir()
         .map(|d| d.join(github_repo))
@@ -76,46 +70,19 @@ pub(crate) async fn detect_actions_for_repo_context(
     let detector = ActionDetector::new(Box::new(provider));
 
     let mode = match local_clone {
-        Some(_) => {
-            log::info!(
-                "[detect_actions_for_repo_context] using Local mode, working_dir={}",
-                provider_dir.display()
-            );
-            FileExplorationMode::Local {
-                working_dir: provider_dir,
-            }
-        }
-        None => {
-            log::info!(
-                "[detect_actions_for_repo_context] using GitHub mode, repo={} subpath={:?}",
-                github_repo,
-                subpath
-            );
-            FileExplorationMode::GitHub {
-                repo: github_repo.to_string(),
-                subpath: subpath.map(str::to_string),
-            }
-        }
+        Some(_) => FileExplorationMode::Local {
+            working_dir: provider_dir,
+        },
+        None => FileExplorationMode::GitHub {
+            repo: github_repo.to_string(),
+            subpath: subpath.map(str::to_string),
+        },
     };
 
-    let result = detector
+    detector
         .detect_actions_with_mode(mode)
         .await
-        .map_err(|e| format!("Action detection failed: {e}"));
-
-    match &result {
-        Ok(actions) => {
-            log::info!(
-                "[detect_actions_for_repo_context] detection complete: {} actions found",
-                actions.len()
-            );
-        }
-        Err(e) => {
-            log::info!("[detect_actions_for_repo_context] detection failed: {e}");
-        }
-    }
-
-    result
+        .map_err(|e| format!("Action detection failed: {e}"))
 }
 
 fn resolve_branch_repo_context(
@@ -559,12 +526,6 @@ pub async fn run_prerun_actions(
 
     // First time we see this repo+subpath, detect actions before running prerun.
     if !context.has_detected_actions {
-        log::info!(
-            "[run_prerun_actions] detecting actions for repo {} (subpath: {:?}), context_id={}",
-            github_repo,
-            subpath,
-            context.id
-        );
         store
             .set_action_context_detecting(&context.id, true)
             .map_err(|e| format!("Failed to set detection status: {e}"))?;
@@ -579,23 +540,7 @@ pub async fn run_prerun_actions(
 
         let detected = match detect_actions_for_repo_context(&github_repo, subpath.as_deref()).await
         {
-            Ok(actions) => {
-                log::info!(
-                    "[run_prerun_actions] action detection returned {} actions for repo {} (subpath: {:?})",
-                    actions.len(),
-                    github_repo,
-                    subpath
-                );
-                for a in &actions {
-                    log::info!(
-                        "[run_prerun_actions]   detected action: name={:?} command={:?} type={:?}",
-                        a.name,
-                        a.command,
-                        a.action_type
-                    );
-                }
-                actions
-            }
+            Ok(actions) => actions,
             Err(e) => {
                 log::warn!(
                     "[run_prerun_actions] action detection failed for repo {} (subpath: {:?}): {e}",
@@ -648,11 +593,6 @@ pub async fn run_prerun_actions(
                 detecting: false,
             },
         );
-    } else {
-        log::info!(
-            "[run_prerun_actions] actions already detected for context_id={}, skipping detection",
-            context.id
-        );
     }
 
     // Get all actions for this context.
@@ -660,34 +600,11 @@ pub async fn run_prerun_actions(
         .list_repo_actions(&context.id)
         .map_err(|e| format!("Failed to list actions: {e}"))?;
 
-    log::info!(
-        "[run_prerun_actions] found {} total actions for context {} (repo: {}, subpath: {:?})",
-        actions.len(),
-        context.id,
-        github_repo,
-        subpath
-    );
-    for a in &actions {
-        log::info!(
-            "[run_prerun_actions]   action: id={} name={:?} command={:?} type={:?}",
-            a.id,
-            a.name,
-            a.command,
-            a.action_type
-        );
-    }
-
     // Filter to prerun actions
     let prerun_actions = actions
         .into_iter()
         .filter(|a| matches!(a.action_type, builderbot_actions::ActionType::Prerun))
         .collect::<Vec<_>>();
-
-    log::info!(
-        "[run_prerun_actions] {} prerun actions to execute for branch {}",
-        prerun_actions.len(),
-        branch_id
-    );
 
     // Get the worktree path for this branch, then apply the repo subpath
     let workdir = store
@@ -702,21 +619,10 @@ pub async fn run_prerun_actions(
         workdir.path
     };
 
-    log::info!(
-        "[run_prerun_actions] working_dir for prerun actions: {}",
-        working_dir
-    );
-
     // Execute each prerun action sequentially, waiting for each to complete
     // before starting the next one
     let mut execution_ids = Vec::new();
     for action in prerun_actions {
-        log::info!(
-            "[run_prerun_actions] executing prerun action: id={} name={:?} command={:?}",
-            action.id,
-            action.name,
-            action.command
-        );
         let listener = Arc::new(TauriExecutionListener::new(
             app.clone(),
             branch_id.clone(),

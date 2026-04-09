@@ -2297,12 +2297,6 @@ pub(crate) async fn run_prerun_actions_for_branch(
 
     // If actions haven't been detected yet for this repo+subpath, detect now
     if !context.has_detected_actions {
-        log::info!(
-            "[run_prerun_actions_for_branch] detecting actions for repo {} (subpath: {:?}), context_id={}",
-            github_repo,
-            subpath,
-            context.id
-        );
         store
             .set_action_context_detecting(&context.id, true)
             .map_err(|e| format!("Failed to set detection status: {e}"))?;
@@ -2323,23 +2317,7 @@ pub(crate) async fn run_prerun_actions_for_branch(
         )
         .await
         {
-            Ok(actions) => {
-                log::info!(
-                    "[run_prerun_actions_for_branch] action detection returned {} actions for repo {} (subpath: {:?})",
-                    actions.len(),
-                    github_repo,
-                    subpath
-                );
-                for a in &actions {
-                    log::info!(
-                        "[run_prerun_actions_for_branch]   detected action: name={:?} command={:?} type={:?}",
-                        a.name,
-                        a.command,
-                        a.action_type
-                    );
-                }
-                actions
-            }
+            Ok(actions) => actions,
             Err(e) => {
                 log::warn!(
                     "[run_prerun_actions_for_branch] action detection failed for repo {} (subpath: {:?}): {e}",
@@ -2394,50 +2372,20 @@ pub(crate) async fn run_prerun_actions_for_branch(
                 "detecting": false,
             }),
         );
-    } else {
-        log::info!(
-            "[run_prerun_actions_for_branch] actions already detected for context_id={}, skipping detection",
-            context.id
-        );
     }
 
     // Get all prerun actions for this context
     let actions = store
         .list_repo_actions(&context.id)
         .map_err(|e| format!("Failed to list actions: {e}"))?;
-    log::info!(
-        "[run_prerun_actions_for_branch] found {} total actions for context {} (repo: {}, subpath: {:?})",
-        actions.len(),
-        context.id,
-        github_repo,
-        subpath
-    );
-    for a in &actions {
-        log::info!(
-            "[run_prerun_actions_for_branch]   action: id={} name={:?} command={:?} type={:?}",
-            a.id,
-            a.name,
-            a.command,
-            a.action_type
-        );
-    }
     let prerun_actions: Vec<_> = actions
         .into_iter()
         .filter(|a| matches!(a.action_type, ActionType::Prerun))
         .collect();
 
     if prerun_actions.is_empty() {
-        log::info!(
-            "[run_prerun_actions_for_branch] no prerun actions found for branch {}, returning early",
-            branch_id
-        );
         return Ok(0);
     }
-    log::info!(
-        "[run_prerun_actions_for_branch] will execute {} prerun actions for branch {}",
-        prerun_actions.len(),
-        branch_id
-    );
 
     // Get the worktree path for this branch
     let workdir = store
@@ -2454,22 +2402,8 @@ pub(crate) async fn run_prerun_actions_for_branch(
         workdir.path
     };
 
-    log::info!(
-        "[run_prerun_actions_for_branch] working_dir for prerun actions: {}",
-        working_dir
-    );
-
     // Execute each prerun action, waiting for each to complete
     let mut count = 0;
-    for action in &prerun_actions {
-        log::info!(
-            "[run_prerun_actions_for_branch] executing prerun action: id={} name={:?} command={:?} in working_dir={}",
-            action.id,
-            action.name,
-            action.command,
-            working_dir
-        );
-    }
     for action in prerun_actions {
         let listener = Arc::new(TauriExecutionListener::new(
             app_handle.clone(),
@@ -2494,11 +2428,6 @@ pub(crate) async fn run_prerun_actions_for_branch(
         {
             Ok(_execution_id) => {
                 count += 1;
-                log::info!(
-                    "[project_mcp] prerun action '{}' completed for branch {}",
-                    action.id,
-                    branch_id
-                );
             }
             Err(e) => {
                 log::warn!(

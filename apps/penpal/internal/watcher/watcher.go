@@ -71,6 +71,9 @@ type Watcher struct {
 	baseWatched    map[string]struct{}
 	dynamicWatched map[string]struct{}
 
+	// Serializes rediscoverProjects calls from concurrent debounce timers.
+	rediscoverMu sync.Mutex
+
 	// E-PENPAL-WATCHER: accumulating debounce for incremental file updates.
 	// Collects per-file paths and ops during the debounce window, then applies
 	// incremental cache mutations instead of full project walks.
@@ -364,6 +367,7 @@ func (w *Watcher) syncBaseWatchesLocked(workspacePaths []string, projects []disc
 		}
 		w.baseWatched[path] = struct{}{}
 	}
+
 }
 
 func (w *Watcher) syncDynamicWatchesLocked() {
@@ -484,27 +488,42 @@ func (w *Watcher) loop() {
 	}
 }
 
+// rediscoverProjects runs full project discovery, updates the cache and watches,
+// and broadcasts a projects-changed SSE event. Serialized by rediscoverMu so
+// concurrent debounce timers don't interleave cache updates.
+func (w *Watcher) rediscoverProjects() {
+	if w.discoverFn == nil {
+		return
+	}
+	w.rediscoverMu.Lock()
+	defer w.rediscoverMu.Unlock()
+
+	projects, err := w.discoverFn()
+	if err != nil {
+		log.Printf("Warning: project discovery failed: %v", err)
+		return
+	}
+	w.cache.RescanWith(projects)
+	w.focusMu.Lock()
+	w.syncBaseWatchesLocked(w.workspacePaths, projects)
+	w.syncDynamicWatchesLocked()
+	w.focusMu.Unlock()
+	w.Broadcast(Event{Type: EventProjectsChanged})
+}
+
 // E-PENPAL-WATCHER: routes fsnotify events to project/workspace refresh or SSE broadcast.
 func (w *Watcher) handleEvent(event fsnotify.Event) {
 	path := filepath.Clean(event.Name)
+	parentDir := filepath.Clean(filepath.Dir(path))
+
+	// E-PENPAL-WORKTREE-WATCH: worktree add/remove is detected by the workspace
+	// directory watch — the new worktree directory appears as a sibling project,
+	// triggering the workspace rescan path below.
 
 	// Check if this is a change in a workspace directory (new/removed project)
-	parentDir := filepath.Clean(filepath.Dir(path))
 	for _, ws := range w.workspacePaths {
 		if parentDir == filepath.Clean(ws) {
-			w.debounceRefresh("workspace:"+ws, func() {
-				if w.discoverFn != nil {
-					projects, err := w.discoverFn()
-					if err == nil {
-						w.cache.RescanWith(projects)
-						w.focusMu.Lock()
-						w.syncBaseWatchesLocked(w.workspacePaths, projects)
-						w.syncDynamicWatchesLocked()
-						w.focusMu.Unlock()
-						w.Broadcast(Event{Type: EventProjectsChanged})
-					}
-				}
-			})
+			w.debounceRefresh("workspace:"+ws, w.rediscoverProjects)
 			return
 		}
 	}
@@ -535,19 +554,7 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 			if matched {
 				for _, p := range w.cache.Projects() {
 					if parentDir == filepath.Clean(p.Path) {
-						w.debounceRefresh("sources:"+p.QualifiedName(), func() {
-							if w.discoverFn != nil {
-								projects, err := w.discoverFn()
-								if err == nil {
-									w.cache.RescanWith(projects)
-									w.focusMu.Lock()
-									w.syncBaseWatchesLocked(w.workspacePaths, projects)
-									w.syncDynamicWatchesLocked()
-									w.focusMu.Unlock()
-									w.Broadcast(Event{Type: EventProjectsChanged})
-								}
-							}
-						})
+						w.debounceRefresh("sources:"+p.QualifiedName(), w.rediscoverProjects)
 						return
 					}
 				}

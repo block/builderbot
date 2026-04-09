@@ -22,7 +22,7 @@ Penpal is a desktop application and local web server for collaborative review of
 
 - <a id="P-PENPAL-STANDALONE"></a>**P-PENPAL-STANDALONE**: Users can add standalone projects (directories or individual files) outside of any workspace, via the home view "+" button or the `penpal open` CLI command.
 
-- <a id="P-PENPAL-WORKTREE"></a>**P-PENPAL-WORKTREE**: Git worktrees for a project are discovered automatically. In the home view, multi-worktree projects expand to show each worktree as a child item with its branch name. In the project view, a worktree dropdown in the breadcrumb bar lets the user switch between worktrees. Each worktree has its own branch name and independent comment storage.
+- <a id="P-PENPAL-WORKTREE"></a>**P-PENPAL-WORKTREE**: Git worktrees for a project are discovered automatically. In the home view, multi-worktree projects expand to show each worktree as a child item with its branch name. In the project view, a worktree dropdown in the breadcrumb bar lets the user switch between worktrees. Each worktree has its own branch name and independent comment storage. When worktrees are added or removed (via `git worktree add`/`remove`), the worktree list updates without restarting the server.
 
 - <a id="P-PENPAL-DEDUP"></a>**P-PENPAL-DEDUP**: When multiple directories in a workspace share the same git repository (one is a worktree of the other), only the main worktree is shown as a project to avoid duplicates.
 

@@ -66,6 +66,7 @@ see-also:
 | Source Types — manual (P-PENPAL-SRC-MANUAL) | — | — | grouping_test.go (TestBuildFileGroups_ManualSourceDirHeadings) | — |
 | Cache & File Scanning (E-PENPAL-CACHE, SCAN) | cache_test.go (TestCheckAllProjectsHasFiles, TestProjectHasAnyMarkdown_IgnoresGitignore, TestProjectHasAnyMarkdown_SkipsVCSDirs, TestAllFiles_DeduplicatesAllMarkdown, TestEnsureProjectScanned_NoDuplicateScans, TestResolveFileInfo, TestUpsertFile, TestRemoveFile, TestRescanWith_PreservesUnchangedProjects, TestSourcesChanged) | — | — | — |
 | Worktree Support (P-PENPAL-WORKTREE) | discovery/worktree_test.go, cache/worktree_test.go | Layout.test.tsx | worktree_test.go (API + MCP) | — |
+| Worktree Watch (E-PENPAL-WORKTREE-WATCH) | watcher_test.go | — | — | — |
 | Worktree Dropdown (P-PENPAL-PROJECT-WORKTREE-DROPDOWN) | — | Layout.test.tsx | — | — |
 | Git Integration (P-PENPAL-GIT-INFO) | — | — | — | — |
 | File List & Grouping (P-PENPAL-FILE-LIST) | — | ProjectPage.test.tsx | grouping_test.go, integration_test.go | — |

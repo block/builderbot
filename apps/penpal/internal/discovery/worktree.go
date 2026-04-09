@@ -1,10 +1,53 @@
 package discovery
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 )
+
+// gitCommonDirFS resolves the shared .git directory using only filesystem
+// reads — no subprocess. For a main worktree .git is a directory; for a
+// linked worktree .git is a file containing "gitdir: <path>" and the
+// referenced gitdir contains a "commondir" file pointing back to the
+// shared .git.
+func gitCommonDirFS(projectPath string) string {
+	gitPath := filepath.Join(projectPath, ".git")
+	info, err := os.Lstat(gitPath)
+	if err != nil {
+		return ""
+	}
+	// Main worktree: .git is a directory — it IS the common dir.
+	if info.IsDir() {
+		return gitPath
+	}
+	// Linked worktree: .git is a file with "gitdir: <path>".
+	data, err := os.ReadFile(gitPath)
+	if err != nil {
+		return ""
+	}
+	line := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(line, "gitdir: ") {
+		return ""
+	}
+	gitDir := strings.TrimPrefix(line, "gitdir: ")
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(projectPath, gitDir)
+	}
+	gitDir = filepath.Clean(gitDir)
+	// Read commondir file to find the shared .git directory.
+	cdPath := filepath.Join(gitDir, "commondir")
+	cdData, err := os.ReadFile(cdPath)
+	if err != nil {
+		return ""
+	}
+	commonDir := strings.TrimSpace(string(cdData))
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(gitDir, commonDir)
+	}
+	return filepath.Clean(commonDir)
+}
 
 // Worktree represents a git worktree associated with a project.
 type Worktree struct {
@@ -81,64 +124,17 @@ func parseWorktreeList(projectPath string, output string) []Worktree {
 	return worktrees
 }
 
-// ResolveWorktree finds the worktree that contains the given absolute path.
-// Returns the worktree name and the main project path, or empty strings if
-// the path doesn't belong to any worktree.
-func ResolveWorktree(projectPath string, absPath string) (worktreeName string, mainProjectPath string) {
-	absPath = filepath.Clean(absPath)
-
-	// First check if this path is inside the main project
-	mainPath := filepath.Clean(projectPath)
-	if strings.HasPrefix(absPath, mainPath+"/") || absPath == mainPath {
-		// Check if it's inside a worktree subdirectory
-		worktrees := DiscoverWorktrees(projectPath)
-		for _, wt := range worktrees {
-			if !wt.IsMain && (strings.HasPrefix(absPath, wt.Path+"/") || absPath == wt.Path) {
-				return wt.Name, mainPath
-			}
-		}
-		return "", mainPath
-	}
-
-	return "", ""
-}
-
-// FindMainWorktree returns the path to the main worktree for a given path
-// that might be inside a worktree. It reads the .git file to find the
-// gitdir and traces back to the main worktree.
-func FindMainWorktree(path string) string {
-	cmd := exec.Command("git", "-C", path, "rev-parse", "--git-common-dir")
-	out, err := cmd.Output()
-	if err != nil {
+// gitWorktreesDir returns the path to the .git/worktrees/ directory for the
+// repository that projectPath belongs to, or "" if it doesn't exist.
+// Uses pure filesystem reads via gitCommonDirFS — no subprocess calls.
+func gitWorktreesDir(projectPath string) string {
+	commonDir := gitCommonDirFS(projectPath)
+	if commonDir == "" {
 		return ""
 	}
-	commonDir := strings.TrimSpace(string(out))
-	if commonDir == "" || commonDir == "." {
-		return ""
+	wtDir := filepath.Join(commonDir, "worktrees")
+	if info, err := os.Stat(wtDir); err == nil && info.IsDir() {
+		return wtDir
 	}
-
-	// commonDir is the .git directory of the main worktree
-	// If it's relative, resolve it relative to the path
-	if !filepath.IsAbs(commonDir) {
-		// Get the actual git dir for this worktree first
-		cmd2 := exec.Command("git", "-C", path, "rev-parse", "--git-dir")
-		out2, err := cmd2.Output()
-		if err != nil {
-			return ""
-		}
-		gitDir := strings.TrimSpace(string(out2))
-		if !filepath.IsAbs(gitDir) {
-			gitDir = filepath.Join(path, gitDir)
-		}
-		commonDir = filepath.Join(gitDir, commonDir)
-	}
-
-	commonDir = filepath.Clean(commonDir)
-
-	// The main worktree is the parent of the .git directory
-	if filepath.Base(commonDir) == ".git" {
-		return filepath.Dir(commonDir)
-	}
-
 	return ""
 }

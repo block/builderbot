@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -51,6 +53,29 @@ func runServe(port int, rootOverride string) {
 
 	c := cache.New()
 	act := activity.New()
+
+	// E-PENPAL-ACTIVITY-PERSIST: load persisted activity and set up debounced save.
+	activityPath := filepath.Join(filepath.Dir(cfgPath), "activity.json")
+	if err := act.Load(activityPath); err != nil {
+		log.Printf("Warning: could not load activity: %v", err)
+	}
+	var saveTimer *time.Timer
+	var saveMu sync.Mutex
+	act.SetOnChange(func() {
+		saveMu.Lock()
+		defer saveMu.Unlock()
+		if saveTimer != nil {
+			saveTimer.Stop()
+		}
+		saveTimer = time.AfterFunc(5*time.Second, func() {
+			saveMu.Lock()
+			defer saveMu.Unlock()
+			if err := act.Save(activityPath); err != nil {
+				log.Printf("Warning: could not save activity: %v", err)
+			}
+		})
+	})
+
 	cs := comments.NewStore(c, act)
 
 	w, err := watcher.New(c, act)
@@ -104,7 +129,18 @@ func runServe(port int, rootOverride string) {
 	am.StopAll()
 	config.RemovePortFile()
 	w.Stop()
+	// Drain in-flight requests before persisting activity.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	httpServer.Shutdown(ctx)
+	// E-PENPAL-ACTIVITY-PERSIST: flush activity to disk on shutdown.
+	// Hold saveMu to prevent a racing debounce timer from calling Save concurrently.
+	saveMu.Lock()
+	if saveTimer != nil {
+		saveTimer.Stop()
+	}
+	if err := act.Save(activityPath); err != nil {
+		log.Printf("Warning: could not save activity on shutdown: %v", err)
+	}
+	saveMu.Unlock()
 }

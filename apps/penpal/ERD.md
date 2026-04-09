@@ -380,6 +380,9 @@ see-also:
 - <a id="E-PENPAL-ACTIVITY"></a>**E-PENPAL-ACTIVITY**: In-memory `activity.Tracker` stores one event per file (keyed by project + path). Event types: `viewed`, `modified`, `created`, `comment`, `published`. `Record()` always overwrites; `RecordAt()` (for seeding from mtime) does not overwrite. Activity is seeded per-project when `EnsureProjectScanned()` performs the first lazy scan — each file's `ModTime` is recorded via `RecordAt()`, excluding `__all_markdown__` duplicates. This populates `/api/recent` progressively as projects are opened.
   ← [P-PENPAL-GLOBAL-RECENT](PRODUCT.md#P-PENPAL-GLOBAL-RECENT), [P-PENPAL-PROJECT-RECENT](PRODUCT.md#P-PENPAL-PROJECT-RECENT)
 
+- <a id="E-PENPAL-ACTIVITY-PERSIST"></a>**E-PENPAL-ACTIVITY-PERSIST**: Activity state is persisted to `~/.config/penpal/activity.json` as a JSON array of `FileActivity` entries. `Save(path)` writes atomically (tmp + rename). `Load(path)` reads entries and populates the tracker via `RecordAt()` so that runtime events always take priority. The server loads on startup and saves on shutdown. `Record()` and `RecordAt()` accept an optional save callback; the server debounces saves (5s) so frequent events don't thrash disk.
+  ← [P-PENPAL-GLOBAL-RECENT](PRODUCT.md#P-PENPAL-GLOBAL-RECENT)
+
 - <a id="E-PENPAL-RECENT-PAGE"></a>**E-PENPAL-RECENT-PAGE**: `GET /api/recent` returns up to 50 recently active files across all projects, sorted by most recent activity. Frontend `RecentPage` renders two-line file rows with filename, workspace / project context, and relative timestamp. Clicking navigates the current tab to the file.
   ← [P-PENPAL-GLOBAL-RECENT](PRODUCT.md#P-PENPAL-GLOBAL-RECENT), [P-PENPAL-GLOBAL-ROW-NAVIGATE](PRODUCT.md#P-PENPAL-GLOBAL-ROW-NAVIGATE)
 

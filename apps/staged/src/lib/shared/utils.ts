@@ -149,7 +149,7 @@ export function projectSubtitle(
  *
  * Examples:
  *   ""                       (idle)
- *   "Building"
+ *   "building"
  *   "making a commit"
  *   "making a commit and a note"
  *   "pushing changes"
@@ -159,7 +159,7 @@ export function projectActivity(
   runActionPhase?: RunActionPhase
 ): string {
   if (sessionTypes.length === 0 && runActionPhase === 'building') {
-    return 'Building';
+    return 'building';
   }
 
   if (sessionTypes.length === 0) {

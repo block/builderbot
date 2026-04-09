@@ -281,11 +281,52 @@
     return empty;
   });
 
+  // Compute next-step suggestions for the currently open note.
+  // Only shown when the note is the last completed item and there are no queued sessions.
+  let openNoteNextSteps = $derived.by(() => {
+    if (!openNote || !timeline) return null;
+    const note = timeline.notes.find((n) => n.id === openNote.noteId);
+    if (!note) return null;
+    if (!note.suggestedNextCommitStep && !note.suggestedNextNoteStep) return null;
+
+    // Check no queued sessions
+    const hasQueuedSessions =
+      timeline.commits.some((c) => c.sessionStatus === 'queued') ||
+      timeline.notes.some((n) => n.sessionStatus === 'queued') ||
+      timeline.reviews.some((r) => r.sessionStatus === 'queued');
+    if (hasQueuedSessions) return null;
+
+    // Check this note is the latest completed item
+    const noteTs = Math.floor((note.completedAt ?? note.createdAt) / 1000);
+    for (const c of timeline.commits) {
+      if (c.sha && c.timestamp > noteTs) return null;
+    }
+    for (const n of timeline.notes) {
+      if (n.id === note.id) continue;
+      const ts = Math.floor((n.completedAt ?? n.createdAt) / 1000);
+      if (ts > noteTs) return null;
+    }
+    for (const r of timeline.reviews) {
+      const ts = Math.floor((r.completedAt ?? r.createdAt) / 1000);
+      if (ts > noteTs) return null;
+    }
+
+    return {
+      commitStep: note.suggestedNextCommitStep,
+      noteStep: note.suggestedNextNoteStep,
+    };
+  });
+
   // Commit diff modal (opened by clicking a commit in the timeline)
   let commitDiffSha = $state<string | null>(null);
 
   // Note modal (opened by clicking a note in the timeline)
-  let openNote = $state<{ title: string; content: string; sessionId?: string } | null>(null);
+  let openNote = $state<{
+    noteId: string;
+    title: string;
+    content: string;
+    sessionId?: string;
+  } | null>(null);
 
   // Image viewer modal (opened by clicking an image in the timeline)
   let viewImageId = $state<string | null>(null);
@@ -528,8 +569,8 @@
     commitDiffSha = sha;
   }
 
-  function handleNoteClick(_noteId: string, title: string, content: string, sessionId?: string) {
-    openNote = { title, content, sessionId };
+  function handleNoteClick(noteId: string, title: string, content: string, sessionId?: string) {
+    openNote = { noteId, title, content, sessionId };
   }
 
   async function handleReviewClick(reviewId: string) {
@@ -990,10 +1031,16 @@
     title={openNote.title}
     content={openNote.content}
     sessionId={openNote.sessionId}
+    nextSteps={openNoteNextSteps}
     onClose={() => (openNote = null)}
     onOpenSession={(sid) => {
       openNote = null;
       sessionMgr.openSessionId = sid;
+    }}
+    onStartSession={(mode, prefill) => {
+      openNote = null;
+      sessionMgr.draftPrompt = prefill;
+      sessionMgr.openNewSession(mode);
     }}
   />
 {/if}
@@ -1060,7 +1107,7 @@
     onOpenNote={(noteId, title, content) => {
       const sid = sessionMgr.openSessionId;
       sessionMgr.openSessionId = null;
-      openNote = { title, content, sessionId: sid ?? undefined };
+      openNote = { noteId, title, content, sessionId: sid ?? undefined };
     }}
     onClose={async () => {
       const closedSessionId = sessionMgr.openSessionId;

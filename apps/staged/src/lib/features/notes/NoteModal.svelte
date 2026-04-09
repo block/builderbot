@@ -24,9 +24,14 @@
     /** When set, shows a button to open the associated chat session. */
     sessionId?: string | null;
     onOpenSession?: (sessionId: string) => void;
+    /** Suggested next steps to show as action buttons at the bottom. */
+    nextSteps?: { commitStep: string | null; noteStep: string | null } | null;
+    /** Called when the user clicks a next-step button. */
+    onStartSession?: (mode: 'commit' | 'note', prefill: string) => void;
   }
 
-  let { title, content, onClose, sessionId, onOpenSession }: Props = $props();
+  let { title, content, onClose, sessionId, onOpenSession, nextSteps, onStartSession }: Props =
+    $props();
 
   let copied = $state(false);
   const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
@@ -215,6 +220,32 @@
         <p class="empty-note">This note has no content.</p>
       {/if}
     </div>
+    {#if nextSteps && onStartSession && (nextSteps.noteStep || nextSteps.commitStep)}
+      <div class="next-steps">
+        {#if nextSteps.noteStep}
+          <div class="next-step-row">
+            <span class="next-step-prompt">{nextSteps.noteStep}</span>
+            <button
+              class="next-step-btn note-btn"
+              onclick={() => onStartSession?.('note', nextSteps!.noteStep!)}
+            >
+              Start note
+            </button>
+          </div>
+        {/if}
+        {#if nextSteps.commitStep}
+          <div class="next-step-row">
+            <span class="next-step-prompt">{nextSteps.commitStep}</span>
+            <button
+              class="next-step-btn commit-btn"
+              onclick={() => onStartSession?.('commit', nextSteps!.commitStep!)}
+            >
+              Start commit
+            </button>
+          </div>
+        {/if}
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -473,5 +504,64 @@
   .markdown-content :global(th) {
     background: var(--bg-primary);
     font-weight: 600;
+  }
+
+  .next-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--border-subtle);
+    flex-shrink: 0;
+  }
+
+  .next-step-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    background: var(--bg-elevated);
+    border-radius: 8px;
+  }
+
+  .next-step-prompt {
+    flex: 1;
+    font-size: var(--size-sm);
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+  }
+
+  .next-step-btn {
+    flex-shrink: 0;
+    padding: 4px 12px;
+    border: none;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition:
+      background-color 0.1s,
+      opacity 0.1s;
+  }
+
+  .next-step-btn.note-btn {
+    color: var(--note-color);
+    background: var(--note-bg);
+  }
+
+  .next-step-btn.note-btn:hover {
+    opacity: 0.85;
+  }
+
+  .next-step-btn.commit-btn {
+    color: var(--commit-color);
+    background: var(--commit-bg);
+  }
+
+  .next-step-btn.commit-btn:hover {
+    opacity: 0.85;
   }
 </style>

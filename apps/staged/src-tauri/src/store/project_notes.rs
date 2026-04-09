@@ -9,8 +9,8 @@ impl Store {
     pub fn create_project_note(&self, note: &ProjectNote) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO project_notes (id, project_id, session_id, title, content, created_at, updated_at, completed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO project_notes (id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 note.id,
                 note.project_id,
@@ -20,6 +20,8 @@ impl Store {
                 note.created_at,
                 note.updated_at,
                 note.completed_at,
+                note.suggested_next_commit_step,
+                note.suggested_next_note_step,
             ],
         )?;
         Ok(())
@@ -28,7 +30,7 @@ impl Store {
     pub fn get_project_note(&self, id: &str) -> Result<Option<ProjectNote>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at
+            "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
              FROM project_notes WHERE id = ?1",
             params![id],
             Self::row_to_project_note,
@@ -40,7 +42,7 @@ impl Store {
     pub fn list_project_notes(&self, project_id: &str) -> Result<Vec<ProjectNote>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at
+            "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
              FROM project_notes
              WHERE project_id = ?1
              ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC",
@@ -56,7 +58,7 @@ impl Store {
     ) -> Result<Option<ProjectNote>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at
+            "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
              FROM project_notes WHERE session_id = ?1",
             params![session_id],
             Self::row_to_project_note,
@@ -72,7 +74,7 @@ impl Store {
     ) -> Result<Option<ProjectNote>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at
+            "SELECT id, project_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
              FROM project_notes WHERE session_id = ?1 AND content = ''",
             params![session_id],
             Self::row_to_project_note,
@@ -86,14 +88,16 @@ impl Store {
         id: &str,
         title: &str,
         content: &str,
+        suggested_next_commit_step: Option<&str>,
+        suggested_next_note_step: Option<&str>,
     ) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         let now = now_timestamp();
         conn.execute(
             "UPDATE project_notes
-             SET title = ?1, content = ?2, updated_at = ?3, completed_at = COALESCE(completed_at, ?4)
-             WHERE id = ?5",
-            params![title, content, now, now, id],
+             SET title = ?1, content = ?2, updated_at = ?3, completed_at = COALESCE(completed_at, ?4), suggested_next_commit_step = ?5, suggested_next_note_step = ?6
+             WHERE id = ?7",
+            params![title, content, now, now, suggested_next_commit_step, suggested_next_note_step, id],
         )?;
         Ok(())
     }
@@ -124,6 +128,8 @@ impl Store {
             created_at: row.get(5)?,
             updated_at: row.get(6)?,
             completed_at: row.get(7)?,
+            suggested_next_commit_step: row.get(8)?,
+            suggested_next_note_step: row.get(9)?,
         })
     }
 }

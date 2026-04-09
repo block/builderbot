@@ -114,6 +114,8 @@ export interface NoteTimelineItem {
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
+  suggestedNextCommitStep: string | null;
+  suggestedNextNoteStep: string | null;
 }
 
 export interface ReviewTimelineItem {
@@ -210,6 +212,8 @@ export interface ProjectNote {
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
+  suggestedNextCommitStep: string | null;
+  suggestedNextNoteStep: string | null;
 }
 
 export interface ProjectSessionResponse {

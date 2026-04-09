@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio_util::sync::CancellationToken;
 
@@ -695,6 +695,21 @@ fn run_post_completion_hooks(
                 .filter(|m| m.role == MessageRole::Assistant)
                 .find_map(|m| extract_note_content(&m.content));
 
+            // Search assistant messages in reverse so the *last* message
+            // containing the fenced block wins (mirrors extract_note_content).
+            let suggested_next_steps = messages
+                .iter()
+                .rev()
+                .filter(|m| m.role == MessageRole::Assistant)
+                .find_map(|m| extract_suggested_next_steps(&m.content));
+            if let Some(ref steps) = suggested_next_steps {
+                log::info!(
+                    "Session {session_id}: extracted suggested next steps — commit: {:?}, note: {:?}",
+                    steps.suggested_next_commit_step,
+                    steps.suggested_next_note_step,
+                );
+            }
+
             for target in &note_targets {
                 let label = match target.kind {
                     NoteKind::Repo => "note",
@@ -711,14 +726,26 @@ fn run_post_completion_hooks(
                             "extracted"
                         }
                     );
+                    let sncs = suggested_next_steps
+                        .as_ref()
+                        .and_then(|s| s.suggested_next_commit_step.as_deref());
+                    let snns = suggested_next_steps
+                        .as_ref()
+                        .and_then(|s| s.suggested_next_note_step.as_deref());
                     let result = match target.kind {
-                        NoteKind::Repo => {
-                            store.update_note_title_and_content(&target.id, &final_title, &body)
-                        }
+                        NoteKind::Repo => store.update_note_title_and_content(
+                            &target.id,
+                            &final_title,
+                            &body,
+                            sncs,
+                            snns,
+                        ),
                         NoteKind::Project => store.update_project_note_title_and_content(
                             &target.id,
                             &final_title,
                             &body,
+                            sncs,
+                            snns,
                         ),
                     };
                     if let Err(e) = result {
@@ -1069,6 +1096,35 @@ fn extract_review_title(text: &str) -> Option<String> {
         None
     } else {
         Some(title.to_string())
+    }
+}
+
+/// Structured representation of the suggested next steps extracted from a
+/// `suggested-next-steps` fenced block.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SuggestedNextSteps {
+    suggested_next_commit_step: Option<String>,
+    suggested_next_note_step: Option<String>,
+}
+
+/// Extract suggested next steps from assistant output.
+///
+/// Looks for a ```suggested-next-steps fenced block and parses the JSON object
+/// inside.  Returns `None` if the block is missing or cannot be parsed.
+fn extract_suggested_next_steps(text: &str) -> Option<SuggestedNextSteps> {
+    let marker = "```suggested-next-steps";
+    let start_pos = find_opening_fence(text, marker)?;
+    let block_start = start_pos + marker.len();
+    let content_start = block_start + text[block_start..].find('\n')? + 1;
+    let end_pos = find_closing_fence(&text[content_start..])?;
+    let json_str = text[content_start..content_start + end_pos].trim();
+    match serde_json::from_str::<SuggestedNextSteps>(json_str) {
+        Ok(steps) => Some(steps),
+        Err(e) => {
+            log::warn!("Failed to parse suggested-next-steps JSON: {e}");
+            None
+        }
     }
 }
 
@@ -1634,5 +1690,61 @@ Second batch:
             strip_action_wrapper(input),
             "leftover</action>\nreal prompt"
         );
+    }
+
+    // ── extract_suggested_next_steps ────────────────────────────────────
+
+    #[test]
+    fn extract_steps_valid_both_fields() {
+        let text = r#"Here are the notes.
+
+```suggested-next-steps
+{"suggestedNextCommitStep": "Implement the plan", "suggestedNextNoteStep": "Research alternatives"}
+```
+
+---
+# Title
+Body
+"#;
+        let steps = extract_suggested_next_steps(text).unwrap();
+        assert_eq!(
+            steps.suggested_next_commit_step.as_deref(),
+            Some("Implement the plan")
+        );
+        assert_eq!(
+            steps.suggested_next_note_step.as_deref(),
+            Some("Research alternatives")
+        );
+    }
+
+    #[test]
+    fn extract_steps_null_fields() {
+        let text = "```suggested-next-steps\n{\"suggestedNextCommitStep\": null, \"suggestedNextNoteStep\": null}\n```\n";
+        let steps = extract_suggested_next_steps(text).unwrap();
+        assert_eq!(steps.suggested_next_commit_step, None);
+        assert_eq!(steps.suggested_next_note_step, None);
+    }
+
+    #[test]
+    fn extract_steps_partial_fields() {
+        let text = "```suggested-next-steps\n{\"suggestedNextCommitStep\": \"Fix the bug\", \"suggestedNextNoteStep\": null}\n```\n";
+        let steps = extract_suggested_next_steps(text).unwrap();
+        assert_eq!(
+            steps.suggested_next_commit_step.as_deref(),
+            Some("Fix the bug")
+        );
+        assert_eq!(steps.suggested_next_note_step, None);
+    }
+
+    #[test]
+    fn extract_steps_missing_block() {
+        let text = "Just a normal assistant message with no fenced blocks.";
+        assert!(extract_suggested_next_steps(text).is_none());
+    }
+
+    #[test]
+    fn extract_steps_malformed_json() {
+        let text = "```suggested-next-steps\n{not valid json}\n```\n";
+        assert!(extract_suggested_next_steps(text).is_none());
     }
 }

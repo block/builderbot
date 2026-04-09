@@ -88,14 +88,14 @@ fn test_project_note_completion_is_write_once() {
     assert!(before.completed_at.is_none());
 
     store
-        .update_project_note_title_and_content(&note.id, "First", "Initial content")
+        .update_project_note_title_and_content(&note.id, "First", "Initial content", None, None)
         .unwrap();
     let completed = store.get_project_note(&note.id).unwrap().unwrap();
     let first_completed_at = completed.completed_at.unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(2));
     store
-        .update_project_note_title_and_content(&note.id, "Second", "Updated content")
+        .update_project_note_title_and_content(&note.id, "Second", "Updated content", None, None)
         .unwrap();
     let updated = store.get_project_note(&note.id).unwrap().unwrap();
 
@@ -117,11 +117,11 @@ fn test_list_project_notes_orders_by_completion_time() {
     store.create_project_note(&newer).unwrap();
 
     store
-        .update_project_note_title_and_content(&newer.id, "Newer", "Completed first")
+        .update_project_note_title_and_content(&newer.id, "Newer", "Completed first", None, None)
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(2));
     store
-        .update_project_note_title_and_content(&older.id, "Older", "Completed second")
+        .update_project_note_title_and_content(&older.id, "Older", "Completed second", None, None)
         .unwrap();
 
     let notes = store.list_project_notes(&project.id).unwrap();
@@ -890,11 +890,11 @@ fn test_list_notes_for_branch_orders_by_completion_time() {
     store.create_note(&newer).unwrap();
 
     store
-        .update_note_title_and_content(&newer.id, "Newer", "Completed first")
+        .update_note_title_and_content(&newer.id, "Newer", "Completed first", None, None)
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(2));
     store
-        .update_note_title_and_content(&older.id, "Older", "Completed second")
+        .update_note_title_and_content(&older.id, "Older", "Completed second", None, None)
         .unwrap();
 
     let notes = store.list_notes_for_branch(&branch.id).unwrap();

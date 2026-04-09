@@ -691,6 +691,10 @@ pub struct Note {
     /// When the AI session finished producing this note's content.
     /// `None` while the session is still running.
     pub completed_at: Option<i64>,
+    /// AI-suggested prompt for a follow-up commit session.
+    pub suggested_next_commit_step: Option<String>,
+    /// AI-suggested prompt for a follow-up note session.
+    pub suggested_next_note_step: Option<String>,
 }
 
 impl Note {
@@ -706,6 +710,8 @@ impl Note {
             created_at: now,
             updated_at: now,
             completed_at: if has_content { Some(now) } else { None },
+            suggested_next_commit_step: None,
+            suggested_next_note_step: None,
         }
     }
 
@@ -737,6 +743,10 @@ pub struct ProjectNote {
     /// When the AI session finished producing this project note's content.
     /// `None` while the session is still running.
     pub completed_at: Option<i64>,
+    /// AI-suggested prompt for a follow-up commit session.
+    pub suggested_next_commit_step: Option<String>,
+    /// AI-suggested prompt for a follow-up note session.
+    pub suggested_next_note_step: Option<String>,
 }
 
 impl ProjectNote {
@@ -752,6 +762,8 @@ impl ProjectNote {
             created_at: now,
             updated_at: now,
             completed_at: if has_content { Some(now) } else { None },
+            suggested_next_commit_step: None,
+            suggested_next_note_step: None,
         }
     }
 

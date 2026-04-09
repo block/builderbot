@@ -283,38 +283,71 @@
 
   // Compute next-step suggestions for the currently open note.
   // Only shown when the note is the last completed item and there are no queued sessions.
+  // Memoized to preserve object identity across reactive re-evaluations so that
+  // NoteModal buttons don't lose hover state from unnecessary DOM re-creation.
+  let prevNextSteps: { commitStep: string | null; noteStep: string | null } | null = null;
   let openNoteNextSteps = $derived.by(() => {
-    if (!openNote || !timeline) return null;
+    if (!openNote || !timeline) {
+      prevNextSteps = null;
+      return null;
+    }
     const note = timeline.notes.find((n) => n.id === openNote.noteId);
-    if (!note) return null;
-    if (!note.suggestedNextCommitStep && !note.suggestedNextNoteStep) return null;
+    if (!note) {
+      prevNextSteps = null;
+      return null;
+    }
+    if (!note.suggestedNextCommitStep && !note.suggestedNextNoteStep) {
+      prevNextSteps = null;
+      return null;
+    }
 
     // Check no queued sessions
     const hasQueuedSessions =
       timeline.commits.some((c) => c.sessionStatus === 'queued') ||
       timeline.notes.some((n) => n.sessionStatus === 'queued') ||
       timeline.reviews.some((r) => r.sessionStatus === 'queued');
-    if (hasQueuedSessions) return null;
+    if (hasQueuedSessions) {
+      prevNextSteps = null;
+      return null;
+    }
 
     // Check this note is the latest completed item
     const noteTs = Math.floor((note.completedAt ?? note.createdAt) / 1000);
     for (const c of timeline.commits) {
-      if (c.sha && c.timestamp > noteTs) return null;
+      if (c.sha && c.timestamp > noteTs) {
+        prevNextSteps = null;
+        return null;
+      }
     }
     for (const n of timeline.notes) {
       if (n.id === note.id) continue;
       const ts = Math.floor((n.completedAt ?? n.createdAt) / 1000);
-      if (ts > noteTs) return null;
+      if (ts > noteTs) {
+        prevNextSteps = null;
+        return null;
+      }
     }
     for (const r of timeline.reviews) {
       const ts = Math.floor((r.completedAt ?? r.createdAt) / 1000);
-      if (ts > noteTs) return null;
+      if (ts > noteTs) {
+        prevNextSteps = null;
+        return null;
+      }
     }
 
-    return {
+    if (
+      prevNextSteps &&
+      prevNextSteps.commitStep === note.suggestedNextCommitStep &&
+      prevNextSteps.noteStep === note.suggestedNextNoteStep
+    ) {
+      return prevNextSteps;
+    }
+
+    prevNextSteps = {
       commitStep: note.suggestedNextCommitStep,
       noteStep: note.suggestedNextNoteStep,
     };
+    return prevNextSteps;
   });
 
   // Commit diff modal (opened by clicking a commit in the timeline)

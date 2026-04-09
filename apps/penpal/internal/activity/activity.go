@@ -1,6 +1,8 @@
 package activity
 
 import (
+	"encoding/json"
+	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -33,14 +35,23 @@ type fileKey struct {
 }
 
 type Tracker struct {
-	mu    sync.RWMutex
-	files map[fileKey]*FileActivity
+	mu       sync.RWMutex
+	files    map[fileKey]*FileActivity
+	onChange func() // called (under no lock) after Record() mutates state
 }
 
 func New() *Tracker {
 	return &Tracker{
 		files: make(map[fileKey]*FileActivity),
 	}
+}
+
+// SetOnChange registers a callback invoked after every Record() call.
+// E-PENPAL-ACTIVITY-PERSIST: hook for debounced save after mutations.
+func (t *Tracker) SetOnChange(fn func()) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.onChange = fn
 }
 
 // RecordAt records activity with a specific timestamp. It does NOT overwrite
@@ -70,14 +81,18 @@ func (t *Tracker) RecordAt(activityType EventType, project, filePath string, tim
 func (t *Tracker) Record(activityType EventType, project, filePath string) {
 	key := fileKey{Project: project, FilePath: filePath}
 	t.mu.Lock()
-	defer t.mu.Unlock()
-
 	t.files[key] = &FileActivity{
 		Type:      activityType,
 		Timestamp: time.Now(),
 		Project:   project,
 		FilePath:  filePath,
 		FileName:  filepath.Base(filePath),
+	}
+	cb := t.onChange
+	t.mu.Unlock()
+
+	if cb != nil {
+		cb()
 	}
 }
 
@@ -112,4 +127,65 @@ func (t *Tracker) Lookup(project, filePath string) *FileActivity {
 	}
 	copy := *fa
 	return &copy
+}
+
+// maxPersistedEntries caps the number of entries saved to disk.
+// Only the most recent entries are kept; older ones are pruned on save.
+const maxPersistedEntries = 500
+
+// Save persists activity entries to a JSON file (atomic write).
+// Prunes to the most recent maxPersistedEntries to bound file size.
+// E-PENPAL-ACTIVITY-PERSIST: atomic save via MkdirAll + tmp + rename.
+func (t *Tracker) Save(path string) error {
+	t.mu.RLock()
+	entries := make([]FileActivity, 0, len(t.files))
+	for _, fa := range t.files {
+		entries = append(entries, *fa)
+	}
+	t.mu.RUnlock()
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Timestamp.After(entries[j].Timestamp)
+	})
+	if len(entries) > maxPersistedEntries {
+		entries = entries[:maxPersistedEntries]
+	}
+
+	data, err := json.Marshal(entries)
+	if err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// Load reads activity entries from a JSON file and seeds them via RecordAt
+// so that runtime events always take priority over persisted data.
+// E-PENPAL-ACTIVITY-PERSIST: load persisted activity on startup.
+func (t *Tracker) Load(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	var entries []FileActivity
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return err
+	}
+
+	for i := range entries {
+		e := &entries[i]
+		t.RecordAt(e.Type, e.Project, e.FilePath, e.Timestamp)
+	}
+	return nil
 }

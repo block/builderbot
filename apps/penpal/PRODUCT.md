@@ -182,7 +182,7 @@ Global views aggregate content across all projects. They appear as top-level ite
 
 - <a id="P-PENPAL-GLOBAL-IN-REVIEW"></a>**P-PENPAL-GLOBAL-IN-REVIEW**: The global In Review view shows all files with open comment threads across all projects. The sidebar shows a breadcrumb (⌂ / In Review) and a flat list of two-line file rows. Each row shows the filename on the first line and workspace / project / source path context on the second line.
 
-- <a id="P-PENPAL-GLOBAL-RECENT"></a>**P-PENPAL-GLOBAL-RECENT**: The global Recent view shows up to 50 recently active files across all projects, sorted by most recent activity first. The sidebar shows a breadcrumb (⌂ / Recent) and two-line file rows with filename, context path, and relative timestamp. Each entry shows an activity type label (viewed, modified, created, comment, published).
+- <a id="P-PENPAL-GLOBAL-RECENT"></a>**P-PENPAL-GLOBAL-RECENT**: The global Recent view shows up to 50 recently active files across all projects, sorted by most recent activity first. The sidebar shows a breadcrumb (⌂ / Recent) and two-line file rows with filename, context path, and relative timestamp. Each entry shows an activity type label (viewed, modified, created, comment, published). Activity history persists across app launches so that recent files are not lost when the server restarts.
 
 - <a id="P-PENPAL-GLOBAL-ROW-NAVIGATE"></a>**P-PENPAL-GLOBAL-ROW-NAVIGATE**: Clicking a file in a global view navigates the current tab to that file and switches the sidebar to the file's project context. Cmd+Click opens in a new tab.
 

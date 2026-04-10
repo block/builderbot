@@ -197,6 +197,15 @@
   /** True when the branch has at least one finalized commit (code changes vs base). */
   let hasCodeChanges = $derived(timeline?.commits.some((c) => c.sha) ?? false);
 
+  /** True when the branch has at least one queued or running session. */
+  function hasActiveSessions(tl: NonNullable<typeof timeline>): boolean {
+    return (
+      tl.commits.some((c) => c.sessionStatus === 'queued' || c.sessionStatus === 'running') ||
+      tl.notes.some((n) => n.sessionStatus === 'queued' || n.sessionStatus === 'running') ||
+      tl.reviews.some((r) => r.sessionStatus === 'queued' || r.sessionStatus === 'running')
+    );
+  }
+
   // Compute suggested prefill prompts from the latest visible timeline entry.
   // Only used when the user hasn't typed a draft yet.
   let suggestedPrefill = $derived.by(() => {
@@ -205,11 +214,7 @@
 
     // Don't prefill when there are active (queued or running) sessions — the user
     // should wait for those to complete before starting new work.
-    const hasActiveSessions =
-      timeline.commits.some((c) => c.sessionStatus === 'queued' || c.sessionStatus === 'running') ||
-      timeline.notes.some((n) => n.sessionStatus === 'queued' || n.sessionStatus === 'running') ||
-      timeline.reviews.some((r) => r.sessionStatus === 'queued' || r.sessionStatus === 'running');
-    if (hasActiveSessions) return empty;
+    if (hasActiveSessions(timeline)) return empty;
 
     // Find the latest completed item across commits, notes, and reviews
     type Candidate =
@@ -225,13 +230,11 @@
     const candidates: Candidate[] = [];
 
     for (const review of timeline.reviews) {
-      if (review.sessionStatus === 'running') continue;
       const ts = Math.floor((review.completedAt ?? review.createdAt) / 1000);
       candidates.push({ kind: 'review', commentCount: review.commentCount, timestamp: ts });
     }
 
     for (const note of timeline.notes) {
-      if (note.sessionStatus === 'running') continue;
       const ts = Math.floor((note.completedAt ?? note.createdAt) / 1000);
       candidates.push({
         kind: 'note',
@@ -291,27 +294,22 @@
     if (!note) return null;
     if (!note.suggestedNextCommitStep && !note.suggestedNextNoteStep) return null;
 
-    // Check no active (queued or running) sessions
-    const hasActiveSessions =
-      timeline.commits.some((c) => c.sessionStatus === 'queued' || c.sessionStatus === 'running') ||
-      timeline.notes.some((n) => n.sessionStatus === 'queued' || n.sessionStatus === 'running') ||
-      timeline.reviews.some((r) => r.sessionStatus === 'queued' || r.sessionStatus === 'running');
-    if (hasActiveSessions) return null;
+    if (hasActiveSessions(timeline)) return null;
 
-    // Check this note is the latest completed item
+    // Check this note is the latest completed item using the same approach
+    // as suggestedPrefill: collect all timestamps and compare.
     const noteTs = Math.floor((note.completedAt ?? note.createdAt) / 1000);
+    const timestamps: number[] = [];
     for (const c of timeline.commits) {
-      if (c.sha && c.timestamp > noteTs) return null;
+      if (c.sha) timestamps.push(c.timestamp);
     }
     for (const n of timeline.notes) {
-      if (n.id === note.id) continue;
-      const ts = Math.floor((n.completedAt ?? n.createdAt) / 1000);
-      if (ts > noteTs) return null;
+      if (n.id !== note.id) timestamps.push(Math.floor((n.completedAt ?? n.createdAt) / 1000));
     }
     for (const r of timeline.reviews) {
-      const ts = Math.floor((r.completedAt ?? r.createdAt) / 1000);
-      if (ts > noteTs) return null;
+      timestamps.push(Math.floor((r.completedAt ?? r.createdAt) / 1000));
     }
+    if (timestamps.some((ts) => ts > noteTs)) return null;
 
     return {
       commitStep: note.suggestedNextCommitStep,

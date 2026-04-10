@@ -227,7 +227,7 @@
             <span class="next-step-prompt">{nextSteps.noteStep}</span>
             <button
               class="next-step-btn note-btn"
-              onclick={() => onStartSession?.('note', nextSteps!.noteStep!)}
+              onclick={() => onStartSession('note', nextSteps!.noteStep!)}
             >
               Start note
             </button>
@@ -238,7 +238,7 @@
             <span class="next-step-prompt">{nextSteps.commitStep}</span>
             <button
               class="next-step-btn commit-btn"
-              onclick={() => onStartSession?.('commit', nextSteps!.commitStep!)}
+              onclick={() => onStartSession('commit', nextSteps!.commitStep!)}
             >
               Start commit
             </button>

@@ -89,11 +89,14 @@ export function createDiffViewerState(
     state.error = null;
 
     try {
+      const t0 = performance.now();
+      console.info('[diff] getDiffFiles start', { branchId: state.branchId, scope: state.scope, commitSha: state.commitSha });
       const response = await commands.getDiffFiles(
         state.branchId,
         state.commitSha ?? undefined,
         state.scope
       );
+      console.info('[diff] getDiffFiles done', { files: response.files.length, elapsed: `${(performance.now() - t0).toFixed(1)}ms` });
 
       state.commitSha = response.commitSha;
       state.files = response.files;
@@ -136,7 +139,22 @@ export function createDiffViewerState(
     state.loadingFile = path;
 
     try {
+      const t0 = performance.now();
+      console.info('[diff] getFileDiff start', { path, commitSha: state.commitSha, scope: state.scope });
       const diff = await commands.getFileDiff(state.branchId, state.commitSha, state.scope, path);
+      const beforeLineCount = diff.before?.content?.type === 'Text' ? diff.before.content.lines.length : 0;
+      const afterLineCount = diff.after?.content?.type === 'Text' ? diff.after.content.lines.length : 0;
+      const beforeMaxLen = diff.before?.content?.type === 'Text' ? Math.max(0, ...diff.before.content.lines.map((l: string) => l.length)) : 0;
+      const afterMaxLen = diff.after?.content?.type === 'Text' ? Math.max(0, ...diff.after.content.lines.map((l: string) => l.length)) : 0;
+      console.info('[diff] getFileDiff done', {
+        path,
+        elapsed: `${(performance.now() - t0).toFixed(1)}ms`,
+        beforeLines: beforeLineCount,
+        afterLines: afterLineCount,
+        beforeMaxLineLen: beforeMaxLen,
+        afterMaxLineLen: afterMaxLen,
+        alignments: diff.alignments.length,
+      });
       // New Map for reactivity.
       const newCache = new Map(state.diffCache);
       newCache.set(path, diff);

@@ -325,6 +325,7 @@ pub fn parse_name_status(output: &str) -> Result<Vec<FileDiffSummary>, GitError>
 /// This is reliable and battle-tested - we use git CLI only for list_diff_files
 /// where fsmonitor support matters for performance.
 pub fn get_file_diff(repo_path: &Path, spec: &DiffSpec, path: &Path) -> Result<FileDiff, GitError> {
+    let start = std::time::Instant::now();
     // Resolve MergeBase to concrete SHA
     let spec = resolve_spec(repo_path, spec)?;
 
@@ -341,6 +342,7 @@ pub fn get_file_diff(repo_path: &Path, spec: &DiffSpec, path: &Path) -> Result<F
     };
 
     // Load file content
+    let t_load = std::time::Instant::now();
     let before = load_file_from_tree(&repo, base_tree.as_ref(), path)?;
     let after = if is_working_tree {
         load_file_from_workdir(&repo, path)?
@@ -349,8 +351,10 @@ pub fn get_file_diff(repo_path: &Path, spec: &DiffSpec, path: &Path) -> Result<F
     } else {
         load_file_from_tree(&repo, head_tree.as_ref(), path)?
     };
+    let load_elapsed = t_load.elapsed();
 
     // Get hunks via libgit2
+    let t_hunks = std::time::Instant::now();
     let hunks = get_hunks_libgit2(
         &repo,
         base_tree.as_ref(),
@@ -359,9 +363,23 @@ pub fn get_file_diff(repo_path: &Path, spec: &DiffSpec, path: &Path) -> Result<F
         is_index,
         path,
     )?;
+    let hunks_elapsed = t_hunks.elapsed();
 
     // Compute alignments from hunks
+    let t_align = std::time::Instant::now();
     let alignments = compute_alignments_from_hunks(&hunks, &before, &after);
+    let align_elapsed = t_align.elapsed();
+
+    log::info!(
+        "git-diff get_file_diff: path={} total={:?} load={:?} hunks={:?}({}) align={:?}({})",
+        path.display(),
+        start.elapsed(),
+        load_elapsed,
+        hunks_elapsed,
+        hunks.len(),
+        align_elapsed,
+        alignments.len()
+    );
 
     Ok(FileDiff {
         before,

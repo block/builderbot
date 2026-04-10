@@ -86,7 +86,15 @@ function lcsLength(a: string, b: string): number {
 function similarity(a: string, b: string): number {
   if (a.length === 0 && b.length === 0) return 1;
   if (a.length === 0 || b.length === 0) return 0;
+  const product = a.length * b.length;
+  if (product > 1_000_000) {
+    console.info('[diff] similarity: large line pair', { aLen: a.length, bLen: b.length, product });
+  }
+  const t0 = product > 1_000_000 ? performance.now() : 0;
   const lcsLen = lcsLength(a, b);
+  if (t0 > 0) {
+    console.info('[diff] similarity done', { elapsed: `${(performance.now() - t0).toFixed(1)}ms` });
+  }
   return (2 * lcsLen) / (a.length + b.length);
 }
 
@@ -100,8 +108,12 @@ function computeCharHighlights(
   before: string,
   after: string,
 ): { beforeHighlights: CharHighlight[]; afterHighlights: CharHighlight[] } {
+  const t0 = performance.now();
   const beforeTokens = splitWords(before);
   const afterTokens = splitWords(after);
+  if (beforeTokens.length * afterTokens.length > 1_000_000) {
+    console.info('[diff] computeCharHighlights: large token pair', { beforeTokens: beforeTokens.length, afterTokens: afterTokens.length, beforeLen: before.length, afterLen: after.length });
+  }
 
   const { aIndices, bIndices } = lcsIndices(beforeTokens, afterTokens);
 
@@ -123,6 +135,11 @@ function computeCharHighlights(
       afterHighlights.push({ start: pos, end: pos + tokenLen });
     }
     pos += tokenLen;
+  }
+
+  const elapsed = performance.now() - t0;
+  if (elapsed > 10) {
+    console.info('[diff] computeCharHighlights done', { elapsed: `${elapsed.toFixed(1)}ms`, beforeLen: before.length, afterLen: after.length });
   }
 
   return {
@@ -152,6 +169,11 @@ export function computeLineDiff(
   beforeLines: string[],
   afterLines: string[],
 ): LineDiffResult {
+  const t0 = performance.now();
+  const beforeMaxLen = Math.max(0, ...beforeLines.map(l => l.length));
+  const afterMaxLen = Math.max(0, ...afterLines.map(l => l.length));
+  console.info('[diff] computeLineDiff start', { beforeLines: beforeLines.length, afterLines: afterLines.length, beforeMaxLineLen: beforeMaxLen, afterMaxLineLen: afterMaxLen });
+
   const { aIndices: lcsBeforeIndices, bIndices: lcsAfterIndices } = lcsIndices(
     beforeLines,
     afterLines,
@@ -236,6 +258,9 @@ export function computeLineDiff(
     afterClasses[unmatchedAfter[ai]] = 'added';
     ai++;
   }
+
+  const elapsed = performance.now() - t0;
+  console.info('[diff] computeLineDiff done', { modifiedPairs: modifiedPairs.length, elapsed: `${elapsed.toFixed(1)}ms` });
 
   return {
     beforeLines: beforeClasses,

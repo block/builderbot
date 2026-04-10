@@ -15,6 +15,7 @@
     "dialog:default",
     "process:allow-restart",
     "updater:default",
+    "opener:default",
     "log:default"
   ]
 }

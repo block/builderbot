@@ -522,10 +522,12 @@
     }
 
     if (highlighterReady && languageReady) {
+      const t0 = performance.now();
       const beforeCode = beforeLines.join('\n');
       const afterCode = afterLines.join('\n');
       beforeTokens = beforeCode ? highlightLines(beforeCode, language) : [];
       afterTokens = afterCode ? highlightLines(afterCode, language) : [];
+      console.info('[diff] syntax highlight', { language, beforeLines: beforeLines.length, afterLines: afterLines.length, elapsed: `${(performance.now() - t0).toFixed(1)}ms` });
     } else {
       beforeTokens = beforeLines.map((line) => [{ content: line, color: 'inherit' }]);
       afterTokens = afterLines.map((line) => [{ content: line, color: 'inherit' }]);

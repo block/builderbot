@@ -559,14 +559,33 @@ pub fn collect_branch_diff(
     head_sha: &str,
     commit_shas: &[String],
 ) -> Result<CollectedDiffs> {
+    let start = std::time::Instant::now();
+    log::info!(
+        "collect_branch_diff: branch={branch_id} workspace={workspace_name} commits={}",
+        commit_shas.len()
+    );
     // Execute the collection script in a single remote call.
     let script = build_collect_script(repo_subpath, base_branch, head_sha, commit_shas);
+    let t_exec = std::time::Instant::now();
     let output = crate::blox::ws_exec(workspace_name, &["bash", "-c", &script])
         .map_err(|e| anyhow::anyhow!("remote diff collection script failed: {e}"))?;
+    log::info!(
+        "collect_branch_diff: remote exec done in {:?}, output size={} bytes",
+        t_exec.elapsed(),
+        output.len()
+    );
 
+    let t_parse = std::time::Instant::now();
     let result: CollectScriptOutput = serde_json::from_str(&output)
         .map_err(|e| anyhow::anyhow!("failed to parse remote diff collection output: {e}"))?;
+    log::info!(
+        "collect_branch_diff: parsed JSON in {:?}, files={} commits={}",
+        t_parse.elapsed(),
+        result.files.len(),
+        result.commits.len()
+    );
 
+    let t_process = std::time::Instant::now();
     let (files, file_diffs) = parse_script_files(&result.files);
 
     let cached_at = std::time::SystemTime::now()
@@ -582,6 +601,11 @@ pub fn collect_branch_diff(
         cached_at,
     };
 
+    log::info!(
+        "collect_branch_diff: processed file diffs in {:?}",
+        t_process.elapsed()
+    );
+
     // Parse commit-level diffs.
     let mut commit_results = Vec::new();
     for commit in &result.commits {
@@ -594,6 +618,13 @@ pub fn collect_branch_diff(
         };
         commit_results.push((commit_index, commit_file_diffs));
     }
+
+    log::info!(
+        "collect_branch_diff: total {:?}, {} file diffs, {} commits",
+        start.elapsed(),
+        file_diffs.len(),
+        commit_results.len()
+    );
 
     Ok((index, file_diffs, commit_results))
 }

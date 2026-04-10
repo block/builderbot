@@ -413,13 +413,22 @@ pub async fn get_diff_files(
     commit_sha: Option<String>,
     scope: String,
 ) -> Result<DiffFilesResponse, String> {
+    let start = std::time::Instant::now();
+    log::info!("get_diff_files: branch_id={branch_id} scope={scope} commit_sha={commit_sha:?}");
     let store = crate::get_store(&store)?;
     let ctx = resolve_branch_context(&store, &branch_id)?;
     if let Some(worktree_path) = ctx.worktree_path.as_deref() {
         let worktree = Path::new(worktree_path);
         let (spec, resolved_sha) =
             build_diff_spec(worktree, &ctx.base_branch, commit_sha.as_deref(), &scope)?;
+        let t0 = std::time::Instant::now();
         let files = git::list_diff_files(worktree, &spec).map_err(|e| e.to_string())?;
+        log::info!(
+            "get_diff_files: local list_diff_files returned {} files in {:?} (total {:?})",
+            files.len(),
+            t0.elapsed(),
+            start.elapsed()
+        );
         return Ok(DiffFilesResponse {
             commit_sha: resolved_sha,
             files,
@@ -497,13 +506,35 @@ pub async fn get_file_diff(
     scope: String,
     path: String,
 ) -> Result<git::FileDiff, String> {
+    let start = std::time::Instant::now();
+    log::info!("get_file_diff: path={path} scope={scope}");
     let store = crate::get_store(&store)?;
     let ctx = resolve_branch_context(&store, &branch_id)?;
     if let Some(worktree_path) = ctx.worktree_path.as_deref() {
         let worktree = Path::new(worktree_path);
         let (spec, _) = build_diff_spec(worktree, &ctx.base_branch, Some(&commit_sha), &scope)?;
         let file_path = Path::new(&path);
-        return git::get_file_diff(worktree, &spec, file_path).map_err(|e| e.to_string());
+        let result = git::get_file_diff(worktree, &spec, file_path).map_err(|e| e.to_string())?;
+        fn file_stats(f: &Option<git::File>) -> (usize, usize) {
+            match f {
+                Some(git::File {
+                    content: git::FileContent::Text { lines },
+                    ..
+                }) => {
+                    let max_len = lines.iter().map(|l| l.len()).max().unwrap_or(0);
+                    (lines.len(), max_len)
+                }
+                _ => (0, 0),
+            }
+        }
+        let (before_lines, before_max) = file_stats(&result.before);
+        let (after_lines, after_max) = file_stats(&result.after);
+        log::info!(
+            "get_file_diff: path={path} done in {:?} before={before_lines} lines (max {before_max} chars) after={after_lines} lines (max {after_max} chars) alignments={}",
+            start.elapsed(),
+            result.alignments.len()
+        );
+        return Ok(result);
     }
 
     // Check cache for branch-scope diffs.

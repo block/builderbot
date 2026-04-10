@@ -593,7 +593,7 @@
     flex: 1;
     min-width: 0;
     min-height: 0;
-    overflow: auto;
+    overflow-y: scroll;
   }
 
   .content {
@@ -682,6 +682,11 @@
   .filter-chip:hover:not(:disabled) {
     background: var(--bg-hover);
     border-color: var(--border-emphasis);
+  }
+
+  .filter-chip.active:hover:not(:disabled) {
+    background: var(--ui-accent);
+    border-color: var(--ui-accent);
   }
 
   .filter-chip:disabled {

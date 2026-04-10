@@ -83,18 +83,17 @@ function lcsLength(a: string, b: string): number {
   return prev[n];
 }
 
+const LCS_BAILOUT_PRODUCT = 1_000_000;
+
 function similarity(a: string, b: string): number {
   if (a.length === 0 && b.length === 0) return 1;
   if (a.length === 0 || b.length === 0) return 0;
   const product = a.length * b.length;
-  if (product > 1_000_000) {
-    console.info('[diff] similarity: large line pair', { aLen: a.length, bLen: b.length, product });
+  if (product > LCS_BAILOUT_PRODUCT) {
+    console.info('[diff] similarity: bailing out on large line pair', { aLen: a.length, bLen: b.length, product });
+    return 0;
   }
-  const t0 = product > 1_000_000 ? performance.now() : 0;
   const lcsLen = lcsLength(a, b);
-  if (t0 > 0) {
-    console.info('[diff] similarity done', { elapsed: `${(performance.now() - t0).toFixed(1)}ms` });
-  }
   return (2 * lcsLen) / (a.length + b.length);
 }
 
@@ -108,13 +107,17 @@ function computeCharHighlights(
   before: string,
   after: string,
 ): { beforeHighlights: CharHighlight[]; afterHighlights: CharHighlight[] } {
-  const t0 = performance.now();
   const beforeTokens = splitWords(before);
   const afterTokens = splitWords(after);
-  if (beforeTokens.length * afterTokens.length > 1_000_000) {
-    console.info('[diff] computeCharHighlights: large token pair', { beforeTokens: beforeTokens.length, afterTokens: afterTokens.length, beforeLen: before.length, afterLen: after.length });
+  if (beforeTokens.length * afterTokens.length > LCS_BAILOUT_PRODUCT) {
+    console.info('[diff] computeCharHighlights: bailing out on large token pair', { beforeTokens: beforeTokens.length, afterTokens: afterTokens.length, beforeLen: before.length, afterLen: after.length });
+    return {
+      beforeHighlights: before.length > 0 ? [{ start: 0, end: before.length }] : [],
+      afterHighlights: after.length > 0 ? [{ start: 0, end: after.length }] : [],
+    };
   }
 
+  const t0 = performance.now();
   const { aIndices, bIndices } = lcsIndices(beforeTokens, afterTokens);
 
   const beforeHighlights: CharHighlight[] = [];

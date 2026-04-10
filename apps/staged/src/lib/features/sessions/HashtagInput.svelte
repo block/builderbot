@@ -101,12 +101,21 @@
   });
 
   let lastExtractedValue = '';
+  let hasUnresolvedTokens = false;
 
   // When value changes from outside, re-render the editor content
   $effect(() => {
     if (value !== lastExtractedValue && editorEl) {
       renderContent(value);
       lastExtractedValue = value;
+    }
+  });
+
+  // When items become available, re-render to resolve plain-text tokens into badges
+  $effect(() => {
+    const _items = itemsById;
+    if (hasUnresolvedTokens && _items.size > 0 && editorEl) {
+      renderContent(value);
     }
   });
 
@@ -128,6 +137,7 @@
     const regex = new RegExp(TOKEN_REGEX.source, 'g');
     let lastIndex = 0;
     let match;
+    let unresolved = false;
 
     while ((match = regex.exec(val)) !== null) {
       if (match.index > lastIndex) {
@@ -143,6 +153,7 @@
         editorEl.appendChild(document.createTextNode('\u200B'));
       } else {
         editorEl.appendChild(document.createTextNode(match[0]));
+        unresolved = true;
       }
 
       lastIndex = match.index + match[0].length;
@@ -151,6 +162,8 @@
     if (lastIndex < val.length) {
       appendTextNodes(editorEl, val.slice(lastIndex));
     }
+
+    hasUnresolvedTokens = unresolved;
   }
 
   function appendTextNodes(parent: HTMLElement, text: string) {

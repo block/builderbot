@@ -594,7 +594,6 @@
     min-width: 0;
     min-height: 0;
     overflow: auto;
-    scrollbar-gutter: stable;
   }
 
   .content {

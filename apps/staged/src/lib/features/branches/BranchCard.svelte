@@ -203,13 +203,13 @@
     const empty = { commit: '', note: '' };
     if (!timeline) return empty;
 
-    // Don't prefill when there are visible queued sessions — the user should wait
-    // for those to complete before starting new work.
-    const hasQueuedSessions =
-      timeline.commits.some((c) => c.sessionStatus === 'queued') ||
-      timeline.notes.some((n) => n.sessionStatus === 'queued') ||
-      timeline.reviews.some((r) => r.sessionStatus === 'queued');
-    if (hasQueuedSessions) return empty;
+    // Don't prefill when there are active (queued or running) sessions — the user
+    // should wait for those to complete before starting new work.
+    const hasActiveSessions =
+      timeline.commits.some((c) => c.sessionStatus === 'queued' || c.sessionStatus === 'running') ||
+      timeline.notes.some((n) => n.sessionStatus === 'queued' || n.sessionStatus === 'running') ||
+      timeline.reviews.some((r) => r.sessionStatus === 'queued' || r.sessionStatus === 'running');
+    if (hasActiveSessions) return empty;
 
     // Find the latest completed item across commits, notes, and reviews
     type Candidate =
@@ -291,12 +291,12 @@
     if (!note) return null;
     if (!note.suggestedNextCommitStep && !note.suggestedNextNoteStep) return null;
 
-    // Check no queued sessions
-    const hasQueuedSessions =
-      timeline.commits.some((c) => c.sessionStatus === 'queued') ||
-      timeline.notes.some((n) => n.sessionStatus === 'queued') ||
-      timeline.reviews.some((r) => r.sessionStatus === 'queued');
-    if (hasQueuedSessions) return null;
+    // Check no active (queued or running) sessions
+    const hasActiveSessions =
+      timeline.commits.some((c) => c.sessionStatus === 'queued' || c.sessionStatus === 'running') ||
+      timeline.notes.some((n) => n.sessionStatus === 'queued' || n.sessionStatus === 'running') ||
+      timeline.reviews.some((r) => r.sessionStatus === 'queued' || r.sessionStatus === 'running');
+    if (hasActiveSessions) return null;
 
     // Check this note is the latest completed item
     const noteTs = Math.floor((note.completedAt ?? note.createdAt) / 1000);

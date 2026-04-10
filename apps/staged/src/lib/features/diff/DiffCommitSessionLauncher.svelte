@@ -104,8 +104,13 @@
   }
 
   async function handleSubmit() {
-    const finalPrompt = draftPrompt.trim();
+    let finalPrompt = draftPrompt.trim();
     if (!finalPrompt || starting) return;
+
+    // Prepend a reference to the review when launched from a review context
+    if (reviewId) {
+      finalPrompt = `Re: #review:${reviewId}\n${finalPrompt}`;
+    }
 
     starting = true;
     try {

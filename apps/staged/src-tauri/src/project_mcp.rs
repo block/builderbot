@@ -238,39 +238,39 @@ impl ProjectToolsHandler {
             payload["error_message"] = serde_json::Value::String(error.clone());
         }
 
-        match handle.artifact_kind {
-            RepoArtifactKind::Note => {
-                let note = self
-                    .store
-                    .get_note(&handle.artifact_id)
-                    .map_err(|e| format!("Error loading note: {e}"))?;
-                if let Some(note) = note {
-                    payload["note"] = serde_json::json!({
-                        "id": note.id,
-                        "title": note.title,
-                        "content": note.content,
-                        "completed_at": note.completed_at,
-                    });
-                }
-            }
-            RepoArtifactKind::Commit => {
-                let commit = self
-                    .store
-                    .get_commit(&handle.artifact_id)
-                    .map_err(|e| format!("Error loading commit: {e}"))?;
-                if let Some(commit) = commit {
-                    payload["commit"] = serde_json::json!({
-                        "id": commit.id,
-                        "sha": commit.sha,
-                    });
-                }
-            }
-        }
-
         if matches!(
             session_status,
             SessionStatus::Completed | SessionStatus::Cancelled | SessionStatus::Error
         ) {
+            match handle.artifact_kind {
+                RepoArtifactKind::Note => {
+                    let note = self
+                        .store
+                        .get_note(&handle.artifact_id)
+                        .map_err(|e| format!("Error loading note: {e}"))?;
+                    if let Some(note) = note {
+                        payload["note"] = serde_json::json!({
+                            "id": note.id,
+                            "title": note.title,
+                            "content": note.content,
+                            "completed_at": note.completed_at,
+                        });
+                    }
+                }
+                RepoArtifactKind::Commit => {
+                    let commit = self
+                        .store
+                        .get_commit(&handle.artifact_id)
+                        .map_err(|e| format!("Error loading commit: {e}"))?;
+                    if let Some(commit) = commit {
+                        payload["commit"] = serde_json::json!({
+                            "id": commit.id,
+                            "sha": commit.sha,
+                        });
+                    }
+                }
+            }
+
             payload["output"] =
                 serde_json::Value::String(self.last_assistant_output(&handle.session_id));
         }

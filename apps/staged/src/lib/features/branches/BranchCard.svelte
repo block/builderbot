@@ -652,11 +652,7 @@
     };
   }
 
-  async function handleDeletePendingCommit(
-    commitId: string,
-    sessionId?: string,
-    _opts?: { altKey: boolean }
-  ) {
+  async function handleDeletePendingCommit(commitId: string, sessionId?: string) {
     deletingCommitKeys = new Set([...deletingCommitKeys, commitId]);
     try {
       if (sessionId) {

@@ -53,11 +53,7 @@
     onReviewClick?: (reviewId: string) => void;
     onImageClick?: (imageId: string) => void;
     onDeleteCommit?: (sha: string, sessionId?: string, opts?: { altKey: boolean }) => void;
-    onDeletePendingCommit?: (
-      commitId: string,
-      sessionId?: string,
-      opts?: { altKey: boolean }
-    ) => void;
+    onDeletePendingCommit?: (commitId: string, sessionId?: string) => void;
     onDeleteNote?: (noteId: string, sessionId?: string, opts?: { altKey: boolean }) => void;
     onDeleteReview?: (reviewId: string, sessionId?: string, opts?: { altKey: boolean }) => void;
     onDeleteImage?: (imageId: string, opts?: { altKey: boolean }) => void;
@@ -486,7 +482,7 @@
       item.commitId &&
       onDeletePendingCommit
     ) {
-      onDeletePendingCommit(item.commitId, item.sessionId, opts);
+      onDeletePendingCommit(item.commitId, item.sessionId);
     } else if (
       (item.type === 'note' ||
         item.type === 'failed-note' ||

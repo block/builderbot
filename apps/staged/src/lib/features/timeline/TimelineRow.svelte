@@ -51,7 +51,7 @@
     sessionId?: string;
     onItemClick?: () => void;
     onSessionClick?: (sessionId: string) => void;
-    onDeleteClick?: (opts: { altKey: boolean }) => void;
+    onDeleteClick?: (opts?: { altKey: boolean }) => void;
     /** When set, the delete button is shown but disabled with this tooltip. */
     deleteDisabledReason?: string;
     onRetryClick?: () => void;

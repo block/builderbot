@@ -542,9 +542,7 @@
     font-size: 12px;
     font-weight: 500;
     cursor: pointer;
-    transition:
-      background-color 0.1s,
-      opacity 0.1s;
+    transition: background-color 0.1s;
   }
 
   .next-step-btn.note-btn {
@@ -553,7 +551,7 @@
   }
 
   .next-step-btn.note-btn:hover {
-    opacity: 0.85;
+    background: var(--note-bg-emphasis);
   }
 
   .next-step-btn.commit-btn {
@@ -562,6 +560,6 @@
   }
 
   .next-step-btn.commit-btn:hover {
-    opacity: 0.85;
+    background: var(--commit-bg-emphasis);
   }
 </style>

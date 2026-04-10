@@ -17,6 +17,9 @@
 
   marked.setOptions({ breaks: true, gfm: true });
 
+  let noteModalInstanceId = Math.random().toString(36).slice(2, 8);
+  console.info(`[NoteModal] mount instance=${noteModalInstanceId}`);
+
   interface Props {
     title: string;
     content: string;
@@ -32,6 +35,17 @@
 
   let { title, content, onClose, sessionId, onOpenSession, nextSteps, onStartSession }: Props =
     $props();
+
+  $effect(() => {
+    console.info(`[NoteModal] props changed instance=${noteModalInstanceId}`, {
+      title,
+      hasContent: !!content,
+      hasNextSteps: !!nextSteps,
+      noteStep: nextSteps?.noteStep,
+      commitStep: nextSteps?.commitStep,
+      hasOnStartSession: !!onStartSession,
+    });
+  });
 
   let copied = $state(false);
   const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
@@ -54,11 +68,27 @@
   });
 
   onDestroy(() => {
+    console.info(`[NoteModal] destroy instance=${noteModalInstanceId}`);
     unregisterSearchTarget?.();
   });
 
   function renderMarkdown(text: string): string {
     return sanitize(marked.parse(text) as string);
+  }
+
+  // Debug action: logs when a next-step button DOM element is created/destroyed
+  function trackElement(node: HTMLElement) {
+    const label = node.textContent?.trim();
+    console.info(
+      `[NoteModal] next-step button CREATED: "${label}" instance=${noteModalInstanceId}`
+    );
+    return {
+      destroy() {
+        console.info(
+          `[NoteModal] next-step button DESTROYED: "${label}" instance=${noteModalInstanceId}`
+        );
+      },
+    };
   }
 
   async function handleShare() {
@@ -227,6 +257,7 @@
             <span class="next-step-prompt">{nextSteps.noteStep}</span>
             <button
               class="next-step-btn note-btn"
+              use:trackElement
               onclick={() => onStartSession('note', nextSteps!.noteStep!)}
             >
               Start note
@@ -238,6 +269,7 @@
             <span class="next-step-prompt">{nextSteps.commitStep}</span>
             <button
               class="next-step-btn commit-btn"
+              use:trackElement
               onclick={() => onStartSession('commit', nextSteps!.commitStep!)}
             >
               Start commit

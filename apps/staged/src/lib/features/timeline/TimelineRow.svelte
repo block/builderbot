@@ -219,7 +219,7 @@
           Retry
         </button>
       {/if}
-      {#if hasSession && !onStartClick}
+      {#if hasSession && !onStartClick && !isQueued}
         <button class="action-btn session-btn" onclick={handleSessionClick} title="View session">
           <MessageSquare size={12} />
         </button>

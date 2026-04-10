@@ -23,10 +23,19 @@
     X,
     ImagePlus,
   } from 'lucide-svelte';
-  import type { Project, ProjectRepo, Branch, WorkspaceStatus, ProjectNote } from '../../types';
+  import type {
+    Project,
+    ProjectRepo,
+    Branch,
+    WorkspaceStatus,
+    ProjectNote,
+    HashtagItem,
+  } from '../../types';
   import { projectDisplayName } from '../../shared/utils';
   import { goHome } from '../layout/navigation.svelte';
   import * as commands from '../../api/commands';
+  import HashtagInput from '../sessions/HashtagInput.svelte';
+  import { buildProjectHashtagItems } from '../sessions/hashtagItems';
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import BranchCard from '../branches/BranchCard.svelte';
@@ -143,7 +152,7 @@
 
   // ── Project session input ──────────────────────────────────────────────
   let promptText = $state('');
-  let promptTextarea = $state<HTMLTextAreaElement | null>(null);
+  let promptTextarea = $state<HTMLElement | null>(null);
   let availableAgents = $derived(agentState.providers);
   let preferredProvider = $derived(
     getPreferredAgentForProject(project.id, availableAgents) ?? undefined
@@ -154,6 +163,14 @@
   );
   /** Session IDs for running project sessions (all produce notes). */
   let activeSessionIds = $state<Set<string>>(new Set());
+
+  // Hashtag reference items
+  let hashtagItems = $state<HashtagItem[]>([]);
+  $effect(() => {
+    buildProjectHashtagItems(project.id, branches, reposById).then((items) => {
+      hashtagItems = items;
+    });
+  });
 
   // Image attachment state
   let imageIds = $state<string[]>([]);
@@ -268,7 +285,7 @@
     return unsub;
   });
 
-  function autoResize(el: HTMLTextAreaElement) {
+  function autoResize(el: HTMLElement) {
     el.style.height = 'auto';
     el.style.height = `${el.scrollHeight}px`;
   }
@@ -499,16 +516,17 @@
             <Paperclip size={14} />
           </button>
         {/if}
-        <textarea
+        <HashtagInput
           class="prompt-input"
           placeholder="Ask about this project…"
           bind:value={promptText}
-          bind:this={promptTextarea}
+          bind:textareaEl={promptTextarea}
           onkeydown={handleKeydown}
-          oninput={(e) => autoResize(e.currentTarget)}
+          oninput={(e) => autoResize(e.currentTarget as HTMLElement)}
           onpaste={handleImagePaste}
           rows={1}
-        ></textarea>
+          items={hashtagItems}
+        />
         <div class="prompt-actions">
           <AgentSelector projectId={project.id} />
           <button
@@ -942,7 +960,7 @@
     background-color: var(--ui-selection);
   }
 
-  .prompt-input {
+  .prompt-input-row :global(.prompt-input) {
     flex: 1;
     margin: 0;
     padding: 4px 0;
@@ -959,8 +977,8 @@
     overflow-y: auto;
   }
 
-  .prompt-input::placeholder {
-    color: var(--text-faint);
+  .prompt-input-row :global(.hashtag-input-wrapper) {
+    flex: 1;
   }
 
   .prompt-actions {
@@ -1125,7 +1143,7 @@
       padding: 6px;
     }
 
-    .prompt-input {
+    .prompt-input-row :global(.prompt-input) {
       padding: 4px 2px;
       font-size: var(--size-xs);
     }

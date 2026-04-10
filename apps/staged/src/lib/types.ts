@@ -324,6 +324,20 @@ export type {
 } from '@builderbot/diff-viewer/types';
 
 // =============================================================================
+// Hashtag references
+// =============================================================================
+
+export interface HashtagItem {
+  type: 'note' | 'commit' | 'review' | 'project-note';
+  id: string;
+  title: string;
+  color: string;
+  bgColor: string;
+  branchName?: string;
+  repoSlug?: string;
+}
+
+// =============================================================================
 // Blox workspace types
 // =============================================================================
 

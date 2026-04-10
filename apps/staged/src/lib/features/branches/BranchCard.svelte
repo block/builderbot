@@ -1009,6 +1009,7 @@
 {#if showBranchDiff}
   <DiffModal
     branchId={branch.id}
+    projectId={branch.projectId}
     commitSha={reviewDiffTarget?.commitSha}
     scope={reviewDiffTarget?.scope ?? 'branch'}
     reviewId={reviewDiffTarget?.reviewId}
@@ -1032,6 +1033,7 @@
 {#if commitDiffSha}
   <DiffModal
     branchId={branch.id}
+    projectId={branch.projectId}
     commitSha={commitDiffSha}
     scope="commit"
     beforeLabel="parent"

@@ -6,10 +6,13 @@
   import { alerts } from '../../shared/alerts.svelte';
   import * as commands from '../../api/commands';
   import { getCommitPrefillFromReviewComments } from '../branches/commitSessionPrefill';
-  import type { SessionStatusPayload } from '../../types';
+  import type { SessionStatusPayload, HashtagItem } from '../../types';
+  import HashtagInput from '../sessions/HashtagInput.svelte';
+  import { buildBranchHashtagItems } from '../sessions/hashtagItems';
 
   interface Props {
     branchId: string;
+    projectId?: string | null;
     commitSha: string;
     scope: 'branch' | 'commit';
     reviewId?: string;
@@ -17,14 +20,23 @@
     onStarted: () => void;
   }
 
-  let { branchId, commitSha, scope, reviewId, visibleCommentCount, onStarted }: Props = $props();
+  let { branchId, projectId, commitSha, scope, reviewId, visibleCommentCount, onStarted }: Props =
+    $props();
 
   let draftPrompt = $state('');
   let isDirty = $state(false);
   let starting = $state(false);
   let timelineLoading = $state(true);
   let hasRunningSession = $state(false);
-  let textareaElement = $state<HTMLTextAreaElement | null>(null);
+  let textareaElement = $state<HTMLElement | null>(null);
+
+  // Hashtag reference items
+  let hashtagItems = $state<HashtagItem[]>([]);
+  $effect(() => {
+    buildBranchHashtagItems(branchId, projectId ?? null).then((items) => {
+      hashtagItems = items;
+    });
+  });
 
   const MIN_TEXTAREA_HEIGHT_PX = 80;
   const MAX_TEXTAREA_HEIGHT_PX = 260;
@@ -76,9 +88,9 @@
     };
   });
 
-  function handleInput(event: Event) {
-    draftPrompt = (event.currentTarget as HTMLTextAreaElement).value;
+  function handleInput(_event: Event) {
     isDirty = true;
+    syncTextareaHeight();
   }
 
   function syncTextareaHeight() {
@@ -143,15 +155,16 @@
 </script>
 
 <div class="composer">
-  <textarea
-    bind:this={textareaElement}
+  <HashtagInput
+    bind:textareaEl={textareaElement}
+    bind:value={draftPrompt}
     class="composer-input"
-    value={draftPrompt}
     placeholder="Describe any changes you want"
     rows="3"
     disabled={starting}
     oninput={handleInput}
-  ></textarea>
+    items={hashtagItems}
+  />
   <div class="composer-footer">
     <button
       class="composer-submit"
@@ -180,7 +193,7 @@
     background: color-mix(in srgb, var(--bg-chrome) 94%, var(--bg-hover));
   }
 
-  .composer-input {
+  .composer :global(.composer-input) {
     padding: 10px 12px;
     background: var(--bg-primary);
     border: 1px solid var(--border-muted);
@@ -196,13 +209,9 @@
     transition: border-color 0.15s;
   }
 
-  .composer-input:focus {
+  .composer :global(.composer-input):focus {
     outline: none;
     border-color: var(--border-emphasis);
-  }
-
-  .composer-input::placeholder {
-    color: var(--text-faint);
   }
 
   .composer-footer {

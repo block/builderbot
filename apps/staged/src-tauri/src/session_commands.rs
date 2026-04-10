@@ -2338,6 +2338,7 @@ fn image_timeline_entries(store: &Arc<Store>, branch_id: &str) -> Vec<TimelineEn
         .collect()
 }
 
+/// Parse `#type:id` tokens from the prompt and resolve their content from the store.
 /// Assemble the full prompt from action instructions + branch context + user prompt.
 fn build_full_prompt(
     user_prompt: &str,

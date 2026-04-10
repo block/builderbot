@@ -19,9 +19,11 @@
   import { tick, untrack } from 'svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
-  import type { Branch, BranchSessionType, ProjectRepo } from '../../types';
+  import type { Branch, BranchSessionType, HashtagItem, ProjectRepo } from '../../types';
   import AgentSelector from '../agents/AgentSelector.svelte';
   import ImageAttachment from './ImageAttachment.svelte';
+  import HashtagInput from './HashtagInput.svelte';
+  import { buildBranchHashtagItems } from './hashtagItems';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import { subscribeDragDrop } from '../branches/dragDrop';
   import { isImageFile } from '../branches/branchCardHelpers';
@@ -65,7 +67,7 @@
   let currentMode = $state<BranchSessionType>('commit');
   let starting = $state(false);
   let initialized = false;
-  let textareaEl: HTMLTextAreaElement | null = $state(null);
+  let textareaEl: HTMLElement | null = $state(null);
   const backdropDismiss = createBackdropDismissHandlers({ onDismiss: handleClose });
 
   let isCommit = $derived(currentMode === 'commit');
@@ -156,9 +158,14 @@
       prompt = modePrefill;
       // Select all so typing replaces the suggestion
       tick().then(() => {
-        if (textareaEl && textareaEl.value.length > 0) {
-          textareaEl.selectionStart = 0;
-          textareaEl.selectionEnd = textareaEl.value.length;
+        if (textareaEl && textareaEl.textContent) {
+          const sel = window.getSelection();
+          if (sel) {
+            const range = document.createRange();
+            range.selectNodeContents(textareaEl);
+            sel.removeAllRanges();
+            sel.addRange(range);
+          }
           textareaEl.focus();
         }
       });
@@ -173,6 +180,14 @@
       modeMenuOpen = false;
     }
   }
+
+  // Hashtag reference items
+  let hashtagItems = $state<HashtagItem[]>([]);
+  $effect(() => {
+    buildBranchHashtagItems(branch.id, branch.projectId).then((items) => {
+      hashtagItems = items;
+    });
+  });
 
   // Image attachment state
   let imageIds = $state<string[]>([]);
@@ -199,13 +214,22 @@
       const shouldSelect = prefilled;
       tick().then(() => {
         el.focus();
-        if (shouldSelect && el.value.length > 0) {
-          // Select all so typing replaces the suggested text
-          el.selectionStart = 0;
-          el.selectionEnd = el.value.length;
-        } else {
-          // Place cursor at end
-          el.selectionStart = el.selectionEnd = el.value.length;
+        const sel = window.getSelection();
+        if (sel) {
+          if (shouldSelect && el.textContent) {
+            // Select all so typing replaces the suggested text
+            const range = document.createRange();
+            range.selectNodeContents(el);
+            sel.removeAllRanges();
+            sel.addRange(range);
+          } else {
+            // Place cursor at end
+            const range = document.createRange();
+            range.selectNodeContents(el);
+            range.collapse(false);
+            sel.removeAllRanges();
+            sel.addRange(range);
+          }
         }
       });
     }
@@ -354,8 +378,8 @@
       {/if}
 
       <div class="form-group">
-        <textarea
-          bind:this={textareaEl}
+        <HashtagInput
+          bind:textareaEl
           bind:value={prompt}
           placeholder={isReview
             ? 'Optional: focus the review on specific areas…'
@@ -364,7 +388,8 @@
               : notePlaceholder}
           rows={isReview ? 4 : 12}
           disabled={starting}
-        ></textarea>
+          items={hashtagItems}
+        />
         <span class="hint">{willQueue ? '⌘ Enter to queue' : '⌘ Enter to start'}</span>
       </div>
 
@@ -583,7 +608,8 @@
     gap: 4px;
   }
 
-  .form-group textarea {
+  .form-group textarea,
+  .form-group :global(.hashtag-editor) {
     padding: 10px 12px;
     background: var(--bg-primary);
     border: 1px solid var(--border-muted);
@@ -597,7 +623,8 @@
     transition: border-color 0.15s;
   }
 
-  .form-group textarea:focus {
+  .form-group textarea:focus,
+  .form-group :global(.hashtag-editor):focus {
     outline: none;
     border-color: var(--border-emphasis);
   }

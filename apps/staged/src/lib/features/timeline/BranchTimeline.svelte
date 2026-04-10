@@ -52,11 +52,15 @@
     onNoteClick?: (noteId: string, title: string, content: string, sessionId?: string) => void;
     onReviewClick?: (reviewId: string) => void;
     onImageClick?: (imageId: string) => void;
-    onDeleteCommit?: (sha: string, sessionId?: string) => void;
-    onDeletePendingCommit?: (commitId: string, sessionId?: string) => void;
-    onDeleteNote?: (noteId: string, sessionId?: string) => void;
-    onDeleteReview?: (reviewId: string, sessionId?: string) => void;
-    onDeleteImage?: (imageId: string) => void;
+    onDeleteCommit?: (sha: string, sessionId?: string, opts?: { altKey: boolean }) => void;
+    onDeletePendingCommit?: (
+      commitId: string,
+      sessionId?: string,
+      opts?: { altKey: boolean }
+    ) => void;
+    onDeleteNote?: (noteId: string, sessionId?: string, opts?: { altKey: boolean }) => void;
+    onDeleteReview?: (reviewId: string, sessionId?: string, opts?: { altKey: boolean }) => void;
+    onDeleteImage?: (imageId: string, opts?: { altKey: boolean }) => void;
     onStartQueued?: () => void;
     /** Optional per-review breakdown of visible comments vs hold-to-reveal annotations. */
     reviewCommentBreakdown?: Record<
@@ -472,9 +476,9 @@
     }
   }
 
-  function handleDeleteClick(item: DisplayItem) {
+  function handleDeleteClick(item: DisplayItem, opts?: { altKey: boolean }) {
     if (item.type === 'commit' && item.commitSha && onDeleteCommit) {
-      onDeleteCommit(item.commitSha, item.sessionId);
+      onDeleteCommit(item.commitSha, item.sessionId, opts);
     } else if (
       (item.type === 'failed-commit' ||
         item.type === 'pending-commit' ||
@@ -482,7 +486,7 @@
       item.commitId &&
       onDeletePendingCommit
     ) {
-      onDeletePendingCommit(item.commitId, item.sessionId);
+      onDeletePendingCommit(item.commitId, item.sessionId, opts);
     } else if (
       (item.type === 'note' ||
         item.type === 'failed-note' ||
@@ -491,7 +495,7 @@
       item.noteId &&
       onDeleteNote
     ) {
-      onDeleteNote(item.noteId, item.sessionId);
+      onDeleteNote(item.noteId, item.sessionId, opts);
     } else if (
       (item.type === 'review' ||
         item.type === 'failed-review' ||
@@ -500,9 +504,9 @@
       item.reviewId &&
       onDeleteReview
     ) {
-      onDeleteReview(item.reviewId, item.sessionId);
+      onDeleteReview(item.reviewId, item.sessionId, opts);
     } else if (item.type === 'image' && item.imageId && onDeleteImage) {
-      onDeleteImage(item.imageId);
+      onDeleteImage(item.imageId, opts);
     }
   }
 </script>
@@ -532,7 +536,9 @@
           deleteDisabledReason={item.deleteDisabledReason}
           {onSessionClick}
           onItemClick={() => handleItemClick(item)}
-          onDeleteClick={item.deleteDisabledReason ? undefined : () => handleDeleteClick(item)}
+          onDeleteClick={item.deleteDisabledReason
+            ? undefined
+            : (opts) => handleDeleteClick(item, opts)}
           onStartClick={item.type.startsWith('queued-') && !hasActiveSession
             ? onStartQueued
             : undefined}

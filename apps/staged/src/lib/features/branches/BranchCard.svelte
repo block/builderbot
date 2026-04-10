@@ -555,85 +555,100 @@
     }
   }
 
-  function handleDeleteCommit(sha: string, sessionId?: string) {
+  function handleDeleteCommit(sha: string, sessionId?: string, opts?: { altKey: boolean }) {
+    const doDelete = async () => {
+      confirmDelete = null;
+      deletingCommitKeys = new Set([...deletingCommitKeys, sha]);
+      try {
+        await commands.deleteCommit(branch.id, sha, !!sessionId);
+        await loadTimeline();
+      } catch (e) {
+        console.error('Failed to delete commit:', e);
+        notifyError('Failed to delete commit', e);
+      } finally {
+        deletingCommitKeys = new Set([...deletingCommitKeys].filter((k) => k !== sha));
+      }
+    };
+    if (opts?.altKey) {
+      doDelete();
+      return;
+    }
     confirmDelete = {
       title: 'Delete Commit',
       message:
         'This will reset the branch to the parent commit, removing this commit and its changes.' +
         (sessionId ? ' The linked session will also be deleted.' : ''),
-      onConfirm: async () => {
-        confirmDelete = null;
-        deletingCommitKeys = new Set([...deletingCommitKeys, sha]);
-        try {
-          await commands.deleteCommit(branch.id, sha, !!sessionId);
-          await loadTimeline();
-        } catch (e) {
-          console.error('Failed to delete commit:', e);
-          notifyError('Failed to delete commit', e);
-        } finally {
-          deletingCommitKeys = new Set([...deletingCommitKeys].filter((k) => k !== sha));
-        }
-      },
+      onConfirm: doDelete,
     };
   }
 
-  function handleDeleteNote(noteId: string, sessionId?: string) {
+  function handleDeleteNote(noteId: string, sessionId?: string, opts?: { altKey: boolean }) {
+    const doDelete = async () => {
+      confirmDelete = null;
+      try {
+        if (sessionId) {
+          try {
+            await commands.cancelSession(sessionId);
+          } catch {
+            // Session may already be finished
+          }
+        }
+        await commands.deleteNote(noteId, !!sessionId);
+        loadTimeline();
+        // Drain the next queued session now that this one has been removed.
+        commands
+          .drainQueuedSessions(branch.id)
+          .catch((e) => console.error('Failed to drain queued sessions:', e));
+      } catch (e) {
+        console.error('Failed to delete note:', e);
+        notifyError('Failed to delete note', e);
+      }
+    };
+    if (opts?.altKey) {
+      doDelete();
+      return;
+    }
     confirmDelete = {
       title: 'Delete Note',
       message:
         'Are you sure you want to delete this note?' +
         (sessionId ? ' The linked session will also be deleted.' : ''),
-      onConfirm: async () => {
-        confirmDelete = null;
-        try {
-          if (sessionId) {
-            try {
-              await commands.cancelSession(sessionId);
-            } catch {
-              // Session may already be finished
-            }
-          }
-          await commands.deleteNote(noteId, !!sessionId);
-          loadTimeline();
-          // Drain the next queued session now that this one has been removed.
-          commands
-            .drainQueuedSessions(branch.id)
-            .catch((e) => console.error('Failed to drain queued sessions:', e));
-        } catch (e) {
-          console.error('Failed to delete note:', e);
-          notifyError('Failed to delete note', e);
-        }
-      },
+      onConfirm: doDelete,
     };
   }
 
-  function handleDeleteReview(reviewId: string, sessionId?: string) {
+  function handleDeleteReview(reviewId: string, sessionId?: string, opts?: { altKey: boolean }) {
+    const doDelete = async () => {
+      confirmDelete = null;
+      try {
+        if (sessionId) {
+          try {
+            await commands.cancelSession(sessionId);
+          } catch {
+            // Session may already be finished
+          }
+        }
+        await commands.deleteReview(reviewId, !!sessionId);
+        loadTimeline();
+        // Drain the next queued session now that this one has been removed.
+        commands
+          .drainQueuedSessions(branch.id)
+          .catch((e) => console.error('Failed to drain queued sessions:', e));
+      } catch (e) {
+        console.error('Failed to delete review:', e);
+        notifyError('Failed to delete review', e);
+      }
+    };
+    if (opts?.altKey) {
+      doDelete();
+      return;
+    }
     confirmDelete = {
       title: 'Delete Review',
       message:
         'Are you sure you want to delete this review and all its comments?' +
         (sessionId ? ' The linked session will also be deleted.' : ''),
-      onConfirm: async () => {
-        confirmDelete = null;
-        try {
-          if (sessionId) {
-            try {
-              await commands.cancelSession(sessionId);
-            } catch {
-              // Session may already be finished
-            }
-          }
-          await commands.deleteReview(reviewId, !!sessionId);
-          loadTimeline();
-          // Drain the next queued session now that this one has been removed.
-          commands
-            .drainQueuedSessions(branch.id)
-            .catch((e) => console.error('Failed to drain queued sessions:', e));
-        } catch (e) {
-          console.error('Failed to delete review:', e);
-          notifyError('Failed to delete review', e);
-        }
-      },
+      onConfirm: doDelete,
     };
   }
 
@@ -669,26 +684,31 @@
     }
   }
 
-  function handleDeleteImage(imageId: string) {
+  function handleDeleteImage(imageId: string, opts?: { altKey: boolean }) {
+    const doDelete = async () => {
+      confirmDelete = null;
+      deletingImageIds = new Set([...deletingImageIds, imageId]);
+      if (viewImageId === imageId) {
+        viewImageId = null;
+      }
+      try {
+        await commands.deleteImage(imageId);
+        loadTimeline();
+      } catch (e) {
+        console.error('Failed to delete image:', e);
+        notifyError('Failed to delete image', e);
+      } finally {
+        deletingImageIds = new Set([...deletingImageIds].filter((id) => id !== imageId));
+      }
+    };
+    if (opts?.altKey) {
+      doDelete();
+      return;
+    }
     confirmDelete = {
       title: 'Delete Image',
       message: 'Are you sure you want to delete this image?',
-      onConfirm: async () => {
-        confirmDelete = null;
-        deletingImageIds = new Set([...deletingImageIds, imageId]);
-        if (viewImageId === imageId) {
-          viewImageId = null;
-        }
-        try {
-          await commands.deleteImage(imageId);
-          loadTimeline();
-        } catch (e) {
-          console.error('Failed to delete image:', e);
-          notifyError('Failed to delete image', e);
-        } finally {
-          deletingImageIds = new Set([...deletingImageIds].filter((id) => id !== imageId));
-        }
-      },
+      onConfirm: doDelete,
     };
   }
 

@@ -752,6 +752,7 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
+    max-width: 300px;
   }
 
   .project-card-wrapper .project-card {

@@ -469,9 +469,6 @@
           fresh
             .then((next) => {
               if (version !== revalidationVersion) return;
-              console.info('[BranchCard] timeline revalidated', {
-                noteModalOpen: !!openNote,
-              });
               error = null;
               timeline = next;
               prunedSessionIds = sessionMgr.prunePendingSessionItems(next);
@@ -494,12 +491,6 @@
 
     try {
       const nextTimeline = await commands.getBranchTimeline(branch.id, { force: !isInitialLoad });
-      console.info('[BranchCard] timeline updated', {
-        isInitialLoad,
-        noteModalOpen: !!openNote,
-        commits: nextTimeline.commits.length,
-        notes: nextTimeline.notes.length,
-      });
       timeline = nextTimeline;
       prunedSessionIds = sessionMgr.prunePendingSessionItems(nextTimeline);
       void loadTimelineReviewDetails(nextTimeline.reviews);
@@ -580,9 +571,7 @@
   }
 
   function handleNoteClick(noteId: string, title: string, content: string, sessionId?: string) {
-    const ns = computeNoteNextSteps(noteId);
-    console.info('[BranchCard] handleNoteClick setting openNote', { noteId, hasNextSteps: !!ns });
-    openNote = { noteId, title, content, sessionId, nextSteps: ns };
+    openNote = { noteId, title, content, sessionId, nextSteps: computeNoteNextSteps(noteId) };
   }
 
   async function handleReviewClick(reviewId: string) {

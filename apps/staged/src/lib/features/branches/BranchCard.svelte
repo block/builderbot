@@ -197,19 +197,24 @@
   /** True when the branch has at least one finalized commit (code changes vs base). */
   let hasCodeChanges = $derived(timeline?.commits.some((c) => c.sha) ?? false);
 
+  /** True when the branch has at least one queued or running session. */
+  function hasActiveSessions(tl: NonNullable<typeof timeline>): boolean {
+    return (
+      tl.commits.some((c) => c.sessionStatus === 'queued' || c.sessionStatus === 'running') ||
+      tl.notes.some((n) => n.sessionStatus === 'queued' || n.sessionStatus === 'running') ||
+      tl.reviews.some((r) => r.sessionStatus === 'queued' || r.sessionStatus === 'running')
+    );
+  }
+
   // Compute suggested prefill prompts from the latest visible timeline entry.
   // Only used when the user hasn't typed a draft yet.
   let suggestedPrefill = $derived.by(() => {
     const empty = { commit: '', note: '' };
     if (!timeline) return empty;
 
-    // Don't prefill when there are visible queued sessions — the user should wait
-    // for those to complete before starting new work.
-    const hasQueuedSessions =
-      timeline.commits.some((c) => c.sessionStatus === 'queued') ||
-      timeline.notes.some((n) => n.sessionStatus === 'queued') ||
-      timeline.reviews.some((r) => r.sessionStatus === 'queued');
-    if (hasQueuedSessions) return empty;
+    // Don't prefill when there are active (queued or running) sessions — the user
+    // should wait for those to complete before starting new work.
+    if (hasActiveSessions(timeline)) return empty;
 
     // Find the latest completed item across commits, notes, and reviews
     type Candidate =
@@ -225,13 +230,11 @@
     const candidates: Candidate[] = [];
 
     for (const review of timeline.reviews) {
-      if (review.sessionStatus === 'running') continue;
       const ts = Math.floor((review.completedAt ?? review.createdAt) / 1000);
       candidates.push({ kind: 'review', commentCount: review.commentCount, timestamp: ts });
     }
 
     for (const note of timeline.notes) {
-      if (note.sessionStatus === 'running') continue;
       const ts = Math.floor((note.completedAt ?? note.createdAt) / 1000);
       candidates.push({
         kind: 'note',
@@ -281,11 +284,50 @@
     return empty;
   });
 
+  // Compute next-step suggestions for a note. Called once when the note modal
+  // is opened so the result is static and doesn't cause DOM churn from polling.
+  function computeNoteNextSteps(
+    noteId: string
+  ): { commitStep: string | null; noteStep: string | null } | null {
+    if (!timeline) return null;
+    const note = timeline.notes.find((n) => n.id === noteId);
+    if (!note) return null;
+    if (!note.suggestedNextCommitStep && !note.suggestedNextNoteStep) return null;
+
+    if (hasActiveSessions(timeline)) return null;
+
+    // Check this note is the latest completed item using the same approach
+    // as suggestedPrefill: collect all timestamps and compare.
+    const noteTs = Math.floor((note.completedAt ?? note.createdAt) / 1000);
+    const timestamps: number[] = [];
+    for (const c of timeline.commits) {
+      if (c.sha) timestamps.push(c.timestamp);
+    }
+    for (const n of timeline.notes) {
+      if (n.id !== note.id) timestamps.push(Math.floor((n.completedAt ?? n.createdAt) / 1000));
+    }
+    for (const r of timeline.reviews) {
+      timestamps.push(Math.floor((r.completedAt ?? r.createdAt) / 1000));
+    }
+    if (timestamps.some((ts) => ts > noteTs)) return null;
+
+    return {
+      commitStep: note.suggestedNextCommitStep,
+      noteStep: note.suggestedNextNoteStep,
+    };
+  }
+
   // Commit diff modal (opened by clicking a commit in the timeline)
   let commitDiffSha = $state<string | null>(null);
 
   // Note modal (opened by clicking a note in the timeline)
-  let openNote = $state<{ title: string; content: string; sessionId?: string } | null>(null);
+  let openNote = $state<{
+    noteId: string;
+    title: string;
+    content: string;
+    sessionId?: string;
+    nextSteps?: { commitStep: string | null; noteStep: string | null } | null;
+  } | null>(null);
 
   // Image viewer modal (opened by clicking an image in the timeline)
   let viewImageId = $state<string | null>(null);
@@ -528,8 +570,8 @@
     commitDiffSha = sha;
   }
 
-  function handleNoteClick(_noteId: string, title: string, content: string, sessionId?: string) {
-    openNote = { title, content, sessionId };
+  function handleNoteClick(noteId: string, title: string, content: string, sessionId?: string) {
+    openNote = { noteId, title, content, sessionId, nextSteps: computeNoteNextSteps(noteId) };
   }
 
   async function handleReviewClick(reviewId: string) {
@@ -1010,10 +1052,15 @@
     title={openNote.title}
     content={openNote.content}
     sessionId={openNote.sessionId}
+    nextSteps={openNote.nextSteps}
     onClose={() => (openNote = null)}
     onOpenSession={(sid) => {
       openNote = null;
       sessionMgr.openSessionId = sid;
+    }}
+    onStartSession={(mode, prefill) => {
+      openNote = null;
+      void sessionMgr.startOrQueueSession(mode, prefill);
     }}
   />
 {/if}
@@ -1080,7 +1127,13 @@
     onOpenNote={(noteId, title, content) => {
       const sid = sessionMgr.openSessionId;
       sessionMgr.openSessionId = null;
-      openNote = { title, content, sessionId: sid ?? undefined };
+      openNote = {
+        noteId,
+        title,
+        content,
+        sessionId: sid ?? undefined,
+        nextSteps: computeNoteNextSteps(noteId),
+      };
     }}
     onClose={async () => {
       const closedSessionId = sessionMgr.openSessionId;

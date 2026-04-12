@@ -150,6 +150,22 @@ func (c *Cache) SetProjects(projects []discovery.Project) {
 	c.projects = projects
 }
 
+// AddProject adds or replaces a single project in the cache without a full
+// re-discovery. This allows HTTP handlers to register a project quickly
+// while a background refresh catches up.
+func (c *Cache) AddProject(p discovery.Project) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	qn := p.QualifiedName()
+	for i, existing := range c.projects {
+		if existing.QualifiedName() == qn {
+			c.projects[i] = p
+			return
+		}
+	}
+	c.projects = append(c.projects, p)
+}
+
 // Projects returns a copy of the projects list
 func (c *Cache) Projects() []discovery.Project {
 	c.mu.RLock()

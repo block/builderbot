@@ -30,11 +30,41 @@ func expandTilde(path string) string {
 // RescanWith preserves cached data for unchanged projects and only scans
 // new or source-changed ones, so we skip the redundant populateProjects
 // call and just enrich git info in the background.
+// Caller must hold cfgMu.
 func (s *Server) refreshAfterConfigChange() {
 	if err := config.Save(s.cfgPath, s.cfg); err != nil {
 		log.Printf("Warning: could not save config: %v", err)
 	}
-	projects := s.discoverAllProjects()
+	s.applyDiscoveredProjects(s.discoverAllProjects())
+}
+
+// refreshAfterConfigChangeAsync saves the config and kicks off a background
+// re-discovery. Use this instead of refreshAfterConfigChange when the caller
+// doesn't need to wait for the full re-discovery to complete (e.g., after
+// adding a single project to the cache with AddProject).
+// Caller must hold cfgMu.
+// E-PENPAL-CLI: non-blocking config refresh avoids hanging /api/open.
+func (s *Server) refreshAfterConfigChangeAsync() {
+	if err := config.Save(s.cfgPath, s.cfg); err != nil {
+		log.Printf("Warning: could not save config: %v", err)
+	}
+	go func() {
+		// Acquire cfgMu during discovery to avoid racing on s.cfg reads.
+		// discoverAllProjects and workspacePaths both read s.cfg fields.
+		s.cfgMu.Lock()
+		projects := s.discoverAllProjects()
+		wsPaths := s.workspacePaths()
+		s.cfgMu.Unlock()
+		s.cache.RescanWith(projects)
+		s.watcher.Refresh(wsPaths, projects)
+		s.watcher.Broadcast(watcher.Event{Type: watcher.EventProjectsChanged})
+		go s.enrichGitInfo()
+	}()
+}
+
+// applyDiscoveredProjects updates the cache, watcher, and broadcasts after
+// project discovery. Caller must ensure discovery results are consistent.
+func (s *Server) applyDiscoveredProjects(projects []discovery.Project) {
 	s.cache.RescanWith(projects)
 	s.watcher.Refresh(s.workspacePaths(), projects)
 	s.watcher.Broadcast(watcher.Event{Type: watcher.EventProjectsChanged})
@@ -646,38 +676,44 @@ func (s *Server) resolveOpenDirectory(w http.ResponseWriter, absPath string) str
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 
+	alreadyInConfig := false
+	var existingCfg config.ProjectConfig
 	for _, pc := range s.cfg.Projects {
 		if filepath.Clean(pc.Path) == filepath.Clean(absPath) {
-			// Already in config but maybe not discovered yet; refresh and return
-			s.refreshAfterConfigChange()
-			for _, p := range s.cache.Projects() {
-				if filepath.Clean(p.Path) == filepath.Clean(absPath) {
-					url := "/project/" + p.QualifiedName()
-					json.NewEncoder(w).Encode(map[string]string{"url": url})
-					return url
-				}
-			}
-			json.NewEncoder(w).Encode(map[string]string{"url": "/"})
-			return ""
+			alreadyInConfig = true
+			existingCfg = pc
+			break
 		}
 	}
 
-	// Not found - add as a new standalone project
-	s.cfg.Projects = append(s.cfg.Projects, config.ProjectConfig{Path: absPath})
-	s.refreshAfterConfigChange()
-
-	// Find the newly added project
-	for _, p := range s.cache.Projects() {
-		if filepath.Clean(p.Path) == filepath.Clean(absPath) {
-			log.Printf("Opened new standalone project: %s", absPath)
-			url := "/project/" + p.QualifiedName()
-			json.NewEncoder(w).Encode(map[string]string{"url": url})
-			return url
-		}
+	if !alreadyInConfig {
+		existingCfg = config.ProjectConfig{Path: absPath}
+		s.cfg.Projects = append(s.cfg.Projects, existingCfg)
 	}
 
-	json.NewEncoder(w).Encode(map[string]string{"url": "/"})
-	return ""
+	// Load the standalone project directly instead of re-discovering
+	// everything, so the handler returns without blocking on git
+	// worktree detection for all projects.
+	p, err := discovery.LoadStandaloneProject(absPath, existingCfg)
+	if err != nil {
+		if !alreadyInConfig {
+			s.cfg.Projects = s.cfg.Projects[:len(s.cfg.Projects)-1]
+		}
+		log.Printf("Warning: could not load standalone project %s: %v", absPath, err)
+		json.NewEncoder(w).Encode(map[string]string{"url": "/"})
+		return ""
+	}
+	s.cache.AddProject(p)
+
+	// Kick off full async refresh so watchers and other projects update.
+	s.refreshAfterConfigChangeAsync()
+
+	if !alreadyInConfig {
+		log.Printf("Opened new standalone project: %s", absPath)
+	}
+	url := "/project/" + p.QualifiedName()
+	json.NewEncoder(w).Encode(map[string]string{"url": url})
+	return url
 }
 
 // resolveOpenFile handles /api/open for a file path.
@@ -709,7 +745,7 @@ func (s *Server) resolveOpenFile(w http.ResponseWriter, absPath string) string {
 					Files: []string{relPath},
 				})
 			}
-			s.refreshAfterConfigChange()
+			s.refreshAfterConfigChangeAsync()
 			s.cfgMu.Unlock()
 
 			url := "/file/" + p.QualifiedName() + "/" + relPath
@@ -738,27 +774,30 @@ func (s *Server) resolveOpenFile(w http.ResponseWriter, absPath string) string {
 	defer s.cfgMu.Unlock()
 
 	// Add as standalone project with this file as a source
-	s.cfg.Projects = append(s.cfg.Projects, config.ProjectConfig{
+	pc := config.ProjectConfig{
 		Path: projectDir,
 		Sources: []config.SourceConfig{{
 			Type:  "files",
 			Files: []string{fileName},
 		}},
-	})
-	s.refreshAfterConfigChange()
-
-	// Find the new project and return its file URL
-	for _, p := range s.cache.Projects() {
-		if filepath.Clean(p.Path) == filepath.Clean(projectDir) {
-			url := "/file/" + p.QualifiedName() + "/" + fileName
-			log.Printf("Opened file %s in new project %s", fileName, p.QualifiedName())
-			json.NewEncoder(w).Encode(map[string]string{"url": url})
-			return url
-		}
 	}
+	s.cfg.Projects = append(s.cfg.Projects, pc)
 
-	json.NewEncoder(w).Encode(map[string]string{"url": "/"})
-	return ""
+	// Load the project directly so the response is immediate.
+	p, err := discovery.LoadStandaloneProject(projectDir, pc)
+	if err != nil {
+		s.cfg.Projects = s.cfg.Projects[:len(s.cfg.Projects)-1]
+		log.Printf("Warning: could not load standalone project %s: %v", projectDir, err)
+		json.NewEncoder(w).Encode(map[string]string{"url": "/"})
+		return ""
+	}
+	s.cache.AddProject(p)
+	s.refreshAfterConfigChangeAsync()
+
+	url := "/file/" + p.QualifiedName() + "/" + fileName
+	log.Printf("Opened file %s in new project %s", fileName, p.QualifiedName())
+	json.NewEncoder(w).Encode(map[string]string{"url": url})
+	return url
 }
 
 // removeFileFromConfig removes a single file from a "files" source in config.

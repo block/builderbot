@@ -10,6 +10,61 @@ import (
 	"github.com/loganj/penpal/internal/discovery"
 )
 
+// E-PENPAL-CACHE: verifies AddProject appends a new project.
+func TestAddProject_AppendsNewProject(t *testing.T) {
+	c := New()
+	c.SetProjects([]discovery.Project{
+		{Name: "existing", Path: "/a", Origin: "standalone"},
+	})
+
+	c.AddProject(discovery.Project{Name: "new-proj", Path: "/b", Origin: "standalone"})
+
+	projects := c.Projects()
+	if len(projects) != 2 {
+		t.Fatalf("expected 2 projects, got %d", len(projects))
+	}
+	if projects[1].Name != "new-proj" {
+		t.Errorf("expected new-proj, got %s", projects[1].Name)
+	}
+}
+
+// E-PENPAL-CACHE: verifies AddProject replaces by qualified name (standalone).
+func TestAddProject_ReplacesByQualifiedName(t *testing.T) {
+	c := New()
+	c.SetProjects([]discovery.Project{
+		{Name: "proj", Path: "/old", Origin: "standalone"},
+	})
+
+	c.AddProject(discovery.Project{Name: "proj", Path: "/new", Origin: "standalone"})
+
+	projects := c.Projects()
+	if len(projects) != 1 {
+		t.Fatalf("expected 1 project (replaced), got %d", len(projects))
+	}
+	if projects[0].Path != "/new" {
+		t.Errorf("expected path /new, got %s", projects[0].Path)
+	}
+}
+
+// E-PENPAL-CACHE: verifies AddProject replaces workspace-scoped projects.
+func TestAddProject_ReplacesWorkspaceProject(t *testing.T) {
+	c := New()
+	c.SetProjects([]discovery.Project{
+		{Name: "proj", WorkspaceName: "ws", Path: "/old", Origin: "workspace"},
+	})
+
+	// Same qualified name "ws/proj"
+	c.AddProject(discovery.Project{Name: "proj", WorkspaceName: "ws", Path: "/new", Origin: "workspace"})
+
+	projects := c.Projects()
+	if len(projects) != 1 {
+		t.Fatalf("expected 1 project (replaced), got %d", len(projects))
+	}
+	if projects[0].Path != "/new" {
+		t.Errorf("expected path /new, got %s", projects[0].Path)
+	}
+}
+
 // E-PENPAL-SCAN: verifies scan classifies files by source type.
 func TestScanProjectSources_ClassifiesFiles(t *testing.T) {
 	// Create temporary project structure

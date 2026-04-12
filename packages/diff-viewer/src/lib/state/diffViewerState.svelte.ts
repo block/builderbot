@@ -144,8 +144,8 @@ export function createDiffViewerState(
       const diff = await commands.getFileDiff(state.branchId, state.commitSha, state.scope, path);
       const beforeLineCount = diff.before?.content?.type === 'Text' ? diff.before.content.lines.length : 0;
       const afterLineCount = diff.after?.content?.type === 'Text' ? diff.after.content.lines.length : 0;
-      const beforeMaxLen = diff.before?.content?.type === 'Text' ? Math.max(0, ...diff.before.content.lines.map((l: string) => l.length)) : 0;
-      const afterMaxLen = diff.after?.content?.type === 'Text' ? Math.max(0, ...diff.after.content.lines.map((l: string) => l.length)) : 0;
+      const beforeMaxLen = diff.before?.content?.type === 'Text' ? diff.before.content.lines.reduce((max: number, l: string) => Math.max(max, l.length), 0) : 0;
+      const afterMaxLen = diff.after?.content?.type === 'Text' ? diff.after.content.lines.reduce((max: number, l: string) => Math.max(max, l.length), 0) : 0;
       console.info('[diff] getFileDiff done', {
         path,
         elapsed: `${(performance.now() - t0).toFixed(1)}ms`,

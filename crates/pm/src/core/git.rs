@@ -211,11 +211,12 @@ pub fn checkout(worktree_path: &Path, branch: &str) -> Result<()> {
     bail!("Failed to checkout '{}': {}", branch, stderr.trim());
 }
 
-/// Get the default branch from a worktree (resolves via remote HEAD)
-fn default_branch_from_worktree(worktree_path: &Path) -> Result<String> {
+/// Resolve the default branch name from a git directory by checking
+/// symbolic-ref and falling back to main/master.
+fn resolve_default_branch(git_dir: &Path) -> Result<String> {
     let output = Command::new("git")
         .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
-        .current_dir(worktree_path)
+        .current_dir(git_dir)
         .stderr(Stdio::null())
         .output()
         .context("Failed to get default branch")?;
@@ -230,7 +231,7 @@ fn default_branch_from_worktree(worktree_path: &Path) -> Result<String> {
     for candidate in &["main", "master"] {
         let output = Command::new("git")
             .args(["rev-parse", "--verify", &format!("origin/{}", candidate)])
-            .current_dir(worktree_path)
+            .current_dir(git_dir)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .output();
@@ -244,41 +245,14 @@ fn default_branch_from_worktree(worktree_path: &Path) -> Result<String> {
     Ok("main".to_string())
 }
 
+/// Get the default branch from a worktree (resolves via remote HEAD)
+fn default_branch_from_worktree(worktree_path: &Path) -> Result<String> {
+    resolve_default_branch(worktree_path)
+}
+
 /// Get the default branch of a bare repo (usually main or master)
 pub fn default_branch(bare_path: &Path) -> Result<String> {
-    let _ = ensure_fetched(bare_path);
-
-    let output = Command::new("git")
-        .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
-        .current_dir(bare_path)
-        .stderr(Stdio::null())
-        .output()
-        .context("Failed to get default branch")?;
-
-    if output.status.success() {
-        let refname = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        // refs/remotes/origin/main -> main
-        if let Some(branch) = refname.strip_prefix("refs/remotes/origin/") {
-            return Ok(branch.to_string());
-        }
-    }
-
-    // Fallback: try main, then master
-    for candidate in &["main", "master"] {
-        let output = Command::new("git")
-            .args(["rev-parse", "--verify", &format!("origin/{}", candidate)])
-            .current_dir(bare_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .output();
-        if let Ok(o) = output
-            && o.status.success()
-        {
-            return Ok(candidate.to_string());
-        }
-    }
-
-    Ok("main".to_string())
+    resolve_default_branch(bare_path)
 }
 
 /// Check if a branch has been merged into the default branch.
@@ -288,8 +262,6 @@ pub fn default_branch(bare_path: &Path) -> Result<String> {
 /// 2. Squash merge: remote branch deleted after squash-merge (branch gone = likely merged)
 /// 3. Local-only: branch exists locally but not remotely — check if local tip is ancestor
 pub fn is_branch_merged(bare_path: &Path, branch: &str, default: &str) -> Result<bool> {
-    let _ = ensure_fetched(bare_path);
-
     // Case 1: Check if remote branch ref is merged via `git branch -r --merged`
     let output = Command::new("git")
         .args(["branch", "-r", "--merged", &format!("origin/{}", default)])
@@ -306,7 +278,9 @@ pub fn is_branch_merged(bare_path: &Path, branch: &str, default: &str) -> Result
         }
     }
 
-    // Case 2: Remote branch no longer exists — it was likely deleted after merge
+    // Case 2: Remote branch no longer exists.
+    // Check if a local branch ref exists — if so, verify it's merged into default.
+    // If neither local nor remote ref exists, the branch is unknown, not "merged".
     let remote_exists = Command::new("git")
         .args(["rev-parse", "--verify", &format!("origin/{}", branch)])
         .current_dir(bare_path)
@@ -317,7 +291,34 @@ pub fn is_branch_merged(bare_path: &Path, branch: &str, default: &str) -> Result
         .unwrap_or(false);
 
     if !remote_exists {
-        return Ok(true);
+        let local_exists = Command::new("git")
+            .args(["rev-parse", "--verify", &format!("refs/heads/{}", branch)])
+            .current_dir(bare_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if local_exists {
+            // Local branch exists — check if it's an ancestor of default
+            let is_ancestor = Command::new("git")
+                .args([
+                    "merge-base",
+                    "--is-ancestor",
+                    &format!("refs/heads/{}", branch),
+                    &format!("origin/{}", default),
+                ])
+                .current_dir(bare_path)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            return Ok(is_ancestor);
+        }
+        // Neither local nor remote ref exists — can't determine merge status
+        return Ok(false);
     }
 
     // Case 3: Remote branch exists but wasn't in --merged list.
@@ -359,7 +360,7 @@ pub fn last_commit_date(bare_path: &Path, branch: &str) -> Result<Option<String>
 }
 
 /// Ensure a bare repo has the fetch refspec configured, then fetch
-fn ensure_fetched(bare_path: &Path) -> Result<()> {
+pub fn ensure_fetched(bare_path: &Path) -> Result<()> {
     let _ = Command::new("git")
         .args([
             "config",

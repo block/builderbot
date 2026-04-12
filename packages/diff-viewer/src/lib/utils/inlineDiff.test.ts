@@ -485,6 +485,32 @@ describe('computeLineDiff', () => {
       expect(result.afterLines[4]).toBe('unchanged');
     });
   });
+
+  describe('LCS bailout', () => {
+    it('treats very long modified lines as removed/added when product exceeds bailout threshold', () => {
+      // LCS_BAILOUT_PRODUCT is 1_000_000. Two lines of length ~1001 each
+      // produce a product of ~1_002_001, exceeding the threshold.
+      // similarity() returns 0, so they won't be paired as "modified".
+      const longA = 'a'.repeat(1001) + ' unique_before';
+      const longB = 'a'.repeat(1001) + ' unique_after';
+      const result = computeLineDiff([longA], [longB]);
+
+      expect(result.beforeLines).toEqual(['removed']);
+      expect(result.afterLines).toEqual(['added']);
+      expect(result.modifiedPairs).toHaveLength(0);
+    });
+
+    it('treats moderately long modified lines as modified when under bailout threshold', () => {
+      // Two lines of length 100 each produce a product of 10_000, well under threshold.
+      const modA = 'x'.repeat(100) + ' before_val';
+      const modB = 'x'.repeat(100) + ' after_val';
+      const result = computeLineDiff([modA], [modB]);
+
+      expect(result.beforeLines).toEqual(['modified']);
+      expect(result.afterLines).toEqual(['modified']);
+      expect(result.modifiedPairs).toHaveLength(1);
+    });
+  });
 });
 
 describe('createLineDiffCache', () => {

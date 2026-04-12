@@ -906,6 +906,7 @@ pub fn cleanup(base: &Path, stale_days: u64) -> Result<()> {
 
     let now = Utc::now();
     let mut found = 0;
+    let mut fetched_repos = std::collections::HashSet::<String>::new();
 
     for (name, project) in &state.projects {
         let mut reasons: Vec<String> = Vec::new();
@@ -930,6 +931,10 @@ pub fn cleanup(base: &Path, stale_days: u64) -> Result<()> {
             if let Some(repo) = state.repos.get(repo_name) {
                 if repo.external {
                     continue;
+                }
+                // Pre-fetch each unique repo once
+                if fetched_repos.insert(repo_name.clone()) {
+                    let _ = git::ensure_fetched(&repo.bare_path);
                 }
                 let default = git::default_branch(&repo.bare_path).unwrap_or("main".to_string());
                 if branch != &default

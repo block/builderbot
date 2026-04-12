@@ -1,10 +1,21 @@
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
+use std::path::Path;
 
 use super::git;
 use super::state::{Slot, State};
 
 const DEFAULT_MAX_SLOTS: usize = 2;
+
+/// Prepare a slot's worktree for the given branch. If the worktree directory
+/// already exists, checks out the branch; otherwise creates a new worktree.
+fn prepare_slot(slot_path: &Path, bare_path: &Path, branch: &str) -> Result<()> {
+    if slot_path.exists() {
+        git::checkout(slot_path, branch)
+    } else {
+        git::add_worktree(bare_path, slot_path, branch)
+    }
+}
 
 /// Ensure a repo has its pool slots initialized in state
 pub fn ensure_slots(state: &mut State, repo_name: &str) -> Result<()> {
@@ -89,11 +100,7 @@ pub fn acquire_slot(
 
         if needs_checkout {
             let repo = state.repos.get(repo_name).unwrap();
-            if slot.path.exists() {
-                git::checkout(&slot.path, branch)?;
-            } else {
-                git::add_worktree(&repo.bare_path, &slot.path, branch)?;
-            }
+            prepare_slot(&slot.path, &repo.bare_path, branch)?;
         }
         return Ok(AcquireResult::Acquired(idx));
     }
@@ -106,11 +113,7 @@ pub fn acquire_slot(
         slot.last_used = Utc::now();
 
         let repo = state.repos.get(repo_name).unwrap();
-        if slot.path.exists() {
-            git::checkout(&slot.path, branch)?;
-        } else {
-            git::add_worktree(&repo.bare_path, &slot.path, branch)?;
-        }
+        prepare_slot(&slot.path, &repo.bare_path, branch)?;
         return Ok(AcquireResult::Acquired(idx));
     }
 
@@ -180,11 +183,7 @@ pub fn execute_eviction(
     // If git fails, the evicted project's state is untouched.
     let slot_path = slots[evict_idx].path.clone();
     let repo = state.repos.get(repo_name).unwrap().clone();
-    if slot_path.exists() {
-        git::checkout(&slot_path, branch)?;
-    } else {
-        git::add_worktree(&repo.bare_path, &slot_path, branch)?;
-    }
+    prepare_slot(&slot_path, &repo.bare_path, branch)?;
 
     // Git succeeded — now safe to update symlinks and state
     let slots = state.pool.slots.get_mut(repo_name).unwrap();
@@ -238,11 +237,7 @@ pub fn grow_and_acquire(
     slot.last_used = Utc::now();
 
     let repo = state.repos.get(repo_name).unwrap();
-    if slot.path.exists() {
-        git::checkout(&slot.path, branch)?;
-    } else {
-        git::add_worktree(&repo.bare_path, &slot.path, branch)?;
-    }
+    prepare_slot(&slot.path, &repo.bare_path, branch)?;
 
     use colored::Colorize;
     eprintln!(

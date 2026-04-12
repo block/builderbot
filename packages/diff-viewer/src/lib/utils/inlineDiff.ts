@@ -173,8 +173,8 @@ export function computeLineDiff(
   afterLines: string[],
 ): LineDiffResult {
   const t0 = performance.now();
-  const beforeMaxLen = Math.max(0, ...beforeLines.map(l => l.length));
-  const afterMaxLen = Math.max(0, ...afterLines.map(l => l.length));
+  const beforeMaxLen = beforeLines.reduce((max, l) => Math.max(max, l.length), 0);
+  const afterMaxLen = afterLines.reduce((max, l) => Math.max(max, l.length), 0);
   console.info('[diff] computeLineDiff start', { beforeLines: beforeLines.length, afterLines: afterLines.length, beforeMaxLineLen: beforeMaxLen, afterMaxLineLen: afterMaxLen });
 
   const { aIndices: lcsBeforeIndices, bIndices: lcsAfterIndices } = lcsIndices(

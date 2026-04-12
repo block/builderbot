@@ -115,7 +115,18 @@
   $effect(() => {
     const _items = itemsById;
     if (hasUnresolvedTokens && _items.size > 0 && editorEl) {
+      // Preserve selection state across re-render (e.g. prefilled select-all)
+      const sel = window.getSelection();
+      const hadSelection = sel && !sel.isCollapsed && editorEl.contains(sel.anchorNode);
+
       renderContent(value);
+
+      if (hadSelection && sel) {
+        const range = document.createRange();
+        range.selectNodeContents(editorEl);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
     }
   });
 

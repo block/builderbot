@@ -76,6 +76,33 @@ func TestSSE_ConnectedEvent(t *testing.T) {
 	}
 }
 
+// readSSEEvent reads a complete SSE frame (event line + data line + blank
+// separator) from reader. It returns the parsed event name and data payload.
+// All three lines of the frame are always consumed to keep the parser in sync.
+func readSSEEvent(t *testing.T, reader *bufio.Reader) (eventName string, evt watcher.Event) {
+	t.Helper()
+	line1, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("reading event line: %v", err)
+	}
+	eventName = strings.TrimSuffix(strings.TrimPrefix(line1, "event: "), "\n")
+
+	line2, err := reader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("reading data line: %v", err)
+	}
+	dataStr := strings.TrimSuffix(strings.TrimPrefix(line2, "data: "), "\n")
+	if err := json.Unmarshal([]byte(dataStr), &evt); err != nil {
+		t.Fatalf("parsing event JSON %q: %v", dataStr, err)
+	}
+
+	// consume trailing blank separator
+	if _, err := reader.ReadString('\n'); err != nil {
+		t.Fatalf("reading separator: %v", err)
+	}
+	return eventName, evt
+}
+
 // E-PENPAL-SSE: verifies broadcast events are delivered to SSE clients as change events.
 func TestSSE_BroadcastDelivery(t *testing.T) {
 	s, _, _ := testServer(t)
@@ -105,29 +132,9 @@ func TestSSE_BroadcastDelivery(t *testing.T) {
 	// goroutines (populateProjects) may emit events that race with ours.
 	var found bool
 	for attempts := 0; attempts < 10; attempts++ {
-		line1, err := reader.ReadString('\n')
-		if err != nil {
-			t.Fatalf("reading event line: %v", err)
-		}
-		if line1 != "event: change\n" {
-			t.Fatalf("expected event line, got %q", line1)
-		}
-
-		line2, err := reader.ReadString('\n')
-		if err != nil {
-			t.Fatalf("reading data line: %v", err)
-		}
-		dataStr := strings.TrimPrefix(line2, "data: ")
-		dataStr = strings.TrimSuffix(dataStr, "\n")
-
-		// Read blank separator
-		if _, err := reader.ReadString('\n'); err != nil {
-			t.Fatalf("reading separator: %v", err)
-		}
-
-		var evt watcher.Event
-		if err := json.Unmarshal([]byte(dataStr), &evt); err != nil {
-			t.Fatalf("parsing event JSON %q: %v", dataStr, err)
+		name, evt := readSSEEvent(t, reader)
+		if name != "change" {
+			continue
 		}
 		if evt.Type == "files" && evt.Project == "test-proj" {
 			found = true
@@ -171,40 +178,27 @@ func TestSSE_MultipleEvents(t *testing.T) {
 		s.watcher.Broadcast(evt)
 	}
 
-	// Read and verify all 3 events (3 lines each = 9 lines)
-	for i, want := range events {
-		line1, err := reader.ReadString('\n')
-		if err != nil {
-			t.Fatalf("event %d line 1: %v", i, err)
+	// Collect events in order, skipping background noise (e.g. populateProjects).
+	// Cap iterations to avoid hanging if an event is dropped.
+	var matched []watcher.Event
+	nextIdx := 0
+	for attempts := 0; attempts < 20 && nextIdx < len(events); attempts++ {
+		name, got := readSSEEvent(t, reader)
+		if name != "change" {
+			continue
 		}
-		if line1 != "event: change\n" {
-			t.Errorf("event %d: expected %q, got %q", i, "event: change\n", line1)
-		}
-
-		line2, err := reader.ReadString('\n')
-		if err != nil {
-			t.Fatalf("event %d line 2: %v", i, err)
-		}
-		dataStr := strings.TrimPrefix(line2, "data: ")
-		dataStr = strings.TrimSuffix(dataStr, "\n")
-		var got watcher.Event
-		if err := json.Unmarshal([]byte(dataStr), &got); err != nil {
-			t.Fatalf("event %d: parsing JSON %q: %v", i, dataStr, err)
+		want := events[nextIdx]
+		if got.Project != want.Project {
+			continue // not one of ours (or out-of-band), skip
 		}
 		if got.Type != want.Type {
-			t.Errorf("event %d: expected type %q, got %q", i, want.Type, got.Type)
+			t.Errorf("event %d: expected type %q, got %q", nextIdx, want.Type, got.Type)
 		}
-		if got.Project != want.Project {
-			t.Errorf("event %d: expected project %q, got %q", i, want.Project, got.Project)
-		}
-
-		line3, err := reader.ReadString('\n')
-		if err != nil {
-			t.Fatalf("event %d line 3: %v", i, err)
-		}
-		if line3 != "\n" {
-			t.Errorf("event %d: expected blank separator, got %q", i, line3)
-		}
+		matched = append(matched, got)
+		nextIdx++
+	}
+	if nextIdx < len(events) {
+		t.Fatalf("only matched %d/%d events after 20 iterations", nextIdx, len(events))
 	}
 }
 

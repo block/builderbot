@@ -41,6 +41,7 @@
   import BranchCard from '../branches/BranchCard.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import AddRepoModal from './AddRepoModal.svelte';
+  import SuggestedRepos from './SuggestedRepos.svelte';
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
   import TimelineRow from '../timeline/TimelineRow.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
@@ -69,7 +70,7 @@
     onDeleteProject?: () => void;
     onDeleteBranch?: (branchId: string) => void;
     onRenameBranch?: (branchId: string, branchName: string) => void;
-    onRepoSelected?: (selection: RepoPickerSelection) => void;
+    onRepoSelected?: (selection: RepoPickerSelection) => void | Promise<void>;
     onRetryWorktree?: (branchId: string) => void;
     onResumeWorkspace?: (workspaceName: string) => void;
     onDismissReason?: (projectRepoId: string) => void;
@@ -140,9 +141,9 @@
     }
   }
 
-  function handleRepoSelected(selection: RepoPickerSelection) {
+  async function handleRepoSelected(selection: RepoPickerSelection) {
     addRepoModalOpen = false;
-    onRepoSelected?.(selection);
+    await onRepoSelected?.(selection);
   }
 
   function repoForBranch(branch: Branch): ProjectRepo | null {
@@ -626,6 +627,8 @@
       />
     {/each}
   </div>
+
+  <SuggestedRepos {project} {reposById} {onRepoSelected} />
 </div>
 
 {#if openNote}

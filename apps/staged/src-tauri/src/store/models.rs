@@ -1146,6 +1146,19 @@ impl Comment {
 }
 
 // =============================================================================
+// Suggested Repos (Repo Affinities)
+// =============================================================================
+
+/// A repo that has historically been used alongside the current project's repos.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestedRepo {
+    pub github_repo: String,
+    pub subpath: Option<String>,
+    pub score: i64,
+}
+
+// =============================================================================
 // Repo Badges
 // =============================================================================
 

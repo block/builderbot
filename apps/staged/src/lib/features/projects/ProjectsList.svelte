@@ -31,7 +31,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import SineWave from '../../shared/SineWave.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
-  import RepoBadge from '../../shared/RepoBadge.svelte';
+
   import { setProjects } from './projectsSidebarState.svelte';
   import { darkMode } from '../../stores/isDark.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
@@ -58,7 +58,7 @@
     )
   );
 
-  /** Unique repo+subpath entries sorted by project count descending */
+  /** Unique repo+subpath entries sorted alphabetically by full display string */
   let repoFilters = $derived.by(() => {
     const counts = new Map<string, { repo: string; subpath: string; count: number }>();
     for (const project of projects) {
@@ -83,7 +83,11 @@
         }
       }
     }
-    return [...counts.values()].sort((a, b) => b.count - a.count);
+    return [...counts.values()].sort((a, b) => {
+      const aDisplay = a.subpath ? `${a.repo}/${a.subpath}` : a.repo;
+      const bDisplay = b.subpath ? `${b.repo}/${b.subpath}` : b.repo;
+      return aDisplay.localeCompare(bDisplay);
+    });
   });
 
   let unreadCount = $derived(projects.filter((p) => projectStateStore.isUnread(p.id)).length);
@@ -453,7 +457,7 @@
                   ? `--repo-bg: ${darkMode.value ? `hsl(${badge.hue} 35% 22%)` : `hsl(${badge.hue} 50% 92%)`}; --repo-fg: ${darkMode.value ? `hsl(${badge.hue} 50% 75%)` : `hsl(${badge.hue} 55% 35%)`}; --repo-bg-hover: ${darkMode.value ? `hsl(${badge.hue} 35% 28%)` : `hsl(${badge.hue} 50% 88%)`}`
                   : ''}
               >
-                {badge?.shortName ?? rf.repo.split('/').pop()}
+                <RepoLabel githubRepo={rf.repo} subpath={rf.subpath || null} />
                 <span class="filter-count">{rf.count}</span>
               </button>
             {/each}
@@ -541,23 +545,47 @@
                 {/if}
                 <div class="repo">
                   {#if repos.length > 0}
-                    {#each repos as r}
+                    {#each [...repos].sort((a, b) => {
+                      const aKey = a.subpath ? `${a.githubRepo}/${a.subpath}` : a.githubRepo;
+                      const bKey = b.subpath ? `${b.githubRepo}/${b.subpath}` : b.githubRepo;
+                      return aKey.localeCompare(bKey);
+                    }) as r}
                       {@const badge = repoBadgeStore.lookup(r.githubRepo, r.subpath)}
-                      <span class="repo-line">
-                        {#if badge}
-                          <RepoBadge shortName={badge.shortName} hue={badge.hue} />
-                        {/if}
-                        <RepoLabel githubRepo={r.githubRepo} subpath={r.subpath} />
-                      </span>
+                      {#if badge}
+                        <span
+                          class="repo-badge-label"
+                          style="background: {darkMode.value
+                            ? `hsl(${badge.hue} 35% 22%)`
+                            : `hsl(${badge.hue} 50% 92%)`}; color: {darkMode.value
+                            ? `hsl(${badge.hue} 50% 75%)`
+                            : `hsl(${badge.hue} 55% 35%)`};"
+                        >
+                          <RepoLabel githubRepo={r.githubRepo} subpath={r.subpath} />
+                        </span>
+                      {:else}
+                        <span class="repo-line">
+                          <RepoLabel githubRepo={r.githubRepo} subpath={r.subpath} />
+                        </span>
+                      {/if}
                     {/each}
                   {:else if project.githubRepo}
                     {@const badge = repoBadgeStore.lookup(project.githubRepo, project.subpath)}
-                    <span class="repo-line">
-                      {#if badge}
-                        <RepoBadge shortName={badge.shortName} hue={badge.hue} />
-                      {/if}
-                      <RepoLabel githubRepo={project.githubRepo} subpath={project.subpath} />
-                    </span>
+                    {#if badge}
+                      <span
+                        class="repo-badge-label"
+                        style="background: {darkMode.value
+                          ? `hsl(${badge.hue} 35% 22%)`
+                          : `hsl(${badge.hue} 50% 92%)`}; color: {darkMode.value
+                          ? `hsl(${badge.hue} 50% 75%)`
+                          : `hsl(${badge.hue} 55% 35%)`};"
+                      >
+                        <RepoLabel githubRepo={project.githubRepo} subpath={project.subpath} />
+                      </span>
+                    {:else}
+                      <span class="repo-line">
+                        <RepoLabel githubRepo={project.githubRepo} subpath={project.subpath} />
+                      </span>
+                    {/if}
                   {:else}
                     No repo attached
                   {/if}
@@ -746,6 +774,15 @@
     background: rgba(128, 128, 128, 0.2);
   }
 
+  .filter-chip.repo-filter :global(.repo-label-prefix) {
+    color: inherit;
+    opacity: 0.6;
+  }
+
+  .filter-chip.repo-filter :global(.repo-label-emphasis) {
+    color: inherit;
+  }
+
   .projects-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
@@ -863,6 +900,27 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .repo-badge-label {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 5px;
+    border-radius: 4px;
+    font-weight: 600;
+    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .repo-badge-label :global(.repo-label-prefix) {
+    color: inherit;
+    opacity: 0.6;
+  }
+
+  .repo-badge-label :global(.repo-label-emphasis) {
+    color: inherit;
   }
 
   .deleting-pill {

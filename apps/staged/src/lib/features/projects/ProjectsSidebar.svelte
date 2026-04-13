@@ -252,7 +252,8 @@
               {@const repos = reposByProject.get(project.id) ?? []}
               {@const badges = repos
                 .map((r) => repoBadgeStore.lookup(r.githubRepo, r.subpath))
-                .filter((b): b is NonNullable<typeof b> => Boolean(b))}
+                .filter((b): b is NonNullable<typeof b> => Boolean(b))
+                .sort((a, b) => a.shortName.localeCompare(b.shortName))}
               {@const activity = projectActivity(sessionTypes, status.runActionPhase)}
               <button
                 class="project-row"

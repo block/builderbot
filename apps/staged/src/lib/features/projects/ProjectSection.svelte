@@ -167,9 +167,12 @@
 
   // ── Live session hints (show latest agent message for running notes) ──
   let liveSessionHints = $state<Record<string, string>>({});
-  const liveSessionHintPoller = createLiveSessionHints((nextHints) => {
-    liveSessionHints = nextHints;
-  });
+  const liveSessionHintPoller = createLiveSessionHints(
+    (nextHints) => {
+      liveSessionHints = nextHints;
+    },
+    () => branches.find((b) => b.worktreePath)?.worktreePath ?? null
+  );
 
   /** Collect session IDs from running project notes + activeSessionIds. */
   let runningNoteSessionIds = $derived.by(() => {

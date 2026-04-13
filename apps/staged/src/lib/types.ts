@@ -133,7 +133,7 @@ export interface ReviewTimelineItem {
   completionReason: string | null;
   title: string | null;
   commentCount: number;
-  isAuto?: boolean;
+  isAuto: boolean;
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;

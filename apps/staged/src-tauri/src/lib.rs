@@ -156,6 +156,7 @@ pub struct ReviewTimelineItem {
     pub completion_reason: Option<String>,
     pub title: Option<String>,
     pub comment_count: usize,
+    pub is_auto: bool,
     pub created_at: i64,
     pub updated_at: i64,
     pub completed_at: Option<i64>,

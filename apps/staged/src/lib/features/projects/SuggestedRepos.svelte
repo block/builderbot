@@ -27,17 +27,20 @@
 
   let suggestions = $state<SuggestedRepo[]>([]);
   let fetchGeneration = 0;
+  let dismissGeneration = 0;
   let addingKey = $state<string | null>(null);
   let dismissed = $state(false);
   let dismissLoaded = $state(false);
 
   const DISMISS_STORE_KEY = 'suggested-repos-dismissed';
 
-  // Load dismiss state on mount.
+  // Load dismiss state on mount / when project changes.
   $effect(() => {
-    void project.id; // re-check when project changes
+    const pid = project.id; // track project.id reactively
+    const gen = ++dismissGeneration;
     getStoreValue<Record<string, boolean>>(DISMISS_STORE_KEY).then((val) => {
-      dismissed = val?.[project.id] ?? false;
+      if (gen !== dismissGeneration) return; // discard stale response
+      dismissed = val?.[pid] ?? false;
       dismissLoaded = true;
     });
   });
@@ -54,7 +57,7 @@
     )
   );
 
-  async function fetchSuggestions() {
+  async function fetchSuggestions(currentAttachedKeys: Set<string>) {
     const gen = ++fetchGeneration;
     try {
       const result = await commands.getSuggestedRepos(project.id);
@@ -62,7 +65,7 @@
       // Filter out any that have been attached since we last fetched.
       suggestions = result.filter((s) => {
         const key = s.subpath ? `${s.githubRepo}::${s.subpath}` : s.githubRepo;
-        return !attachedKeys.has(key);
+        return !currentAttachedKeys.has(key);
       });
       // Ensure badges exist for suggestions so we can look up hues.
       if (suggestions.length > 0) {
@@ -77,9 +80,11 @@
   }
 
   // Re-fetch when the set of attached repos changes.
+  // Reading `attachedKeys` directly (not just `.size`) ensures Svelte tracks
+  // the full derived value, so swapping one repo for another still re-fires.
   $effect(() => {
-    void attachedKeys.size;
-    fetchSuggestions();
+    const keys = attachedKeys;
+    void fetchSuggestions(keys);
   });
 
   function suggestionKey(s: SuggestedRepo): string {

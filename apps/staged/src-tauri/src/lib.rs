@@ -574,15 +574,8 @@ fn get_suggested_repos(
     limit: Option<usize>,
 ) -> Result<Vec<store::SuggestedRepo>, String> {
     let store = get_store(&store)?;
-    let repos = store
-        .list_project_repos(&project_id)
-        .map_err(|e| e.to_string())?;
-    let keys: Vec<String> = repos
-        .iter()
-        .map(|r| store::repo_affinities::repo_affinity_key(&r.github_repo, r.subpath.as_deref()))
-        .collect();
     store
-        .get_suggested_repos(&keys, limit.unwrap_or(5))
+        .get_suggested_repos_for_project(&project_id, limit.unwrap_or(5))
         .map_err(|e| e.to_string())
 }
 

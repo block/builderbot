@@ -50,61 +50,68 @@ impl Store {
         Ok(())
     }
 
-    /// Query repos that have historically been paired with the given keys,
-    /// excluding those already in `current_keys`. Results are sorted by
+    /// Query repos that have historically been paired with the repos in the
+    /// given project, excluding those already attached. Results are sorted by
     /// aggregate affinity score (descending).
-    pub fn get_suggested_repos(
+    ///
+    /// Both the key-building and suggestion query happen under a single lock
+    /// acquisition so the result is consistent.
+    pub fn get_suggested_repos_for_project(
         &self,
-        current_keys: &[String],
+        project_id: &str,
         limit: usize,
     ) -> Result<Vec<SuggestedRepo>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+
+        // Build affinity keys from the project's current repos.
+        let current_keys: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT github_repo, subpath FROM project_repos WHERE project_id = ?1")?;
+            let rows = stmt.query_map(params![project_id], |row| {
+                let github_repo: String = row.get(0)?;
+                let subpath: Option<String> = row.get(1)?;
+                Ok(repo_affinity_key(&github_repo, subpath.as_deref()))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+
         if current_keys.is_empty() {
+            drop(conn);
             return self.get_popular_repos(limit);
         }
 
-        let conn = self.conn.lock().unwrap();
-
-        // Build placeholders for the IN clauses.
-        let placeholders: String = current_keys
-            .iter()
-            .enumerate()
-            .map(|(i, _)| format!("?{}", i + 1))
-            .collect::<Vec<_>>()
-            .join(", ");
-
-        // Offset for the second copy of params (exclude list) and the third copy.
+        // Use a CTE so the current keys are bound once and reused for the
+        // IN-match and the NOT-IN exclusion.
         let n = current_keys.len();
-        let placeholders2: String = (0..n)
-            .map(|i| format!("?{}", n + i + 1))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let exclude_placeholders: String = (0..n)
-            .map(|i| format!("?{}", 2 * n + i + 1))
+        let value_rows: String = (0..n)
+            .map(|i| format!("(?{})", i + 1))
             .collect::<Vec<_>>()
             .join(", ");
 
         let sql = format!(
-            "SELECT repo_key, SUM(co_use_count) as score
+            "WITH current(key) AS (VALUES {value_rows})
+             SELECT repo_key, SUM(co_use_count) as score
              FROM (
-                 SELECT repo_b as repo_key, co_use_count FROM repo_affinities WHERE repo_a IN ({placeholders})
+                 SELECT repo_b AS repo_key, co_use_count
+                 FROM repo_affinities
+                 WHERE repo_a IN (SELECT key FROM current)
                  UNION ALL
-                 SELECT repo_a as repo_key, co_use_count FROM repo_affinities WHERE repo_b IN ({placeholders2})
+                 SELECT repo_a AS repo_key, co_use_count
+                 FROM repo_affinities
+                 WHERE repo_b IN (SELECT key FROM current)
              )
-             WHERE repo_key NOT IN ({exclude_placeholders})
+             WHERE repo_key NOT IN (SELECT key FROM current)
              GROUP BY repo_key
              ORDER BY score DESC
              LIMIT ?{}",
-            3 * n + 1
+            n + 1
         );
 
         let mut stmt = conn.prepare(&sql)?;
 
-        // Bind parameters: current_keys x3 (two IN clauses + exclude), then limit.
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        for _ in 0..3 {
-            for key in current_keys {
-                param_values.push(Box::new(key.clone()));
-            }
+        for key in &current_keys {
+            param_values.push(Box::new(key.clone()));
         }
         param_values.push(Box::new(limit as i64));
 

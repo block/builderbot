@@ -5,7 +5,7 @@
   project notes, repo controls, and all branch cards for this project.
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { listen } from '@tauri-apps/api/event';
   import { untrack } from 'svelte';
   import {
@@ -52,6 +52,7 @@
   import { isImageFile } from '../branches/branchCardHelpers';
   import { createImage, createImageFromData, deleteImage, getImageData } from '../../api/commands';
   import { formatRelativeTime, minuteNow } from '../../shared/relativeTime.svelte';
+  import { createLiveSessionHints } from '../timeline/liveSessionHints';
 
   interface Props {
     project: Project;
@@ -163,6 +164,34 @@
   );
   /** Session IDs for running project sessions (all produce notes). */
   let activeSessionIds = $state<Set<string>>(new Set());
+
+  // ── Live session hints (show latest agent message for running notes) ──
+  let liveSessionHints = $state<Record<string, string>>({});
+  const liveSessionHintPoller = createLiveSessionHints((nextHints) => {
+    liveSessionHints = nextHints;
+  });
+
+  /** Collect session IDs from running project notes + activeSessionIds. */
+  let runningNoteSessionIds = $derived.by(() => {
+    const ids = new Set<string>();
+    for (const note of projectNotes) {
+      if (!note.title.trim() && !note.content.trim() && note.sessionId) {
+        ids.add(note.sessionId);
+      }
+    }
+    for (const sid of activeSessionIds) {
+      ids.add(sid);
+    }
+    return Array.from(ids);
+  });
+
+  $effect(() => {
+    liveSessionHintPoller.syncRunningSessionIds(runningNoteSessionIds);
+  });
+
+  onDestroy(() => {
+    liveSessionHintPoller.destroy();
+  });
 
   // Hashtag reference items
   let hashtagItems = $state<HashtagItem[]>([]);
@@ -578,6 +607,8 @@
           {@const isRunning = !note.title.trim() && !note.content.trim()}
           {@const isFailed = !isRunning && !!note.sessionId && !note.content.trim()}
           {@const noteType = isRunning ? 'generating-note' : isFailed ? 'failed-note' : 'note'}
+          {@const liveHint =
+            isRunning && note.sessionId ? liveSessionHints[note.sessionId] : undefined}
           <TimelineRow
             type={noteType}
             title={isRunning
@@ -585,9 +616,11 @@
               : isFailed
                 ? 'Session finished — no note created'
                 : note.title || 'Untitled note'}
-            secondaryMeta={isRunning || isFailed
-              ? undefined
-              : formatRelativeTime(note.completedAt ?? note.createdAt, nowMs)}
+            secondaryMeta={isRunning
+              ? (liveHint ?? 'Generating note')
+              : isFailed
+                ? undefined
+                : formatRelativeTime(note.completedAt ?? note.createdAt, nowMs)}
             deleting={deletingNoteIds.has(note.id)}
             isLast={index === timelineNotes.length - 1}
             sessionId={note.sessionId ?? undefined}

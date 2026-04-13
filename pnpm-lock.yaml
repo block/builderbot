@@ -20,8 +20,8 @@ importers:
         specifier: ^2.2.0
         version: 2.4.2
       lucide-svelte:
-        specifier: ^0.575.0
-        version: 0.575.0(svelte@5.53.6)
+        specifier: ^0.577.0
+        version: 0.577.0(svelte@5.53.6)
       marked:
         specifier: ^17.0.1
         version: 17.0.3
@@ -199,8 +199,8 @@ importers:
         specifier: ^0.7.2
         version: 0.7.2
       lucide-svelte:
-        specifier: ^0.575.0
-        version: 0.575.0(svelte@5.53.6)
+        specifier: ^0.577.0
+        version: 0.577.0(svelte@5.53.6)
       marked:
         specifier: ^17.0.1
         version: 17.0.3
@@ -2122,8 +2122,8 @@ packages:
     peerDependencies:
       svelte: ^3 || ^4 || ^5.0.0-next.42
 
-  lucide-svelte@0.575.0:
-    resolution: {integrity: sha512-Tu15tJfbmRNPaU61yeNFf3jfRHs8ABA+NwTt7TWmwVbhlSA3H7sW65tX6RttcP7HGV4aHUlYhXixZOlntoFBdw==}
+  lucide-svelte@0.577.0:
+    resolution: {integrity: sha512-0i88o57KsaHWnc80J57fY99CWzlZsSdtH5kKjLUJa7z8dum/9/AbINNLzJ7NiRFUdOgMnfAmJt8jFbW2zeC5qQ==}
     peerDependencies:
       svelte: ^3 || ^4 || ^5.0.0-next.42
 
@@ -4682,7 +4682,7 @@ snapshots:
     dependencies:
       svelte: 5.53.6
 
-  lucide-svelte@0.575.0(svelte@5.53.6):
+  lucide-svelte@0.577.0(svelte@5.53.6):
     dependencies:
       svelte: 5.53.6
 

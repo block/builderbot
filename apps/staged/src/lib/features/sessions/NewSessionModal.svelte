@@ -184,9 +184,13 @@
   // Hashtag reference items
   let hashtagItems = $state<HashtagItem[]>([]);
   $effect(() => {
+    let stale = false;
     buildBranchHashtagItems(branch.id, branch.projectId).then((items) => {
-      hashtagItems = items;
+      if (!stale) hashtagItems = items;
     });
+    return () => {
+      stale = true;
+    };
   });
 
   // Image attachment state

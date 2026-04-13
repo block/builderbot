@@ -1,6 +1,25 @@
 import type { BranchTimeline, HashtagItem, ProjectNote, Branch, ProjectRepo } from '../../types';
 import { getBranchTimeline, listProjectNotes } from '../../commands';
 
+/** Regex matching `#type:id` hashtag tokens in plain text. Use with `new RegExp(source, 'g')` for stateful iteration. */
+export const HASHTAG_TOKEN_RE = /#(note|commit|review|project-note):([^\s]+)/g;
+
+/** Human-readable labels for each hashtag type. */
+export const hashtagTypeLabels: Record<string, string> = {
+  note: 'Note',
+  commit: 'Commit',
+  review: 'Review',
+  'project-note': 'Note',
+};
+
+/** CSS custom-property names for each hashtag type's foreground and background colors. */
+export const hashtagTypeColors: Record<string, { color: string; bg: string }> = {
+  note: { color: '--note-color', bg: '--note-bg' },
+  commit: { color: '--commit-color', bg: '--commit-bg' },
+  review: { color: '--review-color', bg: '--review-bg' },
+  'project-note': { color: '--note-color', bg: '--note-bg' },
+};
+
 /**
  * Build hashtag items for a single branch scope (+ optional project notes).
  */

@@ -21,6 +21,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import type { HashtagItem } from '../../types';
+  import { HASHTAG_TOKEN_RE, hashtagTypeLabels } from './hashtagItems';
 
   interface Props {
     value: string;
@@ -58,15 +59,7 @@
   let dropdownStyle = $state('');
   let pendingInsert: { textNode: Text; hashPos: number; cursorPos: number } | null = null;
 
-  const TOKEN_REGEX = /#(note|commit|review|project-note):([^\s]+)/g;
   const MAX_RESULTS = 10;
-
-  const typeLabels: Record<string, string> = {
-    note: 'Note',
-    commit: 'Commit',
-    review: 'Review',
-    'project-note': 'Note',
-  };
 
   // Sync editorEl to the textareaEl binding
   $effect(() => {
@@ -83,7 +76,7 @@
 
   let selectedTokenKeys = $derived.by(() => {
     const keys = new Set<string>();
-    const regex = new RegExp(TOKEN_REGEX.source, 'g');
+    const regex = new RegExp(HASHTAG_TOKEN_RE.source, 'g');
     let m;
     while ((m = regex.exec(value)) !== null) {
       keys.add(`${m[1]}:${m[2]}`);
@@ -135,7 +128,7 @@
     badge.className = 'hashtag-badge';
     badge.contentEditable = 'false';
     badge.dataset.token = `#${item.type}:${item.id}`;
-    const label = typeLabels[item.type] ?? item.type;
+    const label = hashtagTypeLabels[item.type] ?? item.type;
     badge.textContent = `${label}: ${item.title}`;
     badge.style.cssText = `background: var(${item.bgColor}); color: var(${item.color});`;
     return badge;
@@ -145,7 +138,7 @@
     if (!editorEl) return;
     editorEl.innerHTML = '';
 
-    const regex = new RegExp(TOKEN_REGEX.source, 'g');
+    const regex = new RegExp(HASHTAG_TOKEN_RE.source, 'g');
     let lastIndex = 0;
     let match;
     let unresolved = false;
@@ -446,7 +439,7 @@
             onmouseenter={() => (selectedIndex = i)}
           >
             <span class="hashtag-item-icon {item.type}-icon">
-              {typeLabels[item.type] ?? item.type}
+              {hashtagTypeLabels[item.type] ?? item.type}
             </span>
             <span class="hashtag-item-title">{item.title}</span>
             {#if item.repoSlug || item.branchName}

@@ -33,9 +33,13 @@
   // Hashtag reference items
   let hashtagItems = $state<HashtagItem[]>([]);
   $effect(() => {
+    let stale = false;
     buildBranchHashtagItems(branchId, projectId ?? null).then((items) => {
-      hashtagItems = items;
+      if (!stale) hashtagItems = items;
     });
+    return () => {
+      stale = true;
+    };
   });
 
   const MIN_TEXTAREA_HEIGHT_PX = 80;

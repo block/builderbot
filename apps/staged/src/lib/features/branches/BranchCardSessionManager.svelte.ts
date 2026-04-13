@@ -62,7 +62,7 @@ export default class BranchCardSessionManager {
     return (
       tl.commits.some((c) => c.sessionStatus === 'running') ||
       tl.notes.some((n) => n.sessionStatus === 'running') ||
-      tl.reviews.some((r) => r.sessionStatus === 'running')
+      tl.reviews.some((r) => r.sessionStatus === 'running' && !r.isAuto)
     );
   });
 

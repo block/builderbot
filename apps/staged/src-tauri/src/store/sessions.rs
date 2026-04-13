@@ -224,6 +224,9 @@ impl Store {
     }
 
     /// Check whether a branch already has a running session.
+    ///
+    /// Auto-reviews (`is_auto = 1`) are excluded because they run in the
+    /// background and should never block user-initiated sessions.
     pub fn has_running_session_for_branch(&self, branch_id: &str) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
@@ -232,7 +235,7 @@ impl Store {
                AND (
                    EXISTS (SELECT 1 FROM commits c WHERE c.session_id = s.id AND c.branch_id = ?1)
                    OR EXISTS (SELECT 1 FROM notes n WHERE n.session_id = s.id AND n.branch_id = ?1)
-                   OR EXISTS (SELECT 1 FROM reviews r WHERE r.session_id = s.id AND r.branch_id = ?1)
+                   OR EXISTS (SELECT 1 FROM reviews r WHERE r.session_id = s.id AND r.branch_id = ?1 AND r.is_auto = 0)
                )",
             params![branch_id],
             |row| row.get(0),

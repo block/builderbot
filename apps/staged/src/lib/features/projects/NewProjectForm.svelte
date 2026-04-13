@@ -92,7 +92,7 @@
         normalizedSubpath,
         normalizedBranch,
         prNumber,
-        defaultBranch ?? undefined
+        matchedPr?.baseRef ?? defaultBranch ?? undefined
       );
       onCreated(project);
     } catch (e) {

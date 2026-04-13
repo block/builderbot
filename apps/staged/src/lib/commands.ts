@@ -30,6 +30,7 @@ import type {
   PrStatus,
   PollWorkspaceResult,
   Image,
+  SuggestedRepo,
 } from './types';
 
 // =============================================================================
@@ -124,6 +125,10 @@ export function setPrimaryProjectRepo(projectId: string, projectRepoId: string):
 
 export function clearProjectRepoReason(projectRepoId: string): Promise<void> {
   return invoke('clear_project_repo_reason', { projectRepoId });
+}
+
+export function getSuggestedRepos(projectId: string, limit?: number): Promise<SuggestedRepo[]> {
+  return invoke('get_suggested_repos', { projectId, limit: limit ?? null });
 }
 
 /** List the authenticated user's GitHub organization memberships. */

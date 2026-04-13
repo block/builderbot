@@ -567,6 +567,25 @@ fn list_recent_repos(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command(rename_all = "camelCase")]
+fn get_suggested_repos(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<store::SuggestedRepo>, String> {
+    let store = get_store(&store)?;
+    let repos = store
+        .list_project_repos(&project_id)
+        .map_err(|e| e.to_string())?;
+    let keys: Vec<String> = repos
+        .iter()
+        .map(|r| store::repo_affinities::repo_affinity_key(&r.github_repo, r.subpath.as_deref()))
+        .collect();
+    store
+        .get_suggested_repos(&keys, limit.unwrap_or(5))
+        .map_err(|e| e.to_string())
+}
+
 #[allow(clippy::too_many_arguments)]
 #[tauri::command(rename_all = "camelCase")]
 async fn add_project_repo(
@@ -1704,6 +1723,7 @@ pub fn run() {
             create_project,
             list_project_repos,
             list_recent_repos,
+            get_suggested_repos,
             add_project_repo,
             update_project_repo_branch_name,
             clear_project_repo_reason,

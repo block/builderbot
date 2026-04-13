@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::store::repo_affinities::repo_affinity_key;
 use crate::store::{self, Store};
 use crate::{blox, branches, git};
 
@@ -105,6 +106,15 @@ pub(crate) async fn add_project_repo_impl(
     store
         .record_recent_repo(&github_repo, subpath.clone())
         .map_err(|e| e.to_string())?;
+
+    // Record repo affinity for each existing repo in the project.
+    let new_key = repo_affinity_key(&github_repo, repo.subpath.as_deref());
+    for existing in &existing_repos {
+        let existing_key = repo_affinity_key(&existing.github_repo, existing.subpath.as_deref());
+        if let Err(e) = store.record_repo_affinity(&new_key, &existing_key) {
+            log::warn!("Failed to record repo affinity: {e}");
+        }
+    }
 
     let should_be_primary = repo.is_primary
         || store

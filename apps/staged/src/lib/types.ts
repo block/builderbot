@@ -35,6 +35,12 @@ export interface RecentRepo {
   lastUsedAt: number;
 }
 
+export interface SuggestedRepo {
+  githubRepo: string;
+  subpath: string | null;
+  score: number;
+}
+
 export interface GitHubRepo {
   name: string;
   nameWithOwner: string;

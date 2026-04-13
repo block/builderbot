@@ -608,7 +608,6 @@
     gap: 4px;
   }
 
-  .form-group textarea,
   .form-group :global(.hashtag-editor) {
     padding: 10px 12px;
     background: var(--bg-primary);
@@ -623,18 +622,9 @@
     transition: border-color 0.15s;
   }
 
-  .form-group textarea:focus,
   .form-group :global(.hashtag-editor):focus {
     outline: none;
     border-color: var(--border-emphasis);
-  }
-
-  .form-group textarea::placeholder {
-    color: var(--text-faint);
-  }
-
-  .form-group textarea:disabled {
-    opacity: 0.6;
   }
 
   .hint {

@@ -409,6 +409,7 @@
 <div class="hashtag-input-wrapper" bind:this={wrapperEl}>
   <div class="hashtag-input-container">
     <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <!-- svelte-ignore a11y_interactive_supports_focus -->
     <div
       bind:this={editorEl}
       class="hashtag-editor {className}"

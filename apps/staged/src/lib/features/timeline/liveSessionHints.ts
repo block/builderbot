@@ -145,7 +145,7 @@ export function collectRunningSessionIds(
     }
   }
   for (const review of timeline.reviews) {
-    if (review.sessionStatus === 'running' && review.sessionId) {
+    if (!review.isAuto && review.sessionStatus === 'running' && review.sessionId) {
       ids.add(review.sessionId);
     }
   }

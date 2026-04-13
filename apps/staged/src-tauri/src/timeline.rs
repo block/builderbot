@@ -167,13 +167,11 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         })
         .collect();
 
-    // Get reviews (filter out auto reviews — they're not shown in the timeline)
     let db_reviews = store
         .list_reviews_for_branch(branch_id)
         .map_err(|e| e.to_string())?;
     let reviews: Vec<ReviewTimelineItem> = db_reviews
         .into_iter()
-        .filter(|r| !r.is_auto)
         .map(|r| {
             let (session_id, session_status, completion_reason) =
                 store.resolve_session_status(r.session_id.as_deref());
@@ -187,6 +185,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 completion_reason,
                 title: r.title,
                 comment_count,
+                is_auto: r.is_auto,
                 created_at: r.created_at,
                 updated_at: r.updated_at,
                 completed_at: r.completed_at,

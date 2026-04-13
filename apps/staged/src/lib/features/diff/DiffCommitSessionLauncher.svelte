@@ -51,7 +51,9 @@
           (c) => c.sessionStatus === 'running' || c.sessionStatus === 'queued'
         ) ||
         timeline.notes.some((n) => n.sessionStatus === 'running' || n.sessionStatus === 'queued') ||
-        timeline.reviews.some((r) => r.sessionStatus === 'running' || r.sessionStatus === 'queued');
+        timeline.reviews.some(
+          (r) => !r.isAuto && (r.sessionStatus === 'running' || r.sessionStatus === 'queued')
+        );
     } catch (e) {
       console.error('[DiffCommitSessionLauncher] Failed to load timeline:', e);
       hasRunningSession = false;

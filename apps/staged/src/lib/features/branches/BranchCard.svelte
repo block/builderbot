@@ -202,7 +202,9 @@
     return (
       tl.commits.some((c) => c.sessionStatus === 'queued' || c.sessionStatus === 'running') ||
       tl.notes.some((n) => n.sessionStatus === 'queued' || n.sessionStatus === 'running') ||
-      tl.reviews.some((r) => r.sessionStatus === 'queued' || r.sessionStatus === 'running')
+      tl.reviews.some(
+        (r) => !r.isAuto && (r.sessionStatus === 'queued' || r.sessionStatus === 'running')
+      )
     );
   }
 
@@ -230,6 +232,7 @@
     const candidates: Candidate[] = [];
 
     for (const review of timeline.reviews) {
+      if (review.isAuto) continue;
       const ts = Math.floor((review.completedAt ?? review.createdAt) / 1000);
       candidates.push({ kind: 'review', commentCount: review.commentCount, timestamp: ts });
     }
@@ -307,6 +310,7 @@
       if (n.id !== note.id) timestamps.push(Math.floor((n.completedAt ?? n.createdAt) / 1000));
     }
     for (const r of timeline.reviews) {
+      if (r.isAuto) continue;
       timestamps.push(Math.floor((r.completedAt ?? r.createdAt) / 1000));
     }
     if (timestamps.some((ts) => ts > noteTs)) return null;

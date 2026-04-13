@@ -206,7 +206,7 @@
       if (note.sessionStatus === 'running') return true;
     }
     for (const review of timeline.reviews) {
-      if (review.sessionStatus === 'running') return true;
+      if (!review.isAuto && review.sessionStatus === 'running') return true;
     }
     for (const item of pendingItems) {
       if (item.sessionId && !item.type.startsWith('queued-')) return true;
@@ -324,6 +324,7 @@
     }
 
     for (const review of timeline.reviews) {
+      if (review.isAuto) continue;
       const breakdown = reviewCommentBreakdown[review.id];
       const commentCount = breakdown?.comments ?? review.commentCount;
       const annotationCount = breakdown?.annotations ?? 0;

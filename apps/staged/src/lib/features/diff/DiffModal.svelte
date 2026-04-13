@@ -51,6 +51,8 @@
 
   interface Props {
     branchId: string;
+    /** Project ID for scoping hashtag references to include project-level notes. */
+    projectId?: string | null;
     /** Optional — for branch scope, resolved automatically. */
     commitSha?: string;
     scope?: 'branch' | 'commit';
@@ -73,6 +75,7 @@
 
   let {
     branchId,
+    projectId,
     commitSha,
     scope = 'branch',
     reviewId,
@@ -622,6 +625,7 @@
             {#if !readonly && diffViewer.state.commitSha}
               <DiffCommitSessionLauncher
                 {branchId}
+                {projectId}
                 commitSha={diffViewer.state.commitSha}
                 {scope}
                 {reviewId}

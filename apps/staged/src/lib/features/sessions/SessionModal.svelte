@@ -45,7 +45,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import { marked } from 'marked';
   import { sanitize } from '../../shared/sanitize';
-  import type { Session, SessionMessage } from '../../types';
+  import type { Session, SessionMessage, HashtagItem } from '../../types';
   import {
     cancelSession,
     createImage,
@@ -58,6 +58,13 @@
     handleExternalLinkClick,
     resumeSession,
   } from '../../api/commands';
+  import HashtagInput from './HashtagInput.svelte';
+  import {
+    buildBranchHashtagItems,
+    HASHTAG_TOKEN_RE,
+    hashtagTypeLabels,
+    hashtagTypeColors,
+  } from './hashtagItems';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import { subscribeDragDrop } from '../branches/dragDrop';
   import { isImageFile } from '../branches/branchCardHelpers';
@@ -102,7 +109,7 @@
   let error = $state<string | null>(null);
   let cancelling = $state(false);
   let messagesEl: HTMLDivElement;
-  let inputEl: HTMLTextAreaElement;
+  let inputEl: HTMLElement | null = $state(null);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let pollInFlight = false;
   let closed = false;
@@ -121,6 +128,20 @@
 
   /** Whether the initial load has rendered — transitions are suppressed until then. */
   let animateNewMessages = false;
+
+  // Hashtag reference items
+  let hashtagItems = $state<HashtagItem[]>([]);
+  $effect(() => {
+    if (branchId) {
+      let stale = false;
+      buildBranchHashtagItems(branchId, projectId ?? null).then((items) => {
+        if (!stale) hashtagItems = items;
+      });
+      return () => {
+        stale = true;
+      };
+    }
+  });
 
   // Image attachment state (available when project context is provided; branchId is optional)
   let canAttachImages = $derived(!!projectId);
@@ -582,6 +603,59 @@
     return sanitize(marked.parse(content) as string);
   }
 
+  function escapeHtml(text: string): string {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  /** Replace #type:id tokens in plain text with inline badge HTML.
+   *  Regex-matches on raw text first, then escapes non-token segments individually
+   *  so that IDs containing HTML-special characters are looked up correctly. */
+  function renderHashtagTokens(text: string, items: HashtagItem[]): string {
+    const itemsByKey = new Map<string, HashtagItem>();
+    for (const item of items) {
+      itemsByKey.set(`${item.type}:${item.id}`, item);
+    }
+
+    const regex = new RegExp(HASHTAG_TOKEN_RE.source, 'g');
+    const parts: string[] = [];
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = regex.exec(text)) !== null) {
+      // Escape the plain-text segment before this token
+      if (match.index > lastIndex) {
+        parts.push(escapeHtml(text.slice(lastIndex, match.index)));
+      }
+
+      const type = match[1];
+      const id = match[2];
+      const label = hashtagTypeLabels[type] ?? type;
+      const colors = hashtagTypeColors[type] ?? { color: '--text-muted', bg: '--bg-secondary' };
+      const item = itemsByKey.get(`${type}:${id}`);
+      const title = item
+        ? item.title
+        : type === 'commit' && id.length > 12
+          ? id.slice(0, 8) + '…'
+          : id;
+      parts.push(
+        `<span class="hashtag-badge" style="background: var(${colors.bg}); color: var(${colors.color});">${escapeHtml(label)}: ${escapeHtml(title)}</span>`
+      );
+
+      lastIndex = match.index + match[0].length;
+    }
+
+    // Escape any trailing plain text
+    if (lastIndex < text.length) {
+      parts.push(escapeHtml(text.slice(lastIndex)));
+    }
+
+    return parts.join('');
+  }
+
   // =========================================================================
   // XML tag parsing (action / branch-history blocks)
   // =========================================================================
@@ -950,7 +1024,9 @@
                   <div class="message-row human-message">
                     <div class="human-bubble">
                       {#if userText.trim()}
-                        <span class="human-text">{userText.trim()}</span>
+                        <span class="human-text"
+                          >{@html renderHashtagTokens(userText.trim(), hashtagItems)}</span
+                        >
                       {/if}
                       {#if group.message.imageIds && group.message.imageIds.length > 0}
                         <div class="message-images">
@@ -1219,15 +1295,16 @@
             </button>
           {/if}
         {/if}
-        <textarea
-          bind:this={inputEl}
+        <HashtagInput
+          bind:textareaEl={inputEl}
           bind:value={inputText}
           class="message-input"
           placeholder={isLive ? 'Type to queue a follow-up…' : 'Send a message…'}
           rows={1}
           onkeydown={handleInputKeydown}
           oninput={autoResize}
-        ></textarea>
+          items={hashtagItems}
+        />
         {#if isLive}
           <button
             class="action-btn stop-btn"
@@ -1462,6 +1539,15 @@
   .human-text {
     display: block;
     white-space: pre-wrap;
+  }
+
+  .human-text :global(.hashtag-badge) {
+    display: inline;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 0.85em;
+    font-weight: 500;
+    white-space: nowrap;
   }
 
   .human-bubble .inline-copy {
@@ -2039,7 +2125,7 @@
     cursor: not-allowed;
   }
 
-  .message-input {
+  .input-area :global(.message-input) {
     flex: 1;
     padding: 8px 12px;
     background: var(--bg-primary);
@@ -2055,13 +2141,13 @@
     max-height: 120px;
   }
 
-  .message-input::placeholder {
-    color: var(--text-faint);
-  }
-
-  .message-input:focus {
+  .input-area :global(.message-input):focus {
     outline: none;
     border-color: var(--border-emphasis);
+  }
+
+  .input-area :global(.hashtag-input-wrapper) {
+    flex: 1;
   }
 
   .action-btn {

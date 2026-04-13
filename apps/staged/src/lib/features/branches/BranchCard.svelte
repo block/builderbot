@@ -209,7 +209,7 @@
   // Compute suggested prefill prompts from the latest visible timeline entry.
   // Only used when the user hasn't typed a draft yet.
   let suggestedPrefill = $derived.by(() => {
-    const empty = { commit: '', note: '' };
+    const empty = { commit: '', note: '', commitRef: '', noteRef: '' };
     if (!timeline) return empty;
 
     // Don't prefill when there are active (queued or running) sessions — the user
@@ -218,9 +218,10 @@
 
     // Find the latest completed item across commits, notes, and reviews
     type Candidate =
-      | { kind: 'review'; commentCount: number; timestamp: number }
+      | { kind: 'review'; id: string; commentCount: number; timestamp: number }
       | {
           kind: 'note';
+          id: string;
           title: string;
           timestamp: number;
           suggestedNextCommitStep: string | null;
@@ -231,13 +232,19 @@
 
     for (const review of timeline.reviews) {
       const ts = Math.floor((review.completedAt ?? review.createdAt) / 1000);
-      candidates.push({ kind: 'review', commentCount: review.commentCount, timestamp: ts });
+      candidates.push({
+        kind: 'review',
+        id: review.id,
+        commentCount: review.commentCount,
+        timestamp: ts,
+      });
     }
 
     for (const note of timeline.notes) {
       const ts = Math.floor((note.completedAt ?? note.createdAt) / 1000);
       candidates.push({
         kind: 'note',
+        id: note.id,
         title: note.title,
         timestamp: ts,
         suggestedNextCommitStep: note.suggestedNextCommitStep,
@@ -264,21 +271,39 @@
       latest.kind === 'note' &&
       (latest.suggestedNextCommitStep || latest.suggestedNextNoteStep)
     ) {
+      const ref = `Re: #note:${latest.id}`;
       return {
         commit: latest.suggestedNextCommitStep ?? '',
         note: latest.suggestedNextNoteStep ?? '',
+        commitRef: latest.suggestedNextCommitStep ? ref : '',
+        noteRef: latest.suggestedNextNoteStep ? ref : '',
       };
     }
 
     // Fallback to existing heuristics for reviews and notes without suggestions
     if (latest.kind === 'review' && latest.commentCount > 0) {
-      return { commit: 'Resolve code review comments', note: '' };
+      return {
+        commit: 'Resolve code review comments',
+        note: '',
+        commitRef: `Re: #review:${latest.id}`,
+        noteRef: '',
+      };
     }
     if (latest.kind === 'note' && latest.title.toLowerCase().includes('plan')) {
-      return { commit: 'Implement plan', note: '' };
+      return {
+        commit: 'Implement plan',
+        note: '',
+        commitRef: `Re: #note:${latest.id}`,
+        noteRef: '',
+      };
     }
     if (latest.kind === 'note' && latest.title.toLowerCase().endsWith(' log')) {
-      return { commit: 'Read the latest note which contains logs. Look for any issues.', note: '' };
+      return {
+        commit: 'Read the latest note which contains logs. Look for any issues.',
+        note: '',
+        commitRef: `Re: #note:${latest.id}`,
+        noteRef: '',
+      };
     }
 
     return empty;
@@ -1009,6 +1034,7 @@
 {#if showBranchDiff}
   <DiffModal
     branchId={branch.id}
+    projectId={branch.projectId}
     commitSha={reviewDiffTarget?.commitSha}
     scope={reviewDiffTarget?.scope ?? 'branch'}
     reviewId={reviewDiffTarget?.reviewId}
@@ -1032,6 +1058,7 @@
 {#if commitDiffSha}
   <DiffModal
     branchId={branch.id}
+    projectId={branch.projectId}
     commitSha={commitDiffSha}
     scope="commit"
     beforeLabel="parent"
@@ -1059,8 +1086,9 @@
       sessionMgr.openSessionId = sid;
     }}
     onStartSession={(mode, prefill) => {
+      const noteRef = openNote?.noteId ? `Re: #note:${openNote.noteId}` : '';
       openNote = null;
-      void sessionMgr.startOrQueueSession(mode, prefill);
+      void sessionMgr.startOrQueueSession(mode, noteRef ? `${noteRef}\n${prefill}` : prefill);
     }}
   />
 {/if}
@@ -1081,12 +1109,18 @@
 {/if}
 
 {#if sessionMgr.showNewSession}
-  {@const commitPrefill = suggestedPrefill.commit}
-  {@const notePrefill = suggestedPrefill.note}
+  {@const commitPrefillBase = suggestedPrefill.commit}
+  {@const notePrefillBase = suggestedPrefill.note}
+  {@const commitPrefill = suggestedPrefill.commitRef
+    ? `${suggestedPrefill.commitRef}\n${commitPrefillBase}`
+    : commitPrefillBase}
+  {@const notePrefill = suggestedPrefill.noteRef
+    ? `${suggestedPrefill.noteRef}\n${notePrefillBase}`
+    : notePrefillBase}
   {@const usePrefill =
     !sessionMgr.draftPrompt &&
-    ((sessionMgr.newSessionMode === 'commit' && !!commitPrefill) ||
-      (sessionMgr.newSessionMode === 'note' && !!notePrefill))}
+    ((sessionMgr.newSessionMode === 'commit' && !!commitPrefillBase) ||
+      (sessionMgr.newSessionMode === 'note' && !!notePrefillBase))}
   {@const prefillText =
     sessionMgr.newSessionMode === 'note'
       ? notePrefill

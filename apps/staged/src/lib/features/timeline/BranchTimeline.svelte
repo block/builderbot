@@ -10,9 +10,10 @@
   import type { Snippet } from 'svelte';
   import { slide } from 'svelte/transition';
   import { FileText, GitCommitVertical, FileSearch } from 'lucide-svelte';
-  import type { BranchTimeline as BranchTimelineData } from '../../types';
+  import type { BranchTimeline as BranchTimelineData, HashtagItem } from '../../types';
   import TimelineRow from './TimelineRow.svelte';
   import type { TimelineItemType, TimelineBadge } from './TimelineRow.svelte';
+  import { hasHashtagTokens, renderHashtagTokens } from '../sessions/hashtagItems';
   import {
     formatRelativeTime,
     formatRelativeTimeSeconds,
@@ -81,6 +82,8 @@
     provisioningLabel?: string;
     /** Optional detail text for the provisioning row (e.g. git progress). */
     provisioningDetail?: string | null;
+    /** Hashtag items for rendering #type:id badges in timeline titles. */
+    hashtagItems?: HashtagItem[];
     footerActions?: Snippet;
   }
 
@@ -111,6 +114,7 @@
     error,
     onRetry,
     provisioningLabel,
+    hashtagItems = [],
     provisioningDetail,
     footerActions,
   }: Props = $props();
@@ -175,6 +179,8 @@
     key: string;
     type: TimelineItemType;
     title: string;
+    /** Pre-rendered HTML title with hashtag badges (set when title contains tokens). */
+    titleHtml?: string;
     meta?: string;
     secondaryMeta?: string;
     deleting?: boolean;
@@ -415,6 +421,15 @@
       });
     }
 
+    // Render hashtag badges in titles that contain #type:id tokens
+    if (hashtagItems.length > 0) {
+      for (const item of all) {
+        if (hasHashtagTokens(item.title)) {
+          item.titleHtml = renderHashtagTokens(item.title, hashtagItems);
+        }
+      }
+    }
+
     // Sort by timestamp ascending; pending/generating items at bottom, queued after those
     all.sort((a, b) => {
       const isProvisioning = (item: DisplayItem) => item.type === 'provisioning';
@@ -518,6 +533,7 @@
         <TimelineRow
           type={item.type}
           title={item.title}
+          titleHtml={item.titleHtml}
           meta={item.meta}
           secondaryMeta={item.secondaryMeta}
           badges={item.badges}

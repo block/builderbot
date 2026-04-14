@@ -19,6 +19,7 @@
   import type {
     Branch,
     BranchTimeline as BranchTimelineData,
+    HashtagItem,
     ProjectRepo,
     SessionStatusPayload,
   } from '../../types';
@@ -39,6 +40,7 @@
   import RemoteWorkspaceStatusBadge from './RemoteWorkspaceStatusBadge.svelte';
   import RemoteWorkspaceStatusView from './RemoteWorkspaceStatusView.svelte';
   import { alerts } from '../../shared/alerts.svelte';
+  import { buildBranchHashtagItems } from '../sessions/hashtagItems';
 
   interface Props {
     branch: Branch;
@@ -98,6 +100,20 @@
     warnings: number;
   };
   let timelineReviewDetailsById = $state<Record<string, TimelineReviewDetails>>({});
+
+  // Hashtag items for rendering #type:id badges in timeline titles
+  let hashtagItems = $state<HashtagItem[]>([]);
+  $effect(() => {
+    const branchId = branch.id;
+    const projectId = branch.projectId;
+    let stale = false;
+    buildBranchHashtagItems(branchId, projectId).then((items) => {
+      if (!stale) hashtagItems = items;
+    });
+    return () => {
+      stale = true;
+    };
+  });
   let reviewDetailsLoadVersion = 0;
   let reviewDiffTarget = $state<{
     commitSha: string;
@@ -969,6 +985,7 @@
         <BranchTimeline
           timeline={timeline ?? emptyTimeline}
           repoDir={branch.worktreePath}
+          {hashtagItems}
           pendingDropNotes={isLocal ? pendingDropNotes : undefined}
           pendingItems={sessionMgr.pendingSessionItems}
           {prunedSessionIds}

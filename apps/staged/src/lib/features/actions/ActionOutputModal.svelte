@@ -43,7 +43,7 @@
     listenToActionOutput,
     listenToActionStatus,
   } from './actions';
-  import { processChunksToLines, type TerminalLine } from './processOutput';
+  import { createIncrementalProcessor, type TerminalLine } from './processOutput';
 
   interface Props {
     executionId: string;
@@ -73,7 +73,8 @@
 
   let status = $state<ActionStatus>('running');
   let exitCode = $state<number | null>(null);
-  let outputChunks = $state<OutputChunk[]>([]);
+  let displayLines = $state<TerminalLine[]>([]);
+  let lineProcessor = createIncrementalProcessor();
   let loading = $state(true);
   let error = $state<string | null>(null);
   let saveError = $state<string | null>(null);
@@ -83,6 +84,22 @@
   let unlistenStatus: (() => void) | null = null;
   let shouldAutoScroll = $state(true);
   const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
+
+  // rAF batching for incoming output chunks
+  let pendingChunks: OutputChunk[] = [];
+  let flushRaf: number | null = null;
+
+  function flushPendingChunks() {
+    flushRaf = null;
+    if (pendingChunks.length > 0) {
+      const chunks = pendingChunks;
+      pendingChunks = [];
+      displayLines = lineProcessor.process(chunks);
+      if (shouldAutoScroll) {
+        tick().then(() => scrollToBottom());
+      }
+    }
+  }
 
   // ANSI to HTML converter
   const ansiConverter = new Convert({
@@ -149,8 +166,8 @@
     }
   }
 
-  /** Derived display lines — recomputed whenever outputChunks changes. */
-  let displayLines = $derived(processChunksToLines(outputChunks));
+  // Render cache — avoids re-running ANSI conversion + sanitization for unchanged lines
+  let renderLineCache = new Map<string, string>();
 
   // =========================================================================
   // Lifecycle
@@ -172,7 +189,14 @@
     // Reset state for the new execution
     status = 'running';
     exitCode = null;
-    outputChunks = [];
+    displayLines = [];
+    lineProcessor = createIncrementalProcessor();
+    renderLineCache = new Map();
+    pendingChunks = [];
+    if (flushRaf !== null) {
+      cancelAnimationFrame(flushRaf);
+      flushRaf = null;
+    }
     loading = true;
     error = null;
     shouldAutoScroll = true;
@@ -195,7 +219,7 @@
       error = null;
       const buffer = await getActionOutputBuffer(executionId);
       if (buffer) {
-        outputChunks = buffer;
+        displayLines = lineProcessor.process(buffer);
       }
     } catch (e: any) {
       error = e?.message || 'Failed to load action output';
@@ -207,20 +231,16 @@
 
   async function setupListeners() {
     try {
-      // Listen for output events
+      // Listen for output events — batched via requestAnimationFrame
       unlistenOutput = await listenToActionOutput((event: ActionOutputEvent) => {
         if (event.executionId === executionId) {
-          outputChunks = [
-            ...outputChunks,
-            {
-              chunk: event.chunk,
-              stream: event.stream,
-              timestamp: Date.now(),
-            },
-          ];
-          // Auto-scroll to bottom if user is already at bottom
-          if (shouldAutoScroll) {
-            tick().then(() => scrollToBottom());
+          pendingChunks.push({
+            chunk: event.chunk,
+            stream: event.stream,
+            timestamp: Date.now(),
+          });
+          if (flushRaf === null) {
+            flushRaf = requestAnimationFrame(flushPendingChunks);
           }
         }
       });
@@ -246,6 +266,11 @@
   }
 
   function cleanup() {
+    if (flushRaf !== null) {
+      cancelAnimationFrame(flushRaf);
+      flushRaf = null;
+    }
+    pendingChunks = [];
     if (unlistenOutput) {
       unlistenOutput();
       unlistenOutput = null;
@@ -315,10 +340,14 @@
   // =========================================================================
 
   function renderLine(line: TerminalLine): string {
-    // Convert ANSI codes to HTML
-    const html = ansiConverter.toHtml(line.text);
-    // Sanitize the HTML to prevent XSS
-    return sanitize(html);
+    const text = line.text;
+    let cached = renderLineCache.get(text);
+    if (cached !== undefined) return cached;
+    // Convert ANSI codes to HTML, then sanitize to prevent XSS
+    const html = ansiConverter.toHtml(text);
+    cached = sanitize(html);
+    renderLineCache.set(text, cached);
+    return cached;
   }
 
   function getStatusIcon(s: ActionStatus) {

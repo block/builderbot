@@ -450,6 +450,7 @@
     flex-direction: column;
     width: 580px;
     max-width: 90vw;
+    max-height: calc(100vh - 12vh - 4vh);
     background: var(--bg-chrome);
     border: 2px solid transparent;
     border-radius: 12px;
@@ -597,6 +598,8 @@
     display: flex;
     flex-direction: column;
     gap: 14px;
+    overflow-y: auto;
+    min-height: 0;
   }
 
   .repo-info {

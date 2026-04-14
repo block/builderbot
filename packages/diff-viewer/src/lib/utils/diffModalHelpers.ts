@@ -34,6 +34,46 @@ export function fileStatus(summary: FileDiffSummary): 'added' | 'deleted' | 'mod
   return 'modified';
 }
 
+/** Aggregate comment count and distinct types for a single path. */
+interface CommentAgg {
+  count: number;
+  types: Set<CommentType>;
+}
+
+/** Extract the basename (last segment after '/') from a path. */
+function basename(path: string): string {
+  const idx = path.lastIndexOf('/');
+  return idx === -1 ? path : path.slice(idx + 1);
+}
+
+/**
+ * Pre-groups comments by their basename, then aggregates per unique comment
+ * path. This lets us avoid the O(files × comments) nested loop — each file
+ * only checks the (usually tiny) set of comment paths that share its basename.
+ */
+function groupCommentsByBasename(
+  comments: Comment[]
+): Map<string, Map<string, CommentAgg>> {
+  // basename → (commentPath → CommentAgg)
+  const groups = new Map<string, Map<string, CommentAgg>>();
+  for (const comment of comments) {
+    const base = basename(comment.path);
+    let byPath = groups.get(base);
+    if (!byPath) {
+      byPath = new Map();
+      groups.set(base, byPath);
+    }
+    let agg = byPath.get(comment.path);
+    if (!agg) {
+      agg = { count: 0, types: new Set() };
+      byPath.set(comment.path, agg);
+    }
+    agg.count++;
+    if (comment.commentType) agg.types.add(comment.commentType);
+  }
+  return groups;
+}
+
 export function buildFileEntries(
   files: FileDiffSummary[],
   reviewedPaths: string[],
@@ -41,17 +81,24 @@ export function buildFileEntries(
 ): FileEntry[] {
   const reviewedSet = new Set(reviewedPaths);
   const filePaths = files.map(fileSummaryPath);
+  const commentGroups = groupCommentsByBasename(comments);
 
   return files.map((summary, i) => {
     const path = filePaths[i];
     let commentCount = 0;
     const commentTypes = new Set<CommentType>();
-    for (const comment of comments) {
-      if (pathsMatch(comment.path, path)) {
-        commentCount++;
-        if (comment.commentType) commentTypes.add(comment.commentType);
+
+    // Only inspect comment paths that share this file's basename.
+    const candidates = commentGroups.get(basename(path));
+    if (candidates) {
+      for (const [commentPath, agg] of candidates) {
+        if (pathsMatch(commentPath, path)) {
+          commentCount += agg.count;
+          for (const t of agg.types) commentTypes.add(t);
+        }
       }
     }
+
     return {
       path,
       status: fileStatus(summary),

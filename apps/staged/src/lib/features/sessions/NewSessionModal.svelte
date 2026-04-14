@@ -598,7 +598,6 @@
     display: flex;
     flex-direction: column;
     gap: 14px;
-    overflow-y: auto;
     min-height: 0;
   }
 
@@ -629,6 +628,7 @@
     line-height: 1.5;
     resize: vertical;
     min-height: 240px;
+    max-height: calc(100vh - 12vh - 4vh - 200px);
     transition: border-color 0.15s;
   }
 

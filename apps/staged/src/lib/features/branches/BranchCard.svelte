@@ -302,7 +302,7 @@
     }
     if (latest.kind === 'note' && latest.title.toLowerCase().endsWith(' log')) {
       return {
-        commit: 'Read the latest note which contains logs. Look for any issues.',
+        commit: 'Read the referenced note which contains logs. Look for any issues.',
         note: '',
         commitRef: `Re: #note:${latest.id}`,
         noteRef: '',

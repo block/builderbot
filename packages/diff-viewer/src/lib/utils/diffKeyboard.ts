@@ -161,7 +161,8 @@ export function setupDiffKeyboardNav(config: Partial<DiffNavConfig> = {}): () =>
 
   function handleKeydown(event: KeyboardEvent): void {
     const target = event.target as HTMLElement;
-    const inInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
+    const inInput =
+      target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
 
     const key = event.key.toLowerCase();
     const ctrl = event.ctrlKey;

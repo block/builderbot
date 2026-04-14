@@ -881,6 +881,19 @@
     return groups;
   });
 
+  /** For each index in `grouped`, whether a user message exists at a later index.
+   *  Pre-computed in O(N) so the template can do an O(1) lookup instead of
+   *  scanning with `findIndex` per tool group (which was O(N²) total). */
+  let hasUserAfter = $derived.by(() => {
+    const arr = new Array<boolean>(grouped.length);
+    let seen = false;
+    for (let i = grouped.length - 1; i >= 0; i--) {
+      arr[i] = seen;
+      if (grouped[i].type === 'user') seen = true;
+    }
+    return arr;
+  });
+
   /** Stable key for a message group — used to key the {#each} block for transitions.
    *  For tools groups, keys off the first pair — safe because the grouping logic
    *  in `grouped` always pushes at least one pair before creating a tools group. */
@@ -1080,7 +1093,7 @@
                 </div>
               {:else}
                 <div class="message-row tool-group">
-                  {#each groupByVerb(group.pairs, repoDir, !isLive || sending || grouped.findIndex((g, i) => i > groupIdx && g.type === 'user') !== -1) as vg, vgIdx}
+                  {#each groupByVerb(group.pairs, repoDir, !isLive || sending || hasUserAfter[groupIdx]) as vg, vgIdx}
                     {#if vg.items.length === 1}
                       {@const item = vg.items[0]}
                       {@const isExpanded = expandedTools.has(item.pair.call.id)}

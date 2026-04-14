@@ -102,7 +102,11 @@ fn commits_cache_dir(
 fn path_to_cache_key(path: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(path.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>()
 }
 
 /// Write an index JSON file and per-file diffs into a cache directory.

@@ -113,7 +113,11 @@ impl TokenCache {
         hasher.update(host.as_bytes());
         hasher.update(client_id.as_bytes());
         hasher.update(scopes.join(",").as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
+        let hash = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect::<String>();
 
         let dir = cache_dir();
         let _ = std::fs::create_dir_all(&dir);

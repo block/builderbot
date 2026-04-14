@@ -27,18 +27,18 @@ tauri-plugin-log = "2.8.0"
 thiserror = "2.0"
 anyhow = "1.0"
 base64 = "0.22"
-sha2 = "0.10"
+sha2 = "0.11"
 
 # Review storage
-rusqlite = { version = "0.38", features = ["bundled"] }
-rusqlite_migration = { version = "2.4.1", features = ["from-directory"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite_migration = { version = "2.5.0", features = ["from-directory"] }
 include_dir = "0.7.4"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 dirs = "6.0"
 tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-window-state = "2.4.1"
 reqwest = { version = "0.13.1", features = ["json"] }
-tokio = { version = "1.49.0", features = ["sync", "process", "io-util", "macros", "rt-multi-thread", "time"] }
+tokio = { version = "1.50.0", features = ["sync", "process", "io-util", "macros", "rt-multi-thread", "time"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-process = "2"

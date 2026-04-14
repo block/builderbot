@@ -16,4 +16,4 @@ log = "0.4"
 blox-cli = { path = "../blox-cli" }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["signal"] }
+nix = { version = "0.31", features = ["signal"] }

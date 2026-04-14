@@ -43,6 +43,8 @@
   interface Props {
     type: TimelineItemType;
     title: string;
+    /** Pre-rendered HTML title with hashtag badges. When set, takes precedence over `title`. */
+    titleHtml?: string;
     meta?: string;
     secondaryMeta?: string;
     badges?: TimelineBadge[];
@@ -61,6 +63,7 @@
   let {
     type,
     title,
+    titleHtml,
     meta,
     secondaryMeta,
     badges,
@@ -182,9 +185,15 @@
   </div>
   <div class="timeline-content">
     <div class="timeline-info">
-      <span class="timeline-title" class:skeleton-title={isPending} class:failed-title={isFailed}
-        >{title}</span
-      >
+      {#if titleHtml}
+        <span class="timeline-title" class:skeleton-title={isPending} class:failed-title={isFailed}
+          >{@html titleHtml}</span
+        >
+      {:else}
+        <span class="timeline-title" class:skeleton-title={isPending} class:failed-title={isFailed}
+          >{title}</span
+        >
+      {/if}
       {#if meta || secondaryMeta || (badges && badges.length > 0)}
         <div class="timeline-meta">
           {#if meta}
@@ -391,6 +400,15 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     line-height: 1.4;
+  }
+
+  .timeline-title :global(.hashtag-badge) {
+    display: inline;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 0.85em;
+    font-weight: 500;
+    white-space: nowrap;
   }
 
   .skeleton-title {

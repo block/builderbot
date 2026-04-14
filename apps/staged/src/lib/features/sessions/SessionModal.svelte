@@ -61,9 +61,7 @@
   import HashtagInput from './HashtagInput.svelte';
   import {
     buildBranchHashtagItems,
-    HASHTAG_TOKEN_RE,
-    hashtagTypeLabels,
-    hashtagTypeColors,
+    renderHashtagTokens as renderHashtagTokensShared,
   } from './hashtagItems';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import { subscribeDragDrop } from '../branches/dragDrop';
@@ -604,71 +602,18 @@
     return sanitize(marked.parse(content) as string);
   }
 
-  function escapeHtml(text: string): string {
-    return text
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
-  }
-
-  /** Replace #type:id tokens in plain text with inline badge HTML.
-   *  Regex-matches on raw text first, then escapes non-token segments individually
-   *  so that IDs containing HTML-special characters are looked up correctly.
-   *  Results are memoized per text string; the cache is invalidated when
-   *  hashtagItems changes (tracked via prevHashtagItems). */
+  /** Memoized wrapper around the shared renderHashtagTokens. */
   const hashtagTokenCache = new Map<string, string>();
   let prevHashtagItems: HashtagItem[] | null = null;
 
   function renderHashtagTokens(text: string, items: HashtagItem[]): string {
-    // Invalidate cache when the hashtag items array identity changes
     if (items !== prevHashtagItems) {
       hashtagTokenCache.clear();
       prevHashtagItems = items;
     }
-
     const cached = hashtagTokenCache.get(text);
     if (cached !== undefined) return cached;
-
-    const itemsByKey = new Map<string, HashtagItem>();
-    for (const item of items) {
-      itemsByKey.set(`${item.type}:${item.id}`, item);
-    }
-
-    const regex = new RegExp(HASHTAG_TOKEN_RE.source, 'g');
-    const parts: string[] = [];
-    let lastIndex = 0;
-    let match: RegExpExecArray | null;
-
-    while ((match = regex.exec(text)) !== null) {
-      // Escape the plain-text segment before this token
-      if (match.index > lastIndex) {
-        parts.push(escapeHtml(text.slice(lastIndex, match.index)));
-      }
-
-      const type = match[1];
-      const id = match[2];
-      const label = hashtagTypeLabels[type] ?? type;
-      const colors = hashtagTypeColors[type] ?? { color: '--text-muted', bg: '--bg-secondary' };
-      const item = itemsByKey.get(`${type}:${id}`);
-      const title = item
-        ? item.title
-        : type === 'commit' && id.length > 12
-          ? id.slice(0, 8) + '…'
-          : id;
-      parts.push(
-        `<span class="hashtag-badge" style="background: var(${colors.bg}); color: var(${colors.color});">${escapeHtml(label)}: ${escapeHtml(title)}</span>`
-      );
-
-      lastIndex = match.index + match[0].length;
-    }
-
-    // Escape any trailing plain text
-    if (lastIndex < text.length) {
-      parts.push(escapeHtml(text.slice(lastIndex)));
-    }
-
-    const result = parts.join('');
+    const result = renderHashtagTokensShared(text, items);
     hashtagTokenCache.set(text, result);
     return result;
   }
@@ -1605,6 +1550,7 @@
     color: var(--text-primary);
     line-height: 1.5;
     word-break: break-word;
+    overflow: hidden;
   }
 
   .human-text {

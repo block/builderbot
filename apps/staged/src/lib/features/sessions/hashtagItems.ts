@@ -127,3 +127,64 @@ function projectNotesToHashtagItems(notes: ProjectNote[]): HashtagItem[] {
       bgColor: '--note-bg',
     }));
 }
+
+// ── Shared rendering ─────────────────────────────────────────────────
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/** Returns true when `text` contains at least one `#type:id` hashtag token. */
+export function hasHashtagTokens(text: string): boolean {
+  const re = new RegExp(HASHTAG_TOKEN_RE.source);
+  return re.test(text);
+}
+
+/**
+ * Replace `#type:id` tokens in plain text with inline badge HTML.
+ * Plain-text segments are HTML-escaped; badge spans use CSS custom-property
+ * colours from `hashtagTypeColors`.
+ */
+export function renderHashtagTokens(text: string, items: HashtagItem[]): string {
+  const itemsByKey = new Map<string, HashtagItem>();
+  for (const item of items) {
+    itemsByKey.set(`${item.type}:${item.id}`, item);
+  }
+
+  const regex = new RegExp(HASHTAG_TOKEN_RE.source, 'g');
+  const parts: string[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(text)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(escapeHtml(text.slice(lastIndex, match.index)));
+    }
+
+    const type = match[1];
+    const id = match[2];
+    const label = hashtagTypeLabels[type] ?? type;
+    const colors = hashtagTypeColors[type] ?? { color: '--text-muted', bg: '--bg-secondary' };
+    const item = itemsByKey.get(`${type}:${id}`);
+    const title = item
+      ? item.title
+      : type === 'commit' && id.length > 12
+        ? id.slice(0, 8) + '…'
+        : id;
+    parts.push(
+      `<span class="hashtag-badge" style="background: var(${colors.bg}); color: var(${colors.color});">${escapeHtml(label)}: ${escapeHtml(title)}</span>`
+    );
+
+    lastIndex = match.index + match[0].length;
+  }
+
+  if (lastIndex < text.length) {
+    parts.push(escapeHtml(text.slice(lastIndex)));
+  }
+
+  return parts.join('');
+}

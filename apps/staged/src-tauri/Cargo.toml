@@ -66,3 +66,5 @@ axum = { version = "0.8" }
 # [[bin]]
 # name = "debug_diff"
 # path = "src/bin/debug_diff.rs"
+
+[workspace]

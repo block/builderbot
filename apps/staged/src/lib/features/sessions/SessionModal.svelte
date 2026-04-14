@@ -1151,7 +1151,7 @@
               {:else}
                 {@const forcePastTense = !isLive || sending || hasUserAfter[groupIdx]}
                 <div class="message-row tool-group">
-                  {#each (forcePastTense ? verbGroupCache[groupIdx].past : verbGroupCache[groupIdx].present) as vg, vgIdx}
+                  {#each forcePastTense ? verbGroupCache[groupIdx].past : verbGroupCache[groupIdx].present as vg, vgIdx}
                     {#if vg.items.length === 1}
                       {@const item = vg.items[0]}
                       {@const isExpanded = expandedTools.has(item.pair.call.id)}

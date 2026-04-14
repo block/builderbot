@@ -35,6 +35,7 @@
   import { setProjects } from './projectsSidebarState.svelte';
   import { darkMode } from '../../stores/isDark.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
+  import { badgeBg, badgeFg, badgeBgHover } from '../../shared/badgeColors';
 
   type FilterKind = 'unread' | 'running' | { repo: string; subpath: string };
 
@@ -454,7 +455,7 @@
                 class:active
                 onclick={() => toggleFilter(filter)}
                 style={badge
-                  ? `--repo-bg: ${darkMode.value ? `hsl(${badge.hue} 35% 22%)` : `hsl(${badge.hue} 50% 92%)`}; --repo-fg: ${darkMode.value ? `hsl(${badge.hue} 50% 75%)` : `hsl(${badge.hue} 55% 35%)`}; --repo-bg-hover: ${darkMode.value ? `hsl(${badge.hue} 35% 28%)` : `hsl(${badge.hue} 50% 88%)`}`
+                  ? `--repo-bg: ${badgeBg(badge.hue, darkMode.value)}; --repo-fg: ${badgeFg(badge.hue, darkMode.value)}; --repo-bg-hover: ${badgeBgHover(badge.hue, darkMode.value)}`
                   : ''}
               >
                 <RepoLabel githubRepo={rf.repo} subpath={rf.subpath || null} />
@@ -554,11 +555,10 @@
                       {#if badge}
                         <span
                           class="repo-badge-label"
-                          style="background: {darkMode.value
-                            ? `hsl(${badge.hue} 35% 22%)`
-                            : `hsl(${badge.hue} 50% 92%)`}; color: {darkMode.value
-                            ? `hsl(${badge.hue} 50% 75%)`
-                            : `hsl(${badge.hue} 55% 35%)`};"
+                          style="background: {badgeBg(badge.hue, darkMode.value)}; color: {badgeFg(
+                            badge.hue,
+                            darkMode.value
+                          )};"
                         >
                           <RepoLabel githubRepo={r.githubRepo} subpath={r.subpath} />
                         </span>
@@ -573,11 +573,10 @@
                     {#if badge}
                       <span
                         class="repo-badge-label"
-                        style="background: {darkMode.value
-                          ? `hsl(${badge.hue} 35% 22%)`
-                          : `hsl(${badge.hue} 50% 92%)`}; color: {darkMode.value
-                          ? `hsl(${badge.hue} 50% 75%)`
-                          : `hsl(${badge.hue} 55% 35%)`};"
+                        style="background: {badgeBg(badge.hue, darkMode.value)}; color: {badgeFg(
+                          badge.hue,
+                          darkMode.value
+                        )};"
                       >
                         <RepoLabel githubRepo={project.githubRepo} subpath={project.subpath} />
                       </span>

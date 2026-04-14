@@ -295,6 +295,10 @@ struct AddProjectRepoParams {
     /// the repo is and how it relates to the project — do not include todos or details
     /// about what needs to change.
     pub reason: Option<String>,
+    /// Base branch to branch off from (e.g. "main", "develop"). If omitted,
+    /// the repository's default branch is detected automatically via the
+    /// GitHub API.
+    pub base_branch: Option<String>,
 }
 
 #[derive(Clone)]
@@ -529,10 +533,11 @@ impl ProjectToolsHandler {
     )]
     async fn add_project_repo(&self, Parameters(p): Parameters<AddProjectRepoParams>) -> String {
         log::debug!(
-            "[project_mcp] add_project_repo called: github_repo={:?} branch_name={:?} subpath={:?}",
+            "[project_mcp] add_project_repo called: github_repo={:?} branch_name={:?} subpath={:?} base_branch={:?}",
             p.github_repo,
             p.branch_name,
             p.subpath,
+            p.base_branch,
         );
 
         // If no subpath was provided, check whether the repo is a monorepo.
@@ -577,7 +582,7 @@ impl ProjectToolsHandler {
             None,
             p.reason,
             None,
-            None, // MCP has no prefetched default branch
+            p.base_branch,
         )
         .await
         {

@@ -96,3 +96,78 @@ export function processChunksToLines(chunks: OutputChunk[]): TerminalLine[] {
 
   return lines;
 }
+
+/**
+ * Incremental line processor that maintains state across calls.
+ *
+ * Unlike `processChunksToLines` (which reprocesses every chunk from scratch),
+ * this only processes *new* chunks each time `process()` is called, appending
+ * to an internal list of finalized lines.  This turns the per-update cost from
+ * O(total-characters) to O(new-characters).
+ */
+export function createIncrementalProcessor() {
+  const finalizedLines: TerminalLine[] = [];
+  let currentText = '';
+  let currentStream: 'stdout' | 'stderr' = 'stdout';
+  let pendingCR = false;
+
+  return {
+    /**
+     * Feed new chunks and return the full (finalized + in-progress) line list.
+     */
+    process(chunks: OutputChunk[]): TerminalLine[] {
+      for (const chunk of chunks) {
+        const raw = chunk.chunk;
+        const stream = chunk.stream;
+
+        for (let i = 0; i < raw.length; i++) {
+          const ch = raw[i];
+
+          if (pendingCR) {
+            pendingCR = false;
+            if (ch === '\n') {
+              finalizedLines.push({ text: currentText, stream: currentStream });
+              currentText = '';
+              currentStream = stream;
+              continue;
+            } else {
+              currentText = '';
+              currentStream = stream;
+            }
+          }
+
+          if (ch === '\n') {
+            finalizedLines.push({ text: currentText, stream: currentStream });
+            currentText = '';
+            currentStream = stream;
+          } else if (ch === '\r') {
+            if (i + 1 < raw.length && raw[i + 1] === '\n') {
+              finalizedLines.push({ text: currentText, stream: currentStream });
+              currentText = '';
+              currentStream = stream;
+              i++;
+            } else if (i + 1 < raw.length) {
+              currentText = '';
+              currentStream = stream;
+            } else {
+              pendingCR = true;
+            }
+          } else {
+            currentText += ch;
+            currentStream = stream;
+          }
+        }
+      }
+
+      if (pendingCR) {
+        // Don't discard — just return what we have; the bare CR will resolve
+        // on the next call when more data arrives (or on final snapshot).
+      }
+
+      if (currentText.length > 0) {
+        return [...finalizedLines, { text: currentText, stream: currentStream }];
+      }
+      return [...finalizedLines];
+    },
+  };
+}

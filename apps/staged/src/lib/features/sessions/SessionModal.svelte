@@ -75,6 +75,7 @@
     hasXmlBlocks,
     stripCodeFences,
     stripXmlTags,
+    type VerbGroup,
   } from './sessionModalHelpers';
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
@@ -926,6 +927,30 @@
     return arr;
   });
 
+  /**
+   * Pre-compute verb groups for every tools group in both tenses.
+   * `groupByVerb` is expensive (JSON.parse + string replace per tool call) so we
+   * cache both the past-tense and present-tense variants here. The template then
+   * picks the right variant with a cheap boolean lookup instead of re-running the
+   * heavy computation on every render.
+   */
+  let verbGroupCache = $derived.by(() => {
+    const cache: { past: VerbGroup[]; present: VerbGroup[] }[] = [];
+    for (const group of grouped) {
+      if (group.type === 'tools') {
+        cache.push({
+          past: groupByVerb(group.pairs, repoDir, true),
+          present: groupByVerb(group.pairs, repoDir, false),
+        });
+      } else {
+        // Placeholder — tool-group index won't line up otherwise.
+        // We use a separate counter in the template instead.
+        cache.push({ past: [], present: [] });
+      }
+    }
+    return cache;
+  });
+
   /** Stable key for a message group — used to key the {#each} block for transitions.
    *  For tools groups, keys off the first pair — safe because the grouping logic
    *  in `grouped` always pushes at least one pair before creating a tools group. */
@@ -1124,8 +1149,9 @@
                   </div>
                 </div>
               {:else}
+                {@const forcePastTense = !isLive || sending || hasUserAfter[groupIdx]}
                 <div class="message-row tool-group">
-                  {#each groupByVerb(group.pairs, repoDir, !isLive || sending || hasUserAfter[groupIdx]) as vg, vgIdx}
+                  {#each (forcePastTense ? verbGroupCache[groupIdx].past : verbGroupCache[groupIdx].present) as vg, vgIdx}
                     {#if vg.items.length === 1}
                       {@const item = vg.items[0]}
                       {@const isExpanded = expandedTools.has(item.pair.call.id)}

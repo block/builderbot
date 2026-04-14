@@ -109,6 +109,18 @@ export function createSearchState() {
 	});
 
 	// =============================================================================
+	// Flattened Results Cache
+	// =============================================================================
+
+	// Cache for getFlattenedResults to avoid O(total_matches) recomputation per call.
+	// Invalidated when fileResults or the files array identity changes.
+	let cachedFiles: FileDiffSummary[] | null = null;
+	let cachedFileResults: Map<string, FileSearchResult> | null = null;
+	let cachedFlattened: FlattenedResult[] = [];
+	// Lookup map: filePath -> localIndex -> globalIndex for O(1) getGlobalIndex
+	let cachedGlobalIndexMap: Map<string, Map<number, number>> = new Map();
+
+	// =============================================================================
 	// Actions
 	// =============================================================================
 
@@ -221,9 +233,19 @@ export function createSearchState() {
 	/**
 	 * Flatten all results into a single ordered list for navigation.
 	 * Order follows the file list order.
+	 *
+	 * Results are cached and only recomputed when the files array or
+	 * fileResults map identity changes. Also builds a lookup map for
+	 * O(1) getGlobalIndex lookups.
 	 */
 	function getFlattenedResults(files: FileDiffSummary[]): FlattenedResult[] {
+		// Return cached result if inputs haven't changed (identity check)
+		if (files === cachedFiles && state.fileResults === cachedFileResults) {
+			return cachedFlattened;
+		}
+
 		const flattened: FlattenedResult[] = [];
+		const globalIndexMap = new Map<string, Map<number, number>>();
 		let globalIndex = 0;
 
 		// Iterate in file list order
@@ -233,15 +255,25 @@ export function createSearchState() {
 
 			if (!fileResult) continue;
 
+			const localMap = new Map<number, number>();
 			for (let localIndex = 0; localIndex < fileResult.matches.length; localIndex++) {
 				flattened.push({
 					filePath: path,
 					match: fileResult.matches[localIndex],
-					globalIndex: globalIndex++,
+					globalIndex: globalIndex,
 					localIndex
 				});
+				localMap.set(localIndex, globalIndex);
+				globalIndex++;
 			}
+			globalIndexMap.set(path, localMap);
 		}
+
+		// Update cache
+		cachedFiles = files;
+		cachedFileResults = state.fileResults;
+		cachedFlattened = flattened;
+		cachedGlobalIndexMap = globalIndexMap;
 
 		return flattened;
 	}
@@ -363,6 +395,7 @@ export function createSearchState() {
 
 	/**
 	 * Check if a specific result is the current one.
+	 * Uses the cached flattened results array for O(1) lookup by index.
 	 */
 	function isCurrentResult(files: FileDiffSummary[], filePath: string, localIndex: number): boolean {
 		const flattened = getFlattenedResults(files);
@@ -375,13 +408,16 @@ export function createSearchState() {
 
 	/**
 	 * Get the global index for a specific file and local match index.
+	 * Uses a pre-computed lookup map for O(1) instead of linear search.
 	 */
 	function getGlobalIndex(files: FileDiffSummary[], filePath: string, localIndex: number): number {
-		const flattened = getFlattenedResults(files);
+		// Ensure cache is populated
+		getFlattenedResults(files);
 
-		const result = flattened.find((r) => r.filePath === filePath && r.localIndex === localIndex);
+		const localMap = cachedGlobalIndexMap.get(filePath);
+		if (!localMap) return -1;
 
-		return result?.globalIndex ?? -1;
+		return localMap.get(localIndex) ?? -1;
 	}
 
 	/**

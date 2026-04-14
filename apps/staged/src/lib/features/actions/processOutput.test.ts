@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { processChunksToLines } from './processOutput';
+import { processChunksToLines, createIncrementalProcessor } from './processOutput';
 import type { OutputChunk } from './actions';
 
 /** Helper to build an OutputChunk. */
@@ -113,5 +113,114 @@ describe('processChunksToLines', () => {
 
   it('handles chunk boundaries mid-text', () => {
     expect(texts([chunk('hel'), chunk('lo\nwor'), chunk('ld\n')])).toEqual(['hello', 'world']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createIncrementalProcessor
+// ---------------------------------------------------------------------------
+
+describe('createIncrementalProcessor', () => {
+  /** Helper: feed chunks one-at-a-time and return the final snapshot. */
+  function feedOneByOne(chunks: OutputChunk[]): string[] {
+    const proc = createIncrementalProcessor();
+    let result: ReturnType<typeof proc.process> = [];
+    for (const c of chunks) {
+      result = proc.process([c]);
+    }
+    return result.map((l) => l.text);
+  }
+
+  /** Helper: feed all chunks at once. */
+  function feedAll(chunks: OutputChunk[]): string[] {
+    const proc = createIncrementalProcessor();
+    return proc.process(chunks).map((l) => l.text);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Parity with processChunksToLines
+  // ---------------------------------------------------------------------------
+
+  it('matches batch output for simple newlines', () => {
+    const chunks = [chunk('hello\nworld\n')];
+    expect(feedAll(chunks)).toEqual(texts(chunks));
+  });
+
+  it('matches batch output for \\r\\n', () => {
+    const chunks = [chunk('hello\r\nworld\r\n')];
+    expect(feedAll(chunks)).toEqual(texts(chunks));
+  });
+
+  it('matches batch output for bare \\r overwrites', () => {
+    const chunks = [chunk('10%\r20%\r30%\r40%\n')];
+    expect(feedAll(chunks)).toEqual(texts(chunks));
+  });
+
+  it('matches batch output for interleaved stdout/stderr', () => {
+    const chunks = [chunk('out\n', 'stdout'), chunk('err\n', 'stderr')];
+    const proc = createIncrementalProcessor();
+    let result = proc.process([chunks[0]]);
+    result = proc.process([chunks[1]]);
+    expect(result.map((l) => l.stream)).toEqual(['stdout', 'stderr']);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Incremental accumulation
+  // ---------------------------------------------------------------------------
+
+  it('accumulates lines across multiple process() calls', () => {
+    const proc = createIncrementalProcessor();
+    proc.process([chunk('line1\n')]);
+    const result = proc.process([chunk('line2\n')]);
+    expect(result.map((l) => l.text)).toEqual(['line1', 'line2']);
+  });
+
+  it('shows in-progress line until finalized', () => {
+    const proc = createIncrementalProcessor();
+    let result = proc.process([chunk('partial')]);
+    expect(result.map((l) => l.text)).toEqual(['partial']);
+    result = proc.process([chunk(' more\n')]);
+    expect(result.map((l) => l.text)).toEqual(['partial more']);
+  });
+
+  // ---------------------------------------------------------------------------
+  // \\r\\n split across process() calls — the key correctness case
+  // ---------------------------------------------------------------------------
+
+  it('preserves line text when \\r\\n is split across calls', () => {
+    const proc = createIncrementalProcessor();
+    // First call ends with \r — we don't yet know if it's bare \r or \r\n
+    let result = proc.process([chunk('hello\r')]);
+    // The text should still be visible (not discarded)
+    expect(result.map((l) => l.text)).toEqual(['hello']);
+    // Second call starts with \n — confirms it was \r\n, line should be finalized
+    result = proc.process([chunk('\nworld\n')]);
+    expect(result.map((l) => l.text)).toEqual(['hello', 'world']);
+  });
+
+  it('bare \\r across calls correctly overwrites when followed by non-\\n', () => {
+    const proc = createIncrementalProcessor();
+    proc.process([chunk('old text\r')]);
+    const result = proc.process([chunk('new text\n')]);
+    expect(result.map((l) => l.text)).toEqual(['new text']);
+  });
+
+  it('multiple trailing \\r across calls resolve correctly', () => {
+    const proc = createIncrementalProcessor();
+    proc.process([chunk('10%\r')]);
+    proc.process([chunk('20%\r')]);
+    proc.process([chunk('30%\r')]);
+    const result = proc.process([chunk('done\n')]);
+    expect(result.map((l) => l.text)).toEqual(['done']);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Batched chunks (multiple chunks in one process() call)
+  // ---------------------------------------------------------------------------
+
+  it('handles multiple chunks in a single process() call', () => {
+    const proc = createIncrementalProcessor();
+    const result = proc.process([chunk('hello\n'), chunk('world\n')]);
+    expect(result.map((l) => l.text)).toEqual(['hello', 'world']);
   });
 });

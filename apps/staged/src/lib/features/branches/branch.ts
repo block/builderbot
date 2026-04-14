@@ -1,10 +1,14 @@
 import { invoke } from '@tauri-apps/api/core';
 import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 
-/** An application that can open a directory */
+/** The kind of opener application. */
+export type OpenerKind = 'editor' | 'terminal' | 'file-browser';
+
+/** An application that can open a directory or file. */
 export interface OpenerApp {
   id: string;
   name: string;
+  kind: OpenerKind;
 }
 
 // Cache for performance

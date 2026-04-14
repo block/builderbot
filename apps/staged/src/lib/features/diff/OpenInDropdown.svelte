@@ -19,25 +19,26 @@
 
   let { filePath }: Props = $props();
 
-  /** Apps that can open files (editors only, not terminals/finder). */
-  const DIRECTORY_ONLY_IDS = new Set([
-    'terminal',
-    'warp',
-    'iterm',
-    'hyper',
-    'kitty',
-    'alacritty',
-    'finder',
-  ]);
-
   let fileOpenerApps = $state<OpenerApp[]>([]);
   let showDropdown = $state(false);
+  let triggerEl: HTMLButtonElement | undefined = $state();
+  let menuStyle = $state('');
 
   onMount(() => {
-    getAvailableOpeners().then((apps) => {
-      fileOpenerApps = apps.filter((app) => !DIRECTORY_ONLY_IDS.has(app.id));
-    });
+    getAvailableOpeners()
+      .then((apps) => {
+        fileOpenerApps = apps.filter((app) => app.kind === 'editor');
+      })
+      .catch((err) => {
+        console.warn('Failed to fetch available openers:', err);
+      });
   });
+
+  function positionMenu() {
+    if (!triggerEl) return;
+    const rect = triggerEl.getBoundingClientRect();
+    menuStyle = `position: fixed; top: ${rect.bottom + 4}px; left: ${rect.right}px; transform: translateX(-100%);`;
+  }
 
   function handleOpenIn(appId: string) {
     if (filePath) {
@@ -56,6 +57,9 @@
   function handleToggle(e: MouseEvent) {
     e.stopPropagation();
     showDropdown = !showDropdown;
+    if (showDropdown) {
+      positionMenu();
+    }
   }
 
   function handleClickOutside(e: MouseEvent) {
@@ -71,7 +75,7 @@
   <div class="open-in-dropdown">
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <button class="open-in-trigger" onclick={handleToggle} title="Open in...">
+    <button class="open-in-trigger" bind:this={triggerEl} onclick={handleToggle} title="Open in...">
       <ExternalLink size={12} />
       <span>Open In</span>
       <ChevronDown size={10} />
@@ -80,7 +84,7 @@
     {#if showDropdown}
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="open-in-menu" onclick={(e) => e.stopPropagation()}>
+      <div class="open-in-menu" style={menuStyle} onclick={(e) => e.stopPropagation()}>
         {#each fileOpenerApps as app (app.id)}
           <button class="open-in-item" onclick={() => handleOpenIn(app.id)}>
             {app.name}
@@ -129,9 +133,6 @@
   }
 
   .open-in-menu {
-    position: absolute;
-    top: calc(100% + 4px);
-    right: 0;
     min-width: 160px;
     background: var(--bg-primary);
     border: 1px solid var(--border-default);

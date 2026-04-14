@@ -4,42 +4,60 @@ use crate::blox;
 use serde::Serialize;
 use std::path::Path;
 
-/// An application that can open directories.
+/// An application that can open directories or files.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenerApp {
     id: String,
     name: String,
+    kind: OpenerKind,
 }
 
-/// Known applications with their bundle IDs (macOS).
+/// The kind of opener application.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum OpenerKind {
+    Editor,
+    Terminal,
+    FileBrowser,
+}
+
+/// Known applications with their bundle IDs and kinds (macOS).
 #[cfg(target_os = "macos")]
-const KNOWN_OPENERS: &[(&str, &str)] = &[
+const KNOWN_OPENERS: &[(&str, &str, OpenerKind)] = &[
     // Terminals
-    ("terminal", "com.apple.Terminal"),
-    ("warp", "dev.warp.Warp-Stable"),
-    ("iterm", "com.googlecode.iterm2"),
-    ("hyper", "co.zeit.hyper"),
-    ("kitty", "net.kovidgoyal.kitty"),
-    ("alacritty", "org.alacritty"),
+    ("terminal", "com.apple.Terminal", OpenerKind::Terminal),
+    ("warp", "dev.warp.Warp-Stable", OpenerKind::Terminal),
+    ("iterm", "com.googlecode.iterm2", OpenerKind::Terminal),
+    ("hyper", "co.zeit.hyper", OpenerKind::Terminal),
+    ("kitty", "net.kovidgoyal.kitty", OpenerKind::Terminal),
+    ("alacritty", "org.alacritty", OpenerKind::Terminal),
     // Editors
-    ("vscode", "com.microsoft.VSCode"),
-    ("vscode-insiders", "com.microsoft.VSCodeInsiders"),
-    ("cursor", "com.todesktop.230313mzl4w4u92"),
-    ("sublime", "com.sublimetext.4"),
-    ("atom", "com.github.atom"),
-    ("textmate", "com.macromates.TextMate"),
-    ("nova", "com.panic.Nova"),
-    ("bbedit", "com.barebones.bbedit"),
-    ("intellij", "com.jetbrains.intellij"),
-    ("webstorm", "com.jetbrains.WebStorm"),
-    ("pycharm", "com.jetbrains.pycharm"),
-    ("rubymine", "com.jetbrains.rubymine"),
-    ("goland", "com.jetbrains.goland"),
-    ("fleet", "fleet.app"),
-    ("zed", "dev.zed.Zed"),
+    ("vscode", "com.microsoft.VSCode", OpenerKind::Editor),
+    (
+        "vscode-insiders",
+        "com.microsoft.VSCodeInsiders",
+        OpenerKind::Editor,
+    ),
+    (
+        "cursor",
+        "com.todesktop.230313mzl4w4u92",
+        OpenerKind::Editor,
+    ),
+    ("sublime", "com.sublimetext.4", OpenerKind::Editor),
+    ("atom", "com.github.atom", OpenerKind::Editor),
+    ("textmate", "com.macromates.TextMate", OpenerKind::Editor),
+    ("nova", "com.panic.Nova", OpenerKind::Editor),
+    ("bbedit", "com.barebones.bbedit", OpenerKind::Editor),
+    ("intellij", "com.jetbrains.intellij", OpenerKind::Editor),
+    ("webstorm", "com.jetbrains.WebStorm", OpenerKind::Editor),
+    ("pycharm", "com.jetbrains.pycharm", OpenerKind::Editor),
+    ("rubymine", "com.jetbrains.rubymine", OpenerKind::Editor),
+    ("goland", "com.jetbrains.goland", OpenerKind::Editor),
+    ("fleet", "fleet.app", OpenerKind::Editor),
+    ("zed", "dev.zed.Zed", OpenerKind::Editor),
     // File browsers
-    ("finder", "com.apple.finder"),
+    ("finder", "com.apple.finder", OpenerKind::FileBrowser),
 ];
 
 /// Open a URL in the user's default browser.
@@ -115,7 +133,7 @@ pub async fn get_available_openers() -> Result<Vec<OpenerApp>, String> {
 
         let mut available = Vec::new();
 
-        for (id, bundle_id) in KNOWN_OPENERS {
+        for (id, bundle_id, kind) in KNOWN_OPENERS {
             let output = Command::new("mdfind")
                 .arg(format!("kMDItemCFBundleIdentifier == '{bundle_id}'"))
                 .output()
@@ -127,6 +145,7 @@ pub async fn get_available_openers() -> Result<Vec<OpenerApp>, String> {
                     available.push(OpenerApp {
                         id: id.to_string(),
                         name: prettify_app_name(id),
+                        kind: kind.clone(),
                     });
                 }
             }
@@ -187,8 +206,8 @@ pub async fn open_in_app(path: String, app_id: String) -> Result<(), String> {
         // Find the bundle ID for this app
         let bundle_id = KNOWN_OPENERS
             .iter()
-            .find(|(id, _)| *id == app_id)
-            .map(|(_, bundle)| *bundle)
+            .find(|(id, _, _)| *id == app_id)
+            .map(|(_, bundle, _)| *bundle)
             .ok_or_else(|| format!("Unknown app ID: {app_id}"))?;
 
         let status = Command::new("open")

@@ -28,3 +28,5 @@ git-diff = { path = "../../../crates/git-diff" }
 # macOS font enumeration
 [target.'cfg(target_os = "macos")'.dependencies]
 core-text = "20"
+
+[workspace]

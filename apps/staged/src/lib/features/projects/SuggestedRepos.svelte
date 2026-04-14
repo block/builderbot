@@ -14,6 +14,7 @@
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { darkMode } from '../../stores/isDark.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
+  import * as badge from '../../shared/badgeColors';
   import Spinner from '../../shared/Spinner.svelte';
   import { getStoreValue, setStoreValue } from '../../shared/persistentStore';
 
@@ -114,25 +115,7 @@
     return repoBadgeStore.lookup(suggestion.githubRepo, suggestion.subpath)?.hue ?? 210;
   }
 
-  function badgeBg(hue: number): string {
-    return darkMode.value ? `hsl(${hue} 35% 22%)` : `hsl(${hue} 50% 92%)`;
-  }
-
-  function badgeFg(hue: number): string {
-    return darkMode.value ? `hsl(${hue} 50% 75%)` : `hsl(${hue} 55% 35%)`;
-  }
-
-  function badgeBorder(hue: number): string {
-    return darkMode.value ? `hsl(${hue} 35% 32%)` : `hsl(${hue} 45% 82%)`;
-  }
-
-  function badgeBgHover(hue: number): string {
-    return darkMode.value ? `hsl(${hue} 40% 30%)` : `hsl(${hue} 60% 85%)`;
-  }
-
-  function badgeBorderHover(hue: number): string {
-    return darkMode.value ? `hsl(${hue} 45% 45%)` : `hsl(${hue} 50% 65%)`;
-  }
+  const dark = $derived(darkMode.value);
 </script>
 
 {#if dismissLoaded && !dismissed && suggestions.length > 0}
@@ -149,11 +132,16 @@
         {@const isAdding = addingKey === suggestionKey(suggestion)}
         <button
           class="suggested-chip"
-          style="--chip-bg: {badgeBg(hue)}; --chip-bg-hover: {badgeBgHover(
-            hue
-          )}; --chip-border: {badgeBorder(hue)}; --chip-border-hover: {badgeBorderHover(
-            hue
-          )}; --chip-fg: {badgeFg(hue)};"
+          style="--chip-bg: {badge.badgeBg(hue, dark)}; --chip-bg-hover: {badge.badgeBgHover(
+            hue,
+            dark
+          )}; --chip-border: {badge.badgeBorder(
+            hue,
+            dark
+          )}; --chip-border-hover: {badge.badgeBorderHover(hue, dark)}; --chip-fg: {badge.badgeFg(
+            hue,
+            dark
+          )};"
           disabled={isAdding}
           onclick={() => handleAdd(suggestion)}
         >

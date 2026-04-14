@@ -6,6 +6,7 @@
 -->
 <script lang="ts">
   import { darkMode } from '../stores/isDark.svelte';
+  import { badgeBg, badgeFg } from './badgeColors';
 
   interface Props {
     shortName: string;
@@ -15,9 +16,9 @@
 
   let { shortName, hue, small = false }: Props = $props();
 
-  let bg = $derived(darkMode.value ? `hsl(${hue} 35% 22%)` : `hsl(${hue} 50% 92%)`);
+  let bg = $derived(badgeBg(hue, darkMode.value));
 
-  let fg = $derived(darkMode.value ? `hsl(${hue} 50% 75%)` : `hsl(${hue} 55% 35%)`);
+  let fg = $derived(badgeFg(hue, darkMode.value));
 </script>
 
 <span class="repo-badge" class:small style="background: {bg}; color: {fg};" title={shortName}>

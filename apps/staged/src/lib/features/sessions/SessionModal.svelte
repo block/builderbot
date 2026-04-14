@@ -613,8 +613,22 @@
 
   /** Replace #type:id tokens in plain text with inline badge HTML.
    *  Regex-matches on raw text first, then escapes non-token segments individually
-   *  so that IDs containing HTML-special characters are looked up correctly. */
+   *  so that IDs containing HTML-special characters are looked up correctly.
+   *  Results are memoized per text string; the cache is invalidated when
+   *  hashtagItems changes (tracked via prevHashtagItems). */
+  const hashtagTokenCache = new Map<string, string>();
+  let prevHashtagItems: HashtagItem[] | null = null;
+
   function renderHashtagTokens(text: string, items: HashtagItem[]): string {
+    // Invalidate cache when the hashtag items array identity changes
+    if (items !== prevHashtagItems) {
+      hashtagTokenCache.clear();
+      prevHashtagItems = items;
+    }
+
+    const cached = hashtagTokenCache.get(text);
+    if (cached !== undefined) return cached;
+
     const itemsByKey = new Map<string, HashtagItem>();
     for (const item of items) {
       itemsByKey.set(`${item.type}:${item.id}`, item);
@@ -653,7 +667,9 @@
       parts.push(escapeHtml(text.slice(lastIndex)));
     }
 
-    return parts.join('');
+    const result = parts.join('');
+    hashtagTokenCache.set(text, result);
+    return result;
   }
 
   // =========================================================================
@@ -664,8 +680,23 @@
     | { type: 'text'; text: string }
     | { type: 'xml-block'; tag: string; label: string; content: string; icon: typeof Zap };
 
+  /** Memoization caches for XML block detection and content segment parsing.
+   *  Message content is immutable once set, so keying on the string is reliable. */
+  const xmlBlocksCache = new Map<string, boolean>();
+  const segmentsCache = new Map<string, ContentSegment[]>();
+
+  function cachedHasXmlBlocks(content: string): boolean {
+    const cached = xmlBlocksCache.get(content);
+    if (cached !== undefined) return cached;
+    const result = hasXmlBlocks(content);
+    xmlBlocksCache.set(content, result);
+    return result;
+  }
+
   /** Parse content into segments, extracting XML-style tagged blocks. */
   function parseContentSegments(content: string): ContentSegment[] {
+    const cached = segmentsCache.get(content);
+    if (cached !== undefined) return cached;
     const segments: ContentSegment[] = [];
     let remaining = content;
 
@@ -704,6 +735,7 @@
       segments.push({ type: 'text', text: content });
     }
 
+    segmentsCache.set(content, segments);
     return segments;
   }
 
@@ -980,7 +1012,7 @@
           {#each grouped as group, groupIdx (groupKey(group))}
             <div in:messageSlide class={group.type === 'user' ? 'user-group' : ''}>
               {#if group.type === 'user'}
-                {@const hasBlocks = hasXmlBlocks(group.message.content)}
+                {@const hasBlocks = cachedHasXmlBlocks(group.message.content)}
                 {@const segments = hasBlocks ? parseContentSegments(group.message.content) : []}
                 {@const userText = hasBlocks
                   ? segments

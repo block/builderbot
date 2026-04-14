@@ -15,7 +15,7 @@
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { listen } from '@tauri-apps/api/event';
   import type { Branch, BranchTimeline as BranchTimelineData } from '../../types';
   import * as commands from '../../api/commands';
   import { extractPrNumber, extractPrUrl, isPushRejectedNonFastForward } from './branchCardHelpers';
@@ -25,6 +25,7 @@
   import { pushStateStore, type PushState } from '../../stores/pushState.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
+  import * as prPollingService from '../../services/prPollingService';
 
   interface Props {
     branch: Branch;
@@ -79,10 +80,8 @@
   // PR head SHA — updated from events and branch prop
   let prHeadSha = $state<string | null>(null);
 
-  // PR status polling state
-  let prStatusPollTimer: ReturnType<typeof setInterval> | null = null;
-  let prStatusRefreshing = $state(false);
-  let lastImmediateRefreshPrNumber = $state<number | null>(null);
+  // Stale-data indicator (set by the centralized polling service)
+  let prStatusStale = $state(false);
 
   // PR status fields (local state, updated via events)
   let prStatusState = $state<string | null>(null);
@@ -124,17 +123,13 @@
   let showPushErrorDialog = $state(false);
   let showForcePushDialog = $state(false);
 
-  // Window focus tracking for smart polling
-  let isWindowFocused = $state(true);
-  let handleFocus: (() => void) | null = null;
-  let handleBlur: (() => void) | null = null;
-
-  let unlistenPrStatus: UnlistenFn | null = null;
-  let unlistenPrStatusCleared: UnlistenFn | null = null;
-
+  // =========================================================================
+  // Event listeners for PR status (fix race condition by awaiting promises)
+  // =========================================================================
   $effect(() => {
     const branchId = branch.id;
-    listen<{
+
+    const unlistenStatusPromise = listen<{
       branchId: string;
       prState: string;
       prChecksStatus: string;
@@ -151,12 +146,12 @@
         prStatusMergeable = payload.prMergeable;
         prStatusDraft = payload.prDraft;
         prHeadSha = payload.prHeadSha;
+        // Update the polling service with the new checks status
+        prPollingService.updateChecksStatus(branchId, payload.prChecksStatus === 'PENDING');
       }
-    }).then((unlisten) => {
-      unlistenPrStatus = unlisten;
     });
 
-    listen<string>('pr-status-cleared', (event) => {
+    const unlistenClearedPromise = listen<string>('pr-status-cleared', (event) => {
       if (event.payload === branchId) {
         prStatusState = null;
         prStatusChecks = null;
@@ -165,13 +160,11 @@
         prStatusDraft = null;
         prHeadSha = null;
       }
-    }).then((unlisten) => {
-      unlistenPrStatusCleared = unlisten;
     });
 
     return () => {
-      unlistenPrStatus?.();
-      unlistenPrStatusCleared?.();
+      unlistenStatusPromise.then((fn) => fn());
+      unlistenClearedPromise.then((fn) => fn());
     };
   });
 
@@ -219,119 +212,45 @@
     return () => clearInterval(interval);
   });
 
-  // PR status polling: adaptive intervals based on status
-  $effect(() => {
-    const shouldPoll = branch.prNumber && isWindowFocused;
+  // =========================================================================
+  // Polling service registration
+  // =========================================================================
 
-    if (prStatusState === 'MERGED' || prStatusState === 'CLOSED') {
-      if (prStatusPollTimer) {
-        clearInterval(prStatusPollTimer);
-        prStatusPollTimer = null;
-      }
-      return;
-    }
-
-    let pollInterval: number;
-    if (prStatusChecks === 'PENDING') {
-      pollInterval = 15_000;
-    } else {
-      pollInterval = 60_000;
-    }
-
-    if (shouldPoll) {
-      if (prStatusPollTimer) {
-        clearInterval(prStatusPollTimer);
-      }
-
-      prStatusPollTimer = setInterval(async () => {
-        if (prStatusRefreshing) {
-          return;
-        }
-        try {
-          prStatusRefreshing = true;
-          let timeoutId: ReturnType<typeof setTimeout>;
-          const timeout = new Promise<never>((_, reject) => {
-            timeoutId = setTimeout(
-              () => reject(new Error('refreshPrStatus timed out after 60s')),
-              60_000
-            );
-          });
-          try {
-            await Promise.race([commands.refreshPrStatus(branch.id), timeout]);
-          } finally {
-            clearTimeout(timeoutId!);
-          }
-        } catch (e) {
-          console.error(`[BranchCardPrButton] Poll refresh failed for branch=${branch.id}:`, e);
-        } finally {
-          prStatusRefreshing = false;
-        }
-      }, pollInterval);
-    } else {
-      if (prStatusPollTimer) {
-        clearInterval(prStatusPollTimer);
-        prStatusPollTimer = null;
-      }
-    }
-
-    return () => {
-      if (prStatusPollTimer) {
-        clearInterval(prStatusPollTimer);
-        prStatusPollTimer = null;
-      }
-    };
-  });
-
-  // Kick off an immediate refresh whenever this branch gains a PR number.
-  // This covers branches hydrated after mount, such as project/repo creation from an existing PR.
+  // Track/untrack this branch with the centralized polling service when it
+  // gains or loses a PR number, and when its terminal state changes.
   $effect(() => {
     const prNumber = branch.prNumber;
+    const branchId = branch.id;
+    const projectId = branch.projectId;
 
-    if (!prNumber) {
-      lastImmediateRefreshPrNumber = null;
-      return;
+    if (prNumber && prStatusState !== 'MERGED' && prStatusState !== 'CLOSED') {
+      prPollingService.track(branchId, projectId, prStatusChecks === 'PENDING');
+      return () => {
+        prPollingService.untrack(branchId);
+      };
+    } else {
+      prPollingService.untrack(branchId);
     }
-
-    if (!isWindowFocused || prStatusRefreshing || lastImmediateRefreshPrNumber === prNumber) {
-      return;
-    }
-
-    lastImmediateRefreshPrNumber = prNumber;
-    commands
-      .refreshPrStatus(branch.id)
-      .catch((e) => console.error('Failed to fetch initial PR status:', e));
   });
+
+  // Subscribe to stale-data notifications from the polling service
+  let unsubStale: (() => void) | null = null;
 
   onMount(() => {
     window.addEventListener('keydown', handleOptionDown);
     window.addEventListener('keyup', handleOptionUp);
 
-    handleFocus = () => {
-      isWindowFocused = true;
-      if (branch.prNumber && !prStatusRefreshing) {
-        commands
-          .refreshPrStatus(branch.id)
-          .catch((e) => console.error('Failed to refresh PR status on focus:', e));
+    unsubStale = prPollingService.onStale((branchId, isStale) => {
+      if (branchId === branch.id) {
+        prStatusStale = isStale;
       }
-    };
-    handleBlur = () => {
-      isWindowFocused = false;
-    };
-    window.addEventListener('focus', handleFocus);
-    window.addEventListener('blur', handleBlur);
+    });
   });
 
   onDestroy(() => {
-    unlistenPrStatus?.();
-    unlistenPrStatusCleared?.();
-    if (prStatusPollTimer) {
-      clearInterval(prStatusPollTimer);
-      prStatusPollTimer = null;
-    }
-    if (handleFocus) window.removeEventListener('focus', handleFocus);
-    if (handleBlur) window.removeEventListener('blur', handleBlur);
     window.removeEventListener('keydown', handleOptionDown);
     window.removeEventListener('keyup', handleOptionUp);
+    unsubStale?.();
   });
 
   // =========================================================================
@@ -429,9 +348,7 @@
           if (prNumber) {
             await commands.updateBranchPr(branch.id, prNumber);
             branch.prNumber = prNumber;
-            commands
-              .refreshPrStatus(branch.id)
-              .catch((e) => console.error('Failed to fetch initial PR status:', e));
+            prPollingService.refreshNow(branch.projectId);
           }
           prStateStore.setPrCreated(branch.id, foundUrl);
         } else {
@@ -507,7 +424,7 @@
             prHeadSha = latestCommit.sha;
           }
           // Immediately refresh PR status so checks update right away
-          commands.refreshPrStatus(branch.id).catch(() => {});
+          prPollingService.refreshNow(branch.projectId);
           setTimeout(() => {
             pushStateStore.clearPushState(branch.id);
           }, 1_500);
@@ -675,7 +592,9 @@
         {optionHeld ? 'Create draft PR' : 'Create PR'}
       {/if}
     </span>
-    {#if prStatusIndicator}
+    {#if prStatusStale}
+      <span class="pr-status-stale" title="PR status may be outdated">!</span>
+    {:else if prStatusIndicator}
       <span class="pr-status-indicator {prStatusIndicator}"></span>
     {/if}
   </button>
@@ -813,6 +732,14 @@
 
   .pr-status-indicator.neutral {
     background-color: var(--text-faint, #64748b);
+  }
+
+  .pr-status-stale {
+    font-size: 9px;
+    font-weight: 700;
+    color: var(--text-faint, #94a3b8);
+    margin-left: 2px;
+    opacity: 0.7;
   }
 
   .pr-status-indicator.pending {

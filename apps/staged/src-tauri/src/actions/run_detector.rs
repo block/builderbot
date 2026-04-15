@@ -23,6 +23,13 @@ use super::registry::{ActionRegistry, RunPhase};
 
 use crate::store::Store;
 
+/// Strip ANSI escape sequences so regexes written against plain text can match
+/// terminal output that includes colour/style codes.
+fn strip_ansi_codes(s: &str) -> String {
+    let stripped = strip_ansi_escapes::strip(s);
+    String::from_utf8_lossy(&stripped).into_owned()
+}
+
 /// Spawns a background task that polls the shared output buffer every 2 seconds,
 /// applies the given regex against new lines, and transitions `RunPhase` to
 /// `Running` when the pattern matches.
@@ -106,9 +113,10 @@ pub fn spawn_regex_matcher(
                 lines
             };
 
-            // Apply regex to each new line.
+            // Apply regex to each new line (strip ANSI codes before matching).
             for line in &new_lines {
-                if let Some(caps) = re.captures(line) {
+                let clean = strip_ansi_codes(line);
+                if let Some(caps) = re.captures(&clean) {
                     let endpoint = if has_endpoint_capture {
                         caps.name("endpoint").map(|m| m.as_str().to_string())
                     } else {
@@ -225,11 +233,10 @@ pub fn spawn_autodetect_poller(
             if tail.is_empty() {
                 continue;
             }
-            let output = tail
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join("\n");
+
+            // Strip ANSI codes before sending to AI and before regex matching.
+            let clean_lines: Vec<String> = tail.iter().map(|s| strip_ansi_codes(s)).collect();
+            let output = clean_lines.join("\n");
 
             log::info!(
                 "autodetect_poller: poll {poll_index} for {execution_id}, sending {line_count} lines to AI",
@@ -344,12 +351,11 @@ If still building, set regex and has_endpoint_capture to null/false."#,
                 }
             };
 
-            // Validate that the regex matches at least one line in the current output.
-            let matched_line = lines.iter().find(|line| re.is_match(line));
+            // Validate that the regex matches at least one line in the current
+            // output (using the already-stripped lines).
+            let matched_line = clean_lines.iter().find(|line| re.is_match(line));
             if matched_line.is_none() {
-                // Log sample lines (escaped) so we can see ANSI codes or other
-                // hidden characters that prevent the regex from matching.
-                let sample: Vec<_> = lines
+                let sample: Vec<_> = clean_lines
                     .iter()
                     .filter(|l| l.to_lowercase().contains("local"))
                     .take(5)

@@ -579,7 +579,7 @@
 
           {#if selectedBadge}
             <div class="badge-editor">
-              <div class="badge-editor-fields">
+              <div class="badge-editor-row">
                 <label class="badge-field">
                   <span class="badge-field-label">Short name</span>
                   <input
@@ -596,9 +596,6 @@
                       if (e.key === 'Enter') saveBadge();
                     }}
                   />
-                  {#if badgeError}
-                    <span class="badge-error">{badgeError}</span>
-                  {/if}
                 </label>
                 <label class="badge-field">
                   <span class="badge-field-label">Hue</span>
@@ -612,13 +609,16 @@
                     onchange={saveBadge}
                   />
                 </label>
+                <div class="badge-editor-preview">
+                  <RepoBadge
+                    shortName={badgeEditName || selectedBadge.shortName}
+                    hue={badgeEditHue}
+                  />
+                </div>
               </div>
-              <div class="badge-editor-preview">
-                <RepoBadge
-                  shortName={badgeEditName || selectedBadge.shortName}
-                  hue={badgeEditHue}
-                />
-              </div>
+              {#if badgeError}
+                <span class="badge-error">{badgeError}</span>
+              {/if}
             </div>
           {/if}
 
@@ -976,29 +976,28 @@
 
   .badge-editor {
     display: flex;
-    align-items: center;
-    gap: 12px;
+    flex-direction: column;
+    gap: 6px;
     padding: 8px 10px;
     border: 1px solid var(--border-subtle);
     border-radius: 8px;
     background: var(--bg-primary);
   }
 
-  .badge-editor-preview {
-    flex-shrink: 0;
-  }
-
-  .badge-editor-fields {
+  .badge-editor-row {
     display: flex;
     align-items: center;
     gap: 12px;
     min-width: 0;
   }
 
+  .badge-editor-preview {
+    flex-shrink: 0;
+  }
+
   .badge-field {
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
     gap: 6px;
     font-size: var(--size-xs);
     color: var(--text-muted);
@@ -1026,8 +1025,6 @@
   .badge-error {
     color: var(--ui-danger);
     font-size: var(--size-xs);
-    flex-basis: 100%;
-    margin-top: 2px;
   }
 
   .badge-hue-slider {

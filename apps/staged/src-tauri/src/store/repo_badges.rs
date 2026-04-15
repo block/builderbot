@@ -93,6 +93,32 @@ impl Store {
         Ok(())
     }
 
+    /// Look up a single badge by its short_name.
+    pub fn get_repo_badge_by_short_name(
+        &self,
+        short_name: &str,
+    ) -> Result<Option<RepoBadge>, StoreError> {
+        use rusqlite::OptionalExtension;
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT github_repo, subpath, short_name, hue, created_at
+             FROM repo_badges
+             WHERE short_name = ?1",
+            params![short_name],
+            |row| {
+                Ok(RepoBadge {
+                    github_repo: row.get(0)?,
+                    subpath: row.get(1)?,
+                    short_name: row.get(2)?,
+                    hue: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     /// Delete a badge by (github_repo, subpath).
     pub fn delete_repo_badge(&self, github_repo: &str, subpath: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();

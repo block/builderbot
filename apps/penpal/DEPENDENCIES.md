@@ -58,6 +58,7 @@ see-also:
 - **Used by:** Building the React frontend (Vite), running frontend tests (Vitest), running e2e tests (Playwright)
 - **Where it runs:** Dev and CI only (compiled JS/HTML assets bundled into .app)
 - **Why external:** Vite and TypeScript compiler require a Node.js runtime
+- **Note:** This project uses **pnpm** (not npm). The root `package.json` enforces this via the `packageManager` field, and `pnpm-workspace.yaml` defines the workspace. Do not use `npm install` or commit `package-lock.json` files.
 
 ## Optional Runtime Dependencies
 

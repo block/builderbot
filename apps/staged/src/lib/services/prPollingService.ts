@@ -1,10 +1,11 @@
 /**
  * Centralized PR status polling service.
  *
- * Replaces the per-component setInterval polling in BranchCardPrButton with a
- * single coordinated timer that calls `refreshAllPrStatuses` on the backend.
- * The backend already emits per-branch `pr-status-changed` events, so
- * components only need to listen for those events — no per-branch IPC calls.
+ * Polls all projects app-wide. The selected project polls more frequently
+ * than background projects, and projects with pending CI checks poll fastest.
+ *
+ * The backend's `refreshAllPrStatuses` already emits per-branch
+ * `pr-status-changed` events, so components only need to listen for those.
  */
 
 import { refreshAllPrStatuses } from '../commands';
@@ -13,19 +14,32 @@ import { refreshAllPrStatuses } from '../commands';
 // Types
 // ---------------------------------------------------------------------------
 
-interface TrackedBranch {
-  projectId: string;
-  hasPendingChecks: boolean;
-}
+type StaleCallback = (projectId: string, isStale: boolean) => void;
 
-type StaleCallback = (branchId: string, isStale: boolean) => void;
+// ---------------------------------------------------------------------------
+// Intervals
+// ---------------------------------------------------------------------------
+
+const PENDING_INTERVAL = 15_000; // any project with pending CI checks
+const SELECTED_INTERVAL = 60_000; // selected project, no pending checks
+const BACKGROUND_INTERVAL = 5 * 60_000; // non-selected, no pending checks
+const MAX_CONSECUTIVE_FAILURES = 3;
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
-/** Branches currently being tracked, keyed by branchId. */
-const tracked = new Map<string, TrackedBranch>();
+/** All project IDs to poll. */
+const allProjectIds = new Set<string>();
+
+/** Currently selected (viewed) project. */
+let selectedProjectId: string | null = null;
+
+/** Branches with pending checks, keyed by branchId → projectId. */
+const pendingBranches = new Map<string, string>();
+
+/** When each project was last successfully polled. */
+const lastPolledAt = new Map<string, number>();
 
 /** Consecutive failure count per projectId. */
 const failures = new Map<string, number>();
@@ -36,44 +50,52 @@ const staleCallbacks = new Set<StaleCallback>();
 let timerId: ReturnType<typeof setTimeout> | null = null;
 let refreshInFlight = false;
 let windowFocused = true;
-
-// Intervals
-const PENDING_INTERVAL = 15_000;
-const NORMAL_INTERVAL = 60_000;
-const MAX_CONSECUTIVE_FAILURES = 3;
+let listenersAttached = false;
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-function getInterval(): number {
-  for (const entry of tracked.values()) {
-    if (entry.hasPendingChecks) return PENDING_INTERVAL;
+function projectHasPendingChecks(projectId: string): boolean {
+  for (const pId of pendingBranches.values()) {
+    if (pId === projectId) return true;
   }
-  return NORMAL_INTERVAL;
+  return false;
 }
 
-/** Collect the distinct projectIds that are currently tracked. */
-function trackedProjectIds(): Set<string> {
-  const ids = new Set<string>();
-  for (const entry of tracked.values()) {
-    ids.add(entry.projectId);
+function getProjectInterval(projectId: string): number {
+  if (projectHasPendingChecks(projectId)) return PENDING_INTERVAL;
+  if (projectId === selectedProjectId) return SELECTED_INTERVAL;
+  return BACKGROUND_INTERVAL;
+}
+
+/** Return project IDs whose polling interval has elapsed. */
+function getProjectsDue(): string[] {
+  const now = Date.now();
+  const due: string[] = [];
+  for (const projectId of allProjectIds) {
+    const interval = getProjectInterval(projectId);
+    const last = lastPolledAt.get(projectId) ?? 0;
+    if (now - last >= interval) {
+      due.push(projectId);
+    }
   }
-  return ids;
+  return due;
 }
 
 async function poll() {
-  if (refreshInFlight || !windowFocused || tracked.size === 0) {
+  if (refreshInFlight || !windowFocused || allProjectIds.size === 0) {
     scheduleNext();
     return;
   }
 
   refreshInFlight = true;
-  const projectIds = trackedProjectIds();
+  const due = getProjectsDue();
 
-  for (const projectId of projectIds) {
+  for (const projectId of due) {
     try {
       await refreshAllPrStatuses(projectId);
+      lastPolledAt.set(projectId, Date.now());
       // Reset failure counter on success
       const prev = failures.get(projectId) ?? 0;
       if (prev > 0) {
@@ -99,11 +121,20 @@ async function poll() {
 
 function scheduleNext() {
   stopTimer();
-  if (tracked.size === 0 || !windowFocused) {
-    return;
+  if (allProjectIds.size === 0 || !windowFocused) return;
+
+  const now = Date.now();
+  let minDelay = Infinity;
+  for (const projectId of allProjectIds) {
+    const interval = getProjectInterval(projectId);
+    const last = lastPolledAt.get(projectId) ?? 0;
+    const remaining = Math.max(0, interval - (now - last));
+    minDelay = Math.min(minDelay, remaining);
   }
-  const interval = getInterval();
-  timerId = setTimeout(poll, interval);
+
+  if (!Number.isFinite(minDelay)) return;
+  // Floor at 1s to avoid tight loops
+  timerId = setTimeout(poll, Math.max(1_000, minDelay));
 }
 
 function stopTimer() {
@@ -114,15 +145,11 @@ function stopTimer() {
 }
 
 function notifyStale(projectId: string, isStale: boolean) {
-  for (const [branchId, entry] of tracked) {
-    if (entry.projectId === projectId) {
-      for (const cb of staleCallbacks) {
-        try {
-          cb(branchId, isStale);
-        } catch {
-          // ignore callback errors
-        }
-      }
+  for (const cb of staleCallbacks) {
+    try {
+      cb(projectId, isStale);
+    } catch {
+      // ignore callback errors
     }
   }
 }
@@ -133,7 +160,6 @@ function notifyStale(projectId: string, isStale: boolean) {
 
 function handleFocus() {
   windowFocused = true;
-  // Immediate refresh on focus, then resume schedule
   poll();
 }
 
@@ -141,8 +167,6 @@ function handleBlur() {
   windowFocused = false;
   stopTimer();
 }
-
-let listenersAttached = false;
 
 function ensureWindowListeners() {
   if (listenersAttached) return;
@@ -162,37 +186,67 @@ function removeWindowListeners() {
 // Public API
 // ---------------------------------------------------------------------------
 
-/** Start tracking a branch for PR status polling. */
-export function track(branchId: string, projectId: string, hasPendingChecks = false): void {
-  const isFirst = tracked.size === 0;
-  tracked.set(branchId, { projectId, hasPendingChecks });
+/** Set the full list of project IDs to poll. Starts/stops polling as needed. */
+export function setProjects(projectIds: string[]): void {
+  const newIds = new Set(projectIds);
 
-  if (isFirst) {
+  // Remove projects no longer in the list
+  for (const id of allProjectIds) {
+    if (!newIds.has(id)) {
+      allProjectIds.delete(id);
+      lastPolledAt.delete(id);
+      failures.delete(id);
+    }
+  }
+
+  // Clean up pending branches for removed projects
+  for (const [branchId, projectId] of pendingBranches) {
+    if (!newIds.has(projectId)) {
+      pendingBranches.delete(branchId);
+    }
+  }
+
+  // Add new projects
+  for (const id of newIds) {
+    allProjectIds.add(id);
+  }
+
+  if (allProjectIds.size > 0) {
     ensureWindowListeners();
-    // Start polling immediately
+    // Trigger poll — new projects have no lastPolledAt so they'll be due
     poll();
   } else {
-    // Interval may have changed — reschedule
-    scheduleNext();
-  }
-}
-
-/** Stop tracking a branch. */
-export function untrack(branchId: string): void {
-  tracked.delete(branchId);
-  if (tracked.size === 0) {
     stopTimer();
     removeWindowListeners();
     failures.clear();
   }
 }
 
-/** Update whether a tracked branch has pending checks (affects poll interval). */
-export function updateChecksStatus(branchId: string, hasPendingChecks: boolean): void {
-  const entry = tracked.get(branchId);
-  if (entry && entry.hasPendingChecks !== hasPendingChecks) {
-    entry.hasPendingChecks = hasPendingChecks;
-    // Interval may have changed — reschedule
+/** Set the currently selected project (polls more frequently). */
+export function setSelectedProject(projectId: string | null): void {
+  if (selectedProjectId === projectId) return;
+  selectedProjectId = projectId;
+  if (projectId && allProjectIds.has(projectId)) {
+    // Selected project's interval just changed — trigger a poll if it's due
+    poll();
+  } else {
+    scheduleNext();
+  }
+}
+
+/** Update whether a branch has pending CI checks (affects its project's poll interval). */
+export function updateChecksStatus(
+  branchId: string,
+  projectId: string,
+  hasPendingChecks: boolean
+): void {
+  const hadPending = pendingBranches.has(branchId);
+  if (hasPendingChecks) {
+    pendingBranches.set(branchId, projectId);
+  } else {
+    pendingBranches.delete(branchId);
+  }
+  if (hadPending !== hasPendingChecks) {
     scheduleNext();
   }
 }
@@ -210,6 +264,15 @@ export function refreshNow(projectId: string): void {
   }
   refreshInFlight = true;
   refreshAllPrStatuses(projectId)
+    .then(() => {
+      lastPolledAt.set(projectId, Date.now());
+      // Reset failure counter on success
+      const prev = failures.get(projectId) ?? 0;
+      if (prev > 0) {
+        failures.set(projectId, 0);
+        notifyStale(projectId, false);
+      }
+    })
     .catch((e) =>
       console.error(`[PrPollingService] immediate refresh failed for project=${projectId}:`, e)
     )

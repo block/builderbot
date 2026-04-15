@@ -145,7 +145,11 @@
         prStatusDraft = payload.prDraft;
         prHeadSha = payload.prHeadSha;
         // Update the polling service with the new checks status
-        prPollingService.updateChecksStatus(branchId, payload.prChecksStatus === 'PENDING');
+        prPollingService.updateChecksStatus(
+          branchId,
+          branch.projectId,
+          payload.prChecksStatus === 'PENDING'
+        );
       }
     });
 
@@ -210,27 +214,6 @@
     return () => clearInterval(interval);
   });
 
-  // =========================================================================
-  // Polling service registration
-  // =========================================================================
-
-  // Track/untrack this branch with the centralized polling service when it
-  // gains or loses a PR number, and when its terminal state changes.
-  $effect(() => {
-    const prNumber = branch.prNumber;
-    const branchId = branch.id;
-    const projectId = branch.projectId;
-
-    if (prNumber && prStatusState !== 'MERGED' && prStatusState !== 'CLOSED') {
-      prPollingService.track(branchId, projectId, prStatusChecks === 'PENDING');
-      return () => {
-        prPollingService.untrack(branchId);
-      };
-    } else {
-      prPollingService.untrack(branchId);
-    }
-  });
-
   // Subscribe to stale-data notifications from the polling service
   let unsubStale: (() => void) | null = null;
 
@@ -238,8 +221,8 @@
     window.addEventListener('keydown', handleOptionDown);
     window.addEventListener('keyup', handleOptionUp);
 
-    unsubStale = prPollingService.onStale((branchId, isStale) => {
-      if (branchId === branch.id) {
+    unsubStale = prPollingService.onStale((projectId, isStale) => {
+      if (projectId === branch.projectId) {
         prStatusStale = isStale;
       }
     });

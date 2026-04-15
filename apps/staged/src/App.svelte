@@ -42,6 +42,8 @@
   import { initBloxEnv } from './lib/stores/bloxEnv.svelte';
   import { listenForSessionStatus } from './lib/listeners/sessionStatusListener';
   import { darkMode } from './lib/stores/isDark.svelte';
+  import * as prPollingService from './lib/services/prPollingService';
+  import { projectsList } from './lib/features/projects/projectsSidebarState.svelte';
   import type { StoreIncompatibility } from './lib/types';
 
   const updaterEnabled = import.meta.env.VITE_UPDATER_ENABLED === 'true';
@@ -61,6 +63,17 @@
   let storeIncompat = $state<StoreIncompatibility | null>(null);
   let resetting = $state(false);
   let storeError = $state<string | null>(null);
+
+  // =========================================================================
+  // App-wide PR polling — sync project list and selected project reactively
+  // =========================================================================
+  $effect(() => {
+    prPollingService.setProjects(projectsList.current.map((p) => p.id));
+  });
+
+  $effect(() => {
+    prPollingService.setSelectedProject(navigation.selectedProjectId);
+  });
 
   // Konami code: ↑↑↓↓←→←→BA
   const konamiSequence = [

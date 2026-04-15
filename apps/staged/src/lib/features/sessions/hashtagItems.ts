@@ -68,7 +68,7 @@ export async function buildProjectHashtagItems(
   return items;
 }
 
-function timelineToHashtagItems(
+export function timelineToHashtagItems(
   timeline: BranchTimeline,
   branchName?: string,
   repoSlug?: string

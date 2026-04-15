@@ -40,7 +40,7 @@
   import RemoteWorkspaceStatusBadge from './RemoteWorkspaceStatusBadge.svelte';
   import RemoteWorkspaceStatusView from './RemoteWorkspaceStatusView.svelte';
   import { alerts } from '../../shared/alerts.svelte';
-  import { buildBranchHashtagItems } from '../sessions/hashtagItems';
+  import { timelineToHashtagItems } from '../sessions/hashtagItems';
 
   interface Props {
     branch: Branch;
@@ -101,19 +101,35 @@
   };
   let timelineReviewDetailsById = $state<Record<string, TimelineReviewDetails>>({});
 
-  // Hashtag items for rendering #type:id badges in timeline titles
-  let hashtagItems = $state<HashtagItem[]>([]);
+  // Hashtag items for rendering #type:id badges in timeline titles.
+  // Timeline-derived items are computed reactively so badges update when timeline refreshes.
+  // Project notes are loaded async separately (they don't change during note generation).
+  let timelineHashtagItems = $derived(timeline ? timelineToHashtagItems(timeline) : []);
+  let projectNoteHashtagItems = $state<HashtagItem[]>([]);
   $effect(() => {
-    const branchId = branch.id;
     const projectId = branch.projectId;
+    if (!projectId) {
+      projectNoteHashtagItems = [];
+      return;
+    }
     let stale = false;
-    buildBranchHashtagItems(branchId, projectId).then((items) => {
-      if (!stale) hashtagItems = items;
+    commands.listProjectNotes(projectId).then((notes) => {
+      if (stale) return;
+      projectNoteHashtagItems = notes
+        .filter((n) => n.title.trim())
+        .map((n) => ({
+          type: 'project-note' as const,
+          id: n.id,
+          title: n.title,
+          color: '--note-color',
+          bgColor: '--note-bg',
+        }));
     });
     return () => {
       stale = true;
     };
   });
+  let hashtagItems = $derived([...timelineHashtagItems, ...projectNoteHashtagItems]);
   let reviewDetailsLoadVersion = 0;
   let reviewDiffTarget = $state<{
     commitSha: string;

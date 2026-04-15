@@ -538,6 +538,8 @@
 
   .resume-btn:hover {
     border-color: var(--border-muted);
+    color: var(--text-primary);
+    background: var(--bg-hover);
   }
 
   .start-btn {
@@ -546,8 +548,7 @@
   }
 
   .retry-btn:hover,
-  .start-btn:hover,
-  .resume-btn:hover {
+  .start-btn:hover {
     color: var(--text-primary);
     background: var(--bg-hover);
   }

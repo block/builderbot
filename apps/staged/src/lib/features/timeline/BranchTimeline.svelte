@@ -572,7 +572,7 @@
           onStartClick={item.type.startsWith('queued-') && !hasActiveSession
             ? onStartQueued
             : undefined}
-          onResumeClick={isResumable(item) && onResumeClick && item.sessionId
+          onResumeClick={isResumable(item) && onResumeClick && item.sessionId && !hasActiveSession
             ? () => onResumeClick!(item.sessionId!)
             : undefined}
         />

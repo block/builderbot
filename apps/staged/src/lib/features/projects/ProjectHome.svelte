@@ -119,6 +119,7 @@
         setProjects(projectsList);
         projects = projectsList;
         branchesByProject = new Map(branchesByProject).set(projectId, branches);
+        commands.invalidateProjectBranchTimelines(branches.map((b) => b.id));
         workspaceLifecycle.enqueueInitialSetup(projectId, branches);
         replaceProjectRepos(projectId, repos);
         void repoBadgeStore.ensureForRepos(

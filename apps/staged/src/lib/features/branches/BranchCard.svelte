@@ -143,6 +143,11 @@
       (isRemote && remoteWorkspaceStatus === 'starting')
   );
 
+  /** True during provisioning OR the gap between worktree-ready and timeline-loaded. */
+  let isSettingUp = $derived(
+    isProvisioning || (isLocal && !!branch.worktreePath && !timeline && !error)
+  );
+
   /** Empty timeline used during provisioning so the action buttons render. */
   const emptyTimeline: BranchTimelineData = { commits: [], notes: [], reviews: [], images: [] };
 
@@ -187,22 +192,23 @@
 
   /** Label for the provisioning timeline row, if applicable. */
   let provisioningLabel = $derived.by(() => {
-    if (isLocal && !branch.worktreePath && !worktreeError) {
-      if (setupPhase) {
-        const labels: Record<string, string> = {
-          cloning: 'Cloning repository…',
-          fetching: 'Fetching latest changes…',
-          creating_worktree: 'Creating worktree…',
-          running_setup_actions: 'Running setup actions…',
-        };
-        return labels[setupPhase] ?? 'Setting up…';
+    if (!isSettingUp) return undefined;
+    if (isProvisioning) {
+      if (isLocal) {
+        if (setupPhase) {
+          const labels: Record<string, string> = {
+            cloning: 'Cloning repository…',
+            fetching: 'Fetching latest changes…',
+            creating_worktree: 'Creating worktree…',
+            running_setup_actions: 'Running setup actions…',
+          };
+          return labels[setupPhase] ?? 'Setting up…';
+        }
+        return 'Setting up…';
       }
-      return 'Setting up…';
-    }
-    if (isRemote && remoteWorkspaceStatus === 'starting') {
       return 'Starting workspace…';
     }
-    return undefined;
+    return 'Looking for changes…';
   });
 
   /** Map blox orchestrator CommandType enum names to display labels. */
@@ -215,15 +221,14 @@
 
   /** Detail text for the provisioning row (e.g. git progress percentages or step info). */
   let provisioningDetail = $derived.by(() => {
-    if (isLocal && !branch.worktreePath && !worktreeError) return setupDetail;
-    if (isRemote && remoteWorkspaceStatus === 'starting') {
-      if (setupDetail && setupPhase) {
-        const label = remoteCommandLabels[setupPhase] ?? setupPhase;
-        return `${setupDetail} · ${label}`;
-      }
-      return setupDetail;
+    if (!isProvisioning) return null;
+    if (isLocal) return setupDetail;
+    // Remote workspace starting
+    if (setupDetail && setupPhase) {
+      const label = remoteCommandLabels[setupPhase] ?? setupPhase;
+      return `${setupDetail} · ${label}`;
     }
-    return null;
+    return setupDetail;
   });
 
   /** True when the branch has at least one finalized commit (code changes vs base). */
@@ -462,6 +467,7 @@
           return;
         }
 
+        commands.invalidateBranchTimeline(branch.id);
         loadTimeline();
         // Handle PR session completion
         if (prButton && eventSessionId === prButton.getPrSessionId()) {
@@ -964,7 +970,7 @@
           {repoLabel}
           {isLocal}
           {isRemote}
-          {isProvisioning}
+          {isSettingUp}
           {remoteWorkspaceStatus}
           {onDelete}
           {onRename}
@@ -987,7 +993,7 @@
           {workspaceError}
           fallbackError={error}
         />
-      {:else if loading && !isProvisioning}
+      {:else if loading && !isSettingUp}
         <div class="loading">
           <Spinner size={14} />
           <span>Loading...</span>
@@ -997,7 +1003,7 @@
           <span>{error}</span>
           <button class="retry-btn" onclick={() => loadTimeline()}>Retry</button>
         </div>
-      {:else if timeline || isProvisioning}
+      {:else if timeline || isSettingUp}
         <BranchTimeline
           timeline={timeline ?? emptyTimeline}
           repoDir={branch.worktreePath}

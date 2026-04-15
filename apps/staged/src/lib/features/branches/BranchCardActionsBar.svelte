@@ -61,7 +61,7 @@
     repoLabel?: ProjectRepo | null;
     isLocal: boolean;
     isRemote: boolean;
-    isProvisioning: boolean;
+    isSettingUp: boolean;
     remoteWorkspaceStatus: string | null;
     onDelete?: () => void;
     onRename?: (branchName: string) => void;
@@ -77,7 +77,7 @@
     repoLabel = null,
     isLocal,
     isRemote,
-    isProvisioning,
+    isSettingUp,
     remoteWorkspaceStatus,
     onDelete,
     onRename,
@@ -617,7 +617,7 @@
     </div>
   {/each}
   <!-- Primary run action button -->
-  {#if !isProvisioning && primaryRunAction}
+  {#if !isSettingUp && primaryRunAction}
     {@const execution = primaryActionExecution}
     {@const isRunning = execution?.status === 'running'}
     {@const isStopping = execution && stoppingExecutions.has(execution.executionId)}
@@ -755,7 +755,7 @@
   </button>
   {#if showMoreMenu}
     <div class="more-menu">
-      {#if !isProvisioning}
+      {#if !isSettingUp}
         <!-- Remote-only: Copy workspace name -->
         {#if isRemote && branch.workspaceName}
           <button

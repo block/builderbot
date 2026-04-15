@@ -49,6 +49,7 @@
     /** Existing timeline rows currently being deleted (rendered in-place as deleting). */
     deletingItems?: { type: 'commit' | 'note' | 'review' | 'image'; id: string }[];
     onSessionClick?: (sessionId: string) => void;
+    onResumeClick?: (sessionId: string) => void;
     onCommitClick?: (sha: string) => void;
     onNoteClick?: (noteId: string, title: string, content: string, sessionId?: string) => void;
     onReviewClick?: (reviewId: string) => void;
@@ -95,6 +96,7 @@
     prunedSessionIds = new Set(),
     deletingItems = [],
     onSessionClick,
+    onResumeClick,
     onCommitClick,
     onNoteClick,
     onReviewClick,
@@ -199,6 +201,7 @@
     badges?: TimelineBadge[];
     /** When set, delete button is shown but disabled with this tooltip. */
     deleteDisabledReason?: string;
+    completionReason?: string | null;
   };
 
   let runningSessionIds = $derived.by(() => collectRunningSessionIds(timeline, pendingItems));
@@ -285,6 +288,7 @@
         commitSha: commit.sha || undefined,
         commitId: commit.id ?? undefined,
         deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
+        completionReason: commit.completionReason,
       });
     }
 
@@ -326,6 +330,7 @@
         noteTitle: stripXmlTags(note.title),
         noteContent: note.content,
         deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
+        completionReason: note.completionReason,
       });
     }
 
@@ -388,6 +393,7 @@
         sessionId: review.sessionId ?? undefined,
         reviewId: review.id,
         deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
+        completionReason: review.completionReason,
       });
     }
 
@@ -488,6 +494,17 @@
     }
   }
 
+  const resumableReasons = new Set(['crashed', 'app_quit', 'interrupted']);
+
+  function isResumable(item: DisplayItem): boolean {
+    return (
+      !!item.sessionId &&
+      !!item.completionReason &&
+      resumableReasons.has(item.completionReason) &&
+      !item.deleting
+    );
+  }
+
   function handleDeleteClick(item: DisplayItem, opts?: { altKey: boolean }) {
     if (item.type === 'commit' && item.commitSha && onDeleteCommit) {
       onDeleteCommit(item.commitSha, item.sessionId, opts);
@@ -554,6 +571,9 @@
             : (opts) => handleDeleteClick(item, opts)}
           onStartClick={item.type.startsWith('queued-') && !hasActiveSession
             ? onStartQueued
+            : undefined}
+          onResumeClick={isResumable(item) && onResumeClick && item.sessionId
+            ? () => onResumeClick!(item.sessionId!)
             : undefined}
         />
       </div>

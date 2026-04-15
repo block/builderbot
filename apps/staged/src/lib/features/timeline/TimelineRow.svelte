@@ -14,6 +14,7 @@
     Trash2,
     AlertTriangle,
     Clock,
+    Play,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
 
@@ -58,6 +59,7 @@
     deleteDisabledReason?: string;
     onRetryClick?: () => void;
     onStartClick?: () => void;
+    onResumeClick?: () => void;
   }
 
   let {
@@ -76,6 +78,7 @@
     deleteDisabledReason,
     onRetryClick,
     onStartClick,
+    onResumeClick,
   }: Props = $props();
 
   let isNote = $derived(
@@ -139,6 +142,11 @@
   function handleStartClick(e: MouseEvent) {
     e.stopPropagation();
     onStartClick?.();
+  }
+
+  function handleResumeClick(e: MouseEvent) {
+    e.stopPropagation();
+    onResumeClick?.();
   }
 </script>
 
@@ -217,7 +225,10 @@
         </div>
       {/if}
     </div>
-    <div class="timeline-actions" class:always-visible={!!onRetryClick || !!onStartClick}>
+    <div
+      class="timeline-actions"
+      class:always-visible={!!onRetryClick || !!onStartClick || !!onResumeClick}
+    >
       {#if onStartClick}
         <button class="action-btn start-btn" onclick={handleStartClick} title="Start">
           Start
@@ -226,6 +237,12 @@
       {#if onRetryClick}
         <button class="action-btn retry-btn" onclick={handleRetryClick} title="Retry">
           Retry
+        </button>
+      {/if}
+      {#if onResumeClick}
+        <button class="action-btn resume-btn" onclick={handleResumeClick} title="Resume session">
+          <Play size={10} />
+          Resume
         </button>
       {/if}
       {#if hasSession && !onStartClick && !isQueued}
@@ -503,11 +520,18 @@
   }
 
   .retry-btn,
-  .start-btn {
+  .start-btn,
+  .resume-btn {
     width: auto;
     padding: 0 8px;
     font-size: var(--size-xs);
     color: var(--text-muted);
+  }
+
+  .resume-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
   }
 
   .start-btn {
@@ -516,7 +540,8 @@
   }
 
   .retry-btn:hover,
-  .start-btn:hover {
+  .start-btn:hover,
+  .resume-btn:hover {
     color: var(--text-primary);
     background: var(--bg-hover);
   }

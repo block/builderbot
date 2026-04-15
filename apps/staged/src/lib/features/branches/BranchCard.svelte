@@ -995,6 +995,12 @@
           deletingItems={timelineDeletingItems}
           reviewCommentBreakdown={timelineReviewDetailsById}
           onSessionClick={(sid) => sessionMgr.handleTimelineSessionClick(sid)}
+          onResumeClick={(sid) => {
+            commands
+              .resumeSession(sid, 'Continue where you left off.', undefined, branch.id)
+              .then(() => loadTimeline())
+              .catch((e) => console.error('Failed to resume session:', e));
+          }}
           onCommitClick={handleCommitClick}
           onNoteClick={handleNoteClick}
           onReviewClick={handleReviewClick}

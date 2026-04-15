@@ -254,6 +254,8 @@ Analyze this output and determine:
    - Prefer the EARLIEST line that indicates the service is up and accepting
      connections.
 3. Provide a regex pattern that would match this readiness line in future runs.
+   The regex is tested against each output line individually (single-line matching),
+   so it must match within a single line.
    Be careful to avoid volatile values like timestamps, PIDs, version numbers,
    or build durations.
    - If the readiness line contains a URL/endpoint, include a named capture group

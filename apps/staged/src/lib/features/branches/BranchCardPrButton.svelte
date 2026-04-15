@@ -23,8 +23,6 @@
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { prStateStore, type PrState } from '../../stores/prState.svelte';
   import { pushStateStore, type PushState } from '../../stores/pushState.svelte';
-  import { projectStateStore } from '../../stores/projectState.svelte';
-  import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
   import * as prPollingService from '../../services/prPollingService';
 
   interface Props {
@@ -331,9 +329,10 @@
     commands
       .createPr(branch.id, provider, draft)
       .then((sessionId) => {
-        sessionRegistry.register(sessionId, branch.projectId, 'pr', branch.id);
+        // Session is already registered by the global listener via the
+        // backend's "running" event — just update the local store with the
+        // real session ID so the fallback poller can track it.
         prStateStore.setPrCreating(branch.id, sessionId);
-        projectStateStore.addRunningSession(branch.projectId, sessionId);
       })
       .catch((e) => {
         prStateStore.setPrError(branch.id, e instanceof Error ? e.message : String(e));
@@ -398,9 +397,10 @@
     commands
       .pushBranch(branch.id, provider, force)
       .then((sessionId) => {
-        sessionRegistry.register(sessionId, branch.projectId, 'push', branch.id);
+        // Session is already registered by the global listener via the
+        // backend's "running" event — just update the local store with the
+        // real session ID so the fallback poller can track it.
         pushStateStore.setPushing(branch.id, sessionId);
-        projectStateStore.addRunningSession(branch.projectId, sessionId);
       })
       .catch((e) => {
         pushStateStore.setPushError(branch.id, e instanceof Error ? e.message : String(e));

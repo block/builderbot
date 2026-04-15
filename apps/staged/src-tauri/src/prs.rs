@@ -153,6 +153,17 @@ This is critical - the application parses this to link the PR.
         None
     };
 
+    // Emit "running" event *before* returning so the global session listener
+    // registers this session atomically — avoiding the race where the session
+    // completes before the frontend `.then()` callback fires.
+    session_runner::emit_session_running(
+        &app_handle,
+        &session.id,
+        &branch_id,
+        &branch.project_id,
+        "pr",
+    );
+
     session_runner::start_session(
         session_runner::SessionConfig {
             session_id: session.id.clone(),
@@ -585,6 +596,17 @@ The push must succeed before you finish (unless you output the non-fast-forward 
     } else {
         None
     };
+
+    // Emit "running" event *before* returning so the global session listener
+    // registers this session atomically — avoiding the race where the session
+    // completes before the frontend `.then()` callback fires.
+    session_runner::emit_session_running(
+        &app_handle,
+        &session.id,
+        &branch_id,
+        &branch.project_id,
+        "push",
+    );
 
     session_runner::start_session(
         session_runner::SessionConfig {

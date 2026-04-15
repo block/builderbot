@@ -170,6 +170,9 @@ export default class BranchCardSessionManager {
     if (this.autoReviewSessionId) {
       commands.cancelSession(this.autoReviewSessionId).catch(() => {});
     }
+    if (this.autoReviewId) {
+      commands.deleteReview(this.autoReviewId).catch(() => {});
+    }
     this.autoReviewSessionId = null;
     this.autoReviewId = null;
   }

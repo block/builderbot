@@ -983,6 +983,26 @@ fn update_repo_badge(
         return Err("Hue must be between 0 and 360".into());
     }
     let store = get_store(&store)?;
+
+    // Check if another badge already uses this short name.
+    if let Some(existing) = store
+        .get_repo_badge_by_short_name(&short_name)
+        .map_err(|e| e.to_string())?
+    {
+        let is_same_badge = existing.github_repo == github_repo && existing.subpath == subpath;
+        if !is_same_badge {
+            let owner = if existing.subpath.is_empty() {
+                existing.github_repo.clone()
+            } else {
+                format!("{} ({})", existing.github_repo, existing.subpath)
+            };
+            return Err(format!(
+                "Short name '{}' is already used by {}",
+                short_name, owner
+            ));
+        }
+    }
+
     store
         .update_repo_badge(&github_repo, &subpath, &short_name, hue)
         .map_err(|e| e.to_string())?;

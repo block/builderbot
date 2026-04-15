@@ -176,26 +176,23 @@
 
   /** Label for the provisioning timeline row, if applicable. */
   let provisioningLabel = $derived.by(() => {
-    if (isLocal && !branch.worktreePath && !worktreeError) {
-      if (setupPhase) {
-        const labels: Record<string, string> = {
-          cloning: 'Cloning repository…',
-          fetching: 'Fetching latest changes…',
-          creating_worktree: 'Creating worktree…',
-          running_setup_actions: 'Running setup actions…',
-        };
-        return labels[setupPhase] ?? 'Setting up…';
+    if (!isSettingUp) return undefined;
+    if (isProvisioning) {
+      if (isLocal) {
+        if (setupPhase) {
+          const labels: Record<string, string> = {
+            cloning: 'Cloning repository…',
+            fetching: 'Fetching latest changes…',
+            creating_worktree: 'Creating worktree…',
+            running_setup_actions: 'Running setup actions…',
+          };
+          return labels[setupPhase] ?? 'Setting up…';
+        }
+        return 'Setting up…';
       }
-      return 'Setting up…';
-    }
-    if (isRemote && remoteWorkspaceStatus === 'starting') {
       return 'Starting workspace…';
     }
-    // Worktree is ready but timeline hasn't loaded yet
-    if (isLocal && branch.worktreePath && !timeline && !error) {
-      return 'Looking for changes…';
-    }
-    return undefined;
+    return 'Looking for changes…';
   });
 
   /** Map blox orchestrator CommandType enum names to display labels. */
@@ -208,15 +205,14 @@
 
   /** Detail text for the provisioning row (e.g. git progress percentages or step info). */
   let provisioningDetail = $derived.by(() => {
-    if (isLocal && !branch.worktreePath && !worktreeError) return setupDetail;
-    if (isRemote && remoteWorkspaceStatus === 'starting') {
-      if (setupDetail && setupPhase) {
-        const label = remoteCommandLabels[setupPhase] ?? setupPhase;
-        return `${setupDetail} · ${label}`;
-      }
-      return setupDetail;
+    if (!isProvisioning) return null;
+    if (isLocal) return setupDetail;
+    // Remote workspace starting
+    if (setupDetail && setupPhase) {
+      const label = remoteCommandLabels[setupPhase] ?? setupPhase;
+      return `${setupDetail} · ${label}`;
     }
-    return null;
+    return setupDetail;
   });
 
   /** True when the branch has at least one finalized commit (code changes vs base). */
@@ -958,7 +954,7 @@
           {repoLabel}
           {isLocal}
           {isRemote}
-          isProvisioning={isSettingUp}
+          {isSettingUp}
           {remoteWorkspaceStatus}
           {onDelete}
           {onRename}

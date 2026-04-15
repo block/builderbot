@@ -992,7 +992,6 @@
     display: flex;
     align-items: center;
     gap: 12px;
-    flex: 1;
     min-width: 0;
   }
 
@@ -1027,7 +1026,7 @@
   .badge-error {
     color: var(--danger);
     font-size: var(--size-xs);
-    display: block;
+    flex-basis: 100%;
     margin-top: 2px;
   }
 

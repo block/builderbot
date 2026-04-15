@@ -25,7 +25,6 @@
   import { detectRepoActions, type ActionType } from '../actions/actions';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { matchesRepoSearch } from './repoContextSearch';
-  import { alerts } from '../../shared/alerts.svelte';
 
   type RepoAttachment = {
     projectId: string;
@@ -65,6 +64,7 @@
   });
   let badgeEditName = $state('');
   let badgeEditHue = $state(0);
+  let badgeError = $state('');
 
   let selectedEntry = $derived(mergedEntries.find((e) => e.key === selectedRepoKey) ?? null);
   let selectedContext = $derived(selectedEntry?.context ?? null);
@@ -95,6 +95,7 @@
     // update in the store (which would clobber in-progress edits after save).
     void selectedRepoKey;
     untrack(() => {
+      badgeError = '';
       const badge = selectedBadge;
       if (badge) {
         badgeEditName = badge.shortName;
@@ -105,6 +106,7 @@
 
   async function saveBadge() {
     if (!selectedEntry || !badgeEditName.trim()) return;
+    badgeError = '';
     try {
       await repoBadgeStore.update(
         selectedEntry.githubRepo,
@@ -114,7 +116,7 @@
       );
     } catch (e) {
       const msg = typeof e === 'string' ? e : e instanceof Error ? e.message : String(e);
-      alerts.error(msg, 'Badge update failed');
+      badgeError = msg;
       // Revert edit fields to the last saved values.
       const badge = selectedBadge;
       if (badge) {
@@ -588,16 +590,21 @@
                   <span class="badge-field-label">Short name</span>
                   <input
                     class="badge-input"
+                    class:badge-input-error={badgeError}
                     type="text"
                     maxlength="6"
                     autocapitalize="off"
                     autocorrect="off"
                     bind:value={badgeEditName}
+                    oninput={() => (badgeError = '')}
                     onblur={saveBadge}
                     onkeydown={(e) => {
                       if (e.key === 'Enter') saveBadge();
                     }}
                   />
+                  {#if badgeError}
+                    <span class="badge-error">{badgeError}</span>
+                  {/if}
                 </label>
                 <label class="badge-field">
                   <span class="badge-field-label">Hue</span>
@@ -992,6 +999,7 @@
   .badge-field {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 6px;
     font-size: var(--size-xs);
     color: var(--text-muted);
@@ -1010,6 +1018,17 @@
     color: var(--text-primary);
     font-family: 'SF Mono', Menlo, Consolas, monospace;
     font-size: var(--size-xs);
+  }
+
+  .badge-input-error {
+    border-color: var(--danger);
+  }
+
+  .badge-error {
+    color: var(--danger);
+    font-size: var(--size-xs);
+    display: block;
+    margin-top: 2px;
   }
 
   .badge-hue-slider {

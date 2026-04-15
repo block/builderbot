@@ -590,7 +590,7 @@
                     autocapitalize="off"
                     autocorrect="off"
                     bind:value={badgeEditName}
-                    oninput={() => (badgeError = '')}
+                    oninput={saveBadge}
                     onblur={saveBadge}
                     onkeydown={(e) => {
                       if (e.key === 'Enter') saveBadge();
@@ -1020,11 +1020,11 @@
   }
 
   .badge-input-error {
-    border-color: var(--danger);
+    border-color: var(--ui-danger);
   }
 
   .badge-error {
-    color: var(--danger);
+    color: var(--ui-danger);
     font-size: var(--size-xs);
     flex-basis: 100%;
     margin-top: 2px;

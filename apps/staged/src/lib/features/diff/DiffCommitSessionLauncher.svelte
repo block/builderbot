@@ -99,6 +99,14 @@
     syncTextareaHeight();
   }
 
+  function handleKeydown(e: KeyboardEvent) {
+    // Cmd+Enter to submit
+    if (e.key === 'Enter' && e.metaKey && draftPrompt.trim() && !starting) {
+      e.preventDefault();
+      handleSubmit();
+    }
+  }
+
   function syncTextareaHeight() {
     if (!textareaElement) return;
 
@@ -174,6 +182,7 @@
     rows="3"
     disabled={starting}
     oninput={handleInput}
+    onkeydown={handleKeydown}
     items={hashtagItems}
   />
   <div class="composer-footer">

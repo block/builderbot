@@ -42,6 +42,10 @@ pub fn spawn_regex_matcher(
     has_endpoint_capture: bool,
     mut cancel_rx: watch::Receiver<bool>,
 ) {
+    log::info!(
+        "regex_matcher: started for execution_id={execution_id}, action={action_name}, pattern={pattern:?}"
+    );
+
     tokio::spawn(async move {
         // Compile the regex — if it fails, transition straight to NoDetection.
         let re = match Regex::new(&pattern) {
@@ -190,10 +194,14 @@ pub fn spawn_autodetect_poller(
     working_dir: PathBuf,
     mut cancel_rx: watch::Receiver<bool>,
 ) {
+    log::info!(
+        "autodetect_poller: started for execution_id={execution_id}, action={action_name}, command={command:?}"
+    );
+
     tokio::spawn(async move {
         let schedule = build_poll_schedule();
 
-        for wait_secs in &schedule {
+        for (poll_index, wait_secs) in schedule.iter().enumerate() {
             // ---- Wait the scheduled interval, or bail on cancel ----
             tokio::select! {
                 _ = time::sleep(Duration::from_secs(*wait_secs)) => {}
@@ -222,6 +230,11 @@ pub fn spawn_autodetect_poller(
                 .map(|s| s.as_str())
                 .collect::<Vec<_>>()
                 .join("\n");
+
+            log::info!(
+                "autodetect_poller: poll {poll_index} for {execution_id}, sending {line_count} lines to AI",
+                line_count = tail.len(),
+            );
 
             // ---- Build and send the AI prompt ----
             let prompt = format!(
@@ -293,6 +306,13 @@ If still building, set regex and has_endpoint_capture to null/false."#,
                     continue;
                 }
             };
+
+            log::info!(
+                "autodetect_poller: AI response for {execution_id}: status={status}, regex={regex:?}, has_endpoint_capture={has_endpoint}",
+                status = parsed.status,
+                regex = parsed.regex,
+                has_endpoint = parsed.has_endpoint_capture,
+            );
 
             // ---- Handle "building" status ----
             if parsed.status != "running" {

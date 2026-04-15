@@ -117,12 +117,6 @@
     } catch (e) {
       const msg = typeof e === 'string' ? e : e instanceof Error ? e.message : String(e);
       badgeError = msg;
-      // Revert edit fields to the last saved values.
-      const badge = selectedBadge;
-      if (badge) {
-        badgeEditName = badge.shortName;
-        badgeEditHue = badge.hue;
-      }
     }
   }
 

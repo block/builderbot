@@ -579,12 +579,6 @@
 
           {#if selectedBadge}
             <div class="badge-editor">
-              <div class="badge-editor-preview">
-                <RepoBadge
-                  shortName={badgeEditName || selectedBadge.shortName}
-                  hue={badgeEditHue}
-                />
-              </div>
               <div class="badge-editor-fields">
                 <label class="badge-field">
                   <span class="badge-field-label">Short name</span>
@@ -618,6 +612,12 @@
                     onchange={saveBadge}
                   />
                 </label>
+              </div>
+              <div class="badge-editor-preview">
+                <RepoBadge
+                  shortName={badgeEditName || selectedBadge.shortName}
+                  hue={badgeEditHue}
+                />
               </div>
             </div>
           {/if}

@@ -116,7 +116,7 @@ export function timelineToHashtagItems(
   return items;
 }
 
-function projectNotesToHashtagItems(notes: ProjectNote[]): HashtagItem[] {
+export function projectNotesToHashtagItems(notes: ProjectNote[]): HashtagItem[] {
   return notes
     .filter((n) => n.title.trim())
     .map((n) => ({

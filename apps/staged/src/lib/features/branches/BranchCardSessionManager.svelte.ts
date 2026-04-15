@@ -170,9 +170,6 @@ export default class BranchCardSessionManager {
     if (this.autoReviewSessionId) {
       commands.cancelSession(this.autoReviewSessionId).catch(() => {});
     }
-    if (this.autoReviewId) {
-      commands.deleteReview(this.autoReviewId).catch(() => {});
-    }
     this.autoReviewSessionId = null;
     this.autoReviewId = null;
   }
@@ -191,6 +188,19 @@ export default class BranchCardSessionManager {
       if (this.autoReviewSessionId) {
         sessionRegistry.register(this.autoReviewSessionId, branch.projectId, 'review', branch.id);
         projectStateStore.addRunningSession(branch.projectId, this.autoReviewSessionId);
+      }
+
+      // If the autoreview was interrupted before completing, resume it
+      const needsResume = !review.completedAt && review.sessionId && !this.autoReviewSessionId;
+      if (needsResume) {
+        await commands.resumeSession(
+          review.sessionId!,
+          'Continue reviewing the code changes on this branch.',
+          undefined,
+          branch.id
+        );
+        sessionRegistry.register(review.sessionId!, branch.projectId, 'review', branch.id);
+        projectStateStore.addRunningSession(branch.projectId, review.sessionId!);
       }
 
       this.autoReviewSessionId = null;

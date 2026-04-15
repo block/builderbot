@@ -1466,15 +1466,10 @@ fn cancel_in_flight_auto_review_for_branch(
     if !cancelled {
         let current = store.get_session(session_id).map_err(|e| e.to_string())?;
         return match current.map(|session| session.status) {
-            None => Ok(true),
-            Some(store::SessionStatus::Cancelled) => {
-                store.delete_review(&review.id).map_err(|e| e.to_string())?;
-                Ok(true)
-            }
+            None | Some(store::SessionStatus::Cancelled) => Ok(true),
             _ => Ok(false),
         };
     }
-    store.delete_review(&review.id).map_err(|e| e.to_string())?;
 
     Ok(true)
 }
@@ -2680,8 +2675,10 @@ mod tests {
             cancel_in_flight_auto_review_for_branch(&store, &registry, &branch.id).unwrap();
 
         assert!(cancelled);
-        assert!(store.get_session(&session.id).unwrap().is_none());
-        assert!(store.get_review(&review.id).unwrap().is_none());
+        // Session transitions to Cancelled but both records survive for potential adoption
+        let session = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(session.status, store::SessionStatus::Cancelled);
+        assert!(store.get_review(&review.id).unwrap().is_some());
     }
 
     #[test]
@@ -2695,8 +2692,10 @@ mod tests {
             cancel_in_flight_auto_review_for_branch(&store, &registry, &branch.id).unwrap();
 
         assert!(cancelled);
-        assert!(store.get_session(&session.id).unwrap().is_none());
-        assert!(store.get_review(&review.id).unwrap().is_none());
+        // Session transitions to Cancelled but both records survive for potential adoption
+        let session = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(session.status, store::SessionStatus::Cancelled);
+        assert!(store.get_review(&review.id).unwrap().is_some());
     }
 
     #[test]

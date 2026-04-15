@@ -96,6 +96,8 @@ export interface Review {
   referenceFiles: string[];
   createdAt: number;
   updatedAt: number;
+  /** When the AI session finished producing this review. `null` while running. */
+  completedAt: number | null;
 }
 
 // =============================================================================

@@ -66,17 +66,6 @@
   let badgeEditHue = $state(0);
   let badgeError = $state('');
 
-  let selectedEntry = $derived(mergedEntries.find((e) => e.key === selectedRepoKey) ?? null);
-  let selectedContext = $derived(selectedEntry?.context ?? null);
-  let selectedContextAttachments = $derived(
-    selectedContext ? (repoAttachmentsByContext[selectedContext.id] ?? []) : []
-  );
-  let selectedBadge = $derived(
-    selectedEntry
-      ? repoBadgeStore.lookup(selectedEntry.githubRepo, selectedEntry.subpath)
-      : undefined
-  );
-
   onMount(async () => {
     await repoBadgeStore.loadAll();
     await loadContexts();
@@ -156,6 +145,17 @@
 
     return entries;
   });
+
+  let selectedEntry = $derived(mergedEntries.find((e) => e.key === selectedRepoKey) ?? null);
+  let selectedContext = $derived(selectedEntry?.context ?? null);
+  let selectedContextAttachments = $derived(
+    selectedContext ? (repoAttachmentsByContext[selectedContext.id] ?? []) : []
+  );
+  let selectedBadge = $derived(
+    selectedEntry
+      ? repoBadgeStore.lookup(selectedEntry.githubRepo, selectedEntry.subpath)
+      : undefined
+  );
 
   async function loadRepoAttachments(actionContexts: ActionContext[]) {
     const generation = ++repoAttachmentLoadGeneration;

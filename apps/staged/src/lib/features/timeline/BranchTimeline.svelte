@@ -592,6 +592,9 @@
         <TimelineRow
           type={item.type}
           title={item.title}
+          titleHtml={hashtagItems.length > 0 && hasHashtagTokens(item.title)
+            ? renderHashtagTokens(item.title, hashtagItems)
+            : undefined}
           secondaryMeta={item.sessionId
             ? (liveSessionHints[item.sessionId] ??
               item.secondaryMeta ??

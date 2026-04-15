@@ -20,6 +20,7 @@
     Branch,
     BranchTimeline as BranchTimelineData,
     HashtagItem,
+    ProjectNote,
     ProjectRepo,
     SessionStatusPayload,
   } from '../../types';

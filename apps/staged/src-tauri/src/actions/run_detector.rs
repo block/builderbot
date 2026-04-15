@@ -237,11 +237,22 @@ Recent terminal output (last ~200 lines):
 
 Analyze this output and determine:
 1. Is the application still building/compiling, or has it reached a running/ready state?
-2. If running: identify the specific output that indicates readiness (e.g.,
-   "Listening on http://0.0.0.0:3000", "Server started on port 8080", "ready in 300ms", "Local: http://localhost:1234/").
-3. Provide a regex pattern that would match for this and future runs. Be careful to avoid volatile values like timestamps, PIDs, version numbers or build durations.
-   - If the line contains a URL/endpoint, include a named capture group `(?P<endpoint>...)` for it.
-   - The regex should be general enough to work across restarts
+2. If running: identify the specific output line from the server or build tool that
+   indicates readiness (e.g., "Listening on http://0.0.0.0:3000", "Server started
+   on port 8080", "ready in 300ms", "Local: http://localhost:1234/").
+   - IMPORTANT: Pick the server/framework readiness message, NOT application-level
+     log output. For example, Vite prints "Local: http://localhost:PORT/" when ready —
+     use that, not subsequent browser console logs or webview messages that happen
+     to contain URLs.
+   - Prefer the EARLIEST line that indicates the service is up and accepting
+     connections.
+3. Provide a regex pattern that would match this readiness line in future runs.
+   Be careful to avoid volatile values like timestamps, PIDs, version numbers,
+   or build durations.
+   - If the readiness line contains a URL/endpoint, include a named capture group
+     `(?P<endpoint>...)` for it.
+   - The regex should be general enough to work across restarts but specific enough
+     to avoid matching unrelated log lines that happen to contain URLs.
 
 Respond ONLY with JSON, no other text:
 {{

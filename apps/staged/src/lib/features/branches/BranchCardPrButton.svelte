@@ -253,6 +253,23 @@
         prStatusStale = isStale;
       }
     });
+
+    // PR recovery: if the branch has been pushed but has no PR number,
+    // check GitHub for an existing open PR on this branch name.
+    if (!branch.prNumber && isRemote) {
+      commands
+        .recoverBranchPr(branch.id)
+        .then((prNumber) => {
+          if (prNumber) {
+            console.info(`[PrPolling] recovered PR #${prNumber} for branch=${branch.id}`);
+            branch.prNumber = prNumber;
+            prPollingService.refreshNow(branch.projectId);
+          }
+        })
+        .catch((err) => {
+          console.warn(`[PrPolling] PR recovery failed for branch=${branch.id}:`, err);
+        });
+    }
   });
 
   onDestroy(() => {

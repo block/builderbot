@@ -433,6 +433,73 @@ pub fn clear_branch_pr_status(
     Ok(())
 }
 
+/// Look up an existing open PR for a branch on GitHub and persist it.
+///
+/// Called on component mount when `branch.prNumber` is null but the branch has
+/// been pushed. Runs `gh pr view <branch>` in the background so the frontend
+/// is not blocked. Returns the recovered PR number, or None if no PR exists.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn recover_branch_pr(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<Option<u64>, String> {
+    let store = get_store(&store)?;
+
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    // If the branch already has a PR number, nothing to recover
+    if branch.pr_number.is_some() {
+        return Ok(branch.pr_number);
+    }
+
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
+    let is_remote = branch.branch_type == store::BranchType::Remote;
+    let branch_name = branch.branch_name.clone();
+
+    let (repo_slug, _) = resolve_branch_repo_and_subpath(&store, &project, &branch)?;
+
+    let working_dir = if is_remote {
+        crate::paths::repos_dir()
+            .map(|d| d.join(&repo_slug))
+            .ok_or_else(|| "Cannot determine clone path for remote branch".to_string())?
+    } else {
+        let workdir = store
+            .get_workdir_for_branch(&branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
+        PathBuf::from(&workdir.path)
+    };
+
+    let pr_info = tauri::async_runtime::spawn_blocking(move || {
+        git::get_pr_for_branch(&working_dir, &branch_name)
+    })
+    .await
+    .map_err(|e| format!("recover_branch_pr task failed: {e}"))?
+    .map_err(|e| e.to_string())?;
+
+    if let Some(ref info) = pr_info {
+        let pr_number = info.number;
+        store
+            .update_branch_pr_number(&branch_id, Some(pr_number))
+            .map_err(|e| e.to_string())?;
+        log::info!(
+            "recover_branch_pr: recovered PR #{} for branch_id={}",
+            pr_number,
+            branch_id
+        );
+        Ok(Some(pr_number))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Check if a branch has commits that haven't been pushed to the remote.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn has_unpushed_commits(

@@ -852,6 +852,12 @@ export function updateBranchPr(branchId: string, prNumber: number | null): Promi
   return invoke('update_branch_pr', { branchId, prNumber });
 }
 
+/** Look up an existing open PR for a branch on GitHub and persist it.
+ *  Returns the recovered PR number, or null if no PR exists. */
+export function recoverBranchPr(branchId: string): Promise<number | null> {
+  return invoke('recover_branch_pr', { branchId });
+}
+
 /** Check whether a branch has local commits not yet pushed to the remote. */
 export function hasUnpushedCommits(branchId: string): Promise<boolean> {
   return invoke('has_unpushed_commits', { branchId });

@@ -14,7 +14,6 @@
     Trash2,
     AlertTriangle,
     Clock,
-    Play,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
 
@@ -241,7 +240,6 @@
       {/if}
       {#if onResumeClick}
         <button class="action-btn resume-btn" onclick={handleResumeClick} title="Resume session">
-          <Play size={10} />
           Resume
         </button>
       {/if}
@@ -529,9 +527,17 @@
   }
 
   .resume-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    font-weight: 500;
+    transition:
+      color 0.15s,
+      border-color 0.15s,
+      background-color 0.15s;
+  }
+
+  .resume-btn:hover {
+    border-color: var(--border-muted);
   }
 
   .start-btn {

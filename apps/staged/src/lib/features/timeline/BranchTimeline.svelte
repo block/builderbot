@@ -10,6 +10,7 @@
   import type { Snippet } from 'svelte';
   import { slide } from 'svelte/transition';
   import { FileText, GitCommitVertical, FileSearch } from 'lucide-svelte';
+  import { isResumableReason } from '../../types';
   import type { BranchTimeline as BranchTimelineData, HashtagItem } from '../../types';
   import TimelineRow from './TimelineRow.svelte';
   import type { TimelineItemType, TimelineBadge } from './TimelineRow.svelte';
@@ -494,15 +495,8 @@
     }
   }
 
-  const resumableReasons = new Set(['crashed', 'app_quit', 'interrupted']);
-
   function isResumable(item: DisplayItem): boolean {
-    return (
-      !!item.sessionId &&
-      !!item.completionReason &&
-      resumableReasons.has(item.completionReason) &&
-      !item.deleting
-    );
+    return !!item.sessionId && isResumableReason(item.completionReason) && !item.deleting;
   }
 
   function handleDeleteClick(item: DisplayItem, opts?: { altKey: boolean }) {

@@ -25,6 +25,7 @@
   import { detectRepoActions, type ActionType } from '../actions/actions';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { matchesRepoContextSearch } from './repoContextSearch';
+  import { alerts } from '../../shared/alerts.svelte';
 
   type RepoAttachment = {
     projectId: string;
@@ -103,7 +104,14 @@
         badgeEditHue
       );
     } catch (e) {
-      console.error('Failed to update badge:', e);
+      const msg = typeof e === 'string' ? e : e instanceof Error ? e.message : String(e);
+      alerts.error(msg, 'Badge update failed');
+      // Revert edit fields to the last saved values.
+      const badge = selectedBadge;
+      if (badge) {
+        badgeEditName = badge.shortName;
+        badgeEditHue = badge.hue;
+      }
     }
   }
 

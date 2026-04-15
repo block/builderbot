@@ -127,6 +127,11 @@
       (isRemote && remoteWorkspaceStatus === 'starting')
   );
 
+  /** True during provisioning OR the gap between worktree-ready and timeline-loaded. */
+  let isSettingUp = $derived(
+    isProvisioning || (isLocal && !!branch.worktreePath && !timeline && !error)
+  );
+
   /** Empty timeline used during provisioning so the action buttons render. */
   const emptyTimeline: BranchTimelineData = { commits: [], notes: [], reviews: [], images: [] };
 
@@ -185,6 +190,10 @@
     }
     if (isRemote && remoteWorkspaceStatus === 'starting') {
       return 'Starting workspace…';
+    }
+    // Worktree is ready but timeline hasn't loaded yet
+    if (isLocal && branch.worktreePath && !timeline && !error) {
+      return 'Looking for changes…';
     }
     return undefined;
   });
@@ -446,6 +455,7 @@
           return;
         }
 
+        commands.invalidateBranchTimeline(branch.id);
         loadTimeline();
         // Handle PR session completion
         if (prButton && eventSessionId === prButton.getPrSessionId()) {
@@ -948,7 +958,7 @@
           {repoLabel}
           {isLocal}
           {isRemote}
-          {isProvisioning}
+          isProvisioning={isSettingUp}
           {remoteWorkspaceStatus}
           {onDelete}
           {onRename}
@@ -971,7 +981,7 @@
           {workspaceError}
           fallbackError={error}
         />
-      {:else if loading && !isProvisioning}
+      {:else if loading && !isSettingUp}
         <div class="loading">
           <Spinner size={14} />
           <span>Loading...</span>
@@ -981,7 +991,7 @@
           <span>{error}</span>
           <button class="retry-btn" onclick={() => loadTimeline()}>Retry</button>
         </div>
-      {:else if timeline || isProvisioning}
+      {:else if timeline || isSettingUp}
         <BranchTimeline
           timeline={timeline ?? emptyTimeline}
           repoDir={branch.worktreePath}

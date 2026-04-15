@@ -83,8 +83,14 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         // Local branch: fetch commits from the local worktree
         let worktree_path = Path::new(&wd.path);
         if worktree_path.exists() {
-            let git_commits =
-                git::get_commits_since_base(worktree_path, &branch.base_branch).unwrap_or_default();
+            let git_commits = match git::get_commits_since_base(worktree_path, &branch.base_branch)
+            {
+                Ok(commits) => commits,
+                Err(e) => {
+                    log::warn!("Failed to get commits since base for branch {branch_id}: {e:?}");
+                    vec![]
+                }
+            };
 
             // For each git commit, look up our metadata (session linkage)
             for gc in git_commits {

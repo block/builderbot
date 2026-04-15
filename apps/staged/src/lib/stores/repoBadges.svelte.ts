@@ -15,6 +15,11 @@ function badgeKey(githubRepo: string, subpath: string): string {
 class RepoBadgeStore {
   private badges = $state<Map<string, RepoBadge>>(new Map());
 
+  /** Return all loaded badges. */
+  all(): RepoBadge[] {
+    return Array.from(this.badges.values());
+  }
+
   /** Look up a badge for a repo+subpath. Returns undefined if not yet loaded. */
   lookup(githubRepo: string, subpath: string | null | undefined): RepoBadge | undefined {
     return this.badges.get(badgeKey(githubRepo, subpath ?? ''));

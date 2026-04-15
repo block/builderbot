@@ -24,7 +24,7 @@
   import * as commands from '../../api/commands';
   import { detectRepoActions, type ActionType } from '../actions/actions';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
-  import { matchesRepoContextSearch } from './repoContextSearch';
+  import { matchesRepoSearch } from './repoContextSearch';
   import { alerts } from '../../shared/alerts.svelte';
 
   type RepoAttachment = {
@@ -34,8 +34,16 @@
     branchName: string;
   };
 
+  /** A repo entry from either an action context, a badge, or both. */
+  type RepoEntry = {
+    key: string;
+    githubRepo: string;
+    subpath: string;
+    context: ActionContext | null;
+  };
+
   let contexts = $state<ActionContext[]>([]);
-  let selectedContextId = $state<string | null>(null);
+  let selectedRepoKey = $state<string | null>(null);
   let loadingContexts = $state(false);
   let loadingRepoAttachments = $state(false);
   let repoAttachmentsByContext = $state<Record<string, RepoAttachment[]>>({});
@@ -58,13 +66,14 @@
   let badgeEditName = $state('');
   let badgeEditHue = $state(0);
 
-  let selectedContext = $derived(contexts.find((c) => c.id === selectedContextId) ?? null);
+  let selectedEntry = $derived(mergedEntries.find((e) => e.key === selectedRepoKey) ?? null);
+  let selectedContext = $derived(selectedEntry?.context ?? null);
   let selectedContextAttachments = $derived(
     selectedContext ? (repoAttachmentsByContext[selectedContext.id] ?? []) : []
   );
   let selectedBadge = $derived(
-    selectedContext
-      ? repoBadgeStore.lookup(selectedContext.githubRepo, selectedContext.subpath)
+    selectedEntry
+      ? repoBadgeStore.lookup(selectedEntry.githubRepo, selectedEntry.subpath)
       : undefined
   );
 
@@ -82,9 +91,9 @@
   }
 
   $effect(() => {
-    // Only re-run when the selected context changes, not when badge values
+    // Only re-run when the selected entry changes, not when badge values
     // update in the store (which would clobber in-progress edits after save).
-    void selectedContextId;
+    void selectedRepoKey;
     untrack(() => {
       const badge = selectedBadge;
       if (badge) {
@@ -95,11 +104,11 @@
   });
 
   async function saveBadge() {
-    if (!selectedContext || !badgeEditName.trim()) return;
+    if (!selectedEntry || !badgeEditName.trim()) return;
     try {
       await repoBadgeStore.update(
-        selectedContext.githubRepo,
-        selectedContext.subpath,
+        selectedEntry.githubRepo,
+        selectedEntry.subpath,
         badgeEditName.trim(),
         badgeEditHue
       );
@@ -115,17 +124,42 @@
     }
   }
 
-  function contextKey(githubRepo: string, subpath: string | null | undefined): string {
+  function repoKey(githubRepo: string, subpath: string | null | undefined): string {
     return `${githubRepo}::${subpath ?? ''}`;
   }
 
-  function contextDisplay(context: ActionContext): string {
-    return context.subpath ? `${context.githubRepo}/${context.subpath}` : context.githubRepo;
+  function repoDisplay(githubRepo: string, subpath: string | null | undefined): string {
+    return subpath ? `${githubRepo}/${subpath}` : githubRepo;
   }
 
   function formatProjectCount(count: number): string {
     return `${count} project${count === 1 ? '' : 's'}`;
   }
+
+  /** Merge action contexts and orphan badges into a single list. */
+  let mergedEntries = $derived.by<RepoEntry[]>(() => {
+    const entries: RepoEntry[] = contexts.map((c) => ({
+      key: repoKey(c.githubRepo, c.subpath),
+      githubRepo: c.githubRepo,
+      subpath: c.subpath ?? '',
+      context: c,
+    }));
+
+    const contextKeys = new Set(entries.map((e) => e.key));
+    for (const badge of repoBadgeStore.all()) {
+      const k = repoKey(badge.githubRepo, badge.subpath);
+      if (!contextKeys.has(k)) {
+        entries.push({
+          key: k,
+          githubRepo: badge.githubRepo,
+          subpath: badge.subpath,
+          context: null,
+        });
+      }
+    }
+
+    return entries;
+  });
 
   async function loadRepoAttachments(actionContexts: ActionContext[]) {
     const generation = ++repoAttachmentLoadGeneration;
@@ -142,10 +176,7 @@
       }
 
       const contextIdByRepo = new Map(
-        actionContexts.map((context) => [
-          contextKey(context.githubRepo, context.subpath),
-          context.id,
-        ])
+        actionContexts.map((context) => [repoKey(context.githubRepo, context.subpath), context.id])
       );
       const projects = await commands.listProjects();
       const reposByProject = await Promise.all(
@@ -157,7 +188,7 @@
 
       for (const { project, repos } of reposByProject) {
         for (const repo of repos) {
-          const contextId = contextIdByRepo.get(contextKey(repo.githubRepo, repo.subpath));
+          const contextId = contextIdByRepo.get(repoKey(repo.githubRepo, repo.subpath));
           if (!contextId) continue;
           byContext[contextId] = [
             ...byContext[contextId],
@@ -192,10 +223,10 @@
       const nextContexts = await commands.listActionContexts();
       contexts = nextContexts;
       await loadRepoAttachments(nextContexts);
-      if (!selectedContextId && contexts.length > 0) {
-        selectedContextId = contexts[0].id;
-      } else if (selectedContextId && !contexts.some((c) => c.id === selectedContextId)) {
-        selectedContextId = contexts.length > 0 ? contexts[0].id : null;
+      if (!selectedRepoKey && mergedEntries.length > 0) {
+        selectedRepoKey = mergedEntries[0].key;
+      } else if (selectedRepoKey && !mergedEntries.some((e) => e.key === selectedRepoKey)) {
+        selectedRepoKey = mergedEntries.length > 0 ? mergedEntries[0].key : null;
       }
       await loadActions();
     } catch (e) {
@@ -225,7 +256,7 @@
   }
 
   $effect(() => {
-    selectedContextId;
+    selectedRepoKey;
     loadActions();
   });
 
@@ -235,7 +266,7 @@
     // Capture context before the async gap so that switching repo contexts
     // while detection is in-flight doesn't cause actions to be saved to
     // the wrong context.
-    const contextId = selectedContextId;
+    const entryKey = selectedRepoKey;
     const githubRepo = selectedContext.githubRepo;
     const subpath = selectedContext.subpath ?? undefined;
 
@@ -261,7 +292,7 @@
           nextSortOrder++,
           suggestion.autoCommit
         );
-        if (selectedContextId === contextId) {
+        if (selectedRepoKey === entryKey) {
           actions = [...actions, newAction];
         }
         actionsAdded = true;
@@ -305,7 +336,7 @@
     // if the user switches repo contexts while the save is in-flight.
     const githubRepo = selectedContext.githubRepo;
     const subpath = selectedContext.subpath ?? undefined;
-    const contextId = selectedContextId;
+    const entryKey = selectedRepoKey;
 
     try {
       if (!editingAction?.id) {
@@ -319,7 +350,7 @@
           nextSortOrder,
           editForm.autoCommit
         );
-        if (selectedContextId === contextId) {
+        if (selectedRepoKey === entryKey) {
           actions = [...actions, newAction];
         }
       } else {
@@ -365,14 +396,14 @@
   async function deleteAllActions() {
     if (!selectedContext) return;
 
-    // Capture the context id before the await so a concurrent context
+    // Capture the entry key before the await so a concurrent context
     // switch doesn't clear the wrong context's actions from the UI.
-    const contextId = selectedContextId;
+    const entryKey = selectedRepoKey;
     const repoContextId = selectedContext.id;
 
     try {
       await commands.deleteAllRepoActions(repoContextId);
-      if (selectedContextId === contextId) {
+      if (selectedRepoKey === entryKey) {
         actions = [];
       }
       showDeleteAllConfirm = false;
@@ -383,21 +414,27 @@
   }
 
   async function deleteRepo() {
-    if (!selectedContext) return;
+    if (!selectedEntry) return;
 
-    const contextId = selectedContext.id;
-    const attachments = [...(repoAttachmentsByContext[contextId] ?? [])];
+    const entry = selectedEntry;
+    const entryKey = entry.key;
 
     deletingRepo = true;
     try {
-      for (const attachment of attachments) {
-        await commands.removeProjectRepo(attachment.projectId, attachment.projectRepoId);
+      if (entry.context) {
+        const contextId = entry.context.id;
+        const attachments = [...(repoAttachmentsByContext[contextId] ?? [])];
+
+        for (const attachment of attachments) {
+          await commands.removeProjectRepo(attachment.projectId, attachment.projectRepoId);
+        }
+
+        await commands.deleteActionContext(contextId);
       }
 
-      await commands.deleteActionContext(contextId);
-      await commands.deleteRepoBadge(selectedContext.githubRepo, selectedContext.subpath ?? '');
-      repoBadgeStore.remove(selectedContext.githubRepo, selectedContext.subpath);
-      if (selectedContextId === contextId) {
+      await commands.deleteRepoBadge(entry.githubRepo, entry.subpath);
+      repoBadgeStore.remove(entry.githubRepo, entry.subpath);
+      if (selectedRepoKey === entryKey) {
         actions = [];
       }
       showDeleteRepoConfirm = false;
@@ -431,19 +468,21 @@
     }
   }
 
-  let sortedContexts = $derived.by(() => {
-    return [...contexts].sort((a, b) => {
+  let sortedEntries = $derived.by(() => {
+    return [...mergedEntries].sort((a, b) => {
       const aDisplay = a.subpath ? `${a.githubRepo}/${a.subpath}` : a.githubRepo;
       const bDisplay = b.subpath ? `${b.githubRepo}/${b.subpath}` : b.githubRepo;
       return aDisplay.localeCompare(bDisplay);
     });
   });
 
-  let filteredContexts = $derived.by(() => {
+  let filteredEntries = $derived.by(() => {
     const query = repoSearch.trim();
-    if (!query) return sortedContexts;
+    if (!query) return sortedEntries;
 
-    return sortedContexts.filter((context) => matchesRepoContextSearch(context, query));
+    return sortedEntries.filter((entry) =>
+      matchesRepoSearch(entry.githubRepo, entry.subpath, query)
+    );
   });
 
   let groupedActions = $derived.by(() => {
@@ -482,31 +521,33 @@
       </label>
       {#if loadingContexts}
         <div class="loading-side"><Spinner size={14} /> Loading...</div>
-      {:else if contexts.length === 0}
+      {:else if mergedEntries.length === 0}
         <div class="empty-side">No repo contexts yet</div>
-      {:else if filteredContexts.length === 0}
+      {:else if filteredEntries.length === 0}
         <div class="empty-side">No repos match "{repoSearch.trim()}"</div>
       {:else}
         <div class="context-list">
-          {#each filteredContexts as context (context.id)}
-            {@const badge = repoBadgeStore.lookup(context.githubRepo, context.subpath)}
+          {#each filteredEntries as entry (entry.key)}
+            {@const badge = repoBadgeStore.lookup(entry.githubRepo, entry.subpath)}
             <button
               class="context-item"
-              class:selected={context.id === selectedContextId}
-              onclick={() => (selectedContextId = context.id)}
+              class:selected={entry.key === selectedRepoKey}
+              onclick={() => (selectedRepoKey = entry.key)}
             >
               <div class="context-item-main">
                 <div class="context-item-header">
-                  <RepoLabel githubRepo={context.githubRepo} subpath={context.subpath} />
+                  <RepoLabel githubRepo={entry.githubRepo} subpath={entry.subpath} />
                 </div>
                 <span class="context-meta">
                   {#if loadingRepoAttachments}
                     Loading usage...
-                  {:else if badge}
-                    {@const count = (repoAttachmentsByContext[context.id] ?? []).length}
+                  {:else if badge && entry.context}
+                    {@const count = (repoAttachmentsByContext[entry.context.id] ?? []).length}
                     <RepoBadge shortName={formatProjectCount(count)} hue={badge.hue} small />
-                  {:else}
-                    {formatProjectCount((repoAttachmentsByContext[context.id] ?? []).length)}
+                  {:else if entry.context}
+                    {formatProjectCount((repoAttachmentsByContext[entry.context.id] ?? []).length)}
+                  {:else if badge}
+                    <RepoBadge shortName="orphan" hue={badge.hue} small />
                   {/if}
                 </span>
               </div>
@@ -517,17 +558,19 @@
     </aside>
 
     <section class="main-panel">
-      {#if !selectedContext}
-        <div class="empty-main">Select a repo context to configure actions</div>
+      {#if !selectedEntry}
+        <div class="empty-main">Select a repo to configure actions</div>
       {:else}
         <div class="repo-overview">
           <div class="repo-overview-main">
-            <RepoLabel githubRepo={selectedContext.githubRepo} subpath={selectedContext.subpath} />
+            <RepoLabel githubRepo={selectedEntry.githubRepo} subpath={selectedEntry.subpath} />
             <span class="repo-overview-meta">
               {#if loadingRepoAttachments}
                 Loading usage...
-              {:else}
+              {:else if selectedContext}
                 {formatProjectCount(selectedContextAttachments.length)}
+              {:else}
+                Badge only (no action context)
               {/if}
             </span>
           </div>
@@ -572,16 +615,18 @@
             </div>
           {/if}
 
-          {#if selectedContextAttachments.length > 0}
-            <div class="repo-attachments">
-              {#each selectedContextAttachments as attachment (attachment.projectRepoId)}
-                <span class="attachment-chip"
-                  >{attachment.projectName} ({attachment.branchName})</span
-                >
-              {/each}
-            </div>
-          {:else}
-            <div class="repo-empty-attachments">This repo is not attached to any projects.</div>
+          {#if selectedContext}
+            {#if selectedContextAttachments.length > 0}
+              <div class="repo-attachments">
+                {#each selectedContextAttachments as attachment (attachment.projectRepoId)}
+                  <span class="attachment-chip"
+                    >{attachment.projectName} ({attachment.branchName})</span
+                  >
+                {/each}
+              </div>
+            {:else}
+              <div class="repo-empty-attachments">This repo is not attached to any projects.</div>
+            {/if}
           {/if}
         </div>
 
@@ -598,35 +643,39 @@
             {/if}
             Delete Repo
           </button>
-          {#if actions.length > 0}
+          {#if selectedContext}
+            {#if actions.length > 0}
+              <button
+                class="secondary-btn"
+                onclick={() => (showDeleteAllConfirm = true)}
+                disabled={deletingRepo}
+              >
+                <Trash2 size={14} />
+                Delete All Actions
+              </button>
+            {/if}
             <button
               class="secondary-btn"
-              onclick={() => (showDeleteAllConfirm = true)}
-              disabled={deletingRepo}
+              onclick={detectActions}
+              disabled={detecting || deletingRepo}
             >
-              <Trash2 size={14} />
-              Delete All Actions
+              {#if detecting}
+                <Spinner size={14} />
+              {:else}
+                <Zap size={14} />
+              {/if}
+              Detect Actions
+            </button>
+            <button class="primary-btn" onclick={startAddAction} disabled={deletingRepo}>
+              <Plus size={14} />
+              Add Action
             </button>
           {/if}
-          <button
-            class="secondary-btn"
-            onclick={detectActions}
-            disabled={detecting || deletingRepo}
-          >
-            {#if detecting}
-              <Spinner size={14} />
-            {:else}
-              <Zap size={14} />
-            {/if}
-            Detect Actions
-          </button>
-          <button class="primary-btn" onclick={startAddAction} disabled={deletingRepo}>
-            <Plus size={14} />
-            Add Action
-          </button>
         </div>
 
-        {#if loadingActions}
+        {#if !selectedContext}
+          <!-- Badge-only entry: no actions to show -->
+        {:else if loadingActions}
           <div class="loading-state">
             <Spinner size={24} />
             <span>Loading...</span>
@@ -710,12 +759,12 @@
   {/if}
 </div>
 
-{#if showDeleteRepoConfirm && selectedContext}
+{#if showDeleteRepoConfirm && selectedEntry}
   <ConfirmDialog
     title="Delete Repo"
     message={selectedContextAttachments.length > 0
-      ? `Delete "${contextDisplay(selectedContext)}" from Staged? This removes ${formatProjectCount(selectedContextAttachments.length)} and deletes tracked worktrees/workspaces tied to this repo.`
-      : `Delete "${contextDisplay(selectedContext)}" from Staged? This removes its repo settings and actions.`}
+      ? `Delete "${repoDisplay(selectedEntry.githubRepo, selectedEntry.subpath)}" from Staged? This removes ${formatProjectCount(selectedContextAttachments.length)} and deletes tracked worktrees/workspaces tied to this repo.`
+      : `Delete "${repoDisplay(selectedEntry.githubRepo, selectedEntry.subpath)}" from Staged? This removes its repo settings and actions.`}
     confirmLabel="Delete Repo"
     danger={true}
     onConfirm={deleteRepo}

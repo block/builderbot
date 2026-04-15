@@ -101,7 +101,7 @@ export function timelineToHashtagItems(
   }
 
   for (const review of timeline.reviews) {
-    const title = review.title || `Review of ${review.commitSha.slice(0, 7)}`;
+    const title = review.title || review.commitSha.slice(0, 7);
     items.push({
       type: 'review',
       id: review.id,

@@ -64,12 +64,16 @@ function trackedProjectIds(): Set<string> {
 
 async function poll() {
   if (refreshInFlight || !windowFocused || tracked.size === 0) {
+    console.info(
+      `[PrPolling] poll skipped: refreshInFlight=${refreshInFlight}, windowFocused=${windowFocused}, tracked=${tracked.size}`
+    );
     scheduleNext();
     return;
   }
 
   refreshInFlight = true;
   const projectIds = trackedProjectIds();
+  console.info(`[PrPolling] poll start: projectIds=[${[...projectIds]}], tracked=${tracked.size}`);
 
   for (const projectId of projectIds) {
     try {
@@ -94,13 +98,21 @@ async function poll() {
   }
 
   refreshInFlight = false;
+  console.info(`[PrPolling] poll end`);
   scheduleNext();
 }
 
 function scheduleNext() {
   stopTimer();
-  if (tracked.size === 0 || !windowFocused) return;
-  timerId = setTimeout(poll, getInterval());
+  if (tracked.size === 0 || !windowFocused) {
+    console.info(
+      `[PrPolling] scheduleNext: not scheduling (tracked=${tracked.size}, windowFocused=${windowFocused})`
+    );
+    return;
+  }
+  const interval = getInterval();
+  console.info(`[PrPolling] scheduleNext: interval=${interval}ms, tracked=${tracked.size}`);
+  timerId = setTimeout(poll, interval);
 }
 
 function stopTimer() {
@@ -129,12 +141,14 @@ function notifyStale(projectId: string, isStale: boolean) {
 // ---------------------------------------------------------------------------
 
 function handleFocus() {
+  console.info(`[PrPolling] window focus`);
   windowFocused = true;
   // Immediate refresh on focus, then resume schedule
   poll();
 }
 
 function handleBlur() {
+  console.info(`[PrPolling] window blur`);
   windowFocused = false;
   stopTimer();
 }
@@ -163,6 +177,9 @@ function removeWindowListeners() {
 export function track(branchId: string, projectId: string, hasPendingChecks = false): void {
   const isFirst = tracked.size === 0;
   tracked.set(branchId, { projectId, hasPendingChecks });
+  console.info(
+    `[PrPolling] track: branch=${branchId}, project=${projectId}, pendingChecks=${hasPendingChecks}, isFirst=${isFirst}, totalTracked=${tracked.size}`
+  );
 
   if (isFirst) {
     ensureWindowListeners();
@@ -176,7 +193,11 @@ export function track(branchId: string, projectId: string, hasPendingChecks = fa
 
 /** Stop tracking a branch. */
 export function untrack(branchId: string): void {
+  const existed = tracked.has(branchId);
   tracked.delete(branchId);
+  console.info(
+    `[PrPolling] untrack: branch=${branchId}, existed=${existed}, remaining=${tracked.size}`
+  );
   if (tracked.size === 0) {
     stopTimer();
     removeWindowListeners();
@@ -202,7 +223,11 @@ export function onStale(callback: StaleCallback): () => void {
 
 /** Trigger an immediate refresh for a specific project (e.g. after PR creation or push). */
 export function refreshNow(projectId: string): void {
-  if (refreshInFlight) return;
+  if (refreshInFlight) {
+    console.info(`[PrPolling] refreshNow: DROPPED for project=${projectId} (refreshInFlight=true)`);
+    return;
+  }
+  console.info(`[PrPolling] refreshNow: accepted for project=${projectId}`);
   refreshInFlight = true;
   refreshAllPrStatuses(projectId)
     .catch((e) =>

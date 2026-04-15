@@ -140,6 +140,9 @@
     }>('pr-status-changed', (event) => {
       const payload = event.payload;
       if (payload.branchId === branchId) {
+        console.info(
+          `[PrPolling] pr-status-changed: branch=${branchId}, state=${payload.prState}, checks=${payload.prChecksStatus}, review=${payload.prReviewDecision}`
+        );
         prStatusState = payload.prState;
         prStatusChecks = payload.prChecksStatus;
         prStatusReviewDecision = payload.prReviewDecision;
@@ -224,11 +227,18 @@
     const projectId = branch.projectId;
 
     if (prNumber && prStatusState !== 'MERGED' && prStatusState !== 'CLOSED') {
+      console.info(
+        `[PrPolling] $effect track: branch=${branchId}, prNumber=${prNumber}, prStatusState=${prStatusState}, checks=${prStatusChecks}`
+      );
       prPollingService.track(branchId, projectId, prStatusChecks === 'PENDING');
       return () => {
+        console.info(`[PrPolling] $effect cleanup untrack: branch=${branchId}`);
         prPollingService.untrack(branchId);
       };
     } else {
+      console.info(
+        `[PrPolling] $effect untrack (terminal/no PR): branch=${branchId}, prNumber=${prNumber}, prStatusState=${prStatusState}`
+      );
       prPollingService.untrack(branchId);
     }
   });
@@ -348,6 +358,9 @@
           if (prNumber) {
             await commands.updateBranchPr(branch.id, prNumber);
             branch.prNumber = prNumber;
+            console.info(
+              `[PrPolling] refreshNow after PR creation: branch=${branch.id}, prNumber=${prNumber}`
+            );
             prPollingService.refreshNow(branch.projectId);
           }
           prStateStore.setPrCreated(branch.id, foundUrl);
@@ -424,6 +437,7 @@
             prHeadSha = latestCommit.sha;
           }
           // Immediately refresh PR status so checks update right away
+          console.info(`[PrPolling] refreshNow after push: branch=${branch.id}`);
           prPollingService.refreshNow(branch.projectId);
           setTimeout(() => {
             pushStateStore.clearPushState(branch.id);

@@ -54,6 +54,7 @@ acp-client = { path = "../../../crates/acp-client" }
 blox-cli = { path = "../../../crates/blox-cli" }
 
 regex = "1"
+strip-ansi-escapes = "0.2"
 async-trait = "0.1"
 tokio-util = { version = "0.7", features = ["compat"] }
 tauri-plugin-store = "2.4.2"

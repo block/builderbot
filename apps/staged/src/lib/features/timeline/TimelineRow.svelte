@@ -58,6 +58,7 @@
     deleteDisabledReason?: string;
     onRetryClick?: () => void;
     onStartClick?: () => void;
+    onResumeClick?: () => void;
   }
 
   let {
@@ -76,6 +77,7 @@
     deleteDisabledReason,
     onRetryClick,
     onStartClick,
+    onResumeClick,
   }: Props = $props();
 
   let isNote = $derived(
@@ -139,6 +141,11 @@
   function handleStartClick(e: MouseEvent) {
     e.stopPropagation();
     onStartClick?.();
+  }
+
+  function handleResumeClick(e: MouseEvent) {
+    e.stopPropagation();
+    onResumeClick?.();
   }
 </script>
 
@@ -217,7 +224,10 @@
         </div>
       {/if}
     </div>
-    <div class="timeline-actions" class:always-visible={!!onRetryClick || !!onStartClick}>
+    <div
+      class="timeline-actions"
+      class:always-visible={!!onRetryClick || !!onStartClick || !!onResumeClick}
+    >
       {#if onStartClick}
         <button class="action-btn start-btn" onclick={handleStartClick} title="Start">
           Start
@@ -226,6 +236,11 @@
       {#if onRetryClick}
         <button class="action-btn retry-btn" onclick={handleRetryClick} title="Retry">
           Retry
+        </button>
+      {/if}
+      {#if onResumeClick}
+        <button class="action-btn resume-btn" onclick={handleResumeClick} title="Resume session">
+          Resume
         </button>
       {/if}
       {#if hasSession && !onStartClick && !isQueued}
@@ -503,11 +518,28 @@
   }
 
   .retry-btn,
-  .start-btn {
+  .start-btn,
+  .resume-btn {
     width: auto;
     padding: 0 8px;
     font-size: var(--size-xs);
     color: var(--text-muted);
+  }
+
+  .resume-btn {
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    font-weight: 500;
+    transition:
+      color 0.15s,
+      border-color 0.15s,
+      background-color 0.15s;
+  }
+
+  .resume-btn:hover {
+    border-color: var(--border-muted);
+    color: var(--text-primary);
+    background: var(--bg-hover);
   }
 
   .start-btn {

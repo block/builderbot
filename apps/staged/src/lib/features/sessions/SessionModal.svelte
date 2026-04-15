@@ -45,6 +45,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import { marked } from 'marked';
   import { sanitize } from '../../shared/sanitize';
+  import { isResumableReason } from '../../types';
   import type { Session, SessionMessage, HashtagItem } from '../../types';
   import {
     cancelSession,
@@ -1215,7 +1216,7 @@
           <span>{session.errorMessage}</span>
         </div>
       {:else if session && session.status !== 'running' && session.status !== 'queued'}
-        {#if session.completionReason === 'crashed' || session.completionReason === 'app_quit' || session.completionReason === 'interrupted'}
+        {#if isResumableReason(session.completionReason)}
           <div
             class="session-end-banner"
             class:warning={session.completionReason === 'crashed' ||

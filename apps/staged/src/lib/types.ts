@@ -235,6 +235,17 @@ export type SessionStatus = 'queued' | 'running' | 'completed' | 'error' | 'canc
 
 export type CompletionReason = 'turn_complete' | 'interrupted' | 'crashed' | 'app_quit' | 'unknown';
 
+/** Completion reasons that indicate a session can be resumed. */
+export const RESUMABLE_REASONS: ReadonlySet<CompletionReason> = new Set<CompletionReason>([
+  'crashed',
+  'app_quit',
+  'interrupted',
+]);
+
+export function isResumableReason(reason: string | null | undefined): boolean {
+  return !!reason && RESUMABLE_REASONS.has(reason as CompletionReason);
+}
+
 export interface Session {
   id: string;
   prompt: string;

@@ -599,6 +599,7 @@
     flex-direction: column;
     gap: 14px;
     min-height: 0;
+    overflow: hidden;
   }
 
   .repo-info {
@@ -615,6 +616,17 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+    min-height: 0;
+    flex: 1 1 0;
+    overflow: hidden;
+  }
+
+  .form-group :global(.hashtag-input-wrapper),
+  .form-group :global(.hashtag-input-container) {
+    min-height: 0;
+    flex: 1 1 0;
+    display: flex;
+    flex-direction: column;
   }
 
   .form-group :global(.hashtag-editor) {
@@ -627,8 +639,8 @@
     font-family: inherit;
     line-height: 1.5;
     resize: vertical;
-    min-height: 240px;
-    max-height: calc(100vh - 12vh - 4vh - 200px);
+    min-height: 0;
+    flex: 1 1 0;
     transition: border-color 0.15s;
   }
 

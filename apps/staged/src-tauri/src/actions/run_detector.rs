@@ -347,8 +347,17 @@ If still building, set regex and has_endpoint_capture to null/false."#,
             // Validate that the regex matches at least one line in the current output.
             let matched_line = lines.iter().find(|line| re.is_match(line));
             if matched_line.is_none() {
+                // Log sample lines (escaped) so we can see ANSI codes or other
+                // hidden characters that prevent the regex from matching.
+                let sample: Vec<_> = lines
+                    .iter()
+                    .filter(|l| l.to_lowercase().contains("local"))
+                    .take(5)
+                    .map(|l| format!("{:?}", l))
+                    .collect();
                 log::warn!(
-                    "autodetect_poller: AI regex does not match any output line for {execution_id}"
+                    "autodetect_poller: AI regex does not match any output line for {execution_id}, \
+                     pattern={pattern:?}, sample lines containing 'local': {sample:?}"
                 );
                 continue;
             }

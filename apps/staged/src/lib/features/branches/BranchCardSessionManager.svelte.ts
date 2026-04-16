@@ -186,25 +186,34 @@ export default class BranchCardSessionManager {
       const review = await commands.findFreshAutoReview(branch.id);
       if (!review) return false;
 
-      await commands.setReviewAuto(review.id, false);
-
       if (this.autoReviewSessionId) {
+        // We're tracking the session locally — register it before revealing
         sessionRegistry.register(this.autoReviewSessionId, branch.projectId, 'review', branch.id);
         projectStateStore.addRunningSession(branch.projectId, this.autoReviewSessionId);
+      } else if (!review.completedAt && review.sessionId) {
+        // The autoreview has a session we're not tracking. Check its status
+        // to decide whether to resume or just register it.
+        const session = await commands.getSession(review.sessionId);
+        if (session && session.status === 'running') {
+          // Session is already running (e.g. agent connected but frontend
+          // lost track) — just register it, no resume needed.
+          sessionRegistry.register(review.sessionId, branch.projectId, 'review', branch.id);
+          projectStateStore.addRunningSession(branch.projectId, review.sessionId);
+        } else {
+          // Session exists but isn't running — resume it
+          await commands.resumeSession(
+            review.sessionId,
+            'Continue reviewing the code changes on this branch.',
+            undefined,
+            branch.id
+          );
+          sessionRegistry.register(review.sessionId, branch.projectId, 'review', branch.id);
+          projectStateStore.addRunningSession(branch.projectId, review.sessionId);
+        }
       }
 
-      // If the autoreview was interrupted before completing, resume it
-      const needsResume = !review.completedAt && review.sessionId && !this.autoReviewSessionId;
-      if (needsResume) {
-        await commands.resumeSession(
-          review.sessionId!,
-          'Continue reviewing the code changes on this branch.',
-          undefined,
-          branch.id
-        );
-        sessionRegistry.register(review.sessionId!, branch.projectId, 'review', branch.id);
-        projectStateStore.addRunningSession(branch.projectId, review.sessionId!);
-      }
+      // Only reveal the review after all fallible operations succeed
+      await commands.setReviewAuto(review.id, false);
 
       this.autoReviewSessionId = null;
       this.autoReviewId = null;

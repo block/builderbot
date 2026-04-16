@@ -166,6 +166,17 @@ export default class BranchCardSessionManager {
     }
   }
 
+  /** Register a session on the frontend and mark it as running. */
+  private registerRunningSession(
+    sessionId: string,
+    projectId: string,
+    mode: BranchSessionType,
+    branchId: string
+  ) {
+    sessionRegistry.register(sessionId, projectId, mode, branchId);
+    projectStateStore.addRunningSession(projectId, sessionId);
+  }
+
   cancelAutoReview() {
     if (this.autoReviewSessionId) {
       commands.cancelSession(this.autoReviewSessionId).catch(() => {});
@@ -188,8 +199,12 @@ export default class BranchCardSessionManager {
 
       if (this.autoReviewSessionId) {
         // We're tracking the session locally — register it before revealing
-        sessionRegistry.register(this.autoReviewSessionId, branch.projectId, 'review', branch.id);
-        projectStateStore.addRunningSession(branch.projectId, this.autoReviewSessionId);
+        this.registerRunningSession(
+          this.autoReviewSessionId,
+          branch.projectId,
+          'review',
+          branch.id
+        );
       } else if (!review.completedAt && review.sessionId) {
         // The autoreview has a session we're not tracking. Check its status
         // to decide whether to resume or just register it.
@@ -197,8 +212,7 @@ export default class BranchCardSessionManager {
         if (session && session.status === 'running') {
           // Session is already running (e.g. agent connected but frontend
           // lost track) — just register it, no resume needed.
-          sessionRegistry.register(review.sessionId, branch.projectId, 'review', branch.id);
-          projectStateStore.addRunningSession(branch.projectId, review.sessionId);
+          this.registerRunningSession(review.sessionId, branch.projectId, 'review', branch.id);
         } else {
           // Session exists but isn't running — resume it
           await commands.resumeSession(
@@ -207,8 +221,7 @@ export default class BranchCardSessionManager {
             undefined,
             branch.id
           );
-          sessionRegistry.register(review.sessionId, branch.projectId, 'review', branch.id);
-          projectStateStore.addRunningSession(branch.projectId, review.sessionId);
+          this.registerRunningSession(review.sessionId, branch.projectId, 'review', branch.id);
         }
       }
 
@@ -263,8 +276,7 @@ export default class BranchCardSessionManager {
         throw new Error('Failed to start session: no session ID returned');
       }
 
-      sessionRegistry.register(result.sessionId, branch.projectId, mode, branch.id);
-      projectStateStore.addRunningSession(branch.projectId, result.sessionId);
+      this.registerRunningSession(result.sessionId, branch.projectId, mode, branch.id);
 
       this.pendingSessionItems = this.pendingSessionItems.map((item) =>
         item.key === pendingKey

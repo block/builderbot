@@ -40,7 +40,7 @@
   import RemoteWorkspaceStatusBadge from './RemoteWorkspaceStatusBadge.svelte';
   import RemoteWorkspaceStatusView from './RemoteWorkspaceStatusView.svelte';
   import { alerts } from '../../shared/alerts.svelte';
-  import { timelineToHashtagItems } from '../sessions/hashtagItems';
+  import { timelineToHashtagItems, projectNotesToHashtagItems } from '../sessions/hashtagItems';
 
   interface Props {
     branch: Branch;
@@ -115,15 +115,7 @@
     let stale = false;
     commands.listProjectNotes(projectId).then((notes) => {
       if (stale) return;
-      projectNoteHashtagItems = notes
-        .filter((n) => n.title.trim())
-        .map((n) => ({
-          type: 'project-note' as const,
-          id: n.id,
-          title: n.title,
-          color: '--note-color',
-          bgColor: '--note-bg',
-        }));
+      projectNoteHashtagItems = projectNotesToHashtagItems(notes);
     });
     return () => {
       stale = true;

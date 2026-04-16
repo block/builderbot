@@ -101,7 +101,7 @@ export function timelineToHashtagItems(
   }
 
   for (const review of timeline.reviews) {
-    const title = review.title || `Review of ${review.commitSha.slice(0, 7)}`;
+    const title = review.title || review.commitSha.slice(0, 7);
     items.push({
       type: 'review',
       id: review.id,
@@ -116,7 +116,7 @@ export function timelineToHashtagItems(
   return items;
 }
 
-function projectNotesToHashtagItems(notes: ProjectNote[]): HashtagItem[] {
+export function projectNotesToHashtagItems(notes: ProjectNote[]): HashtagItem[] {
   return notes
     .filter((n) => n.title.trim())
     .map((n) => ({

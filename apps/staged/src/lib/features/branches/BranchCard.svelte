@@ -505,6 +505,18 @@
     void loadTimeline();
   });
 
+  // Re-fetch timeline when the cache is invalidated (e.g. after project-setup-progress)
+  $effect(() => {
+    const handler = (e: Event) => {
+      const { branchIds } = (e as CustomEvent<{ branchIds: string[] }>).detail;
+      if (branchIds.includes(branch.id) && (branch.worktreePath || isRemote)) {
+        void loadTimeline();
+      }
+    };
+    window.addEventListener('timeline-invalidated', handler);
+    return () => window.removeEventListener('timeline-invalidated', handler);
+  });
+
   let revalidationVersion = 0;
 
   async function loadTimeline() {

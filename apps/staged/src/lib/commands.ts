@@ -320,6 +320,9 @@ const inFlightTimelines = new Map<string, Promise<BranchTimeline>>();
 
 export function invalidateBranchTimeline(branchId: string): void {
   timelineCache.delete(branchId);
+  window.dispatchEvent(
+    new CustomEvent('timeline-invalidated', { detail: { branchIds: [branchId] } })
+  );
 }
 
 interface GetBranchTimelineOptions {
@@ -373,6 +376,7 @@ export function invalidateProjectBranchTimelines(branchIds: string[]): void {
   for (const id of branchIds) {
     timelineCache.delete(id);
   }
+  window.dispatchEvent(new CustomEvent('timeline-invalidated', { detail: { branchIds } }));
 }
 
 // =============================================================================

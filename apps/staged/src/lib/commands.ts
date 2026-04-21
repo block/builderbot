@@ -805,6 +805,11 @@ export function checkExistingLocalBranch(projectId: string, branchName: string):
   return invoke('check_existing_local_branch', { projectId, branchName });
 }
 
+/** Fetch a single PR by number. Throws if not found. */
+export function getPrForRepo(githubRepo: string, prNumber: number): Promise<PullRequest> {
+  return invoke('get_pr_for_repo', { githubRepo, prNumber });
+}
+
 export function listPullRequests(githubRepo: string): Promise<PullRequest[]> {
   return invoke('list_pull_requests', { githubRepo });
 }

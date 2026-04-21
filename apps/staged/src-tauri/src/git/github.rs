@@ -565,6 +565,23 @@ pub fn search_github_repos(query: &str, owner: Option<&str>) -> Result<Vec<GitHu
         .collect())
 }
 
+/// Fetch a single pull request by number using `-R owner/repo` (no local dir needed).
+pub fn get_pr_for_repo(github_repo: &str, pr_number: u64) -> Result<PullRequest, GitError> {
+    let output = run_gh_global(&[
+        "pr",
+        "view",
+        &pr_number.to_string(),
+        "-R",
+        github_repo,
+        "--json=number,title,author,baseRefName,headRefName,headRepository,isDraft,updatedAt",
+    ])?;
+
+    let item: GhPrListItem =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    Ok(item.into())
+}
+
 /// List open pull requests for a repo using `-R owner/repo` (no local dir needed).
 pub fn list_pull_requests_for_repo(github_repo: &str) -> Result<Vec<PullRequest>, GitError> {
     let output = run_gh_global(&[

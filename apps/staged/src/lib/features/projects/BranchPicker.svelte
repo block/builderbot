@@ -88,112 +88,125 @@
     loading = true;
 
     try {
-      // When we have an initialPrNumber, speculatively check if the repo is
-      // a fork in parallel with fetching PRs — saves a round-trip if the PR
-      // isn't found on this repo (common for pasted fork URLs).
-      const parentRepoPromise =
-        prNum != null ? commands.getParentRepo(ghRepo).catch(() => null) : null;
-
-      const [prs, refs] = await Promise.all([
-        commands.listPullRequests(ghRepo).catch(() => [] as PullRequest[]),
-        commands.listGitBranches(ghRepo).catch(() => [] as BranchRef[]),
-      ]);
-
-      // Discard results if a newer fetch was started while we were waiting
-      if (gen !== fetchGeneration) return;
-      pullRequests = prs;
-      branches = refs;
-      loadedRepo = ghRepo;
-
-      // Auto-select a PR if initialPrNumber was provided (e.g. from a pasted PR URL).
+      // When we have an initialPrNumber, fetch the specific PR directly
+      // instead of searching a potentially incomplete list. This works
+      // regardless of how many open PRs the repo has and also works for
+      // closed/merged PRs.
       if (prNum != null && initialPrNumber === prNum) {
-        const pr = prs.find((p) => p.number === prNum);
-        if (pr) {
+        // Fetch the PR directly and check parent repo in parallel with list data.
+        const [directPr, parentRepo, prs, refs] = await Promise.all([
+          commands.getPrForRepo(ghRepo, prNum).catch(() => null),
+          commands.getParentRepo(ghRepo).catch(() => null),
+          commands.listPullRequests(ghRepo).catch(() => [] as PullRequest[]),
+          commands.listGitBranches(ghRepo).catch(() => [] as BranchRef[]),
+        ]);
+
+        if (gen !== fetchGeneration) return;
+        pullRequests = prs;
+        branches = refs;
+        loadedRepo = ghRepo;
+
+        if (directPr && initialPrNumber === prNum) {
           selectItem(
             {
               kind: 'pr',
-              label: `#${pr.number} ${pr.title}`,
-              branchName: pr.headRef,
-              detail: pr.headRef,
+              label: `#${directPr.number} ${directPr.title}`,
+              branchName: directPr.headRef,
+              detail: directPr.headRef,
             },
             { focus: false }
           );
-          initialPrNumber = null;
-        } else {
-          // PR not found — check the speculative parent repo result and
-          // pre-fetch PRs for the parent repo inline to avoid a second
-          // round-trip through the effect cycle.
-          const parentRepo = await parentRepoPromise;
-          if (gen !== fetchGeneration) return;
-          if (parentRepo && initialPrNumber === prNum) {
-            const [parentPrs, parentRefs] = await Promise.all([
-              commands.listPullRequests(parentRepo).catch(() => [] as PullRequest[]),
-              commands.listGitBranches(parentRepo).catch(() => [] as BranchRef[]),
-            ]);
-            if (gen !== fetchGeneration) return;
-
-            // Pre-populate data so the effect-triggered fetchData is skipped.
-            pullRequests = parentPrs;
-            branches = parentRefs;
-            loadedRepo = parentRepo;
-
-            // Signal the repo switch (triggers monorepo check, default branch, etc.)
-            onBaseRepoSwitch?.(parentRepo, ghRepo);
-
-            // Auto-select the PR from the parent repo's data.
-            const parentPr = parentPrs.find((p) => p.number === prNum);
-            if (parentPr) {
-              selectItem(
-                {
-                  kind: 'pr',
-                  label: `#${parentPr.number} ${parentPr.title}`,
-                  branchName: parentPr.headRef,
-                  detail: parentPr.headRef,
-                },
-                { focus: false }
-              );
-            }
-            initialPrNumber = null;
-          } else {
-            initialPrNumber = null;
+          // Add to pullRequests if not already present so the PR card shows.
+          if (!prs.some((p) => p.number === directPr.number)) {
+            pullRequests = [directPr, ...prs];
           }
-        }
-      }
-      // Auto-fill a branch name if initialBranchName was provided (e.g. from a pasted branch URL).
-      // Skip focusing the input — the user didn't interact with the picker directly.
-      else if (initialBranchName) {
-        const branchNameToFind = initialBranchName;
-        // Check PRs first — a branch might back a PR
-        const prForBranch = prs.find((p) => p.headRef === branchNameToFind);
-        if (prForBranch) {
-          selectItem(
-            {
-              kind: 'pr',
-              label: `#${prForBranch.number} ${prForBranch.title}`,
-              branchName: prForBranch.headRef,
-              detail: prForBranch.headRef,
-            },
-            { focus: false }
-          );
-        } else {
-          // Check remote branches
-          const refName = refs.find((r) => r.name.replace(/^origin\//, '') === branchNameToFind);
-          if (refName) {
+          initialPrNumber = null;
+        } else if (parentRepo && initialPrNumber === prNum) {
+          // PR not on this repo — try the parent (upstream) repo.
+          const [parentPr, parentPrs, parentRefs] = await Promise.all([
+            commands.getPrForRepo(parentRepo, prNum).catch(() => null),
+            commands.listPullRequests(parentRepo).catch(() => [] as PullRequest[]),
+            commands.listGitBranches(parentRepo).catch(() => [] as BranchRef[]),
+          ]);
+          if (gen !== fetchGeneration) return;
+
+          pullRequests = parentPrs;
+          branches = parentRefs;
+          loadedRepo = parentRepo;
+
+          onBaseRepoSwitch?.(parentRepo, ghRepo);
+
+          if (parentPr) {
             selectItem(
               {
-                kind: 'branch',
-                label: branchNameToFind,
-                branchName: branchNameToFind,
+                kind: 'pr',
+                label: `#${parentPr.number} ${parentPr.title}`,
+                branchName: parentPr.headRef,
+                detail: parentPr.headRef,
+              },
+              { focus: false }
+            );
+            if (!parentPrs.some((p) => p.number === parentPr.number)) {
+              pullRequests = [parentPr, ...parentPrs];
+            }
+          }
+          initialPrNumber = null;
+        } else {
+          initialPrNumber = null;
+        }
+      }
+      // No initialPrNumber — normal fetch for branches / initialBranchName.
+      else {
+        const [prs, refs] = await Promise.all([
+          commands.listPullRequests(ghRepo).catch(() => [] as PullRequest[]),
+          commands.listGitBranches(ghRepo).catch(() => [] as BranchRef[]),
+        ]);
+
+        if (gen !== fetchGeneration) return;
+        pullRequests = prs;
+        branches = refs;
+        loadedRepo = ghRepo;
+
+        // Auto-fill a branch name if initialBranchName was provided (e.g. from a pasted branch URL).
+        // Skip focusing the input — the user didn't interact with the picker directly.
+        if (initialBranchName) {
+          const branchNameToFind = initialBranchName;
+          // Check PRs first — a branch might back a PR
+          const prForBranch = prs.find((p) => p.headRef === branchNameToFind);
+          if (prForBranch) {
+            selectItem(
+              {
+                kind: 'pr',
+                label: `#${prForBranch.number} ${prForBranch.title}`,
+                branchName: prForBranch.headRef,
+                detail: prForBranch.headRef,
               },
               { focus: false }
             );
           } else {
-            // Branch not in the list — just set the value (will show as "New branch")
-            value = branchNameToFind;
-            onSelect?.({ kind: 'branch', branchName: branchNameToFind, label: branchNameToFind });
+            // Check remote branches
+            const refName = refs.find((r) => r.name.replace(/^origin\//, '') === branchNameToFind);
+            if (refName) {
+              selectItem(
+                {
+                  kind: 'branch',
+                  label: branchNameToFind,
+                  branchName: branchNameToFind,
+                },
+                { focus: false }
+              );
+            } else {
+              // Branch not in the list — just set the value (will show as "New branch")
+              value = branchNameToFind;
+              onSelect?.({
+                kind: 'branch',
+                branchName: branchNameToFind,
+                label: branchNameToFind,
+              });
+            }
           }
+          initialBranchName = null;
         }
-        initialBranchName = null;
       }
     } finally {
       loading = false;

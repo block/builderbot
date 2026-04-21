@@ -1810,6 +1810,7 @@ pub fn run() {
             github_commands::detect_default_branch_cmd,
             github_commands::prune_remote_refs,
             github_commands::check_existing_local_branch,
+            github_commands::get_pr_for_repo,
             github_commands::list_pull_requests,
             github_commands::get_parent_repo,
             github_commands::list_issues,

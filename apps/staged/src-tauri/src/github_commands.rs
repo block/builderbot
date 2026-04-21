@@ -126,6 +126,19 @@ pub async fn check_existing_local_branch(
     }
 }
 
+/// Fetch a single pull request by number (via `-R owner/repo`).
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_pr_for_repo(
+    github_repo: String,
+    pr_number: u64,
+) -> Result<git::github::PullRequest, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git::github::get_pr_for_repo(&github_repo, pr_number).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// List open pull requests for a repository (via `-R owner/repo`).
 #[tauri::command(rename_all = "camelCase")]
 pub async fn list_pull_requests(

@@ -572,18 +572,51 @@ impl ProjectToolsHandler {
             }
         }
 
-        let github_repo = p.github_repo.clone();
+        // Detect fork repos: if the provided github_repo is a fork, use the
+        // parent (upstream) repo for cloning/API calls and record the fork as
+        // head_repo so the UI displays the correct source.
+        let (effective_repo, head_repo) = {
+            let slug = p.github_repo.clone();
+            match tauri::async_runtime::spawn_blocking(move || {
+                crate::git::github::get_parent_repo(&slug)
+            })
+            .await
+            {
+                Ok(Ok(Some(parent))) => {
+                    log::info!(
+                        "[project_mcp] detected fork: {} -> parent {}",
+                        p.github_repo,
+                        parent
+                    );
+                    (parent, Some(p.github_repo.clone()))
+                }
+                Ok(Ok(None)) => (p.github_repo.clone(), None),
+                Ok(Err(e)) => {
+                    log::warn!(
+                        "[project_mcp] failed to check if {} is a fork: {e}",
+                        p.github_repo
+                    );
+                    (p.github_repo.clone(), None)
+                }
+                Err(e) => {
+                    log::warn!("[project_mcp] fork check task panicked: {e}");
+                    (p.github_repo.clone(), None)
+                }
+            }
+        };
+
+        let github_repo = effective_repo.clone();
         let repo = match crate::project_commands::add_project_repo_impl(
             Arc::clone(&self.store),
             self.project_id.clone(),
-            p.github_repo,
+            effective_repo,
             p.branch_name,
             p.subpath,
             None,
             p.reason,
             None,
             p.base_branch,
-            None, // MCP has no head_repo for fork PRs
+            head_repo,
         )
         .await
         {

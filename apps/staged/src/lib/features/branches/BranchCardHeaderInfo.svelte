@@ -15,7 +15,10 @@
 <div class="header-left">
   {#if repoLabel}
     <span class="repo-name"
-      ><RepoLabel githubRepo={repoLabel.githubRepo} subpath={repoLabel.subpath} /></span
+      ><RepoLabel
+        githubRepo={repoLabel.headRepo ?? repoLabel.githubRepo}
+        subpath={repoLabel.subpath}
+      /></span
     >
     <div class="header-meta">
       <span class="branch-name">{branchName}</span>

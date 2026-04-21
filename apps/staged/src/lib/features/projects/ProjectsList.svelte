@@ -66,12 +66,13 @@
       const repos = reposByProject.get(project.id) ?? [];
       if (repos.length > 0) {
         for (const r of repos) {
-          const key = `${r.githubRepo}:${r.subpath ?? ''}`;
+          const displayRepo = r.headRepo ?? r.githubRepo;
+          const key = `${displayRepo}:${r.subpath ?? ''}`;
           const entry = counts.get(key);
           if (entry) {
             entry.count++;
           } else {
-            counts.set(key, { repo: r.githubRepo, subpath: r.subpath ?? '', count: 1 });
+            counts.set(key, { repo: displayRepo, subpath: r.subpath ?? '', count: 1 });
           }
         }
       } else if (project.githubRepo) {
@@ -120,7 +121,9 @@
     return projects.filter((p) => {
       const repos = reposByProject.get(p.id) ?? [];
       if (repos.length > 0) {
-        return repos.some((r) => r.githubRepo === repo && (r.subpath ?? '') === subpath);
+        return repos.some(
+          (r) => (r.headRepo ?? r.githubRepo) === repo && (r.subpath ?? '') === subpath
+        );
       }
       return p.githubRepo === repo && (p.subpath ?? '') === subpath;
     });
@@ -560,11 +563,11 @@
                             darkMode.value
                           )};"
                         >
-                          <RepoLabel githubRepo={r.githubRepo} subpath={r.subpath} />
+                          <RepoLabel githubRepo={r.headRepo ?? r.githubRepo} subpath={r.subpath} />
                         </span>
                       {:else}
                         <span class="repo-line">
-                          <RepoLabel githubRepo={r.githubRepo} subpath={r.subpath} />
+                          <RepoLabel githubRepo={r.headRepo ?? r.githubRepo} subpath={r.subpath} />
                         </span>
                       {/if}
                     {/each}

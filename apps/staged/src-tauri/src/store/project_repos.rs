@@ -9,8 +9,8 @@ impl Store {
     pub fn create_project_repo(&self, repo: &ProjectRepo) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         if let Err(e) = conn.execute(
-            "INSERT INTO project_repos (id, project_id, github_repo, branch_name, subpath, is_primary, reason, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO project_repos (id, project_id, github_repo, branch_name, subpath, is_primary, reason, head_repo, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 repo.id,
                 repo.project_id,
@@ -19,6 +19,7 @@ impl Store {
                 repo.subpath,
                 if repo.is_primary { 1 } else { 0 },
                 repo.reason,
+                repo.head_repo,
                 repo.created_at,
                 repo.updated_at,
             ],
@@ -44,7 +45,7 @@ impl Store {
     pub fn get_project_repo(&self, id: &str) -> Result<Option<ProjectRepo>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, project_id, github_repo, branch_name, subpath, is_primary, reason, created_at, updated_at
+            "SELECT id, project_id, github_repo, branch_name, subpath, is_primary, reason, head_repo, created_at, updated_at
              FROM project_repos WHERE id = ?1",
             params![id],
             Self::row_to_project_repo,
@@ -56,7 +57,7 @@ impl Store {
     pub fn list_project_repos(&self, project_id: &str) -> Result<Vec<ProjectRepo>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, project_id, github_repo, branch_name, subpath, is_primary, reason, created_at, updated_at
+            "SELECT id, project_id, github_repo, branch_name, subpath, is_primary, reason, head_repo, created_at, updated_at
              FROM project_repos WHERE project_id = ?1
              ORDER BY is_primary DESC, created_at ASC",
         )?;
@@ -70,7 +71,7 @@ impl Store {
     ) -> Result<Option<ProjectRepo>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, project_id, github_repo, branch_name, subpath, is_primary, reason, created_at, updated_at
+            "SELECT id, project_id, github_repo, branch_name, subpath, is_primary, reason, head_repo, created_at, updated_at
              FROM project_repos WHERE project_id = ?1 AND is_primary = 1
              ORDER BY created_at ASC LIMIT 1",
             params![project_id],
@@ -137,8 +138,9 @@ impl Store {
             subpath: row.get(4)?,
             is_primary: is_primary_i64 == 1,
             reason: row.get(6)?,
-            created_at: row.get(7)?,
-            updated_at: row.get(8)?,
+            head_repo: row.get(7)?,
+            created_at: row.get(8)?,
+            updated_at: row.get(9)?,
         })
     }
 }

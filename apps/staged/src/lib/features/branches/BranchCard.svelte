@@ -1106,7 +1106,7 @@
       ? reviewDiffTarget.commitSha.slice(0, 7)
       : branch.branchName}
     {projectName}
-    githubRepo={repoLabel?.githubRepo}
+    githubRepo={repoLabel?.headRepo ?? repoLabel?.githubRepo}
     subpath={repoLabel?.subpath}
     onClose={() => {
       showBranchDiff = false;
@@ -1125,7 +1125,7 @@
     beforeLabel="parent"
     afterLabel={commitDiffSha.slice(0, 7)}
     {projectName}
-    githubRepo={repoLabel?.githubRepo}
+    githubRepo={repoLabel?.headRepo ?? repoLabel?.githubRepo}
     subpath={repoLabel?.subpath}
     readonly
     onClose={() => {

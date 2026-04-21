@@ -36,6 +36,9 @@ pub struct PullRequest {
     pub base_ref: String,
     /// Source branch (e.g., "feature-x") - not useful for forks
     pub head_ref: String,
+    /// The repository the PR's head branch lives in (e.g., "fork-owner/repo" for fork PRs).
+    /// None if the head repository has been deleted.
+    pub head_repo: Option<String>,
     pub draft: bool,
     pub updated_at: String,
 }
@@ -84,6 +87,25 @@ pub struct Issue {
     pub author: String,
     pub updated_at: String,
     pub labels: Vec<String>,
+}
+
+/// Owner login for deserializing `gh repo view --json=parent`.
+#[derive(Deserialize)]
+struct RepoOwner {
+    login: String,
+}
+
+/// Parent repo info from `gh repo view --json=parent`.
+#[derive(Deserialize)]
+struct ParentRepoInfo {
+    owner: RepoOwner,
+    name: String,
+}
+
+/// Top-level response from `gh repo view --json=parent`.
+#[derive(Deserialize)]
+struct ParentRepoView {
+    parent: Option<ParentRepoInfo>,
 }
 
 // =============================================================================
@@ -543,6 +565,46 @@ pub fn search_github_repos(query: &str, owner: Option<&str>) -> Result<Vec<GitHu
         .collect())
 }
 
+/// Fetch a single pull request by number using `-R owner/repo` (no local dir needed).
+pub fn get_pr_for_repo(github_repo: &str, pr_number: u64) -> Result<PullRequest, GitError> {
+    let output = run_gh_global(&[
+        "pr",
+        "view",
+        &pr_number.to_string(),
+        "-R",
+        github_repo,
+        "--json=number,title,author,baseRefName,headRefName,headRepository,isDraft,updatedAt",
+    ])?;
+
+    let item: GhPrListItem =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    Ok(item.into())
+}
+
+/// Find the open PR (if any) whose head branch matches `branch_name`.
+pub fn get_pr_for_branch_for_repo(
+    github_repo: &str,
+    branch_name: &str,
+) -> Result<Option<PullRequest>, GitError> {
+    let output = run_gh_global(&[
+        "pr",
+        "list",
+        "-R",
+        github_repo,
+        "--head",
+        branch_name,
+        "--state=open",
+        "--limit=1",
+        "--json=number,title,author,baseRefName,headRefName,headRepository,isDraft,updatedAt",
+    ])?;
+
+    let items: Vec<GhPrListItem> =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    Ok(items.into_iter().next().map(Into::into))
+}
+
 /// List open pull requests for a repo using `-R owner/repo` (no local dir needed).
 pub fn list_pull_requests_for_repo(github_repo: &str) -> Result<Vec<PullRequest>, GitError> {
     let output = run_gh_global(&[
@@ -552,7 +614,7 @@ pub fn list_pull_requests_for_repo(github_repo: &str) -> Result<Vec<PullRequest>
         github_repo,
         "--state=open",
         "--limit=50",
-        "--json=number,title,author,baseRefName,headRefName,isDraft,updatedAt",
+        "--json=number,title,author,baseRefName,headRefName,headRepository,isDraft,updatedAt",
     ])?;
 
     let items: Vec<GhPrListItem> =
@@ -1073,6 +1135,8 @@ struct GhPrListItem {
     base_ref_name: String,
     #[serde(rename = "headRefName")]
     head_ref_name: String,
+    #[serde(rename = "headRepository")]
+    head_repository: Option<GhRepository>,
     #[serde(rename = "isDraft")]
     is_draft: bool,
     #[serde(rename = "updatedAt")]
@@ -1084,6 +1148,12 @@ struct GhAuthor {
     login: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct GhRepository {
+    #[serde(rename = "nameWithOwner")]
+    name_with_owner: String,
+}
+
 impl From<GhPrListItem> for PullRequest {
     fn from(item: GhPrListItem) -> Self {
         PullRequest {
@@ -1092,6 +1162,7 @@ impl From<GhPrListItem> for PullRequest {
             author: item.author.login,
             base_ref: item.base_ref_name,
             head_ref: item.head_ref_name,
+            head_repo: item.head_repository.map(|r| r.name_with_owner),
             draft: item.is_draft,
             updated_at: item.updated_at,
         }
@@ -1112,7 +1183,7 @@ pub fn list_pull_requests(repo: &Path) -> Result<Vec<PullRequest>, GitError> {
             "list",
             "--state=open",
             "--limit=50",
-            "--json=number,title,author,baseRefName,headRefName,isDraft,updatedAt",
+            "--json=number,title,author,baseRefName,headRefName,headRepository,isDraft,updatedAt",
         ],
     )?;
 
@@ -1139,7 +1210,7 @@ pub fn search_pull_requests(repo: &Path, query: &str) -> Result<Vec<PullRequest>
             "--state=open",
             "--limit=50",
             &format!("--search={query}"),
-            "--json=number,title,author,baseRefName,headRefName,isDraft,updatedAt",
+            "--json=number,title,author,baseRefName,headRefName,headRepository,isDraft,updatedAt",
         ],
     )?;
 
@@ -1233,15 +1304,10 @@ pub fn search_issues(repo: &Path, query: &str) -> Result<Vec<Issue>, GitError> {
 /// Returns DiffSpec with two concrete SHAs: Rev(merge_base)..Rev(head_sha)
 pub fn fetch_pr(repo: &Path, base_ref: &str, pr_number: u64) -> Result<DiffSpec, GitError> {
     use super::cli;
+    use super::worktree::fetch_pr_head_sha;
 
-    // Fetch the PR head ref
-    let pr_ref = format!("refs/pull/{pr_number}/head");
-    cli::run(repo, &["fetch", "origin", &pr_ref])?;
-
-    // Get the SHA of the fetched PR head IMMEDIATELY (before next fetch overwrites FETCH_HEAD)
-    let head_sha = cli::run(repo, &["rev-parse", "FETCH_HEAD"])?
-        .trim()
-        .to_string();
+    // Fetch the PR head ref using a named local ref (safe for concurrent use)
+    let head_sha = fetch_pr_head_sha(repo, pr_number)?;
 
     // Fetch the base branch
     let base_remote_ref = format!("origin/{base_ref}");
@@ -2013,6 +2079,73 @@ pub fn fetch_pr_status_for_repo(github_repo: &str, pr_number: u64) -> Result<PrS
         },
         head_sha: item.head_ref_oid,
     })
+}
+
+/// Fetch the canonical GitHub URL for a pull request.
+///
+/// PRs always live on the base (upstream) repository, but the stored repo may
+/// be the fork (head) repo for fork PRs. This function first tries the given
+/// repo, then falls back to checking if it's a fork and querying the parent.
+pub fn fetch_pr_url(github_repo: &str, pr_number: u64) -> Result<String, GitError> {
+    let pr_num_str = pr_number.to_string();
+
+    // Try the stored repo first — works when it's already the base repo.
+    if let Ok(url) = fetch_pr_url_from_repo(github_repo, &pr_num_str) {
+        return Ok(url);
+    }
+
+    // The PR wasn't found — the stored repo may be the fork. Check for a parent.
+    let parent_args = &["repo", "view", github_repo, "--json=parent"];
+    let parent_output = run_gh_global(parent_args).map_err(|e| {
+        log::warn!(
+            "fetch_pr_url: failed to look up parent repo for {}: {}",
+            github_repo,
+            e
+        );
+        e
+    })?;
+
+    let view: ParentRepoView = serde_json::from_str(&parent_output)
+        .map_err(|e| GitError::CommandFailed(format!("Failed to parse parent repo: {e}")))?;
+
+    match view.parent {
+        Some(parent) => {
+            let parent_slug = format!("{}/{}", parent.owner.login, parent.name);
+            fetch_pr_url_from_repo(&parent_slug, &pr_num_str)
+        }
+        None => {
+            // Not a fork — fall back to constructing the URL.
+            Ok(format!(
+                "https://github.com/{}/pull/{}",
+                github_repo, pr_number
+            ))
+        }
+    }
+}
+
+/// If `github_repo` is a fork, return the parent repo slug. Returns `None` otherwise.
+pub fn get_parent_repo(github_repo: &str) -> Result<Option<String>, GitError> {
+    let args = &["repo", "view", github_repo, "--json=parent"];
+    let output = run_gh_global(args)?;
+
+    let view: ParentRepoView = serde_json::from_str(&output)
+        .map_err(|e| GitError::CommandFailed(format!("Failed to parse repo view: {e}")))?;
+
+    Ok(view.parent.map(|p| format!("{}/{}", p.owner.login, p.name)))
+}
+
+fn fetch_pr_url_from_repo(github_repo: &str, pr_num_str: &str) -> Result<String, GitError> {
+    let args = &["pr", "view", pr_num_str, "-R", github_repo, "--json=url"];
+    let output = run_gh_global(args)?;
+
+    #[derive(Deserialize)]
+    struct PrUrl {
+        url: String,
+    }
+
+    let parsed: PrUrl = serde_json::from_str(&output)
+        .map_err(|e| GitError::CommandFailed(format!("Failed to parse PR URL: {e}")))?;
+    Ok(parsed.url)
 }
 
 /// Push a branch to the remote.

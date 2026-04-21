@@ -62,7 +62,8 @@ export function createProject(
   subpath?: string,
   branchName?: string,
   prNumber?: number,
-  defaultBranch?: string
+  defaultBranch?: string,
+  headRepo?: string
 ): Promise<Project> {
   return invoke('create_project', {
     name,
@@ -72,6 +73,7 @@ export function createProject(
     branchName: branchName ?? null,
     prNumber: prNumber ?? null,
     defaultBranch: defaultBranch ?? null,
+    headRepo: headRepo ?? null,
   });
 }
 
@@ -94,7 +96,8 @@ export function addProjectRepo(
   subpath?: string,
   setAsPrimary?: boolean,
   prNumber?: number,
-  defaultBranch?: string
+  defaultBranch?: string,
+  headRepo?: string
 ): Promise<ProjectRepo> {
   return invoke('add_project_repo', {
     projectId,
@@ -104,6 +107,7 @@ export function addProjectRepo(
     setAsPrimary: setAsPrimary ?? null,
     prNumber: prNumber ?? null,
     defaultBranch: defaultBranch ?? null,
+    headRepo: headRepo ?? null,
   });
 }
 
@@ -801,8 +805,26 @@ export function checkExistingLocalBranch(projectId: string, branchName: string):
   return invoke('check_existing_local_branch', { projectId, branchName });
 }
 
+/** Fetch a single PR by number. Throws if not found. */
+export function getPrForRepo(githubRepo: string, prNumber: number): Promise<PullRequest> {
+  return invoke('get_pr_for_repo', { githubRepo, prNumber });
+}
+
+/** Find the open PR (if any) whose head branch matches `branchName`. */
+export function getPrForBranch(
+  githubRepo: string,
+  branchName: string
+): Promise<PullRequest | null> {
+  return invoke('get_pr_for_branch', { githubRepo, branchName });
+}
+
 export function listPullRequests(githubRepo: string): Promise<PullRequest[]> {
   return invoke('list_pull_requests', { githubRepo });
+}
+
+/** If the repo is a fork, return the parent repo slug (e.g. `"base-owner/repo"`). */
+export function getParentRepo(githubRepo: string): Promise<string | null> {
+  return invoke('get_parent_repo', { githubRepo });
 }
 
 export function listIssues(githubRepo: string): Promise<Issue[]> {

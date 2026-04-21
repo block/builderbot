@@ -177,9 +177,14 @@ This is critical - the application parses this to link the PR.
     Ok(session.id)
 }
 
-/// Build the GitHub PR URL for a branch from its repo slug and PR number.
+/// Build the GitHub PR URL for a branch.
+///
+/// For fork PRs the stored repo may be the fork (head) repo, but PRs always
+/// live on the base (upstream) repo. This queries the GitHub API to resolve
+/// the canonical URL, falling back to the parent repo when the stored repo
+/// is a fork.
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_pr_url(
+pub async fn get_pr_url(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
     pr_number: u64,
@@ -197,15 +202,11 @@ pub fn get_pr_url(
         .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
 
     let (repo_slug, _) = resolve_branch_repo_and_subpath(&store, &project, &branch)?;
-    let parts: Vec<&str> = repo_slug.splitn(2, '/').collect();
-    if parts.len() != 2 {
-        return Err(format!("Invalid github_repo format: {}", repo_slug));
-    }
-    let (owner, repo_name) = (parts[0], parts[1]);
 
-    Ok(format!(
-        "https://github.com/{owner}/{repo_name}/pull/{pr_number}"
-    ))
+    tauri::async_runtime::spawn_blocking(move || git::fetch_pr_url(&repo_slug, pr_number))
+        .await
+        .map_err(|e| format!("get_pr_url task failed: {e}"))?
+        .map_err(|e| e.to_string())
 }
 
 /// Update the PR number for a branch.

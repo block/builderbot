@@ -14,7 +14,7 @@ pub use files::{get_file_at_ref, search_files};
 pub use github::{
     check_github_auth, check_monorepo_modules, create_pull_request, detect_default_branch_for_repo,
     ensure_local_clone, ensure_local_clone_with_progress, fetch_for_worktree, fetch_github_repo,
-    fetch_pr, fetch_pr_status, fetch_pr_status_for_repo, get_pr_for_branch,
+    fetch_pr, fetch_pr_status, fetch_pr_status_for_repo, fetch_pr_url, get_pr_for_branch,
     invalidate_cache as invalidate_pr_cache, list_branches_for_repo, list_github_orgs,
     list_github_repos, list_issues, list_issues_for_repo, list_pull_requests,
     list_pull_requests_for_repo, list_repo_directories, list_user_repos, prune_remote_for_repo,
@@ -31,8 +31,9 @@ pub use types::*;
 pub use worktree::{
     branch_exists, create_worktree, create_worktree_at_path, create_worktree_for_existing_branch,
     create_worktree_for_existing_branch_at_path, create_worktree_from_pr,
-    create_worktree_from_pr_at_path, get_commits_since_base, get_full_commit_log, get_head_sha,
-    get_parent_commit, has_unpushed_commits, list_worktrees, project_worktree_path_for,
-    project_worktree_root_for, remote_branch_exists, remove_worktree, reset_to_commit,
-    switch_branch, update_branch_from_pr, worktree_path_for, CommitInfo, UpdateFromPrResult,
+    create_worktree_from_pr_at_path, fetch_pr_head_sha, get_commits_since_base,
+    get_full_commit_log, get_head_sha, get_parent_commit, has_unpushed_commits, list_worktrees,
+    project_worktree_path_for, project_worktree_root_for, remote_branch_exists, remove_worktree,
+    reset_to_commit, set_upstream_to_origin, switch_branch, update_branch_from_pr,
+    worktree_path_for, CommitInfo, UpdateFromPrResult,
 };

@@ -24,6 +24,8 @@ export interface ProjectRepo {
   subpath: string | null;
   isPrimary: boolean;
   reason: string | null;
+  /** For fork PRs, the head (fork) repo slug. Null for non-fork PRs. */
+  headRepo: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -192,6 +194,8 @@ export interface PullRequest {
   author: string;
   baseRef: string;
   headRef: string;
+  /** The repository the PR's head branch lives in (e.g. "fork-owner/repo" for fork PRs). */
+  headRepo: string | null;
   draft: boolean;
   updatedAt: string;
 }

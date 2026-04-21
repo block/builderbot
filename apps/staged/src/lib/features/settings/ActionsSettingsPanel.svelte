@@ -503,7 +503,7 @@
   <div class="panel-intro">
     <h2>
       <FolderGit2 size={16} />
-      Repo
+      Repos
     </h2>
     <p>Manage per-repo actions and remove repos from Staged when they are no longer needed.</p>
   </div>

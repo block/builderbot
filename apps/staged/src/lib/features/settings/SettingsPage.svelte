@@ -38,10 +38,6 @@
 
   <div class="settings-body">
     <aside class="settings-nav" aria-label="Settings sections">
-      <div class="settings-nav-header">
-        <span class="settings-nav-title">Sections</span>
-      </div>
-
       <div class="settings-nav-list">
         <button
           class="nav-item"
@@ -51,7 +47,7 @@
           <div class="nav-main">
             <FolderGit2 size={14} />
             <div class="nav-text">
-              <span class="nav-name">Repo</span>
+              <span class="nav-name">Repos</span>
               <span class="nav-meta">Per-repo actions and cleanup</span>
             </div>
           </div>
@@ -172,19 +168,6 @@
     background: color-mix(in srgb, var(--bg-chrome) 75%, transparent);
   }
 
-  .settings-nav-header {
-    padding: 14px 12px 8px;
-  }
-
-  .settings-nav-title {
-    display: inline-block;
-    font-size: calc(var(--size-xs) - 1px);
-    font-weight: 600;
-    color: var(--text-faint);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-  }
-
   .settings-nav-list {
     display: flex;
     flex-direction: column;
@@ -284,10 +267,6 @@
       border-right: 0;
       border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 60%, transparent);
       background: color-mix(in srgb, var(--bg-chrome) 65%, transparent);
-    }
-
-    .settings-nav-header {
-      display: none;
     }
 
     .settings-nav-list {

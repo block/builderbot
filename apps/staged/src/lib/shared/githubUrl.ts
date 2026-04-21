@@ -5,6 +5,8 @@ export interface RepoSelection {
   branchName?: string;
   /** Pre-fetched default branch to avoid a slow API call during project/repo creation. */
   defaultBranch?: string | null;
+  /** For fork PRs, the head (fork) repo slug when it differs from nameWithOwner. */
+  headRepo?: string | null;
 }
 
 /**

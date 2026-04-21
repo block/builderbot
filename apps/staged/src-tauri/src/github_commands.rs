@@ -128,12 +128,33 @@ pub async fn check_existing_local_branch(
 
 /// List open pull requests for a repository (via `-R owner/repo`).
 #[tauri::command(rename_all = "camelCase")]
-pub fn list_pull_requests(github_repo: String) -> Result<Vec<git::github::PullRequest>, String> {
-    git::list_pull_requests_for_repo(&github_repo).map_err(|e| e.to_string())
+pub async fn list_pull_requests(
+    github_repo: String,
+) -> Result<Vec<git::github::PullRequest>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git::list_pull_requests_for_repo(&github_repo).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// If `github_repo` is a fork, return the parent repo slug (e.g. `"base-owner/repo"`).
+/// Returns `null` when the repo is not a fork.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_parent_repo(github_repo: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git::github::get_parent_repo(&github_repo).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// List open issues for a repository (via `-R owner/repo`).
 #[tauri::command(rename_all = "camelCase")]
-pub fn list_issues(github_repo: String) -> Result<Vec<git::github::Issue>, String> {
-    git::list_issues_for_repo(&github_repo).map_err(|e| e.to_string())
+pub async fn list_issues(github_repo: String) -> Result<Vec<git::github::Issue>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git::list_issues_for_repo(&github_repo).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

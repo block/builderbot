@@ -583,6 +583,7 @@ impl ProjectToolsHandler {
             p.reason,
             None,
             p.base_branch,
+            None, // MCP has no head_repo for fork PRs
         )
         .await
         {

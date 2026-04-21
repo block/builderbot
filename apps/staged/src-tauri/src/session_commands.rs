@@ -1767,7 +1767,8 @@ fn build_project_session_context(
     } else {
         lines.push("Repositories in this project:".to_string());
         for repo in &repos {
-            let label = format_repo_label(&repo.github_repo, repo.subpath.as_deref());
+            let display_repo = repo.head_repo.as_deref().unwrap_or(&repo.github_repo);
+            let label = format_repo_label(display_repo, repo.subpath.as_deref());
             let primary_tag = if repo.is_primary { " (primary)" } else { "" };
             let reason_tag = repo
                 .reason

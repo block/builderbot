@@ -377,7 +377,10 @@
     <form class="modal-body" onsubmit={handleSubmit}>
       {#if repoLabel}
         <div class="repo-info">
-          <RepoLabel githubRepo={repoLabel.githubRepo} subpath={repoLabel.subpath} />
+          <RepoLabel
+            githubRepo={repoLabel.headRepo ?? repoLabel.githubRepo}
+            subpath={repoLabel.subpath}
+          />
         </div>
       {/if}
 

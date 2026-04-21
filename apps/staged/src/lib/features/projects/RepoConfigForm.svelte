@@ -11,11 +11,12 @@
 
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { slide } from 'svelte/transition';
+  import { slide, fade } from 'svelte/transition';
   import { GitBranch, X, Clock, Command } from 'lucide-svelte';
   import type { RecentRepo, PullRequest } from '../../types';
   import * as commands from '../../api/commands';
   import RepoLabel from '../../shared/RepoLabel.svelte';
+  import Spinner from '../../shared/Spinner.svelte';
   import RepoSearchInput from './RepoSearchInput.svelte';
   import SubpathInput from './SubpathInput.svelte';
   import type { SubpathInputApi } from './SubpathInput.svelte';
@@ -25,6 +26,8 @@
   interface Props {
     // Bindable state
     selectedRepo?: string | null;
+    /** For fork PRs, the head (fork) repo slug that differs from selectedRepo. */
+    headRepo?: string | null;
     subpath?: string;
     branchName?: string;
     isNewBranch?: boolean;
@@ -52,6 +55,7 @@
 
   let {
     selectedRepo = $bindable(null),
+    headRepo = $bindable(null),
     subpath = $bindable(''),
     branchName = $bindable(''),
     isNewBranch = $bindable(false),
@@ -84,6 +88,20 @@
 
   let pendingPrNumber = $state<number | null>(null);
   let pendingBranchName = $state<string | null>(null);
+
+  /** For fork PRs, the head repo differs from the base repo. We display the
+   *  head repo name but keep selectedRepo as the base repo for all API calls
+   *  (monorepo check, default branch, subpath, project creation) since
+   *  refs/pull/<N>/head only exists on the base repo's clone. */
+  let displayRepo = $state<string | null>(null);
+
+  /** True while resolving a PR from a pasted URL (fetching PRs, detecting forks). */
+  let resolvingPr = $state(false);
+
+  // Clear resolvingPr once a PR is matched or the pending PR number is cleared.
+  $effect(() => {
+    if (matchedPr || pendingPrNumber == null) resolvingPr = false;
+  });
 
   onMount(async () => {
     try {
@@ -151,9 +169,11 @@
     if (branchPickerTimer) clearTimeout(branchPickerTimer);
     showBranchPicker = false;
     selectedRepo = selection.nameWithOwner;
+    displayRepo = selection.nameWithOwner;
     subpath = selection.subpath ?? '';
     pendingPrNumber = selection.prNumber ?? null;
     pendingBranchName = selection.branchName ?? null;
+    resolvingPr = selection.prNumber != null;
     // Mount BranchPicker after the slide animation completes.
     // BranchPicker is expensive to mount in WebKit, so deferring it
     // keeps the initial repo selection feeling responsive.
@@ -181,106 +201,209 @@
 
 <svelte:window onkeydown={handleKeydown} />
 
-<div class="form-group">
-  <label for="project-repo-select"
-    >Repository
-    {#if repoRequired && !selectedRepo}
-      <span class="field-badge required">Required</span>
-    {/if}</label
-  >
-  {#if selectedRepo}
-    <div class="repo-info" class:disabled>
-      <GitBranch size={14} class="repo-info-icon" />
-      <div class="repo-details">
-        <span class="repo-name">{selectedRepo}</span>
-      </div>
+<!-- Grid stacking: both the overlay and form occupy the same cell so the form
+     always contributes to layout height, avoiding a jump when the overlay disappears. -->
+<div class="repo-fields-stack">
+  {#if resolvingPr}
+    <div class="pr-loading-overlay" transition:fade={{ duration: 100 }}>
+      <Spinner size={20} />
+      <span class="pr-loading-text">Loading PR&hellip;</span>
       <button
-        class="clear-button"
+        class="pr-loading-cancel"
         onclick={() => {
+          resolvingPr = false;
+          pendingPrNumber = null;
           if (branchPickerTimer) clearTimeout(branchPickerTimer);
           showBranchPicker = false;
           selectedRepo = null;
+          displayRepo = null;
+          headRepo = null;
           subpath = '';
           branchName = '';
           matchedPr = null;
-          pendingPrNumber = null;
           pendingBranchName = null;
         }}
       >
-        <X size={14} />
+        Cancel
       </button>
     </div>
-  {:else}
-    <RepoSearchInput onSelect={handleRepoSelected} {disabled} {excludeRepos} />
   {/if}
 
-  {#if !selectedRepo && filteredRecentRepos.length > 0}
-    <div class="recent-repos" out:slide={{ duration: SLIDE_DURATION }}>
-      {#each filteredRecentRepos.slice(0, 5) as recent, i}
-        <button
-          class="recent-repo-item"
-          onclick={() =>
-            handleRepoSelected({
-              nameWithOwner: recent.githubRepo,
-              subpath: recent.subpath ?? undefined,
-            })}
-        >
-          <Clock size={12} class="recent-repo-icon" />
-          <span class="recent-repo-label">
-            <RepoLabel githubRepo={recent.githubRepo} subpath={recent.subpath} />
-          </span>
-          <span class="recent-repo-shortcut">
-            <Command size={9} />
-            {i + 1}
-          </span>
-        </button>
-      {/each}
+  <!-- Keep form fields in the DOM so BranchPicker can resolve the PR, but hide
+     them while the loading overlay is visible. -->
+  <div class="repo-fields" class:resolving-hidden={resolvingPr}>
+    <div class="form-group">
+      <label for="project-repo-select"
+        >Repository
+        {#if repoRequired && !selectedRepo}
+          <span class="field-badge required">Required</span>
+        {/if}</label
+      >
+      {#if selectedRepo}
+        <div class="repo-info" class:disabled>
+          <GitBranch size={14} class="repo-info-icon" />
+          <div class="repo-details">
+            <span class="repo-name">{displayRepo ?? selectedRepo}</span>
+          </div>
+          <button
+            class="clear-button"
+            onclick={() => {
+              if (branchPickerTimer) clearTimeout(branchPickerTimer);
+              showBranchPicker = false;
+              selectedRepo = null;
+              displayRepo = null;
+              headRepo = null;
+              subpath = '';
+              branchName = '';
+              matchedPr = null;
+              pendingPrNumber = null;
+              pendingBranchName = null;
+            }}
+          >
+            <X size={14} />
+          </button>
+        </div>
+      {:else}
+        <RepoSearchInput onSelect={handleRepoSelected} {disabled} {excludeRepos} />
+      {/if}
+
+      {#if !selectedRepo && filteredRecentRepos.length > 0}
+        <div class="recent-repos" out:slide={{ duration: SLIDE_DURATION }}>
+          {#each filteredRecentRepos.slice(0, 5) as recent, i}
+            <button
+              class="recent-repo-item"
+              onclick={() =>
+                handleRepoSelected({
+                  nameWithOwner: recent.githubRepo,
+                  subpath: recent.subpath ?? undefined,
+                })}
+            >
+              <Clock size={12} class="recent-repo-icon" />
+              <span class="recent-repo-label">
+                <RepoLabel githubRepo={recent.githubRepo} subpath={recent.subpath} />
+              </span>
+              <span class="recent-repo-shortcut">
+                <Command size={9} />
+                {i + 1}
+              </span>
+            </button>
+          {/each}
+        </div>
+      {/if}
     </div>
-  {/if}
-</div>
 
-{#if selectedRepo}
-  <div class="form-group" transition:slide={{ duration: SLIDE_DURATION }}>
-    <label for="project-subpath"
-      >Subpath
-      <span class="field-badge {isMonorepo ? 'recommended' : 'optional'}"
-        >{isMonorepo ? 'Recommended' : 'Optional'}</span
-      ></label
-    >
-    <SubpathInput bind:value={subpath} repo={selectedRepo} {disabled} bind:api={subpathApi} />
-  </div>
+    {#if selectedRepo}
+      <div class="form-group" transition:slide={{ duration: SLIDE_DURATION }}>
+        <label for="project-subpath"
+          >Subpath
+          <span class="field-badge {isMonorepo ? 'recommended' : 'optional'}"
+            >{isMonorepo ? 'Recommended' : 'Optional'}</span
+          ></label
+        >
+        <SubpathInput bind:value={subpath} repo={selectedRepo} {disabled} bind:api={subpathApi} />
+      </div>
 
-  <div class="form-group" transition:slide={{ duration: SLIDE_DURATION }}>
-    <label for="project-branch"
-      >PR or Branch
-      <span class="field-badge {isNewBranch ? 'new-branch' : 'optional'}"
-        >{isNewBranch ? 'New branch' : 'Optional'}</span
-      ></label
-    >
-    {#if showBranchPicker}
-      <BranchPicker
-        bind:value={branchName}
-        bind:isNewBranch
-        bind:matchedPr
-        bind:initialPrNumber={pendingPrNumber}
-        bind:initialBranchName={pendingBranchName}
-        repo={selectedRepo}
-        {disabled}
-        onSelect={onBranchSelected}
-      />
-    {:else}
-      <input
-        class="branch-picker-placeholder"
-        type="text"
-        placeholder="Search PRs or branches…"
-        readonly
-        tabindex="-1"
-      />
+      <div class="form-group" transition:slide={{ duration: SLIDE_DURATION }}>
+        <label for="project-branch"
+          >PR or Branch
+          <span class="field-badge {isNewBranch ? 'new-branch' : 'optional'}"
+            >{isNewBranch ? 'New branch' : 'Optional'}</span
+          ></label
+        >
+        {#if showBranchPicker}
+          <BranchPicker
+            bind:value={branchName}
+            bind:isNewBranch
+            bind:matchedPr
+            bind:initialPrNumber={pendingPrNumber}
+            bind:initialBranchName={pendingBranchName}
+            repo={selectedRepo}
+            {disabled}
+            onSelect={onBranchSelected}
+            onRepoChange={(newRepo) => {
+              displayRepo = newRepo;
+              headRepo = newRepo !== selectedRepo ? newRepo : null;
+            }}
+            onBaseRepoSwitch={(baseRepo, forkRepo) => {
+              // A pasted fork URL needs the base repo for API calls/cloning.
+              // Switch selectedRepo to the base repo (triggers PR re-fetch)
+              // while keeping the fork as the display/head repo.
+              displayRepo = forkRepo;
+              headRepo = forkRepo;
+              selectedRepo = baseRepo;
+            }}
+          />
+        {:else}
+          <input
+            class="branch-picker-placeholder"
+            type="text"
+            placeholder="Search PRs or branches…"
+            readonly
+            tabindex="-1"
+          />
+        {/if}
+      </div>
     {/if}
   </div>
-{/if}
+
+  <!-- /resolving-hidden wrapper -->
+</div>
+
+<!-- /repo-fields-stack -->
 
 <style>
+  .repo-fields-stack {
+    display: grid;
+  }
+
+  .repo-fields-stack > * {
+    grid-area: 1 / 1;
+  }
+
+  .pr-loading-overlay {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 32px 16px;
+    border-radius: 10px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    z-index: 1;
+  }
+
+  .pr-loading-text {
+    font-size: var(--size-sm);
+    color: var(--text-muted);
+  }
+
+  .pr-loading-cancel {
+    font-size: var(--size-xs);
+    color: var(--text-faint);
+    background: none;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    padding: 4px 10px;
+    cursor: pointer;
+    transition: color 0.1s;
+  }
+
+  .pr-loading-cancel:hover {
+    color: var(--text-primary);
+    border-color: var(--border-default);
+  }
+
+  .repo-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .resolving-hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
+
   .form-group {
     display: flex;
     flex-direction: column;

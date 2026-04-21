@@ -23,6 +23,7 @@
   const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
 
   let selectedRepo = $state<string | null>(null);
+  let headRepo = $state<string | null>(null);
   let subpath = $state('');
   let branchName = $state('');
   let isNewBranch = $state(false);
@@ -71,6 +72,7 @@
         subpath: normalizedSubpath,
         prNumber,
         defaultBranch: matchedPr?.baseRef ?? defaultBranch ?? undefined,
+        headRepo: headRepo ?? undefined,
       });
       onClose();
     } catch (e) {
@@ -127,6 +129,7 @@
       <div class="add-repo-form">
         <RepoConfigForm
           bind:selectedRepo
+          bind:headRepo
           bind:subpath
           bind:branchName
           bind:isNewBranch

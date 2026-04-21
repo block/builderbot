@@ -20,6 +20,7 @@ pub(crate) async fn add_project_repo_impl(
     reason: Option<String>,
     pr_number: Option<u64>,
     default_branch: Option<String>,
+    head_repo: Option<String>,
 ) -> Result<store::ProjectRepo, String> {
     let project = store
         .get_project(&project_id)
@@ -71,6 +72,7 @@ pub(crate) async fn add_project_repo_impl(
         repo = repo.primary();
     }
     repo.reason = reason;
+    repo.head_repo = head_repo;
     if project.location == store::ProjectLocation::Remote {
         let ws_name = branches::resolve_project_workspace_name(&store, &project, None)?;
         let ws_info = tauri::async_runtime::spawn_blocking({

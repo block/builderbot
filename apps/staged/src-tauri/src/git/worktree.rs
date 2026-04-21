@@ -122,9 +122,10 @@ pub fn create_worktree_at_path(
     ensure_worktree_parent_exists(worktree_path)?;
     ensure_worktree_absent(worktree_path)?;
 
-    // Normalise the start point to "origin/<branch>" form.
-    // The caller (setup_worktree) already fetched via fetch_for_worktree.
-    let remote_start = if start_point.starts_with("origin/") {
+    // Normalise the start point to "origin/<branch>" form unless it's
+    // already a full ref or a bare SHA (e.g. from fetch_pr_head_sha).
+    let is_sha = start_point.len() == 40 && start_point.chars().all(|c| c.is_ascii_hexdigit());
+    let remote_start = if is_sha || start_point.starts_with("origin/") {
         start_point.to_string()
     } else {
         format!("origin/{start_point}")
@@ -407,11 +408,53 @@ pub fn branch_exists(repo: &Path, branch_name: &str) -> Result<bool, GitError> {
     Ok(result.is_ok())
 }
 
+/// Set the upstream tracking branch for a local branch.
+///
+/// Runs `git branch --set-upstream-to=origin/<remote_branch> <local_branch>`.
+/// Returns `Ok(true)` if the upstream was set, `Ok(false)` if the remote branch
+/// doesn't exist (so there's nothing to track).
+pub fn set_upstream_to_origin(
+    repo: &Path,
+    local_branch: &str,
+    remote_branch: &str,
+) -> Result<bool, GitError> {
+    if !remote_branch_exists(repo, remote_branch)? {
+        return Ok(false);
+    }
+    let upstream = format!("origin/{remote_branch}");
+    cli::run(
+        repo,
+        &["branch", "--set-upstream-to", &upstream, local_branch],
+    )?;
+    Ok(true)
+}
+
 /// Check whether a remote tracking branch (`origin/<branch_name>`) exists.
 pub fn remote_branch_exists(repo: &Path, branch_name: &str) -> Result<bool, GitError> {
     let ref_name = format!("refs/remotes/origin/{branch_name}");
     let result = cli::run(repo, &["rev-parse", "--verify", &ref_name]);
     Ok(result.is_ok())
+}
+
+/// Fetch a PR's head ref and return the resulting commit SHA.
+/// Works for fork PRs because GitHub exposes `refs/pull/<N>/head` regardless
+/// of whether the head branch lives in the same repo or a fork.
+///
+/// Fetches into a named local ref (`refs/staged/pr/<N>`) instead of relying on
+/// `FETCH_HEAD`, which makes this safe for concurrent use across different PRs.
+pub fn fetch_pr_head_sha(repo: &Path, pr_number: u64) -> Result<String, GitError> {
+    let pr_ref = format!("refs/pull/{pr_number}/head");
+    let local_ref = format!("refs/staged/pr/{pr_number}");
+    let refspec = format!("+{pr_ref}:{local_ref}");
+    cli::run(repo, &["fetch", "origin", &refspec])?;
+    let sha = cli::run(repo, &["rev-parse", &local_ref])?
+        .trim()
+        .to_string();
+    // Clean up the temporary local ref to avoid accumulating refs over time
+    if let Err(e) = cli::run(repo, &["update-ref", "-d", &local_ref]) {
+        log::warn!("failed to clean up temporary ref {local_ref}: {e}");
+    }
+    Ok(sha)
 }
 
 /// Reset HEAD to a specific commit (hard reset).
@@ -468,14 +511,8 @@ pub fn create_worktree_from_pr_at_path(
     ensure_worktree_parent_exists(worktree_path)?;
     ensure_worktree_absent(worktree_path)?;
 
-    // Fetch the PR head ref
-    let pr_ref = format!("refs/pull/{pr_number}/head");
-    cli::run(repo, &["fetch", "origin", &pr_ref])?;
-
-    // Get the SHA of the fetched PR head
-    let head_sha = cli::run(repo, &["rev-parse", "FETCH_HEAD"])?
-        .trim()
-        .to_string();
+    // Fetch the PR head ref into a named local ref (safe for concurrent use)
+    let head_sha = fetch_pr_head_sha(repo, pr_number)?;
 
     let worktree_str = worktree_path
         .to_str()
@@ -528,14 +565,8 @@ pub fn update_branch_from_pr(
     // Get the current HEAD before update
     let old_sha = get_head_sha(worktree)?;
 
-    // Fetch the PR head ref
-    let pr_ref = format!("refs/pull/{pr_number}/head");
-    cli::run(worktree, &["fetch", "origin", &pr_ref])?;
-
-    // Get the SHA of the fetched PR head
-    let new_sha = cli::run(worktree, &["rev-parse", "FETCH_HEAD"])?
-        .trim()
-        .to_string();
+    // Fetch the PR head ref into a named local ref (safe for concurrent use)
+    let new_sha = fetch_pr_head_sha(worktree, pr_number)?;
 
     // If already up to date, return early
     if old_sha == new_sha {
@@ -555,11 +586,11 @@ pub fn update_branch_from_pr(
 
     if is_fast_forward {
         // Fast-forward: just move HEAD to the new commit
-        cli::run(worktree, &["merge", "--ff-only", "FETCH_HEAD"])?;
+        cli::run(worktree, &["merge", "--ff-only", &new_sha])?;
     } else {
         // Not a fast-forward (PR was force-pushed or rebased)
         // Hard reset to the new PR head
-        cli::run(worktree, &["reset", "--hard", "FETCH_HEAD"])?;
+        cli::run(worktree, &["reset", "--hard", &new_sha])?;
     }
 
     // Count how many commits were added

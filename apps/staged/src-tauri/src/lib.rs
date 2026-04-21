@@ -354,6 +354,7 @@ fn create_project(
     branch_name: Option<String>,
     pr_number: Option<u64>,
     default_branch: Option<String>,
+    head_repo: Option<String>,
 ) -> Result<store::Project, String> {
     let store = get_store(&store)?;
     let trimmed = name.trim();
@@ -404,8 +405,9 @@ fn create_project(
     }
 
     if let Some(repo) = github_repo {
-        let project_repo =
+        let mut project_repo =
             store::ProjectRepo::new(&project.id, &repo, &inferred_branch_name, subpath).primary();
+        project_repo.head_repo = head_repo;
         store
             .create_project_repo(&project_repo)
             .map_err(|e| e.to_string())?;
@@ -592,6 +594,7 @@ async fn add_project_repo(
     set_as_primary: Option<bool>,
     pr_number: Option<u64>,
     default_branch: Option<String>,
+    head_repo: Option<String>,
 ) -> Result<store::ProjectRepo, String> {
     let store = get_store(&store)?;
     let repo = project_commands::add_project_repo_impl(
@@ -604,6 +607,7 @@ async fn add_project_repo(
         None,
         pr_number,
         default_branch,
+        head_repo,
     )
     .await?;
 
@@ -1807,6 +1811,7 @@ pub fn run() {
             github_commands::prune_remote_refs,
             github_commands::check_existing_local_branch,
             github_commands::list_pull_requests,
+            github_commands::get_parent_repo,
             github_commands::list_issues,
             // PRs
             prs::create_pr,

@@ -127,6 +127,10 @@ pub struct ProjectRepo {
     pub subpath: Option<String>,
     pub is_primary: bool,
     pub reason: Option<String>,
+    /// For fork PRs, the head (fork) repo that differs from `github_repo` (the
+    /// base repo used for cloning and API calls).  `None` when the PR is not
+    /// from a fork.
+    pub head_repo: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -147,6 +151,7 @@ impl ProjectRepo {
             subpath,
             is_primary: false,
             reason: None,
+            head_repo: None,
             created_at: now,
             updated_at: now,
         }

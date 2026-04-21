@@ -41,6 +41,7 @@
   let isNewBranch = $state(false);
   let matchedPr = $state<PullRequest | null>(null);
   let defaultBranch = $state<string | null>(null);
+  let headRepo = $state<string | null>(null);
 
   let saving = $state(false);
   let error = $state<string | null>(null);
@@ -92,7 +93,8 @@
         normalizedSubpath,
         normalizedBranch,
         prNumber,
-        matchedPr?.baseRef ?? defaultBranch ?? undefined
+        matchedPr?.baseRef ?? defaultBranch ?? undefined,
+        headRepo ?? undefined
       );
       onCreated(project);
     } catch (e) {
@@ -190,6 +192,7 @@
 
   <RepoConfigForm
     bind:selectedRepo
+    bind:headRepo
     bind:subpath
     bind:branchName
     bind:isNewBranch

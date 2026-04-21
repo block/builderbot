@@ -38,6 +38,10 @@
     /** When set, auto-fill this branch name after data loads. Cleared after use. */
     initialBranchName?: string | null;
     onSelect?: (selection: BranchSelection) => void;
+    /** Called when a fork PR is detected and the repo should switch to the head repo. */
+    onRepoChange?: (newRepo: string) => void;
+    /** Called when a pasted PR URL points to a fork and the base repo should be used instead. */
+    onBaseRepoSwitch?: (baseRepo: string, forkRepo: string) => void;
   }
 
   let {
@@ -49,6 +53,8 @@
     initialPrNumber = $bindable(null),
     initialBranchName = $bindable(null),
     onSelect,
+    onRepoChange,
+    onBaseRepoSwitch,
   }: Props = $props();
 
   let pullRequests = $state<PullRequest[]>([]);
@@ -59,22 +65,35 @@
   let inputEl: HTMLInputElement | undefined = $state();
   /** Generation counter to discard stale async responses when repo changes rapidly. */
   let fetchGeneration = 0;
+  /** Repo slug whose data is already loaded — prevents redundant re-fetch after fork switch. */
+  let loadedRepo: string | null = null;
 
   // Fetch PRs and branches when repo changes
   $effect(() => {
-    if (repo) {
-      fetchData(repo);
+    const r = repo; // read `repo` to track it as a dependency
+    if (r) {
+      // Skip if we already loaded data for this repo (e.g. pre-fetched after fork detection).
+      if (r === loadedRepo && pullRequests.length > 0) return;
+      fetchData(r);
     } else {
       pullRequests = [];
       branches = [];
+      loadedRepo = null;
     }
   });
 
   async function fetchData(ghRepo: string) {
     const gen = ++fetchGeneration;
+    const prNum = initialPrNumber;
     loading = true;
 
     try {
+      // When we have an initialPrNumber, speculatively check if the repo is
+      // a fork in parallel with fetching PRs — saves a round-trip if the PR
+      // isn't found on this repo (common for pasted fork URLs).
+      const parentRepoPromise =
+        prNum != null ? commands.getParentRepo(ghRepo).catch(() => null) : null;
+
       const [prs, refs] = await Promise.all([
         commands.listPullRequests(ghRepo).catch(() => [] as PullRequest[]),
         commands.listGitBranches(ghRepo).catch(() => [] as BranchRef[]),
@@ -84,11 +103,11 @@
       if (gen !== fetchGeneration) return;
       pullRequests = prs;
       branches = refs;
+      loadedRepo = ghRepo;
 
       // Auto-select a PR if initialPrNumber was provided (e.g. from a pasted PR URL).
-      // Skip focusing the input — the user didn't interact with the picker directly.
-      if (initialPrNumber != null) {
-        const pr = prs.find((p) => p.number === initialPrNumber);
+      if (prNum != null && initialPrNumber === prNum) {
+        const pr = prs.find((p) => p.number === prNum);
         if (pr) {
           selectItem(
             {
@@ -99,8 +118,46 @@
             },
             { focus: false }
           );
+          initialPrNumber = null;
+        } else {
+          // PR not found — check the speculative parent repo result and
+          // pre-fetch PRs for the parent repo inline to avoid a second
+          // round-trip through the effect cycle.
+          const parentRepo = await parentRepoPromise;
+          if (gen !== fetchGeneration) return;
+          if (parentRepo && initialPrNumber === prNum) {
+            const [parentPrs, parentRefs] = await Promise.all([
+              commands.listPullRequests(parentRepo).catch(() => [] as PullRequest[]),
+              commands.listGitBranches(parentRepo).catch(() => [] as BranchRef[]),
+            ]);
+            if (gen !== fetchGeneration) return;
+
+            // Pre-populate data so the effect-triggered fetchData is skipped.
+            pullRequests = parentPrs;
+            branches = parentRefs;
+            loadedRepo = parentRepo;
+
+            // Signal the repo switch (triggers monorepo check, default branch, etc.)
+            onBaseRepoSwitch?.(parentRepo, ghRepo);
+
+            // Auto-select the PR from the parent repo's data.
+            const parentPr = parentPrs.find((p) => p.number === prNum);
+            if (parentPr) {
+              selectItem(
+                {
+                  kind: 'pr',
+                  label: `#${parentPr.number} ${parentPr.title}`,
+                  branchName: parentPr.headRef,
+                  detail: parentPr.headRef,
+                },
+                { focus: false }
+              );
+            }
+            initialPrNumber = null;
+          } else {
+            initialPrNumber = null;
+          }
         }
-        initialPrNumber = null;
       }
       // Auto-fill a branch name if initialBranchName was provided (e.g. from a pasted branch URL).
       // Skip focusing the input — the user didn't interact with the picker directly.
@@ -228,6 +285,10 @@
     // Update matched PR: set when selecting a PR item, clear for branches
     if (item.kind === 'pr') {
       matchedPr = pullRequests.find((pr) => pr.headRef === item.branchName) ?? null;
+      // For fork PRs, signal repo change so the displayed repo updates
+      if (matchedPr?.headRepo && matchedPr.headRepo !== repo) {
+        onRepoChange?.(matchedPr.headRepo);
+      }
     } else {
       matchedPr = null;
     }

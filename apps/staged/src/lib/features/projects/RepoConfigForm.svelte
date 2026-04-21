@@ -95,12 +95,21 @@
    *  refs/pull/<N>/head only exists on the base repo's clone. */
   let displayRepo = $state<string | null>(null);
 
-  /** True while resolving a PR from a pasted URL (fetching PRs, detecting forks). */
+  /** True while resolving a PR from a pasted URL (fetching PRs, detecting forks).
+   *  Set explicitly in handleRepoSelected; cleared explicitly when BranchPicker
+   *  finishes (pendingPrNumber transitions from non-null to null) or on cancel. */
   let resolvingPr = $state(false);
+  let prevPendingPrNumber: number | null = null;
 
-  // Clear resolvingPr once a PR is matched or the pending PR number is cleared.
+  // Clear resolvingPr when BranchPicker signals completion by nulling pendingPrNumber.
+  // This avoids the old derived approach where a stale matchedPr from a previous
+  // selection could prematurely clear the flag.
   $effect(() => {
-    if (matchedPr || pendingPrNumber == null) resolvingPr = false;
+    const cur = pendingPrNumber;
+    if (prevPendingPrNumber != null && cur == null) {
+      resolvingPr = false;
+    }
+    prevPendingPrNumber = cur;
   });
 
   onMount(async () => {
@@ -168,6 +177,7 @@
   function handleRepoSelected(selection: RepoSelection) {
     if (branchPickerTimer) clearTimeout(branchPickerTimer);
     showBranchPicker = false;
+    matchedPr = null;
     selectedRepo = selection.nameWithOwner;
     displayRepo = selection.nameWithOwner;
     subpath = selection.subpath ?? '';

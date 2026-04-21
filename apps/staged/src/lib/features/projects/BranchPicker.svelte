@@ -333,11 +333,12 @@
       // The branch might have a PR outside the top-50 list — look it up by head ref.
       if (repo) {
         const branchName = item.branchName;
+        const gen = fetchGeneration;
         commands
           .getPrForBranch(repo, branchName)
           .then((pr) => {
-            // Only apply if the user hasn't changed selection since we fired.
-            if (pr && value === branchName) {
+            // Only apply if the user hasn't changed selection or repo since we fired.
+            if (pr && value === branchName && gen === fetchGeneration) {
               if (!pullRequests.some((p) => p.number === pr.number)) {
                 pullRequests = [pr, ...pullRequests];
               }

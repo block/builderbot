@@ -446,12 +446,6 @@
   }
 
   .modal {
-    /* Modal height budget:
-       100vh - padding-top (12vh) - bottom breathing room (4vh).
-       --modal-chrome-height is the non-editor chrome inside the modal
-       (header, padding, buttons, gaps) — used by the editor to size itself. */
-    --modal-chrome-height: 200px;
-
     display: flex;
     flex-direction: column;
     width: 580px;
@@ -604,6 +598,8 @@
     display: flex;
     flex-direction: column;
     gap: 14px;
+    flex: 1;
+    min-height: 0;
   }
 
   .repo-info {
@@ -620,6 +616,8 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+    flex: 1;
+    min-height: 0;
   }
 
   .form-group :global(.hashtag-editor) {
@@ -632,8 +630,8 @@
     font-family: inherit;
     line-height: 1.5;
     resize: vertical;
+    flex: 1;
     min-height: 240px;
-    max-height: calc(100vh - 12vh - 4vh - var(--modal-chrome-height));
     overflow-y: auto;
     transition: border-color 0.15s;
   }

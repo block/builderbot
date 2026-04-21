@@ -582,6 +582,29 @@ pub fn get_pr_for_repo(github_repo: &str, pr_number: u64) -> Result<PullRequest,
     Ok(item.into())
 }
 
+/// Find the open PR (if any) whose head branch matches `branch_name`.
+pub fn get_pr_for_branch_for_repo(
+    github_repo: &str,
+    branch_name: &str,
+) -> Result<Option<PullRequest>, GitError> {
+    let output = run_gh_global(&[
+        "pr",
+        "list",
+        "-R",
+        github_repo,
+        "--head",
+        branch_name,
+        "--state=open",
+        "--limit=1",
+        "--json=number,title,author,baseRefName,headRefName,headRepository,isDraft,updatedAt",
+    ])?;
+
+    let items: Vec<GhPrListItem> =
+        serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
+
+    Ok(items.into_iter().next().map(Into::into))
+}
+
 /// List open pull requests for a repo using `-R owner/repo` (no local dir needed).
 pub fn list_pull_requests_for_repo(github_repo: &str) -> Result<Vec<PullRequest>, GitError> {
     let output = run_gh_global(&[

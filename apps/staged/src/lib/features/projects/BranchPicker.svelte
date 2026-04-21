@@ -205,13 +205,30 @@
                 { focus: false }
               );
             } else {
-              // Branch not in the list — just set the value (will show as "New branch")
+              // Branch not in the list — just set the value (will show as "New branch").
+              // Still check for an associated PR via --head lookup.
               value = branchNameToFind;
               onSelect?.({
                 kind: 'branch',
                 branchName: branchNameToFind,
                 label: branchNameToFind,
               });
+              if (ghRepo) {
+                commands
+                  .getPrForBranch(ghRepo, branchNameToFind)
+                  .then((pr) => {
+                    if (pr && value === branchNameToFind) {
+                      if (!pullRequests.some((p) => p.number === pr.number)) {
+                        pullRequests = [pr, ...pullRequests];
+                      }
+                      matchedPr = pr;
+                      if (pr.headRepo && pr.headRepo !== repo) {
+                        onRepoChange?.(pr.headRepo);
+                      }
+                    }
+                  })
+                  .catch(() => {});
+              }
             }
           }
           initialBranchName = null;
@@ -313,6 +330,27 @@
       }
     } else {
       matchedPr = null;
+      // The branch might have a PR outside the top-50 list — look it up by head ref.
+      if (repo) {
+        const branchName = item.branchName;
+        commands
+          .getPrForBranch(repo, branchName)
+          .then((pr) => {
+            // Only apply if the user hasn't changed selection since we fired.
+            if (pr && value === branchName) {
+              if (!pullRequests.some((p) => p.number === pr.number)) {
+                pullRequests = [pr, ...pullRequests];
+              }
+              matchedPr = pr;
+              if (pr.headRepo && pr.headRepo !== repo) {
+                onRepoChange?.(pr.headRepo);
+              }
+            }
+          })
+          .catch(() => {
+            /* no PR for this branch — that's fine */
+          });
+      }
     }
 
     // For PRs, pass the PR title (strip the "#123 " prefix); for branches, pass the branch name.

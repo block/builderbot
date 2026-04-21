@@ -810,6 +810,14 @@ export function getPrForRepo(githubRepo: string, prNumber: number): Promise<Pull
   return invoke('get_pr_for_repo', { githubRepo, prNumber });
 }
 
+/** Find the open PR (if any) whose head branch matches `branchName`. */
+export function getPrForBranch(
+  githubRepo: string,
+  branchName: string
+): Promise<PullRequest | null> {
+  return invoke('get_pr_for_branch', { githubRepo, branchName });
+}
+
 export function listPullRequests(githubRepo: string): Promise<PullRequest[]> {
   return invoke('list_pull_requests', { githubRepo });
 }

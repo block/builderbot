@@ -139,6 +139,20 @@ pub async fn get_pr_for_repo(
     .map_err(|e| e.to_string())?
 }
 
+/// Find the open PR (if any) whose head branch matches `branch_name`.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_pr_for_branch(
+    github_repo: String,
+    branch_name: String,
+) -> Result<Option<git::github::PullRequest>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git::github::get_pr_for_branch_for_repo(&github_repo, &branch_name)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// List open pull requests for a repository (via `-R owner/repo`).
 #[tauri::command(rename_all = "camelCase")]
 pub async fn list_pull_requests(

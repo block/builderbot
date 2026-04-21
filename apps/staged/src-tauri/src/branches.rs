@@ -885,7 +885,15 @@ fn create_and_link_worktree(
     // Reuse any existing worktree for this branch; otherwise create one.
     // Only consider worktrees within this project's directory to avoid
     // picking up stale worktrees from deleted projects.
-    let project_root = git::project_worktree_root_for(&branch.project_id).ok();
+    let project_root = git::project_worktree_root_for(&branch.project_id)
+        .inspect_err(|e| {
+            log::debug!(
+                "Could not determine worktree root for project '{}': {e}; \
+                 falling back to accepting any matching worktree",
+                branch.project_id
+            );
+        })
+        .ok();
     let project_root_ref = project_root.as_deref();
 
     // When a stale worktree from another project holds the branch name, pick

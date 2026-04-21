@@ -442,6 +442,9 @@ pub fn remote_branch_exists(repo: &Path, branch_name: &str) -> Result<bool, GitE
 ///
 /// Fetches into a named local ref (`refs/staged/pr/<N>`) instead of relying on
 /// `FETCH_HEAD`, which makes this safe for concurrent use across different PRs.
+/// The local ref is intentionally kept after use — refs are tiny and harmless
+/// to accumulate, and deleting them would race with concurrent callers fetching
+/// the same PR number.
 pub fn fetch_pr_head_sha(repo: &Path, pr_number: u64) -> Result<String, GitError> {
     let pr_ref = format!("refs/pull/{pr_number}/head");
     let local_ref = format!("refs/staged/pr/{pr_number}");
@@ -450,10 +453,6 @@ pub fn fetch_pr_head_sha(repo: &Path, pr_number: u64) -> Result<String, GitError
     let sha = cli::run(repo, &["rev-parse", &local_ref])?
         .trim()
         .to_string();
-    // Clean up the temporary local ref to avoid accumulating refs over time
-    if let Err(e) = cli::run(repo, &["update-ref", "-d", &local_ref]) {
-        log::warn!("failed to clean up temporary ref {local_ref}: {e}");
-    }
     Ok(sha)
 }
 

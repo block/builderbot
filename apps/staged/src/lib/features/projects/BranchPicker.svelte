@@ -78,7 +78,7 @@
   $effect(() => {
     const r = repo; // read `repo` to track it as a dependency
     if (r) {
-      if (r === loadedRepo && pullRequests.length > 0) return;
+      if (r === loadedRepo) return;
       fetchData(r);
     } else {
       // Repo cleared (e.g. cancel button) — discard any in-flight fetch
@@ -136,7 +136,7 @@
             commands.listPullRequests(parentRepo).catch(() => [] as PullRequest[]),
             commands.listGitBranches(parentRepo).catch(() => [] as BranchRef[]),
           ]);
-          if (gen !== fetchGeneration) return;
+          if (gen !== fetchGeneration || initialPrNumber !== prNum) return;
 
           pullRequests = parentPrs;
           branches = parentRefs;

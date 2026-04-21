@@ -56,7 +56,7 @@
 
   <div class="panel-body">
     <div class="field">
-      <label class="field-label">Auto start code reviews</label>
+      <span class="field-label">Auto start code reviews</span>
       <FormToggle options={autoReviewOptions} bind:value={autoReviewValue} />
       <p class="field-description">
         {#if autoReviewValue === 'after-changes'}

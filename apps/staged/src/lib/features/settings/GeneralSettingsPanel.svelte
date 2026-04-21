@@ -5,9 +5,31 @@
     getAvailableSyntaxThemes,
     selectSyntaxTheme,
     isLightTheme,
+    setAutoReviewMode,
+    type AutoReviewMode,
   } from './preferences.svelte';
+  import FormToggle from '../../shared/FormToggle.svelte';
 
   let searchQuery = $state('');
+
+  const autoReviewOptions: { value: AutoReviewMode; label: string }[] = [
+    { value: 'never', label: 'Never' },
+    { value: 'after-changes', label: 'After changes' },
+  ];
+
+  let autoReviewValue = $state(preferences.autoReviewMode);
+
+  // Sync from store on load
+  $effect(() => {
+    autoReviewValue = preferences.autoReviewMode;
+  });
+
+  // Persist when user changes
+  $effect(() => {
+    if (preferences.loaded && autoReviewValue !== preferences.autoReviewMode) {
+      setAutoReviewMode(autoReviewValue);
+    }
+  });
 
   let filteredThemes = $derived.by(() => {
     const themes = getAvailableSyntaxThemes();
@@ -28,11 +50,23 @@
         <Settings2 size={16} />
         General
       </h2>
-      <p>Appearance and display preferences.</p>
+      <p>General preferences.</p>
     </div>
   </div>
 
   <div class="panel-body">
+    <div class="field">
+      <label class="field-label">Auto start code reviews</label>
+      <FormToggle options={autoReviewOptions} bind:value={autoReviewValue} />
+      <p class="field-description">
+        {#if autoReviewValue === 'after-changes'}
+          A code review will automatically start after each commit session completes.
+        {:else}
+          Code reviews will only start when you manually request them.
+        {/if}
+      </p>
+    </div>
+
     <div class="field">
       <label class="field-label" for="theme-search">Theme</label>
       <input
@@ -112,12 +146,22 @@
     min-height: 0;
     overflow-y: auto;
     padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
   }
 
   .field {
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  .field-description {
+    margin: 0;
+    font-size: var(--size-xs);
+    color: var(--text-muted);
+    line-height: 1.4;
   }
 
   .field-label {

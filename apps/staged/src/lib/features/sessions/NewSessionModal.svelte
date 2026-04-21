@@ -393,7 +393,7 @@
             : isCommit
               ? 'Describe the change…'
               : notePlaceholder}
-          rows={isReview ? 4 : 12}
+          rows={12}
           disabled={starting}
           items={hashtagItems}
         />

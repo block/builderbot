@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { ArrowLeft, FolderGit2, Keyboard, Stethoscope } from 'lucide-svelte';
+  import { ArrowLeft, FolderGit2, Keyboard, Settings2, Stethoscope } from 'lucide-svelte';
   import { closeSettings, navigation } from '../layout/navigation.svelte';
   import ActionsSettingsPanel from './ActionsSettingsPanel.svelte';
   import DoctorSettingsPanel from './DoctorSettingsPanel.svelte';
+  import GeneralSettingsPanel from './GeneralSettingsPanel.svelte';
   import KeyboardSettingsPanel from './KeyboardSettingsPanel.svelte';
 
   let appVersion = $state(__APP_VERSION__);
@@ -39,6 +40,19 @@
   <div class="settings-body">
     <aside class="settings-nav" aria-label="Settings sections">
       <div class="settings-nav-list">
+        <button
+          class="nav-item"
+          class:active={navigation.settingsSection === 'general'}
+          onclick={() => (navigation.settingsSection = 'general')}
+        >
+          <div class="nav-main">
+            <Settings2 size={14} />
+            <div class="nav-text">
+              <span class="nav-name">General</span>
+              <span class="nav-meta">Theme and appearance</span>
+            </div>
+          </div>
+        </button>
         <button
           class="nav-item"
           class:active={navigation.settingsSection === 'repo'}
@@ -82,7 +96,9 @@
     </aside>
 
     <section class="settings-content">
-      {#if navigation.settingsSection === 'repo'}
+      {#if navigation.settingsSection === 'general'}
+        <GeneralSettingsPanel />
+      {:else if navigation.settingsSection === 'repo'}
         <ActionsSettingsPanel />
       {:else if navigation.settingsSection === 'keyboard'}
         <KeyboardSettingsPanel />

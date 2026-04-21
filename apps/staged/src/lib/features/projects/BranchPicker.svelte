@@ -107,6 +107,10 @@
         loadedRepo = ghRepo;
 
         if (directPr && initialPrNumber === prNum) {
+          // Prepend before selectItem so the PR is findable in pullRequests.
+          if (!prs.some((p) => p.number === directPr.number)) {
+            pullRequests = [directPr, ...prs];
+          }
           selectItem(
             {
               kind: 'pr',
@@ -116,10 +120,6 @@
             },
             { focus: false }
           );
-          // Add to pullRequests if not already present so the PR card shows.
-          if (!prs.some((p) => p.number === directPr.number)) {
-            pullRequests = [directPr, ...prs];
-          }
           initialPrNumber = null;
         } else if (parentRepo && initialPrNumber === prNum) {
           // PR not on this repo — try the parent (upstream) repo.
@@ -137,6 +137,10 @@
           onBaseRepoSwitch?.(parentRepo, ghRepo);
 
           if (parentPr) {
+            // Prepend before selectItem so the PR is findable in pullRequests.
+            if (!parentPrs.some((p) => p.number === parentPr.number)) {
+              pullRequests = [parentPr, ...parentPrs];
+            }
             selectItem(
               {
                 kind: 'pr',
@@ -146,9 +150,6 @@
               },
               { focus: false }
             );
-            if (!parentPrs.some((p) => p.number === parentPr.number)) {
-              pullRequests = [parentPr, ...parentPrs];
-            }
           }
           initialPrNumber = null;
         } else {

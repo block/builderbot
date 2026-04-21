@@ -68,14 +68,22 @@
   /** Repo slug whose data is already loaded — prevents redundant re-fetch after fork switch. */
   let loadedRepo: string | null = null;
 
-  // Fetch PRs and branches when repo changes
+  // Fetch PRs and branches when repo changes.
+  //
+  // The `loadedRepo` guard prevents an infinite re-fetch loop during fork
+  // detection: when `onBaseRepoSwitch` sets `selectedRepo = baseRepo` in the
+  // parent, this effect re-fires with the new repo value. But BranchPicker
+  // already set `loadedRepo = parentRepo` (which equals `baseRepo`) before
+  // invoking the callback, so `r === loadedRepo` short-circuits the fetch.
   $effect(() => {
     const r = repo; // read `repo` to track it as a dependency
     if (r) {
-      // Skip if we already loaded data for this repo (e.g. pre-fetched after fork detection).
       if (r === loadedRepo && pullRequests.length > 0) return;
       fetchData(r);
     } else {
+      // Repo cleared (e.g. cancel button) — discard any in-flight fetch
+      // results by bumping the generation counter alongside clearing state.
+      ++fetchGeneration;
       pullRequests = [];
       branches = [];
       loadedRepo = null;

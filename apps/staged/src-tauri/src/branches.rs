@@ -854,50 +854,20 @@ pub fn create_branch(
     Ok(to_branch_with_workdir(branch, None))
 }
 
-/// Create the git worktree for a local branch and record its workdir.
+/// Core worktree creation + DB linkage logic shared by [`setup_worktree`] and
+/// [`setup_worktree_sync`].
 ///
-/// Separated from `create_branch` so the frontend can dismiss the modal
-/// immediately and show a "Creating worktree…" spinner on the branch card
-/// while this runs in the background.
-#[tauri::command(rename_all = "camelCase")]
-pub async fn setup_worktree(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    branch_id: String,
-) -> Result<BranchWithWorkdir, String> {
-    let store = get_store(&store)?;
-
-    let branch = store
-        .get_branch(&branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-
-    let project = store
-        .get_project(&branch.project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
-
-    // Idempotent fast-path: if this branch already has a workdir, reuse it.
-    if let Some(existing) = store
-        .get_workdir_for_branch(&branch.id)
-        .map_err(|e| e.to_string())?
-    {
-        return Ok(to_branch_with_workdir(branch, Some(existing.path)));
-    }
-
-    // Ensure we have a local clone, then fetch the specific refs we need.
-    let repo_slug = resolve_branch_repo_slug(&store, &project, &branch)?;
-    let repo_path = git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?;
-    git::fetch_for_worktree(
-        &repo_path,
-        &repo_slug,
-        &branch.branch_name,
-        &branch.base_branch,
-    )
-    .map_err(|e| e.to_string())?;
-    let desired_worktree_path =
-        git::project_worktree_path_for(&branch.project_id, &repo_slug, &branch.branch_name)
-            .map_err(|e| e.to_string())?;
-
+/// Acquires the per-branch worktree lock, creates (or reuses) a git worktree,
+/// sets upstream tracking for PR branches, persists any branch-name changes,
+/// and links the workdir in the database.
+///
+/// Returns the worktree path as a string.
+fn create_and_link_worktree(
+    store: &Arc<Store>,
+    branch: &store::Branch,
+    repo_path: &std::path::Path,
+    desired_worktree_path: &std::path::Path,
+) -> Result<String, String> {
     // Serialize worktree creation per branch so that concurrent callers
     // (frontend `setup_worktree` vs backend `setup_worktree_sync`) do not race.
     let lock = worktree_setup_lock_for(&branch.id);
@@ -909,7 +879,7 @@ pub async fn setup_worktree(
         .get_workdir_for_branch(&branch.id)
         .map_err(|e| e.to_string())?
     {
-        return Ok(to_branch_with_workdir(branch, Some(existing.path)));
+        return Ok(existing.path);
     }
 
     // Reuse any existing worktree for this branch; otherwise create one.
@@ -922,9 +892,9 @@ pub async fn setup_worktree(
     // a unique local branch name so we don't collide.
     let mut local_branch_name = branch.branch_name.clone();
     let existing_worktree =
-        find_existing_worktree_for_branch(&repo_path, &branch.branch_name, project_root_ref)?;
+        find_existing_worktree_for_branch(repo_path, &branch.branch_name, project_root_ref)?;
     if let ExistingWorktree::Stale = &existing_worktree {
-        local_branch_name = unique_branch_name(&repo_path, &branch.branch_name)?;
+        local_branch_name = unique_branch_name(repo_path, &branch.branch_name)?;
         log::info!(
             "Branch '{}' is checked out in a stale worktree; using '{}' instead",
             branch.branch_name,
@@ -935,12 +905,12 @@ pub async fn setup_worktree(
     let worktree_path = if let ExistingWorktree::Found(path) = existing_worktree {
         path
     } else if local_branch_name == branch.branch_name
-        && git::branch_exists(&repo_path, &local_branch_name).map_err(|e| e.to_string())?
+        && git::branch_exists(repo_path, &local_branch_name).map_err(|e| e.to_string())?
     {
         create_worktree_for_existing_branch_with_fallback(
-            &repo_path,
+            repo_path,
             &local_branch_name,
-            &desired_worktree_path,
+            desired_worktree_path,
             project_root_ref,
         )
         .map_err(|e| e.to_string())?
@@ -952,9 +922,9 @@ pub async fn setup_worktree(
         let remote_ref = format!("origin/{}", branch.branch_name);
         let pr_head_sha;
         let start_point = if let Some(pr_num) = branch.pr_number {
-            pr_head_sha = git::fetch_pr_head_sha(&repo_path, pr_num).map_err(|e| e.to_string())?;
+            pr_head_sha = git::fetch_pr_head_sha(repo_path, pr_num).map_err(|e| e.to_string())?;
             &pr_head_sha
-        } else if git::remote_branch_exists(&repo_path, &branch.branch_name)
+        } else if git::remote_branch_exists(repo_path, &branch.branch_name)
             .map_err(|e| e.to_string())?
         {
             &remote_ref
@@ -962,16 +932,16 @@ pub async fn setup_worktree(
             &branch.base_branch
         };
         match create_worktree_with_fallback(
-            &repo_path,
+            repo_path,
             &local_branch_name,
             start_point,
-            &desired_worktree_path,
+            desired_worktree_path,
             project_root_ref,
         ) {
             Ok(path) => path,
             Err(create_err) => {
                 if let ExistingWorktree::Found(path) = find_existing_worktree_for_branch(
-                    &repo_path,
+                    repo_path,
                     &local_branch_name,
                     project_root_ref,
                 )? {
@@ -981,18 +951,17 @@ pub async fn setup_worktree(
                         local_branch_name
                     );
                     path
-                } else if git::branch_exists(&repo_path, &local_branch_name)
+                } else if git::branch_exists(repo_path, &local_branch_name)
                     .map_err(|e| e.to_string())?
                 {
                     log::warn!(
-                        "Branch '{}' already exists after create attempt; retrying with existing branch in repo '{}'",
-                        local_branch_name,
-                        repo_slug
+                        "Branch '{}' already exists after create attempt; retrying with existing branch",
+                        local_branch_name
                     );
                     create_worktree_for_existing_branch_with_fallback(
-                        &repo_path,
+                        repo_path,
                         &local_branch_name,
-                        &desired_worktree_path,
+                        desired_worktree_path,
                         project_root_ref,
                     )
                     .map_err(|e| e.to_string())?
@@ -1008,7 +977,7 @@ pub async fn setup_worktree(
     // (same-repo PRs). Fork PRs won't have a matching remote branch, so this
     // is a best-effort no-op for them.
     if branch.pr_number.is_some() {
-        let _ = git::set_upstream_to_origin(&repo_path, &local_branch_name, &branch.branch_name);
+        let _ = git::set_upstream_to_origin(repo_path, &local_branch_name, &branch.branch_name);
     }
 
     // If we picked a different local branch name, persist it.
@@ -1058,6 +1027,56 @@ pub async fn setup_worktree(
     }
 
     // _guard dropped here, releasing the per-branch lock.
+    Ok(worktree_str)
+}
+
+/// Create the git worktree for a local branch and record its workdir.
+///
+/// Separated from `create_branch` so the frontend can dismiss the modal
+/// immediately and show a "Creating worktree…" spinner on the branch card
+/// while this runs in the background.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn setup_worktree(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<BranchWithWorkdir, String> {
+    let store = get_store(&store)?;
+
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
+    // Idempotent fast-path: if this branch already has a workdir, reuse it.
+    if let Some(existing) = store
+        .get_workdir_for_branch(&branch.id)
+        .map_err(|e| e.to_string())?
+    {
+        return Ok(to_branch_with_workdir(branch, Some(existing.path)));
+    }
+
+    // Ensure we have a local clone, then fetch the specific refs we need.
+    let repo_slug = resolve_branch_repo_slug(&store, &project, &branch)?;
+    let repo_path = git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?;
+    git::fetch_for_worktree(
+        &repo_path,
+        &repo_slug,
+        &branch.branch_name,
+        &branch.base_branch,
+    )
+    .map_err(|e| e.to_string())?;
+    let desired_worktree_path =
+        git::project_worktree_path_for(&branch.project_id, &repo_slug, &branch.branch_name)
+            .map_err(|e| e.to_string())?;
+
+    let worktree_str =
+        create_and_link_worktree(&store, &branch, &repo_path, &desired_worktree_path)?;
+
     Ok(to_branch_with_workdir(branch, Some(worktree_str)))
 }
 
@@ -2166,8 +2185,10 @@ fn parse_git_progress_line(line: &str) -> Option<(String, u32)> {
 
 /// Set up a git worktree for a branch synchronously.
 ///
-/// This replicates the core logic from `branches::setup_worktree` without
-/// requiring Tauri state, so it can be called from the MCP server.
+/// Like [`setup_worktree`] but callable without Tauri state (e.g. from the
+/// MCP server). Handles cloning with optional progress reporting, then
+/// delegates to [`create_and_link_worktree`] for worktree creation and DB
+/// linkage.
 pub(crate) fn setup_worktree_sync(
     store: &Arc<Store>,
     branch_id: &str,
@@ -2244,166 +2265,10 @@ pub(crate) fn setup_worktree_sync(
         crate::git::project_worktree_path_for(&branch.project_id, &repo_slug, &branch.branch_name)
             .map_err(|e| e.to_string())?;
 
-    // Serialize worktree creation per branch so that concurrent callers
-    // (frontend `setup_worktree` vs backend `setup_worktree_sync`) do not race.
-    let lock = worktree_setup_lock_for(&branch.id);
-    let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
-
-    // Re-check the DB fast-path under the lock — the other caller may have
-    // finished while we were waiting.
-    if let Some(existing) = store
-        .get_workdir_for_branch(&branch.id)
-        .map_err(|e| e.to_string())?
-    {
-        return Ok(existing.path);
-    }
-
     emit_progress("creating_worktree", None);
-    // Reuse any existing worktree for this branch; otherwise create one.
-    // Only consider worktrees within this project's directory to avoid
-    // picking up stale worktrees from deleted projects.
-    let project_root = crate::git::project_worktree_root_for(&branch.project_id).ok();
-    let project_root_ref = project_root.as_deref();
+    let worktree_str =
+        create_and_link_worktree(store, &branch, &repo_path, &desired_worktree_path)?;
 
-    // When a stale worktree from another project holds the branch name, pick
-    // a unique local branch name so we don't collide.
-    let mut local_branch_name = branch.branch_name.clone();
-    let existing_worktree =
-        find_existing_worktree_for_branch(&repo_path, &branch.branch_name, project_root_ref)?;
-    if let ExistingWorktree::Stale = &existing_worktree {
-        local_branch_name = unique_branch_name(&repo_path, &branch.branch_name)?;
-        log::info!(
-            "Branch '{}' is checked out in a stale worktree; using '{}' instead",
-            branch.branch_name,
-            local_branch_name,
-        );
-    }
-
-    let worktree_path = if let ExistingWorktree::Found(path) = existing_worktree {
-        path
-    } else if local_branch_name == branch.branch_name
-        && crate::git::branch_exists(&repo_path, &local_branch_name).map_err(|e| e.to_string())?
-    {
-        create_worktree_for_existing_branch_with_fallback(
-            &repo_path,
-            &local_branch_name,
-            &desired_worktree_path,
-            project_root_ref,
-        )?
-    } else {
-        // For PRs, always start from `refs/pull/<N>/head` — the branch
-        // name on origin may belong to a different branch when the PR
-        // comes from a fork repo.  For non-PR branches, fall back to the
-        // remote tracking ref or base_branch.
-        let remote_ref = format!("origin/{}", branch.branch_name);
-        let pr_head_sha;
-        let start_point = if let Some(pr_num) = branch.pr_number {
-            pr_head_sha =
-                crate::git::fetch_pr_head_sha(&repo_path, pr_num).map_err(|e| e.to_string())?;
-            &pr_head_sha
-        } else if crate::git::remote_branch_exists(&repo_path, &branch.branch_name)
-            .map_err(|e| e.to_string())?
-        {
-            &remote_ref
-        } else {
-            &branch.base_branch
-        };
-        match create_worktree_with_fallback(
-            &repo_path,
-            &local_branch_name,
-            start_point,
-            &desired_worktree_path,
-            project_root_ref,
-        ) {
-            Ok(path) => path,
-            Err(create_err) => {
-                if let ExistingWorktree::Found(path) = find_existing_worktree_for_branch(
-                    &repo_path,
-                    &local_branch_name,
-                    project_root_ref,
-                )? {
-                    log::warn!(
-                        "[setup_worktree_sync] Reusing existing worktree '{}' for branch '{}' after create failure",
-                        path.display(),
-                        local_branch_name
-                    );
-                    path
-                } else if crate::git::branch_exists(&repo_path, &local_branch_name)
-                    .map_err(|e| e.to_string())?
-                {
-                    log::warn!(
-                        "[setup_worktree_sync] Branch '{}' already exists after create attempt; retrying with existing branch",
-                        local_branch_name
-                    );
-                    create_worktree_for_existing_branch_with_fallback(
-                        &repo_path,
-                        &local_branch_name,
-                        &desired_worktree_path,
-                        project_root_ref,
-                    )?
-                } else {
-                    return Err(create_err);
-                }
-            }
-        }
-    };
-
-    // For PR branches created from a SHA, git won't have set upstream tracking
-    // automatically. Set it to origin/<branch_name> if the remote branch exists
-    // (same-repo PRs). Fork PRs won't have a matching remote branch, so this
-    // is a best-effort no-op for them.
-    if branch.pr_number.is_some() {
-        let _ =
-            crate::git::set_upstream_to_origin(&repo_path, &local_branch_name, &branch.branch_name);
-    }
-
-    // If we picked a different local branch name, persist it.
-    if local_branch_name != branch.branch_name {
-        store
-            .update_branch_name(&branch.id, &local_branch_name)
-            .map_err(|e| e.to_string())?;
-        if let Some(repo_id) = &branch.project_repo_id {
-            store
-                .update_project_repo_branch_name(&branch.project_id, repo_id, &local_branch_name)
-                .map_err(|e| e.to_string())?;
-        }
-    }
-
-    let worktree_str = worktree_path
-        .to_str()
-        .ok_or("Invalid worktree path")?
-        .to_string();
-
-    // Link this path to the branch in DB (create or assign existing record).
-    let tracked_workdir = store
-        .list_workdirs_for_project(&branch.project_id)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .find(|wd| wd.path == worktree_str);
-
-    match tracked_workdir {
-        Some(wd) => match wd.branch_id.as_deref() {
-            Some(existing_branch_id) if existing_branch_id != branch.id => {
-                return Err(format!(
-                    "Worktree '{}' is already assigned to another branch",
-                    wd.path
-                ));
-            }
-            Some(_) => {}
-            None => {
-                store
-                    .assign_workdir(&wd.id, &branch.id)
-                    .map_err(|e| e.to_string())?;
-            }
-        },
-        None => {
-            let workdir = crate::store::Workdir::new(&branch.project_id, &worktree_str)
-                .with_branch(&branch.id);
-            store.create_workdir(&workdir).map_err(|e| e.to_string())?;
-        }
-    }
-
-    // _guard dropped here, releasing the per-branch lock.
     Ok(worktree_str)
 }
 

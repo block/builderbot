@@ -446,6 +446,12 @@
   }
 
   .modal {
+    /* Modal height budget:
+       100vh - padding-top (12vh) - bottom breathing room (4vh).
+       --modal-chrome-height is the non-editor chrome inside the modal
+       (header, padding, buttons, gaps) — used by the editor to size itself. */
+    --modal-chrome-height: 200px;
+
     display: flex;
     flex-direction: column;
     width: 580px;
@@ -627,7 +633,7 @@
     line-height: 1.5;
     resize: vertical;
     min-height: 240px;
-    max-height: calc(100vh - 12vh - 4vh - 200px);
+    max-height: calc(100vh - 12vh - 4vh - var(--modal-chrome-height));
     overflow-y: auto;
     transition: border-color 0.15s;
   }

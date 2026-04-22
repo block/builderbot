@@ -464,9 +464,13 @@
   // on remount (e.g. project switch). This prevents the "Looking for changes…"
   // flash and the slide-in animation for already-cached rows.
   {
+    // svelte-ignore state_referenced_locally
     const initIsLocal = isLocal;
+    // svelte-ignore state_referenced_locally
     const initIsRemote = isRemote;
+    // svelte-ignore state_referenced_locally
     const initBranch = branch;
+    // svelte-ignore state_referenced_locally
     const initRemoteWorkspaceStatus = remoteWorkspaceStatus;
     untrack(() => {
       const ready = initIsLocal

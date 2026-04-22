@@ -318,18 +318,15 @@ export function refreshNow(projectId: string): void {
     )
     .finally(() => {
       refreshInFlight = false;
-      // Drain all queued immediate-refresh requests before rescheduling.
+      // Drain queued immediate-refresh requests one at a time.
       if (pendingRefreshProjectIds.size > 0) {
         const queued = [...pendingRefreshProjectIds];
         pendingRefreshProjectIds.clear();
-        // Refresh each queued project sequentially via the same path
-        // (the first call sets refreshInFlight, subsequent ones queue again).
-        for (const queuedId of queued) {
-          refreshNow(queuedId);
-          // Only the first call will actually run — the rest re-queue
-          // because refreshInFlight is set by the first call. This is
-          // correct: they'll drain on the next finally cycle.
+        // Re-queue all but the first; they'll drain on the next finally cycle.
+        for (let i = 1; i < queued.length; i++) {
+          pendingRefreshProjectIds.add(queued[i]);
         }
+        refreshNow(queued[0]);
       } else {
         scheduleNext();
       }

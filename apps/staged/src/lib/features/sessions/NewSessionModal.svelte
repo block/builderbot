@@ -644,9 +644,7 @@
     font-size: var(--size-sm);
     font-family: inherit;
     line-height: 1.5;
-    resize: vertical;
     flex: 1;
-    min-height: 240px;
     overflow-y: auto;
     transition: border-color 0.15s;
   }

@@ -41,6 +41,7 @@
   import RemoteWorkspaceStatusView from './RemoteWorkspaceStatusView.svelte';
   import { alerts } from '../../shared/alerts.svelte';
   import { timelineToHashtagItems, projectNotesToHashtagItems } from '../sessions/hashtagItems';
+  import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
 
   interface Props {
     branch: Branch;
@@ -707,6 +708,9 @@
           }
         }
         await commands.deleteNote(noteId, !!sessionId);
+        if (sessionId) {
+          sessionRegistry.cleanupSession(sessionId);
+        }
         loadTimeline();
         // Drain the next queued session now that this one has been removed.
         commands
@@ -742,6 +746,9 @@
           }
         }
         await commands.deleteReview(reviewId, !!sessionId);
+        if (sessionId) {
+          sessionRegistry.cleanupSession(sessionId);
+        }
         loadTimeline();
         // Drain the next queued session now that this one has been removed.
         commands
@@ -776,6 +783,9 @@
         }
       }
       await commands.deletePendingCommit(commitId, !!sessionId);
+      if (sessionId) {
+        sessionRegistry.cleanupSession(sessionId);
+      }
       await loadTimeline();
       // Drain the next queued session now that this one has been removed.
       commands

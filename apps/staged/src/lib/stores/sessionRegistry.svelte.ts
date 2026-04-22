@@ -17,6 +17,8 @@
  * But they delegate session metadata tracking to this central registry.
  */
 
+import { projectStateStore } from './projectState.svelte';
+
 export type SessionType = 'commit' | 'pr' | 'push' | 'note' | 'review' | 'other';
 
 interface SessionMetadata {
@@ -131,6 +133,21 @@ class SessionRegistry {
   unregister(sessionId: string): void {
     this.sessions.delete(sessionId);
     this.version++;
+  }
+
+  /**
+   * Clean up a session's running state from projectStateStore and unregister it.
+   *
+   * This is the symmetric counterpart to register() — it removes the session
+   * from both the project-level running session tracking and this registry.
+   * Idempotent: safe to call even if the session is already gone.
+   */
+  cleanupSession(sessionId: string): void {
+    const projectId = this.getProjectId(sessionId);
+    if (projectId) {
+      projectStateStore.removeRunningSession(projectId, sessionId);
+    }
+    this.unregister(sessionId);
   }
 
   /**

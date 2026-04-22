@@ -741,6 +741,22 @@ pub async fn start_branch_session(
     }
     store.create_session(&session).map_err(|e| e.to_string())?;
 
+    // Emit a "running" event so the frontend can register the session in its
+    // state stores (project list spinner, unread badges, etc.) regardless of
+    // which UI surface started the session.
+    let session_type_str = match session_type {
+        BranchSessionType::Commit => "commit",
+        BranchSessionType::Note => "note",
+        BranchSessionType::Review => "review",
+    };
+    session_runner::emit_session_running(
+        &app_handle,
+        &session.id,
+        &branch_id,
+        &branch.project_id,
+        session_type_str,
+    );
+
     // Create artifact stub and compute pre-head SHA
     let (artifact_id, pre_head_sha) = match session_type {
         BranchSessionType::Note => {

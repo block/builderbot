@@ -214,22 +214,28 @@
     return () => clearInterval(interval);
   });
 
-  // Subscribe to stale-data notifications from the polling service
-  let unsubStale: (() => void) | null = null;
+  // Subscribe to stale-data notifications from the polling service.
+  // Using $effect with cleanup so the subscription is immune to double-mount
+  // (e.g. HMR, keyed re-render) and automatically tracks branch.projectId.
+  $effect(() => {
+    const projectId = branch.projectId;
+    const unsub = prPollingService.onStale((staleProjectId, isStale) => {
+      if (staleProjectId === projectId) {
+        prStatusStale = isStale;
+      }
+    });
+    return () => unsub();
+  });
 
   onMount(() => {
     window.addEventListener('keydown', handleOptionDown);
     window.addEventListener('keyup', handleOptionUp);
 
-    unsubStale = prPollingService.onStale((projectId, isStale) => {
-      if (projectId === branch.projectId) {
-        prStatusStale = isStale;
-      }
-    });
-
     // PR recovery: if the branch has been pushed but has no PR number,
     // check GitHub for an existing open PR on this branch name.
-    if (!branch.prNumber && isRemote) {
+    // The shouldAttemptRecovery guard prevents N concurrent `gh pr view`
+    // CLI calls when many components mount simultaneously.
+    if (!branch.prNumber && isRemote && prPollingService.shouldAttemptRecovery(branch.id)) {
       commands
         .recoverBranchPr(branch.id)
         .then((prNumber) => {
@@ -247,7 +253,6 @@
   onDestroy(() => {
     window.removeEventListener('keydown', handleOptionDown);
     window.removeEventListener('keyup', handleOptionUp);
-    unsubStale?.();
   });
 
   // =========================================================================

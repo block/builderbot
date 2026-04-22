@@ -52,6 +52,9 @@ let refreshInFlight = false;
 let windowFocused = true;
 let listenersAttached = false;
 
+/** Project ID queued for immediate refresh while another refresh is in-flight. */
+let pendingRefreshProjectId: string | null = null;
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -85,7 +88,9 @@ function getProjectsDue(): string[] {
 
 async function poll() {
   if (refreshInFlight || !windowFocused || allProjectIds.size === 0) {
-    scheduleNext();
+    // Don't reschedule here — the in-flight operation's `finally` block
+    // already calls scheduleNext(), and the other two cases (unfocused /
+    // empty) intentionally have no timer running.
     return;
   }
 
@@ -109,7 +114,7 @@ async function poll() {
         `[PrPollingService] refreshAllPrStatuses failed for project=${projectId} (attempt ${count}):`,
         e
       );
-      if (count >= MAX_CONSECUTIVE_FAILURES) {
+      if (count === MAX_CONSECUTIVE_FAILURES) {
         notifyStale(projectId, true);
       }
     }
@@ -190,6 +195,11 @@ function removeWindowListeners() {
 export function setProjects(projectIds: string[]): void {
   const newIds = new Set(projectIds);
 
+  // Short-circuit if the set of project IDs hasn't changed
+  if (newIds.size === allProjectIds.size && projectIds.every((id) => allProjectIds.has(id))) {
+    return;
+  }
+
   // Remove projects no longer in the list
   for (const id of allProjectIds) {
     if (!newIds.has(id)) {
@@ -257,9 +267,30 @@ export function onStale(callback: StaleCallback): () => void {
   return () => staleCallbacks.delete(callback);
 }
 
+// ---------------------------------------------------------------------------
+// PR recovery coordination
+// ---------------------------------------------------------------------------
+
+/** Branch IDs for which recovery has already been attempted (or is in progress). */
+const recoveryAttempted = new Set<string>();
+
+/**
+ * Guard for PR recovery: returns true if recovery should proceed for this
+ * branch, false if it has already been attempted or is in progress.
+ * Prevents N concurrent `gh pr view` CLI calls when many BranchCardPrButton
+ * components mount simultaneously for branches without PR numbers.
+ */
+export function shouldAttemptRecovery(branchId: string): boolean {
+  if (recoveryAttempted.has(branchId)) return false;
+  recoveryAttempted.add(branchId);
+  return true;
+}
+
 /** Trigger an immediate refresh for a specific project (e.g. after PR creation or push). */
 export function refreshNow(projectId: string): void {
   if (refreshInFlight) {
+    // Queue so the project is refreshed as soon as the current operation finishes.
+    pendingRefreshProjectId = projectId;
     return;
   }
   refreshInFlight = true;
@@ -278,6 +309,13 @@ export function refreshNow(projectId: string): void {
     )
     .finally(() => {
       refreshInFlight = false;
-      scheduleNext();
+      // Drain any queued immediate-refresh request before rescheduling.
+      const queued = pendingRefreshProjectId;
+      pendingRefreshProjectId = null;
+      if (queued) {
+        refreshNow(queued);
+      } else {
+        scheduleNext();
+      }
     });
 }

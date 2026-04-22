@@ -431,7 +431,7 @@
    */
   function applyCachedTimeline(
     cached: BranchTimelineData,
-    fresh: Promise<BranchTimelineData> | undefined
+    fresh: Promise<BranchTimelineData> | null
   ) {
     timeline = cached;
     loading = false;
@@ -463,7 +463,7 @@
   // Synchronously hydrate timeline from cache so isSettingUp is never true
   // on remount (e.g. project switch). This prevents the "Looking for changes…"
   // flash and the slide-in animation for already-cached rows.
-  {
+  untrack(() => {
     const ready = isLocal ? !!branch.worktreePath : remoteWorkspaceStatus === 'running';
     if (ready) {
       const key = isRemote ? `${branch.id}:<remote>` : `${branch.id}:${branch.worktreePath}`;
@@ -473,7 +473,7 @@
         applyCachedTimeline(cached, fresh);
       }
     }
-  }
+  });
 
   /** Number of finalized commits on this branch. */
   let commitCount = $derived(timeline?.commits.filter((c) => c.sha).length ?? 0);

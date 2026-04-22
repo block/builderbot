@@ -66,7 +66,7 @@
   } from './hashtagItems';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import { subscribeDragDrop } from '../branches/dragDrop';
-  import { isImageFile } from '../branches/branchCardHelpers';
+  import { isImageFile, isMaybeTextFile } from '../branches/branchCardHelpers';
   import {
     formatToolDisplay,
     groupByVerb,
@@ -266,13 +266,7 @@
   async function handleFileDrop(paths: string[]) {
     if (!projectId) return;
     const imagePaths = paths.filter((p) => isImageFile(p));
-    const otherPaths = paths.filter((p) => !isImageFile(p));
-
-    if (otherPaths.length > 0) {
-      const insertion = otherPaths.join('\n');
-      inputText = inputText ? inputText + '\n' + insertion : insertion;
-    }
-
+    const textPaths = paths.filter((p) => isMaybeTextFile(p));
     const bid = branchId ?? null;
     const pid = projectId;
     const newIds: string[] = [];
@@ -286,6 +280,11 @@
     }
     if (newIds.length > 0) {
       replyImageIds = [...replyImageIds, ...newIds];
+    }
+    if (textPaths.length > 0 && inputEl) {
+      const insert = textPaths.map((p) => p).join('\n');
+      inputEl.focus();
+      document.execCommand('insertText', false, insert);
     }
   }
 

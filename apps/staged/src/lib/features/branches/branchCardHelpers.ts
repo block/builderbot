@@ -1,6 +1,18 @@
 import type { ProjectAction } from '../../api/commands';
 
-const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
+const IMAGE_EXTENSIONS = [
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.svg',
+  '.bmp',
+  '.tiff',
+  '.ico',
+  '.heic',
+  '.avif',
+];
 
 export function groupActionsByType(actions: ProjectAction[]): Record<string, ProjectAction[]> {
   const groups: Record<string, ProjectAction[]> = {
@@ -125,6 +137,10 @@ export function isPushRejectedNonFastForward(
 export function isImageFile(filePath: string): boolean {
   const lower = filePath.toLowerCase();
   return IMAGE_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+export function isMaybeTextFile(filePath: string): boolean {
+  return !isImageFile(filePath);
 }
 
 export function fileNameFromPath(filePath: string): string {

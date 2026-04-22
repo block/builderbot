@@ -144,6 +144,7 @@
     line-height: 1.5;
     resize: none;
     overflow-y: auto;
+    user-select: text;
   }
 
   .comment-textarea:focus {

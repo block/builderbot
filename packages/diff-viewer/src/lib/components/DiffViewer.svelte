@@ -1656,6 +1656,10 @@
   // ==========================================================================
 
   function handleCopy(event: ClipboardEvent) {
+    // Don't intercept copy from form elements (e.g. comment textareas)
+    const target = document.activeElement;
+    if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) return;
+
     if (selectedLineRange) {
       event.preventDefault();
       const pane = selectedLineRange.pane === 'before' ? beforePane : afterPane;

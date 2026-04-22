@@ -393,15 +393,18 @@ pub fn start_session(
             )
             .unwrap_or(false);
 
-        if transitioned {
-            emit_status(
-                &app_handle,
-                &session_id_for_status,
-                new_status,
-                error_msg,
-                Some(&completion_reason),
-            );
+        // Always emit the terminal status event, even if the DB row was already
+        // deleted (e.g. user deleted the pending commit). This lets the frontend
+        // clean up sidebar "running" state as a safety net.
+        emit_status(
+            &app_handle,
+            &session_id_for_status,
+            new_status,
+            error_msg,
+            Some(&completion_reason),
+        );
 
+        if transitioned {
             let branch_id = store_for_status
                 .get_branch_id_for_session(&session_id_for_status)
                 .ok()
@@ -509,15 +512,14 @@ pub fn recover_dead_sessions(
                     Some(&CompletionReason::AppQuit),
                 )
                 .unwrap_or(false);
+            emit_status(
+                &app_handle,
+                &session.id,
+                "error",
+                None,
+                Some(&CompletionReason::AppQuit),
+            );
             if transitioned {
-                emit_status(
-                    &app_handle,
-                    &session.id,
-                    "error",
-                    None,
-                    Some(&CompletionReason::AppQuit),
-                );
-
                 let branch_id = store.get_branch_id_for_session(&session.id).ok().flatten();
                 if let Some(branch_id) = branch_id {
                     let store_for_follow_up = Arc::clone(&store);

@@ -434,7 +434,7 @@
     isLocalVal: boolean,
     isRemoteVal: boolean,
     worktreePath: string | undefined | null,
-    remoteStatus: string | undefined
+    remoteStatus: string | null | undefined
   ): string | null {
     if (isLocalVal && !worktreePath) return null;
     if (!isLocalVal && (!isRemoteVal || remoteStatus !== 'running')) return null;

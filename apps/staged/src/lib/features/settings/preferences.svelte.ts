@@ -14,13 +14,15 @@ import {
   setSyntaxTheme,
   getTheme,
   isLightTheme,
+  loadAllThemePreviewColors,
   type SyntaxThemeName,
+  type ThemePreviewColors,
 } from '../diff/highlighter';
 import { initPersistentStore, getStoreValue, setStoreValue } from '../../shared/persistentStore';
 import { createAdaptiveTheme, themeToVarMap } from '../../theme';
 
 // Re-export for convenience
-export { isLightTheme };
+export { isLightTheme, loadAllThemePreviewColors, type ThemePreviewColors };
 
 // =============================================================================
 // Constants

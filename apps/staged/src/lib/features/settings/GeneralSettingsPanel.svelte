@@ -1,11 +1,14 @@
 <script lang="ts">
-  import { Settings2, Info } from 'lucide-svelte';
+  import { onMount } from 'svelte';
+  import { Settings2, Info, Check } from 'lucide-svelte';
   import {
     preferences,
     getAvailableSyntaxThemes,
     selectSyntaxTheme,
     setAutoReviewMode,
+    loadAllThemePreviewColors,
     type AutoReviewMode,
+    type ThemePreviewColors,
   } from './preferences.svelte';
 
   const autoReviewOptions: { value: AutoReviewMode; label: string }[] = [
@@ -15,14 +18,21 @@
 
   const themes = $derived(getAvailableSyntaxThemes());
 
+  let previewColors = $state<Map<string, ThemePreviewColors>>(new Map());
+
+  onMount(() => {
+    loadAllThemePreviewColors().then((colors) => {
+      previewColors = colors;
+    });
+  });
+
   function handleAutoReviewChange(e: Event) {
     const select = e.target as HTMLSelectElement;
     setAutoReviewMode(select.value as AutoReviewMode);
   }
 
-  function handleThemeChange(e: Event) {
-    const select = e.target as HTMLSelectElement;
-    selectSyntaxTheme(select.value);
+  function handleThemeSelect(name: string) {
+    selectSyntaxTheme(name);
   }
 </script>
 
@@ -61,17 +71,34 @@
     </div>
 
     <div class="field">
-      <label class="field-label" for="theme-select">Theme</label>
-      <select
-        id="theme-select"
-        class="theme-select"
-        value={preferences.syntaxTheme}
-        onchange={handleThemeChange}
-      >
+      <span class="field-label">Theme</span>
+      <div class="theme-list">
         {#each themes as theme (theme.name)}
-          <option value={theme.name}>{theme.name}</option>
+          {@const colors = previewColors.get(theme.name)}
+          {@const isActive = preferences.syntaxTheme === theme.name}
+          <button
+            class="theme-swatch"
+            class:active={isActive}
+            style:background={colors?.bg ?? 'var(--bg-primary)'}
+            style:border-color={isActive
+              ? (colors?.comment ?? 'var(--border-emphasis)')
+              : 'transparent'}
+            onclick={() => handleThemeSelect(theme.name)}
+          >
+            <span class="swatch-name" style:color={colors?.fg ?? 'var(--text-primary)'}
+              >{theme.name}</span
+            >
+            <span class="swatch-comment" style:color={colors?.comment ?? 'var(--text-muted)'}
+              >// preview</span
+            >
+            {#if isActive}
+              <span class="swatch-check" style:color={colors?.comment ?? 'var(--text-muted)'}>
+                <Check size={14} />
+              </span>
+            {/if}
+          </button>
         {/each}
-      </select>
+      </div>
     </div>
   </div>
 </div>
@@ -166,5 +193,51 @@
     outline: none;
     border-color: var(--border-emphasis);
     background-color: var(--bg-hover);
+  }
+
+  .theme-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-width: 360px;
+  }
+
+  .theme-swatch {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border: 1.5px solid transparent;
+    border-radius: 5px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: border-color 0.1s;
+  }
+
+  .theme-swatch:hover {
+    filter: brightness(1.08);
+  }
+
+  .theme-swatch.active {
+    border-style: solid;
+  }
+
+  .swatch-name {
+    font-size: var(--size-xs);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .swatch-comment {
+    font-size: var(--size-xs);
+    opacity: 0.8;
+    white-space: nowrap;
+    margin-left: auto;
+  }
+
+  .swatch-check {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
   }
 </style>

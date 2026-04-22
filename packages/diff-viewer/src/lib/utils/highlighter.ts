@@ -699,6 +699,62 @@ function extractGitColors(colors: Record<string, string> | undefined): {
 }
 
 /**
+ * Preview colors for a theme swatch (extracted from raw theme data).
+ */
+export interface ThemePreviewColors {
+  bg: string;
+  fg: string;
+  comment: string;
+}
+
+/**
+ * Extract preview colors from a raw theme definition without loading it into the highlighter.
+ */
+function extractPreviewColors(raw: ThemeRegistrationRaw): ThemePreviewColors {
+  const bg =
+    (raw.colors?.['editor.background'] as string) ||
+    (raw as Record<string, unknown>).bg as string ||
+    '#1e1e1e';
+  const fg =
+    (raw.colors?.['editor.foreground'] as string) ||
+    (raw as Record<string, unknown>).fg as string ||
+    '#d4d4d4';
+
+  const settings = (raw as Record<string, unknown>).tokenColors as ThemeSetting[] | undefined ||
+    (raw as Record<string, unknown>).settings as ThemeSetting[] | undefined ||
+    [];
+  const comment = extractCommentColor(settings, fg);
+
+  return { bg, fg, comment };
+}
+
+/**
+ * Load preview colors for all registered themes.
+ * Loads raw theme data in parallel without registering them in the highlighter.
+ */
+export async function loadAllThemePreviewColors(): Promise<Map<string, ThemePreviewColors>> {
+  const results = new Map<string, ThemePreviewColors>();
+  const entries = [...themeRegistry.entries()];
+
+  const loaded = await Promise.all(
+    entries.map(async ([name, desc]) => {
+      try {
+        const raw = await desc.load();
+        return [name, extractPreviewColors(raw)] as const;
+      } catch {
+        return null;
+      }
+    })
+  );
+
+  for (const entry of loaded) {
+    if (entry) results.set(entry[0], entry[1]);
+  }
+
+  return results;
+}
+
+/**
  * Extract theme info from a loaded Shiki theme.
  */
 function extractThemeInfo(themeName: string, theme: ThemeRegistrationResolved): HighlighterTheme {

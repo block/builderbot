@@ -9,8 +9,10 @@ export {
   getSyntaxThemeName,
   setSyntaxTheme,
   isLightTheme,
+  loadAllThemePreviewColors,
   SYNTAX_THEMES,
   type Token,
   type HighlighterTheme,
+  type ThemePreviewColors,
   type SyntaxThemeName,
 } from '@builderbot/diff-viewer/utils';

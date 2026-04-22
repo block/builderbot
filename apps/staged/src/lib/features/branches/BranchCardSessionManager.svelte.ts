@@ -276,6 +276,9 @@ export default class BranchCardSessionManager {
         throw new Error('Failed to start session: no session ID returned');
       }
 
+      this.registerRunningSession(result.sessionId, branch.projectId, mode, branch.id);
+
+
       this.pendingSessionItems = this.pendingSessionItems.map((item) =>
         item.key === pendingKey
           ? {

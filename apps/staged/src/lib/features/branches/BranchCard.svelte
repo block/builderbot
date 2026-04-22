@@ -1186,6 +1186,9 @@
     afterLabel={reviewDiffTarget?.commitSha
       ? reviewDiffTarget.commitSha.slice(0, 7)
       : branch.branchName}
+    commits={timeline?.commits}
+    baseBranchLabel={formatBaseBranch(branch.baseBranch)}
+    branchLabel={branch.branchName}
     {projectName}
     githubRepo={repoLabel?.headRepo ?? repoLabel?.githubRepo}
     subpath={repoLabel?.subpath}
@@ -1205,10 +1208,12 @@
     scope="commit"
     beforeLabel="parent"
     afterLabel={commitDiffSha.slice(0, 7)}
+    commits={timeline?.commits}
+    baseBranchLabel={formatBaseBranch(branch.baseBranch)}
+    branchLabel={branch.branchName}
     {projectName}
     githubRepo={repoLabel?.headRepo ?? repoLabel?.githubRepo}
     subpath={repoLabel?.subpath}
-    readonly
     onClose={() => {
       commitDiffSha = null;
       loadTimeline();

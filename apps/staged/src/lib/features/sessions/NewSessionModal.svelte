@@ -393,7 +393,7 @@
             : isCommit
               ? 'Describe the change…'
               : notePlaceholder}
-          rows={12}
+          rows={isReview ? 4 : 12}
           disabled={starting}
           items={hashtagItems}
         />
@@ -634,6 +634,7 @@
     display: flex;
     flex-direction: column;
   }
+
 
   .form-group :global(.hashtag-editor) {
     padding: 10px 12px;

@@ -421,6 +421,45 @@
 
   let revalidationVersion = 0;
 
+  /**
+   * Apply a cached timeline immediately and, if a `fresh` promise is provided,
+   * set up revalidation handlers guarded by `revalidationVersion` so stale
+   * responses are discarded.
+   *
+   * Shared by the synchronous-hydration block (below) and the `isInitialLoad`
+   * path inside `loadTimeline()`.
+   */
+  function applyCachedTimeline(
+    cached: BranchTimelineData,
+    fresh: Promise<BranchTimelineData> | undefined
+  ) {
+    timeline = cached;
+    loading = false;
+    prunedSessionIds = sessionMgr.prunePendingSessionItems(cached);
+    if (fresh) {
+      revalidating = true;
+      const version = ++revalidationVersion;
+      fresh
+        .then((next) => {
+          if (version !== revalidationVersion) return;
+          error = null;
+          timeline = next;
+          prunedSessionIds = sessionMgr.prunePendingSessionItems(next);
+          void loadTimelineReviewDetails(next.reviews);
+        })
+        .catch((e) => {
+          if (version !== revalidationVersion) return;
+          error = e instanceof Error ? e.message : String(e);
+        })
+        .finally(() => {
+          if (version !== revalidationVersion) return;
+          revalidating = false;
+        });
+    } else {
+      void loadTimelineReviewDetails(cached.reviews);
+    }
+  }
+
   // Synchronously hydrate timeline from cache so isSettingUp is never true
   // on remount (e.g. project switch). This prevents the "Looking for changes…"
   // flash and the slide-in animation for already-cached rows.
@@ -430,32 +469,8 @@
       const key = isRemote ? `${branch.id}:<remote>` : `${branch.id}:${branch.worktreePath}`;
       const { cached, fresh } = commands.getBranchTimelineWithRevalidation(branch.id);
       if (cached) {
-        timeline = cached;
-        loading = false;
         loadedTimelineKey = key;
-        prunedSessionIds = sessionMgr.prunePendingSessionItems(cached);
-        if (fresh) {
-          revalidating = true;
-          const version = ++revalidationVersion;
-          fresh
-            .then((next) => {
-              if (version !== revalidationVersion) return;
-              error = null;
-              timeline = next;
-              prunedSessionIds = sessionMgr.prunePendingSessionItems(next);
-              void loadTimelineReviewDetails(next.reviews);
-            })
-            .catch((e) => {
-              if (version !== revalidationVersion) return;
-              error = e instanceof Error ? e.message : String(e);
-            })
-            .finally(() => {
-              if (version !== revalidationVersion) return;
-              revalidating = false;
-            });
-        } else {
-          void loadTimelineReviewDetails(cached.reviews);
-        }
+        applyCachedTimeline(cached, fresh);
       }
     }
   }
@@ -568,32 +583,7 @@
     if (isInitialLoad) {
       const { cached, fresh } = commands.getBranchTimelineWithRevalidation(branch.id);
       if (cached) {
-        // Show stale data immediately
-        timeline = cached;
-        loading = false;
-        prunedSessionIds = sessionMgr.prunePendingSessionItems(cached);
-        if (!fresh) {
-          void loadTimelineReviewDetails(cached.reviews);
-        } else {
-          revalidating = true;
-          const version = revalidationVersion;
-          fresh
-            .then((next) => {
-              if (version !== revalidationVersion) return;
-              error = null;
-              timeline = next;
-              prunedSessionIds = sessionMgr.prunePendingSessionItems(next);
-              void loadTimelineReviewDetails(next.reviews);
-            })
-            .catch((e) => {
-              if (version !== revalidationVersion) return;
-              error = e instanceof Error ? e.message : String(e);
-            })
-            .finally(() => {
-              if (version !== revalidationVersion) return;
-              revalidating = false;
-            });
-        }
+        applyCachedTimeline(cached, fresh);
         return;
       }
       // No cache — show loading spinner as before

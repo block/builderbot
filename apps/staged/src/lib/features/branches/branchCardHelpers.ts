@@ -1,6 +1,5 @@
 import type { ProjectAction } from '../../api/commands';
 
-const TEXT_EXTENSIONS = ['.txt', '.md', '.markdown', '.text', '.rst', '.org', '.adoc'];
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
 
 export function groupActionsByType(actions: ProjectAction[]): Record<string, ProjectAction[]> {
@@ -121,11 +120,6 @@ export function isPushRejectedNonFastForward(
       (msg.role === 'assistant' || msg.role === 'tool_result') &&
       msg.content.includes('PUSH_REJECTED: NON_FAST_FORWARD')
   );
-}
-
-export function isTextFile(filePath: string): boolean {
-  const lower = filePath.toLowerCase();
-  return TEXT_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
 export function isImageFile(filePath: string): boolean {

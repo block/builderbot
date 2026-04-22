@@ -31,7 +31,7 @@
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
-  import { fileNameFromPath, formatBaseBranch, isTextFile, isImageFile } from './branchCardHelpers';
+  import { fileNameFromPath, formatBaseBranch, isImageFile } from './branchCardHelpers';
   import BranchCardHeaderInfo from './BranchCardHeaderInfo.svelte';
   import BranchCardActionsBar from './BranchCardActionsBar.svelte';
   import BranchCardPrButton from './BranchCardPrButton.svelte';
@@ -931,7 +931,7 @@
   let pendingDropNotes = $state<{ key: string; title: string }[]>([]);
 
   function handleFileDrop(paths: string[]) {
-    const textPaths = paths.filter(isTextFile);
+    const textPaths = paths.filter((p) => !isImageFile(p));
     const imagePaths = paths.filter(isImageFile);
 
     if (textPaths.length > 0) {
@@ -948,7 +948,8 @@
             const title = fileNameFromPath(filePath);
             await commands.createNote(branch.id, title, content);
           } catch (e) {
-            console.error('Failed to create note from dropped file:', e);
+            const msg = e instanceof Error ? e.message : String(e);
+            alerts.error(msg, 'Could not create note');
           } finally {
             pendingDropNotes = pendingDropNotes.filter((p) => p.key !== placeholders[i].key);
           }

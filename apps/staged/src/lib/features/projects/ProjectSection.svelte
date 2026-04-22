@@ -285,6 +285,13 @@
 
   async function handleFileDrop(paths: string[]) {
     const imagePaths = paths.filter((p) => isImageFile(p));
+    const otherPaths = paths.filter((p) => !isImageFile(p));
+
+    if (otherPaths.length > 0) {
+      const insertion = otherPaths.join('\n');
+      promptText = promptText ? promptText + '\n' + insertion : insertion;
+    }
+
     const pid = project.id;
     const newIds: string[] = [];
     for (const path of imagePaths) {

@@ -262,10 +262,17 @@
     });
   }
 
-  // Drag-and-drop images (via Tauri native drag-drop events)
+  // Drag-and-drop files (via Tauri native drag-drop events)
   async function handleFileDrop(paths: string[]) {
     if (!projectId) return;
     const imagePaths = paths.filter((p) => isImageFile(p));
+    const otherPaths = paths.filter((p) => !isImageFile(p));
+
+    if (otherPaths.length > 0) {
+      const insertion = otherPaths.join('\n');
+      inputText = inputText ? inputText + '\n' + insertion : insertion;
+    }
+
     const bid = branchId ?? null;
     const pid = projectId;
     const newIds: string[] = [];

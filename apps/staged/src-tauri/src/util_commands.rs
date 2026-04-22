@@ -68,8 +68,6 @@ pub fn is_sq_available() -> bool {
 /// File objects like browser drag events).
 #[tauri::command(rename_all = "camelCase")]
 pub fn read_text_file(file_path: String) -> Result<String, String> {
-    const MAX_SIZE: u64 = 1_048_576; // 1 MB
-
     let path = Path::new(&file_path);
     if !path.exists() {
         return Err(format!("File does not exist: {file_path}"));
@@ -77,10 +75,11 @@ pub fn read_text_file(file_path: String) -> Result<String, String> {
     if !path.is_file() {
         return Err(format!("Not a file: {file_path}"));
     }
-    let metadata =
-        std::fs::metadata(path).map_err(|e| format!("Failed to read file metadata: {e}"))?;
-    if metadata.len() > MAX_SIZE {
-        return Err("File too large (>1 MB)".to_string());
+    let metadata = path
+        .metadata()
+        .map_err(|e| format!("Failed to read file metadata: {e}"))?;
+    if metadata.len() > 307_200 {
+        return Err("File too large (>300 KB)".to_string());
     }
     std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))
 }

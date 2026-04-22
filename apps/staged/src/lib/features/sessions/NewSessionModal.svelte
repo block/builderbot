@@ -620,6 +620,21 @@
     min-height: 0;
   }
 
+  /* Propagate flex constraint through HashtagInput wrapper divs */
+  .form-group :global(.hashtag-input-wrapper) {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .form-group :global(.hashtag-input-container) {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
   .form-group :global(.hashtag-editor) {
     padding: 10px 12px;
     background: var(--bg-primary);

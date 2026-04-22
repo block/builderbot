@@ -14,7 +14,7 @@ static SQ_AVAILABLE: OnceLock<bool> = OnceLock::new();
 /// The result is cached for the lifetime of the process since the PATH
 /// won't change mid-session.
 pub fn is_sq_available() -> bool {
-    *SQ_AVAILABLE.get_or_init(|| blox_cli::is_sq_available())
+    *SQ_AVAILABLE.get_or_init(blox_cli::is_sq_available)
 }
 
 /// Start a new Blox workspace.

@@ -419,6 +419,47 @@
     getTimeline: () => timeline,
   });
 
+  let revalidationVersion = 0;
+
+  // Synchronously hydrate timeline from cache so isSettingUp is never true
+  // on remount (e.g. project switch). This prevents the "Looking for changes…"
+  // flash and the slide-in animation for already-cached rows.
+  {
+    const ready = isLocal ? !!branch.worktreePath : remoteWorkspaceStatus === 'running';
+    if (ready) {
+      const key = isRemote ? `${branch.id}:<remote>` : `${branch.id}:${branch.worktreePath}`;
+      const { cached, fresh } = commands.getBranchTimelineWithRevalidation(branch.id);
+      if (cached) {
+        timeline = cached;
+        loading = false;
+        loadedTimelineKey = key;
+        prunedSessionIds = sessionMgr.prunePendingSessionItems(cached);
+        if (fresh) {
+          revalidating = true;
+          const version = ++revalidationVersion;
+          fresh
+            .then((next) => {
+              if (version !== revalidationVersion) return;
+              error = null;
+              timeline = next;
+              prunedSessionIds = sessionMgr.prunePendingSessionItems(next);
+              void loadTimelineReviewDetails(next.reviews);
+            })
+            .catch((e) => {
+              if (version !== revalidationVersion) return;
+              error = e instanceof Error ? e.message : String(e);
+            })
+            .finally(() => {
+              if (version !== revalidationVersion) return;
+              revalidating = false;
+            });
+        } else {
+          void loadTimelineReviewDetails(cached.reviews);
+        }
+      }
+    }
+  }
+
   /** Number of finalized commits on this branch. */
   let commitCount = $derived(timeline?.commits.filter((c) => c.sha).length ?? 0);
 
@@ -517,8 +558,6 @@
     window.addEventListener('timeline-invalidated', handler);
     return () => window.removeEventListener('timeline-invalidated', handler);
   });
-
-  let revalidationVersion = 0;
 
   async function loadTimeline() {
     const isInitialLoad = !timeline;

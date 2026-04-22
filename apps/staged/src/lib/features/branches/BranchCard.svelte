@@ -42,7 +42,6 @@
   import { alerts } from '../../shared/alerts.svelte';
   import { timelineToHashtagItems, projectNotesToHashtagItems } from '../sessions/hashtagItems';
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
-  import { projectStateStore } from '../../stores/projectState.svelte';
 
   interface Props {
     branch: Branch;
@@ -670,14 +669,6 @@
     }
   }
 
-  function cleanupSessionState(sessionId: string) {
-    const projectId = sessionRegistry.getProjectId(sessionId);
-    if (projectId) {
-      projectStateStore.removeRunningSession(projectId, sessionId);
-    }
-    sessionRegistry.unregister(sessionId);
-  }
-
   function handleDeleteCommit(sha: string, sessionId?: string, opts?: { altKey: boolean }) {
     const doDelete = async () => {
       confirmDelete = null;
@@ -715,9 +706,11 @@
           } catch {
             // Session may already be finished
           }
-          cleanupSessionState(sessionId);
         }
         await commands.deleteNote(noteId, !!sessionId);
+        if (sessionId) {
+          sessionRegistry.cleanupSession(sessionId);
+        }
         loadTimeline();
         // Drain the next queued session now that this one has been removed.
         commands
@@ -751,9 +744,11 @@
           } catch {
             // Session may already be finished
           }
-          cleanupSessionState(sessionId);
         }
         await commands.deleteReview(reviewId, !!sessionId);
+        if (sessionId) {
+          sessionRegistry.cleanupSession(sessionId);
+        }
         loadTimeline();
         // Drain the next queued session now that this one has been removed.
         commands
@@ -786,9 +781,11 @@
         } catch {
           // Session may already be finished, that's fine
         }
-        cleanupSessionState(sessionId);
       }
       await commands.deletePendingCommit(commitId, !!sessionId);
+      if (sessionId) {
+        sessionRegistry.cleanupSession(sessionId);
+      }
       await loadTimeline();
       // Drain the next queued session now that this one has been removed.
       commands

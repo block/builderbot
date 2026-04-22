@@ -73,11 +73,6 @@ async function handleSessionEnd(sessionId: string, status: string) {
     projectStateStore.markAsUnread(sessionProjectId);
   }
 
-  // Always remove the running session from its project.
-  if (sessionProjectId) {
-    projectStateStore.removeRunningSession(sessionProjectId, sessionId);
-  }
-
   if (sessionType === 'pr' && branchId) {
     await handlePrCompletion(sessionId, branchId, status);
     prStateStore.clearSessionTracking(branchId);
@@ -88,8 +83,8 @@ async function handleSessionEnd(sessionId: string, status: string) {
     pushStateStore.clearSessionTracking(branchId);
   }
 
-  // Clean up the session from the unified registry (single point of cleanup).
-  sessionRegistry.unregister(sessionId);
+  // Remove running state from projectStateStore and unregister from the registry.
+  sessionRegistry.cleanupSession(sessionId);
 }
 
 async function handlePrCompletion(sessionId: string, branchId: string, status: string) {

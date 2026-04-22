@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Settings2, Info, Check } from 'lucide-svelte';
+  import { Settings2, Info, Check, ChevronDown } from 'lucide-svelte';
   import {
     preferences,
     getAvailableSyntaxThemes,
@@ -19,11 +19,23 @@
   const themes = $derived(getAvailableSyntaxThemes());
 
   let previewColors = $state<Map<string, ThemePreviewColors>>(new Map());
+  let dropdownOpen = $state(false);
+  let dropdownRef = $state<HTMLDivElement | null>(null);
+
+  const activeColors = $derived(previewColors.get(preferences.syntaxTheme));
 
   onMount(() => {
     loadAllThemePreviewColors().then((colors) => {
       previewColors = colors;
     });
+
+    function handleClickOutside(e: MouseEvent) {
+      if (dropdownRef && !dropdownRef.contains(e.target as Node)) {
+        dropdownOpen = false;
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
   });
 
   function handleAutoReviewChange(e: Event) {
@@ -33,6 +45,7 @@
 
   function handleThemeSelect(name: string) {
     selectSyntaxTheme(name);
+    dropdownOpen = false;
   }
 </script>
 
@@ -72,32 +85,42 @@
 
     <div class="field">
       <span class="field-label">Theme</span>
-      <div class="theme-list">
-        {#each themes as theme (theme.name)}
-          {@const colors = previewColors.get(theme.name)}
-          {@const isActive = preferences.syntaxTheme === theme.name}
-          <button
-            class="theme-swatch"
-            class:active={isActive}
-            style:background={colors?.bg ?? 'var(--bg-primary)'}
-            style:border-color={isActive
-              ? (colors?.comment ?? 'var(--border-emphasis)')
-              : 'transparent'}
-            onclick={() => handleThemeSelect(theme.name)}
-          >
-            <span class="swatch-name" style:color={colors?.fg ?? 'var(--text-primary)'}
-              >{theme.name}</span
+      <div class="theme-dropdown" bind:this={dropdownRef}>
+        <button class="theme-dropdown-trigger" onclick={() => (dropdownOpen = !dropdownOpen)}>
+          <span class="trigger-swatch" style:background={activeColors?.bg ?? 'var(--bg-primary)'}>
+            <span style:color={activeColors?.fg ?? 'var(--text-primary)'}
+              >{preferences.syntaxTheme}</span
             >
-            <span class="swatch-comment" style:color={colors?.comment ?? 'var(--text-muted)'}
-              >// preview</span
-            >
-            {#if isActive}
-              <span class="swatch-check" style:color={colors?.comment ?? 'var(--text-muted)'}>
-                <Check size={14} />
-              </span>
-            {/if}
-          </button>
-        {/each}
+          </span>
+          <ChevronDown size={14} />
+        </button>
+
+        {#if dropdownOpen}
+          <div class="theme-dropdown-panel">
+            {#each themes as theme (theme.name)}
+              {@const colors = previewColors.get(theme.name)}
+              {@const isActive = preferences.syntaxTheme === theme.name}
+              <button
+                class="theme-swatch"
+                class:active={isActive}
+                style:background={colors?.bg ?? 'var(--bg-primary)'}
+                style:border-color={isActive
+                  ? (colors?.comment ?? 'var(--border-emphasis)')
+                  : 'transparent'}
+                onclick={() => handleThemeSelect(theme.name)}
+              >
+                <span class="swatch-name" style:color={colors?.fg ?? 'var(--text-primary)'}
+                  >{theme.name}</span
+                >
+                {#if isActive}
+                  <span class="swatch-check" style:color={colors?.comment ?? 'var(--text-muted)'}>
+                    <Check size={14} />
+                  </span>
+                {/if}
+              </button>
+            {/each}
+          </div>
+        {/if}
       </div>
     </div>
   </div>
@@ -195,20 +218,74 @@
     background-color: var(--bg-hover);
   }
 
-  .theme-list {
+  .theme-dropdown {
+    position: relative;
+    max-width: 320px;
+  }
+
+  .theme-dropdown-trigger {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 0;
+    background: none;
+    border: 1px solid var(--border-muted);
+    border-radius: 5px;
+    color: var(--text-primary);
+    font-size: var(--size-xs);
+    cursor: pointer;
+    overflow: hidden;
+    transition:
+      border-color 0.1s,
+      background-color 0.1s;
+  }
+
+  .theme-dropdown-trigger:hover {
+    border-color: var(--border-emphasis);
+  }
+
+  .trigger-swatch {
+    flex: 1;
+    padding: 6px 10px;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    border-radius: 4px 0 0 4px;
+  }
+
+  .theme-dropdown-trigger :global(svg) {
+    flex-shrink: 0;
+    margin-right: 8px;
+    color: var(--text-muted);
+  }
+
+  .theme-dropdown-panel {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    max-height: 320px;
+    overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    max-width: 360px;
+    gap: 2px;
+    padding: 4px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-muted);
+    border-radius: 5px;
+    box-shadow: var(--shadow-elevated);
+    z-index: 10;
   }
 
   .theme-swatch {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 6px 10px;
+    padding: 5px 8px;
     border: 1.5px solid transparent;
-    border-radius: 5px;
+    border-radius: 4px;
     cursor: pointer;
     font-family: inherit;
     transition: border-color 0.1s;
@@ -228,16 +305,10 @@
     white-space: nowrap;
   }
 
-  .swatch-comment {
-    font-size: var(--size-xs);
-    opacity: 0.8;
-    white-space: nowrap;
-    margin-left: auto;
-  }
-
   .swatch-check {
     display: flex;
     align-items: center;
     flex-shrink: 0;
+    margin-left: auto;
   }
 </style>

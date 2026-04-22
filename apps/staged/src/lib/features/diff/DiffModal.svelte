@@ -404,16 +404,27 @@
   // Keyboard
   // ==========================================================================
 
+  /** True when the event target is an editable element (input, textarea, contentEditable). */
+  function isEditableTarget(target: EventTarget | null): boolean {
+    return (
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      (target instanceof HTMLElement && target.isContentEditable)
+    );
+  }
+
   function handleKeydown(event: KeyboardEvent) {
+    const inInput = isEditableTarget(event.target);
+
     // Command+Left Arrow to go back
-    if (event.key === 'ArrowLeft' && event.metaKey) {
+    if (event.key === 'ArrowLeft' && event.metaKey && !inInput) {
       event.preventDefault();
       event.stopPropagation();
       onClose();
       return;
     }
     // Command+Up/Down Arrow to navigate between files
-    if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && event.metaKey) {
+    if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && event.metaKey && !inInput) {
       event.preventDefault();
       event.stopPropagation();
       const currentPath = diffViewer.state.selectedFile;
@@ -425,10 +436,9 @@
       }
       return;
     }
-    // Escape to dismiss layers, then close modal (skip if focused on an input/textarea)
+    // Escape to dismiss layers, then close modal (skip if focused on an editable element)
     if (event.key === 'Escape') {
-      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement)
-        return;
+      if (inInput) return;
       // If DiffViewer already handled this Escape (e.g. clearing selection/comment state),
       // don't also close the modal. Both handlers are on `document`, so stopPropagation
       // doesn't help — check defaultPrevented instead.
@@ -447,12 +457,7 @@
     }
     // Hold A to reveal AI annotations
     if (event.key === 'a' || event.key === 'A') {
-      if (
-        event.target instanceof HTMLInputElement ||
-        event.target instanceof HTMLTextAreaElement ||
-        (event.target instanceof HTMLElement && event.target.isContentEditable)
-      )
-        return;
+      if (inInput) return;
       if (!event.repeat) {
         annotationsRevealed = true;
       }
@@ -461,12 +466,7 @@
 
   function handleKeyup(event: KeyboardEvent) {
     if (event.key === 'a' || event.key === 'A') {
-      if (
-        event.target instanceof HTMLInputElement ||
-        event.target instanceof HTMLTextAreaElement ||
-        (event.target instanceof HTMLElement && event.target.isContentEditable)
-      )
-        return;
+      if (isEditableTarget(event.target)) return;
       annotationsRevealed = false;
     }
   }

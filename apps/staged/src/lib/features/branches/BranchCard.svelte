@@ -419,6 +419,97 @@
     getTimeline: () => timeline,
   });
 
+  let revalidationVersion = 0;
+
+  /**
+   * Compute the timeline cache key for a branch, or null if the branch is
+   * not yet ready for timeline loading.
+   *
+   * Shared between the synchronous hydration block and the $effect that
+   * triggers loadTimeline(), so the readiness conditions and key format
+   * stay in sync.
+   */
+  function getTimelineKey(
+    branchId: string,
+    isLocalVal: boolean,
+    isRemoteVal: boolean,
+    worktreePath: string | undefined | null,
+    remoteStatus: string | null | undefined
+  ): string | null {
+    if (isLocalVal && !worktreePath) return null;
+    if (!isLocalVal && (!isRemoteVal || remoteStatus !== 'running')) return null;
+    return isRemoteVal ? `${branchId}:<remote>` : `${branchId}:${worktreePath}`;
+  }
+
+  /**
+   * Apply a cached timeline immediately and, if a `fresh` promise is provided,
+   * set up revalidation handlers guarded by `revalidationVersion` so stale
+   * responses are discarded.
+   *
+   * Shared by the synchronous-hydration block (below) and the `isInitialLoad`
+   * path inside `loadTimeline()`.
+   */
+  function applyCachedTimeline(
+    cached: BranchTimelineData,
+    fresh: Promise<BranchTimelineData> | null
+  ) {
+    timeline = cached;
+    loading = false;
+    prunedSessionIds = sessionMgr.prunePendingSessionItems(cached);
+    if (fresh) {
+      revalidating = true;
+      const version = ++revalidationVersion;
+      fresh
+        .then((next) => {
+          if (version !== revalidationVersion) return;
+          error = null;
+          timeline = next;
+          prunedSessionIds = sessionMgr.prunePendingSessionItems(next);
+          void loadTimelineReviewDetails(next.reviews);
+        })
+        .catch((e) => {
+          if (version !== revalidationVersion) return;
+          error = e instanceof Error ? e.message : String(e);
+        })
+        .finally(() => {
+          if (version !== revalidationVersion) return;
+          revalidating = false;
+        });
+    } else {
+      void loadTimelineReviewDetails(cached.reviews);
+    }
+  }
+
+  // Synchronously hydrate timeline from cache so isSettingUp is never true
+  // on remount (e.g. project switch). This prevents the "Looking for changes…"
+  // flash and the slide-in animation for already-cached rows.
+  {
+    // svelte-ignore state_referenced_locally
+    const initIsLocal = isLocal;
+    // svelte-ignore state_referenced_locally
+    const initIsRemote = isRemote;
+    // svelte-ignore state_referenced_locally
+    const initBranch = branch;
+    // svelte-ignore state_referenced_locally
+    const initRemoteWorkspaceStatus = remoteWorkspaceStatus;
+    untrack(() => {
+      const key = getTimelineKey(
+        initBranch.id,
+        initIsLocal,
+        initIsRemote,
+        initBranch.worktreePath,
+        initRemoteWorkspaceStatus
+      );
+      if (key) {
+        const { cached, fresh } = commands.getBranchTimelineWithRevalidation(initBranch.id);
+        if (cached) {
+          loadedTimelineKey = key;
+          applyCachedTimeline(cached, fresh);
+        }
+      }
+    });
+  }
+
   /** Number of finalized commits on this branch. */
   let commitCount = $derived(timeline?.commits.filter((c) => c.sha).length ?? 0);
 
@@ -500,11 +591,14 @@
 
   // Load timeline when a branch becomes timeline-ready
   $effect(() => {
-    if (isLocal && !branch.worktreePath) return;
-    if (isRemote && remoteWorkspaceStatus !== 'running') return;
-
-    const timelineKey = isRemote ? `${branch.id}:<remote>` : `${branch.id}:${branch.worktreePath}`;
-    if (timelineKey === loadedTimelineKey) return;
+    const timelineKey = getTimelineKey(
+      branch.id,
+      isLocal,
+      isRemote,
+      branch.worktreePath,
+      remoteWorkspaceStatus
+    );
+    if (!timelineKey || timelineKey === loadedTimelineKey) return;
 
     loadedTimelineKey = timelineKey;
     void loadTimeline();
@@ -522,8 +616,6 @@
     return () => window.removeEventListener('timeline-invalidated', handler);
   });
 
-  let revalidationVersion = 0;
-
   async function loadTimeline() {
     const isInitialLoad = !timeline;
     error = null;
@@ -533,32 +625,7 @@
     if (isInitialLoad) {
       const { cached, fresh } = commands.getBranchTimelineWithRevalidation(branch.id);
       if (cached) {
-        // Show stale data immediately
-        timeline = cached;
-        loading = false;
-        prunedSessionIds = sessionMgr.prunePendingSessionItems(cached);
-        if (!fresh) {
-          void loadTimelineReviewDetails(cached.reviews);
-        } else {
-          revalidating = true;
-          const version = revalidationVersion;
-          fresh
-            .then((next) => {
-              if (version !== revalidationVersion) return;
-              error = null;
-              timeline = next;
-              prunedSessionIds = sessionMgr.prunePendingSessionItems(next);
-              void loadTimelineReviewDetails(next.reviews);
-            })
-            .catch((e) => {
-              if (version !== revalidationVersion) return;
-              error = e instanceof Error ? e.message : String(e);
-            })
-            .finally(() => {
-              if (version !== revalidationVersion) return;
-              revalidating = false;
-            });
-        }
+        applyCachedTimeline(cached, fresh);
         return;
       }
       // No cache — show loading spinner as before

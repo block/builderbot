@@ -749,18 +749,12 @@ pub async fn start_branch_session(
         BranchSessionType::Note => "note",
         BranchSessionType::Review => "review",
     };
-    let _ = app_handle.emit(
-        "session-status-changed",
-        session_runner::SessionStatusEvent {
-            session_id: session.id.clone(),
-            status: "running".to_string(),
-            error_message: None,
-            completion_reason: None,
-            branch_id: Some(branch_id.clone()),
-            project_id: Some(branch.project_id.clone()),
-            session_type: Some(session_type_str.to_string()),
-            is_auto_review: false,
-        },
+    session_runner::emit_session_running(
+        &app_handle,
+        &session.id,
+        &branch_id,
+        &branch.project_id,
+        session_type_str,
     );
 
     // Create artifact stub and compute pre-head SHA

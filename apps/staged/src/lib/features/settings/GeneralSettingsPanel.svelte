@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Settings2 } from 'lucide-svelte';
+  import { Settings2, Info } from 'lucide-svelte';
   import {
     preferences,
     getAvailableSyntaxThemes,
@@ -7,28 +7,18 @@
     setAutoReviewMode,
     type AutoReviewMode,
   } from './preferences.svelte';
-  import FormToggle from '../../shared/FormToggle.svelte';
 
   const autoReviewOptions: { value: AutoReviewMode; label: string }[] = [
     { value: 'never', label: 'Never' },
     { value: 'after-changes', label: 'After changes' },
   ];
 
-  let autoReviewValue = $state(preferences.autoReviewMode);
-
-  // Sync from store on load
-  $effect(() => {
-    autoReviewValue = preferences.autoReviewMode;
-  });
-
-  // Persist when user changes
-  $effect(() => {
-    if (preferences.loaded && autoReviewValue !== preferences.autoReviewMode) {
-      setAutoReviewMode(autoReviewValue);
-    }
-  });
-
   const themes = $derived(getAvailableSyntaxThemes());
+
+  function handleAutoReviewChange(e: Event) {
+    const select = e.target as HTMLSelectElement;
+    setAutoReviewMode(select.value as AutoReviewMode);
+  }
 
   function handleThemeChange(e: Event) {
     const select = e.target as HTMLSelectElement;
@@ -49,10 +39,20 @@
 
   <div class="panel-body">
     <div class="field">
-      <span class="field-label">Auto start code reviews</span>
-      <FormToggle options={autoReviewOptions} bind:value={autoReviewValue} />
+      <label class="field-label" for="auto-review-select">Auto start code reviews</label>
+      <select
+        id="auto-review-select"
+        class="theme-select"
+        value={preferences.autoReviewMode}
+        onchange={handleAutoReviewChange}
+      >
+        {#each autoReviewOptions as opt (opt.value)}
+          <option value={opt.value}>{opt.label}</option>
+        {/each}
+      </select>
       <p class="field-description">
-        {#if autoReviewValue === 'after-changes'}
+        <Info size={12} />
+        {#if preferences.autoReviewMode === 'after-changes'}
           A code review will automatically start after each commit session completes.
         {:else}
           Code reviews will only start when you manually request them.
@@ -136,6 +136,9 @@
     font-size: var(--size-xs);
     color: var(--text-muted);
     line-height: 1.4;
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
   }
 
   .field-label {

@@ -480,8 +480,12 @@
             }
           });
         }
-        // Refresh the timeline so the pending note/commit stub appears immediately
-        if (!isAutoReview) {
+        // Refresh the timeline so the pending note/commit stub appears immediately.
+        // Skip if a session start is in-flight (pending item has no sessionId yet),
+        // because startBranchSessionWithPendingItem will call loadTimeline after
+        // it gets the sessionId — otherwise pruning can't match the pending item
+        // and both the pending and real items briefly render simultaneously.
+        if (!isAutoReview && !sessionMgr.isSessionStartPending) {
           loadTimeline();
         }
       }

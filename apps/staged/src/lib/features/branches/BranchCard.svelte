@@ -422,6 +422,26 @@
   let revalidationVersion = 0;
 
   /**
+   * Compute the timeline cache key for a branch, or null if the branch is
+   * not yet ready for timeline loading.
+   *
+   * Shared between the synchronous hydration block and the $effect that
+   * triggers loadTimeline(), so the readiness conditions and key format
+   * stay in sync.
+   */
+  function getTimelineKey(
+    branchId: string,
+    isLocalVal: boolean,
+    isRemoteVal: boolean,
+    worktreePath: string | undefined | null,
+    remoteStatus: string | undefined
+  ): string | null {
+    if (isLocalVal && !worktreePath) return null;
+    if (!isLocalVal && (!isRemoteVal || remoteStatus !== 'running')) return null;
+    return isRemoteVal ? `${branchId}:<remote>` : `${branchId}:${worktreePath}`;
+  }
+
+  /**
    * Apply a cached timeline immediately and, if a `fresh` promise is provided,
    * set up revalidation handlers guarded by `revalidationVersion` so stale
    * responses are discarded.
@@ -473,13 +493,14 @@
     // svelte-ignore state_referenced_locally
     const initRemoteWorkspaceStatus = remoteWorkspaceStatus;
     untrack(() => {
-      const ready = initIsLocal
-        ? !!initBranch.worktreePath
-        : initRemoteWorkspaceStatus === 'running';
-      if (ready) {
-        const key = initIsRemote
-          ? `${initBranch.id}:<remote>`
-          : `${initBranch.id}:${initBranch.worktreePath}`;
+      const key = getTimelineKey(
+        initBranch.id,
+        initIsLocal,
+        initIsRemote,
+        initBranch.worktreePath,
+        initRemoteWorkspaceStatus
+      );
+      if (key) {
         const { cached, fresh } = commands.getBranchTimelineWithRevalidation(initBranch.id);
         if (cached) {
           loadedTimelineKey = key;
@@ -566,11 +587,14 @@
 
   // Load timeline when a branch becomes timeline-ready
   $effect(() => {
-    if (isLocal && !branch.worktreePath) return;
-    if (isRemote && remoteWorkspaceStatus !== 'running') return;
-
-    const timelineKey = isRemote ? `${branch.id}:<remote>` : `${branch.id}:${branch.worktreePath}`;
-    if (timelineKey === loadedTimelineKey) return;
+    const timelineKey = getTimelineKey(
+      branch.id,
+      isLocal,
+      isRemote,
+      branch.worktreePath,
+      remoteWorkspaceStatus
+    );
+    if (!timelineKey || timelineKey === loadedTimelineKey) return;
 
     loadedTimelineKey = timelineKey;
     void loadTimeline();

@@ -405,15 +405,20 @@
   // ==========================================================================
 
   function handleKeydown(event: KeyboardEvent) {
+    const inInput =
+      event.target instanceof HTMLInputElement ||
+      event.target instanceof HTMLTextAreaElement ||
+      (event.target instanceof HTMLElement && event.target.isContentEditable);
+
     // Command+Left Arrow to go back
-    if (event.key === 'ArrowLeft' && event.metaKey) {
+    if (event.key === 'ArrowLeft' && event.metaKey && !inInput) {
       event.preventDefault();
       event.stopPropagation();
       onClose();
       return;
     }
     // Command+Up/Down Arrow to navigate between files
-    if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && event.metaKey) {
+    if ((event.key === 'ArrowUp' || event.key === 'ArrowDown') && event.metaKey && !inInput) {
       event.preventDefault();
       event.stopPropagation();
       const currentPath = diffViewer.state.selectedFile;

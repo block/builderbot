@@ -3,11 +3,18 @@
 //! Thin wrappers around shared `blox-cli` helpers so existing Staged code can
 //! keep using `crate::blox::*`.
 
+use std::sync::OnceLock;
+
 pub use blox_cli::{BloxError, WorkspaceCommand, WorkspaceInfo, WorkspaceListEntry};
 
+static SQ_AVAILABLE: OnceLock<bool> = OnceLock::new();
+
 /// Check whether the `sq` CLI is available on this system.
+///
+/// The result is cached for the lifetime of the process since the PATH
+/// won't change mid-session.
 pub fn is_sq_available() -> bool {
-    blox_cli::is_sq_available()
+    *SQ_AVAILABLE.get_or_init(|| blox_cli::is_sq_available())
 }
 
 /// Start a new Blox workspace.

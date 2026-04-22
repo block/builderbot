@@ -441,7 +441,7 @@ pub fn start_session(
                                         .map(String::from)
                                 })
                                 .map(|mode| mode != "never")
-                                .unwrap_or(true); // default to enabled
+                                .unwrap_or_else(|| crate::blox::is_sq_available());
 
                             if let Some(auto_review_branch_id) =
                                 auto_review_branch_id.filter(|_| auto_review_enabled)

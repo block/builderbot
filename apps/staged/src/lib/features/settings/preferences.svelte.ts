@@ -153,6 +153,9 @@ export async function initPreferences(): Promise<void> {
   const savedAutoReview = await getStoreValue<AutoReviewMode>(AUTO_REVIEW_STORE_KEY);
   if (savedAutoReview === 'never' || savedAutoReview === 'after-changes') {
     preferences.autoReviewMode = savedAutoReview;
+  } else {
+    const { isSqAvailable } = await import('../../commands');
+    preferences.autoReviewMode = (await isSqAvailable()) ? 'after-changes' : 'never';
   }
 
   preferences.loaded = true;

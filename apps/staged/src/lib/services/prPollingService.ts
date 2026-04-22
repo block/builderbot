@@ -52,8 +52,8 @@ let refreshInFlight = false;
 let windowFocused = true;
 let listenersAttached = false;
 
-/** Project ID queued for immediate refresh while another refresh is in-flight. */
-let pendingRefreshProjectId: string | null = null;
+/** Project IDs queued for immediate refresh while another refresh is in-flight. */
+const pendingRefreshProjectIds = new Set<string>();
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -286,11 +286,20 @@ export function shouldAttemptRecovery(branchId: string): boolean {
   return true;
 }
 
+/**
+ * Clear the recovery guard for a branch so it can be retried.
+ * Call this when recovery fails (e.g. network error) so a transient
+ * failure doesn't permanently prevent recovery for that branch.
+ */
+export function clearRecoveryAttempt(branchId: string): void {
+  recoveryAttempted.delete(branchId);
+}
+
 /** Trigger an immediate refresh for a specific project (e.g. after PR creation or push). */
 export function refreshNow(projectId: string): void {
   if (refreshInFlight) {
     // Queue so the project is refreshed as soon as the current operation finishes.
-    pendingRefreshProjectId = projectId;
+    pendingRefreshProjectIds.add(projectId);
     return;
   }
   refreshInFlight = true;
@@ -309,11 +318,18 @@ export function refreshNow(projectId: string): void {
     )
     .finally(() => {
       refreshInFlight = false;
-      // Drain any queued immediate-refresh request before rescheduling.
-      const queued = pendingRefreshProjectId;
-      pendingRefreshProjectId = null;
-      if (queued) {
-        refreshNow(queued);
+      // Drain all queued immediate-refresh requests before rescheduling.
+      if (pendingRefreshProjectIds.size > 0) {
+        const queued = [...pendingRefreshProjectIds];
+        pendingRefreshProjectIds.clear();
+        // Refresh each queued project sequentially via the same path
+        // (the first call sets refreshInFlight, subsequent ones queue again).
+        for (const queuedId of queued) {
+          refreshNow(queuedId);
+          // Only the first call will actually run — the rest re-queue
+          // because refreshInFlight is set by the first call. This is
+          // correct: they'll drain on the next finally cycle.
+        }
       } else {
         scheduleNext();
       }

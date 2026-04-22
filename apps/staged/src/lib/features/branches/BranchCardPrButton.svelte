@@ -245,7 +245,9 @@
           }
         })
         .catch(() => {
-          // PR recovery is best-effort; ignore failures
+          // PR recovery is best-effort; clear the guard so it can be
+          // retried on next mount (e.g. after a transient network error).
+          prPollingService.clearRecoveryAttempt(branch.id);
         });
     }
   });

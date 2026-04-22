@@ -74,28 +74,6 @@
 
   <div class="panel-body">
     <div class="field">
-      <label class="field-label" for="auto-review-select">Auto start code reviews</label>
-      <select
-        id="auto-review-select"
-        class="theme-select"
-        value={preferences.autoReviewMode}
-        onchange={handleAutoReviewChange}
-      >
-        {#each autoReviewOptions as opt (opt.value)}
-          <option value={opt.value}>{opt.label}</option>
-        {/each}
-      </select>
-      <p class="field-description">
-        <Info size={12} />
-        {#if preferences.autoReviewMode === 'after-changes'}
-          A code review will automatically start after each commit session completes.
-        {:else}
-          Code reviews will only start when you manually request them.
-        {/if}
-      </p>
-    </div>
-
-    <div class="field">
       <span class="field-label">Theme</span>
       <div class="theme-dropdown" bind:this={dropdownRef}>
         <button class="theme-dropdown-trigger" onclick={() => (dropdownOpen = !dropdownOpen)}>
@@ -145,6 +123,28 @@
           </div>
         {/if}
       </div>
+    </div>
+
+    <div class="field">
+      <label class="field-label" for="auto-review-select">Auto start code reviews</label>
+      <select
+        id="auto-review-select"
+        class="theme-select"
+        value={preferences.autoReviewMode}
+        onchange={handleAutoReviewChange}
+      >
+        {#each autoReviewOptions as opt (opt.value)}
+          <option value={opt.value}>{opt.label}</option>
+        {/each}
+      </select>
+      <p class="field-description">
+        <Info size={12} />
+        {#if preferences.autoReviewMode === 'after-changes'}
+          A code review will automatically start after each commit session completes.
+        {:else}
+          Code reviews will only start when you manually request them.
+        {/if}
+      </p>
     </div>
   </div>
 </div>

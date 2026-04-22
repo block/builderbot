@@ -7,6 +7,7 @@
     selectSyntaxTheme,
     setAutoReviewMode,
     loadAllThemePreviewColors,
+    isLightTheme,
     type AutoReviewMode,
     type ThemePreviewColors,
   } from './preferences.svelte';
@@ -16,10 +17,21 @@
     { value: 'after-changes', label: 'After changes' },
   ];
 
-  const themes = $derived(getAvailableSyntaxThemes());
+  type ThemeFilter = 'all' | 'light' | 'dark';
 
+  const allThemes = $derived(getAvailableSyntaxThemes());
+
+  let themeFilter = $state<ThemeFilter>('all');
   let previewColors = $state<Map<string, ThemePreviewColors>>(new Map());
   let dropdownOpen = $state(false);
+
+  const themes = $derived(
+    themeFilter === 'all'
+      ? allThemes
+      : allThemes.filter((t) =>
+          themeFilter === 'light' ? isLightTheme(t.name) : !isLightTheme(t.name)
+        )
+  );
   let dropdownRef = $state<HTMLDivElement | null>(null);
 
   const activeColors = $derived(previewColors.get(preferences.syntaxTheme));
@@ -97,6 +109,17 @@
 
         {#if dropdownOpen}
           <div class="theme-dropdown-panel">
+            <div class="theme-filters">
+              {#each ['all', 'light', 'dark'] as filter (filter)}
+                <button
+                  class="theme-filter-btn"
+                  class:active={themeFilter === filter}
+                  onclick={() => (themeFilter = filter as ThemeFilter)}
+                >
+                  {filter.charAt(0).toUpperCase() + filter.slice(1)}
+                </button>
+              {/each}
+            </div>
             {#each themes as theme (theme.name)}
               {@const colors = previewColors.get(theme.name)}
               {@const isActive = preferences.syntaxTheme === theme.name}
@@ -277,6 +300,40 @@
     border-radius: 5px;
     box-shadow: var(--shadow-elevated);
     z-index: 10;
+  }
+
+  .theme-filters {
+    display: flex;
+    gap: 2px;
+    padding: 0 0 4px;
+    border-bottom: 1px solid var(--border-subtle);
+    margin-bottom: 2px;
+  }
+
+  .theme-filter-btn {
+    flex: 1;
+    padding: 4px 8px;
+    background: none;
+    border: none;
+    border-radius: 3px;
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+    font-family: inherit;
+    cursor: pointer;
+    transition:
+      background-color 0.1s,
+      color 0.1s;
+  }
+
+  .theme-filter-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .theme-filter-btn.active {
+    background: var(--bg-active);
+    color: var(--text-primary);
+    font-weight: 600;
   }
 
   .theme-swatch {

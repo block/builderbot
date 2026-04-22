@@ -393,7 +393,7 @@
             : isCommit
               ? 'Describe the change…'
               : notePlaceholder}
-          rows={isReview ? 4 : 12}
+          rows={12}
           disabled={starting}
           items={hashtagItems}
         />
@@ -450,6 +450,7 @@
     flex-direction: column;
     width: 580px;
     max-width: 90vw;
+    max-height: calc(100vh - 12vh - 4vh);
     background: var(--bg-chrome);
     border: 2px solid transparent;
     border-radius: 12px;
@@ -597,6 +598,8 @@
     display: flex;
     flex-direction: column;
     gap: 14px;
+    flex: 1;
+    min-height: 0;
   }
 
   .repo-info {
@@ -613,6 +616,23 @@
     display: flex;
     flex-direction: column;
     gap: 4px;
+    flex: 1;
+    min-height: 0;
+  }
+
+  /* Propagate flex constraint through HashtagInput wrapper divs */
+  .form-group :global(.hashtag-input-wrapper) {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .form-group :global(.hashtag-input-container) {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
   }
 
   .form-group :global(.hashtag-editor) {
@@ -624,8 +644,8 @@
     font-size: var(--size-sm);
     font-family: inherit;
     line-height: 1.5;
-    resize: vertical;
-    min-height: 240px;
+    flex: 1;
+    overflow-y: auto;
     transition: border-color 0.15s;
   }
 

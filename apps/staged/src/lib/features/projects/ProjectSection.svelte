@@ -50,7 +50,11 @@
   import { agentState } from '../agents/agent.svelte';
   import { getPreferredAgentForProject } from '../settings/preferences.svelte';
   import { subscribeDragDrop } from '../branches/dragDrop';
-  import { isImageFile, isMaybeTextFile } from '../branches/branchCardHelpers';
+  import {
+    isImageFile,
+    isMaybeTextFile,
+    insertFilePathsAtCursor,
+  } from '../branches/branchCardHelpers';
   import { createImage, createImageFromData, deleteImage, getImageData } from '../../api/commands';
   import { formatRelativeTime, minuteNow } from '../../shared/relativeTime.svelte';
   import { createLiveSessionHints } from '../timeline/liveSessionHints';
@@ -300,9 +304,7 @@
       imageIds = [...imageIds, ...newIds];
     }
     if (textPaths.length > 0 && promptTextarea) {
-      const insert = textPaths.map((p) => p).join('\n');
-      promptTextarea.focus();
-      document.execCommand('insertText', false, insert);
+      insertFilePathsAtCursor(promptTextarea, textPaths);
     }
   }
 

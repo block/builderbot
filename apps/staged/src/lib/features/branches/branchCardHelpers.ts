@@ -143,6 +143,17 @@ export function isMaybeTextFile(filePath: string): boolean {
   return !isImageFile(filePath);
 }
 
+/**
+ * Insert file paths into a textarea at the cursor position, preserving undo history.
+ * Uses `document.execCommand('insertText')` which, while deprecated, is the simplest
+ * way to get undo-friendly insertion in Chromium/Tauri webviews.
+ */
+export function insertFilePathsAtCursor(element: HTMLElement, paths: string[]): void {
+  const insert = paths.join('\n');
+  element.focus();
+  document.execCommand('insertText', false, insert);
+}
+
 export function fileNameFromPath(filePath: string): string {
   const parts = filePath.split('/');
   const name = parts[parts.length - 1] || filePath;

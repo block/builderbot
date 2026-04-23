@@ -26,7 +26,11 @@
   import { buildBranchHashtagItems } from './hashtagItems';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import { subscribeDragDrop } from '../branches/dragDrop';
-  import { isImageFile, isMaybeTextFile } from '../branches/branchCardHelpers';
+  import {
+    isImageFile,
+    isMaybeTextFile,
+    insertFilePathsAtCursor,
+  } from '../branches/branchCardHelpers';
   import { createImage } from '../../commands';
 
   interface Props {
@@ -290,9 +294,7 @@
       onImageIdsChange(imageIds);
     }
     if (textPaths.length > 0 && textareaEl) {
-      const insert = textPaths.map((p) => p).join('\n');
-      textareaEl.focus();
-      document.execCommand('insertText', false, insert);
+      insertFilePathsAtCursor(textareaEl, textPaths);
     }
   }
 

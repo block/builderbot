@@ -953,9 +953,9 @@
             const title = fileNameFromPath(filePath);
             await commands.createNote(branch.id, title, content);
           } catch (e) {
-            alerts.error(
-              `Could not read "${fileNameFromPath(filePath)}" \u2014 it may be a binary file.`
-            );
+            const reason = e instanceof Error ? e.message : typeof e === 'string' ? e : null;
+            const detail = reason ?? 'it may be a binary file';
+            alerts.error(`Could not read "${fileNameFromPath(filePath)}" \u2014 ${detail}`);
           } finally {
             pendingDropNotes = pendingDropNotes.filter((p) => p.key !== placeholders[i].key);
           }

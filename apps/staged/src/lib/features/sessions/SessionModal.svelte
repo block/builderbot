@@ -66,7 +66,11 @@
   } from './hashtagItems';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import { subscribeDragDrop } from '../branches/dragDrop';
-  import { isImageFile, isMaybeTextFile } from '../branches/branchCardHelpers';
+  import {
+    isImageFile,
+    isMaybeTextFile,
+    insertFilePathsAtCursor,
+  } from '../branches/branchCardHelpers';
   import {
     formatToolDisplay,
     groupByVerb,
@@ -282,9 +286,7 @@
       replyImageIds = [...replyImageIds, ...newIds];
     }
     if (textPaths.length > 0 && inputEl) {
-      const insert = textPaths.map((p) => p).join('\n');
-      inputEl.focus();
-      document.execCommand('insertText', false, insert);
+      insertFilePathsAtCursor(inputEl, textPaths);
     }
   }
 

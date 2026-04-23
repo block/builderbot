@@ -57,13 +57,17 @@ fn collect_find_matches(base: &Path, branch: &str) -> Result<Vec<FindMatch>> {
             if repo.external {
                 continue;
             }
+            let repo_path = project_dir.join(repo_name);
+            if !repo_path.is_dir() {
+                continue;
+            }
 
             let normalized_branch = normalize_branch_lookup(stored_branch);
             let entry = FindMatch {
                 project: project_name.clone(),
                 repo: repo_name.clone(),
                 branch: stored_branch.clone(),
-                path: project_dir.join(repo_name),
+                path: repo_path,
             };
 
             if normalized_branch == query {
@@ -1062,7 +1066,7 @@ mod tests {
     use crate::core::state::{Project, RepoEntry, State};
     use chrono::Utc;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_dir(prefix: &str) -> PathBuf {
@@ -1086,6 +1090,10 @@ mod tests {
             created_at: Utc::now(),
             last_activated: None,
         }
+    }
+
+    fn create_checkout_path(root: &Path, project: &str, repo: &str) {
+        fs::create_dir_all(root.join(project).join(repo)).unwrap();
     }
 
     fn managed_repo(name: &str) -> RepoEntry {
@@ -1130,7 +1138,7 @@ mod tests {
     fn collect_find_matches_prefers_exact_matches() {
         let root = temp_dir("find-exact");
         fs::create_dir_all(root.join(".pm")).unwrap();
-        fs::create_dir_all(root.join("wallet-pr")).unwrap();
+        create_checkout_path(&root, "wallet-pr", "bitoshi");
 
         let mut state = State::new(root.clone());
         state
@@ -1158,7 +1166,7 @@ mod tests {
     fn collect_find_matches_supports_suffix_lookup() {
         let root = temp_dir("find-suffix");
         fs::create_dir_all(root.join(".pm")).unwrap();
-        fs::create_dir_all(root.join("wallet-pr")).unwrap();
+        create_checkout_path(&root, "wallet-pr", "bitoshi");
 
         let mut state = State::new(root.clone());
         state
@@ -1184,8 +1192,8 @@ mod tests {
     fn collect_find_matches_reports_ambiguous_suffixes() {
         let root = temp_dir("find-ambiguous");
         fs::create_dir_all(root.join(".pm")).unwrap();
-        fs::create_dir_all(root.join("wallet-pr")).unwrap();
-        fs::create_dir_all(root.join("dashboard-pr")).unwrap();
+        create_checkout_path(&root, "wallet-pr", "bitoshi");
+        create_checkout_path(&root, "dashboard-pr", "dashboard");
 
         let mut state = State::new(root.clone());
         state
@@ -1236,6 +1244,31 @@ mod tests {
         state.save().unwrap();
 
         let matches = collect_find_matches(&root, "main").unwrap();
+        assert!(matches.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn collect_find_matches_skips_missing_checkout_paths() {
+        let root = temp_dir("find-missing-checkout");
+        fs::create_dir_all(root.join(".pm")).unwrap();
+        fs::create_dir_all(root.join("wallet-pr")).unwrap();
+
+        let mut state = State::new(root.clone());
+        state
+            .repos
+            .insert("bitoshi".to_string(), managed_repo("bitoshi"));
+        state.projects.insert(
+            "wallet-pr".to_string(),
+            Project {
+                name: "wallet-pr".to_string(),
+                ..project(&[("bitoshi", "dev/create-wallet-address")])
+            },
+        );
+        state.save().unwrap();
+
+        let matches = collect_find_matches(&root, "create-wallet-address").unwrap();
         assert!(matches.is_empty());
 
         let _ = fs::remove_dir_all(root);

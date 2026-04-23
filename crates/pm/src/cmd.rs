@@ -18,6 +18,93 @@ pub struct AddConflictOpts {
     pub grow_pool: bool,
 }
 
+#[derive(Debug, Clone)]
+struct FindMatch {
+    project: String,
+    repo: String,
+    branch: String,
+    path: PathBuf,
+}
+
+fn normalize_branch_lookup(raw: &str) -> String {
+    let normalized = raw.trim();
+    let normalized = normalized.strip_prefix("refs/heads/").unwrap_or(normalized);
+    let normalized = normalized.strip_prefix("origin/").unwrap_or(normalized);
+
+    normalized
+        .rsplit_once(':')
+        .map(|(_, branch)| branch)
+        .unwrap_or(normalized)
+        .to_string()
+}
+
+fn collect_find_matches(base: &Path, branch: &str) -> Result<Vec<FindMatch>> {
+    let state = State::load_or_err(base)?;
+    let query = normalize_branch_lookup(branch);
+    let mut exact = Vec::new();
+    let mut suffix = Vec::new();
+
+    for (project_name, project) in &state.projects {
+        let project_dir = base.join(project_name);
+        if !project_dir.exists() {
+            continue;
+        }
+
+        for (repo_name, stored_branch) in &project.repos {
+            let Some(repo) = state.repos.get(repo_name) else {
+                continue;
+            };
+            if repo.external {
+                continue;
+            }
+
+            let normalized_branch = normalize_branch_lookup(stored_branch);
+            let entry = FindMatch {
+                project: project_name.clone(),
+                repo: repo_name.clone(),
+                branch: stored_branch.clone(),
+                path: project_dir.join(repo_name),
+            };
+
+            if normalized_branch == query {
+                exact.push(entry);
+            } else if normalized_branch.ends_with(&format!("/{query}")) {
+                suffix.push(entry);
+            }
+        }
+    }
+
+    Ok(if exact.is_empty() { suffix } else { exact })
+}
+
+pub fn find(base: &Path, branch: &str) -> Result<()> {
+    let matches = collect_find_matches(base, branch)?;
+
+    match matches.len() {
+        0 => bail!(
+            "No project repo path found for branch '{}'. `pm find` only matches worktree-managed repos in this workspace.",
+            branch
+        ),
+        1 => {
+            println!("{}", matches[0].path.display());
+            Ok(())
+        }
+        _ => {
+            eprintln!("Multiple matches for '{}':", branch);
+            for entry in matches {
+                eprintln!(
+                    "  {} {}:{} -> {}",
+                    entry.project,
+                    entry.repo,
+                    entry.branch,
+                    entry.path.display()
+                );
+            }
+            bail!("Branch lookup is ambiguous.")
+        }
+    }
+}
+
 // ── init ────────────────────────────────────────────────────────────────
 
 pub fn init(base: &Path) -> Result<()> {
@@ -967,4 +1054,190 @@ pub fn cleanup(base: &Path, stale_days: u64) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{collect_find_matches, normalize_branch_lookup};
+    use crate::core::state::{Project, RepoEntry, State};
+    use chrono::Utc;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("pm-{prefix}-{unique}"));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn project(branches: &[(&str, &str)]) -> Project {
+        Project {
+            name: "unused".to_string(),
+            repos: branches
+                .iter()
+                .map(|(repo, branch)| ((*repo).to_string(), (*branch).to_string()))
+                .collect(),
+            pinned: false,
+            created_at: Utc::now(),
+            last_activated: None,
+        }
+    }
+
+    fn managed_repo(name: &str) -> RepoEntry {
+        RepoEntry {
+            url: format!("https://github.com/example/{name}.git"),
+            name: name.to_string(),
+            bare_path: PathBuf::from(format!("/tmp/{name}.git")),
+            max_slots: 2,
+            external: false,
+            external_path: None,
+        }
+    }
+
+    fn external_repo(name: &str) -> RepoEntry {
+        RepoEntry {
+            url: format!("local:{name}"),
+            name: name.to_string(),
+            bare_path: PathBuf::new(),
+            max_slots: 1,
+            external: true,
+            external_path: Some(PathBuf::from(format!("/tmp/{name}"))),
+        }
+    }
+
+    #[test]
+    fn normalize_branch_lookup_strips_common_prefixes() {
+        assert_eq!(
+            normalize_branch_lookup("origin/dev/create-wallet-address"),
+            "dev/create-wallet-address"
+        );
+        assert_eq!(
+            normalize_branch_lookup("refs/heads/dev/create-wallet-address"),
+            "dev/create-wallet-address"
+        );
+        assert_eq!(
+            normalize_branch_lookup("dev:create-wallet-address"),
+            "create-wallet-address"
+        );
+    }
+
+    #[test]
+    fn collect_find_matches_prefers_exact_matches() {
+        let root = temp_dir("find-exact");
+        fs::create_dir_all(root.join(".pm")).unwrap();
+        fs::create_dir_all(root.join("wallet-pr")).unwrap();
+
+        let mut state = State::new(root.clone());
+        state
+            .repos
+            .insert("bitoshi".to_string(), managed_repo("bitoshi"));
+        state.projects.insert(
+            "wallet-pr".to_string(),
+            Project {
+                name: "wallet-pr".to_string(),
+                ..project(&[("bitoshi", "dev/create-wallet-address")])
+            },
+        );
+        state.save().unwrap();
+
+        let matches = collect_find_matches(&root, "origin/dev/create-wallet-address").unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].project, "wallet-pr");
+        assert_eq!(matches[0].repo, "bitoshi");
+        assert_eq!(matches[0].path, root.join("wallet-pr").join("bitoshi"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn collect_find_matches_supports_suffix_lookup() {
+        let root = temp_dir("find-suffix");
+        fs::create_dir_all(root.join(".pm")).unwrap();
+        fs::create_dir_all(root.join("wallet-pr")).unwrap();
+
+        let mut state = State::new(root.clone());
+        state
+            .repos
+            .insert("bitoshi".to_string(), managed_repo("bitoshi"));
+        state.projects.insert(
+            "wallet-pr".to_string(),
+            Project {
+                name: "wallet-pr".to_string(),
+                ..project(&[("bitoshi", "dev/create-wallet-address")])
+            },
+        );
+        state.save().unwrap();
+
+        let matches = collect_find_matches(&root, "create-wallet-address").unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].branch, "dev/create-wallet-address");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn collect_find_matches_reports_ambiguous_suffixes() {
+        let root = temp_dir("find-ambiguous");
+        fs::create_dir_all(root.join(".pm")).unwrap();
+        fs::create_dir_all(root.join("wallet-pr")).unwrap();
+        fs::create_dir_all(root.join("dashboard-pr")).unwrap();
+
+        let mut state = State::new(root.clone());
+        state
+            .repos
+            .insert("bitoshi".to_string(), managed_repo("bitoshi"));
+        state
+            .repos
+            .insert("dashboard".to_string(), managed_repo("dashboard"));
+        state.projects.insert(
+            "wallet-pr".to_string(),
+            Project {
+                name: "wallet-pr".to_string(),
+                ..project(&[("bitoshi", "dev/feature-a")])
+            },
+        );
+        state.projects.insert(
+            "dashboard-pr".to_string(),
+            Project {
+                name: "dashboard-pr".to_string(),
+                ..project(&[("dashboard", "alice/feature-a")])
+            },
+        );
+        state.save().unwrap();
+
+        let matches = collect_find_matches(&root, "feature-a").unwrap();
+        assert_eq!(matches.len(), 2);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn collect_find_matches_skips_external_repos() {
+        let root = temp_dir("find-external");
+        fs::create_dir_all(root.join(".pm")).unwrap();
+        fs::create_dir_all(root.join("wallet-pr")).unwrap();
+
+        let mut state = State::new(root.clone());
+        state
+            .repos
+            .insert("bitoshi".to_string(), external_repo("bitoshi"));
+        state.projects.insert(
+            "wallet-pr".to_string(),
+            Project {
+                name: "wallet-pr".to_string(),
+                ..project(&[("bitoshi", "(external)")])
+            },
+        );
+        state.save().unwrap();
+
+        let matches = collect_find_matches(&root, "main").unwrap();
+        assert!(matches.is_empty());
+
+        let _ = fs::remove_dir_all(root);
+    }
 }

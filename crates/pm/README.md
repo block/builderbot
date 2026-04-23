@@ -81,6 +81,33 @@ pm status
 
 Shows all projects, their repos/branches, and pool slot usage.
 
+### Find a branch
+
+```sh
+pm find dev/create-wallet-address
+pm find origin/dev/create-wallet-address
+pm find create-wallet-address
+cd "$(pm --root ~/projects find create-wallet-address)"
+```
+
+`pm find` searches the current workspace and prints exactly one `<project>/<repo>` path to stdout when it finds a unique match.
+
+- Exact branch matches win first.
+- If there is no exact match, `pm find` also accepts suffixes like `create-wallet-address` for `dev/create-wallet-address`.
+- In v1, `pm find` only matches worktree-managed repos. Repos added with `--existing` without `--worktree` are skipped because `pm` does not track their live branch in workspace state.
+
+Because `pm find` prints only the resolved path, it composes cleanly with a shell helper:
+
+```sh
+pmd() { cd "$(pm --root ~/projects find "$@")"; }
+```
+
+Then you can jump straight into the repo checkout for a branch:
+
+```sh
+pmd create-wallet-address
+```
+
 ### Clean up
 
 ```sh
@@ -101,3 +128,5 @@ Removes the directory, releases pool slots, and cleans up state. Also handles pr
 ## Workspace detection
 
 pm walks up from your cwd looking for `.pm/state.json`. A new workspace is auto-initialized if none exists. Override with `--root <path>`.
+
+`pm find` is the exception: it requires an existing workspace and will not auto-initialize one.

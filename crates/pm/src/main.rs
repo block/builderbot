@@ -1,7 +1,7 @@
 mod cmd;
 mod core;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -77,6 +77,15 @@ enum Commands {
         #[arg(long, default_value = "14")]
         stale_days: u64,
     },
+
+    #[command(
+        after_help = "Examples:\n  pm find dev/create-wallet-address\n  pm find origin/dev/create-wallet-address\n  pm find create-wallet-address\n  cd \"$(pm --root ~/projects find create-wallet-address)\""
+    )]
+    /// Find the project repo path for a branch in this workspace
+    Find {
+        /// Branch name copied from GitHub or git
+        branch: String,
+    },
 }
 
 fn styling() -> clap::builder::Styles {
@@ -122,15 +131,22 @@ fn infer_project(base: &std::path::Path) -> Option<String> {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let base = resolve_root(cli.root)?;
+    let Cli { root, command } = Cli::parse();
+    let base = resolve_root(root)?;
+    let workspace_exists = base.join(".pm").join("state.json").exists();
 
     // Auto-init if no workspace exists
-    if !base.join(".pm").join("state.json").exists() {
+    if matches!(&command, Commands::Find { .. }) && !workspace_exists {
+        return Err(anyhow!(
+            "No pm workspace found. Use --root <path> or run `pm new <project>` in the workspace you want to search."
+        ));
+    }
+
+    if !matches!(&command, Commands::Find { .. }) && !workspace_exists {
         cmd::init(&base)?;
     }
 
-    match cli.command {
+    match command {
         Commands::New { name } => cmd::new(&base, &name),
         Commands::Add {
             repo,
@@ -159,5 +175,6 @@ fn main() -> Result<()> {
         Commands::Rm { name } => cmd::rm(&base, &name),
         Commands::Status => cmd::status(&base),
         Commands::Cleanup { stale_days } => cmd::cleanup(&base, stale_days),
+        Commands::Find { branch } => cmd::find(&base, &branch),
     }
 }

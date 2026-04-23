@@ -711,17 +711,18 @@ export interface ThemePreviewColors {
  * Extract preview colors from a raw theme definition without loading it into the highlighter.
  */
 function extractPreviewColors(raw: ThemeRegistrationRaw): ThemePreviewColors {
+  const rawObj = raw as unknown as Record<string, unknown>;
   const bg =
     (raw.colors?.['editor.background'] as string) ||
-    (raw as Record<string, unknown>).bg as string ||
+    rawObj.bg as string ||
     '#1e1e1e';
   const fg =
     (raw.colors?.['editor.foreground'] as string) ||
-    (raw as Record<string, unknown>).fg as string ||
+    rawObj.fg as string ||
     '#d4d4d4';
 
-  const settings = (raw as Record<string, unknown>).tokenColors as ThemeSetting[] | undefined ||
-    (raw as Record<string, unknown>).settings as ThemeSetting[] | undefined ||
+  const settings = rawObj.tokenColors as ThemeSetting[] | undefined ||
+    rawObj.settings as ThemeSetting[] | undefined ||
     [];
   const comment = extractCommentColor(settings, fg);
 

@@ -68,7 +68,7 @@
         <Settings2 size={16} />
         General
       </h2>
-      <p>General preferences.</p>
+      <p>Appearance and app behaviour.</p>
     </div>
   </div>
 

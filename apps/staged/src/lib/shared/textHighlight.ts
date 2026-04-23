@@ -45,11 +45,6 @@ export function highlightMatches(
       if (node.parentElement?.tagName === 'MARK') {
         return NodeFilter.FILTER_REJECT;
       }
-      // Skip text nodes inside <code> or <pre> blocks
-      const parent = node.parentElement;
-      if (parent?.tagName === 'CODE' || parent?.closest('pre')) {
-        return NodeFilter.FILTER_REJECT;
-      }
       return NodeFilter.FILTER_ACCEPT;
     },
   });

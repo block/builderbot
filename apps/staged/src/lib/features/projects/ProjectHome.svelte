@@ -25,6 +25,20 @@
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
 
+  /**
+   * Merge incoming branches with existing ones, preserving worktreePath when
+   * a stale async response would overwrite an already-populated value with null.
+   */
+  function mergeBranchesPreservingWorktree(existing: Branch[], incoming: Branch[]): Branch[] {
+    return incoming.map((newBranch) => {
+      const prev = existing.find((b) => b.id === newBranch.id);
+      if (prev?.worktreePath && !newBranch.worktreePath) {
+        return { ...newBranch, worktreePath: prev.worktreePath };
+      }
+      return newBranch;
+    });
+  }
+
   interface Props {
     selectedProjectId?: string | null;
   }
@@ -118,19 +132,13 @@
         ]);
         setProjects(projectsList);
         projects = projectsList;
-        // Merge branches carefully: don't let a stale async response overwrite
-        // worktreePath with null when we already have it set.
-        const existingBranches = branchesByProject.get(projectId) || [];
-        const mergedBranches = branches.map((newBranch) => {
-          const existing = existingBranches.find((b) => b.id === newBranch.id);
-          if (existing?.worktreePath && !newBranch.worktreePath) {
-            return { ...newBranch, worktreePath: existing.worktreePath };
-          }
-          return newBranch;
-        });
+        const mergedBranches = mergeBranchesPreservingWorktree(
+          branchesByProject.get(projectId) || [],
+          branches
+        );
         branchesByProject = new Map(branchesByProject).set(projectId, mergedBranches);
         commands.invalidateProjectBranchTimelines(mergedBranches.map((b) => b.id));
-        workspaceLifecycle.enqueueInitialSetup(projectId, branches);
+        workspaceLifecycle.enqueueInitialSetup(projectId, mergedBranches);
         replaceProjectRepos(projectId, repos);
         void repoBadgeStore.ensureForRepos(
           repos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
@@ -558,16 +566,10 @@
       ]);
       setProjects(projectsList);
       projects = projectsList;
-      // Merge branches carefully: don't let a stale async response overwrite
-      // worktreePath with null when the setup-progress handler already set it.
-      const existingBranches = branchesByProject.get(projectId) || [];
-      const mergedBranches = branches.map((newBranch) => {
-        const existing = existingBranches.find((b) => b.id === newBranch.id);
-        if (existing?.worktreePath && !newBranch.worktreePath) {
-          return { ...newBranch, worktreePath: existing.worktreePath };
-        }
-        return newBranch;
-      });
+      const mergedBranches = mergeBranchesPreservingWorktree(
+        branchesByProject.get(projectId) || [],
+        branches
+      );
       branchesByProject = new Map(branchesByProject).set(projectId, mergedBranches);
       commands.invalidateProjectBranchTimelines(mergedBranches.map((b) => b.id));
       workspaceLifecycle.enqueueInitialSetup(projectId, mergedBranches);

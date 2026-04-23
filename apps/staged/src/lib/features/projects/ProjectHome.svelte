@@ -558,8 +558,19 @@
       ]);
       setProjects(projectsList);
       projects = projectsList;
-      branchesByProject = new Map(branchesByProject).set(projectId, branches);
-      workspaceLifecycle.enqueueInitialSetup(projectId, branches);
+      // Merge branches carefully: don't let a stale async response overwrite
+      // worktreePath with null when the setup-progress handler already set it.
+      const existingBranches = branchesByProject.get(projectId) || [];
+      const mergedBranches = branches.map((newBranch) => {
+        const existing = existingBranches.find((b) => b.id === newBranch.id);
+        if (existing?.worktreePath && !newBranch.worktreePath) {
+          return { ...newBranch, worktreePath: existing.worktreePath };
+        }
+        return newBranch;
+      });
+      branchesByProject = new Map(branchesByProject).set(projectId, mergedBranches);
+      commands.invalidateProjectBranchTimelines(mergedBranches.map((b) => b.id));
+      workspaceLifecycle.enqueueInitialSetup(projectId, mergedBranches);
       replaceProjectRepos(projectId, repos);
       void repoBadgeStore.ensureForRepos(
         repos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))

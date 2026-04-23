@@ -116,6 +116,9 @@ pub async fn detect_repo_actions(
     let context = store
         .get_or_create_action_context(&github_repo, subpath.as_deref())
         .map_err(|e| format!("Failed to get action context: {e}"))?;
+    if context.detecting_actions {
+        return Err("Detection is already in progress for this repository".into());
+    }
     store
         .set_action_context_detecting(&context.id, true)
         .map_err(|e| format!("Failed to set detection status: {e}"))?;

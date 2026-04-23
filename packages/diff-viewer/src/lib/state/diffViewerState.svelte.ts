@@ -99,8 +99,6 @@ export function createDiffViewerState(
         state.commitSha ?? undefined,
         state.scope
       );
-      console.info('[diff] getDiffFiles done', { files: response.files.length, elapsed: `${(performance.now() - t0).toFixed(1)}ms` });
-
       // Discard result if a newer context switch happened while we were loading.
       if (generation !== contextGeneration) return;
 

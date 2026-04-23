@@ -56,8 +56,10 @@ export {
   getRegisteredThemes,
   hasTheme,
   SYNTAX_THEMES,
+  loadAllThemePreviewColors,
   type Token,
   type HighlighterTheme,
+  type ThemePreviewColors,
   type SyntaxThemeName,
 } from './highlighter';
 

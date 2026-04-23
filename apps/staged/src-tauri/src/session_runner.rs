@@ -429,7 +429,23 @@ pub fn start_session(
                             log::info!("Drained next queued session for branch {branch_id}");
                         }
                         Ok(false) => {
-                            if let Some(auto_review_branch_id) = auto_review_branch_id {
+                            // Check if auto-review is enabled in user preferences
+                            let auto_review_enabled = crate::preferences_store_path_buf()
+                                .and_then(|path| std::fs::read_to_string(&path).ok())
+                                .and_then(|contents| {
+                                    serde_json::from_str::<serde_json::Value>(&contents).ok()
+                                })
+                                .and_then(|json| {
+                                    json.get("auto-start-code-reviews")?
+                                        .as_str()
+                                        .map(String::from)
+                                })
+                                .map(|mode| mode != "never")
+                                .unwrap_or_else(crate::blox::is_sq_available);
+
+                            if let Some(auto_review_branch_id) =
+                                auto_review_branch_id.filter(|_| auto_review_enabled)
+                            {
                                 match crate::session_commands::trigger_auto_review(
                                     store_for_follow_up,
                                     registry_for_follow_up,

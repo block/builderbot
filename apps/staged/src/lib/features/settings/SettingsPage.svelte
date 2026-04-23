@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { ArrowLeft, FolderGit2, Keyboard, Stethoscope } from 'lucide-svelte';
+  import { ArrowLeft, FolderGit2, Keyboard, Settings2, Stethoscope } from 'lucide-svelte';
   import { closeSettings, navigation } from '../layout/navigation.svelte';
   import ActionsSettingsPanel from './ActionsSettingsPanel.svelte';
   import DoctorSettingsPanel from './DoctorSettingsPanel.svelte';
+  import GeneralSettingsPanel from './GeneralSettingsPanel.svelte';
   import KeyboardSettingsPanel from './KeyboardSettingsPanel.svelte';
 
   let appVersion = $state(__APP_VERSION__);
@@ -38,11 +39,20 @@
 
   <div class="settings-body">
     <aside class="settings-nav" aria-label="Settings sections">
-      <div class="settings-nav-header">
-        <span class="settings-nav-title">Sections</span>
-      </div>
-
       <div class="settings-nav-list">
+        <button
+          class="nav-item"
+          class:active={navigation.settingsSection === 'general'}
+          onclick={() => (navigation.settingsSection = 'general')}
+        >
+          <div class="nav-main">
+            <Settings2 size={14} />
+            <div class="nav-text">
+              <span class="nav-name">General</span>
+              <span class="nav-meta">Theme and appearance</span>
+            </div>
+          </div>
+        </button>
         <button
           class="nav-item"
           class:active={navigation.settingsSection === 'repo'}
@@ -51,7 +61,7 @@
           <div class="nav-main">
             <FolderGit2 size={14} />
             <div class="nav-text">
-              <span class="nav-name">Repo</span>
+              <span class="nav-name">Repos</span>
               <span class="nav-meta">Per-repo actions and cleanup</span>
             </div>
           </div>
@@ -86,7 +96,9 @@
     </aside>
 
     <section class="settings-content">
-      {#if navigation.settingsSection === 'repo'}
+      {#if navigation.settingsSection === 'general'}
+        <GeneralSettingsPanel />
+      {:else if navigation.settingsSection === 'repo'}
         <ActionsSettingsPanel />
       {:else if navigation.settingsSection === 'keyboard'}
         <KeyboardSettingsPanel />
@@ -170,19 +182,6 @@
     flex-direction: column;
     min-height: 0;
     background: color-mix(in srgb, var(--bg-chrome) 75%, transparent);
-  }
-
-  .settings-nav-header {
-    padding: 14px 12px 8px;
-  }
-
-  .settings-nav-title {
-    display: inline-block;
-    font-size: calc(var(--size-xs) - 1px);
-    font-weight: 600;
-    color: var(--text-faint);
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
   }
 
   .settings-nav-list {
@@ -284,10 +283,6 @@
       border-right: 0;
       border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 60%, transparent);
       background: color-mix(in srgb, var(--bg-chrome) 65%, transparent);
-    }
-
-    .settings-nav-header {
-      display: none;
     }
 
     .settings-nav-list {

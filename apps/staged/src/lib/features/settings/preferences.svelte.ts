@@ -14,13 +14,15 @@ import {
   setSyntaxTheme,
   getTheme,
   isLightTheme,
+  loadAllThemePreviewColors,
   type SyntaxThemeName,
+  type ThemePreviewColors,
 } from '../diff/highlighter';
 import { initPersistentStore, getStoreValue, setStoreValue } from '../../shared/persistentStore';
 import { createAdaptiveTheme, themeToVarMap } from '../../theme';
 
 // Re-export for convenience
-export { isLightTheme };
+export { isLightTheme, loadAllThemePreviewColors, type ThemePreviewColors };
 
 // =============================================================================
 // Constants
@@ -35,10 +37,13 @@ const SIZE_STORE_KEY = 'size-base';
 const SYNTAX_THEME_STORE_KEY = 'syntax-theme';
 const RECENT_AGENTS_STORE_KEY = 'recent-agents';
 const PROJECT_AGENTS_STORE_KEY = 'project-agents';
+const AUTO_REVIEW_STORE_KEY = 'auto-start-code-reviews';
 /** Maximum number of recent agents to remember. */
 const RECENT_AGENTS_MAX = 10;
 
 const DEFAULT_SYNTAX_THEME: SyntaxThemeName = 'laserwave';
+
+export type AutoReviewMode = 'never' | 'after-changes';
 
 // =============================================================================
 // Reactive State
@@ -71,6 +76,8 @@ export const preferences = $state({
    * Used by project-level chat so changing one project does not affect others.
    */
   projectAgents: {} as Record<string, string>,
+  /** Whether auto code reviews are triggered after commits */
+  autoReviewMode: 'after-changes' as AutoReviewMode,
   /** Whether all preferences have been loaded from storage */
   loaded: false,
 });
@@ -144,6 +151,15 @@ export async function initPreferences(): Promise<void> {
     preferences.projectAgents = savedProjectAgents;
   }
 
+  // Load auto-review mode
+  const savedAutoReview = await getStoreValue<AutoReviewMode>(AUTO_REVIEW_STORE_KEY);
+  if (savedAutoReview === 'never' || savedAutoReview === 'after-changes') {
+    preferences.autoReviewMode = savedAutoReview;
+  } else {
+    const { isSqAvailable } = await import('../../commands');
+    preferences.autoReviewMode = (await isSqAvailable()) ? 'after-changes' : 'never';
+  }
+
   preferences.loaded = true;
 }
 
@@ -166,6 +182,15 @@ export async function selectSyntaxTheme(name: string): Promise<void> {
   preferences.syntaxTheme = name;
   await setStoreValue(SYNTAX_THEME_STORE_KEY, name);
   applyAdaptiveTheme();
+}
+
+// =============================================================================
+// Auto Review Actions
+// =============================================================================
+
+export function setAutoReviewMode(mode: AutoReviewMode): void {
+  preferences.autoReviewMode = mode;
+  setStoreValue(AUTO_REVIEW_STORE_KEY, mode);
 }
 
 // =============================================================================

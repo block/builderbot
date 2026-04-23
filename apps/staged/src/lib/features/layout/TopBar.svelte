@@ -1,22 +1,19 @@
 <!--
-  TopBar.svelte - Minimal top bar with drag region, theme selector, and new project button
+  TopBar.svelte - Minimal top bar with drag region, settings, and new project button
 
-  Provides a drag region for window movement, a theme picker, and a "+" button
-  for adding new projects.
+  Provides a drag region for window movement, a "+" button for adding new
+  projects, and a settings button.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Palette, PanelLeftClose, PanelLeftOpen, Plus, SlidersHorizontal } from 'lucide-svelte';
+  import { PanelLeftClose, PanelLeftOpen, Plus, SlidersHorizontal } from 'lucide-svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import ThemeSelectorModal from '../settings/ThemeSelectorModal.svelte';
   import { navigation, openSettings } from './navigation.svelte';
   import {
     hydrateProjectsSidebarState,
     projectsSidebarState,
     setProjectsSidebarCollapsed,
   } from '../projects/projectsSidebarState.svelte';
-
-  let showThemeModal = $state(false);
 
   onMount(() => {
     void hydrateProjectsSidebarState();
@@ -68,21 +65,9 @@
       <Plus size={14} />
     </button>
 
-    <button
-      class="icon-btn theme-btn"
-      onclick={() => (showThemeModal = !showThemeModal)}
-      title="Select theme"
-    >
-      <Palette size={14} />
-    </button>
-
     <button class="icon-btn" onclick={() => openSettings()} title="Settings (⌘,)">
       <SlidersHorizontal size={14} />
     </button>
-
-    {#if showThemeModal}
-      <ThemeSelectorModal onClose={() => (showThemeModal = false)} />
-    {/if}
   </div>
 </div>
 

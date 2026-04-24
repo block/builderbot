@@ -79,12 +79,15 @@ export function createDiffViewerState(
   // Counter to ignore stale async loads after rapid file selection.
   let selectionGeneration = 0;
 
+  // Counter to ignore stale context switches (e.g. user rapidly clicks commit A then B).
+  let contextGeneration = 0;
+
   // =========================================================================
   // Actions
   // =========================================================================
 
-  /** Load the file list. Called once on creation. */
-  async function loadFiles(): Promise<void> {
+  /** Load the file list. Called once on creation, and again on context switch. */
+  async function loadFiles(generation: number): Promise<void> {
     state.loading = true;
     state.error = null;
 
@@ -96,6 +99,9 @@ export function createDiffViewerState(
         state.commitSha ?? undefined,
         state.scope
       );
+      // Discard result if a newer context switch happened while we were loading.
+      if (generation !== contextGeneration) return;
+
       console.info('[diff] getDiffFiles done', { files: response.files.length, elapsed: `${(performance.now() - t0).toFixed(1)}ms` });
 
       state.commitSha = response.commitSha;
@@ -106,10 +112,14 @@ export function createDiffViewerState(
         await selectFile(fileSummaryPath(state.files[0]));
       }
     } catch (e) {
+      // Discard error if a newer context switch happened while we were loading.
+      if (generation !== contextGeneration) return;
       state.error = e instanceof Error ? e.message : String(e);
       state.files = [];
     } finally {
-      state.loading = false;
+      if (generation === contextGeneration) {
+        state.loading = false;
+      }
     }
   }
 
@@ -174,13 +184,37 @@ export function createDiffViewerState(
     return state.diffCache.get(state.selectedFile) ?? null;
   }
 
+  /**
+   * Switch to a different diff context (branch vs commit scope).
+   * Clears the cache and reloads the file list.
+   *
+   * Uses a generation counter so that rapid switches (e.g. user clicks
+   * commit A then immediately commit B) don't race — only the latest
+   * loadFiles result is applied.
+   */
+  async function switchContext(
+    newScope: 'branch' | 'commit',
+    newCommitSha?: string
+  ): Promise<void> {
+    const generation = ++contextGeneration;
+    state.scope = newScope;
+    state.commitSha = newCommitSha ?? null;
+    state.diffCache = new Map();
+    state.selectedFile = null;
+    state.loadingFile = null;
+    state.files = [];
+    state.error = null;
+    await loadFiles(generation);
+  }
+
   // Kick off initial load.
-  loadFiles();
+  loadFiles(contextGeneration);
 
   return {
     state,
     selectFile,
     loadFileDiff,
     getCurrentDiff,
+    switchContext,
   };
 }

@@ -13,10 +13,11 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { X, ArrowLeft } from 'lucide-svelte';
+  import { X, ArrowLeft, ChevronDown, GitBranch, GitCommitHorizontal } from 'lucide-svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
+  import { formatRelativeTimeSeconds } from '../../shared/relativeTime.svelte';
   import { DiffViewer, CrossFileSearchBar } from '@builderbot/diff-viewer/components';
   import DiffCommentsSection from './DiffCommentsSection.svelte';
   import DiffFileTreeSection from './DiffFileTreeSection.svelte';
@@ -32,7 +33,7 @@
     createSearchInitializationTracker,
     createFileSelectionWithSearch,
   } from '@builderbot/diff-viewer/utils';
-  import type { Comment, SmartDiffAnnotation, Span } from '../../types';
+  import type { Comment, CommitTimelineItem, SmartDiffAnnotation, Span } from '../../types';
   import { findFreshAutoReview, getSession } from '../../commands';
   import {
     buildFileEntries,
@@ -64,6 +65,12 @@
     afterLabel?: string;
     /** When true, hides commenting, reference files, and review status. */
     readonly?: boolean;
+    /** Available commits for the context switcher dropdown. */
+    commits?: CommitTimelineItem[];
+    /** Base branch name (e.g. "main") for label display when switching to branch scope. */
+    baseBranchLabel?: string;
+    /** Branch name for label display when switching to branch scope. */
+    branchLabel?: string;
     /** Project name to display in title bar. */
     projectName?: string;
     /** GitHub repo (e.g., "owner/repo") to display in title bar. */
@@ -82,6 +89,9 @@
     beforeLabel = 'base',
     afterLabel = 'head',
     readonly = false,
+    commits,
+    baseBranchLabel,
+    branchLabel,
     projectName,
     githubRepo,
     subpath,
@@ -101,14 +111,157 @@
   type ReviewHandle = ReturnType<typeof createReviewState>;
   let reviewHandle = $state<ReviewHandle | null>(null);
 
-  // Create review state once we have a resolved commitSha (skip in readonly mode)
+  // Create review state once we have a resolved commitSha (skip in readonly mode).
+  // NOTE: This effect's tracked dependencies are `diffViewer.state.commitSha` and
+  // `reviewHandle`. When `switchDiffContext` sets `reviewHandle = null`, the effect
+  // re-fires and reads `activeScope`/`activeReviewId` inside the `if` branch.
+  // Those reads happen *conditionally* (only when `reviewHandle` is null), so Svelte
+  // tracks them only on runs where the branch executes. This is correct today but
+  // relies on Svelte 5's fine-grained conditional tracking — if that ever changes,
+  // explicitly adding `activeScope`/`activeReviewId` to the dependency list would
+  // be needed to keep the effect firing on context switches.
   $effect(() => {
     const sha = diffViewer.state.commitSha;
     if (sha && !reviewHandle && !readonly) {
       // svelte-ignore state_referenced_locally
-      reviewHandle = createReviewState(branchId, sha, scope, reviewId);
+      reviewHandle = createReviewState(branchId, sha, activeScope, activeReviewId);
     }
   });
+
+  // Context switcher state
+  // svelte-ignore state_referenced_locally
+  let activeScope = $state<'branch' | 'commit'>(scope);
+  // svelte-ignore state_referenced_locally
+  let activeCommitSha = $state<string | undefined>(commitSha);
+  // svelte-ignore state_referenced_locally
+  let activeBeforeLabel = $state(beforeLabel);
+  // svelte-ignore state_referenced_locally
+  let activeAfterLabel = $state(afterLabel);
+  // svelte-ignore state_referenced_locally
+  let activeReviewId = $state<string | undefined>(reviewId);
+  let showContextDropdown = $state(false);
+  /** Whether a context switch is currently in-flight (disables the dropdown). */
+  let switchingContext = $state(false);
+  /** Tracks the active auto-review reload promise so it can be ignored on stale switches. */
+  let contextSwitchGeneration = 0;
+
+  /** Label for the current context shown in the dropdown trigger. */
+  let contextLabel = $derived(
+    activeScope === 'branch'
+      ? 'All changes'
+      : (commits?.find((c) => c.sha === activeCommitSha)?.subject ?? 'Commit')
+  );
+
+  /** Whether the context switcher should be shown. */
+  let showContextSwitcher = $derived((commits?.length ?? 0) > 0);
+
+  async function switchDiffContext(newScope: 'branch' | 'commit', newCommitSha?: string) {
+    showContextDropdown = false;
+
+    // No-op if already on this context
+    if (newScope === activeScope && newCommitSha === activeCommitSha) return;
+
+    const thisGeneration = ++contextSwitchGeneration;
+    switchingContext = true;
+
+    activeScope = newScope;
+    activeCommitSha = newCommitSha;
+    activeReviewId = undefined; // Clear specific review when switching
+
+    // Update labels
+    if (newScope === 'branch') {
+      activeBeforeLabel = baseBranchLabel ?? 'base';
+      activeAfterLabel = branchLabel ?? 'head';
+    } else {
+      activeBeforeLabel = 'parent';
+      activeAfterLabel = newCommitSha?.slice(0, 7) ?? 'head';
+    }
+
+    // Always stop polling on any context switch — will restart below if needed
+    stopAutoReviewPolling();
+    autoReviewComments = [];
+
+    // Reset review state — the $effect will recreate it once the new commitSha resolves
+    reviewHandle = null;
+
+    // Switch diff context (reloads file list)
+    try {
+      await diffViewer.switchContext(newScope, newCommitSha);
+    } finally {
+      // Bail if a newer context switch started while we were loading
+      if (thisGeneration !== contextSwitchGeneration) return;
+      switchingContext = false;
+    }
+
+    // If switching to branch scope, reload auto-review annotations.
+    // Guard each async step against stale generations so a rapid switch
+    // doesn't start polling for an already-abandoned context.
+    if (newScope === 'branch') {
+      loadAutoReviewAnnotations().then((review) => {
+        if (thisGeneration !== contextSwitchGeneration) return;
+        if (review?.sessionId) {
+          getSession(review.sessionId)
+            .then((session) => {
+              if (thisGeneration !== contextSwitchGeneration) return;
+              if (session?.status === 'running') {
+                startAutoReviewPolling(review.sessionId!);
+              }
+            })
+            .catch((e) => console.warn('Failed to check auto-review session status:', e));
+        }
+      });
+    }
+  }
+
+  /** Index of the focused option in the dropdown (-1 = none). 0..N-1 = commits, N = "All changes". */
+  let dropdownFocusIndex = $state(-1);
+
+  /** Total number of options in the dropdown (1 for "All changes" + commit count). */
+  let dropdownOptionCount = $derived(1 + (commits?.length ?? 0));
+
+  /** Commits in chronological order (oldest first) for dropdown display and keyboard nav. */
+  let reversedCommits = $derived([...(commits ?? [])].reverse());
+
+  function openDropdown() {
+    showContextDropdown = true;
+    dropdownFocusIndex = -1;
+  }
+
+  function closeDropdown() {
+    showContextDropdown = false;
+    dropdownFocusIndex = -1;
+  }
+
+  function handleDropdownKeydown(event: KeyboardEvent) {
+    if (!showContextDropdown) return;
+
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      dropdownFocusIndex = Math.min(dropdownFocusIndex + 1, dropdownOptionCount - 1);
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      dropdownFocusIndex = Math.max(dropdownFocusIndex - 1, 0);
+    } else if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      const commitCount = reversedCommits.length;
+      if (dropdownFocusIndex === commitCount) {
+        switchDiffContext('branch');
+      } else if (dropdownFocusIndex >= 0 && dropdownFocusIndex < commitCount) {
+        const commit = reversedCommits[dropdownFocusIndex];
+        if (commit) switchDiffContext('commit', commit.sha);
+      }
+    } else if (event.key === 'Escape') {
+      // Let the main keydown handler close the dropdown
+      return;
+    }
+  }
+
+  function handleClickOutsideDropdown(event: MouseEvent) {
+    const target = event.target as HTMLElement;
+    if (showContextDropdown && !target.closest('.context-switcher')) {
+      closeDropdown();
+    }
+  }
 
   // Sidebar state
   let collapsedDirs = $state(new Set<string>());
@@ -175,7 +328,7 @@
 
   // Load auto review annotations for branch-scope diffs (no specific reviewId)
   // svelte-ignore state_referenced_locally
-  if (scope === 'branch' && !reviewId) {
+  if (activeScope === 'branch' && !reviewId) {
     loadAutoReviewAnnotations().then((review) => {
       if (review?.sessionId) {
         // Check if the session is still running to start polling
@@ -185,7 +338,7 @@
               startAutoReviewPolling(review.sessionId!);
             }
           })
-          .catch(() => {});
+          .catch((e) => console.warn('Failed to check auto-review session status:', e));
       }
     });
   }
@@ -443,6 +596,13 @@
       // don't also close the modal. Both handlers are on `document`, so stopPropagation
       // doesn't help — check defaultPrevented instead.
       if (event.defaultPrevented) return;
+      // Close context dropdown first if open
+      if (showContextDropdown) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeDropdown();
+        return;
+      }
       // Close search bar first if open
       if (searchState.state.isOpen) {
         event.preventDefault();
@@ -501,9 +661,11 @@
   onMount(() => {
     document.addEventListener('keydown', handleKeydown);
     document.addEventListener('keyup', handleKeyup);
+    document.addEventListener('click', handleClickOutsideDropdown);
     return () => {
       document.removeEventListener('keydown', handleKeydown);
       document.removeEventListener('keyup', handleKeyup);
+      document.removeEventListener('click', handleClickOutsideDropdown);
     };
   });
 
@@ -543,6 +705,65 @@
         {/if}
       </div>
       <div class="drag-spacer"></div>
+      {#if showContextSwitcher}
+        <div class="context-switcher">
+          <button
+            type="button"
+            class="context-switcher-btn"
+            disabled={switchingContext}
+            onclick={() => (showContextDropdown ? closeDropdown() : openDropdown())}
+            onkeydown={handleDropdownKeydown}
+            aria-expanded={showContextDropdown}
+            aria-haspopup="listbox"
+            title="Switch diff context"
+          >
+            {#if activeScope === 'branch'}
+              <GitBranch size={12} />
+            {:else}
+              <GitCommitHorizontal size={12} />
+            {/if}
+            <span class="context-label">{contextLabel}</span>
+            <ChevronDown size={12} />
+          </button>
+          {#if showContextDropdown}
+            <div class="context-dropdown" role="listbox" aria-label="Diff context">
+              {#each reversedCommits as commit, i (commit.sha)}
+                <button
+                  type="button"
+                  class="context-option commit-option"
+                  role="option"
+                  aria-selected={activeScope === 'commit' && activeCommitSha === commit.sha}
+                  class:selected={activeScope === 'commit' && activeCommitSha === commit.sha}
+                  class:focused={dropdownFocusIndex === i}
+                  onclick={() => switchDiffContext('commit', commit.sha)}
+                >
+                  <span class="commit-icon-wrapper"><GitCommitHorizontal size={14} /></span>
+                  <span class="option-label commit-option-label">
+                    <span class="commit-subject">{commit.subject}</span>
+                    <span class="commit-meta">
+                      <span class="commit-sha">{commit.shortSha}</span>
+                      <span class="commit-time">{formatRelativeTimeSeconds(commit.timestamp)}</span>
+                    </span>
+                  </span>
+                </button>
+              {/each}
+              <div class="context-separator"></div>
+              <button
+                type="button"
+                class="context-option"
+                role="option"
+                aria-selected={activeScope === 'branch'}
+                class:selected={activeScope === 'branch'}
+                class:focused={dropdownFocusIndex === reversedCommits.length}
+                onclick={() => switchDiffContext('branch')}
+              >
+                <GitBranch size={14} />
+                <span class="option-label">All changes</span>
+              </button>
+            </div>
+          {/if}
+        </div>
+      {/if}
     </div>
 
     <div class="modal-body">
@@ -554,8 +775,8 @@
           {jumpToComment}
           {jumpToLine}
           loading={diffViewer.state.loadingFile !== null}
-          {beforeLabel}
-          {afterLabel}
+          beforeLabel={activeBeforeLabel}
+          afterLabel={activeAfterLabel}
           annotations={revealedAnnotations}
           {annotationsRevealed}
           searchState={searchState.state}
@@ -635,8 +856,8 @@
                 {branchId}
                 {projectId}
                 commitSha={diffViewer.state.commitSha}
-                {scope}
-                {reviewId}
+                scope={activeScope}
+                reviewId={activeReviewId}
                 visibleCommentCount={currentComments.length}
                 onStarted={onClose}
               />
@@ -767,6 +988,147 @@
   .icon-btn:disabled {
     opacity: 0.35;
     cursor: not-allowed;
+  }
+
+  /* ========================================================================
+   * Context switcher
+   * ====================================================================== */
+
+  .context-switcher {
+    position: relative;
+    -webkit-app-region: no-drag;
+  }
+
+  .context-switcher-btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px;
+    background: none;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+    font-weight: 500;
+    font-family: inherit;
+    cursor: pointer;
+    transition:
+      color 0.15s,
+      border-color 0.15s,
+      background-color 0.15s;
+  }
+
+  .context-switcher-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--border-muted);
+    background: var(--bg-hover);
+  }
+
+  .context-label {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 200px;
+  }
+
+  .context-dropdown {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 4px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-muted);
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    overflow: hidden;
+    z-index: 1001;
+    min-width: 220px;
+    max-width: 340px;
+    max-height: 320px;
+    overflow-y: auto;
+  }
+
+  .context-separator {
+    height: 1px;
+    background: var(--border-subtle);
+    margin: 2px 0;
+  }
+
+  .context-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 12px;
+    background: none;
+    border: none;
+    color: var(--text-primary);
+    font-size: var(--size-sm);
+    font-family: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 0.1s;
+  }
+
+  .context-option:hover,
+  .context-option.focused {
+    background-color: var(--bg-hover);
+  }
+
+  .context-option.selected {
+    color: var(--ui-accent);
+  }
+
+  .context-option.selected :global(svg) {
+    color: var(--ui-accent);
+  }
+
+  .context-option .option-label {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    overflow: hidden;
+  }
+
+  .commit-option {
+    align-items: flex-start;
+  }
+
+  .commit-icon-wrapper {
+    display: flex;
+    margin-top: 2px;
+  }
+
+  .commit-option-label {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+  }
+
+  .commit-subject {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    width: 100%;
+  }
+
+  .commit-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    font-size: var(--size-xs);
+    color: var(--text-faint);
+  }
+
+  .commit-sha {
+    font-family: var(--font-mono, monospace);
+  }
+
+  .commit-time {
+    white-space: nowrap;
   }
 
   /* ========================================================================

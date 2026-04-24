@@ -25,10 +25,13 @@ export async function getAvailableOpeners(): Promise<OpenerApp[]> {
 }
 
 /**
- * Open a directory in a specific application.
+ * Open a file or directory in a specific application.
+ *
+ * When `projectPath` is provided, editors that support it (VS Code, Cursor,
+ * Zed) will open the file within the project workspace context.
  */
-export async function openInApp(path: string, appId: string): Promise<void> {
-  return invoke<void>('open_in_app', { path, appId });
+export async function openInApp(path: string, appId: string, projectPath?: string): Promise<void> {
+  return invoke<void>('open_in_app', { path, appId, projectPath: projectPath ?? null });
 }
 
 /**

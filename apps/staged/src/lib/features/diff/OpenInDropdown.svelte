@@ -15,9 +15,11 @@
   interface Props {
     /** Full absolute path to the file to open. */
     filePath: string | null;
+    /** Optional project/worktree path for project-aware editor opening. */
+    projectPath?: string | null;
   }
 
-  let { filePath }: Props = $props();
+  let { filePath, projectPath }: Props = $props();
 
   let fileOpenerApps = $state<OpenerApp[]>([]);
   let showDropdown = $state(false);
@@ -42,7 +44,7 @@
 
   function handleOpenIn(appId: string) {
     if (filePath) {
-      openInApp(filePath, appId);
+      openInApp(filePath, appId, projectPath ?? undefined);
     }
     showDropdown = false;
   }

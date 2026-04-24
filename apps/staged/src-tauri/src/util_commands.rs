@@ -192,13 +192,24 @@ fn prettify_app_name(id: &str) -> String {
     .to_string()
 }
 
-/// Open a directory in a specific application.
+/// Editors that support `--args <project> <file>` for project-aware opening.
+#[cfg(target_os = "macos")]
+const PROJECT_AWARE_OPENERS: &[&str] = &["vscode", "vscode-insiders", "cursor", "zed"];
+
+/// Open a file or directory in a specific application.
 ///
 /// On macOS, uses the `open -b` command with the app's bundle ID.
+/// When `project_path` is provided and the app supports it, passes
+/// `--args <project_path> <file_path>` so the editor opens with
+/// the project as the workspace context.
 /// On other platforms, returns an error.
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 #[allow(unused_variables)]
-pub async fn open_in_app(path: String, app_id: String) -> Result<(), String> {
+pub async fn open_in_app(
+    path: String,
+    app_id: String,
+    project_path: Option<String>,
+) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;
@@ -210,12 +221,30 @@ pub async fn open_in_app(path: String, app_id: String) -> Result<(), String> {
             .map(|(_, bundle, _)| *bundle)
             .ok_or_else(|| format!("Unknown app ID: {app_id}"))?;
 
-        let status = Command::new("open")
-            .arg("-b")
-            .arg(bundle_id)
-            .arg(&path)
-            .status()
-            .map_err(|e| format!("Failed to run open command: {e}"))?;
+        let status = if let Some(ref project) = project_path {
+            if PROJECT_AWARE_OPENERS.contains(&app_id.as_str()) {
+                Command::new("open")
+                    .arg("-b")
+                    .arg(bundle_id)
+                    .arg("--args")
+                    .arg(project)
+                    .arg(&path)
+                    .status()
+            } else {
+                Command::new("open")
+                    .arg("-b")
+                    .arg(bundle_id)
+                    .arg(&path)
+                    .status()
+            }
+        } else {
+            Command::new("open")
+                .arg("-b")
+                .arg(bundle_id)
+                .arg(&path)
+                .status()
+        }
+        .map_err(|e| format!("Failed to run open command: {e}"))?;
 
         if status.success() {
             Ok(())

@@ -775,7 +775,7 @@
       <div class="diff-viewer-container">
         {#snippet openInSnippet(afterPath: string | null)}
           {#if worktreePath && afterPath}
-            <OpenInDropdown filePath="{worktreePath}/{afterPath}" />
+            <OpenInDropdown filePath="{worktreePath}/{afterPath}" projectPath={worktreePath} />
           {/if}
         {/snippet}
         <DiffViewer

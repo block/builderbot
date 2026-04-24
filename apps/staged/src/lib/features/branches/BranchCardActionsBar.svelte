@@ -429,7 +429,7 @@
     showMoreMenu = false;
     showOpenInSubmenu = false;
     if (branch.worktreePath) {
-      await openInApp(branch.worktreePath, appId);
+      await openInApp(branch.worktreePath, appId, branch.worktreePath);
     }
   }
 

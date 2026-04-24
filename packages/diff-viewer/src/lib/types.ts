@@ -79,6 +79,8 @@ export interface Comment {
   /** The type/severity of this comment. Null for user-authored comments. */
   commentType: CommentType | null;
   createdAt: number;
+  /** When the comment was soft-deleted. Null means active. */
+  deletedAt: number | null;
 }
 
 /** A review anchored to a branch + commit + scope. */
@@ -175,6 +177,8 @@ export interface ReviewCommands {
 
   updateComment(commentId: string, content: string): Promise<void>;
   deleteComment(commentId: string): Promise<void>;
+  restoreComment(commentId: string): Promise<void>;
+  getDeletedComments(reviewId: string): Promise<Comment[]>;
 
   markReviewed(reviewId: string, path: string): Promise<void>;
   unmarkReviewed(reviewId: string, path: string): Promise<void>;

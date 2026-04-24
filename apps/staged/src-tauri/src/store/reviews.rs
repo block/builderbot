@@ -221,10 +221,15 @@ impl Store {
         Ok(())
     }
 
-    /// Delete a comment.
+    /// Soft-delete a comment by setting `deleted_at` to the current timestamp.
     pub fn delete_comment(&self, comment_id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
-        // Get parent review before deleting
+        let now = now_timestamp();
+        conn.execute(
+            "UPDATE comments SET deleted_at = ?1 WHERE id = ?2",
+            params![now, comment_id],
+        )?;
+        // Touch the parent review
         let review_id: Option<String> = conn
             .query_row(
                 "SELECT review_id FROM comments WHERE id = ?1",
@@ -232,11 +237,57 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        conn.execute("DELETE FROM comments WHERE id = ?1", params![comment_id])?;
         if let Some(rid) = review_id {
             Self::touch_review(&conn, &rid)?;
         }
         Ok(())
+    }
+
+    /// Restore a soft-deleted comment by clearing `deleted_at`.
+    pub fn restore_comment(&self, comment_id: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE comments SET deleted_at = NULL WHERE id = ?1",
+            params![comment_id],
+        )?;
+        let review_id: Option<String> = conn
+            .query_row(
+                "SELECT review_id FROM comments WHERE id = ?1",
+                params![comment_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(rid) = review_id {
+            Self::touch_review(&conn, &rid)?;
+        }
+        Ok(())
+    }
+
+    /// Get soft-deleted comments for a review, ordered by deletion time (newest first).
+    pub fn get_deleted_comments(&self, review_id: &str) -> Result<Vec<Comment>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, path, span_start, span_end, content, author, comment_type, created_at, deleted_at
+             FROM comments WHERE review_id = ?1 AND deleted_at IS NOT NULL ORDER BY deleted_at DESC",
+        )?;
+        let comments = stmt
+            .query_map(params![review_id], |row| {
+                let author_str: String = row.get(5)?;
+                let comment_type_str: Option<String> = row.get(6)?;
+                Ok(Comment {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    span: Span::new(row.get(2)?, row.get(3)?),
+                    content: row.get(4)?,
+                    author: super::models::CommentAuthor::parse(&author_str)
+                        .unwrap_or(super::models::CommentAuthor::User),
+                    comment_type: comment_type_str.as_deref().and_then(CommentType::parse),
+                    created_at: row.get(7)?,
+                    deleted_at: row.get(8)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(comments)
     }
 
     /// Add a reference file path.
@@ -440,10 +491,10 @@ impl Store {
             .query_map(params![&review.id], |row| row.get(0))?
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Load comments
+        // Load comments (only active — soft-deleted comments are excluded)
         let mut stmt = conn.prepare(
             "SELECT id, path, span_start, span_end, content, author, comment_type, created_at
-             FROM comments WHERE review_id = ?1 ORDER BY created_at ASC",
+             FROM comments WHERE review_id = ?1 AND deleted_at IS NULL ORDER BY created_at ASC",
         )?;
         review.comments = stmt
             .query_map(params![&review.id], |row| {
@@ -458,6 +509,7 @@ impl Store {
                         .unwrap_or(super::models::CommentAuthor::User),
                     comment_type: comment_type_str.as_deref().and_then(CommentType::parse),
                     created_at: row.get(7)?,
+                    deleted_at: None,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;

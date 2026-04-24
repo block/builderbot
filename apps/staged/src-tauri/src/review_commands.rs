@@ -118,6 +118,28 @@ pub async fn delete_comment(
         .map_err(|e| e.to_string())
 }
 
+/// Restore a soft-deleted comment.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn restore_comment(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    comment_id: String,
+) -> Result<(), String> {
+    crate::get_store(&store)?
+        .restore_comment(&comment_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Get soft-deleted comments for a review.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_deleted_comments(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    review_id: String,
+) -> Result<Vec<crate::store::Comment>, String> {
+    crate::get_store(&store)?
+        .get_deleted_comments(&review_id)
+        .map_err(|e| e.to_string())
+}
+
 /// Add a reference file to a review.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn add_reference_file(

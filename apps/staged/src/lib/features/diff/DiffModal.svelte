@@ -213,7 +213,7 @@
     }
   }
 
-  /** Index of the focused option in the dropdown (-1 = none). 0 = "All changes", 1+ = commits. */
+  /** Index of the focused option in the dropdown (-1 = none). 0..N-1 = commits, N = "All changes". */
   let dropdownFocusIndex = $state(-1);
 
   /** Total number of options in the dropdown (1 for "All changes" + commit count). */
@@ -754,7 +754,7 @@
                 role="option"
                 aria-selected={activeScope === 'branch'}
                 class:selected={activeScope === 'branch'}
-                class:focused={dropdownFocusIndex === (commits?.length ?? 0)}
+                class:focused={dropdownFocusIndex === reversedCommits.length}
                 onclick={() => switchDiffContext('branch')}
               >
                 <GitBranch size={14} />

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import {
     FolderGit2,
     Play,
@@ -22,7 +22,11 @@
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import type { ActionContext, ProjectAction } from '../../api/commands';
   import * as commands from '../../api/commands';
-  import { detectRepoActions, type ActionType } from '../actions/actions';
+  import {
+    detectRepoActions,
+    listenToRepoActionsDetection,
+    type ActionType,
+  } from '../actions/actions';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { matchesRepoSearch } from './repoContextSearch';
 
@@ -66,10 +70,28 @@
   let badgeEditHue = $state(0);
   let badgeError = $state('');
 
+  let unlistenDetection: (() => void) | undefined;
+
   onMount(async () => {
+    listenToRepoActionsDetection((event) => {
+      const ctx = selectedContext;
+      if (!ctx) return;
+      if (event.githubRepo !== ctx.githubRepo || event.subpath !== (ctx.subpath ?? null)) return;
+      detecting = event.detecting;
+      if (!event.detecting) {
+        loadActions();
+      }
+    }).then((unlisten) => {
+      unlistenDetection = unlisten;
+    });
+
     await repoBadgeStore.loadAll();
     await loadContexts();
     await ensureBadgesForContexts(contexts);
+  });
+
+  onDestroy(() => {
+    unlistenDetection?.();
   });
 
   async function ensureBadgesForContexts(ctxs: ActionContext[]) {
@@ -254,6 +276,10 @@
   $effect(() => {
     selectedRepoKey;
     loadActions();
+  });
+
+  $effect(() => {
+    detecting = selectedContext?.detectingActions ?? false;
   });
 
   async function detectActions() {

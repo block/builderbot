@@ -192,16 +192,22 @@ fn prettify_app_name(id: &str) -> String {
     .to_string()
 }
 
-/// Editors that support `--args <project> <file>` for project-aware opening.
+/// Mapping from app ID to CLI command name for editors that have dedicated
+/// CLI tools. These CLIs handle window reuse, IPC, and workspace resolution
+/// properly — unlike `open -b` which just launches the Electron binary.
 #[cfg(target_os = "macos")]
-const PROJECT_AWARE_OPENERS: &[&str] = &["vscode", "vscode-insiders", "cursor", "zed"];
+const CLI_OPENERS: &[(&str, &str)] = &[
+    ("vscode", "code"),
+    ("vscode-insiders", "code-insiders"),
+    ("cursor", "cursor"),
+    ("zed", "zed"),
+];
 
 /// Open a file or directory in a specific application.
 ///
-/// On macOS, uses the `open -b` command with the app's bundle ID.
-/// When `project_path` is provided and the app supports it, passes
-/// `--args <project_path> <file_path>` so the editor opens with
-/// the project as the workspace context.
+/// For editors with dedicated CLI tools (VS Code, Cursor, Zed), uses the CLI
+/// to open with proper project context. Falls back to `open -b <bundle_id>`
+/// when the CLI is not available or for other apps.
 /// On other platforms, returns an error.
 #[tauri::command(rename_all = "camelCase")]
 #[allow(unused_variables)]
@@ -221,30 +227,44 @@ pub async fn open_in_app(
             .map(|(_, bundle, _)| *bundle)
             .ok_or_else(|| format!("Unknown app ID: {app_id}"))?;
 
-        let status = if let Some(ref project) = project_path {
-            if PROJECT_AWARE_OPENERS.contains(&app_id.as_str()) {
-                Command::new("open")
-                    .arg("-b")
-                    .arg(bundle_id)
-                    .arg("--args")
-                    .arg(project)
-                    .arg(&path)
+        // Try CLI tool first for supported editors
+        if let Some(cli_cmd) = CLI_OPENERS
+            .iter()
+            .find(|(id, _)| *id == app_id)
+            .map(|(_, cmd)| *cmd)
+        {
+            // Check if the CLI is available
+            let has_cli = Command::new("which")
+                .arg(cli_cmd)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+
+            if has_cli {
+                let mut cmd = Command::new(cli_cmd);
+                if let Some(ref project) = project_path {
+                    cmd.arg(project);
+                }
+                cmd.arg(&path);
+
+                let status = cmd
                     .status()
-            } else {
-                Command::new("open")
-                    .arg("-b")
-                    .arg(bundle_id)
-                    .arg(&path)
-                    .status()
+                    .map_err(|e| format!("Failed to run {cli_cmd}: {e}"))?;
+
+                if status.success() {
+                    return Ok(());
+                }
+                // CLI failed — fall through to open -b
             }
-        } else {
-            Command::new("open")
-                .arg("-b")
-                .arg(bundle_id)
-                .arg(&path)
-                .status()
         }
-        .map_err(|e| format!("Failed to run open command: {e}"))?;
+
+        // Fallback: open via bundle ID (no --args)
+        let status = Command::new("open")
+            .arg("-b")
+            .arg(bundle_id)
+            .arg(&path)
+            .status()
+            .map_err(|e| format!("Failed to run open command: {e}"))?;
 
         if status.success() {
             Ok(())

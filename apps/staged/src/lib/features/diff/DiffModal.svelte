@@ -13,15 +13,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import {
-    X,
-    ArrowLeft,
-    ChevronDown,
-    Check,
-    GitBranch,
-    GitCommitHorizontal,
-    Info,
-  } from 'lucide-svelte';
+  import { X, ArrowLeft, ChevronDown, GitBranch, GitCommitHorizontal } from 'lucide-svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
@@ -162,19 +154,6 @@
 
   /** Whether the context switcher should be shown. */
   let showContextSwitcher = $derived((commits?.length ?? 0) > 0);
-
-  /** The SHA of the latest (most recent) commit on the branch.
-   *  Explicitly sorts by descending order to avoid depending on array ordering from the backend. */
-  let latestCommitSha = $derived(
-    commits?.filter((c) => c.sha).sort((a, b) => b.order - a.order)[0]?.sha
-  );
-
-  /** Whether the current context allows commenting and commit actions.
-   *  True for branch scope ("All changes") and the latest commit; false for older commits. */
-  let isContextEditable = $derived(
-    activeScope === 'branch' ||
-      (activeScope === 'commit' && activeCommitSha != null && activeCommitSha === latestCommitSha)
-  );
 
   async function switchDiffContext(newScope: 'branch' | 'commit', newCommitSha?: string) {
     showContextDropdown = false;
@@ -766,9 +745,6 @@
                       <span class="commit-time">{formatRelativeTimeSeconds(commit.timestamp)}</span>
                     </span>
                   </span>
-                  {#if activeScope === 'commit' && activeCommitSha === commit.sha}
-                    <Check size={14} />
-                  {/if}
                 </button>
               {/each}
               <div class="context-separator"></div>
@@ -783,9 +759,6 @@
               >
                 <GitBranch size={14} />
                 <span class="option-label">All changes</span>
-                {#if activeScope === 'branch'}
-                  <Check size={14} />
-                {/if}
               </button>
             </div>
           {/if}
@@ -807,11 +780,9 @@
           annotations={revealedAnnotations}
           {annotationsRevealed}
           searchState={searchState.state}
-          onAddComment={readonly || !isContextEditable ? undefined : handleAddComment}
-          onUpdateComment={readonly || !isContextEditable ? undefined : handleUpdateComment}
-          onDeleteComment={readonly || !isContextEditable
-            ? undefined
-            : handleDeleteCommentFromViewer}
+          onAddComment={readonly ? undefined : handleAddComment}
+          onUpdateComment={readonly ? undefined : handleUpdateComment}
+          onDeleteComment={readonly ? undefined : handleDeleteCommentFromViewer}
         />
       </div>
 
@@ -857,7 +828,7 @@
                 {searchState}
                 diffViewerState={diffViewer}
               />
-              {#if !readonly && isContextEditable}
+              {#if !readonly}
                 <DiffReferenceSection
                   referenceFiles={reviewHandle?.state.referenceFiles ?? []}
                   selectedFile={diffViewer.state.selectedFile}
@@ -877,27 +848,10 @@
                   onDeleteAll={handleDeleteAllComments}
                   onDeleteComment={handleDeleteComment}
                 />
-              {:else if !readonly && !isContextEditable}
-                <div class="context-info-box">
-                  <Info size={14} />
-                  <span
-                    >Comments and actions are only available when viewing
-                    <button class="context-link-btn" onclick={() => switchDiffContext('branch')}
-                      >all changes</button
-                    >
-                    or the
-                    <button
-                      class="context-link-btn"
-                      onclick={() =>
-                        latestCommitSha && switchDiffContext('commit', latestCommitSha)}
-                      disabled={!latestCommitSha}>latest commit</button
-                    >.</span
-                  >
-                </div>
               {/if}
             </div>
 
-            {#if !readonly && isContextEditable && diffViewer.state.commitSha}
+            {#if !readonly && diffViewer.state.commitSha}
               <DiffCommitSessionLauncher
                 {branchId}
                 {projectId}
@@ -1222,41 +1176,6 @@
     padding: 12px 16px;
     font-size: var(--size-sm);
     color: var(--text-muted);
-  }
-
-  .context-info-box {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    margin: 16px 12px 8px;
-    padding: 10px 12px;
-    border-radius: 6px;
-    background-color: var(--bg-hover);
-    font-size: var(--size-xs);
-    color: var(--text-muted);
-    line-height: 1.4;
-  }
-
-  .context-link-btn {
-    all: unset;
-    color: var(--text-default);
-    text-decoration: underline;
-    cursor: pointer;
-  }
-
-  .context-link-btn:hover {
-    color: var(--ui-primary);
-  }
-
-  .context-link-btn:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-
-  .context-info-box :global(svg) {
-    flex-shrink: 0;
-    margin-top: 1px;
-    color: var(--text-faint);
   }
 
   .sidebar-error {

@@ -724,13 +724,6 @@ pub async fn start_branch_session(
         (worktree_path, ctx)
     };
 
-    // Enrich squash/rebase prompts with merge-base info for local branches.
-    let prompt = if !is_remote {
-        enrich_prompt_with_merge_base(&prompt, &working_dir, &branch.base_branch)
-    } else {
-        prompt
-    };
-
     // Build the full prompt with action instructions + project information + branch context.
     let project_information = build_project_context(&store, &project, &branch);
     let full_prompt = build_full_prompt(
@@ -2355,47 +2348,6 @@ fn image_timeline_entries(store: &Arc<Store>, branch_id: &str) -> Vec<TimelineEn
             }
         })
         .collect()
-}
-
-/// Enrich squash/rebase prompts with merge-base info so the agent knows the
-/// exact branch-off point and doesn't rely on a potentially stale local ref.
-fn enrich_prompt_with_merge_base(prompt: &str, worktree: &Path, base_branch: &str) -> String {
-    if prompt == "Squash this branch's commits" {
-        match git::merge_base(worktree, base_branch, "HEAD") {
-            Ok(merge_base_sha) => {
-                let commit_count = git::get_commits_since_base(worktree, base_branch)
-                    .map(|c| c.len())
-                    .unwrap_or(0);
-                format!(
-                    "Squash this branch's commits into a single commit.\n\
-                     The branch has {commit_count} commits since its branch-off point (merge-base: {merge_base_sha}).\n\
-                     Only squash the commits listed in the branch history above.\n\
-                     Use `git reset --soft {merge_base_sha}` followed by `git commit` to squash.\n\
-                     Do not squash any commits beyond the branch-off point."
-                )
-            }
-            Err(e) => {
-                log::warn!("Failed to compute merge-base for squash prompt: {e}");
-                prompt.to_string()
-            }
-        }
-    } else if prompt == "Rebase this branch. Do not push the branch." {
-        match git::merge_base(worktree, base_branch, "HEAD") {
-            Ok(merge_base_sha) => {
-                format!(
-                    "Rebase this branch. Do not push the branch.\n\
-                     The branch-off point is {merge_base_sha} (base branch: {base_branch}).\n\
-                     Use `git rebase {base_branch}` to rebase."
-                )
-            }
-            Err(e) => {
-                log::warn!("Failed to compute merge-base for rebase prompt: {e}");
-                prompt.to_string()
-            }
-        }
-    } else {
-        prompt.to_string()
-    }
 }
 
 /// Assemble the full prompt from action instructions + branch context + user prompt.

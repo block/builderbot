@@ -1061,9 +1061,15 @@
           {onRename}
           onNoteCreated={() => loadTimeline()}
           onRebaseBranch={() =>
-            sessionMgr.startOrQueueSession('commit', 'Rebase this branch. Do not push the branch.')}
+            sessionMgr.startOrQueueSession(
+              'commit',
+              `Rebase this branch onto ${branch.baseBranch} using git merge-base to find the fork point. Do not push.`
+            )}
           onSquashCommits={() =>
-            sessionMgr.startOrQueueSession('commit', "Squash this branch's commits")}
+            sessionMgr.startOrQueueSession(
+              'commit',
+              `Squash this branch's commits. Run git merge-base ${branch.baseBranch} HEAD to find the branch-off point, then git reset --soft <result> && git commit to squash. Do not squash beyond the merge-base.`
+            )}
           newCommitDisabled={sessionMgr.isNewSessionDisabled}
           {commitCount}
         />

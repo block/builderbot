@@ -173,7 +173,7 @@ prepare version:
     # Update version in Cargo.toml (source of truth)
     sed -i '' 's/^version = ".*"/version = "{{version}}"/' frontend/src-tauri/Cargo.toml
     # Update version in package.json
-    cd frontend && npm version "{{version}}" --no-git-tag-version && cd ..
+    cd frontend && pnpm version "{{version}}" --no-git-tag-version && cd ..
 
     # Generate and review changelog
     just changelog {{version}}

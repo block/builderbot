@@ -209,6 +209,7 @@
       {:else}
         <Send size={14} />
         {willQueue ? 'Queue commit' : 'Start commit'}
+        <span class="shortcut-badge">⌘↵</span>
       {/if}
     </button>
   </div>
@@ -267,6 +268,12 @@
     border: none;
     color: var(--bg-deepest);
     width: 100%;
+  }
+
+  .shortcut-badge {
+    margin-left: auto;
+    font-size: var(--size-xs);
+    opacity: 0.6;
   }
 
   .composer-submit:hover:not(:disabled) {

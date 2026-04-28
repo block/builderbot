@@ -121,16 +121,18 @@
   let filteredProjects = $derived.by(() => {
     if (activeFilters.size === 0) return projects;
     return projects.filter((p) => {
-      if (activeFilters.has('unread') && projectStateStore.isUnread(p.id)) return true;
+      // Status filters are AND'd with each other and with repo filters
+      if (activeFilters.has('unread') && !projectStateStore.isUnread(p.id)) return false;
       if (activeFilters.has('running')) {
         const status = getProjectStatus(
           p.id,
           deletingProjectNames,
           projectBranches.get(p.id) || []
         );
-        if (status.kind === 'running' || status.kind === 'runAction') return true;
+        if (status.kind !== 'running' && status.kind !== 'runAction') return false;
       }
-      if (!hasRepoFilters) return false;
+      // Repo filters are OR'd with each other
+      if (!hasRepoFilters) return true;
       const repos = reposByProject.get(p.id) ?? [];
       if (repos.length > 0) {
         return repos.some((r) =>

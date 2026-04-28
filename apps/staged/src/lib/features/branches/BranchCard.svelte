@@ -1063,7 +1063,7 @@
           onRebaseBranch={() =>
             sessionMgr.startOrQueueSession(
               'commit',
-              `Rebase this branch onto ${branch.baseBranch} using git merge-base to find the fork point. Do not push.`
+              `Rebase this branch onto ${branch.baseBranch}. Run \`git fetch origin\` first, then \`git merge-base ${branch.baseBranch} HEAD\` to find the fork point, then \`git rebase --onto ${branch.baseBranch} <merge-base> HEAD\`. Do not push.`
             )}
           onSquashCommits={() =>
             sessionMgr.startOrQueueSession(

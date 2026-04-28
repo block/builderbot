@@ -742,9 +742,24 @@ export function updateComment(commentId: string, content: string): Promise<void>
   return invoke('update_comment', { commentId, content });
 }
 
-/** Delete a comment. */
+/** Delete a comment (soft delete). */
 export function deleteComment(commentId: string): Promise<void> {
   return invoke('delete_comment', { commentId });
+}
+
+/** Soft-delete all active comments for a review in one atomic operation. */
+export function deleteAllComments(reviewId: string): Promise<void> {
+  return invoke('delete_all_comments', { reviewId });
+}
+
+/** Restore a soft-deleted comment. */
+export function restoreComment(commentId: string): Promise<void> {
+  return invoke('restore_comment', { commentId });
+}
+
+/** Get soft-deleted comments for a review. */
+export function getDeletedComments(reviewId: string): Promise<Comment[]> {
+  return invoke('get_deleted_comments', { reviewId });
 }
 
 /** Add a reference file to a review. */

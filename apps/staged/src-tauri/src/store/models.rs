@@ -1124,6 +1124,8 @@ pub struct Comment {
     /// The type/severity of this comment. `None` for user-authored comments.
     pub comment_type: Option<CommentType>,
     pub created_at: i64,
+    /// When the comment was soft-deleted. `None` means active.
+    pub deleted_at: Option<i64>,
 }
 
 impl Comment {
@@ -1136,6 +1138,7 @@ impl Comment {
             author: CommentAuthor::User,
             comment_type: None,
             created_at: now_timestamp(),
+            deleted_at: None,
         }
     }
 

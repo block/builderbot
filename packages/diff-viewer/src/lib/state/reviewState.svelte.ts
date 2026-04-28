@@ -30,6 +30,8 @@ export interface ReviewState {
   review: Review | null;
   /** Local comments list (optimistic, kept in sync with backend). */
   comments: Comment[];
+  /** Soft-deleted comments (recoverable). */
+  deletedComments: Comment[];
   /** Paths marked as reviewed. */
   reviewedPaths: string[];
   /** Reference files pinned for viewing. */
@@ -62,6 +64,7 @@ export function createReviewState(
   const state: ReviewState = $state({
     review: null,
     comments: [],
+    deletedComments: [],
     reviewedPaths: [],
     referenceFiles: [],
     loading: false,
@@ -89,6 +92,9 @@ export function createReviewState(
       if (review.referenceFiles.length > 0) {
         loadReferenceFilesFromPaths(review.referenceFiles);
       }
+
+      // Load deleted comments in background
+      loadDeletedComments(review.id);
 
       return review.id;
     } catch (e) {
@@ -120,6 +126,9 @@ export function createReviewState(
         if (review.referenceFiles.length > 0) {
           loadReferenceFilesFromPaths(review.referenceFiles);
         }
+
+        // Load deleted comments in background
+        loadDeletedComments(review.id);
       }
     } catch (e) {
       console.error('Failed to load existing review:', e);
@@ -166,16 +175,49 @@ export function createReviewState(
   }
 
   /**
-   * Delete a comment (optimistic).
+   * Soft-delete a comment (optimistic — moves to deletedComments).
    */
   async function deleteComment(commentId: string): Promise<void> {
-    // Optimistic removal
+    // Optimistic: move from comments to deletedComments
+    const comment = state.comments.find((c) => c.id === commentId);
     state.comments = state.comments.filter((c) => c.id !== commentId);
+    if (comment) {
+      state.deletedComments = [{ ...comment, deletedAt: Date.now() }, ...state.deletedComments];
+    }
 
     try {
       await commands.deleteComment(commentId);
     } catch (e) {
       console.error('Failed to delete comment:', e);
+    }
+  }
+
+  /**
+   * Restore a soft-deleted comment (optimistic — moves back to comments).
+   */
+  async function restoreComment(commentId: string): Promise<void> {
+    const comment = state.deletedComments.find((c) => c.id === commentId);
+    state.deletedComments = state.deletedComments.filter((c) => c.id !== commentId);
+    if (comment) {
+      state.comments = [...state.comments, { ...comment, deletedAt: null }];
+    }
+
+    try {
+      await commands.restoreComment(commentId);
+    } catch (e) {
+      console.error('Failed to restore comment:', e);
+    }
+  }
+
+  /**
+   * Load soft-deleted comments from backend (fire-and-forget).
+   */
+  async function loadDeletedComments(reviewId: string): Promise<void> {
+    try {
+      const deleted = await commands.getDeletedComments(reviewId);
+      state.deletedComments = deleted;
+    } catch (e) {
+      console.error('Failed to load deleted comments:', e);
     }
   }
 
@@ -294,14 +336,18 @@ export function createReviewState(
   }
 
   /**
-   * Delete all comments (optimistic, parallel backend calls).
+   * Delete all comments (optimistic, single atomic backend call).
    */
   async function deleteAllComments(): Promise<void> {
-    const ids = state.comments.map((c) => c.id);
+    if (!state.review) return;
+
+    const now = Date.now();
+    const movedComments = state.comments.map((c) => ({ ...c, deletedAt: now }));
+    state.deletedComments = [...movedComments, ...state.deletedComments];
     state.comments = [];
 
     try {
-      await Promise.all(ids.map((id) => commands.deleteComment(id)));
+      await commands.deleteAllComments(state.review.id);
     } catch (e) {
       console.error('Failed to delete all comments:', e);
     }
@@ -312,6 +358,7 @@ export function createReviewState(
     addComment,
     updateComment,
     deleteComment,
+    restoreComment,
     deleteAllComments,
     markReviewed,
     unmarkReviewed,

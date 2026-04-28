@@ -1,32 +1,71 @@
 <script lang="ts">
-  import { AlertTriangle, Bot, Check, Copy, MessageSquare, Trash2 } from 'lucide-svelte';
+  import {
+    AlertTriangle,
+    Bot,
+    Check,
+    ChevronRight,
+    Copy,
+    MessageSquare,
+    Trash2,
+    Undo2,
+  } from 'lucide-svelte';
   import type { Comment } from '../../types';
   import { formatLineRange, truncateText } from './diffModalHelpers';
 
   interface Props {
     comments: Comment[];
+    deletedComments: Comment[];
     selectedCommentId: string | null;
     copiedFeedback: boolean;
     onSelectComment: (comment: Comment) => void;
     onCopyAll: () => void;
     onDeleteAll: () => void;
     onDeleteComment: (commentId: string) => void;
+    onRestoreComment: (commentId: string) => void;
   }
 
   let {
     comments,
+    deletedComments,
     selectedCommentId,
     copiedFeedback,
     onSelectComment,
     onCopyAll,
     onDeleteAll,
     onDeleteComment,
+    onRestoreComment,
   }: Props = $props();
+
+  let deletedExpanded = $state(false);
 
   function getFileName(path: string): string {
     return path.split('/').pop() || path;
   }
 </script>
+
+{#snippet commentItemContent(comment: Comment)}
+  <span class="comment-icons">
+    {#if comment.author === 'agent'}
+      <span class="comment-icon agent-icon">
+        <Bot size={12} />
+      </span>
+    {/if}
+    <span class="comment-icon" class:comment-icon-warning={comment.commentType === 'warning'}>
+      {#if comment.commentType === 'warning'}
+        <AlertTriangle size={12} />
+      {:else}
+        <MessageSquare size={12} />
+      {/if}
+    </span>
+  </span>
+  <span class="comment-details">
+    <span class="comment-location">
+      <span class="comment-file">{getFileName(comment.path)}</span>
+      <span class="comment-line">{formatLineRange(comment.span)}</span>
+    </span>
+    <span class="comment-preview">{truncateText(comment.content)}</span>
+  </span>
+{/snippet}
 
 <div class="section-header comments-header">
   <div class="section-left"></div>
@@ -68,30 +107,7 @@
             style="padding-left: 8px"
             onclick={() => onSelectComment(comment)}
           >
-            <span class="comment-icons">
-              {#if comment.author === 'agent'}
-                <span class="comment-icon agent-icon">
-                  <Bot size={12} />
-                </span>
-              {/if}
-              <span
-                class="comment-icon"
-                class:comment-icon-warning={comment.commentType === 'warning'}
-              >
-                {#if comment.commentType === 'warning'}
-                  <AlertTriangle size={12} />
-                {:else}
-                  <MessageSquare size={12} />
-                {/if}
-              </span>
-            </span>
-            <span class="comment-details">
-              <span class="comment-location">
-                <span class="comment-file">{getFileName(comment.path)}</span>
-                <span class="comment-line">{formatLineRange(comment.span)}</span>
-              </span>
-              <span class="comment-preview">{truncateText(comment.content)}</span>
-            </span>
+            {@render commentItemContent(comment)}
           </button>
           <button
             class="comment-delete-btn"
@@ -107,6 +123,40 @@
       </li>
     {/each}
   </ul>
+{/if}
+
+{#if deletedComments.length > 0}
+  <button class="deleted-toggle" onclick={() => (deletedExpanded = !deletedExpanded)}>
+    <span class="deleted-toggle-icon" class:expanded={deletedExpanded}>
+      <ChevronRight size={12} />
+    </span>
+    <span class="deleted-toggle-label">Deleted</span>
+    <span class="count-capsule">{deletedComments.length}</span>
+  </button>
+
+  {#if deletedExpanded}
+    <ul class="tree-section comments-section deleted-comments-section">
+      {#each deletedComments as comment (comment.id)}
+        <li class="tree-item-wrapper">
+          <div class="comment-item-container deleted-comment">
+            <div class="tree-item comment-item" style="padding-left: 8px">
+              {@render commentItemContent(comment)}
+            </div>
+            <button
+              class="comment-restore-btn"
+              onclick={(e) => {
+                e.stopPropagation();
+                onRestoreComment(comment.id);
+              }}
+              title="Restore comment"
+            >
+              <Undo2 size={12} />
+            </button>
+          </div>
+        </li>
+      {/each}
+    </ul>
+  {/if}
 {/if}
 
 <style>
@@ -354,5 +404,92 @@
   .delete-all-btn:hover {
     background-color: var(--bg-hover);
     color: var(--status-deleted);
+  }
+
+  /* Deleted comments section */
+
+  .deleted-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 12px;
+    background: none;
+    border: none;
+    color: var(--text-faint);
+    font-size: calc(var(--size-xs) - 1px);
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    cursor: pointer;
+    width: 100%;
+    text-align: left;
+    transition:
+      color 0.1s,
+      background-color 0.1s;
+  }
+
+  .deleted-toggle:hover {
+    color: var(--text-muted);
+    background-color: var(--bg-hover);
+  }
+
+  .deleted-toggle-icon {
+    display: flex;
+    align-items: center;
+    transition: transform 0.15s ease;
+  }
+
+  .deleted-toggle-icon.expanded {
+    transform: rotate(90deg);
+  }
+
+  .deleted-toggle-label {
+    text-transform: uppercase;
+  }
+
+  .deleted-comments-section {
+    margin-bottom: 8px;
+  }
+
+  .deleted-comment {
+    opacity: 0.5;
+  }
+
+  .deleted-comment:hover {
+    opacity: 0.8;
+  }
+
+  .deleted-comment .tree-item {
+    cursor: default;
+  }
+
+  .comment-restore-btn {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px;
+    background: none;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-faint);
+    cursor: pointer;
+    opacity: 0;
+    transition:
+      opacity 0.1s,
+      color 0.1s,
+      background-color 0.1s;
+    z-index: 1;
+  }
+
+  .comment-item-container:hover .comment-restore-btn {
+    opacity: 1;
+  }
+
+  .comment-restore-btn:hover {
+    color: var(--status-added);
+    background-color: var(--bg-primary);
   }
 </style>

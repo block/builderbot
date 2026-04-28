@@ -1871,6 +1871,9 @@ pub fn run() {
             review_commands::add_comment,
             review_commands::update_comment,
             review_commands::delete_comment,
+            review_commands::delete_all_comments,
+            review_commands::restore_comment,
+            review_commands::get_deleted_comments,
             review_commands::add_reference_file,
             review_commands::remove_reference_file,
             // Doctor

@@ -1556,7 +1556,7 @@ pub(crate) fn build_branch_context(
         None,
         max_commit_ts,
     ));
-    timeline.extend(image_timeline_entries(store, branch_id));
+    timeline.extend(image_timeline_entries(store, branch_id, None, project_id));
 
     // Project-level notes
     timeline.extend(project_note_timeline_entries(store, project_id, None));
@@ -1610,27 +1610,36 @@ pub(crate) fn build_remote_branch_context(
         }
     }
 
-    // Notes written to temp files inside the remote workspace via ws_exec
+    // Notes, reviews, images, and project notes written to temp files inside
+    // the remote workspace via ws_exec — run in parallel to reduce round trips.
     let max_commit_ts = timeline.iter().map(|e| e.timestamp).max();
-    timeline.extend(note_timeline_entries(
-        store,
-        branch_id,
-        Some(workspace_name),
-    ));
-    timeline.extend(review_timeline_entries(
-        store,
-        branch_id,
-        Some(workspace_name),
-        max_commit_ts,
-    ));
-    timeline.extend(image_timeline_entries(store, branch_id));
+    std::thread::scope(|s| {
+        let note_handle = s.spawn(|| note_timeline_entries(store, branch_id, Some(workspace_name)));
+        let review_handle = s.spawn(|| {
+            review_timeline_entries(store, branch_id, Some(workspace_name), max_commit_ts)
+        });
+        let image_handle =
+            s.spawn(|| image_timeline_entries(store, branch_id, Some(workspace_name), project_id));
+        let project_note_handle =
+            s.spawn(|| project_note_timeline_entries(store, project_id, Some(workspace_name)));
 
-    // Project-level notes
-    timeline.extend(project_note_timeline_entries(
-        store,
-        project_id,
-        Some(workspace_name),
-    ));
+        match note_handle.join() {
+            Ok(entries) => timeline.extend(entries),
+            Err(_) => log::error!("note_timeline_entries thread panicked"),
+        }
+        match review_handle.join() {
+            Ok(entries) => timeline.extend(entries),
+            Err(_) => log::error!("review_timeline_entries thread panicked"),
+        }
+        match image_handle.join() {
+            Ok(entries) => timeline.extend(entries),
+            Err(_) => log::error!("image_timeline_entries thread panicked"),
+        }
+        match project_note_handle.join() {
+            Ok(entries) => timeline.extend(entries),
+            Err(_) => log::error!("project_note_timeline_entries thread panicked"),
+        }
+    });
 
     parts.push(render_timeline(timeline, None));
     parts.join("\n\n")
@@ -1915,7 +1924,12 @@ fn build_branch_timeline_summary(
         workspace_name,
         max_commit_ts,
     ));
-    timeline.extend(image_timeline_entries(store, &branch.id));
+    timeline.extend(image_timeline_entries(
+        store,
+        &branch.id,
+        workspace_name,
+        &branch.project_id,
+    ));
 
     if timeline.is_empty() {
         if let Some(err) = commit_error {
@@ -2004,22 +2018,19 @@ fn parse_timestamped_log(output: &str) -> Vec<TimelineEntry> {
     entries
 }
 
-/// Write note content to a temp file inside a remote workspace via `ws_exec`.
+/// Write raw bytes to a file inside a remote workspace via `ws_exec`.
 ///
-/// Uses base64 encoding to avoid shell-escaping issues with arbitrary markdown.
-/// Returns the remote path on success, or an error string on failure.
-fn write_note_to_remote(
+/// Uses base64 encoding to avoid shell-escaping issues with arbitrary content.
+/// For payloads exceeding ~500KB of base64, the data is chunked to stay under
+/// ARG_MAX (~1MB on macOS). Returns `Ok(())` on success.
+fn write_bytes_to_remote(
     workspace_name: &str,
-    note_id: &str,
-    content: &str,
-    prefix: &str,
-) -> Result<String, String> {
+    bytes: &[u8],
+    remote_path: &str,
+) -> Result<(), String> {
     use base64::Engine;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(content);
-    let remote_path = format!("/tmp/{prefix}-{note_id}.md");
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
 
-    // For very large notes, chunk the base64 to stay under ARG_MAX (~1MB on macOS).
-    // Each chunk is ~500KB of base64 (~375KB decoded), well within limits.
     const CHUNK_SIZE: usize = 500_000;
 
     if encoded.len() <= CHUNK_SIZE {
@@ -2031,9 +2042,8 @@ fn write_note_to_remote(
                 &format!("echo '{}' | base64 -d > '{}'", encoded, remote_path),
             ],
         )
-        .map_err(|e| format!("Failed to write note to remote workspace: {e}"))?;
+        .map_err(|e| format!("Failed to write to remote workspace: {e}"))?;
     } else {
-        // Chunk: first chunk overwrites, subsequent chunks append
         for (i, chunk) in encoded.as_bytes().chunks(CHUNK_SIZE).enumerate() {
             let chunk_str = std::str::from_utf8(chunk)
                 .map_err(|e| format!("Invalid UTF-8 in base64 chunk: {e}"))?;
@@ -2049,10 +2059,25 @@ fn write_note_to_remote(
                     ),
                 ],
             )
-            .map_err(|e| format!("Failed to write note chunk {i} to remote workspace: {e}"))?;
+            .map_err(|e| format!("Failed to write chunk {i} to remote workspace: {e}"))?;
         }
     }
 
+    Ok(())
+}
+
+/// Write note content to a temp file inside a remote workspace via `ws_exec`.
+///
+/// Uses base64 encoding to avoid shell-escaping issues with arbitrary markdown.
+/// Returns the remote path on success, or an error string on failure.
+fn write_note_to_remote(
+    workspace_name: &str,
+    note_id: &str,
+    content: &str,
+    prefix: &str,
+) -> Result<String, String> {
+    let remote_path = format!("/tmp/{prefix}-{note_id}.md");
+    write_bytes_to_remote(workspace_name, content.as_bytes(), &remote_path)?;
     Ok(remote_path)
 }
 
@@ -2104,6 +2129,94 @@ fn write_content_to_temp_file(
                 None
             }
         }
+    }
+}
+
+/// Copy an image to a temp file so the agent can read it with its `Read` tool.
+///
+/// - **Local** (`workspace_name` is `None`): copies the source file to
+///   `/tmp/staged-image-{id}.{ext}`.
+/// - **Remote** (`workspace_name` is `Some`): base64-encodes the file and writes
+///   it to the remote workspace via `blox ws_exec`, using the same chunking
+///   strategy as `write_note_to_remote`.
+///
+/// Returns the temp path on success, `None` on failure.
+fn write_image_to_temp_file(
+    source_path: &std::path::Path,
+    image_id: &str,
+    ext: &str,
+    workspace_name: Option<&str>,
+) -> Option<String> {
+    let temp_filename = format!("staged-image-{image_id}.{ext}");
+
+    if let Some(ws_name) = workspace_name {
+        // Remote: read the file and write via the shared helper
+        let bytes = match std::fs::read(source_path) {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!("Failed to read image file for remote transfer: {e}");
+                return None;
+            }
+        };
+        let remote_path = format!("/tmp/{temp_filename}");
+
+        if let Err(e) = write_bytes_to_remote(ws_name, &bytes, &remote_path) {
+            log::warn!("Failed to write image to remote workspace: {e}");
+            return None;
+        }
+
+        Some(remote_path)
+    } else {
+        // Local: clone or copy the file to the system temp directory
+        let dest = std::env::temp_dir().join(&temp_filename);
+
+        #[cfg(target_os = "macos")]
+        {
+            use std::ffi::CString;
+            use std::os::unix::ffi::OsStrExt;
+
+            extern "C" {
+                fn clonefile(
+                    src: *const std::ffi::c_char,
+                    dst: *const std::ffi::c_char,
+                    flags: u32,
+                ) -> std::ffi::c_int;
+            }
+
+            // Remove any existing file so clonefile doesn't fail with EEXIST.
+            // This ensures repeated branch-context builds always get a zero-cost
+            // clone rather than falling back to a full byte-for-byte copy.
+            let _ = std::fs::remove_file(&dest);
+
+            let src_c = CString::new(source_path.as_os_str().as_bytes()).ok();
+            let dst_c = CString::new(dest.as_os_str().as_bytes()).ok();
+
+            let cloned = src_c
+                .zip(dst_c)
+                .map(|(s, d)| {
+                    // SAFETY: both CStrings are valid, null-terminated, and live for the call.
+                    unsafe { clonefile(s.as_ptr(), d.as_ptr(), 0) == 0 }
+                })
+                .unwrap_or(false);
+
+            if !cloned {
+                // Falls back to regular copy (cross-volume, non-APFS, etc.)
+                if let Err(e) = std::fs::copy(source_path, &dest) {
+                    log::warn!("Failed to copy image to temp file: {e}");
+                    return None;
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            if let Err(e) = std::fs::copy(source_path, &dest) {
+                log::warn!("Failed to copy image to temp file: {e}");
+                return None;
+            }
+        }
+
+        Some(dest.display().to_string())
     }
 }
 
@@ -2317,9 +2430,15 @@ fn review_timeline_entries(
 
 /// Convert images from the DB into timeline entries.
 ///
-/// Each entry is a brief mention so the agent knows what images are attached
-/// to this branch without embedding the actual image data.
-fn image_timeline_entries(store: &Arc<Store>, branch_id: &str) -> Vec<TimelineEntry> {
+/// When possible, each image is copied to a temp file (local or remote) and
+/// referenced by path so the agent can `Read` it.  Falls back to a text-only
+/// placeholder if the file cannot be written.
+fn image_timeline_entries(
+    store: &Arc<Store>,
+    branch_id: &str,
+    workspace_name: Option<&str>,
+    project_id: &str,
+) -> Vec<TimelineEntry> {
     let images = match store.list_images_for_branch(branch_id) {
         Ok(imgs) => imgs,
         Err(e) => {
@@ -2338,13 +2457,38 @@ fn image_timeline_entries(store: &Arc<Store>, branch_id: &str) -> Vec<TimelineEn
             } else {
                 format!("{} B", img.size_bytes)
             };
-            TimelineEntry {
-                timestamp: img.created_at / 1000,
-                order: 0,
-                content: format!(
+
+            // Try to resolve the source path and copy to a temp file
+            let content = match store::images::image_file_path(project_id, &img.id, &img.filename) {
+                Ok(source_path) if source_path.exists() => {
+                    // Extension is always present since image_file_path constructs the
+                    // path from img.filename which includes an extension. The "bin"
+                    // fallback is defensive but should be unreachable in practice.
+                    let ext = source_path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("bin");
+                    match write_image_to_temp_file(&source_path, &img.id, ext, workspace_name) {
+                        Some(temp_path) => format!(
+                            "### Image: {}\n\nSee: `{}`",
+                            img.filename, temp_path
+                        ),
+                        None => format!(
+                            "### Image: {}\n\nAttached image ({}, {}). If this image was included in the current prompt, it will appear as an image content block.",
+                            img.filename, img.mime_type, size_label
+                        ),
+                    }
+                }
+                _ => format!(
                     "### Image: {}\n\nAttached image ({}, {}). If this image was included in the current prompt, it will appear as an image content block.",
                     img.filename, img.mime_type, size_label
                 ),
+            };
+
+            TimelineEntry {
+                timestamp: img.created_at / 1000,
+                order: 0,
+                content,
             }
         })
         .collect()

@@ -49,7 +49,6 @@
   let reposByProject = $state<Map<string, ProjectRepo[]>>(new Map());
   let repoLoadGeneration = 0;
   let activeFilters = $state<Set<string>>(new Set());
-  let lastClickedFilterKey = $state<string | null>(null);
 
   let repoCountsByProject = $derived(
     new Map(
@@ -149,21 +148,9 @@
 
   function toggleFilter(filter: FilterKind, event?: MouseEvent) {
     const key = filterKey(filter);
-    const currentIndex = allFilters.findIndex((f) => filterKey(f) === key);
-    const lastIndex =
-      lastClickedFilterKey !== null
-        ? allFilters.findIndex((f) => filterKey(f) === lastClickedFilterKey)
-        : -1;
 
-    if (event?.shiftKey && lastIndex !== -1 && currentIndex !== -1) {
-      const start = Math.min(lastIndex, currentIndex);
-      const end = Math.max(lastIndex, currentIndex);
-      const next = new Set(activeFilters);
-      for (let i = start; i <= end; i++) {
-        next.add(filterKey(allFilters[i]));
-      }
-      activeFilters = next;
-    } else {
+    if (event?.shiftKey) {
+      // Shift+click: toggle individual filter
       const next = new Set(activeFilters);
       if (next.has(key)) {
         next.delete(key);
@@ -171,9 +158,15 @@
         next.add(key);
       }
       activeFilters = next;
+    } else {
+      // Plain click: switch to this filter exclusively
+      if (activeFilters.size === 1 && activeFilters.has(key)) {
+        // Clicking the only active filter deselects it (back to showing all)
+        activeFilters = new Set();
+      } else {
+        activeFilters = new Set([key]);
+      }
     }
-
-    lastClickedFilterKey = key;
   }
 
   function isFilterActive(filter: FilterKind): boolean {

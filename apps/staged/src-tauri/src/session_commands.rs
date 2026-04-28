@@ -1610,32 +1610,24 @@ pub(crate) fn build_remote_branch_context(
         }
     }
 
-    // Notes written to temp files inside the remote workspace via ws_exec
+    // Notes, reviews, images, and project notes written to temp files inside
+    // the remote workspace via ws_exec — run in parallel to reduce round trips.
     let max_commit_ts = timeline.iter().map(|e| e.timestamp).max();
-    timeline.extend(note_timeline_entries(
-        store,
-        branch_id,
-        Some(workspace_name),
-    ));
-    timeline.extend(review_timeline_entries(
-        store,
-        branch_id,
-        Some(workspace_name),
-        max_commit_ts,
-    ));
-    timeline.extend(image_timeline_entries(
-        store,
-        branch_id,
-        Some(workspace_name),
-        project_id,
-    ));
+    std::thread::scope(|s| {
+        let note_handle = s.spawn(|| note_timeline_entries(store, branch_id, Some(workspace_name)));
+        let review_handle = s.spawn(|| {
+            review_timeline_entries(store, branch_id, Some(workspace_name), max_commit_ts)
+        });
+        let image_handle =
+            s.spawn(|| image_timeline_entries(store, branch_id, Some(workspace_name), project_id));
+        let project_note_handle =
+            s.spawn(|| project_note_timeline_entries(store, project_id, Some(workspace_name)));
 
-    // Project-level notes
-    timeline.extend(project_note_timeline_entries(
-        store,
-        project_id,
-        Some(workspace_name),
-    ));
+        timeline.extend(note_handle.join().unwrap_or_default());
+        timeline.extend(review_handle.join().unwrap_or_default());
+        timeline.extend(image_handle.join().unwrap_or_default());
+        timeline.extend(project_note_handle.join().unwrap_or_default());
+    });
 
     parts.push(render_timeline(timeline, None));
     parts.join("\n\n")

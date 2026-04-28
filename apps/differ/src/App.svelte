@@ -435,6 +435,7 @@
       author: 'user',
       commentType: null,
       createdAt: Date.now(),
+      deletedAt: null,
     };
     localComments = [...localComments, comment];
   }

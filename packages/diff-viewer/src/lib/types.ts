@@ -177,6 +177,7 @@ export interface ReviewCommands {
 
   updateComment(commentId: string, content: string): Promise<void>;
   deleteComment(commentId: string): Promise<void>;
+  deleteAllComments(reviewId: string): Promise<void>;
   restoreComment(commentId: string): Promise<void>;
   getDeletedComments(reviewId: string): Promise<Comment[]>;
 

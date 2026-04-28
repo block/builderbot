@@ -43,6 +43,30 @@
   }
 </script>
 
+{#snippet commentItemContent(comment: Comment)}
+  <span class="comment-icons">
+    {#if comment.author === 'agent'}
+      <span class="comment-icon agent-icon">
+        <Bot size={12} />
+      </span>
+    {/if}
+    <span class="comment-icon" class:comment-icon-warning={comment.commentType === 'warning'}>
+      {#if comment.commentType === 'warning'}
+        <AlertTriangle size={12} />
+      {:else}
+        <MessageSquare size={12} />
+      {/if}
+    </span>
+  </span>
+  <span class="comment-details">
+    <span class="comment-location">
+      <span class="comment-file">{getFileName(comment.path)}</span>
+      <span class="comment-line">{formatLineRange(comment.span)}</span>
+    </span>
+    <span class="comment-preview">{truncateText(comment.content)}</span>
+  </span>
+{/snippet}
+
 <div class="section-header comments-header">
   <div class="section-left"></div>
   <div class="section-divider">
@@ -83,30 +107,7 @@
             style="padding-left: 8px"
             onclick={() => onSelectComment(comment)}
           >
-            <span class="comment-icons">
-              {#if comment.author === 'agent'}
-                <span class="comment-icon agent-icon">
-                  <Bot size={12} />
-                </span>
-              {/if}
-              <span
-                class="comment-icon"
-                class:comment-icon-warning={comment.commentType === 'warning'}
-              >
-                {#if comment.commentType === 'warning'}
-                  <AlertTriangle size={12} />
-                {:else}
-                  <MessageSquare size={12} />
-                {/if}
-              </span>
-            </span>
-            <span class="comment-details">
-              <span class="comment-location">
-                <span class="comment-file">{getFileName(comment.path)}</span>
-                <span class="comment-line">{formatLineRange(comment.span)}</span>
-              </span>
-              <span class="comment-preview">{truncateText(comment.content)}</span>
-            </span>
+            {@render commentItemContent(comment)}
           </button>
           <button
             class="comment-delete-btn"
@@ -139,30 +140,7 @@
         <li class="tree-item-wrapper">
           <div class="comment-item-container deleted-comment">
             <div class="tree-item comment-item" style="padding-left: 8px">
-              <span class="comment-icons">
-                {#if comment.author === 'agent'}
-                  <span class="comment-icon agent-icon">
-                    <Bot size={12} />
-                  </span>
-                {/if}
-                <span
-                  class="comment-icon"
-                  class:comment-icon-warning={comment.commentType === 'warning'}
-                >
-                  {#if comment.commentType === 'warning'}
-                    <AlertTriangle size={12} />
-                  {:else}
-                    <MessageSquare size={12} />
-                  {/if}
-                </span>
-              </span>
-              <span class="comment-details">
-                <span class="comment-location">
-                  <span class="comment-file">{getFileName(comment.path)}</span>
-                  <span class="comment-line">{formatLineRange(comment.span)}</span>
-                </span>
-                <span class="comment-preview">{truncateText(comment.content)}</span>
-              </span>
+              {@render commentItemContent(comment)}
             </div>
             <button
               class="comment-restore-btn"

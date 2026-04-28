@@ -747,6 +747,11 @@ export function deleteComment(commentId: string): Promise<void> {
   return invoke('delete_comment', { commentId });
 }
 
+/** Soft-delete all active comments for a review in one atomic operation. */
+export function deleteAllComments(reviewId: string): Promise<void> {
+  return invoke('delete_all_comments', { reviewId });
+}
+
 /** Restore a soft-deleted comment. */
 export function restoreComment(commentId: string): Promise<void> {
   return invoke('restore_comment', { commentId });

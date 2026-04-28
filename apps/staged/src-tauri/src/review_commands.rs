@@ -118,6 +118,17 @@ pub async fn delete_comment(
         .map_err(|e| e.to_string())
 }
 
+/// Soft-delete all active comments for a review in one atomic operation.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn delete_all_comments(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    review_id: String,
+) -> Result<(), String> {
+    crate::get_store(&store)?
+        .delete_all_comments(&review_id)
+        .map_err(|e| e.to_string())
+}
+
 /// Restore a soft-deleted comment.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn restore_comment(

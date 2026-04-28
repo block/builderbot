@@ -207,17 +207,7 @@ impl Store {
             "UPDATE comments SET content = ?1 WHERE id = ?2",
             params![content, comment_id],
         )?;
-        // Touch the parent review
-        let review_id: Option<String> = conn
-            .query_row(
-                "SELECT review_id FROM comments WHERE id = ?1",
-                params![comment_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(rid) = review_id {
-            Self::touch_review(&conn, &rid)?;
-        }
+        Self::touch_review_for_comment(&conn, comment_id)?;
         Ok(())
     }
 
@@ -226,20 +216,22 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let now = now_timestamp();
         conn.execute(
-            "UPDATE comments SET deleted_at = ?1 WHERE id = ?2",
+            "UPDATE comments SET deleted_at = ?1 WHERE id = ?2 AND deleted_at IS NULL",
             params![now, comment_id],
         )?;
-        // Touch the parent review
-        let review_id: Option<String> = conn
-            .query_row(
-                "SELECT review_id FROM comments WHERE id = ?1",
-                params![comment_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(rid) = review_id {
-            Self::touch_review(&conn, &rid)?;
-        }
+        Self::touch_review_for_comment(&conn, comment_id)?;
+        Ok(())
+    }
+
+    /// Soft-delete all active comments for a review in a single statement.
+    pub fn delete_all_comments(&self, review_id: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_timestamp();
+        conn.execute(
+            "UPDATE comments SET deleted_at = ?1 WHERE review_id = ?2 AND deleted_at IS NULL",
+            params![now, review_id],
+        )?;
+        Self::touch_review(&conn, review_id)?;
         Ok(())
     }
 
@@ -247,19 +239,10 @@ impl Store {
     pub fn restore_comment(&self, comment_id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE comments SET deleted_at = NULL WHERE id = ?1",
+            "UPDATE comments SET deleted_at = NULL WHERE id = ?1 AND deleted_at IS NOT NULL",
             params![comment_id],
         )?;
-        let review_id: Option<String> = conn
-            .query_row(
-                "SELECT review_id FROM comments WHERE id = ?1",
-                params![comment_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        if let Some(rid) = review_id {
-            Self::touch_review(&conn, &rid)?;
-        }
+        Self::touch_review_for_comment(&conn, comment_id)?;
         Ok(())
     }
 
@@ -462,6 +445,21 @@ impl Store {
             "UPDATE reviews SET updated_at = ?1 WHERE id = ?2",
             params![now_timestamp(), review_id],
         )?;
+        Ok(())
+    }
+
+    /// Look up the parent review for a comment and touch its `updated_at`.
+    fn touch_review_for_comment(conn: &Connection, comment_id: &str) -> Result<(), StoreError> {
+        let review_id: Option<String> = conn
+            .query_row(
+                "SELECT review_id FROM comments WHERE id = ?1",
+                params![comment_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(rid) = review_id {
+            Self::touch_review(conn, &rid)?;
+        }
         Ok(())
     }
 

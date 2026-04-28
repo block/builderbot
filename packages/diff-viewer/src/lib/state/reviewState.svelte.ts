@@ -336,17 +336,18 @@ export function createReviewState(
   }
 
   /**
-   * Delete all comments (optimistic, parallel backend calls).
+   * Delete all comments (optimistic, single atomic backend call).
    */
   async function deleteAllComments(): Promise<void> {
+    if (!state.review) return;
+
     const now = Date.now();
     const movedComments = state.comments.map((c) => ({ ...c, deletedAt: now }));
-    const ids = state.comments.map((c) => c.id);
     state.deletedComments = [...movedComments, ...state.deletedComments];
     state.comments = [];
 
     try {
-      await Promise.all(ids.map((id) => commands.deleteComment(id)));
+      await commands.deleteAllComments(state.review.id);
     } catch (e) {
       console.error('Failed to delete all comments:', e);
     }

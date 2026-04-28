@@ -1068,7 +1068,7 @@
           onSquashCommits={() =>
             sessionMgr.startOrQueueSession(
               'commit',
-              `Squash this branch's commits. Run git merge-base ${branch.baseBranch} HEAD to find the branch-off point, then git reset --soft <result> && git commit to squash. Do not squash beyond the merge-base.`
+              `Squash this branch's commits. Run \`git merge-base ${branch.baseBranch} HEAD\` to find the branch-off point, then \`git reset --soft <result> && git commit\` to squash. Do not squash beyond the merge-base.`
             )}
           newCommitDisabled={sessionMgr.isNewSessionDisabled}
           {commitCount}

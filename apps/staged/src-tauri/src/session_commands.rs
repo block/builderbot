@@ -1556,7 +1556,7 @@ pub(crate) fn build_branch_context(
         None,
         max_commit_ts,
     ));
-    timeline.extend(image_timeline_entries(store, branch_id));
+    timeline.extend(image_timeline_entries(store, branch_id, None, project_id));
 
     // Project-level notes
     timeline.extend(project_note_timeline_entries(store, project_id, None));
@@ -1623,7 +1623,12 @@ pub(crate) fn build_remote_branch_context(
         Some(workspace_name),
         max_commit_ts,
     ));
-    timeline.extend(image_timeline_entries(store, branch_id));
+    timeline.extend(image_timeline_entries(
+        store,
+        branch_id,
+        Some(workspace_name),
+        project_id,
+    ));
 
     // Project-level notes
     timeline.extend(project_note_timeline_entries(
@@ -1915,7 +1920,12 @@ fn build_branch_timeline_summary(
         workspace_name,
         max_commit_ts,
     ));
-    timeline.extend(image_timeline_entries(store, &branch.id));
+    timeline.extend(image_timeline_entries(
+        store,
+        &branch.id,
+        workspace_name,
+        &branch.project_id,
+    ));
 
     if timeline.is_empty() {
         if let Some(err) = commit_error {
@@ -2101,6 +2111,91 @@ fn write_content_to_temp_file(
             Ok(()) => Some(fmt_ok(&path.display().to_string())),
             Err(e) => {
                 log::warn!("Failed to write to temp file, inlining: {e}");
+                None
+            }
+        }
+    }
+}
+
+/// Copy an image to a temp file so the agent can read it with its `Read` tool.
+///
+/// - **Local** (`workspace_name` is `None`): copies the source file to
+///   `/tmp/staged-image-{id}.{ext}`.
+/// - **Remote** (`workspace_name` is `Some`): base64-encodes the file and writes
+///   it to the remote workspace via `blox ws_exec`, using the same chunking
+///   strategy as `write_note_to_remote`.
+///
+/// Returns the temp path on success, `None` on failure.
+fn write_image_to_temp_file(
+    source_path: &std::path::Path,
+    image_id: &str,
+    ext: &str,
+    workspace_name: Option<&str>,
+) -> Option<String> {
+    let temp_filename = format!("staged-image-{image_id}.{ext}");
+
+    if let Some(ws_name) = workspace_name {
+        // Remote: read the file, base64-encode, and write via ws_exec
+        let bytes = match std::fs::read(source_path) {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!("Failed to read image file for remote transfer: {e}");
+                return None;
+            }
+        };
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let remote_path = format!("/tmp/{temp_filename}");
+
+        const CHUNK_SIZE: usize = 500_000;
+
+        if encoded.len() <= CHUNK_SIZE {
+            if let Err(e) = blox::ws_exec(
+                ws_name,
+                &[
+                    "sh",
+                    "-c",
+                    &format!("echo '{}' | base64 -d > '{}'", encoded, remote_path),
+                ],
+            ) {
+                log::warn!("Failed to write image to remote workspace: {e}");
+                return None;
+            }
+        } else {
+            for (i, chunk) in encoded.as_bytes().chunks(CHUNK_SIZE).enumerate() {
+                let chunk_str = match std::str::from_utf8(chunk) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::warn!("Invalid UTF-8 in base64 chunk: {e}");
+                        return None;
+                    }
+                };
+                let redirect = if i == 0 { ">" } else { ">>" };
+                if let Err(e) = blox::ws_exec(
+                    ws_name,
+                    &[
+                        "sh",
+                        "-c",
+                        &format!(
+                            "echo '{}' | base64 -d {} '{}'",
+                            chunk_str, redirect, remote_path
+                        ),
+                    ],
+                ) {
+                    log::warn!("Failed to write image chunk {i} to remote workspace: {e}");
+                    return None;
+                }
+            }
+        }
+
+        Some(remote_path)
+    } else {
+        // Local: copy the file to the system temp directory
+        let dest = std::env::temp_dir().join(&temp_filename);
+        match std::fs::copy(source_path, &dest) {
+            Ok(_) => Some(dest.display().to_string()),
+            Err(e) => {
+                log::warn!("Failed to copy image to temp file: {e}");
                 None
             }
         }
@@ -2317,9 +2412,15 @@ fn review_timeline_entries(
 
 /// Convert images from the DB into timeline entries.
 ///
-/// Each entry is a brief mention so the agent knows what images are attached
-/// to this branch without embedding the actual image data.
-fn image_timeline_entries(store: &Arc<Store>, branch_id: &str) -> Vec<TimelineEntry> {
+/// When possible, each image is copied to a temp file (local or remote) and
+/// referenced by path so the agent can `Read` it.  Falls back to a text-only
+/// placeholder if the file cannot be written.
+fn image_timeline_entries(
+    store: &Arc<Store>,
+    branch_id: &str,
+    workspace_name: Option<&str>,
+    project_id: &str,
+) -> Vec<TimelineEntry> {
     let images = match store.list_images_for_branch(branch_id) {
         Ok(imgs) => imgs,
         Err(e) => {
@@ -2338,13 +2439,35 @@ fn image_timeline_entries(store: &Arc<Store>, branch_id: &str) -> Vec<TimelineEn
             } else {
                 format!("{} B", img.size_bytes)
             };
-            TimelineEntry {
-                timestamp: img.created_at / 1000,
-                order: 0,
-                content: format!(
+
+            // Try to resolve the source path and copy to a temp file
+            let content = match store::images::image_file_path(project_id, &img.id, &img.filename) {
+                Ok(source_path) if source_path.exists() => {
+                    let ext = source_path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("bin");
+                    match write_image_to_temp_file(&source_path, &img.id, ext, workspace_name) {
+                        Some(temp_path) => format!(
+                            "### Image: {}\n\nSee: `{}`",
+                            img.filename, temp_path
+                        ),
+                        None => format!(
+                            "### Image: {}\n\nAttached image ({}, {}). If this image was included in the current prompt, it will appear as an image content block.",
+                            img.filename, img.mime_type, size_label
+                        ),
+                    }
+                }
+                _ => format!(
                     "### Image: {}\n\nAttached image ({}, {}). If this image was included in the current prompt, it will appear as an image content block.",
                     img.filename, img.mime_type, size_label
                 ),
+            };
+
+            TimelineEntry {
+                timestamp: img.created_at / 1000,
+                order: 0,
+                content,
             }
         })
         .collect()

@@ -101,6 +101,7 @@ export function timelineToHashtagItems(
   }
 
   for (const review of timeline.reviews) {
+    if (review.isAuto) continue;
     const title = review.title || review.commitSha.slice(0, 7);
     items.push({
       type: 'review',

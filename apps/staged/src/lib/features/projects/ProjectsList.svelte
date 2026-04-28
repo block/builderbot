@@ -49,7 +49,7 @@
   let reposByProject = $state<Map<string, ProjectRepo[]>>(new Map());
   let repoLoadGeneration = 0;
   let activeFilters = $state<Set<string>>(new Set());
-  let lastClickedFilterIndex = $state<number | null>(null);
+  let lastClickedFilterKey = $state<string | null>(null);
 
   let repoCountsByProject = $derived(
     new Map(
@@ -115,6 +115,10 @@
     }).length
   );
 
+  let hasRepoFilters = $derived(
+    [...activeFilters].some((key) => key !== 'unread' && key !== 'running')
+  );
+
   let filteredProjects = $derived.by(() => {
     if (activeFilters.size === 0) return projects;
     return projects.filter((p) => {
@@ -127,6 +131,7 @@
         );
         if (status.kind === 'running' || status.kind === 'runAction') return true;
       }
+      if (!hasRepoFilters) return false;
       const repos = reposByProject.get(p.id) ?? [];
       if (repos.length > 0) {
         return repos.some((r) =>
@@ -145,10 +150,14 @@
   function toggleFilter(filter: FilterKind, event?: MouseEvent) {
     const key = filterKey(filter);
     const currentIndex = allFilters.findIndex((f) => filterKey(f) === key);
+    const lastIndex =
+      lastClickedFilterKey !== null
+        ? allFilters.findIndex((f) => filterKey(f) === lastClickedFilterKey)
+        : -1;
 
-    if (event?.shiftKey && lastClickedFilterIndex !== null && currentIndex !== -1) {
-      const start = Math.min(lastClickedFilterIndex, currentIndex);
-      const end = Math.max(lastClickedFilterIndex, currentIndex);
+    if (event?.shiftKey && lastIndex !== -1 && currentIndex !== -1) {
+      const start = Math.min(lastIndex, currentIndex);
+      const end = Math.max(lastIndex, currentIndex);
       const next = new Set(activeFilters);
       for (let i = start; i <= end; i++) {
         next.add(filterKey(allFilters[i]));
@@ -164,7 +173,7 @@
       activeFilters = next;
     }
 
-    lastClickedFilterIndex = currentIndex;
+    lastClickedFilterKey = key;
   }
 
   function isFilterActive(filter: FilterKind): boolean {

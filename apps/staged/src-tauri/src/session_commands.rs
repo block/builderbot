@@ -2182,15 +2182,51 @@ fn write_image_to_temp_file(
 
         Some(remote_path)
     } else {
-        // Local: copy the file to the system temp directory
+        // Local: clone or copy the file to the system temp directory
         let dest = std::env::temp_dir().join(&temp_filename);
-        match std::fs::copy(source_path, &dest) {
-            Ok(_) => Some(dest.display().to_string()),
-            Err(e) => {
-                log::warn!("Failed to copy image to temp file: {e}");
-                None
+
+        #[cfg(target_os = "macos")]
+        {
+            use std::ffi::CString;
+            use std::os::unix::ffi::OsStrExt;
+
+            extern "C" {
+                fn clonefile(
+                    src: *const std::ffi::c_char,
+                    dst: *const std::ffi::c_char,
+                    flags: u32,
+                ) -> std::ffi::c_int;
+            }
+
+            let src_c = CString::new(source_path.as_os_str().as_bytes()).ok();
+            let dst_c = CString::new(dest.as_os_str().as_bytes()).ok();
+
+            let cloned = src_c
+                .zip(dst_c)
+                .map(|(s, d)| {
+                    // SAFETY: both CStrings are valid, null-terminated, and live for the call.
+                    unsafe { clonefile(s.as_ptr(), d.as_ptr(), 0) == 0 }
+                })
+                .unwrap_or(false);
+
+            if !cloned {
+                // Falls back to regular copy (cross-volume, non-APFS, file already exists, etc.)
+                if let Err(e) = std::fs::copy(source_path, &dest) {
+                    log::warn!("Failed to copy image to temp file: {e}");
+                    return None;
+                }
             }
         }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            if let Err(e) = std::fs::copy(source_path, &dest) {
+                log::warn!("Failed to copy image to temp file: {e}");
+                return None;
+            }
+        }
+
+        Some(dest.display().to_string())
     }
 }
 

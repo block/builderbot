@@ -1623,10 +1623,22 @@ pub(crate) fn build_remote_branch_context(
         let project_note_handle =
             s.spawn(|| project_note_timeline_entries(store, project_id, Some(workspace_name)));
 
-        timeline.extend(note_handle.join().unwrap_or_default());
-        timeline.extend(review_handle.join().unwrap_or_default());
-        timeline.extend(image_handle.join().unwrap_or_default());
-        timeline.extend(project_note_handle.join().unwrap_or_default());
+        match note_handle.join() {
+            Ok(entries) => timeline.extend(entries),
+            Err(_) => log::error!("note_timeline_entries thread panicked"),
+        }
+        match review_handle.join() {
+            Ok(entries) => timeline.extend(entries),
+            Err(_) => log::error!("review_timeline_entries thread panicked"),
+        }
+        match image_handle.join() {
+            Ok(entries) => timeline.extend(entries),
+            Err(_) => log::error!("image_timeline_entries thread panicked"),
+        }
+        match project_note_handle.join() {
+            Ok(entries) => timeline.extend(entries),
+            Err(_) => log::error!("project_note_timeline_entries thread panicked"),
+        }
     });
 
     parts.push(render_timeline(timeline, None));
@@ -2006,22 +2018,19 @@ fn parse_timestamped_log(output: &str) -> Vec<TimelineEntry> {
     entries
 }
 
-/// Write note content to a temp file inside a remote workspace via `ws_exec`.
+/// Write raw bytes to a file inside a remote workspace via `ws_exec`.
 ///
-/// Uses base64 encoding to avoid shell-escaping issues with arbitrary markdown.
-/// Returns the remote path on success, or an error string on failure.
-fn write_note_to_remote(
+/// Uses base64 encoding to avoid shell-escaping issues with arbitrary content.
+/// For payloads exceeding ~500KB of base64, the data is chunked to stay under
+/// ARG_MAX (~1MB on macOS). Returns `Ok(())` on success.
+fn write_bytes_to_remote(
     workspace_name: &str,
-    note_id: &str,
-    content: &str,
-    prefix: &str,
-) -> Result<String, String> {
+    bytes: &[u8],
+    remote_path: &str,
+) -> Result<(), String> {
     use base64::Engine;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(content);
-    let remote_path = format!("/tmp/{prefix}-{note_id}.md");
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
 
-    // For very large notes, chunk the base64 to stay under ARG_MAX (~1MB on macOS).
-    // Each chunk is ~500KB of base64 (~375KB decoded), well within limits.
     const CHUNK_SIZE: usize = 500_000;
 
     if encoded.len() <= CHUNK_SIZE {
@@ -2033,9 +2042,8 @@ fn write_note_to_remote(
                 &format!("echo '{}' | base64 -d > '{}'", encoded, remote_path),
             ],
         )
-        .map_err(|e| format!("Failed to write note to remote workspace: {e}"))?;
+        .map_err(|e| format!("Failed to write to remote workspace: {e}"))?;
     } else {
-        // Chunk: first chunk overwrites, subsequent chunks append
         for (i, chunk) in encoded.as_bytes().chunks(CHUNK_SIZE).enumerate() {
             let chunk_str = std::str::from_utf8(chunk)
                 .map_err(|e| format!("Invalid UTF-8 in base64 chunk: {e}"))?;
@@ -2051,10 +2059,25 @@ fn write_note_to_remote(
                     ),
                 ],
             )
-            .map_err(|e| format!("Failed to write note chunk {i} to remote workspace: {e}"))?;
+            .map_err(|e| format!("Failed to write chunk {i} to remote workspace: {e}"))?;
         }
     }
 
+    Ok(())
+}
+
+/// Write note content to a temp file inside a remote workspace via `ws_exec`.
+///
+/// Uses base64 encoding to avoid shell-escaping issues with arbitrary markdown.
+/// Returns the remote path on success, or an error string on failure.
+fn write_note_to_remote(
+    workspace_name: &str,
+    note_id: &str,
+    content: &str,
+    prefix: &str,
+) -> Result<String, String> {
+    let remote_path = format!("/tmp/{prefix}-{note_id}.md");
+    write_bytes_to_remote(workspace_name, content.as_bytes(), &remote_path)?;
     Ok(remote_path)
 }
 
@@ -2127,7 +2150,7 @@ fn write_image_to_temp_file(
     let temp_filename = format!("staged-image-{image_id}.{ext}");
 
     if let Some(ws_name) = workspace_name {
-        // Remote: read the file, base64-encode, and write via ws_exec
+        // Remote: read the file and write via the shared helper
         let bytes = match std::fs::read(source_path) {
             Ok(b) => b,
             Err(e) => {
@@ -2135,49 +2158,11 @@ fn write_image_to_temp_file(
                 return None;
             }
         };
-        use base64::Engine;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
         let remote_path = format!("/tmp/{temp_filename}");
 
-        const CHUNK_SIZE: usize = 500_000;
-
-        if encoded.len() <= CHUNK_SIZE {
-            if let Err(e) = blox::ws_exec(
-                ws_name,
-                &[
-                    "sh",
-                    "-c",
-                    &format!("echo '{}' | base64 -d > '{}'", encoded, remote_path),
-                ],
-            ) {
-                log::warn!("Failed to write image to remote workspace: {e}");
-                return None;
-            }
-        } else {
-            for (i, chunk) in encoded.as_bytes().chunks(CHUNK_SIZE).enumerate() {
-                let chunk_str = match std::str::from_utf8(chunk) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        log::warn!("Invalid UTF-8 in base64 chunk: {e}");
-                        return None;
-                    }
-                };
-                let redirect = if i == 0 { ">" } else { ">>" };
-                if let Err(e) = blox::ws_exec(
-                    ws_name,
-                    &[
-                        "sh",
-                        "-c",
-                        &format!(
-                            "echo '{}' | base64 -d {} '{}'",
-                            chunk_str, redirect, remote_path
-                        ),
-                    ],
-                ) {
-                    log::warn!("Failed to write image chunk {i} to remote workspace: {e}");
-                    return None;
-                }
-            }
+        if let Err(e) = write_bytes_to_remote(ws_name, &bytes, &remote_path) {
+            log::warn!("Failed to write image to remote workspace: {e}");
+            return None;
         }
 
         Some(remote_path)
@@ -2198,6 +2183,11 @@ fn write_image_to_temp_file(
                 ) -> std::ffi::c_int;
             }
 
+            // Remove any existing file so clonefile doesn't fail with EEXIST.
+            // This ensures repeated branch-context builds always get a zero-cost
+            // clone rather than falling back to a full byte-for-byte copy.
+            let _ = std::fs::remove_file(&dest);
+
             let src_c = CString::new(source_path.as_os_str().as_bytes()).ok();
             let dst_c = CString::new(dest.as_os_str().as_bytes()).ok();
 
@@ -2210,7 +2200,7 @@ fn write_image_to_temp_file(
                 .unwrap_or(false);
 
             if !cloned {
-                // Falls back to regular copy (cross-volume, non-APFS, file already exists, etc.)
+                // Falls back to regular copy (cross-volume, non-APFS, etc.)
                 if let Err(e) = std::fs::copy(source_path, &dest) {
                     log::warn!("Failed to copy image to temp file: {e}");
                     return None;
@@ -2471,6 +2461,9 @@ fn image_timeline_entries(
             // Try to resolve the source path and copy to a temp file
             let content = match store::images::image_file_path(project_id, &img.id, &img.filename) {
                 Ok(source_path) if source_path.exists() => {
+                    // Extension is always present since image_file_path constructs the
+                    // path from img.filename which includes an extension. The "bin"
+                    // fallback is defensive but should be unreachable in practice.
                     let ext = source_path
                         .extension()
                         .and_then(|e| e.to_str())

@@ -77,6 +77,7 @@ export function timelineToHashtagItems(
 
   for (const note of timeline.notes) {
     if (!note.title.trim()) continue;
+    if (note.completedAt == null) continue;
     items.push({
       type: 'note',
       id: note.id,
@@ -89,6 +90,7 @@ export function timelineToHashtagItems(
   }
 
   for (const commit of timeline.commits) {
+    if (!commit.sha) continue;
     items.push({
       type: 'commit',
       id: commit.sha,
@@ -102,6 +104,7 @@ export function timelineToHashtagItems(
 
   for (const review of timeline.reviews) {
     if (review.isAuto) continue;
+    if (review.completedAt == null) continue;
     const title = review.title || review.commitSha.slice(0, 7);
     items.push({
       type: 'review',

@@ -248,7 +248,7 @@
 
     if (hashPos >= 0) {
       const fragment = text.slice(hashPos + 1, pos);
-      if (/#?(note|commit|review|project-note):[^\s]+/.test('#' + fragment)) {
+      if (new RegExp(HASHTAG_TOKEN_RE.source).test('#' + fragment)) {
         closeDropdown();
         return;
       }
@@ -568,6 +568,11 @@
   .hashtag-item-icon.review-icon {
     background-color: var(--review-bg);
     color: var(--review-color);
+  }
+
+  .hashtag-item-icon.image-icon {
+    background-color: var(--image-bg);
+    color: var(--image-color);
   }
 
   .hashtag-item-title {

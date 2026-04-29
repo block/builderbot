@@ -1059,15 +1059,11 @@
             deletedComments={reviewHandle?.state.deletedComments ?? []}
             {selectedCommentId}
             {copiedFeedback}
-            {hasPr}
             onSelectComment={handleSelectComment}
             onCopyAll={handleCopyComments}
             onDeleteAll={handleDeleteAllComments}
             onDeleteComment={handleDeleteComment}
             onRestoreComment={handleRestoreComment}
-            onNewNote={handleNewNote}
-            onNewCommit={handleNewCommit}
-            onSendToGithub={handleSendToGithub}
           />
         {/if}
       </div>
@@ -1206,6 +1202,9 @@
           onAddComment={readonly ? undefined : handleAddComment}
           onUpdateComment={readonly ? undefined : handleUpdateComment}
           onDeleteComment={readonly ? undefined : handleDeleteCommentFromViewer}
+          onCommentNote={readonly ? undefined : handleNewNote}
+          onCommentCommit={readonly ? undefined : handleNewCommit}
+          onCommentGithub={readonly || !hasPr ? undefined : handleSendToGithub}
         />
       </div>
 

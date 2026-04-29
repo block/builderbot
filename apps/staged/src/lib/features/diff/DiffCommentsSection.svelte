@@ -5,9 +5,6 @@
     Check,
     ChevronRight,
     Copy,
-    FileText,
-    GitCommitVertical,
-    Github,
     MessageSquare,
     Trash2,
     Undo2,
@@ -20,15 +17,11 @@
     deletedComments: Comment[];
     selectedCommentId: string | null;
     copiedFeedback: boolean;
-    hasPr: boolean;
     onSelectComment: (comment: Comment) => void;
     onCopyAll: () => void;
     onDeleteAll: () => void;
     onDeleteComment: (commentId: string) => void;
     onRestoreComment: (commentId: string) => void;
-    onNewNote: (comment: Comment, event: MouseEvent) => void;
-    onNewCommit: (comment: Comment, event: MouseEvent) => void;
-    onSendToGithub: (comment: Comment) => void;
   }
 
   let {
@@ -36,15 +29,11 @@
     deletedComments,
     selectedCommentId,
     copiedFeedback,
-    hasPr,
     onSelectComment,
     onCopyAll,
     onDeleteAll,
     onDeleteComment,
     onRestoreComment,
-    onNewNote,
-    onNewCommit,
-    onSendToGithub,
   }: Props = $props();
 
   let deletedExpanded = $state(false);
@@ -131,45 +120,6 @@
             <Trash2 size={12} />
           </button>
         </div>
-        {#if selectedCommentId === comment.id}
-          <div class="comment-actions">
-            <button
-              class="comment-action-btn note-btn"
-              onclick={(e) => {
-                e.stopPropagation();
-                onNewNote(comment, e);
-              }}
-              title="New note (Option+click to skip dialog)"
-            >
-              <FileText size={12} />
-              <span>Note</span>
-            </button>
-            <button
-              class="comment-action-btn commit-btn"
-              onclick={(e) => {
-                e.stopPropagation();
-                onNewCommit(comment, e);
-              }}
-              title="New commit (Option+click to skip dialog)"
-            >
-              <GitCommitVertical size={12} />
-              <span>Commit</span>
-            </button>
-            {#if hasPr}
-              <button
-                class="comment-action-btn github-btn"
-                onclick={(e) => {
-                  e.stopPropagation();
-                  onSendToGithub(comment);
-                }}
-                title="Send to GitHub"
-              >
-                <Github size={12} />
-                <span>GitHub</span>
-              </button>
-            {/if}
-          </div>
-        {/if}
       </li>
     {/each}
   </ul>
@@ -541,62 +491,5 @@
   .comment-restore-btn:hover {
     color: var(--status-added);
     background-color: var(--bg-primary);
-  }
-
-  /* Action buttons row */
-
-  .comment-actions {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 8px 6px 40px;
-  }
-
-  .comment-action-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 3px 8px;
-    border-radius: 5px;
-    border: 1px dashed var(--border-subtle);
-    background: transparent;
-    color: var(--text-muted);
-    font-size: calc(var(--size-xs) - 1px);
-    font-weight: 500;
-    cursor: pointer;
-    transition:
-      color 0.15s,
-      border-color 0.15s,
-      background-color 0.15s;
-  }
-
-  .comment-action-btn.note-btn :global(svg) {
-    color: var(--note-color);
-  }
-
-  .comment-action-btn.commit-btn :global(svg) {
-    color: var(--commit-color);
-  }
-
-  .comment-action-btn.github-btn :global(svg) {
-    color: var(--text-primary);
-  }
-
-  .comment-action-btn.note-btn:hover {
-    color: var(--note-color);
-    border-color: var(--note-color);
-    background-color: var(--note-bg);
-  }
-
-  .comment-action-btn.commit-btn:hover {
-    color: var(--commit-color);
-    border-color: var(--commit-color);
-    background-color: var(--commit-bg);
-  }
-
-  .comment-action-btn.github-btn:hover {
-    color: var(--text-primary);
-    border-color: var(--text-muted);
-    background-color: var(--bg-hover);
   }
 </style>

@@ -110,6 +110,11 @@
     onAddComment?: (path: string, span: Span, content: string) => Promise<void>;
     onUpdateComment?: (commentId: string, content: string) => Promise<void>;
     onDeleteComment?: (commentId: string) => Promise<void>;
+
+    // -- Comment action callbacks (optional; shown in editor bottom bar) --
+    onCommentNote?: (comment: Comment, event: MouseEvent) => void;
+    onCommentCommit?: (comment: Comment, event: MouseEvent) => void;
+    onCommentGithub?: (comment: Comment) => void;
   }
 
   let {
@@ -128,6 +133,9 @@
     onAddComment,
     onUpdateComment,
     onDeleteComment,
+    onCommentNote,
+    onCommentCommit,
+    onCommentGithub,
   }: Props = $props();
 
   // ==========================================================================
@@ -2266,6 +2274,15 @@
               handleCommentCancel();
             }
           : undefined}
+        onNote={existingComment && onCommentNote
+          ? (e) => onCommentNote(existingComment, e)
+          : undefined}
+        onCommit={existingComment && onCommentCommit
+          ? (e) => onCommentCommit(existingComment, e)
+          : undefined}
+        onGithub={existingComment && onCommentGithub
+          ? () => onCommentGithub(existingComment)
+          : undefined}
       />
     {/if}
 
@@ -2321,6 +2338,15 @@
               handleCommentDelete(existingComment.id);
               clearLineSelection();
             }
+          : undefined}
+        onNote={existingComment && onCommentNote
+          ? (e) => onCommentNote(existingComment, e)
+          : undefined}
+        onCommit={existingComment && onCommentCommit
+          ? (e) => onCommentCommit(existingComment, e)
+          : undefined}
+        onGithub={existingComment && onCommentGithub
+          ? () => onCommentGithub(existingComment)
           : undefined}
       />
     {/if}

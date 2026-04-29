@@ -17,6 +17,7 @@
 
 <style>
   .form-input {
+    width: 100%;
     min-height: 42px;
     border: 1.5px solid var(--border-muted);
     background: transparent;
@@ -27,6 +28,7 @@
     font-family: inherit;
     outline: none;
     transition: border-color 0.15s ease;
+    box-sizing: border-box;
   }
 
   .form-input:focus {

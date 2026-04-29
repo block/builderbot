@@ -109,6 +109,9 @@ export interface Theme {
     noteColor: string; // Icon/text color for note items (inherits from status.modified)
     noteBg: string; // Subtle background for note items
     noteBgEmphasis: string; // Emphasized background (hover) for note items
+    imageColor: string; // Icon/text color for image items (cyan/teal)
+    imageBg: string; // Subtle background for image items
+    imageBgEmphasis: string; // Emphasized background (hover) for image items
     branchColor: string; // Icon/text color for branch items (inherits from status.renamed)
   };
 }
@@ -341,6 +344,7 @@ export function createAdaptiveTheme(
   const fallbackRed = isDark ? '#f85149' : '#cf222e';
   const fallbackOrange = isDark ? '#d29922' : '#9a6700';
   const fallbackPurple = isDark ? '#a78bfa' : '#8250df';
+  const fallbackCyan = isDark ? '#22d3ee' : '#0891b2';
 
   // Use theme git colors when available, fallback otherwise
   const accentGreen = gitColors?.added ?? fallbackGreen;
@@ -348,6 +352,7 @@ export function createAdaptiveTheme(
   const accentBlue = gitColors?.modified ?? fallbackBlue;
   const accentOrange = fallbackOrange; // Used for warnings/caution UI elements
   const accentPurple = fallbackPurple;
+  const accentCyan = fallbackCyan; // Used for image timeline items
 
   // Border that's visible but not harsh
   const borderBase = mix(primaryBg, syntaxFg, isDark ? 0.15 : 0.12);
@@ -455,6 +460,10 @@ export function createAdaptiveTheme(
       noteColor: accentOrange,
       noteBg: overlay(accentOrange, isDark ? 0.08 : 0.1),
       noteBgEmphasis: overlay(accentOrange, isDark ? 0.15 : 0.18),
+      // Image uses cyan/teal color - distinct from other timeline types
+      imageColor: accentCyan,
+      imageBg: overlay(accentCyan, isDark ? 0.08 : 0.1),
+      imageBgEmphasis: overlay(accentCyan, isDark ? 0.15 : 0.18),
       // Branch uses renamed/blue color
       branchColor: accentBlue,
     },
@@ -529,6 +538,9 @@ export function themeToVarMap(t: Theme): Record<string, string> {
     '--note-color': t.timeline.noteColor,
     '--note-bg': t.timeline.noteBg,
     '--note-bg-emphasis': t.timeline.noteBgEmphasis,
+    '--image-color': t.timeline.imageColor,
+    '--image-bg': t.timeline.imageBg,
+    '--image-bg-emphasis': t.timeline.imageBgEmphasis,
     '--branch-color': t.timeline.branchColor,
   };
 }

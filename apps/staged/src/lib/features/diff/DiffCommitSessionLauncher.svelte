@@ -81,6 +81,8 @@
   onMount(() => {
     void refreshQueueState();
 
+    document.addEventListener('keydown', handleGlobalKeydown);
+
     let unlisten: UnlistenFn | null = null;
     listen<SessionStatusPayload>('session-status-changed', (event) => {
       if (event.payload.branchId !== branchId) return;
@@ -90,6 +92,7 @@
     });
 
     return () => {
+      document.removeEventListener('keydown', handleGlobalKeydown);
       unlisten?.();
     };
   });
@@ -99,12 +102,21 @@
     syncTextareaHeight();
   }
 
-  function handleKeydown(e: KeyboardEvent) {
-    // Cmd+Enter to submit
-    if (e.key === 'Enter' && e.metaKey && draftPrompt.trim() && !starting) {
-      e.preventDefault();
-      handleSubmit();
-    }
+  function handleGlobalKeydown(e: KeyboardEvent) {
+    if (e.key !== 'Enter' || !e.metaKey) return;
+    if (starting || !draftPrompt.trim()) return;
+
+    const target = e.target as HTMLElement | null;
+    const inInput =
+      target instanceof HTMLInputElement ||
+      target instanceof HTMLTextAreaElement ||
+      (target instanceof HTMLElement && target.isContentEditable);
+
+    // Allow if focus is in the commit textbox itself, or not in any input
+    if (inInput && !textareaElement?.contains(target)) return;
+
+    e.preventDefault();
+    handleSubmit();
   }
 
   function syncTextareaHeight() {
@@ -182,7 +194,6 @@
     rows="3"
     disabled={starting}
     oninput={handleInput}
-    onkeydown={handleKeydown}
     items={hashtagItems}
   />
   <div class="composer-footer">
@@ -198,6 +209,7 @@
       {:else}
         <Send size={14} />
         {willQueue ? 'Queue commit' : 'Start commit'}
+        <span class="shortcut-badge">⌘↵</span>
       {/if}
     </button>
   </div>
@@ -256,6 +268,12 @@
     border: none;
     color: var(--bg-deepest);
     width: 100%;
+  }
+
+  .shortcut-badge {
+    margin-left: auto;
+    font-size: var(--size-xs);
+    opacity: 0.6;
   }
 
   .composer-submit:hover:not(:disabled) {

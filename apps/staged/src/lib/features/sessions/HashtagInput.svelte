@@ -21,7 +21,8 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import type { HashtagItem } from '../../types';
-  import { HASHTAG_TOKEN_RE, hashtagTypeLabels } from './hashtagItems';
+  import { FileText, GitCommitVertical, FileSearch } from 'lucide-svelte';
+  import { HASHTAG_TOKEN_RE, hashtagTypeIconSvg } from './hashtagItems';
 
   interface Props {
     value: string;
@@ -128,8 +129,8 @@
     badge.className = 'hashtag-badge';
     badge.contentEditable = 'false';
     badge.dataset.token = `#${item.type}:${item.id}`;
-    const label = hashtagTypeLabels[item.type] ?? item.type;
-    badge.textContent = `${label}: ${item.title}`;
+    const iconSvg = hashtagTypeIconSvg[item.type] ?? '';
+    badge.innerHTML = `${iconSvg} ${item.title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}`;
     badge.style.cssText = `background: var(${item.bgColor}); color: var(${item.color});`;
     return badge;
   }
@@ -439,7 +440,13 @@
             onmouseenter={() => (selectedIndex = i)}
           >
             <span class="hashtag-item-icon {item.type}-icon">
-              {hashtagTypeLabels[item.type] ?? item.type}
+              {#if item.type === 'note' || item.type === 'project-note'}
+                <FileText size={14} />
+              {:else if item.type === 'commit'}
+                <GitCommitVertical size={14} />
+              {:else if item.type === 'review'}
+                <FileSearch size={14} />
+              {/if}
             </span>
             <span class="hashtag-item-title">{item.title}</span>
             {#if item.repoSlug || item.branchName}
@@ -547,11 +554,18 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 2px 6px;
+    width: 24px;
+    height: 24px;
     border-radius: 4px;
     flex-shrink: 0;
-    font-size: var(--size-xs);
-    font-weight: 600;
+  }
+
+  .hashtag-editor :global(.hashtag-badge svg) {
+    width: 12px;
+    height: 12px;
+    vertical-align: middle;
+    margin-right: 2px;
+    flex-shrink: 0;
   }
 
   .hashtag-item-icon.note-icon,

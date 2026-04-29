@@ -426,6 +426,13 @@
     white-space: nowrap;
   }
 
+  .timeline-title :global(.hashtag-badge svg) {
+    width: 12px;
+    height: 12px;
+    vertical-align: middle;
+    margin-right: 2px;
+  }
+
   .skeleton-title {
     color: var(--text-muted);
   }

@@ -350,8 +350,8 @@
   }
 
   .timeline-icon.image-icon {
-    color: #0891b2;
-    background-color: rgba(8, 145, 178, 0.1);
+    color: var(--image-color);
+    background-color: var(--image-bg);
     border-color: transparent;
   }
 

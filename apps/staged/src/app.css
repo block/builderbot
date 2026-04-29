@@ -49,6 +49,10 @@
   --review-bg: rgba(167, 139, 250, 0.08);
   --review-bg-emphasis: rgba(167, 139, 250, 0.15);
 
+  --image-color: #0891b2;
+  --image-bg: rgba(8, 145, 178, 0.08);
+  --image-bg-emphasis: rgba(8, 145, 178, 0.15);
+
   --branch-color: var(--status-renamed);
 
   --diff-added-bg: rgba(63, 185, 80, 0.08);

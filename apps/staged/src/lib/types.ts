@@ -349,7 +349,7 @@ export type {
 // =============================================================================
 
 export interface HashtagItem {
-  type: 'note' | 'commit' | 'review' | 'project-note';
+  type: 'note' | 'commit' | 'review' | 'project-note' | 'image';
   id: string;
   title: string;
   color: string;

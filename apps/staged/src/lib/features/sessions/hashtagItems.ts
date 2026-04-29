@@ -2,7 +2,7 @@ import type { BranchTimeline, HashtagItem, ProjectNote, Branch, ProjectRepo } fr
 import { getBranchTimeline, listProjectNotes } from '../../commands';
 
 /** Regex matching `#type:id` hashtag tokens in plain text. Use with `new RegExp(source, 'g')` for stateful iteration. */
-export const HASHTAG_TOKEN_RE = /#(note|commit|review|project-note):([^\s]+)/g;
+export const HASHTAG_TOKEN_RE = /#(note|commit|review|project-note|image):([^\s]+)/g;
 
 /** Human-readable labels for each hashtag type. */
 export const hashtagTypeLabels: Record<string, string> = {
@@ -10,6 +10,7 @@ export const hashtagTypeLabels: Record<string, string> = {
   commit: 'Commit',
   review: 'Review',
   'project-note': 'Note',
+  image: 'Image',
 };
 
 /** CSS custom-property names for each hashtag type's foreground and background colors. */
@@ -18,6 +19,7 @@ export const hashtagTypeColors: Record<string, { color: string; bg: string }> = 
   commit: { color: '--commit-color', bg: '--commit-bg' },
   review: { color: '--review-color', bg: '--review-bg' },
   'project-note': { color: '--note-color', bg: '--note-bg' },
+  image: { color: '--image-color', bg: '--image-bg' },
 };
 
 /**
@@ -109,6 +111,18 @@ export function timelineToHashtagItems(
       title,
       color: '--review-color',
       bgColor: '--review-bg',
+      branchName,
+      repoSlug,
+    });
+  }
+
+  for (const image of timeline.images) {
+    items.push({
+      type: 'image',
+      id: image.id,
+      title: image.filename,
+      color: '--image-color',
+      bgColor: '--image-bg',
       branchName,
       repoSlug,
     });

@@ -94,6 +94,7 @@ pub struct BranchWithWorkdir {
     pub pr_url: Option<String>,
     pub pr_updated_at: Option<i64>,
     pub pr_fetched_at: Option<i64>,
+    pub pr_head_sha: Option<String>,
     pub setup_complete: bool,
     pub worktree_path: Option<String>,
     pub created_at: i64,
@@ -1769,6 +1770,7 @@ pub fn run() {
             github_commands::validate_subpath,
             github_commands::list_repo_directories,
             // Branches
+            branches::get_branch,
             branches::list_branches_for_project,
             branches::create_branch,
             branches::setup_worktree,
@@ -1821,6 +1823,7 @@ pub fn run() {
             github_commands::list_pull_requests,
             github_commands::get_parent_repo,
             github_commands::list_issues,
+            github_commands::post_comment_to_github,
             // PRs
             prs::create_pr,
             prs::get_pr_url,

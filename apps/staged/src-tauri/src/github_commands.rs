@@ -2,7 +2,7 @@
 
 use crate::git;
 use crate::paths;
-use crate::store::Store;
+use crate::store::{self, Store};
 use std::sync::{Arc, Mutex};
 
 /// List the authenticated user's GitHub organization memberships.
@@ -184,4 +184,44 @@ pub async fn list_issues(github_repo: String) -> Result<Vec<git::github::Issue>,
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Post a single review comment to a GitHub PR.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn post_comment_to_github(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+    pr_number: u64,
+    comment: store::Comment,
+    local_head_sha: String,
+) -> Result<git::GitHubCommentResult, String> {
+    let store = crate::get_store(&store)?;
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
+    let repo_slug = if let Some(repo_id) = &branch.project_repo_id {
+        store
+            .get_project_repo(repo_id)
+            .map_err(|e| e.to_string())?
+            .map(|r| r.github_repo)
+            .unwrap_or_else(|| project.primary_repo().unwrap_or_default().to_string())
+    } else {
+        project
+            .primary_repo()
+            .ok_or_else(|| format!("Project '{}' has no repository attached", project.name))?
+            .to_string()
+    };
+
+    let repo_path = paths::clone_path_for(&repo_slug)
+        .ok_or_else(|| "Cannot determine clone path".to_string())?;
+
+    git::post_single_comment_to_github(&repo_path, pr_number, &comment, &local_head_sha)
+        .await
+        .map_err(|e| e.to_string())
 }

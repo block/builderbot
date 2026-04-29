@@ -220,6 +220,11 @@ export function listBranchesForProject(projectId: string): Promise<Branch[]> {
   return invoke('list_branches_for_project', { projectId });
 }
 
+/** Get a single branch by ID. */
+export function getBranch(branchId: string): Promise<Branch | null> {
+  return invoke('get_branch', { branchId });
+}
+
 /** Create a local branch record (DB only — no git worktree yet).
  *  Returns immediately with worktreePath = null.
  *  Call `setupWorktree` separately to create the git worktree. */
@@ -887,6 +892,20 @@ export function pushBranch(branchId: string, provider?: string, force?: boolean)
     provider: provider ?? null,
     force: force ?? null,
   });
+}
+
+/** Post a single review comment to a GitHub PR. */
+export function postCommentToGithub(
+  branchId: string,
+  prNumber: number,
+  comment: Comment,
+  localHeadSha: string
+): Promise<GitHubCommentResult> {
+  return invoke('post_comment_to_github', { branchId, prNumber, comment, localHeadSha });
+}
+
+export interface GitHubCommentResult {
+  commentUrl: string;
 }
 
 // =============================================================================

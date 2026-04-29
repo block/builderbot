@@ -117,6 +117,7 @@ export function timelineToHashtagItems(
   }
 
   for (const image of timeline.images) {
+    if (!image.filename.trim()) continue;
     items.push({
       type: 'image',
       id: image.id,

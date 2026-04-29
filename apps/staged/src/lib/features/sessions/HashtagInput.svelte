@@ -248,7 +248,7 @@
 
     if (hashPos >= 0) {
       const fragment = text.slice(hashPos + 1, pos);
-      if (/#?(note|commit|review|project-note|image):[^\s]+/.test('#' + fragment)) {
+      if (new RegExp(HASHTAG_TOKEN_RE.source).test('#' + fragment)) {
         closeDropdown();
         return;
       }

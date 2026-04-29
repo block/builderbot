@@ -21,7 +21,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import type { HashtagItem } from '../../types';
-  import { FileText, GitCommitVertical, FileSearch } from 'lucide-svelte';
+  import { FileText, GitCommitVertical, FileSearch, Image as ImageLucide } from 'lucide-svelte';
   import { HASHTAG_TOKEN_RE, hashtagTypeIconSvg } from './hashtagItems';
 
   interface Props {
@@ -446,6 +446,8 @@
                 <GitCommitVertical size={14} />
               {:else if item.type === 'review'}
                 <FileSearch size={14} />
+              {:else if item.type === 'image'}
+                <ImageLucide size={14} />
               {/if}
             </span>
             <span class="hashtag-item-title">{item.title}</span>

@@ -22,7 +22,17 @@
   import { tick } from 'svelte';
   import type { HashtagItem } from '../../types';
   import { FileText, GitCommitVertical, FileSearch, Image as ImageLucide } from 'lucide-svelte';
-  import { HASHTAG_TOKEN_RE, hashtagTypeIconSvg } from './hashtagItems';
+  import type { Component } from 'svelte';
+  import { HASHTAG_TOKEN_RE, hashtagTypeIconSvg, escapeHtml } from './hashtagItems';
+
+  /** Component lookup map for dropdown icons — keep in sync with hashtagTypeIconSvg SVG strings. */
+  const dropdownIconMap: Record<string, Component> = {
+    note: FileText,
+    commit: GitCommitVertical,
+    review: FileSearch,
+    'project-note': FileText,
+    image: ImageLucide,
+  };
 
   interface Props {
     value: string;
@@ -130,7 +140,7 @@
     badge.contentEditable = 'false';
     badge.dataset.token = `#${item.type}:${item.id}`;
     const iconSvg = hashtagTypeIconSvg[item.type] ?? '';
-    badge.innerHTML = `${iconSvg} ${item.title.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}`;
+    badge.innerHTML = `${iconSvg} ${escapeHtml(item.title)}`;
     badge.style.cssText = `background: var(${item.bgColor}); color: var(${item.color});`;
     return badge;
   }
@@ -440,14 +450,8 @@
             onmouseenter={() => (selectedIndex = i)}
           >
             <span class="hashtag-item-icon {item.type}-icon">
-              {#if item.type === 'note' || item.type === 'project-note'}
-                <FileText size={14} />
-              {:else if item.type === 'commit'}
-                <GitCommitVertical size={14} />
-              {:else if item.type === 'review'}
-                <FileSearch size={14} />
-              {:else if item.type === 'image'}
-                <ImageLucide size={14} />
+              {#if dropdownIconMap[item.type]}
+                <svelte:component this={dropdownIconMap[item.type]} size={14} />
               {/if}
             </span>
             <span class="hashtag-item-title">{item.title}</span>
@@ -559,14 +563,6 @@
     width: 24px;
     height: 24px;
     border-radius: 4px;
-    flex-shrink: 0;
-  }
-
-  .hashtag-editor :global(.hashtag-badge svg) {
-    width: 12px;
-    height: 12px;
-    vertical-align: middle;
-    margin-right: 2px;
     flex-shrink: 0;
   }
 

@@ -1568,13 +1568,6 @@
     white-space: nowrap;
   }
 
-  .human-text :global(.hashtag-badge svg) {
-    width: 12px;
-    height: 12px;
-    vertical-align: middle;
-    margin-right: 2px;
-  }
-
   .human-bubble .inline-copy {
     position: absolute;
     top: 6px;

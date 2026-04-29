@@ -906,6 +906,8 @@ export function postCommentToGithub(
 
 export interface GitHubCommentResult {
   commentUrl: string;
+  commentId: number;
+  commentType: string;
 }
 
 // =============================================================================

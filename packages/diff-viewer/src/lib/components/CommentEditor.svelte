@@ -5,8 +5,10 @@
   Handles its own visibility based on scroll position.
 -->
 <script lang="ts">
-  import { FileText, GitCommitVertical, Github, Trash2 } from 'lucide-svelte';
+  import { Check, FileText, GitCommitVertical, Github, Loader2, Trash2 } from 'lucide-svelte';
   import type { Comment } from '../types';
+
+  export type GithubButtonState = 'idle' | 'sending' | 'sent' | 'stale';
 
   interface Props {
     /** Position relative to the viewer container */
@@ -33,6 +35,8 @@
     onCommit?: (event: MouseEvent) => void;
     /** Called when "GitHub" action is clicked (only shown if existingComment is set). */
     onGithub?: () => void;
+    /** Current state of the GitHub send/update button. */
+    githubState?: GithubButtonState;
   }
 
   let {
@@ -49,6 +53,7 @@
     onNote,
     onCommit,
     onGithub,
+    githubState = 'idle',
   }: Props = $props();
 
   // Track current input value - initialized by effect when existingComment changes
@@ -137,11 +142,23 @@
         {#if onGithub}
           <button
             class="comment-action-btn github-btn"
+            class:github-btn-sent={githubState === 'sent'}
             onclick={() => onGithub?.()}
-            title="Send to GitHub"
+            title={githubState === 'sent' ? 'Sent to GitHub' : githubState === 'stale' ? 'Update on GitHub' : 'Send to GitHub'}
+            disabled={githubState === 'sending' || githubState === 'sent'}
           >
-            <Github size={12} />
-            <span>GitHub</span>
+            {#if githubState === 'sending'}
+              <Loader2 size={12} class="spinner" />
+            {:else if githubState === 'sent'}
+              <Check size={12} />
+            {:else}
+              <Github size={12} />
+            {/if}
+            {#if githubState === 'stale'}
+              <span>Update on GitHub</span>
+            {:else if githubState !== 'sent'}
+              <span>GitHub</span>
+            {/if}
           </button>
         {/if}
       </div>
@@ -255,10 +272,34 @@
     background-color: var(--commit-bg);
   }
 
-  .comment-action-btn.github-btn:hover {
+  .comment-action-btn.github-btn:hover:not(:disabled) {
     color: var(--text-primary);
     border-color: var(--text-muted);
     background-color: var(--bg-hover);
+  }
+
+  .comment-action-btn.github-btn:disabled {
+    cursor: default;
+    opacity: 0.7;
+  }
+
+  .comment-action-btn.github-btn-sent {
+    border-style: solid;
+    color: var(--status-added, #3fb950);
+    border-color: var(--status-added, #3fb950);
+  }
+
+  .comment-action-btn.github-btn-sent :global(svg) {
+    color: var(--status-added, #3fb950) !important;
+  }
+
+  .comment-action-btn :global(.spinner) {
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
   }
 
   .delete-comment-btn {

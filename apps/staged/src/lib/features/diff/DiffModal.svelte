@@ -544,8 +544,13 @@
     }
   }
 
+  /** Track which comments are currently being sent/updated on GitHub. */
+  let sendingCommentIds = $state(new Set<string>());
+
   async function handleSendToGithub(comment: Comment) {
     if (!branch?.prNumber) return;
+
+    sendingCommentIds = new Set([...sendingCommentIds, comment.id]);
 
     try {
       const result = await commands.postCommentToGithub(
@@ -554,7 +559,19 @@
         comment,
         diffViewer.state.commitSha ?? ''
       );
-      alerts.show({ tone: 'success', message: 'Comment posted to GitHub' });
+      // Optimistically update the comment's GitHub tracking fields
+      if (reviewHandle) {
+        reviewHandle.state.comments = reviewHandle.state.comments.map((c) =>
+          c.id === comment.id
+            ? {
+                ...c,
+                githubCommentId: result.commentId,
+                githubCommentType: result.commentType,
+                githubCommentStale: false,
+              }
+            : c
+        );
+      }
     } catch (e) {
       alerts.show({
         tone: 'error',
@@ -562,7 +579,17 @@
         message: e instanceof Error ? e.message : String(e),
         durationMs: 0,
       });
+    } finally {
+      sendingCommentIds = new Set([...sendingCommentIds].filter((id) => id !== comment.id));
     }
+  }
+
+  function getCommentGithubState(comment: Comment): 'idle' | 'sending' | 'sent' | 'stale' {
+    if (sendingCommentIds.has(comment.id)) return 'sending';
+    if (comment.githubCommentId != null) {
+      return comment.githubCommentStale ? 'stale' : 'sent';
+    }
+    return 'idle';
   }
 
   // Create tracker for search initialization
@@ -1205,6 +1232,7 @@
           onCommentNote={readonly ? undefined : handleNewNote}
           onCommentCommit={readonly ? undefined : handleNewCommit}
           onCommentGithub={readonly || !hasPr ? undefined : handleSendToGithub}
+          commentGithubState={readonly || !hasPr ? undefined : getCommentGithubState}
         />
       </div>
 

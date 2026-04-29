@@ -163,8 +163,12 @@ export function createReviewState(
    * Update a comment's content (optimistic).
    */
   async function updateComment(commentId: string, content: string): Promise<void> {
-    // Optimistic update
-    state.comments = state.comments.map((c) => (c.id === commentId ? { ...c, content } : c));
+    // Optimistic update — also mark GitHub sync as stale if previously posted
+    state.comments = state.comments.map((c) =>
+      c.id === commentId
+        ? { ...c, content, githubCommentStale: c.githubCommentId != null ? true : c.githubCommentStale }
+        : c
+    );
 
     try {
       await commands.updateComment(commentId, content);

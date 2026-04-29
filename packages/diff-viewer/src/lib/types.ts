@@ -81,6 +81,12 @@ export interface Comment {
   createdAt: number;
   /** When the comment was soft-deleted. Null means active. */
   deletedAt: number | null;
+  /** The GitHub API comment ID, set after posting to GitHub. */
+  githubCommentId: number | null;
+  /** The type of GitHub comment: "review" (inline) or "issue" (fallback). */
+  githubCommentType: string | null;
+  /** Whether the local content has been edited since the last GitHub sync. */
+  githubCommentStale: boolean;
 }
 
 /** A review anchored to a branch + commit + scope. */

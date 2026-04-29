@@ -200,14 +200,30 @@ impl Store {
         Ok(())
     }
 
-    /// Update a comment's content.
+    /// Update a comment's content. Marks the GitHub sync as stale if the comment
+    /// was previously posted to GitHub.
     pub fn update_comment(&self, comment_id: &str, content: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE comments SET content = ?1 WHERE id = ?2",
+            "UPDATE comments SET content = ?1, github_comment_stale = CASE WHEN github_comment_id IS NOT NULL THEN 1 ELSE 0 END WHERE id = ?2",
             params![content, comment_id],
         )?;
         Self::touch_review_for_comment(&conn, comment_id)?;
+        Ok(())
+    }
+
+    /// Record a GitHub comment ID after posting/updating a comment on GitHub.
+    pub fn set_github_comment(
+        &self,
+        comment_id: &str,
+        github_id: i64,
+        github_type: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE comments SET github_comment_id = ?1, github_comment_type = ?2, github_comment_stale = 0 WHERE id = ?3",
+            params![github_id, github_type, comment_id],
+        )?;
         Ok(())
     }
 
@@ -250,7 +266,7 @@ impl Store {
     pub fn get_deleted_comments(&self, review_id: &str) -> Result<Vec<Comment>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, path, span_start, span_end, content, author, comment_type, created_at, deleted_at
+            "SELECT id, path, span_start, span_end, content, author, comment_type, created_at, deleted_at, github_comment_id, github_comment_type, github_comment_stale
              FROM comments WHERE review_id = ?1 AND deleted_at IS NOT NULL ORDER BY deleted_at DESC",
         )?;
         let comments = stmt
@@ -267,6 +283,9 @@ impl Store {
                     comment_type: comment_type_str.as_deref().and_then(CommentType::parse),
                     created_at: row.get(7)?,
                     deleted_at: row.get(8)?,
+                    github_comment_id: row.get(9)?,
+                    github_comment_type: row.get(10)?,
+                    github_comment_stale: row.get(11)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -491,7 +510,7 @@ impl Store {
 
         // Load comments (only active — soft-deleted comments are excluded)
         let mut stmt = conn.prepare(
-            "SELECT id, path, span_start, span_end, content, author, comment_type, created_at
+            "SELECT id, path, span_start, span_end, content, author, comment_type, created_at, github_comment_id, github_comment_type, github_comment_stale
              FROM comments WHERE review_id = ?1 AND deleted_at IS NULL ORDER BY created_at ASC",
         )?;
         review.comments = stmt
@@ -508,6 +527,9 @@ impl Store {
                     comment_type: comment_type_str.as_deref().and_then(CommentType::parse),
                     created_at: row.get(7)?,
                     deleted_at: None,
+                    github_comment_id: row.get(8)?,
+                    github_comment_type: row.get(9)?,
+                    github_comment_stale: row.get(10)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;

@@ -1796,6 +1796,10 @@ pub async fn sync_review_to_github(
 pub struct GitHubCommentResult {
     /// URL to the posted comment
     pub comment_url: String,
+    /// The GitHub API comment ID (for later updates)
+    pub comment_id: i64,
+    /// The type of comment: "review" (inline) or "issue" (fallback)
+    pub comment_type: String,
 }
 
 /// Post a single comment to a GitHub PR as a submitted review (not pending).
@@ -1871,17 +1875,31 @@ pub async fn post_single_comment_to_github(
         convert_comment(&c, valid_lines_by_file.get(&comment.path))
     };
 
+    #[derive(Deserialize)]
+    struct CommentResponse {
+        id: i64,
+        html_url: String,
+    }
+
     match inline_comment {
         Ok(gh_comment) => {
-            // Post as a submitted COMMENT review with one inline comment
+            // Post as a direct pull request review comment (gives us the comment ID)
             let url = format!(
-                "https://api.github.com/repos/{owner}/{repo_name}/pulls/{pr_number}/reviews"
+                "https://api.github.com/repos/{owner}/{repo_name}/pulls/{pr_number}/comments"
             );
-            let request = CreateReviewRequest {
-                body: None,
-                event: Some("COMMENT".to_string()),
-                comments: vec![gh_comment],
-            };
+            let mut request = serde_json::json!({
+                "body": gh_comment.body,
+                "commit_id": local_head_sha,
+                "path": gh_comment.path,
+                "line": gh_comment.line,
+                "side": gh_comment.side,
+            });
+            if let Some(start_line) = gh_comment.start_line {
+                request["start_line"] = serde_json::json!(start_line);
+            }
+            if let Some(start_side) = gh_comment.start_side {
+                request["start_side"] = serde_json::json!(start_side);
+            }
 
             let response = client
                 .post(&url)
@@ -1892,7 +1910,7 @@ pub async fn post_single_comment_to_github(
                 .json(&request)
                 .send()
                 .await
-                .map_err(|e| GitError::CommandFailed(format!("Failed to create review: {e}")))?;
+                .map_err(|e| GitError::CommandFailed(format!("Failed to post comment: {e}")))?;
 
             let status = response.status();
             if !status.is_success() {
@@ -1902,12 +1920,14 @@ pub async fn post_single_comment_to_github(
                 )));
             }
 
-            let review: CreateReviewResponse = response.json().await.map_err(|e| {
-                GitError::CommandFailed(format!("Failed to parse review response: {e}"))
+            let created: CommentResponse = response.json().await.map_err(|e| {
+                GitError::CommandFailed(format!("Failed to parse comment response: {e}"))
             })?;
 
             Ok(GitHubCommentResult {
-                comment_url: review.html_url,
+                comment_url: created.html_url,
+                comment_id: created.id,
+                comment_type: "review".to_string(),
             })
         }
         Err(_out_of_diff) => {
@@ -1945,20 +1965,80 @@ pub async fn post_single_comment_to_github(
                 )));
             }
 
-            #[derive(Deserialize)]
-            struct IssueComment {
-                html_url: String,
-            }
-
-            let issue_comment: IssueComment = response.json().await.map_err(|e| {
+            let created: CommentResponse = response.json().await.map_err(|e| {
                 GitError::CommandFailed(format!("Failed to parse comment response: {e}"))
             })?;
 
             Ok(GitHubCommentResult {
-                comment_url: issue_comment.html_url,
+                comment_url: created.html_url,
+                comment_id: created.id,
+                comment_type: "issue".to_string(),
             })
         }
     }
+}
+
+/// Update an existing comment on GitHub.
+pub async fn update_comment_on_github(
+    repo: &Path,
+    _pr_number: u64,
+    github_comment_id: i64,
+    github_comment_type: &str,
+    body: &str,
+) -> Result<GitHubCommentResult, GitError> {
+    let token = get_github_token()?;
+    let (owner, repo_name) = get_github_repo(repo)?;
+    let client = reqwest::Client::new();
+
+    let url = match github_comment_type {
+        "review" => format!(
+            "https://api.github.com/repos/{owner}/{repo_name}/pulls/comments/{github_comment_id}"
+        ),
+        "issue" => format!(
+            "https://api.github.com/repos/{owner}/{repo_name}/issues/comments/{github_comment_id}"
+        ),
+        other => {
+            return Err(GitError::CommandFailed(format!(
+                "Unknown GitHub comment type: {other}"
+            )));
+        }
+    };
+
+    let response = client
+        .patch(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "application/vnd.github+json")
+        .header("User-Agent", "staged-app")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .json(&serde_json::json!({ "body": body }))
+        .send()
+        .await
+        .map_err(|e| GitError::CommandFailed(format!("Failed to update comment: {e}")))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let error_body = response.text().await.unwrap_or_default();
+        return Err(GitError::CommandFailed(format!(
+            "Failed to update comment: {status} - {error_body}"
+        )));
+    }
+
+    #[derive(Deserialize)]
+    struct CommentResponse {
+        id: i64,
+        html_url: String,
+    }
+
+    let updated: CommentResponse = response
+        .json()
+        .await
+        .map_err(|e| GitError::CommandFailed(format!("Failed to parse comment response: {e}")))?;
+
+    Ok(GitHubCommentResult {
+        comment_url: updated.html_url,
+        comment_id: updated.id,
+        comment_type: github_comment_type.to_string(),
+    })
 }
 
 // =============================================================================

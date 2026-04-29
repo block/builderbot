@@ -70,7 +70,7 @@
   import type { BeforeLineClass, AfterLineClass, CharHighlight } from '../utils/inlineDiff.js';
   import { setupDiffKeyboardNav } from '../utils/diffKeyboard';
   import { pathsMatch } from '../utils/diffModalHelpers';
-  import CommentEditor from './CommentEditor.svelte';
+  import CommentEditor, { type GithubButtonState } from './CommentEditor.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import BeforeAnnotationOverlay from './BeforeAnnotationOverlay.svelte';
   import Scrollbar from './Scrollbar.svelte';
@@ -115,6 +115,8 @@
     onCommentNote?: (comment: Comment, event: MouseEvent) => void;
     onCommentCommit?: (comment: Comment, event: MouseEvent) => void;
     onCommentGithub?: (comment: Comment) => void;
+    /** Returns the GitHub button state for a given comment. */
+    commentGithubState?: (comment: Comment) => GithubButtonState;
   }
 
   let {
@@ -136,6 +138,7 @@
     onCommentNote,
     onCommentCommit,
     onCommentGithub,
+    commentGithubState,
   }: Props = $props();
 
   // ==========================================================================
@@ -2283,6 +2286,9 @@
         onGithub={existingComment && onCommentGithub
           ? () => onCommentGithub(existingComment)
           : undefined}
+        githubState={existingComment && commentGithubState
+          ? commentGithubState(existingComment)
+          : 'idle'}
       />
     {/if}
 
@@ -2348,6 +2354,9 @@
         onGithub={existingComment && onCommentGithub
           ? () => onCommentGithub(existingComment)
           : undefined}
+        githubState={existingComment && commentGithubState
+          ? commentGithubState(existingComment)
+          : 'idle'}
       />
     {/if}
   {/if}

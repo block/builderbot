@@ -2317,7 +2317,7 @@ fn project_note_timeline_entries(
     entries
 }
 
-fn is_branch_history_review_comment(comment: &store::Comment) -> bool {
+fn should_include_in_history(comment: &store::Comment) -> bool {
     comment.deleted_at.is_none()
         && !matches!(
             comment.comment_type.as_ref(),
@@ -2335,7 +2335,7 @@ fn format_review_comments(review: &store::Review) -> String {
     for comment in review
         .comments
         .iter()
-        .filter(|comment| is_branch_history_review_comment(comment))
+        .filter(|comment| should_include_in_history(comment))
     {
         by_path.entry(&comment.path).or_default().push(comment);
     }
@@ -2364,15 +2364,13 @@ fn review_summary_counts(review: &store::Review) -> (usize, usize) {
     let total = review
         .comments
         .iter()
-        .filter(|comment| is_branch_history_review_comment(comment))
+        .filter(|comment| should_include_in_history(comment))
         .count();
     let issues = review
         .comments
         .iter()
-        .filter(|c| {
-            is_branch_history_review_comment(c)
-                && matches!(c.comment_type.as_ref(), Some(store::CommentType::Issue))
-        })
+        .filter(|c| should_include_in_history(c))
+        .filter(|c| matches!(c.comment_type.as_ref(), Some(store::CommentType::Issue)))
         .count();
     (total, issues)
 }
@@ -2401,8 +2399,7 @@ fn review_timeline_entries(
         if review.is_auto {
             continue;
         }
-        let has_branch_history_comments =
-            review.comments.iter().any(is_branch_history_review_comment);
+        let has_branch_history_comments = review.comments.iter().any(should_include_in_history);
         if !has_branch_history_comments {
             continue;
         }

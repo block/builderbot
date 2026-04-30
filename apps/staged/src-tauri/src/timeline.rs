@@ -7,6 +7,7 @@ use crate::{
     blox, branches, BranchTimeline, CommitTimelineItem, ImageTimelineItem, NoteTimelineItem,
     ReviewTimelineItem,
 };
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -146,6 +147,12 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         }
     }
 
+    let visible_shas: HashSet<&str> = commits
+        .iter()
+        .filter(|c| !c.sha.is_empty())
+        .map(|c| c.sha.as_str())
+        .collect();
+
     // Get notes
     let db_notes = store
         .list_notes_for_branch(branch_id)
@@ -175,6 +182,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         .map_err(|e| e.to_string())?;
     let reviews: Vec<ReviewTimelineItem> = db_reviews
         .into_iter()
+        .filter(|r| visible_shas.contains(r.commit_sha.as_str()))
         .map(|r| {
             let resolved = store.resolve_session_status(r.session_id.as_deref());
             let comment_count = r.comments.len();
@@ -446,4 +454,104 @@ pub async fn delete_commit(
     })
     .await
     .map_err(|e| format!("Delete task failed: {e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::models::{Branch, Project, Review, ReviewScope, Workdir};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use uuid::Uuid;
+
+    struct TempGitRepo {
+        path: PathBuf,
+    }
+
+    impl TempGitRepo {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("staged-timeline-{}", Uuid::new_v4()));
+            fs::create_dir_all(&path).unwrap();
+
+            let repo = Self { path };
+            repo.run_git(&["init"]);
+            repo.run_git(&["checkout", "-b", "main"]);
+            repo.run_git(&["config", "user.email", "test@example.com"]);
+            repo.run_git(&["config", "user.name", "Timeline Test"]);
+            repo
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        fn write_file(&self, name: &str, content: &str) {
+            fs::write(self.path.join(name), content).unwrap();
+        }
+
+        fn commit(&self, message: &str) -> String {
+            self.run_git(&["add", "."]);
+            self.run_git(&["commit", "-m", message]);
+            self.run_git(&["rev-parse", "HEAD"]).trim().to_string()
+        }
+
+        fn run_git(&self, args: &[&str]) -> String {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(&self.path)
+                .args(args)
+                .output()
+                .unwrap();
+
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+
+            String::from_utf8(output.stdout).unwrap()
+        }
+    }
+
+    impl Drop for TempGitRepo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn build_branch_timeline_hides_reviews_for_commits_missing_from_git_history() {
+        let repo = TempGitRepo::new();
+        repo.write_file("file.txt", "base\n");
+        repo.commit("base");
+        repo.run_git(&["checkout", "-b", "feature"]);
+        repo.write_file("file.txt", "base\nvisible\n");
+        let visible_sha = repo.commit("visible change");
+        repo.write_file("file.txt", "base\nvisible\nstale\n");
+        let stale_sha = repo.commit("stale change");
+        repo.run_git(&["reset", "--hard", &visible_sha]);
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let project = Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+        let workdir =
+            Workdir::new(&project.id, repo.path().to_str().unwrap()).with_branch(&branch.id);
+        store.create_workdir(&workdir).unwrap();
+
+        let visible_review = Review::new(&branch.id, &visible_sha, ReviewScope::Commit);
+        let stale_review = Review::new(&branch.id, &stale_sha, ReviewScope::Commit);
+        store.create_review(&visible_review).unwrap();
+        store.create_review(&stale_review).unwrap();
+
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+
+        assert_eq!(timeline.commits.len(), 1);
+        assert_eq!(timeline.commits[0].sha, visible_sha);
+        assert_eq!(timeline.reviews.len(), 1);
+        assert_eq!(timeline.reviews[0].id, visible_review.id);
+    }
 }

@@ -202,4 +202,30 @@
   .placeholder.error {
     color: var(--ui-danger);
   }
+
+  @media (max-width: 640px) {
+    .modal {
+      width: 100vw;
+      max-width: none;
+      height: 100vh;
+      height: 100dvh;
+      max-height: none;
+      border-radius: 0;
+      box-shadow: none;
+    }
+
+    .close-btn,
+    .delete-btn {
+      width: 40px;
+      height: 40px;
+    }
+
+    .modal-body {
+      padding: 12px;
+    }
+
+    .modal-body img {
+      max-height: calc(100dvh - 80px);
+    }
+  }
 </style>

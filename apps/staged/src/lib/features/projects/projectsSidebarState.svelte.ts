@@ -23,6 +23,7 @@ export const projectsList = $state<{ current: Project[] }>({ current: [] });
 export const projectsSidebarState = $state({
   width: SIDEBAR_DEFAULT_WIDTH,
   collapsed: false,
+  mobileOpen: false,
   hydrated: false,
   hasProjects: true,
 });
@@ -64,4 +65,8 @@ export function setProjectsSidebarCollapsed(collapsed: boolean): void {
   if (projectsSidebarState.collapsed === collapsed) return;
   projectsSidebarState.collapsed = collapsed;
   void setStoreValue(SIDEBAR_COLLAPSED_KEY, collapsed);
+}
+
+export function setProjectsSidebarMobileOpen(open: boolean): void {
+  projectsSidebarState.mobileOpen = open;
 }

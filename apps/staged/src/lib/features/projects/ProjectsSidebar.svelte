@@ -29,11 +29,13 @@
   import {
     hydrateProjectsSidebarState,
     projectsSidebarState,
+    setProjectsSidebarMobileOpen,
     setProjectsSidebarWidth,
     SIDEBAR_DEFAULT_WIDTH,
     SIDEBAR_MAX_WIDTH,
     SIDEBAR_MIN_WIDTH,
   } from './projectsSidebarState.svelte';
+  import { viewport, watchViewport } from '../../shared/viewport.svelte';
 
   const devBranch = import.meta.env.VITE_DEV_BRANCH as string | undefined;
 
@@ -67,10 +69,23 @@
     );
     if (status.kind === 'deleting') return;
     selectProject(projectId);
+    closeMobileSidebar();
+  }
+
+  function openAllProjects() {
+    goHome();
+    closeMobileSidebar();
   }
 
   function openNewProject() {
     window.dispatchEvent(new CustomEvent('staged:new-project'));
+    closeMobileSidebar();
+  }
+
+  function closeMobileSidebar() {
+    if (viewport.isMobile) {
+      setProjectsSidebarMobileOpen(false);
+    }
   }
 
   function scrollIfActive(node: HTMLElement, active: boolean) {
@@ -116,9 +131,18 @@
   let resizing = $state(false);
   let resizeStartX = 0;
   let resizeStartWidth = SIDEBAR_DEFAULT_WIDTH;
+  let sidebarVisible = $derived(
+    projectsSidebarState.hasProjects &&
+      (viewport.isMobile ? projectsSidebarState.mobileOpen : !projectsSidebarState.collapsed)
+  );
+  let sidebarStyle = $derived(viewport.isMobile ? '' : `width: ${projectsSidebarState.width}px;`);
 
   onMount(() => {
+    const stopWatchingViewport = watchViewport();
     void hydrateProjectsSidebarState();
+    return () => {
+      stopWatchingViewport();
+    };
   });
 
   onDestroy(() => {
@@ -194,11 +218,22 @@
   }
 </script>
 
-{#if !projectsSidebarState.collapsed && projectsSidebarState.hasProjects}
+{#if sidebarVisible}
+  {#if viewport.isMobile}
+    <button
+      type="button"
+      class="sidebar-backdrop"
+      aria-label="Close projects sidebar"
+      onclick={closeMobileSidebar}
+      transition:fade={{ duration: 150 }}
+    ></button>
+  {/if}
+
   <aside
     class="projects-sidebar"
     class:resizing
-    style={`width: ${projectsSidebarState.width}px;`}
+    class:mobile={viewport.isMobile}
+    style={sidebarStyle}
     in:slideOpen
     out:slideClose
   >
@@ -225,7 +260,7 @@
             <button
               class="project-row all-projects-row"
               class:active={navigation.selectedProjectId === null}
-              onclick={goHome}
+              onclick={openAllProjects}
               title="Show all projects"
             >
               <div class="row-main">
@@ -369,6 +404,16 @@
 {/if}
 
 <style>
+  .sidebar-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    border: none;
+    padding: 0;
+    background: var(--shadow-overlay);
+    cursor: default;
+  }
+
   .projects-sidebar {
     position: relative;
     flex-shrink: 0;
@@ -378,6 +423,15 @@
     flex-direction: column;
     min-height: 0;
     transition: width 0.14s ease;
+  }
+
+  .projects-sidebar.mobile {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 41;
+    width: min(320px, calc(100vw - 48px));
+    max-width: 100vw;
+    box-shadow: var(--shadow-elevated);
   }
 
   .projects-sidebar.resizing {
@@ -684,5 +738,14 @@
   .resize-handle:focus-visible::after,
   .resize-handle.active::after {
     background-color: var(--border-emphasis);
+  }
+
+  .projects-sidebar.mobile .resize-handle {
+    display: none;
+  }
+
+  .projects-sidebar.mobile .project-row,
+  .projects-sidebar.mobile .new-project-button {
+    min-height: 44px;
   }
 </style>

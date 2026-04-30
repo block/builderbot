@@ -13,10 +13,16 @@
     hydrateProjectsSidebarState,
     projectsSidebarState,
     setProjectsSidebarCollapsed,
+    setProjectsSidebarMobileOpen,
   } from '../projects/projectsSidebarState.svelte';
+  import { viewport, watchViewport } from '../../shared/viewport.svelte';
 
   onMount(() => {
+    const stopWatchingViewport = watchViewport();
     void hydrateProjectsSidebarState();
+    return () => {
+      stopWatchingViewport();
+    };
   });
 
   function startDrag(e: PointerEvent) {
@@ -30,8 +36,16 @@
   }
 
   function toggleProjectsSidebar() {
+    if (viewport.isMobile) {
+      setProjectsSidebarMobileOpen(!projectsSidebarState.mobileOpen);
+      return;
+    }
     setProjectsSidebarCollapsed(!projectsSidebarState.collapsed);
   }
+
+  let sidebarOpen = $derived(
+    viewport.isMobile ? projectsSidebarState.mobileOpen : !projectsSidebarState.collapsed
+  );
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -42,9 +56,9 @@
       class="icon-btn"
       onclick={toggleProjectsSidebar}
       disabled={!projectsSidebarState.hasProjects}
-      title={projectsSidebarState.collapsed ? 'Show projects sidebar' : 'Hide projects sidebar'}
+      title={sidebarOpen ? 'Hide projects sidebar' : 'Show projects sidebar'}
     >
-      {#if projectsSidebarState.collapsed || !projectsSidebarState.hasProjects}
+      {#if !sidebarOpen || !projectsSidebarState.hasProjects}
         <PanelLeftOpen size={14} />
       {:else}
         <PanelLeftClose size={14} />
@@ -129,5 +143,21 @@
   .icon-btn:disabled {
     opacity: 0.35;
     cursor: not-allowed;
+  }
+
+  @media (max-width: 768px) {
+    .top-bar {
+      padding: 6px 8px;
+    }
+
+    .traffic-light-spacer {
+      width: 58px;
+    }
+
+    .icon-btn {
+      width: 40px;
+      height: 40px;
+      padding: 0;
+    }
   }
 </style>

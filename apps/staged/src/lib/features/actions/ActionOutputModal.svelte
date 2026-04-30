@@ -774,4 +774,42 @@
     gap: 6px;
     white-space: nowrap;
   }
+
+  @media (max-width: 640px) {
+    .modal {
+      width: 100vw;
+      max-width: none;
+      height: 100vh;
+      height: 100dvh;
+      max-height: none;
+      border-radius: 0;
+      box-shadow: none;
+    }
+
+    .modal-header {
+      border-radius: 0;
+      padding: 12px;
+    }
+
+    .header-actions {
+      gap: 4px;
+    }
+
+    .close-btn {
+      width: 40px;
+      height: 40px;
+    }
+
+    .stop-btn,
+    .run-again-btn,
+    .remove-btn,
+    .save-note-btn {
+      min-height: 40px;
+      padding: 6px 10px;
+    }
+
+    .modal-content {
+      padding: 12px;
+    }
+  }
 </style>

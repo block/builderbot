@@ -389,4 +389,40 @@
     color: var(--text-primary);
     background-color: var(--bg-hover);
   }
+
+  @media (max-width: 640px) {
+    .splash {
+      padding: 24px 16px 0;
+    }
+
+    .splash-center {
+      gap: 20px;
+    }
+
+    .icon-frame {
+      width: 84px;
+      height: 84px;
+      border-radius: 20px;
+    }
+
+    .inline-form {
+      width: 100%;
+      max-width: 100%;
+    }
+
+    .splash-actions {
+      padding-bottom: 20px;
+    }
+
+    .splash-pill {
+      min-height: 44px;
+      max-width: calc(100vw - 32px);
+      padding: 12px 20px;
+    }
+
+    .close-circle {
+      width: 44px;
+      height: 44px;
+    }
+  }
 </style>

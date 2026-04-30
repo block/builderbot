@@ -112,4 +112,39 @@
   .modal-body {
     padding: 16px;
   }
+
+  @media (max-width: 640px) {
+    .modal-backdrop {
+      align-items: stretch;
+      padding-top: 0;
+    }
+
+    .modal {
+      width: 100vw;
+      max-width: none;
+      height: 100vh;
+      height: 100dvh;
+      border-radius: 0;
+      box-shadow: none;
+    }
+
+    .modal-header {
+      flex-shrink: 0;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border-subtle);
+      border-radius: 0;
+    }
+
+    .close-button {
+      width: 40px;
+      height: 40px;
+    }
+
+    .modal-body {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      padding: 16px;
+    }
+  }
 </style>

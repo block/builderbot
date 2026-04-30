@@ -285,4 +285,15 @@
     align-items: center;
     gap: 6px;
   }
+
+  @media (max-width: 640px) {
+    .actions {
+      flex-direction: column-reverse;
+    }
+
+    .actions :global(.form-btn) {
+      width: 100%;
+      min-height: 44px;
+    }
+  }
 </style>

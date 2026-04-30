@@ -98,4 +98,30 @@
     padding: 14px;
     overflow: hidden;
   }
+
+  @media (max-width: 640px) {
+    .modal-backdrop {
+      align-items: stretch;
+      justify-content: stretch;
+    }
+
+    .modal {
+      width: 100vw;
+      max-height: none;
+      height: 100vh;
+      height: 100dvh;
+      border-radius: 0;
+      box-shadow: none;
+    }
+
+    .close-btn {
+      width: 40px;
+      height: 40px;
+    }
+
+    .modal-body {
+      padding: 12px;
+      overflow: auto;
+    }
+  }
 </style>

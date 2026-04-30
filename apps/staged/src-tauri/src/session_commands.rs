@@ -2317,14 +2317,26 @@ fn project_note_timeline_entries(
     entries
 }
 
+fn is_branch_history_review_comment(comment: &store::Comment) -> bool {
+    comment.deleted_at.is_none()
+        && !matches!(
+            comment.comment_type.as_ref(),
+            Some(store::CommentType::Information)
+        )
+}
+
 /// Build the inline comment content for a review (used both for inlining and temp files).
-fn format_review_comments(review: &crate::store::models::Review) -> String {
+fn format_review_comments(review: &store::Review) -> String {
     let mut content = String::new();
 
     // Group comments by file path
-    let mut by_path: std::collections::BTreeMap<&str, Vec<&crate::store::models::Comment>> =
+    let mut by_path: std::collections::BTreeMap<&str, Vec<&store::Comment>> =
         std::collections::BTreeMap::new();
-    for comment in &review.comments {
+    for comment in review
+        .comments
+        .iter()
+        .filter(|comment| is_branch_history_review_comment(comment))
+    {
         by_path.entry(&comment.path).or_default().push(comment);
     }
 
@@ -2348,16 +2360,18 @@ fn format_review_comments(review: &crate::store::models::Review) -> String {
 }
 
 /// Count (total_comments, issues) for a review's comments.
-fn review_summary_counts(review: &crate::store::models::Review) -> (usize, usize) {
-    let total = review.comments.len();
+fn review_summary_counts(review: &store::Review) -> (usize, usize) {
+    let total = review
+        .comments
+        .iter()
+        .filter(|comment| is_branch_history_review_comment(comment))
+        .count();
     let issues = review
         .comments
         .iter()
         .filter(|c| {
-            matches!(
-                c.comment_type,
-                Some(crate::store::models::CommentType::Issue)
-            )
+            is_branch_history_review_comment(c)
+                && matches!(c.comment_type.as_ref(), Some(store::CommentType::Issue))
         })
         .count();
     (total, issues)
@@ -2384,7 +2398,12 @@ fn review_timeline_entries(
 
     let mut entries = Vec::new();
     for review in &reviews {
-        if review.is_auto || review.comments.is_empty() {
+        if review.is_auto {
+            continue;
+        }
+        let has_branch_history_comments =
+            review.comments.iter().any(is_branch_history_review_comment);
+        if !has_branch_history_comments {
             continue;
         }
         let short_sha = &review.commit_sha[..review.commit_sha.len().min(7)];
@@ -2767,6 +2786,29 @@ mod tests {
         (session, review)
     }
 
+    fn create_branch_review(
+        store: &Arc<Store>,
+        branch_id: &str,
+        commit_sha: &str,
+    ) -> store::Review {
+        let review = store::Review::new(branch_id, commit_sha, store::ReviewScope::Branch);
+        store.create_review(&review).unwrap();
+        review
+    }
+
+    fn add_agent_comment(
+        store: &Arc<Store>,
+        review_id: &str,
+        content: &str,
+        comment_type: store::CommentType,
+    ) -> store::Comment {
+        let comment = store::Comment::new("src/lib.rs", crate::git::Span::new(10, 10), content)
+            .with_author(store::CommentAuthor::Agent)
+            .with_comment_type(comment_type);
+        store.add_comment(review_id, &comment).unwrap();
+        comment
+    }
+
     #[test]
     fn infer_branch_resume_session_type_detects_pr_prompts() {
         assert_eq!(
@@ -2823,6 +2865,136 @@ mod tests {
             "Put only the JSON array inside the review-comments block (no prose or markdown)."
         ));
         assert!(prompt.contains("do not output any preamble, commentary, or thinking before it"));
+    }
+
+    #[test]
+    fn review_timeline_entries_exclude_information_comments() {
+        let (store, branch) = setup_branch_store();
+        let review = create_branch_review(&store, &branch.id, "abc1234");
+        add_agent_comment(
+            &store,
+            &review.id,
+            "issue should appear",
+            store::CommentType::Issue,
+        );
+        add_agent_comment(
+            &store,
+            &review.id,
+            "warning should appear",
+            store::CommentType::Warning,
+        );
+        add_agent_comment(
+            &store,
+            &review.id,
+            "suggestion should appear",
+            store::CommentType::Suggestion,
+        );
+        add_agent_comment(
+            &store,
+            &review.id,
+            "information should be hidden",
+            store::CommentType::Information,
+        );
+
+        let entries = review_timeline_entries(&store, &branch.id, None, None);
+
+        assert_eq!(entries.len(), 1);
+        let content = &entries[0].content;
+        assert!(content.contains("issue should appear"));
+        assert!(content.contains("warning should appear"));
+        assert!(content.contains("suggestion should appear"));
+        assert!(!content.contains("information should be hidden"));
+    }
+
+    #[test]
+    fn review_timeline_entries_skip_information_only_reviews() {
+        let (store, branch) = setup_branch_store();
+        let review = create_branch_review(&store, &branch.id, "abc1234");
+        add_agent_comment(
+            &store,
+            &review.id,
+            "information should be hidden",
+            store::CommentType::Information,
+        );
+
+        let entries = review_timeline_entries(&store, &branch.id, None, None);
+
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn review_timeline_entries_exclude_deleted_comments() {
+        let (store, branch) = setup_branch_store();
+        let review = create_branch_review(&store, &branch.id, "abc1234");
+        let deleted = add_agent_comment(
+            &store,
+            &review.id,
+            "deleted comment should be hidden",
+            store::CommentType::Warning,
+        );
+        add_agent_comment(
+            &store,
+            &review.id,
+            "active comment should appear",
+            store::CommentType::Suggestion,
+        );
+
+        store.delete_comment(&deleted.id).unwrap();
+        let entries = review_timeline_entries(&store, &branch.id, None, None);
+
+        assert_eq!(entries.len(), 1);
+        let content = &entries[0].content;
+        assert!(content.contains("active comment should appear"));
+        assert!(!content.contains("deleted comment should be hidden"));
+    }
+
+    #[test]
+    fn old_review_summary_counts_exclude_information_comments() {
+        let (store, branch) = setup_branch_store();
+        let review = create_branch_review(&store, &branch.id, "abc1234");
+        let temp_path = std::env::temp_dir().join(format!("staged-review-{}.md", review.id));
+        let _ = std::fs::remove_file(&temp_path);
+
+        add_agent_comment(
+            &store,
+            &review.id,
+            "issue should appear",
+            store::CommentType::Issue,
+        );
+        add_agent_comment(
+            &store,
+            &review.id,
+            "warning should appear",
+            store::CommentType::Warning,
+        );
+        add_agent_comment(
+            &store,
+            &review.id,
+            "suggestion should appear",
+            store::CommentType::Suggestion,
+        );
+        add_agent_comment(
+            &store,
+            &review.id,
+            "information should be hidden",
+            store::CommentType::Information,
+        );
+
+        let max_commit_ts = Some(review.created_at / 1000 + 1);
+        let entries = review_timeline_entries(&store, &branch.id, None, max_commit_ts);
+
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].content.contains("3 comments, 1 issues"));
+        assert!(!entries[0].content.contains("4 comments"));
+        assert!(entries[0].content.contains("See:"));
+
+        let temp_content = std::fs::read_to_string(&temp_path).unwrap();
+        assert!(temp_content.contains("issue should appear"));
+        assert!(temp_content.contains("warning should appear"));
+        assert!(temp_content.contains("suggestion should appear"));
+        assert!(!temp_content.contains("information should be hidden"));
+
+        let _ = std::fs::remove_file(&temp_path);
     }
 
     #[test]

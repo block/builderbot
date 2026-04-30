@@ -366,7 +366,13 @@ fn create_project(
     // re-validation here removes a ~500ms-2s GitHub API round-trip.
 
     let project_location = match location.as_deref() {
-        Some("remote") => store::ProjectLocation::Remote,
+        Some("remote") if blox::is_sq_available() => store::ProjectLocation::Remote,
+        Some("remote") => {
+            log::warn!(
+                "[create_project] remote project requested but sq CLI is unavailable; creating a local project instead"
+            );
+            store::ProjectLocation::Local
+        }
         _ => store::ProjectLocation::Local,
     };
     let inferred_branch_name = branch_name

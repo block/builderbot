@@ -26,7 +26,11 @@
   import { buildBranchHashtagItems } from './hashtagItems';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import { subscribeDragDrop } from '../branches/dragDrop';
-  import { isImageFile } from '../branches/branchCardHelpers';
+  import {
+    isImageFile,
+    isMaybeTextFile,
+    insertFilePathsAtCursor,
+  } from '../branches/branchCardHelpers';
   import { createImage } from '../../commands';
 
   interface Props {
@@ -270,11 +274,12 @@
   }
 
   // =========================================================================
-  // Drag-and-drop images (via Tauri native drag-drop events)
+  // Drag-and-drop files (via Tauri native drag-drop events)
   // =========================================================================
 
   async function handleFileDrop(paths: string[]) {
     const imagePaths = paths.filter((p) => isImageFile(p));
+    const textPaths = paths.filter((p) => isMaybeTextFile(p));
     const newIds: string[] = [];
     for (const path of imagePaths) {
       try {
@@ -287,6 +292,9 @@
     if (newIds.length > 0) {
       imageIds = [...imageIds, ...newIds];
       onImageIdsChange(imageIds);
+    }
+    if (textPaths.length > 0 && textareaEl) {
+      insertFilePathsAtCursor(textareaEl, textPaths);
     }
   }
 

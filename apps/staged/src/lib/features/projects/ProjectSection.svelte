@@ -50,7 +50,11 @@
   import { agentState } from '../agents/agent.svelte';
   import { getPreferredAgentForProject } from '../settings/preferences.svelte';
   import { subscribeDragDrop } from '../branches/dragDrop';
-  import { isImageFile } from '../branches/branchCardHelpers';
+  import {
+    isImageFile,
+    isMaybeTextFile,
+    insertFilePathsAtCursor,
+  } from '../branches/branchCardHelpers';
   import { createImage, createImageFromData, deleteImage, getImageData } from '../../api/commands';
   import { formatRelativeTime, minuteNow } from '../../shared/relativeTime.svelte';
   import { createLiveSessionHints } from '../timeline/liveSessionHints';
@@ -285,6 +289,7 @@
 
   async function handleFileDrop(paths: string[]) {
     const imagePaths = paths.filter((p) => isImageFile(p));
+    const textPaths = paths.filter((p) => isMaybeTextFile(p));
     const pid = project.id;
     const newIds: string[] = [];
     for (const path of imagePaths) {
@@ -297,6 +302,9 @@
     }
     if (newIds.length > 0) {
       imageIds = [...imageIds, ...newIds];
+    }
+    if (textPaths.length > 0 && promptTextarea) {
+      insertFilePathsAtCursor(promptTextarea, textPaths);
     }
   }
 

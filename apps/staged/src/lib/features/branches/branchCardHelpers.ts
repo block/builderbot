@@ -1,6 +1,5 @@
 import type { ProjectAction } from '../../api/commands';
 
-const TEXT_EXTENSIONS = ['.txt', '.md', '.markdown', '.text', '.rst', '.org', '.adoc'];
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
 
 export function groupActionsByType(actions: ProjectAction[]): Record<string, ProjectAction[]> {
@@ -123,14 +122,24 @@ export function isPushRejectedNonFastForward(
   );
 }
 
-export function isTextFile(filePath: string): boolean {
-  const lower = filePath.toLowerCase();
-  return TEXT_EXTENSIONS.some((ext) => lower.endsWith(ext));
-}
-
 export function isImageFile(filePath: string): boolean {
   const lower = filePath.toLowerCase();
   return IMAGE_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+export function isMaybeTextFile(filePath: string): boolean {
+  return !isImageFile(filePath);
+}
+
+/**
+ * Insert file paths into a textarea at the cursor position, preserving undo history.
+ * Uses `document.execCommand('insertText')` which, while deprecated, is the simplest
+ * way to get undo-friendly insertion in Chromium/Tauri webviews.
+ */
+export function insertFilePathsAtCursor(element: HTMLElement, paths: string[]): void {
+  const insert = paths.join('\n');
+  element.focus();
+  document.execCommand('insertText', false, insert);
 }
 
 export function fileNameFromPath(filePath: string): string {

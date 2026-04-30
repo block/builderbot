@@ -66,7 +66,11 @@
   } from './hashtagItems';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import { subscribeDragDrop } from '../branches/dragDrop';
-  import { isImageFile } from '../branches/branchCardHelpers';
+  import {
+    isImageFile,
+    isMaybeTextFile,
+    insertFilePathsAtCursor,
+  } from '../branches/branchCardHelpers';
   import {
     formatToolDisplay,
     groupByVerb,
@@ -262,10 +266,11 @@
     });
   }
 
-  // Drag-and-drop images (via Tauri native drag-drop events)
+  // Drag-and-drop files (via Tauri native drag-drop events)
   async function handleFileDrop(paths: string[]) {
     if (!projectId) return;
     const imagePaths = paths.filter((p) => isImageFile(p));
+    const textPaths = paths.filter((p) => isMaybeTextFile(p));
     const bid = branchId ?? null;
     const pid = projectId;
     const newIds: string[] = [];
@@ -279,6 +284,9 @@
     }
     if (newIds.length > 0) {
       replyImageIds = [...replyImageIds, ...newIds];
+    }
+    if (textPaths.length > 0 && inputEl) {
+      insertFilePathsAtCursor(inputEl, textPaths);
     }
   }
 

@@ -31,7 +31,12 @@
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
-  import { fileNameFromPath, formatBaseBranch, isTextFile, isImageFile } from './branchCardHelpers';
+  import {
+    fileNameFromPath,
+    formatBaseBranch,
+    isMaybeTextFile,
+    isImageFile,
+  } from './branchCardHelpers';
   import BranchCardHeaderInfo from './BranchCardHeaderInfo.svelte';
   import BranchCardActionsBar from './BranchCardActionsBar.svelte';
   import BranchCardPrButton from './BranchCardPrButton.svelte';
@@ -931,7 +936,7 @@
   let pendingDropNotes = $state<{ key: string; title: string }[]>([]);
 
   function handleFileDrop(paths: string[]) {
-    const textPaths = paths.filter(isTextFile);
+    const textPaths = paths.filter(isMaybeTextFile);
     const imagePaths = paths.filter(isImageFile);
 
     if (textPaths.length > 0) {
@@ -948,7 +953,9 @@
             const title = fileNameFromPath(filePath);
             await commands.createNote(branch.id, title, content);
           } catch (e) {
-            console.error('Failed to create note from dropped file:', e);
+            const reason = e instanceof Error ? e.message : typeof e === 'string' ? e : null;
+            const detail = reason ?? 'it may be a binary file';
+            alerts.error(`Could not read "${fileNameFromPath(filePath)}" \u2014 ${detail}`);
           } finally {
             pendingDropNotes = pendingDropNotes.filter((p) => p.key !== placeholders[i].key);
           }

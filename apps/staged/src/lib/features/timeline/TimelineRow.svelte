@@ -417,15 +417,6 @@
     line-height: 1.4;
   }
 
-  .timeline-title :global(.hashtag-badge) {
-    display: inline;
-    padding: 1px 6px;
-    border-radius: 4px;
-    font-size: 0.85em;
-    font-weight: 500;
-    white-space: nowrap;
-  }
-
   .skeleton-title {
     color: var(--text-muted);
   }

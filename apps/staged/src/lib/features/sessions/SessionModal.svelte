@@ -1559,15 +1559,6 @@
     white-space: pre-wrap;
   }
 
-  .human-text :global(.hashtag-badge) {
-    display: inline;
-    padding: 1px 6px;
-    border-radius: 4px;
-    font-size: 0.85em;
-    font-weight: 500;
-    white-space: nowrap;
-  }
-
   .human-bubble .inline-copy {
     position: absolute;
     top: 6px;

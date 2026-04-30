@@ -1,18 +1,6 @@
 import type { ProjectAction } from '../../api/commands';
 
-const IMAGE_EXTENSIONS = [
-  '.png',
-  '.jpg',
-  '.jpeg',
-  '.gif',
-  '.webp',
-  '.svg',
-  '.bmp',
-  '.tiff',
-  '.ico',
-  '.heic',
-  '.avif',
-];
+const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
 
 export function groupActionsByType(actions: ProjectAction[]): Record<string, ProjectAction[]> {
   const groups: Record<string, ProjectAction[]> = {

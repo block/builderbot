@@ -48,7 +48,7 @@
   let deletingProjectNames = $state<Map<string, string>>(new Map());
   let reposByProject = $state<Map<string, ProjectRepo[]>>(new Map());
   let repoLoadGeneration = 0;
-  let activeFilter = $state<FilterKind | null>(null);
+  let activeFilters = $state<Set<string>>(new Set());
 
   let repoCountsByProject = $derived(
     new Map(
@@ -92,6 +92,19 @@
     });
   });
 
+  function filterKey(filter: FilterKind): string {
+    if (typeof filter === 'string') return filter;
+    return `repo:${filter.repo}:${filter.subpath}`;
+  }
+
+  let allFilters = $derived.by(() => {
+    const filters: FilterKind[] = ['unread', 'running'];
+    for (const rf of repoFilters) {
+      filters.push({ repo: rf.repo, subpath: rf.subpath });
+    }
+    return filters;
+  });
+
   let unreadCount = $derived(projects.filter((p) => projectStateStore.isUnread(p.id)).length);
 
   let runningCount = $derived(
@@ -101,67 +114,65 @@
     }).length
   );
 
+  let hasRepoFilters = $derived(
+    [...activeFilters].some((key) => key !== 'unread' && key !== 'running')
+  );
+
   let filteredProjects = $derived.by(() => {
-    if (!activeFilter) return projects;
-    if (activeFilter === 'unread') {
-      return projects.filter((p) => projectStateStore.isUnread(p.id));
-    }
-    if (activeFilter === 'running') {
-      return projects.filter((p) => {
+    if (activeFilters.size === 0) return projects;
+    return projects.filter((p) => {
+      // Status filters are AND'd with each other and with repo filters
+      if (activeFilters.has('unread') && !projectStateStore.isUnread(p.id)) return false;
+      if (activeFilters.has('running')) {
         const status = getProjectStatus(
           p.id,
           deletingProjectNames,
           projectBranches.get(p.id) || []
         );
-        return status.kind === 'running' || status.kind === 'runAction';
-      });
-    }
-    // Repo filter
-    const { repo, subpath } = activeFilter;
-    return projects.filter((p) => {
+        if (status.kind !== 'running' && status.kind !== 'runAction') return false;
+      }
+      // Repo filters are OR'd with each other
+      if (!hasRepoFilters) return true;
       const repos = reposByProject.get(p.id) ?? [];
       if (repos.length > 0) {
-        return repos.some(
-          (r) => (r.headRepo ?? r.githubRepo) === repo && (r.subpath ?? '') === subpath
+        return repos.some((r) =>
+          activeFilters.has(
+            filterKey({ repo: r.headRepo ?? r.githubRepo, subpath: r.subpath ?? '' })
+          )
         );
       }
-      return p.githubRepo === repo && (p.subpath ?? '') === subpath;
+      if (p.githubRepo) {
+        return activeFilters.has(filterKey({ repo: p.githubRepo, subpath: p.subpath ?? '' }));
+      }
+      return false;
     });
   });
 
-  function toggleFilter(filter: FilterKind) {
-    if (activeFilter === filter) {
-      activeFilter = null;
-    } else if (
-      typeof activeFilter === 'object' &&
-      activeFilter !== null &&
-      typeof filter === 'object' &&
-      filter !== null &&
-      'repo' in activeFilter &&
-      'repo' in filter &&
-      activeFilter.repo === filter.repo &&
-      activeFilter.subpath === filter.subpath
-    ) {
-      activeFilter = null;
+  function toggleFilter(filter: FilterKind, event?: MouseEvent) {
+    const key = filterKey(filter);
+
+    if (event?.shiftKey) {
+      // Shift+click: toggle individual filter
+      const next = new Set(activeFilters);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      activeFilters = next;
     } else {
-      activeFilter = filter;
+      // Plain click: switch to this filter exclusively
+      if (activeFilters.size === 1 && activeFilters.has(key)) {
+        // Clicking the only active filter deselects it (back to showing all)
+        activeFilters = new Set();
+      } else {
+        activeFilters = new Set([key]);
+      }
     }
   }
 
   function isFilterActive(filter: FilterKind): boolean {
-    if (!activeFilter) return false;
-    if (activeFilter === filter) return true;
-    if (
-      typeof activeFilter === 'object' &&
-      activeFilter !== null &&
-      typeof filter === 'object' &&
-      filter !== null &&
-      'repo' in activeFilter &&
-      'repo' in filter
-    ) {
-      return activeFilter.repo === filter.repo && activeFilter.subpath === filter.subpath;
-    }
-    return false;
+    return activeFilters.has(filterKey(filter));
   }
 
   onMount(() => {
@@ -434,7 +445,7 @@
             <button
               class="filter-chip"
               class:active={isFilterActive('unread')}
-              onclick={() => toggleFilter('unread')}
+              onclick={(e: MouseEvent) => toggleFilter('unread', e)}
               disabled={unreadCount === 0 && !isFilterActive('unread')}
             >
               Unread
@@ -443,7 +454,7 @@
             <button
               class="filter-chip"
               class:active={isFilterActive('running')}
-              onclick={() => toggleFilter('running')}
+              onclick={(e: MouseEvent) => toggleFilter('running', e)}
               disabled={runningCount === 0 && !isFilterActive('running')}
             >
               Running
@@ -456,7 +467,7 @@
               <button
                 class="filter-chip repo-filter"
                 class:active
-                onclick={() => toggleFilter(filter)}
+                onclick={(e: MouseEvent) => toggleFilter(filter, e)}
                 style={badge
                   ? `--repo-bg: ${badgeBg(badge.hue, darkMode.value)}; --repo-fg: ${badgeFg(badge.hue, darkMode.value)}; --repo-bg-hover: ${badgeBgHover(badge.hue, darkMode.value)}`
                   : ''}

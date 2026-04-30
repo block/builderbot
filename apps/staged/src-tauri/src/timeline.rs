@@ -182,7 +182,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         .map_err(|e| e.to_string())?;
     let reviews: Vec<ReviewTimelineItem> = db_reviews
         .into_iter()
-        .filter(|r| visible_shas.contains(r.commit_sha.as_str()))
+        .filter(|r| r.commit_sha.is_empty() || visible_shas.contains(r.commit_sha.as_str()))
         .map(|r| {
             let resolved = store.resolve_session_status(r.session_id.as_deref());
             let comment_count = r.comments.len();
@@ -475,8 +475,7 @@ mod tests {
             fs::create_dir_all(&path).unwrap();
 
             let repo = Self { path };
-            repo.run_git(&["init"]);
-            repo.run_git(&["checkout", "-b", "main"]);
+            repo.run_git(&["init", "--initial-branch=main"]);
             repo.run_git(&["config", "user.email", "test@example.com"]);
             repo.run_git(&["config", "user.name", "Timeline Test"]);
             repo

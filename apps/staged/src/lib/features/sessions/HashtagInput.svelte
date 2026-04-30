@@ -21,7 +21,19 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import type { HashtagItem } from '../../types';
-  import { HASHTAG_TOKEN_RE, hashtagTypeLabels } from './hashtagItems';
+  import { FileText, GitCommitVertical, FileSearch, Image as ImageLucide } from 'lucide-svelte';
+  import { HASHTAG_TOKEN_RE, hashtagTypeIconSvg, escapeHtml } from './hashtagItems';
+
+  type DropdownIconComponent = typeof FileText;
+
+  /** Component lookup map for dropdown icons — keep in sync with hashtagTypeIconSvg SVG strings. */
+  const dropdownIconMap: Record<string, DropdownIconComponent> = {
+    note: FileText,
+    commit: GitCommitVertical,
+    review: FileSearch,
+    'project-note': FileText,
+    image: ImageLucide,
+  };
 
   interface Props {
     value: string;
@@ -128,8 +140,8 @@
     badge.className = 'hashtag-badge';
     badge.contentEditable = 'false';
     badge.dataset.token = `#${item.type}:${item.id}`;
-    const label = hashtagTypeLabels[item.type] ?? item.type;
-    badge.textContent = `${label}: ${item.title}`;
+    const iconSvg = hashtagTypeIconSvg[item.type] ?? '';
+    badge.innerHTML = `${iconSvg} ${escapeHtml(item.title)}`;
     badge.style.cssText = `background: var(${item.bgColor}); color: var(${item.color});`;
     return badge;
   }
@@ -428,6 +440,7 @@
         bind:this={dropdownEl}
       >
         {#each filteredItems as item, i}
+          {@const Icon = dropdownIconMap[item.type]}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div
             class="hashtag-dropdown-item"
@@ -439,7 +452,9 @@
             onmouseenter={() => (selectedIndex = i)}
           >
             <span class="hashtag-item-icon {item.type}-icon">
-              {hashtagTypeLabels[item.type] ?? item.type}
+              {#if Icon}
+                <Icon size={14} />
+              {/if}
             </span>
             <span class="hashtag-item-title">{item.title}</span>
             {#if item.repoSlug || item.branchName}
@@ -547,11 +562,10 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 2px 6px;
+    width: 24px;
+    height: 24px;
     border-radius: 4px;
     flex-shrink: 0;
-    font-size: var(--size-xs);
-    font-weight: 600;
   }
 
   .hashtag-item-icon.note-icon,

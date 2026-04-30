@@ -22,11 +22,12 @@
   import { tick } from 'svelte';
   import type { HashtagItem } from '../../types';
   import { FileText, GitCommitVertical, FileSearch, Image as ImageLucide } from 'lucide-svelte';
-  import type { Component } from 'svelte';
   import { HASHTAG_TOKEN_RE, hashtagTypeIconSvg, escapeHtml } from './hashtagItems';
 
+  type DropdownIconComponent = typeof FileText;
+
   /** Component lookup map for dropdown icons — keep in sync with hashtagTypeIconSvg SVG strings. */
-  const dropdownIconMap: Record<string, Component> = {
+  const dropdownIconMap: Record<string, DropdownIconComponent> = {
     note: FileText,
     commit: GitCommitVertical,
     review: FileSearch,
@@ -439,6 +440,7 @@
         bind:this={dropdownEl}
       >
         {#each filteredItems as item, i}
+          {@const Icon = dropdownIconMap[item.type]}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
           <div
             class="hashtag-dropdown-item"
@@ -450,8 +452,8 @@
             onmouseenter={() => (selectedIndex = i)}
           >
             <span class="hashtag-item-icon {item.type}-icon">
-              {#if dropdownIconMap[item.type]}
-                <svelte:component this={dropdownIconMap[item.type]} size={14} />
+              {#if Icon}
+                <Icon size={14} />
               {/if}
             </span>
             <span class="hashtag-item-title">{item.title}</span>

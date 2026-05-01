@@ -506,15 +506,8 @@
       hoveredRangeIndex = null;
       rangeToolbarStyle = null;
       focusedHunkIndex = null;
-      lineSelection = null;
-      commentingOnLines = null;
-      lineCommentEditorStyle = null;
-      lineCommentPositionPreference = 'below';
-      editingCommentId = null;
-      activeLineComment = null;
-      lineCommentReadOnly = false;
-      commentingOnRange = null;
-      commentEditorStyle = null;
+      clearLineSelection();
+      clearRangeSelection();
     }
   });
 
@@ -528,9 +521,7 @@
 
   $effect(() => {
     if (activeRangeCommentState.missing) {
-      commentingOnRange = null;
-      commentEditorStyle = null;
-      editingRangeCommentId = null;
+      clearRangeSelection();
     }
   });
 
@@ -1373,13 +1364,11 @@
     const span: Span = { start: alignment.after.start, end: alignment.after.end };
 
     await onAddComment(currentFilePath, span, content);
-    commentingOnRange = null;
-    commentEditorStyle = null;
+    clearRangeSelection();
   }
 
   function handleCommentCancel() {
-    commentingOnRange = null;
-    commentEditorStyle = null;
+    clearRangeSelection();
   }
 
   async function handleCommentEdit(id: string, content: string) {
@@ -1453,6 +1442,12 @@
     editingCommentId = null;
     activeLineComment = null;
     lineCommentReadOnly = false;
+  }
+
+  function clearRangeSelection() {
+    commentingOnRange = null;
+    commentEditorStyle = null;
+    editingRangeCommentId = null;
   }
 
   // Store the initial left position for line selection toolbar
@@ -1661,8 +1656,7 @@
       if (commentingOnRange !== null) {
         event.preventDefault();
         event.stopPropagation();
-        commentingOnRange = null;
-        commentEditorStyle = null;
+        clearRangeSelection();
         return;
       }
       if (selectedLineRange) {

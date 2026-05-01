@@ -45,4 +45,22 @@ describe('resolveTrackedComment', () => {
       missing: false,
     });
   });
+
+  it('falls back to editingCommentId when activeComment is null (range-comment scenario)', () => {
+    const comment = createComment({ id: 'range-comment-1' });
+
+    expect(resolveTrackedComment([comment], null, 'range-comment-1')).toEqual({
+      commentId: 'range-comment-1',
+      existingComment: comment,
+      missing: false,
+    });
+  });
+
+  it('marks a range comment as missing when editingCommentId is set but comment is deleted', () => {
+    expect(resolveTrackedComment([], null, 'range-comment-1')).toEqual({
+      commentId: 'range-comment-1',
+      existingComment: null,
+      missing: true,
+    });
+  });
 });

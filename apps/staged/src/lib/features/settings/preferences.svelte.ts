@@ -20,7 +20,6 @@ import {
 } from '../diff/highlighter';
 import { initPersistentStore, getStoreValue, setStoreValue } from '../../shared/persistentStore';
 import { createAdaptiveTheme, themeToVarMap } from '../../theme';
-import { ensureSqAvailabilityLoaded } from './sq.svelte';
 
 // Re-export for convenience
 export { isLightTheme, loadAllThemePreviewColors, type ThemePreviewColors };
@@ -107,6 +106,12 @@ function applyAdaptiveTheme() {
   }
 }
 
+async function loadSqAvailabilityForDefault(): Promise<boolean> {
+  // Keep preferences from taking a static dependency on the sq state module.
+  const { ensureSqAvailabilityLoaded } = await import('./sq.svelte');
+  return ensureSqAvailabilityLoaded();
+}
+
 // =============================================================================
 // Initialization
 // =============================================================================
@@ -157,7 +162,7 @@ export async function initPreferences(): Promise<void> {
   if (savedAutoReview === 'never' || savedAutoReview === 'after-changes') {
     preferences.autoReviewMode = savedAutoReview;
   } else {
-    preferences.autoReviewMode = (await ensureSqAvailabilityLoaded()) ? 'after-changes' : 'never';
+    preferences.autoReviewMode = (await loadSqAvailabilityForDefault()) ? 'after-changes' : 'never';
   }
 
   preferences.loaded = true;

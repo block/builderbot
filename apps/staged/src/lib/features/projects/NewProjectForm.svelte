@@ -64,7 +64,7 @@
   let effectiveLocation = $derived(remoteProjectsAvailable ? location : 'local');
 
   $effect(() => {
-    if (!remoteProjectsAvailable && location === 'remote') {
+    if (sqState.loaded && !sqState.available && location === 'remote') {
       location = 'local';
     }
   });

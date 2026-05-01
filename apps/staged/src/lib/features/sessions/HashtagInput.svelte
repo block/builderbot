@@ -517,12 +517,6 @@
 
   /* Inline badge for referenced items */
   .hashtag-editor :global(.hashtag-badge) {
-    display: inline;
-    padding: 1px 6px;
-    border-radius: 4px;
-    font-size: 0.85em;
-    font-weight: 500;
-    white-space: nowrap;
     cursor: default;
     vertical-align: baseline;
     user-select: all;

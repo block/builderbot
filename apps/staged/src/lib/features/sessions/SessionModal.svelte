@@ -2318,4 +2318,33 @@
     border: none;
     border-top: 1px solid var(--border-subtle);
   }
+
+  @media (max-width: 700px) {
+    .modal {
+      width: 100vw;
+      height: 100vh;
+      height: 100dvh;
+      max-height: none;
+      border-radius: 0;
+      box-shadow: none;
+    }
+
+    .modal-header {
+      padding: 12px;
+    }
+
+    .header-btn,
+    .close-btn {
+      min-height: 40px;
+    }
+
+    .close-btn {
+      width: 40px;
+      padding: 0;
+    }
+
+    .modal-content {
+      padding: 12px;
+    }
+  }
 </style>

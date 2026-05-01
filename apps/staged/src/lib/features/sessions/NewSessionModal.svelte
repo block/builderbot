@@ -721,4 +721,66 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
+
+  @media (max-width: 640px) {
+    .modal-backdrop {
+      align-items: stretch;
+      padding-top: 0;
+    }
+
+    .modal {
+      width: 100vw;
+      max-width: none;
+      height: 100vh;
+      height: 100dvh;
+      max-height: none;
+      border-radius: 0;
+      box-shadow: none;
+    }
+
+    .modal-header {
+      padding: 12px 16px;
+    }
+
+    .mode-switcher-btn,
+    .close-btn {
+      min-height: 40px;
+    }
+
+    .close-btn {
+      width: 40px;
+      padding: 0;
+      justify-content: center;
+    }
+
+    .modal-body {
+      padding: 16px;
+    }
+
+    .form-actions {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .form-actions :global(.selector-btn) {
+      min-height: 40px;
+      max-width: calc(100vw - 32px);
+    }
+
+    .form-actions :global(.selector-label) {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .form-actions-right {
+      width: 100%;
+    }
+
+    .cancel-btn,
+    .submit-btn {
+      flex: 1;
+      justify-content: center;
+      min-height: 44px;
+    }
+  }
 </style>

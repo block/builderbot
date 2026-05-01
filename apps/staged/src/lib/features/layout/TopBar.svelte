@@ -14,9 +14,14 @@
     projectsSidebarState,
     setProjectsSidebarCollapsed,
   } from '../projects/projectsSidebarState.svelte';
+  import { viewport, watchViewport } from '../../shared/viewport.svelte';
 
   onMount(() => {
+    const stopWatchingViewport = watchViewport();
     void hydrateProjectsSidebarState();
+    return () => {
+      stopWatchingViewport();
+    };
   });
 
   function startDrag(e: PointerEvent) {
@@ -32,25 +37,29 @@
   function toggleProjectsSidebar() {
     setProjectsSidebarCollapsed(!projectsSidebarState.collapsed);
   }
+
+  let sidebarOpen = $derived(!projectsSidebarState.collapsed);
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="top-bar" onpointerdown={startDrag}>
   <div class="traffic-light-spacer"></div>
-  <div class="left-actions">
-    <button
-      class="icon-btn"
-      onclick={toggleProjectsSidebar}
-      disabled={!projectsSidebarState.hasProjects}
-      title={projectsSidebarState.collapsed ? 'Show projects sidebar' : 'Hide projects sidebar'}
-    >
-      {#if projectsSidebarState.collapsed || !projectsSidebarState.hasProjects}
-        <PanelLeftOpen size={14} />
-      {:else}
-        <PanelLeftClose size={14} />
-      {/if}
-    </button>
-  </div>
+  {#if !viewport.isMobile}
+    <div class="left-actions">
+      <button
+        class="icon-btn"
+        onclick={toggleProjectsSidebar}
+        disabled={!projectsSidebarState.hasProjects}
+        title={sidebarOpen ? 'Hide projects sidebar' : 'Show projects sidebar'}
+      >
+        {#if !sidebarOpen || !projectsSidebarState.hasProjects}
+          <PanelLeftOpen size={14} />
+        {:else}
+          <PanelLeftClose size={14} />
+        {/if}
+      </button>
+    </div>
+  {/if}
   <div class="drag-spacer"></div>
 
   <div class="top-bar-actions">
@@ -129,5 +138,21 @@
   .icon-btn:disabled {
     opacity: 0.35;
     cursor: not-allowed;
+  }
+
+  @media (max-width: 768px) {
+    .top-bar {
+      padding: 6px 8px;
+    }
+
+    .traffic-light-spacer {
+      width: 58px;
+    }
+
+    .icon-btn {
+      width: 40px;
+      height: 40px;
+      padding: 0;
+    }
   }
 </style>

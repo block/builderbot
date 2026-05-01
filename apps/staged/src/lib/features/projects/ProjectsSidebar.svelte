@@ -34,6 +34,7 @@
     SIDEBAR_MAX_WIDTH,
     SIDEBAR_MIN_WIDTH,
   } from './projectsSidebarState.svelte';
+  import { viewport, watchViewport } from '../../shared/viewport.svelte';
 
   const devBranch = import.meta.env.VITE_DEV_BRANCH as string | undefined;
 
@@ -67,6 +68,10 @@
     );
     if (status.kind === 'deleting') return;
     selectProject(projectId);
+  }
+
+  function openAllProjects() {
+    goHome();
   }
 
   function openNewProject() {
@@ -116,9 +121,17 @@
   let resizing = $state(false);
   let resizeStartX = 0;
   let resizeStartWidth = SIDEBAR_DEFAULT_WIDTH;
+  let sidebarVisible = $derived(
+    projectsSidebarState.hasProjects && !viewport.isMobile && !projectsSidebarState.collapsed
+  );
+  let sidebarStyle = $derived(`width: ${projectsSidebarState.width}px;`);
 
   onMount(() => {
+    const stopWatchingViewport = watchViewport();
     void hydrateProjectsSidebarState();
+    return () => {
+      stopWatchingViewport();
+    };
   });
 
   onDestroy(() => {
@@ -194,14 +207,8 @@
   }
 </script>
 
-{#if !projectsSidebarState.collapsed && projectsSidebarState.hasProjects}
-  <aside
-    class="projects-sidebar"
-    class:resizing
-    style={`width: ${projectsSidebarState.width}px;`}
-    in:slideOpen
-    out:slideClose
-  >
+{#if sidebarVisible}
+  <aside class="projects-sidebar" class:resizing style={sidebarStyle} in:slideOpen out:slideClose>
     <div class="sidebar-header">
       <div class="title-row">
         <span class="brand-logo">
@@ -225,7 +232,7 @@
             <button
               class="project-row all-projects-row"
               class:active={navigation.selectedProjectId === null}
-              onclick={goHome}
+              onclick={openAllProjects}
               title="Show all projects"
             >
               <div class="row-main">

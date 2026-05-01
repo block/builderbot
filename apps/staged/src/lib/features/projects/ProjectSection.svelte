@@ -1186,22 +1186,91 @@
   }
 
   @media (max-width: 720px) {
+    .project-section {
+      gap: 14px;
+    }
+
+    .project-header {
+      align-items: stretch;
+      flex-direction: column;
+      gap: 8px;
+      padding: 12px 0 6px;
+    }
+
+    .project-info {
+      flex-wrap: wrap;
+    }
+
+    .project-name {
+      flex: 1 1 160px;
+      font-size: var(--size-lg);
+    }
+
+    .back-button {
+      width: 40px;
+      height: 40px;
+    }
+
+    .header-actions {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 6px;
+      width: 100%;
+    }
+
+    .header-action-button {
+      min-height: 40px;
+      justify-content: center;
+      padding: 8px;
+    }
+
+    .detecting-status,
+    .deleting-status,
+    .workspace-status-badge {
+      margin-left: 0;
+    }
+
     .prompt-input-row {
+      align-items: stretch;
+      flex-wrap: wrap;
       padding: 6px;
+    }
+
+    .attach-btn {
+      width: 40px;
+      height: 40px;
+    }
+
+    .prompt-input-row :global(.hashtag-input-wrapper) {
+      min-width: 0;
+      flex: 1 1 calc(100% - 48px);
     }
 
     .prompt-input-row :global(.prompt-input) {
       padding: 4px 2px;
-      font-size: var(--size-xs);
+      min-height: 40px;
+      font-size: var(--size-sm);
     }
 
     .prompt-actions {
-      gap: 2px;
+      width: 100%;
+      justify-content: flex-end;
+      gap: 4px;
+    }
+
+    .prompt-actions :global(.selector-btn) {
+      min-height: 40px;
+      max-width: calc(100vw - 112px);
+    }
+
+    .prompt-actions :global(.selector-label) {
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .send-button {
-      width: 30px;
-      height: 30px;
+      width: 40px;
+      height: 40px;
     }
   }
 </style>

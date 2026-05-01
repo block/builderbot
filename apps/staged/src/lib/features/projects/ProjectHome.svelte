@@ -975,4 +975,34 @@
     flex-direction: column;
     gap: 32px;
   }
+
+  @media (max-width: 720px) {
+    .update-state {
+      padding: 16px;
+    }
+
+    .update-card {
+      width: 100%;
+      max-width: 460px;
+    }
+
+    .update-footer {
+      align-items: stretch;
+      flex-direction: column;
+    }
+
+    .update-actions {
+      justify-content: flex-end;
+    }
+
+    .close-button,
+    .reset-button {
+      min-height: 40px;
+    }
+
+    .projects-list {
+      padding: 0 16px 16px;
+      gap: 20px;
+    }
+  }
 </style>

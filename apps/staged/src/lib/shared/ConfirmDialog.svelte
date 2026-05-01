@@ -253,4 +253,37 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
+
+  @media (max-width: 640px) {
+    .modal-backdrop {
+      align-items: stretch;
+      justify-content: stretch;
+    }
+
+    .modal {
+      width: 100vw;
+      max-width: none;
+      height: 100vh;
+      height: 100dvh;
+      border-radius: 0;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .modal-content {
+      flex: 1;
+      overflow: auto;
+      padding: 20px 16px;
+    }
+
+    .modal-actions {
+      flex-direction: column-reverse;
+      padding: 12px 16px;
+    }
+
+    .btn {
+      width: 100%;
+      min-height: 44px;
+    }
+  }
 </style>

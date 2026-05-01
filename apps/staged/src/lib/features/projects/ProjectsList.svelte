@@ -4,7 +4,7 @@
   Clicking a project navigates to its project page.
 -->
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { fade } from 'svelte/transition';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import {
@@ -33,6 +33,11 @@
   import RepoLabel from '../../shared/RepoLabel.svelte';
 
   import { setProjects } from './projectsSidebarState.svelte';
+  import {
+    finishProjectsListRestore,
+    projectsListViewState,
+    setProjectsListScrollTop,
+  } from './projectsListViewState.svelte';
   import { darkMode } from '../../stores/isDark.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { badgeBg, badgeFg, badgeBgHover } from '../../shared/badgeColors';
@@ -47,8 +52,13 @@
   let isCommandKeyHeld = $state(false);
   let deletingProjectNames = $state<Map<string, string>>(new Map());
   let reposByProject = $state<Map<string, ProjectRepo[]>>(new Map());
+  let reposHydrating = $state(false);
+  let mainPanelEl = $state<HTMLDivElement | null>(null);
   let repoLoadGeneration = 0;
   let activeFilters = $state<Set<string>>(new Set());
+  let restoreInProgress = false;
+  let restoreToken = 0;
+  const projectCardElements = new Map<string, HTMLElement>();
 
   let repoCountsByProject = $derived(
     new Map(
@@ -175,6 +185,72 @@
     return activeFilters.has(filterKey(filter));
   }
 
+  function trackProjectCard(node: HTMLElement, projectId: string) {
+    let currentProjectId = projectId;
+    projectCardElements.set(currentProjectId, node);
+
+    return {
+      update(nextProjectId: string) {
+        if (nextProjectId === currentProjectId) return;
+        if (projectCardElements.get(currentProjectId) === node) {
+          projectCardElements.delete(currentProjectId);
+        }
+        currentProjectId = nextProjectId;
+        projectCardElements.set(currentProjectId, node);
+      },
+      destroy() {
+        if (projectCardElements.get(currentProjectId) === node) {
+          projectCardElements.delete(currentProjectId);
+        }
+      },
+    };
+  }
+
+  function handleMainPanelScroll() {
+    if (!mainPanelEl) return;
+    setProjectsListScrollTop(mainPanelEl.scrollTop);
+  }
+
+  async function restoreProjectsListPosition() {
+    if (!mainPanelEl || restoreInProgress) return;
+
+    restoreInProgress = true;
+    const token = ++restoreToken;
+    let restored = false;
+
+    try {
+      await tick();
+      if (token !== restoreToken || !mainPanelEl) return;
+
+      mainPanelEl.scrollTop = projectsListViewState.scrollTop;
+      const targetProjectId = projectsListViewState.returnTargetProjectId;
+      const targetEl = targetProjectId ? projectCardElements.get(targetProjectId) : null;
+      targetEl?.scrollIntoView({ block: 'nearest' });
+      restored = true;
+    } finally {
+      if (token === restoreToken) {
+        restoreInProgress = false;
+        if (restored) {
+          finishProjectsListRestore();
+        }
+      }
+    }
+  }
+
+  $effect(() => {
+    const readyToRestore =
+      projectsListViewState.restorePending &&
+      !restoreInProgress &&
+      !loading &&
+      !reposHydrating &&
+      !error &&
+      filteredProjects.length > 0 &&
+      mainPanelEl;
+
+    if (!readyToRestore) return;
+    void restoreProjectsListPosition();
+  });
+
   onMount(() => {
     loadProjects();
     void projectRunActionsStore.startListening();
@@ -281,25 +357,32 @@
 
   async function hydrateRepos(projectList: Project[]) {
     const generation = ++repoLoadGeneration;
-    const entries = await Promise.all(
-      projectList.map(async (project) => {
-        try {
-          const repos = await commands.listProjectRepos(project.id);
-          return [project.id, repos] as const;
-        } catch (e) {
-          console.error(`[ProjectsList] Failed to load repos for project '${project.id}':`, e);
-          return [project.id, [] as ProjectRepo[]] as const;
-        }
-      })
-    );
-    if (generation !== repoLoadGeneration) return;
-    reposByProject = new Map(entries);
+    reposHydrating = true;
+    try {
+      const entries = await Promise.all(
+        projectList.map(async (project) => {
+          try {
+            const repos = await commands.listProjectRepos(project.id);
+            return [project.id, repos] as const;
+          } catch (e) {
+            console.error(`[ProjectsList] Failed to load repos for project '${project.id}':`, e);
+            return [project.id, [] as ProjectRepo[]] as const;
+          }
+        })
+      );
+      if (generation !== repoLoadGeneration) return;
+      reposByProject = new Map(entries);
 
-    // Ensure badges exist for all repos
-    const allRepos = entries.flatMap(([, repos]) =>
-      repos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
-    );
-    void repoBadgeStore.ensureForRepos(allRepos);
+      // Ensure badges exist for all repos
+      const allRepos = entries.flatMap(([, repos]) =>
+        repos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
+      );
+      void repoBadgeStore.ensureForRepos(allRepos);
+    } finally {
+      if (generation === repoLoadGeneration) {
+        reposHydrating = false;
+      }
+    }
   }
 
   function handleProjectCreated(project: Project) {
@@ -317,6 +400,9 @@
 
   function openProject(projectId: string) {
     if (isProjectDeleting(projectId)) return;
+    if (mainPanelEl) {
+      setProjectsListScrollTop(mainPanelEl.scrollTop);
+    }
     selectProject(projectId);
   }
 
@@ -420,7 +506,7 @@
     showAllProjectsRow={true}
   />
 
-  <div class="main-panel">
+  <div class="main-panel" bind:this={mainPanelEl} onscroll={handleMainPanelScroll}>
     <div class="content" class:empty-layout={!loading && !error && projects.length === 0}>
       {#if loading}
         <div class="state">Loading projects…</div>
@@ -491,7 +577,7 @@
             {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}
             {@const workspaceStatus =
               project.location === 'remote' ? getProjectWorkspaceStatus(project.id) : null}
-            <div class="project-card-wrapper">
+            <div class="project-card-wrapper" use:trackProjectCard={project.id}>
               <button
                 class="project-card"
                 class:deleting={status.kind === 'deleting'}
@@ -1003,5 +1089,58 @@
     height: 8px;
     background-color: var(--ui-accent);
     border-radius: 50%;
+  }
+
+  @media (max-width: 900px) {
+    .projects-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 640px) {
+    .projects-list-page {
+      --sidebar-title-offset: 20px;
+    }
+
+    .content {
+      padding: var(--sidebar-title-offset) 16px 16px;
+    }
+
+    .title-row {
+      align-items: flex-start;
+      gap: 12px;
+    }
+
+    .new-project-btn {
+      min-height: 40px;
+      padding: 8px 12px;
+      flex-shrink: 0;
+    }
+
+    .filter-bar {
+      flex-wrap: nowrap;
+      gap: 8px;
+      overflow-x: auto;
+      margin: 0 -16px 14px;
+      padding: 0 16px 4px;
+    }
+
+    .filter-chip {
+      min-height: 36px;
+    }
+
+    .projects-grid {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 10px;
+    }
+
+    .project-card {
+      min-height: 104px;
+      padding: 14px;
+    }
+
+    .card-header {
+      font-size: var(--size-md);
+    }
   }
 </style>

@@ -562,4 +562,37 @@
   .next-step-btn.commit-btn:hover {
     background: var(--commit-bg-emphasis);
   }
+
+  @media (max-width: 700px) {
+    .modal {
+      width: 100vw;
+      height: 100vh;
+      height: 100dvh;
+      max-height: none;
+      border-radius: 0;
+      box-shadow: none;
+    }
+
+    .modal-header {
+      padding: 12px;
+    }
+
+    .header-btn,
+    .close-btn {
+      min-height: 40px;
+    }
+
+    .close-btn {
+      width: 40px;
+      padding: 0;
+    }
+
+    .modal-content {
+      padding: 16px;
+    }
+
+    .next-steps {
+      padding: 12px;
+    }
+  }
 </style>

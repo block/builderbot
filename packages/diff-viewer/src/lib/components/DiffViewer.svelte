@@ -49,6 +49,7 @@
     buildBeforeMarkers,
     buildLineToAlignmentMap,
     findCommentById,
+    resolveTrackedComment,
     getCommentsForAlignment,
     getTokensForLine,
     isLineInChangedAlignment as helperIsLineInChangedAlignment,
@@ -329,7 +330,13 @@
 
   // Comments for the current file (suffix-match to handle path prefix mismatches)
   let currentFileComments = $derived(
-    comments.filter((c) => currentFilePath !== null && pathsMatch(c.path, currentFilePath)),
+    comments.filter((c) => currentFilePath !== null && pathsMatch(c.path, currentFilePath))
+  );
+  let activeLineCommentState = $derived(
+    resolveTrackedComment(currentFileComments, activeLineComment, editingCommentId)
+  );
+  let activeRangeCommentState = $derived(
+    resolveTrackedComment(currentFileComments, null, editingRangeCommentId)
   );
 
   // ==========================================================================
@@ -499,15 +506,22 @@
       hoveredRangeIndex = null;
       rangeToolbarStyle = null;
       focusedHunkIndex = null;
-      lineSelection = null;
-      commentingOnLines = null;
-      lineCommentEditorStyle = null;
-      lineCommentPositionPreference = 'below';
-      editingCommentId = null;
-      activeLineComment = null;
-      lineCommentReadOnly = false;
-      commentingOnRange = null;
-      commentEditorStyle = null;
+      clearLineSelection();
+      clearRangeSelection();
+    }
+  });
+
+  // Keep editor state tied to the latest comments prop. When an opened comment
+  // is deleted upstream, close the editor instead of showing a stale or blank one.
+  $effect(() => {
+    if (activeLineCommentState.missing) {
+      clearLineSelection();
+    }
+  });
+
+  $effect(() => {
+    if (activeRangeCommentState.missing) {
+      clearRangeSelection();
     }
   });
 
@@ -1350,13 +1364,11 @@
     const span: Span = { start: alignment.after.start, end: alignment.after.end };
 
     await onAddComment(currentFilePath, span, content);
-    commentingOnRange = null;
-    commentEditorStyle = null;
+    clearRangeSelection();
   }
 
   function handleCommentCancel() {
-    commentingOnRange = null;
-    commentEditorStyle = null;
+    clearRangeSelection();
   }
 
   async function handleCommentEdit(id: string, content: string) {
@@ -1430,6 +1442,12 @@
     editingCommentId = null;
     activeLineComment = null;
     lineCommentReadOnly = false;
+  }
+
+  function clearRangeSelection() {
+    commentingOnRange = null;
+    commentEditorStyle = null;
+    editingRangeCommentId = null;
   }
 
   // Store the initial left position for line selection toolbar
@@ -1638,8 +1656,7 @@
       if (commentingOnRange !== null) {
         event.preventDefault();
         event.stopPropagation();
-        commentingOnRange = null;
-        commentEditorStyle = null;
+        clearRangeSelection();
         return;
       }
       if (selectedLineRange) {
@@ -2226,10 +2243,8 @@
     {/if}
 
     <!-- Range comment editor (two-pane mode only) -->
-    {#if commentingOnRange !== null && commentEditorStyle}
-      {@const existingComment = editingRangeCommentId
-        ? findCommentById(comments, editingRangeCommentId)
-        : null}
+    {#if commentingOnRange !== null && commentEditorStyle && !activeRangeCommentState.missing}
+      {@const existingComment = activeRangeCommentState.existingComment}
       <CommentEditor
         top={commentEditorStyle.top}
         left={commentEditorStyle.left}
@@ -2280,10 +2295,8 @@
     {/if}
 
     <!-- Line comment editor -->
-    {#if commentingOnLines && lineCommentEditorStyle}
-      {@const existingComment =
-        activeLineComment ??
-        (editingCommentId ? findCommentById(comments, editingCommentId) : null)}
+    {#if commentingOnLines && lineCommentEditorStyle && !activeLineCommentState.missing}
+      {@const existingComment = activeLineCommentState.existingComment}
       <CommentEditor
         top={lineCommentEditorStyle.top}
         left={lineCommentEditorStyle.left}

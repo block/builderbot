@@ -25,6 +25,7 @@ export {
   buildBeforeMarkers,
   buildAfterMarkers,
   findCommentById,
+  resolveTrackedComment,
   getCommentsForAlignment,
   getTokensForLine,
   isLineInChangedAlignment,

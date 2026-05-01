@@ -13,7 +13,6 @@
     hydrateProjectsSidebarState,
     projectsSidebarState,
     setProjectsSidebarCollapsed,
-    setProjectsSidebarMobileOpen,
   } from '../projects/projectsSidebarState.svelte';
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
 
@@ -36,35 +35,31 @@
   }
 
   function toggleProjectsSidebar() {
-    if (viewport.isMobile) {
-      setProjectsSidebarMobileOpen(!projectsSidebarState.mobileOpen);
-      return;
-    }
     setProjectsSidebarCollapsed(!projectsSidebarState.collapsed);
   }
 
-  let sidebarOpen = $derived(
-    viewport.isMobile ? projectsSidebarState.mobileOpen : !projectsSidebarState.collapsed
-  );
+  let sidebarOpen = $derived(!projectsSidebarState.collapsed);
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="top-bar" onpointerdown={startDrag}>
   <div class="traffic-light-spacer"></div>
-  <div class="left-actions">
-    <button
-      class="icon-btn"
-      onclick={toggleProjectsSidebar}
-      disabled={!projectsSidebarState.hasProjects}
-      title={sidebarOpen ? 'Hide projects sidebar' : 'Show projects sidebar'}
-    >
-      {#if !sidebarOpen || !projectsSidebarState.hasProjects}
-        <PanelLeftOpen size={14} />
-      {:else}
-        <PanelLeftClose size={14} />
-      {/if}
-    </button>
-  </div>
+  {#if !viewport.isMobile}
+    <div class="left-actions">
+      <button
+        class="icon-btn"
+        onclick={toggleProjectsSidebar}
+        disabled={!projectsSidebarState.hasProjects}
+        title={sidebarOpen ? 'Hide projects sidebar' : 'Show projects sidebar'}
+      >
+        {#if !sidebarOpen || !projectsSidebarState.hasProjects}
+          <PanelLeftOpen size={14} />
+        {:else}
+          <PanelLeftClose size={14} />
+        {/if}
+      </button>
+    </div>
+  {/if}
   <div class="drag-spacer"></div>
 
   <div class="top-bar-actions">

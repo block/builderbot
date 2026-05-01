@@ -394,6 +394,15 @@
   // Split AI "information" comments into annotations; everything else stays as comments
   let currentComments = $derived(allComments.filter((c) => c.commentType !== 'information'));
 
+  $effect(() => {
+    if (selectedCommentId && !currentComments.some((c) => c.id === selectedCommentId)) {
+      clearCommentNavigation(selectedCommentId);
+    }
+    if (jumpToComment && !currentComments.some((c) => c.id === jumpToComment?.id)) {
+      jumpToComment = null;
+    }
+  });
+
   /** Convert "information" comments to SmartDiffAnnotation for the overlay system.
    *  Merges annotations from both the user's review and the latest auto review. */
   let currentAnnotations = $derived<SmartDiffAnnotation[]>([
@@ -486,11 +495,22 @@
     return path.split('/').pop() || path;
   }
 
+  function clearCommentNavigation(commentId?: string) {
+    if (!commentId || selectedCommentId === commentId) {
+      selectedCommentId = null;
+    }
+    if (!commentId || jumpToComment?.id === commentId) {
+      jumpToComment = null;
+    }
+  }
+
   async function handleDeleteComment(commentId: string) {
+    clearCommentNavigation(commentId);
     await reviewHandle?.deleteComment(commentId);
   }
 
   async function handleDeleteAllComments() {
+    clearCommentNavigation();
     await reviewHandle?.deleteAllComments();
   }
 
@@ -567,6 +587,7 @@
   }
 
   async function handleDeleteCommentFromViewer(commentId: string): Promise<void> {
+    clearCommentNavigation(commentId);
     await reviewHandle?.deleteComment(commentId);
   }
 

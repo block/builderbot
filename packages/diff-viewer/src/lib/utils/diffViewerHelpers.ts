@@ -171,6 +171,20 @@ export function findCommentById(comments: Comment[], id: string): Comment | null
   return comments.find((c) => c.id === id) ?? null;
 }
 
+export function resolveTrackedComment(
+  comments: Comment[],
+  activeComment: Comment | null,
+  editingCommentId: string | null
+): { commentId: string | null; existingComment: Comment | null; missing: boolean } {
+  const commentId = activeComment?.id ?? editingCommentId;
+  if (!commentId) {
+    return { commentId: null, existingComment: null, missing: false };
+  }
+
+  const existingComment = findCommentById(comments, commentId);
+  return { commentId, existingComment, missing: existingComment === null };
+}
+
 export function getCommentsForAlignment(
   alignmentIndex: number,
   changedAlignments: ChangedAlignmentEntry[],

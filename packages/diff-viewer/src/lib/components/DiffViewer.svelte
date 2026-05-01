@@ -49,6 +49,7 @@
     buildBeforeMarkers,
     buildLineToAlignmentMap,
     findCommentById,
+    resolveTrackedComment,
     getCommentsForAlignment,
     getTokensForLine,
     isLineInChangedAlignment as helperIsLineInChangedAlignment,
@@ -329,7 +330,13 @@
 
   // Comments for the current file (suffix-match to handle path prefix mismatches)
   let currentFileComments = $derived(
-    comments.filter((c) => currentFilePath !== null && pathsMatch(c.path, currentFilePath)),
+    comments.filter((c) => currentFilePath !== null && pathsMatch(c.path, currentFilePath))
+  );
+  let activeLineCommentState = $derived(
+    resolveTrackedComment(currentFileComments, activeLineComment, editingCommentId)
+  );
+  let activeRangeCommentState = $derived(
+    resolveTrackedComment(currentFileComments, null, editingRangeCommentId)
   );
 
   // ==========================================================================
@@ -508,6 +515,22 @@
       lineCommentReadOnly = false;
       commentingOnRange = null;
       commentEditorStyle = null;
+    }
+  });
+
+  // Keep editor state tied to the latest comments prop. When an opened comment
+  // is deleted upstream, close the editor instead of showing a stale or blank one.
+  $effect(() => {
+    if (activeLineCommentState.missing) {
+      clearLineSelection();
+    }
+  });
+
+  $effect(() => {
+    if (activeRangeCommentState.missing) {
+      commentingOnRange = null;
+      commentEditorStyle = null;
+      editingRangeCommentId = null;
     }
   });
 
@@ -2226,10 +2249,8 @@
     {/if}
 
     <!-- Range comment editor (two-pane mode only) -->
-    {#if commentingOnRange !== null && commentEditorStyle}
-      {@const existingComment = editingRangeCommentId
-        ? findCommentById(comments, editingRangeCommentId)
-        : null}
+    {#if commentingOnRange !== null && commentEditorStyle && !activeRangeCommentState.missing}
+      {@const existingComment = activeRangeCommentState.existingComment}
       <CommentEditor
         top={commentEditorStyle.top}
         left={commentEditorStyle.left}
@@ -2280,10 +2301,8 @@
     {/if}
 
     <!-- Line comment editor -->
-    {#if commentingOnLines && lineCommentEditorStyle}
-      {@const existingComment =
-        activeLineComment ??
-        (editingCommentId ? findCommentById(comments, editingCommentId) : null)}
+    {#if commentingOnLines && lineCommentEditorStyle && !activeLineCommentState.missing}
+      {@const existingComment = activeLineCommentState.existingComment}
       <CommentEditor
         top={lineCommentEditorStyle.top}
         left={lineCommentEditorStyle.left}

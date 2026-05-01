@@ -737,7 +737,7 @@
     if (event.pointerType === 'mouse' && event.button !== 0) return;
 
     const target = event.target as HTMLElement;
-    if (!target.closest('.after-pane')) return;
+    if (!target.closest('.after-pane, .spine')) return;
     if (isMobileDiffInteractiveTarget(target)) return;
 
     mobileDiffPointerId = event.pointerId;
@@ -770,6 +770,13 @@
       diffViewerContainerEl.releasePointerCapture(event.pointerId);
     }
     resetMobileDiffDrag();
+  }
+
+  function handleMobileDiffMouseDownCapture(event: MouseEvent) {
+    if (!isSmallDiffViewport) return;
+    const target = event.target as HTMLElement;
+    if (!target.closest('.spine')) return;
+    event.stopPropagation();
   }
 </script>
 
@@ -958,6 +965,7 @@
         onpointermove={handleMobileDiffPointerMove}
         onpointerup={handleMobileDiffPointerUp}
         onpointercancel={handleMobileDiffPointerUp}
+        onmousedowncapture={handleMobileDiffMouseDownCapture}
       >
         <DiffViewer
           diff={currentDiff}
@@ -1421,6 +1429,7 @@
     .diff-viewer-container {
       --mobile-diff-rest-offset: 20px;
       --mobile-diff-edge-peek: 28px;
+      --mobile-diff-spine-width: 16px;
       width: 100%;
     }
 
@@ -1445,10 +1454,15 @@
     :global(.diff-viewer-container .diff-content:not(.single-pane) .after-pane) {
       position: absolute;
       inset: 0 auto 0 0;
-      width: calc(100% - var(--mobile-diff-rest-offset));
+      width: calc(100% - var(--mobile-diff-rest-offset) - var(--mobile-diff-spine-width));
       flex: none !important;
       border-radius: 0;
-      transform: translateX(calc(var(--mobile-diff-rest-offset) + var(--mobile-diff-drag-x, 0px)));
+      transform: translateX(
+        calc(
+          var(--mobile-diff-rest-offset) + var(--mobile-diff-spine-width) +
+            var(--mobile-diff-drag-x, 0px)
+        )
+      );
       transition: transform 0.22s ease;
       z-index: 3;
       cursor: grab;
@@ -1465,6 +1479,24 @@
     }
 
     :global(.diff-viewer-container .diff-content:not(.single-pane) .spine) {
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: var(--mobile-diff-spine-width);
+      flex: none !important;
+      transform: translateX(calc(var(--mobile-diff-rest-offset) + var(--mobile-diff-drag-x, 0px)));
+      transition: transform 0.22s ease;
+      z-index: 4;
+      cursor: grab;
+      touch-action: pan-y;
+    }
+
+    :global(.diff-viewer-container.mobile-diff-dragging .diff-content .spine) {
+      cursor: grabbing;
+      transition: none;
+      user-select: none;
+    }
+
+    :global(.diff-viewer-container .diff-content:not(.single-pane) .spine .divider-handle) {
       display: none;
     }
   }

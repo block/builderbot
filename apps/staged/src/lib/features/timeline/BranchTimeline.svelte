@@ -9,7 +9,7 @@
   import { onDestroy } from 'svelte';
   import type { Snippet } from 'svelte';
   import { slide } from 'svelte/transition';
-  import { FileText, GitCommitVertical, FileSearch } from 'lucide-svelte';
+  import { FileText, GitCommitVertical, FileSearch, Plus } from 'lucide-svelte';
   import { isResumableReason } from '../../types';
   import type { BranchTimeline as BranchTimelineData, HashtagItem } from '../../types';
   import TimelineRow from './TimelineRow.svelte';
@@ -639,8 +639,10 @@
               disabled={newSessionDisabled}
               title="New note"
             >
-              <FileText size={18} />
-              <span>New note</span>
+              <FileText class="add-item-icon-default" size={18} />
+              <Plus class="add-item-icon-compact" size={18} />
+              <span class="label-full">New note</span>
+              <span class="label-compact">Note</span>
             </button>
           {/if}
           {#if onNewCommit}
@@ -651,8 +653,10 @@
               disabled={newSessionDisabled}
               title="New commit"
             >
-              <GitCommitVertical size={18} />
-              <span>New commit</span>
+              <GitCommitVertical class="add-item-icon-default" size={18} />
+              <Plus class="add-item-icon-compact" size={18} />
+              <span class="label-full">New commit</span>
+              <span class="label-compact">Commit</span>
             </button>
           {/if}
           {#if onNewReview}
@@ -663,8 +667,10 @@
               disabled={newSessionDisabled}
               title="New code review"
             >
-              <FileSearch size={18} />
-              <span>New code review</span>
+              <FileSearch class="add-item-icon-default" size={18} />
+              <Plus class="add-item-icon-compact" size={18} />
+              <span class="label-full">New code review</span>
+              <span class="label-compact">Code review</span>
             </button>
           {/if}
         </div>
@@ -760,6 +766,11 @@
     height: 13px;
   }
 
+  .add-item-btn :global(.add-item-icon-compact),
+  .label-compact {
+    display: none;
+  }
+
   .add-item-btn-enlarged {
     flex: 1;
     justify-content: center;
@@ -826,5 +837,20 @@
   .add-item-btn:disabled {
     opacity: 0.3;
     cursor: not-allowed;
+  }
+
+  @media (max-width: 768px) {
+    .add-item-btn :global(.add-item-icon-default),
+    .label-full {
+      display: none;
+    }
+
+    .add-item-btn :global(.add-item-icon-compact) {
+      display: block;
+    }
+
+    .label-compact {
+      display: inline;
+    }
   }
 </style>

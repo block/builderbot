@@ -13,7 +13,14 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { X, ArrowLeft, ChevronDown, GitBranch, GitCommitHorizontal } from 'lucide-svelte';
+  import {
+    X,
+    ArrowLeft,
+    ChevronDown,
+    GitBranch,
+    GitCommitHorizontal,
+    PanelRightOpen,
+  } from 'lucide-svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
@@ -109,6 +116,10 @@
 
   type ReviewHandle = ReturnType<typeof createReviewState>;
   let reviewHandle = $state<ReviewHandle | null>(null);
+
+  const SMALL_DIFF_BREAKPOINT = 700;
+  const MOBILE_DIFF_REST_OFFSET = 20;
+  const MOBILE_DIFF_EDGE_PEEK = 28;
 
   // Create review state once we have a resolved commitSha (skip in readonly mode).
   // NOTE: This effect's tracked dependencies are `diffViewer.state.commitSha` and
@@ -270,6 +281,16 @@
   let commentJumpToken = 0;
   let jumpToLine = $state<{ lineIndex: number; token: number } | null>(null);
   let lineJumpToken = 0;
+  let isSmallDiffViewport = $state(false);
+  let showMobileSidebar = $state(false);
+  let diffViewerContainerEl: HTMLDivElement | null = $state(null);
+  let mobileDiffDragX = $state(0);
+  let mobileDiffPointerId: number | null = null;
+  let mobileDiffStartX = 0;
+  let mobileDiffStartY = 0;
+  let mobileDiffStartDragX = 0;
+  let mobileDiffIsDragging = $state(false);
+  let mobileDiffStyle = $derived(`--mobile-diff-drag-x: ${mobileDiffDragX}px;`);
 
   // (No confirmation dialogs — soft delete is reversible)
 
@@ -436,6 +457,7 @@
 
   function selectFile(file: FileEntry) {
     selectedCommentId = null;
+    if (isSmallDiffViewport) showMobileSidebar = false;
     handleSearchOnFileSelect(file.path);
     diffViewer.selectFile(file.path);
   }
@@ -507,6 +529,7 @@
 
   async function handleSelectComment(comment: Comment) {
     selectedCommentId = comment.id;
+    if (isSmallDiffViewport) showMobileSidebar = false;
     const resolvedPath = resolveCommentPath(comment.path);
     // Set jumpToComment BEFORE awaiting selectFile so the auto-scroll effect
     // sees the pending token and defers to the explicit comment navigation.
@@ -522,6 +545,7 @@
 
   // Jump to a specific line (for search results)
   function handleJumpToLine(lineIndex: number) {
+    if (isSmallDiffViewport) showMobileSidebar = false;
     lineJumpToken += 1;
     jumpToLine = { lineIndex, token: lineJumpToken };
   }
@@ -592,6 +616,13 @@
         closeDropdown();
         return;
       }
+      // Close the mobile file dialog before dismissing the whole diff.
+      if (showMobileSidebar) {
+        event.preventDefault();
+        event.stopPropagation();
+        showMobileSidebar = false;
+        return;
+      }
       // Close search bar first if open
       if (searchState.state.isOpen) {
         event.preventDefault();
@@ -648,10 +679,22 @@
   });
 
   onMount(() => {
+    const mediaQuery = window.matchMedia(`(max-width: ${SMALL_DIFF_BREAKPOINT}px)`);
+    const updateSmallDiffViewport = () => {
+      isSmallDiffViewport = mediaQuery.matches;
+      if (!isSmallDiffViewport) {
+        showMobileSidebar = false;
+        resetMobileDiffDrag();
+      }
+    };
+
+    updateSmallDiffViewport();
+    mediaQuery.addEventListener('change', updateSmallDiffViewport);
     document.addEventListener('keydown', handleKeydown);
     document.addEventListener('keyup', handleKeyup);
     document.addEventListener('click', handleClickOutsideDropdown);
     return () => {
+      mediaQuery.removeEventListener('change', updateSmallDiffViewport);
       document.removeEventListener('keydown', handleKeydown);
       document.removeEventListener('keyup', handleKeyup);
       document.removeEventListener('click', handleClickOutsideDropdown);
@@ -671,7 +714,146 @@
       getCurrentWindow().startDragging();
     }
   }
+
+  function getMobileDiffMaxDrag(): number {
+    const width = diffViewerContainerEl?.clientWidth ?? 0;
+    return Math.max(0, width - MOBILE_DIFF_EDGE_PEEK - MOBILE_DIFF_REST_OFFSET);
+  }
+
+  function resetMobileDiffDrag() {
+    mobileDiffPointerId = null;
+    mobileDiffIsDragging = false;
+    mobileDiffDragX = 0;
+  }
+
+  function isMobileDiffInteractiveTarget(target: HTMLElement): boolean {
+    return !!target.closest(
+      'button, a, input, textarea, select, [role="button"], [contenteditable="true"], .scrollbar, .scrollbar-h, .range-toolbar, .line-selection-toolbar, .comment-editor'
+    );
+  }
+
+  function handleMobileDiffPointerDown(event: PointerEvent) {
+    if (!isSmallDiffViewport) return;
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+
+    const target = event.target as HTMLElement;
+    if (!target.closest('.after-pane')) return;
+    if (isMobileDiffInteractiveTarget(target)) return;
+
+    mobileDiffPointerId = event.pointerId;
+    mobileDiffStartX = event.clientX;
+    mobileDiffStartY = event.clientY;
+    mobileDiffStartDragX = mobileDiffDragX;
+    mobileDiffIsDragging = false;
+    diffViewerContainerEl?.setPointerCapture(event.pointerId);
+  }
+
+  function handleMobileDiffPointerMove(event: PointerEvent) {
+    if (!isSmallDiffViewport || mobileDiffPointerId !== event.pointerId) return;
+
+    const deltaX = event.clientX - mobileDiffStartX;
+    const deltaY = event.clientY - mobileDiffStartY;
+    if (!mobileDiffIsDragging) {
+      const horizontalIntent = Math.abs(deltaX) > 8 && Math.abs(deltaX) > Math.abs(deltaY);
+      if (!horizontalIntent) return;
+      mobileDiffIsDragging = true;
+    }
+
+    event.preventDefault();
+    const nextX = mobileDiffStartDragX + deltaX;
+    mobileDiffDragX = Math.max(0, Math.min(getMobileDiffMaxDrag(), nextX));
+  }
+
+  function handleMobileDiffPointerUp(event: PointerEvent) {
+    if (mobileDiffPointerId !== event.pointerId) return;
+    if (diffViewerContainerEl?.hasPointerCapture(event.pointerId)) {
+      diffViewerContainerEl.releasePointerCapture(event.pointerId);
+    }
+    resetMobileDiffDrag();
+  }
 </script>
+
+{#snippet fileSidebarContents()}
+  {#if diffViewer.state.loading}
+    <div class="sidebar-loading">
+      <Spinner size={14} />
+      <span>Loading files...</span>
+    </div>
+  {:else if diffViewer.state.error}
+    <div class="sidebar-error">
+      <span>{diffViewer.state.error}</span>
+    </div>
+  {:else if diffViewer.state.files.length === 0}
+    <div class="sidebar-empty">
+      <span>No changes</span>
+    </div>
+  {:else}
+    <div class="sidebar-content">
+      <div class="sidebar-scroll">
+        <!-- Search bar -->
+        <CrossFileSearchBar
+          files={diffViewer.state.files}
+          loadFileDiff={loadFileDiffForSearch}
+          {searchState}
+        />
+
+        <DiffFileTreeSection
+          {readonly}
+          {fileEntries}
+          {needsReview}
+          {reviewed}
+          {readonlyTree}
+          {needsReviewTree}
+          {reviewedTree}
+          selectedFile={diffViewer.state.selectedFile}
+          {isCollapsed}
+          onToggleDir={toggleDir}
+          onSelectFile={selectFile}
+          onToggleReviewed={toggleReviewed}
+          onJumpToLine={handleJumpToLine}
+          {searchState}
+          diffViewerState={diffViewer}
+        />
+        {#if !readonly}
+          <DiffReferenceSection
+            referenceFiles={reviewHandle?.state.referenceFiles ?? []}
+            selectedFile={diffViewer.state.selectedFile}
+            onSelectFile={(path) => {
+              selectedCommentId = null;
+              if (isSmallDiffViewport) showMobileSidebar = false;
+              diffViewer.selectFile(path);
+            }}
+            onRemoveReferenceFile={handleRemoveReferenceFile}
+          />
+
+          <DiffCommentsSection
+            comments={currentComments}
+            deletedComments={reviewHandle?.state.deletedComments ?? []}
+            {selectedCommentId}
+            {copiedFeedback}
+            onSelectComment={handleSelectComment}
+            onCopyAll={handleCopyComments}
+            onDeleteAll={handleDeleteAllComments}
+            onDeleteComment={handleDeleteComment}
+            onRestoreComment={handleRestoreComment}
+          />
+        {/if}
+      </div>
+
+      {#if !readonly && diffViewer.state.commitSha}
+        <DiffCommitSessionLauncher
+          {branchId}
+          {projectId}
+          commitSha={diffViewer.state.commitSha}
+          scope={activeScope}
+          reviewId={activeReviewId}
+          visibleCommentCount={currentComments.length}
+          onStarted={onClose}
+        />
+      {/if}
+    </div>
+  {/if}
+{/snippet}
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="diff-modal-backdrop" onkeydown={handleKeydown}>
@@ -753,11 +935,30 @@
           {/if}
         </div>
       {/if}
+      {#if isSmallDiffViewport}
+        <button
+          class="icon-btn mobile-sidebar-trigger"
+          onclick={() => (showMobileSidebar = true)}
+          title="Show changed files"
+          aria-label="Show changed files"
+        >
+          <PanelRightOpen size={14} />
+        </button>
+      {/if}
     </div>
 
     <div class="modal-body">
       <!-- Diff viewer -->
-      <div class="diff-viewer-container">
+      <div
+        class="diff-viewer-container"
+        class:mobile-diff-dragging={mobileDiffIsDragging}
+        style={mobileDiffStyle}
+        bind:this={diffViewerContainerEl}
+        onpointerdown={handleMobileDiffPointerDown}
+        onpointermove={handleMobileDiffPointerMove}
+        onpointerup={handleMobileDiffPointerUp}
+        onpointercancel={handleMobileDiffPointerUp}
+      >
         <DiffViewer
           diff={currentDiff}
           comments={readonly ? [] : currentComments}
@@ -776,88 +977,34 @@
       </div>
 
       <!-- File sidebar (right side) -->
-      <div class="file-sidebar">
-        {#if diffViewer.state.loading}
-          <div class="sidebar-loading">
-            <Spinner size={14} />
-            <span>Loading files...</span>
-          </div>
-        {:else if diffViewer.state.error}
-          <div class="sidebar-error">
-            <span>{diffViewer.state.error}</span>
-          </div>
-        {:else if diffViewer.state.files.length === 0}
-          <div class="sidebar-empty">
-            <span>No changes</span>
-          </div>
-        {:else}
-          <div class="sidebar-content">
-            <div class="sidebar-scroll">
-              <!-- Search bar -->
-              <CrossFileSearchBar
-                files={diffViewer.state.files}
-                loadFileDiff={loadFileDiffForSearch}
-                {searchState}
-              />
-
-              <DiffFileTreeSection
-                {readonly}
-                {fileEntries}
-                {needsReview}
-                {reviewed}
-                {readonlyTree}
-                {needsReviewTree}
-                {reviewedTree}
-                selectedFile={diffViewer.state.selectedFile}
-                {isCollapsed}
-                onToggleDir={toggleDir}
-                onSelectFile={selectFile}
-                onToggleReviewed={toggleReviewed}
-                onJumpToLine={handleJumpToLine}
-                {searchState}
-                diffViewerState={diffViewer}
-              />
-              {#if !readonly}
-                <DiffReferenceSection
-                  referenceFiles={reviewHandle?.state.referenceFiles ?? []}
-                  selectedFile={diffViewer.state.selectedFile}
-                  onSelectFile={(path) => {
-                    selectedCommentId = null;
-                    diffViewer.selectFile(path);
-                  }}
-                  onRemoveReferenceFile={handleRemoveReferenceFile}
-                />
-
-                <DiffCommentsSection
-                  comments={currentComments}
-                  deletedComments={reviewHandle?.state.deletedComments ?? []}
-                  {selectedCommentId}
-                  {copiedFeedback}
-                  onSelectComment={handleSelectComment}
-                  onCopyAll={handleCopyComments}
-                  onDeleteAll={handleDeleteAllComments}
-                  onDeleteComment={handleDeleteComment}
-                  onRestoreComment={handleRestoreComment}
-                />
-              {/if}
-            </div>
-
-            {#if !readonly && diffViewer.state.commitSha}
-              <DiffCommitSessionLauncher
-                {branchId}
-                {projectId}
-                commitSha={diffViewer.state.commitSha}
-                scope={activeScope}
-                reviewId={activeReviewId}
-                visibleCommentCount={currentComments.length}
-                onStarted={onClose}
-              />
-            {/if}
-          </div>
-        {/if}
-      </div>
+      {#if !isSmallDiffViewport}
+        <div class="file-sidebar">
+          {@render fileSidebarContents()}
+        </div>
+      {/if}
     </div>
   </div>
+
+  {#if isSmallDiffViewport && showMobileSidebar}
+    <div class="mobile-sidebar-backdrop" role="dialog" aria-modal="true" aria-label="Changed files">
+      <div class="mobile-sidebar-dialog">
+        <div class="mobile-sidebar-header">
+          <span class="mobile-sidebar-title">Changed files</span>
+          <button
+            class="icon-btn"
+            onclick={() => (showMobileSidebar = false)}
+            title="Close changed files"
+            aria-label="Close changed files"
+          >
+            <X size={14} />
+          </button>
+        </div>
+        <div class="mobile-sidebar-body">
+          {@render fileSidebarContents()}
+        </div>
+      </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -1159,6 +1306,50 @@
     overflow: hidden;
   }
 
+  .mobile-sidebar-trigger {
+    display: none;
+  }
+
+  .mobile-sidebar-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 1002;
+    background: var(--bg-chrome);
+  }
+
+  .mobile-sidebar-dialog {
+    display: flex;
+    flex-direction: column;
+    width: 100vw;
+    height: 100vh;
+    height: 100dvh;
+    background: var(--bg-chrome);
+  }
+
+  .mobile-sidebar-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 44px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border-subtle);
+    flex-shrink: 0;
+  }
+
+  .mobile-sidebar-title {
+    flex: 1;
+    min-width: 0;
+    color: var(--text-primary);
+    font-size: var(--size-sm);
+    font-weight: 600;
+  }
+
+  .mobile-sidebar-body {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+  }
+
   :global(.diff-viewer-container .comment-editor) {
     background: var(--diff-comment-bg);
     border-color: var(--diff-comment-border);
@@ -1194,5 +1385,87 @@
   :global(.diff-viewer-container .range-btn.comment-btn:hover) {
     color: var(--text-primary);
     background-color: color-mix(in srgb, var(--diff-comment-accent) 14%, var(--diff-comment-bg));
+  }
+
+  @media (max-width: 700px) {
+    .title-bar {
+      gap: 6px;
+    }
+
+    .traffic-light-spacer {
+      width: 58px;
+    }
+
+    .title-content {
+      min-width: 0;
+    }
+
+    .project-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .context-label {
+      max-width: 96px;
+    }
+
+    .mobile-sidebar-trigger {
+      display: flex;
+    }
+
+    .modal-body {
+      position: relative;
+    }
+
+    .diff-viewer-container {
+      --mobile-diff-rest-offset: 20px;
+      --mobile-diff-edge-peek: 28px;
+      width: 100%;
+    }
+
+    :global(.diff-viewer-container .diff-content) {
+      padding-left: 0;
+    }
+
+    :global(.diff-viewer-container .diff-content:not(.single-pane)) {
+      position: relative;
+      isolation: isolate;
+    }
+
+    :global(.diff-viewer-container .diff-content:not(.single-pane) .before-pane) {
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: calc(100% - var(--mobile-diff-edge-peek));
+      flex: none !important;
+      border-radius: 0;
+      z-index: 1;
+    }
+
+    :global(.diff-viewer-container .diff-content:not(.single-pane) .after-pane) {
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: calc(100% - var(--mobile-diff-rest-offset));
+      flex: none !important;
+      border-radius: 0;
+      transform: translateX(calc(var(--mobile-diff-rest-offset) + var(--mobile-diff-drag-x, 0px)));
+      transition: transform 0.22s ease;
+      z-index: 3;
+      cursor: grab;
+      touch-action: pan-y;
+      box-shadow:
+        -18px 0 28px color-mix(in srgb, var(--bg-deepest) 52%, transparent),
+        var(--shadow-elevated);
+    }
+
+    :global(.diff-viewer-container.mobile-diff-dragging .diff-content .after-pane) {
+      cursor: grabbing;
+      transition: none;
+      user-select: none;
+    }
+
+    :global(.diff-viewer-container .diff-content:not(.single-pane) .spine) {
+      display: none;
+    }
   }
 </style>

@@ -3,7 +3,9 @@ import type { Session, SessionMessage, SessionStatus, CompletionReason } from '.
 import {
   buildNoteFollowupMessage,
   countAssistantMessagesAfterNote,
+  formatChatButtonLabel,
   getNoteFollowupLabel,
+  hasNoteFollowupBeenSent,
   latestAssistantMessage,
   type LinkedNoteContext,
 } from './noteFreshness';
@@ -130,5 +132,40 @@ describe('note freshness', () => {
     expect(updateMessage).toContain('\n---\n# <Title>');
     expect(updateMessage).toContain('Please update the note to reflect the latest chat.');
     expect(writeMessage).toContain('Please write the note for this session.');
+  });
+
+  it('suppresses note followup CTA when a followup was already sent', () => {
+    const followupContent = buildNoteFollowupMessage(true);
+    const messages = [
+      message(1, 'assistant', 1500),
+      message(2, 'user', 2500, followupContent),
+      message(3, 'assistant', 3000),
+    ];
+
+    expect(hasNoteFollowupBeenSent(messages)).toBe(true);
+    expect(getNoteFollowupLabel(session(), messages, note())).toBeNull();
+  });
+
+  it('does not suppress CTA when no followup has been sent', () => {
+    const messages = [message(1, 'user', 1500, 'Can you help me?'), message(2, 'assistant', 3000)];
+
+    expect(hasNoteFollowupBeenSent(messages)).toBe(false);
+    expect(getNoteFollowupLabel(session(), messages, note())).toBe(
+      'Ask for the note to be updated'
+    );
+  });
+});
+
+describe('formatChatButtonLabel', () => {
+  it('returns singular label for 1 message', () => {
+    expect(formatChatButtonLabel(1)).toBe('1 message after note in chat');
+  });
+
+  it('returns plural label for multiple messages', () => {
+    expect(formatChatButtonLabel(5)).toBe('5 messages after note in chat');
+  });
+
+  it('returns generic label for 0 messages', () => {
+    expect(formatChatButtonLabel(0)).toBe('View chat');
   });
 });

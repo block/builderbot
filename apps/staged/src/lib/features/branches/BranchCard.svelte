@@ -65,7 +65,7 @@
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import type { WorktreeChangesPreview } from '../../commands';
-  import type { LinkedNoteContext } from '../sessions/noteFreshness';
+  import type { LinkedNoteContext, NoteClickInfo } from '../sessions/noteFreshness';
 
   interface Props {
     branch: Branch;
@@ -865,20 +865,14 @@
     commitDiffSha = sha;
   }
 
-  function handleNoteClick(
-    noteId: string,
-    title: string,
-    content: string,
-    sessionId: string | undefined,
-    noteUpdatedAt: number | undefined
-  ) {
+  function handleNoteClick(note: NoteClickInfo) {
     openNote = {
-      noteId,
-      title,
-      content,
-      sessionId,
-      noteUpdatedAt,
-      nextSteps: computeNoteNextSteps(noteId),
+      noteId: note.noteId,
+      title: note.title,
+      content: note.content,
+      sessionId: note.sessionId,
+      noteUpdatedAt: note.updatedAt,
+      nextSteps: computeNoteNextSteps(note.noteId),
     };
   }
 

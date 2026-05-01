@@ -11,6 +11,7 @@
   import { sanitize } from '../../shared/sanitize';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import { countAssistantMessagesAfter, handleExternalLinkClick } from '../../api/commands';
+  import { formatChatButtonLabel } from '../sessions/noteFreshness';
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
@@ -46,13 +47,7 @@
   let copied = $state(false);
   const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
   let assistantMessagesAfterNote = $state(0);
-  let chatButtonLabel = $derived(
-    assistantMessagesAfterNote === 1
-      ? '1 message after note in chat'
-      : assistantMessagesAfterNote > 1
-        ? `${assistantMessagesAfterNote} messages after note in chat`
-        : 'View chat'
-  );
+  let chatButtonLabel = $derived(formatChatButtonLabel(assistantMessagesAfterNote));
 
   // Search state
   let searchVisible = $state(false);

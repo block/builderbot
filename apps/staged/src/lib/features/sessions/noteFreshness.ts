@@ -8,6 +8,15 @@ export interface LinkedNoteContext {
   hasParsedNote: boolean;
 }
 
+/** Info passed when a note is clicked in the timeline. */
+export interface NoteClickInfo {
+  noteId: string;
+  title: string;
+  content: string;
+  sessionId?: string;
+  updatedAt?: number;
+}
+
 export function countAssistantMessagesAfterNote(
   messages: SessionMessage[],
   noteUpdatedAt: number | null | undefined
@@ -16,6 +25,16 @@ export function countAssistantMessagesAfterNote(
   return messages.filter(
     (message) => message.role === 'assistant' && message.createdAt > noteUpdatedAt
   ).length;
+}
+
+/**
+ * Formats a label for the "view chat" button in the note modal.
+ * Shows the count of assistant messages after the note was last updated.
+ */
+export function formatChatButtonLabel(messagesAfterNote: number): string {
+  if (messagesAfterNote === 1) return '1 message after note in chat';
+  if (messagesAfterNote > 1) return `${messagesAfterNote} messages after note in chat`;
+  return 'View chat';
 }
 
 export function latestAssistantMessage(messages: SessionMessage[]): SessionMessage | null {
@@ -33,6 +52,17 @@ export function latestAssistantMessage(messages: SessionMessage[]): SessionMessa
   return latest;
 }
 
+/** Marker text embedded in the note followup action block. */
+const NOTE_FOLLOWUP_MARKER = 'The user is asking you to';
+
+/**
+ * Returns true if any user message in the session already contains the
+ * note-followup prompt. Used to suppress the CTA after it has been clicked.
+ */
+export function hasNoteFollowupBeenSent(messages: SessionMessage[]): boolean {
+  return messages.some((m) => m.role === 'user' && m.content.includes(NOTE_FOLLOWUP_MARKER));
+}
+
 export function shouldAskForNoteUpdate(
   session: Session | null,
   messages: SessionMessage[],
@@ -40,6 +70,7 @@ export function shouldAskForNoteUpdate(
 ): boolean {
   if (!session || !noteContext) return false;
   if (session.status !== 'completed' || session.completionReason !== 'turn_complete') return false;
+  if (hasNoteFollowupBeenSent(messages)) return false;
 
   const latestAssistant = latestAssistantMessage(messages);
   return !!latestAssistant && latestAssistant.createdAt > noteContext.updatedAt;

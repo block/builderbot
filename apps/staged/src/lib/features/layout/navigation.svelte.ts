@@ -14,6 +14,7 @@ import { getStoreValue, setStoreValue } from '../../shared/persistentStore';
 import * as commands from '../../api/commands';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { projectsList } from '../projects/projectsSidebarState.svelte';
+import { requestProjectsListRestore } from '../projects/projectsListViewState.svelte';
 
 const LAST_PROJECT_STORE_KEY = 'last-viewed-project';
 
@@ -129,6 +130,7 @@ export function selectNextProject(): void {
 /** Navigate back to the projects list (landing page). */
 export function goHome(): void {
   showWorkspaceView();
+  requestProjectsListRestore(navigation.selectedProjectId);
   navigation.selectedProjectId = null;
   persistLastProject(null);
 }

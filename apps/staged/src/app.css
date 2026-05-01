@@ -154,12 +154,13 @@ mark.search-match-current {
 
 /* ── Hashtag badges (shared across all badge contexts) ── */
 .hashtag-badge {
-  display: inline;
+  display: inline-block;
   padding: 3px 6px;
   border-radius: 4px;
   font-size: 0.85em;
   font-weight: 500;
   line-height: 1.35;
+  vertical-align: baseline;
   white-space: nowrap;
 }
 

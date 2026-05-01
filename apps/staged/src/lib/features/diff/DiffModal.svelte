@@ -290,7 +290,11 @@
   let mobileDiffStartY = 0;
   let mobileDiffStartDragX = 0;
   let mobileDiffIsDragging = $state(false);
-  let mobileDiffStyle = $derived(`--mobile-diff-drag-x: ${mobileDiffDragX}px;`);
+  let mobileDiffStyle = $derived(
+    `--mobile-diff-drag-x: ${mobileDiffDragX}px;` +
+      `--mobile-diff-rest-offset: ${MOBILE_DIFF_REST_OFFSET}px;` +
+      `--mobile-diff-edge-peek: ${MOBILE_DIFF_EDGE_PEEK}px;`
+  );
 
   // (No confirmation dialogs — soft delete is reversible)
 
@@ -1427,8 +1431,6 @@
     }
 
     .diff-viewer-container {
-      --mobile-diff-rest-offset: 20px;
-      --mobile-diff-edge-peek: 28px;
       --mobile-diff-spine-width: 16px;
       width: 100%;
     }

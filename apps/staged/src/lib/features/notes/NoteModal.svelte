@@ -563,7 +563,7 @@
     background: var(--commit-bg-emphasis);
   }
 
-  @media (max-width: 640px) {
+  @media (max-width: 700px) {
     .modal {
       width: 100vw;
       height: 100vh;

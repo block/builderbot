@@ -38,6 +38,7 @@
     ChevronDown,
     Zap,
     GitBranch,
+    FileText,
     Paperclip,
     ImagePlus,
     Plus,
@@ -90,6 +91,11 @@
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
   import { viewport } from '../../shared/viewport.svelte';
+  import {
+    buildNoteFollowupMessage,
+    getNoteFollowupLabel,
+    type LinkedNoteContext,
+  } from './noteFreshness';
 
   // Configure marked
   marked.setOptions({ breaks: true, gfm: true });
@@ -106,8 +112,8 @@
     /** Repo label for grouping branch-scoped hashtag suggestions. */
     repoLabel?: Pick<ProjectRepo, 'githubRepo' | 'subpath' | 'headRepo'> | null;
     /** When set, shows a button to open the associated note. */
-    noteInfo?: { id: string; title: string; content: string } | null;
-    onOpenNote?: (noteId: string, title: string, content: string) => void;
+    noteInfo?: LinkedNoteContext | null;
+    onOpenNote?: (note: LinkedNoteContext) => void;
   }
 
   let {
@@ -147,6 +153,7 @@
 
   let isLive = $derived(session?.status === 'running');
   let hasQueuedMessages = $derived(messageQueue.length > 0);
+  let noteFollowupLabel = $derived(getNoteFollowupLabel(session, messages, noteInfo));
 
   const SLIDE_DURATION = 150;
 
@@ -523,6 +530,11 @@
     } finally {
       sending = false;
     }
+  }
+
+  function handleNoteFollowupClick() {
+    if (!noteInfo || sending) return;
+    void sendMessage(buildNoteFollowupMessage(noteInfo.hasParsedNote));
   }
 
   /** Process the next queued message when the session becomes idle. */
@@ -1011,12 +1023,8 @@
         onClose={closeSearch}
       />
       <div class="header-actions">
-        {#if noteInfo && onOpenNote}
-          <button
-            class="header-btn"
-            onclick={() => onOpenNote?.(noteInfo!.id, noteInfo!.title, noteInfo!.content)}
-            title="Open note"
-          >
+        {#if noteInfo?.content.trim() && onOpenNote}
+          <button class="header-btn" onclick={() => onOpenNote?.(noteInfo!)} title="Open note">
             View note
           </button>
         {/if}
@@ -1276,6 +1284,23 @@
             <div class="thinking" in:messageSlide>
               <Spinner size={14} />
               <span>Thinking…</span>
+            </div>
+          {/if}
+
+          {#if noteFollowupLabel}
+            <div class="note-followup-row" in:messageSlide>
+              <button
+                class="note-followup-btn"
+                onclick={handleNoteFollowupClick}
+                disabled={sending}
+              >
+                {#if sending}
+                  <Spinner size={13} />
+                {:else}
+                  <FileText size={13} />
+                {/if}
+                <span>{noteFollowupLabel}</span>
+              </button>
             </div>
           {/if}
         </div>
@@ -1952,6 +1977,42 @@
     color: var(--text-muted);
     font-size: var(--size-xs);
     padding: 4px 0;
+  }
+
+  .note-followup-row {
+    display: flex;
+    justify-content: center;
+    padding: 4px 0;
+  }
+
+  .note-followup-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 30px;
+    padding: 6px 12px;
+    border: 1px solid var(--border-muted);
+    border-radius: 6px;
+    background: var(--note-bg);
+    color: var(--note-color);
+    font-size: var(--size-xs);
+    font-weight: 500;
+    cursor: pointer;
+    transition:
+      background-color 0.1s,
+      border-color 0.1s,
+      color 0.1s;
+  }
+
+  .note-followup-btn:hover:not(:disabled) {
+    border-color: var(--note-color);
+    background: var(--note-bg-emphasis);
+  }
+
+  .note-followup-btn:disabled {
+    cursor: default;
+    opacity: 0.65;
   }
 
   /* Error banner */

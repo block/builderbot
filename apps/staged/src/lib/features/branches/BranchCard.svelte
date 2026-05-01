@@ -65,6 +65,7 @@
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import type { WorktreeChangesPreview } from '../../commands';
+  import type { LinkedNoteContext } from '../sessions/noteFreshness';
 
   interface Props {
     branch: Branch;
@@ -452,6 +453,7 @@
     title: string;
     content: string;
     sessionId?: string;
+    noteUpdatedAt?: number;
     nextSteps?: { commitStep: string | null; noteStep: string | null } | null;
   } | null>(null);
 
@@ -847,20 +849,37 @@
   // =========================================================================
 
   /** Look up note info from timeline data by session ID (for cross-modal navigation). */
-  function findNoteForSession(
-    sessionId: string
-  ): { id: string; title: string; content: string } | null {
-    const note = timeline?.notes.find((n) => n.sessionId === sessionId && n.content?.trim());
+  function findNoteForSession(sessionId: string): LinkedNoteContext | null {
+    const note = timeline?.notes.find((n) => n.sessionId === sessionId);
     if (!note) return null;
-    return { id: note.id, title: note.title, content: note.content };
+    return {
+      id: note.id,
+      title: note.title,
+      content: note.content,
+      updatedAt: note.updatedAt,
+      hasParsedNote: !!note.content.trim(),
+    };
   }
 
   function handleCommitClick(sha: string) {
     commitDiffSha = sha;
   }
 
-  function handleNoteClick(noteId: string, title: string, content: string, sessionId?: string) {
-    openNote = { noteId, title, content, sessionId, nextSteps: computeNoteNextSteps(noteId) };
+  function handleNoteClick(
+    noteId: string,
+    title: string,
+    content: string,
+    sessionId: string | undefined,
+    noteUpdatedAt: number
+  ) {
+    openNote = {
+      noteId,
+      title,
+      content,
+      sessionId,
+      noteUpdatedAt,
+      nextSteps: computeNoteNextSteps(noteId),
+    };
   }
 
   async function handleReviewClick(reviewId: string) {
@@ -1571,6 +1590,7 @@
     title={openNote.title}
     content={openNote.content}
     sessionId={openNote.sessionId}
+    noteUpdatedAt={openNote.noteUpdatedAt}
     nextSteps={openNote.nextSteps}
     onClose={() => (openNote = null)}
     onOpenSession={(sid) => {
@@ -1655,15 +1675,16 @@
     projectId={branch.projectId}
     {repoLabel}
     noteInfo={findNoteForSession(sessionMgr.openSessionId)}
-    onOpenNote={(noteId, title, content) => {
+    onOpenNote={(note) => {
       const sid = sessionMgr.openSessionId;
       sessionMgr.openSessionId = null;
       openNote = {
-        noteId,
-        title,
-        content,
+        noteId: note.id,
+        title: note.title,
+        content: note.content,
         sessionId: sid ?? undefined,
-        nextSteps: computeNoteNextSteps(noteId),
+        noteUpdatedAt: note.updatedAt,
+        nextSteps: computeNoteNextSteps(note.id),
       };
     }}
     onClose={async () => {

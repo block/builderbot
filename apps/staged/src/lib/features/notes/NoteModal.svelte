@@ -10,11 +10,12 @@
   import { marked } from 'marked';
   import { sanitize } from '../../shared/sanitize';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
-  import { handleExternalLinkClick } from '../../api/commands';
+  import { getSessionMessages, handleExternalLinkClick } from '../../api/commands';
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
   import { viewport } from '../../shared/viewport.svelte';
+  import { countAssistantMessagesAfterNote } from '../sessions/noteFreshness';
 
   marked.setOptions({ breaks: true, gfm: true });
 
@@ -24,6 +25,7 @@
     onClose: () => void;
     /** When set, shows a button to open the associated chat session. */
     sessionId?: string | null;
+    noteUpdatedAt?: number | null;
     onOpenSession?: (sessionId: string) => void;
     /** Suggested next steps to show as action buttons at the bottom. */
     nextSteps?: { commitStep: string | null; noteStep: string | null } | null;
@@ -31,11 +33,27 @@
     onStartSession?: (mode: 'commit' | 'note', prefill: string) => void;
   }
 
-  let { title, content, onClose, sessionId, onOpenSession, nextSteps, onStartSession }: Props =
-    $props();
+  let {
+    title,
+    content,
+    onClose,
+    sessionId,
+    noteUpdatedAt,
+    onOpenSession,
+    nextSteps,
+    onStartSession,
+  }: Props = $props();
 
   let copied = $state(false);
   const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
+  let assistantMessagesAfterNote = $state(0);
+  let chatButtonLabel = $derived(
+    assistantMessagesAfterNote === 1
+      ? '1 message after note in chat'
+      : assistantMessagesAfterNote > 1
+        ? `${assistantMessagesAfterNote} messages after note in chat`
+        : 'View chat'
+  );
 
   // Search state
   let searchVisible = $state(false);
@@ -56,6 +74,30 @@
 
   onDestroy(() => {
     unregisterSearchTarget?.();
+  });
+
+  $effect(() => {
+    const sid = sessionId;
+    const updatedAt = noteUpdatedAt;
+    if (!sid || typeof updatedAt !== 'number') {
+      assistantMessagesAfterNote = 0;
+      return;
+    }
+
+    let stale = false;
+    getSessionMessages(sid)
+      .then((messages) => {
+        if (!stale) {
+          assistantMessagesAfterNote = countAssistantMessagesAfterNote(messages, updatedAt);
+        }
+      })
+      .catch(() => {
+        if (!stale) assistantMessagesAfterNote = 0;
+      });
+
+    return () => {
+      stale = true;
+    };
   });
 
   function renderMarkdown(text: string): string {
@@ -203,7 +245,7 @@
             onclick={() => onOpenSession?.(sessionId!)}
             title="Open chat session"
           >
-            View chat
+            {chatButtonLabel}
           </button>
         {/if}
         <button

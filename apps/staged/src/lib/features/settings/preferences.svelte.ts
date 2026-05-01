@@ -20,6 +20,7 @@ import {
 } from '../diff/highlighter';
 import { initPersistentStore, getStoreValue, setStoreValue } from '../../shared/persistentStore';
 import { createAdaptiveTheme, themeToVarMap } from '../../theme';
+import { ensureSqAvailabilityLoaded } from './sq.svelte';
 
 // Re-export for convenience
 export { isLightTheme, loadAllThemePreviewColors, type ThemePreviewColors };
@@ -156,8 +157,7 @@ export async function initPreferences(): Promise<void> {
   if (savedAutoReview === 'never' || savedAutoReview === 'after-changes') {
     preferences.autoReviewMode = savedAutoReview;
   } else {
-    const { isSqAvailable } = await import('../../commands');
-    preferences.autoReviewMode = (await isSqAvailable()) ? 'after-changes' : 'never';
+    preferences.autoReviewMode = (await ensureSqAvailabilityLoaded()) ? 'after-changes' : 'never';
   }
 
   preferences.loaded = true;

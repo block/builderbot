@@ -24,7 +24,7 @@
     resetSize,
   } from './lib/features/settings/preferences.svelte';
   import { refreshProviders } from './lib/features/agents/agent.svelte';
-  import { refreshSqAvailability } from './lib/features/settings/sq.svelte';
+  import { ensureSqAvailabilityLoaded } from './lib/features/settings/sq.svelte';
   import {
     navigation,
     initNavigation,
@@ -382,8 +382,8 @@
       setAiAgent(providers[0].id);
     }
 
-    // Check for `sq` CLI in the background (non-blocking).
-    refreshSqAvailability();
+    // Check for `sq` CLI in the background if preferences did not need it.
+    ensureSqAvailabilityLoaded();
 
     // Window was created hidden — show it now that the theme is applied
     await getCurrentWindow().show();

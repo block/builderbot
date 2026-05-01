@@ -106,6 +106,12 @@ function applyAdaptiveTheme() {
   }
 }
 
+async function loadSqAvailabilityForDefault(): Promise<boolean> {
+  // Keep preferences from taking a static dependency on the sq state module.
+  const { ensureSqAvailabilityLoaded } = await import('./sq.svelte');
+  return ensureSqAvailabilityLoaded();
+}
+
 // =============================================================================
 // Initialization
 // =============================================================================
@@ -156,8 +162,7 @@ export async function initPreferences(): Promise<void> {
   if (savedAutoReview === 'never' || savedAutoReview === 'after-changes') {
     preferences.autoReviewMode = savedAutoReview;
   } else {
-    const { isSqAvailable } = await import('../../commands');
-    preferences.autoReviewMode = (await isSqAvailable()) ? 'after-changes' : 'never';
+    preferences.autoReviewMode = (await loadSqAvailabilityForDefault()) ? 'after-changes' : 'never';
   }
 
   preferences.loaded = true;

@@ -18,6 +18,7 @@
   import { parseGitHubUrl } from '../../shared/githubUrl';
   import type { RepoSelection } from '../../shared/githubUrl';
   import type { PullRequest } from '../../types';
+  import { sqState } from '../settings/sq.svelte';
 
   interface Props {
     onCreated: (project: Project) => void;
@@ -59,7 +60,16 @@
     error = null;
   });
 
-  let repoMissing = $derived(location === 'remote' && !selectedRepo);
+  let remoteProjectsAvailable = $derived(sqState.loaded && sqState.available);
+  let effectiveLocation = $derived(remoteProjectsAvailable ? location : 'local');
+
+  $effect(() => {
+    if (sqState.loaded && !sqState.available && location === 'remote') {
+      location = 'local';
+    }
+  });
+
+  let repoMissing = $derived(effectiveLocation === 'remote' && !selectedRepo);
   let canCreate = $derived(!!name.trim() && !saving && !repoMissing);
 
   async function handleCreate() {
@@ -88,7 +98,7 @@
 
       const project = await commands.createProject(
         name.trim(),
-        location,
+        effectiveLocation,
         selectedRepo ?? undefined,
         normalizedSubpath,
         normalizedBranch,
@@ -168,27 +178,29 @@
     />
   </div>
 
-  <div class="form-group">
-    <div class="field-label">Location</div>
-    <FormToggle
-      bind:value={location}
-      options={[
-        {
-          value: 'local',
-          label: 'Local',
-          description: 'Run agents on your machine',
-          icon: Monitor,
-        },
-        {
-          value: 'remote',
-          label: 'Remote',
-          description: 'Run agents in the cloud',
-          icon: Cloud,
-        },
-      ]}
-      disabled={saving}
-    />
-  </div>
+  {#if remoteProjectsAvailable}
+    <div class="form-group">
+      <div class="field-label">Location</div>
+      <FormToggle
+        bind:value={location}
+        options={[
+          {
+            value: 'local',
+            label: 'Local',
+            description: 'Run agents on your machine',
+            icon: Monitor,
+          },
+          {
+            value: 'remote',
+            label: 'Remote',
+            description: 'Run agents in the cloud',
+            icon: Cloud,
+          },
+        ]}
+        disabled={saving}
+      />
+    </div>
+  {/if}
 
   <RepoConfigForm
     bind:selectedRepo
@@ -200,7 +212,7 @@
     bind:defaultBranch
     bind:api={repoConfigApi}
     disabled={saving}
-    repoRequired={location === 'remote'}
+    repoRequired={effectiveLocation === 'remote'}
     onBranchSelected={handleBranchSelected}
   />
 

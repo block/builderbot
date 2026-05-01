@@ -13,12 +13,9 @@ export const sqState = $state({
   loaded: false,
 });
 
-/**
- * Detect whether the `sq` CLI is present and update the cache.
- *
- * Called once at startup from App.svelte. Safe to call again if needed.
- */
-export async function refreshSqAvailability(): Promise<boolean> {
+let sqAvailabilityPromise: Promise<boolean> | null = null;
+
+async function loadSqAvailability(): Promise<boolean> {
   try {
     const available = await isSqAvailable();
     sqState.available = available;
@@ -28,5 +25,28 @@ export async function refreshSqAvailability(): Promise<boolean> {
     sqState.available = false;
     sqState.loaded = true;
     return false;
+  } finally {
+    sqAvailabilityPromise = null;
   }
+}
+
+/**
+ * Detect whether the `sq` CLI is present and update the cache.
+ *
+ * Safe to call again if a caller needs to refresh the app-level state.
+ */
+export async function refreshSqAvailability(): Promise<boolean> {
+  sqAvailabilityPromise ??= loadSqAvailability();
+  return sqAvailabilityPromise;
+}
+
+/**
+ * Return cached `sq` availability, loading it once if needed.
+ */
+export function ensureSqAvailabilityLoaded(): Promise<boolean> {
+  if (sqState.loaded) {
+    return Promise.resolve(sqState.available);
+  }
+
+  return refreshSqAvailability();
 }

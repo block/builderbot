@@ -10,12 +10,11 @@
   import { marked } from 'marked';
   import { sanitize } from '../../shared/sanitize';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
-  import { getSessionMessages, handleExternalLinkClick } from '../../api/commands';
+  import { countAssistantMessagesAfter, handleExternalLinkClick } from '../../api/commands';
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
   import { viewport } from '../../shared/viewport.svelte';
-  import { countAssistantMessagesAfterNote } from '../sessions/noteFreshness';
 
   marked.setOptions({ breaks: true, gfm: true });
 
@@ -85,10 +84,10 @@
     }
 
     let stale = false;
-    getSessionMessages(sid)
-      .then((messages) => {
+    countAssistantMessagesAfter(sid, updatedAt)
+      .then((count) => {
         if (!stale) {
-          assistantMessagesAfterNote = countAssistantMessagesAfterNote(messages, updatedAt);
+          assistantMessagesAfterNote = count;
         }
       })
       .catch(() => {

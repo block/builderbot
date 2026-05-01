@@ -870,7 +870,7 @@
     title: string,
     content: string,
     sessionId: string | undefined,
-    noteUpdatedAt: number
+    noteUpdatedAt: number | undefined
   ) {
     openNote = {
       noteId,

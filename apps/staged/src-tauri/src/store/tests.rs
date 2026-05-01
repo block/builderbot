@@ -623,6 +623,41 @@ fn test_session_messages() {
     assert_eq!(since[1].id, id2);
 }
 
+#[test]
+fn test_count_assistant_messages_after() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    // Add messages with different roles — timestamps are auto-set via now_timestamp()
+    // so we use a timestamp of 0 to count all assistant messages.
+    store
+        .add_session_message(&session.id, MessageRole::User, "hello")
+        .unwrap();
+    store
+        .add_session_message(&session.id, MessageRole::Assistant, "hi there")
+        .unwrap();
+    store
+        .add_session_message(&session.id, MessageRole::User, "more")
+        .unwrap();
+    store
+        .add_session_message(&session.id, MessageRole::Assistant, "reply")
+        .unwrap();
+
+    // All assistant messages are after timestamp 0
+    let count = store
+        .count_assistant_messages_after(&session.id, 0)
+        .unwrap();
+    assert_eq!(count, 2);
+
+    // No assistant messages after a far-future timestamp
+    let count = store
+        .count_assistant_messages_after(&session.id, i64::MAX)
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
 // =============================================================================
 // Workdirs
 // =============================================================================

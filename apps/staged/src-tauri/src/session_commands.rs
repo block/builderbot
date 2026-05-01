@@ -119,6 +119,17 @@ pub fn get_session_messages_since(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn count_assistant_messages_after(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    session_id: String,
+    after_timestamp: i64,
+) -> Result<i64, String> {
+    get_store(&store)?
+        .count_assistant_messages_after(&session_id, after_timestamp)
+        .map_err(|e| e.to_string())
+}
+
 // =============================================================================
 // Lifecycle commands
 // =============================================================================

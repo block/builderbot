@@ -63,7 +63,7 @@
       title: string,
       content: string,
       sessionId: string | undefined,
-      updatedAt: number
+      updatedAt: number | undefined
     ) => void;
     onReviewClick?: (reviewId: string) => void;
     onImageClick?: (imageId: string) => void;
@@ -787,7 +787,7 @@
         item.noteTitle ?? '',
         item.noteContent ?? '',
         item.sessionId,
-        item.noteUpdatedAt ?? 0
+        item.noteUpdatedAt
       );
     } else if (item.type === 'review' && item.reviewId && onReviewClick) {
       onReviewClick(item.reviewId);

@@ -385,12 +385,14 @@
 
   let branch = $state<Branch | null>(null);
 
-  commands
-    .getBranch(branchId)
-    .then((b) => {
-      if (b) branch = b;
-    })
-    .catch((e) => console.warn('Failed to load branch:', e));
+  onMount(() => {
+    commands
+      .getBranch(branchId)
+      .then((b) => {
+        if (b) branch = b;
+      })
+      .catch((e) => console.warn('Failed to load branch:', e));
+  });
 
   let hasPr = $derived(branch?.prNumber != null);
 
@@ -403,8 +405,8 @@
   let newSessionPrefill = $state('');
 
   function buildCommentPrompt(comment: Comment, mode: 'note' | 'commit'): string {
-    const reviewId = reviewHandle?.state.reviewId;
-    const reviewRef = reviewId ? `#review:${reviewId}\n` : '';
+    const reviewId = reviewHandle?.state.review?.id ?? activeReviewId;
+    const reviewRef = reviewId ? `Re: #review:${reviewId}\n` : '';
     const tail = mode === 'note' ? 'Plan a fix for this' : 'Fix this';
     return `${reviewRef}Code review comment:\n> ${comment.path} ${formatLineRange(comment.span)}\n> ${comment.content}\n\n${tail}`;
   }
@@ -1272,6 +1274,7 @@
       mode={newSessionMode}
       initialPrompt={newSessionPrefill}
       prefilled
+      prefillSelection="last-line"
       onClose={() => {
         showNewSessionModal = false;
       }}

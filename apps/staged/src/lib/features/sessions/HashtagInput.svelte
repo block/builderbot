@@ -120,20 +120,39 @@
   $effect(() => {
     const _items = itemsById;
     if (hasUnresolvedTokens && _items.size > 0 && editorEl) {
-      // Preserve selection state across re-render (e.g. prefilled select-all)
-      const sel = window.getSelection();
-      const hadSelection = sel && !sel.isCollapsed && editorEl.contains(sel.anchorNode);
+      const shouldRestoreSelectAll = selectionCoversContents(editorEl);
 
       renderContent(value);
 
-      if (hadSelection && sel) {
+      if (shouldRestoreSelectAll) {
+        const sel = window.getSelection();
         const range = document.createRange();
         range.selectNodeContents(editorEl);
-        sel.removeAllRanges();
-        sel.addRange(range);
+        if (sel) {
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
       }
     }
   });
+
+  function selectionCoversContents(root: HTMLElement): boolean {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount || !sel.anchorNode || !sel.focusNode) {
+      return false;
+    }
+    if (!root.contains(sel.anchorNode) || !root.contains(sel.focusNode)) {
+      return false;
+    }
+
+    const selectionRange = sel.getRangeAt(0);
+    const fullRange = document.createRange();
+    fullRange.selectNodeContents(root);
+    return (
+      selectionRange.compareBoundaryPoints(Range.START_TO_START, fullRange) === 0 &&
+      selectionRange.compareBoundaryPoints(Range.END_TO_END, fullRange) === 0
+    );
+  }
 
   function createBadgeElement(item: HashtagItem): HTMLSpanElement {
     const badge = document.createElement('span');

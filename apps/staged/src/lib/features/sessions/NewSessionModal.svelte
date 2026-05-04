@@ -39,8 +39,10 @@
     repoLabel?: ProjectRepo | null;
     initialPrompt?: string;
     initialImageIds?: string[];
-    /** When true, the initial prompt is a suggestion — select all so typing replaces it. */
+    /** When true, the initial prompt is a suggestion — select text according to prefillSelection. */
     prefilled?: boolean;
+    /** Which part of the initial prompt should be selected when prefilled is true. */
+    prefillSelection?: 'all' | 'last-line';
     /** Commit-mode prefill text — used when switching to commit mode with no user draft. */
     commitPrefill?: string;
     /** Note-mode prefill text — used when switching to note mode with no user draft. */
@@ -59,6 +61,7 @@
     initialPrompt = '',
     initialImageIds = [],
     prefilled = false,
+    prefillSelection = 'all',
     commitPrefill = '',
     notePrefill = '',
     remote = false,
@@ -77,6 +80,57 @@
   let isCommit = $derived(currentMode === 'commit');
   let isReview = $derived(currentMode === 'review');
   let isNote = $derived(!isCommit && !isReview);
+
+  function selectPromptContent(el: HTMLElement, selection: 'all' | 'last-line') {
+    const sel = window.getSelection();
+    if (!sel) return;
+
+    const range = document.createRange();
+    if (selection === 'last-line') {
+      const start = findLastLineStart(el);
+      range.setStart(start.node, start.offset);
+      range.setEnd(el, el.childNodes.length);
+    } else {
+      range.selectNodeContents(el);
+    }
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+
+  function findLastLineStart(el: HTMLElement): { node: Node; offset: number } {
+    let start: { node: Node; offset: number } = { node: el, offset: 0 };
+
+    function visit(node: Node) {
+      if (node instanceof HTMLBRElement) {
+        const parent = node.parentNode;
+        if (parent) {
+          start = {
+            node: parent,
+            offset: Array.prototype.indexOf.call(parent.childNodes, node) + 1,
+          };
+        }
+        return;
+      }
+
+      for (const child of node.childNodes) {
+        visit(child);
+      }
+    }
+
+    visit(el);
+    return start;
+  }
+
+  function placeCursorAtEnd(el: HTMLElement) {
+    const sel = window.getSelection();
+    if (!sel) return;
+
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    range.collapse(false);
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
 
   // Animated placeholder for note mode — cycles through example prompts
   const notePlaceholders = [
@@ -160,16 +214,9 @@
       newMode === 'commit' ? commitPrefill : newMode === 'note' ? notePrefill : '';
     if (modePrefill && !userDraft) {
       prompt = modePrefill;
-      // Select all so typing replaces the suggestion
       tick().then(() => {
         if (textareaEl && textareaEl.textContent) {
-          const sel = window.getSelection();
-          if (sel) {
-            const range = document.createRange();
-            range.selectNodeContents(textareaEl);
-            sel.removeAllRanges();
-            sel.addRange(range);
-          }
+          selectPromptContent(textareaEl, prefillSelection);
           textareaEl.focus();
         }
       });
@@ -222,25 +269,28 @@
       const shouldSelect = prefilled;
       tick().then(() => {
         el.focus();
-        const sel = window.getSelection();
-        if (sel) {
-          if (shouldSelect && el.textContent) {
-            // Select all so typing replaces the suggested text
-            const range = document.createRange();
-            range.selectNodeContents(el);
-            sel.removeAllRanges();
-            sel.addRange(range);
-          } else {
-            // Place cursor at end
-            const range = document.createRange();
-            range.selectNodeContents(el);
-            range.collapse(false);
-            sel.removeAllRanges();
-            sel.addRange(range);
-          }
+        if (shouldSelect && el.textContent) {
+          selectPromptContent(el, prefillSelection);
+        } else {
+          placeCursorAtEnd(el);
         }
       });
     }
+  });
+
+  // Resolving hashtag references can re-render the editor. Keep diff-launched
+  // prompts focused on the editable action line as long as the prefill is untouched.
+  $effect(() => {
+    const _hashtagItems = hashtagItems;
+    if (!textareaEl || !prefilled || prefillSelection !== 'last-line' || prompt !== initialPrompt) {
+      return;
+    }
+
+    tick().then(() => {
+      if (textareaEl && document.activeElement === textareaEl && prompt === initialPrompt) {
+        selectPromptContent(textareaEl, 'last-line');
+      }
+    });
   });
 
   function handleSubmit(e?: Event) {

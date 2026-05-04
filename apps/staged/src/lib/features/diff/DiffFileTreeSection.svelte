@@ -105,8 +105,8 @@
     return `+${added} / -${deleted}`;
   }
 
-  function changeIndicatorWidth(total: number): number {
-    return Math.round(4 + fileChangeScale(total, maxFileChangeTotal) * 14);
+  function changeIndicatorHeight(total: number): number {
+    return Math.round(4 + fileChangeScale(total, maxFileChangeTotal) * 12);
   }
 
   // Helper to get snippet for a search result
@@ -192,21 +192,22 @@
   {@const deleted = lineCount(file.deletedLines)}
   <span
     class="change-indicator"
+    class:change-indicator-visible={total !== null}
     title={total !== null && total > 0 ? changeIndicatorTitle(added, deleted) : undefined}
     aria-hidden="true"
   >
     {#if total !== null && total > 0}
-      <span class="change-indicator-fill" style:width={`${changeIndicatorWidth(total)}px`}>
+      <span class="change-indicator-fill" style:height={`${changeIndicatorHeight(total)}px`}>
         {#if added > 0}
           <span
             class="change-segment change-segment-added"
-            style:width={`${(added / total) * 100}%`}
+            style:height={`${(added / total) * 100}%`}
           ></span>
         {/if}
         {#if deleted > 0}
           <span
             class="change-segment change-segment-deleted"
-            style:width={`${(deleted / total) * 100}%`}
+            style:height={`${(deleted / total) * 100}%`}
           ></span>
         {/if}
       </span>
@@ -581,23 +582,29 @@
 
   .change-indicator {
     display: inline-flex;
-    align-items: center;
-    justify-content: flex-start;
+    align-items: flex-end;
+    justify-content: center;
     flex-shrink: 0;
-    width: 18px;
-    height: 12px;
+    width: 8px;
+    height: 16px;
+    overflow: hidden;
+    border-radius: 2px;
+  }
+
+  .change-indicator-visible {
+    background: color-mix(in srgb, var(--border-muted) 35%, transparent);
   }
 
   .change-indicator-fill {
     display: flex;
-    height: 6px;
+    flex-direction: column;
+    width: 100%;
     overflow: hidden;
-    border-radius: 2px;
-    background: var(--border-muted);
+    border-radius: inherit;
   }
 
   .change-segment {
-    height: 100%;
+    width: 100%;
   }
 
   .change-segment-added {

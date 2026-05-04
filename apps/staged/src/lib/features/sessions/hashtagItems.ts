@@ -108,7 +108,7 @@ export function timelineToHashtagItems(
     items.push({
       type: 'commit',
       id: commit.sha,
-      title: `${commit.shortSha} ${commit.subject}`,
+      title: commit.subject,
       color: '--commit-color',
       bgColor: '--commit-bg',
       branchName,

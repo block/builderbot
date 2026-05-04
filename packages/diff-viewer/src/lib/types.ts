@@ -31,6 +31,8 @@ export interface File {
 export interface FileDiffSummary {
   before: string | null;
   after: string | null;
+  addedLines?: number | null;
+  deletedLines?: number | null;
 }
 
 /** Maps a region in the before file to a region in the after file. */

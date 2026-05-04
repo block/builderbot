@@ -13,7 +13,12 @@
   } from 'lucide-svelte';
   import { FileSearchResults } from '@builderbot/diff-viewer/components';
   import { getMatchSnippet, getTextLines, type SearchMatch } from '@builderbot/diff-viewer/utils';
-  import type { FileEntry, TreeNode } from './diffModalHelpers';
+  import {
+    fileChangeScale,
+    fileChangeTotal,
+    type FileEntry,
+    type TreeNode,
+  } from './diffModalHelpers';
   import type { FileDiff, FileDiffSummary } from '@builderbot/diff-viewer/types';
   import type { FileSearchResult } from '@builderbot/diff-viewer/state';
   import '@builderbot/diff-viewer/components/search.css';
@@ -83,8 +88,26 @@
     fileEntries.map((entry) => ({
       before: entry.status === 'added' ? null : entry.path,
       after: entry.status === 'deleted' ? null : entry.path,
+      addedLines: entry.addedLines,
+      deletedLines: entry.deletedLines,
     }))
   );
+
+  const maxFileChangeTotal = $derived(
+    fileEntries.reduce((max, entry) => Math.max(max, fileChangeTotal(entry) ?? 0), 0)
+  );
+
+  function lineCount(value: number | null | undefined): number {
+    return typeof value === 'number' ? Math.max(0, value) : 0;
+  }
+
+  function changeIndicatorTitle(added: number, deleted: number): string {
+    return `+${added} / -${deleted}`;
+  }
+
+  function changeIndicatorWidth(total: number): number {
+    return Math.round(4 + fileChangeScale(total, maxFileChangeTotal) * 14);
+  }
 
   // Helper to get snippet for a search result
   function getSnippet(match: SearchMatch, filePath: string): string {
@@ -163,6 +186,34 @@
   {/if}
 {/snippet}
 
+{#snippet changeIndicator(file: FileEntry)}
+  {@const total = fileChangeTotal(file)}
+  {@const added = lineCount(file.addedLines)}
+  {@const deleted = lineCount(file.deletedLines)}
+  <span
+    class="change-indicator"
+    title={total !== null && total > 0 ? changeIndicatorTitle(added, deleted) : undefined}
+    aria-hidden="true"
+  >
+    {#if total !== null && total > 0}
+      <span class="change-indicator-fill" style:width={`${changeIndicatorWidth(total)}px`}>
+        {#if added > 0}
+          <span
+            class="change-segment change-segment-added"
+            style:width={`${(added / total) * 100}%`}
+          ></span>
+        {/if}
+        {#if deleted > 0}
+          <span
+            class="change-segment change-segment-deleted"
+            style:width={`${(deleted / total) * 100}%`}
+          ></span>
+        {/if}
+      </span>
+    {/if}
+  </span>
+{/snippet}
+
 {#snippet treeNodes(nodes: TreeNode[], depth: number, showReviewedSection: boolean)}
   {#each nodes as node (node.path)}
     {#if node.isDir}
@@ -227,6 +278,7 @@
             {/if}
           {/if}
           {@render fileIcon(node.file, showReviewedSection)}
+          {@render changeIndicator(node.file)}
           <span class="file-name">{node.name}</span>
           {#if node.file.commentCount > 0}
             <span
@@ -525,6 +577,35 @@
 
   .icon-hover-unreview {
     color: var(--text-muted);
+  }
+
+  .change-indicator {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-start;
+    flex-shrink: 0;
+    width: 18px;
+    height: 12px;
+  }
+
+  .change-indicator-fill {
+    display: flex;
+    height: 6px;
+    overflow: hidden;
+    border-radius: 2px;
+    background: var(--border-muted);
+  }
+
+  .change-segment {
+    height: 100%;
+  }
+
+  .change-segment-added {
+    background: var(--status-added);
+  }
+
+  .change-segment-deleted {
+    background: var(--status-deleted);
   }
 
   .comment-indicator {

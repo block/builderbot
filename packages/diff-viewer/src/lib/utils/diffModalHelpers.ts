@@ -4,6 +4,8 @@ import { fileSummaryPath } from '../state/diffViewerState.svelte';
 export interface FileEntry {
   path: string;
   status: 'added' | 'deleted' | 'modified' | 'renamed';
+  addedLines?: number | null;
+  deletedLines?: number | null;
   isReviewed: boolean;
   commentCount: number;
   /** The distinct comment types present on this file (e.g. 'warning', 'suggestion'). */
@@ -32,6 +34,23 @@ export function fileStatus(summary: FileDiffSummary): 'added' | 'deleted' | 'mod
   if (!summary.after) return 'deleted';
   if (summary.before !== summary.after) return 'renamed';
   return 'modified';
+}
+
+export function fileChangeTotal(
+  file: Pick<FileDiffSummary | FileEntry, 'addedLines' | 'deletedLines'>
+): number | null {
+  const added = file.addedLines;
+  const deleted = file.deletedLines;
+  if (typeof added !== 'number' && typeof deleted !== 'number') return null;
+  return Math.max(0, added ?? 0) + Math.max(0, deleted ?? 0);
+}
+
+export function fileChangeScale(
+  fileTotal: number | null | undefined,
+  maxTotalInDiff: number
+): number {
+  if (!fileTotal || fileTotal <= 0 || maxTotalInDiff <= 0) return 0;
+  return Math.min(1, Math.log1p(fileTotal) / Math.log1p(maxTotalInDiff));
 }
 
 /** Aggregate comment count and distinct types for a single path. */
@@ -102,6 +121,8 @@ export function buildFileEntries(
     return {
       path,
       status: fileStatus(summary),
+      addedLines: summary.addedLines ?? null,
+      deletedLines: summary.deletedLines ?? null,
       isReviewed: reviewedSet.has(path),
       commentCount,
       commentTypes: [...commentTypes],

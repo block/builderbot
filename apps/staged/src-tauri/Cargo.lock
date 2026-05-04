@@ -17,6 +17,7 @@ dependencies = [
  "doctor",
  "git-diff",
  "include_dir",
+ "libc",
  "log",
  "regex",
  "reqwest",

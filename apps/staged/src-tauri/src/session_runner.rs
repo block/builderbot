@@ -1288,7 +1288,7 @@ async fn collect_pipe_output(
 fn terminate_pipeline_child(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
-        if send_signal_to_pipeline_process_group(pid, "TERM").is_ok() {
+        if send_signal_to_pipeline_process_group(pid, libc::SIGTERM).is_ok() {
             return;
         }
     }
@@ -1301,7 +1301,7 @@ fn terminate_pipeline_child(child: &mut tokio::process::Child) {
 fn force_kill_pipeline_child(child: &mut tokio::process::Child) {
     #[cfg(unix)]
     if let Some(pid) = child.id() {
-        if send_signal_to_pipeline_process_group(pid, "KILL").is_ok() {
+        if send_signal_to_pipeline_process_group(pid, libc::SIGKILL).is_ok() {
             return;
         }
     }
@@ -1312,18 +1312,17 @@ fn force_kill_pipeline_child(child: &mut tokio::process::Child) {
 }
 
 #[cfg(unix)]
-fn send_signal_to_pipeline_process_group(pid: u32, signal: &str) -> io::Result<()> {
-    let status = std::process::Command::new("kill")
-        .arg(format!("-{signal}"))
-        .arg(format!("-{pid}"))
-        .status()?;
+fn send_signal_to_pipeline_process_group(pid: u32, signal: libc::c_int) -> io::Result<()> {
+    let pgid = i32::try_from(pid)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "process id exceeds i32"))?;
 
-    if status.success() {
+    // SAFETY: kill(2) does not dereference pointers. A negative pid targets the
+    // process group created for the pipeline command.
+    let result = unsafe { libc::kill(-pgid, signal) };
+    if result == 0 {
         Ok(())
     } else {
-        Err(io::Error::other(format!(
-            "kill -{signal} -{pid} exited with {status}"
-        )))
+        Err(io::Error::last_os_error())
     }
 }
 

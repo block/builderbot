@@ -11,6 +11,7 @@
   import { Bot, Check, X, Circle, Minus } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import type { PipelineExecution, PipelineStepStatus, PipelineStepPayload } from '../../types';
+  import { formatPipelineStepDuration } from './pipelineDuration';
 
   interface Props {
     sessionId: string;
@@ -100,17 +101,6 @@
     expandedSteps = next;
   }
 
-  function formatDuration(
-    startedAt: number | null,
-    completedAt: number | null,
-    currentTime: number
-  ): string {
-    if (!startedAt) return '';
-    const end = completedAt ?? currentTime;
-    const ms = Math.max(0, end - startedAt);
-    return `${Math.round(ms / 1000)}s`;
-  }
-
   function showsAiHandoffIcon(step: PipelineStepStatus): boolean {
     return (
       step.stepType === 'ai_handoff' &&
@@ -148,7 +138,7 @@
           <span class="step-kind">AI</span>
         {:else}
           <span class="step-duration">
-            {formatDuration(step.startedAt, step.completedAt, now)}
+            {formatPipelineStepDuration(step.startedAt, step.completedAt, now)}
           </span>
         {/if}
       </button>

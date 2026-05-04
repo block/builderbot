@@ -1232,11 +1232,67 @@ pub async fn drain_queued_sessions_for_branch(
 // Auto review commands
 // =============================================================================
 
+/// Agents known to be available on remote Blox workstations.
+///
+/// Must stay in sync with the frontend's `REMOTE_AGENTS` filter in
+/// `agent.svelte.ts`.  See the "Why REMOTE_PROVIDER_IDS Exists" note in
+/// the branch history for the rationale and future cleanup path.
+const REMOTE_PROVIDER_IDS: &[&str] = &["goose", "claude"];
+
+/// Resolve the preferred provider for an auto-review, mirroring the
+/// frontend's `getPreferredAgent` logic.
+///
+/// 1. Read `recent-agents` from `preferences.json`.
+/// 2. Filter against the set of available providers (local:
+///    `discover_providers()`, remote: `REMOTE_PROVIDER_IDS`).
+/// 3. Return the first match, or the first available provider as a
+///    fallback.
+///
+/// Returns `None` only when no providers are available at all.
+fn resolve_preferred_provider(is_remote: bool) -> Option<String> {
+    let available_ids: Vec<String> = if is_remote {
+        REMOTE_PROVIDER_IDS.iter().map(|s| s.to_string()).collect()
+    } else {
+        agent::discover_providers()
+            .into_iter()
+            .map(|p| p.id)
+            .collect()
+    };
+
+    if available_ids.is_empty() {
+        return None;
+    }
+
+    // Read the recent-agents preference (same key the frontend uses).
+    let recent: Vec<String> = crate::preferences_store_path_buf()
+        .and_then(|path| std::fs::read_to_string(&path).ok())
+        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+        .and_then(|json| {
+            json.get("recent-agents")
+                .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+        })
+        .unwrap_or_default();
+
+    // First recent agent that is available wins.
+    for agent_id in &recent {
+        if available_ids.contains(agent_id) {
+            return Some(agent_id.clone());
+        }
+    }
+
+    // Fallback to first available.
+    Some(available_ids.into_iter().next().unwrap())
+}
+
 /// Core logic for starting an automatic review for a branch.
 ///
 /// Creates a review with `is_auto = true`, starts a session, and emits
 /// `session-status-changed` with `isAutoReview: true` so the frontend
 /// can track it.
+///
+/// When `provider` is `None`, resolves the user's current preferred agent
+/// from persisted preferences so that auto-reviews match what the user
+/// would get if they clicked "Review" manually.
 ///
 /// This is called both from the Tauri command and from the session runner
 /// when a commit session completes.
@@ -1259,6 +1315,19 @@ pub async fn trigger_auto_review(
         .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
 
     let is_remote = branch.workspace_name.is_some();
+
+    // Resolve the provider: use the caller's explicit choice, or fall back
+    // to the user's current preferred agent so auto-reviews match what
+    // they'd get from a manual "Review" click.
+    let provider = provider.or_else(|| {
+        let resolved = resolve_preferred_provider(is_remote);
+        if let Some(ref id) = resolved {
+            log::info!("[auto_review] resolved preferred provider: {id}");
+        } else {
+            log::warn!("[auto_review] no provider available for branch {branch_id}");
+        }
+        resolved
+    });
 
     // Resolve working directory and branch context.
     let (working_dir, branch_context) = if is_remote {

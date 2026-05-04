@@ -464,16 +464,16 @@ pub fn start_session(
                             if let Some(auto_review_branch_id) =
                                 auto_review_branch_id.filter(|_| auto_review_enabled)
                             {
-                                // Use the completing session's provider so the
-                                // auto-review runs on the same agent the user
-                                // chose for the commit.
-                                let provider = config.provider.clone();
+                                // Pass None so trigger_auto_review resolves
+                                // the user's current preferred agent at
+                                // trigger time, rather than reusing the
+                                // (possibly stale) commit session provider.
                                 match crate::session_commands::trigger_auto_review(
                                     store_for_follow_up,
                                     registry_for_follow_up,
                                     app_handle_for_follow_up,
                                     auto_review_branch_id.clone(),
-                                    provider,
+                                    None,
                                 )
                                 .await
                                 {

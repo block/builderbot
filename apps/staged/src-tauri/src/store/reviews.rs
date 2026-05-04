@@ -411,34 +411,34 @@ impl Store {
         git_latest_commit_ms: i64,
     ) -> Result<Option<Review>, StoreError> {
         let conn = self.conn.lock().unwrap();
+        // LEFT JOIN sessions to fetch the provider in the same query,
+        // keeping the review row and session metadata consistent under a
+        // single lock acquisition.
         let review: Option<Review> = conn
             .query_row(
-                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at, completed_at
-                 FROM reviews
-                 WHERE branch_id = ?1 AND is_auto = 1
-                   AND created_at >= MAX(
+                "SELECT r.id, r.branch_id, r.commit_sha, r.scope, r.session_id, r.title, r.is_auto, r.created_at, r.updated_at, r.completed_at,
+                        s.provider
+                 FROM reviews r
+                 LEFT JOIN sessions s ON s.id = r.session_id
+                 WHERE r.branch_id = ?1 AND r.is_auto = 1
+                   AND r.created_at >= MAX(
                        ?2,
                        COALESCE(
                            (SELECT MAX(updated_at) FROM commits WHERE branch_id = ?1 AND sha IS NOT NULL),
                            0))
-                 ORDER BY created_at DESC LIMIT 1",
+                 ORDER BY r.created_at DESC LIMIT 1",
                 params![branch_id, git_latest_commit_ms],
-                Self::row_to_review_header,
+                |row| {
+                    let mut r = Self::row_to_review_header(row)?;
+                    r.session_provider = row.get(10)?;
+                    Ok(r)
+                },
             )
             .optional()?;
 
         match review {
             Some(mut r) => {
                 Self::load_review_children(&conn, &mut r)?;
-                // Fetch the session's provider so the frontend can compare
-                // it against the user's preferred agent without a stale
-                // timeline lookup.
-                if let Some(ref sid) = r.session_id {
-                    // Drop the conn lock before calling get_session_provider
-                    // which acquires its own lock.
-                    drop(conn);
-                    r.session_provider = self.get_session_provider(sid)?;
-                }
                 Ok(Some(r))
             }
             None => Ok(None),

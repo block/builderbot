@@ -134,7 +134,7 @@ describe('note freshness', () => {
     expect(writeMessage).toContain('Please write the note for this session.');
   });
 
-  it('suppresses note followup CTA when a followup was already sent', () => {
+  it('suppresses note followup CTA when a followup was already sent after note updatedAt', () => {
     const followupContent = buildNoteFollowupMessage(true);
     const messages = [
       message(1, 'assistant', 1500),
@@ -142,14 +142,30 @@ describe('note freshness', () => {
       message(3, 'assistant', 3000),
     ];
 
-    expect(hasNoteFollowupBeenSent(messages)).toBe(true);
+    expect(hasNoteFollowupBeenSent(messages, 2000)).toBe(true);
     expect(getNoteFollowupLabel(session(), messages, note())).toBeNull();
   });
 
   it('does not suppress CTA when no followup has been sent', () => {
     const messages = [message(1, 'user', 1500, 'Can you help me?'), message(2, 'assistant', 3000)];
 
-    expect(hasNoteFollowupBeenSent(messages)).toBe(false);
+    expect(hasNoteFollowupBeenSent(messages, 2000)).toBe(false);
+    expect(getNoteFollowupLabel(session(), messages, note())).toBe(
+      'Ask for the note to be updated'
+    );
+  });
+
+  it('does not suppress CTA when followup was sent before note was updated', () => {
+    // A followup was sent at t=1500, but the note was updated at t=2000 (after the followup).
+    // New assistant messages at t=3000 should still trigger the CTA.
+    const followupContent = buildNoteFollowupMessage(true);
+    const messages = [
+      message(1, 'assistant', 1000),
+      message(2, 'user', 1500, followupContent),
+      message(3, 'assistant', 3000),
+    ];
+
+    expect(hasNoteFollowupBeenSent(messages, 2000)).toBe(false);
     expect(getNoteFollowupLabel(session(), messages, note())).toBe(
       'Ask for the note to be updated'
     );

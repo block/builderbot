@@ -56,11 +56,19 @@ export function latestAssistantMessage(messages: SessionMessage[]): SessionMessa
 const NOTE_FOLLOWUP_MARKER = 'The user is asking you to';
 
 /**
- * Returns true if any user message in the session already contains the
- * note-followup prompt. Used to suppress the CTA after it has been clicked.
+ * Returns true if any user message created after `noteUpdatedAt` contains the
+ * note-followup prompt. Only markers sent after the note was last updated
+ * suppress the CTA, so that a subsequent note update (which advances updatedAt)
+ * re-enables the prompt if new assistant messages arrive.
  */
-export function hasNoteFollowupBeenSent(messages: SessionMessage[]): boolean {
-  return messages.some((m) => m.role === 'user' && m.content.includes(NOTE_FOLLOWUP_MARKER));
+export function hasNoteFollowupBeenSent(
+  messages: SessionMessage[],
+  noteUpdatedAt: number
+): boolean {
+  return messages.some(
+    (m) =>
+      m.role === 'user' && m.createdAt > noteUpdatedAt && m.content.includes(NOTE_FOLLOWUP_MARKER)
+  );
 }
 
 export function shouldAskForNoteUpdate(
@@ -70,7 +78,7 @@ export function shouldAskForNoteUpdate(
 ): boolean {
   if (!session || !noteContext) return false;
   if (session.status !== 'completed' || session.completionReason !== 'turn_complete') return false;
-  if (hasNoteFollowupBeenSent(messages)) return false;
+  if (hasNoteFollowupBeenSent(messages, noteContext.updatedAt)) return false;
 
   const latestAssistant = latestAssistantMessage(messages);
   return !!latestAssistant && latestAssistant.createdAt > noteContext.updatedAt;

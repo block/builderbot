@@ -1816,6 +1816,7 @@ pub async fn sync_review_to_github(
 
 /// Result of posting a single comment to a GitHub PR.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GitHubCommentResult {
     /// URL to the posted comment
     pub comment_url: String,
@@ -2807,6 +2808,24 @@ mod tests {
         assert_eq!(
             github_issue_comment_body(&comment, "Unused here"),
             "**src/lib.rs** (Lines 10-12)\n\nUnused here"
+        );
+    }
+
+    #[test]
+    fn test_github_comment_result_serializes_camel_case() {
+        let result = GitHubCommentResult {
+            comment_url: "https://github.com/owner/repo/pull/1#discussion_r123".to_string(),
+            comment_id: 123,
+            comment_type: "review".to_string(),
+        };
+
+        assert_eq!(
+            serde_json::to_value(result).unwrap(),
+            serde_json::json!({
+                "commentUrl": "https://github.com/owner/repo/pull/1#discussion_r123",
+                "commentId": 123,
+                "commentType": "review",
+            })
         );
     }
 }

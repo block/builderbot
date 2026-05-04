@@ -1833,13 +1833,13 @@ pub async fn post_single_comment_to_github(
     repo: &Path,
     pr_number: u64,
     comment: &Comment,
-    local_head_sha: &str,
+    current_head_sha: &str,
 ) -> Result<GitHubCommentResult, GitError> {
     let token = get_github_token()?;
     let (owner, repo_name) = get_github_repo(repo)?;
     let client = reqwest::Client::new();
 
-    // Validate local HEAD matches PR HEAD
+    // Validate the branch HEAD matches the PR HEAD before creating comments.
     let pr_url = format!("https://api.github.com/repos/{owner}/{repo_name}/pulls/{pr_number}");
     let pr_response = client
         .get(&pr_url)
@@ -1872,7 +1872,7 @@ pub async fn post_single_comment_to_github(
         .await
         .map_err(|e| GitError::CommandFailed(format!("Failed to parse PR info: {e}")))?;
 
-    if pr_info.head.sha != local_head_sha {
+    if pr_info.head.sha != current_head_sha {
         return Err(GitError::CommandFailed(
             "Local branch and PR are not at the same commit. Push your changes first.".to_string(),
         ));
@@ -1904,7 +1904,7 @@ pub async fn post_single_comment_to_github(
             );
             let mut request = serde_json::json!({
                 "body": gh_comment.body,
-                "commit_id": local_head_sha,
+                "commit_id": current_head_sha,
                 "path": gh_comment.path,
                 "line": gh_comment.line,
                 "side": gh_comment.side,

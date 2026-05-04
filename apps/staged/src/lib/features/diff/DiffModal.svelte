@@ -555,12 +555,7 @@
     sendingCommentIds = new Set([...sendingCommentIds, comment.id]);
 
     try {
-      const result = await commands.postCommentToGithub(
-        branchId,
-        branch.prNumber,
-        comment,
-        diffViewer.state.commitSha ?? ''
-      );
+      const result = await commands.postCommentToGithub(branchId, branch.prNumber, comment);
       // Optimistically update the comment's GitHub tracking fields
       if (reviewHandle) {
         reviewHandle.state.comments = reviewHandle.state.comments.map((c) =>

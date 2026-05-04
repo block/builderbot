@@ -3,6 +3,7 @@
 use crate::git;
 use crate::paths;
 use crate::store::{self, Store};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// List the authenticated user's GitHub organization memberships.
@@ -198,7 +199,6 @@ pub async fn post_comment_to_github(
     branch_id: String,
     pr_number: u64,
     comment: store::Comment,
-    local_head_sha: String,
 ) -> Result<git::GitHubCommentResult, String> {
     let store = crate::get_store(&store)?;
     let branch = store
@@ -243,7 +243,8 @@ pub async fn post_comment_to_github(
             .await
             .map_err(|e| e.to_string())?
     } else {
-        git::post_single_comment_to_github(&repo_path, pr_number, &comment, &local_head_sha)
+        let current_head_sha = current_branch_head_sha(&store, &branch).await?;
+        git::post_single_comment_to_github(&repo_path, pr_number, &comment, &current_head_sha)
             .await
             .map_err(|e| e.to_string())?
     };
@@ -254,4 +255,42 @@ pub async fn post_comment_to_github(
         .map_err(|e| e.to_string())?;
 
     Ok(result)
+}
+
+async fn current_branch_head_sha(
+    store: &Arc<Store>,
+    branch: &store::Branch,
+) -> Result<String, String> {
+    if branch.branch_type == store::BranchType::Remote {
+        let workspace_name = branch
+            .workspace_name
+            .as_deref()
+            .ok_or_else(|| format!("Branch has no workspace name: {}", branch.id))?
+            .to_string();
+        let repo_subpath = crate::branches::resolve_branch_workspace_subpath(store, branch)?;
+
+        let head_sha = tauri::async_runtime::spawn_blocking(move || {
+            crate::branches::run_workspace_git(
+                &workspace_name,
+                repo_subpath.as_deref(),
+                &["rev-parse", "HEAD"],
+            )
+        })
+        .await
+        .map_err(|e| format!("get remote HEAD task failed: {e}"))?
+        .map_err(|e| format!("Failed to get remote HEAD SHA: {e}"))?;
+
+        return Ok(head_sha.trim().to_string());
+    }
+
+    let workdir = store
+        .get_workdir_for_branch(&branch.id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("No worktree for branch: {}", branch.id))?;
+    let worktree_path = PathBuf::from(workdir.path);
+
+    tauri::async_runtime::spawn_blocking(move || git::get_head_sha(&worktree_path))
+        .await
+        .map_err(|e| format!("get local HEAD task failed: {e}"))?
+        .map_err(|e| format!("Failed to get local HEAD SHA: {e}"))
 }

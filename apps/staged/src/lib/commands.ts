@@ -898,10 +898,9 @@ export function pushBranch(branchId: string, provider?: string, force?: boolean)
 export function postCommentToGithub(
   branchId: string,
   prNumber: number,
-  comment: Comment,
-  localHeadSha: string
+  comment: Comment
 ): Promise<GitHubCommentResult> {
-  return invoke('post_comment_to_github', { branchId, prNumber, comment, localHeadSha });
+  return invoke('post_comment_to_github', { branchId, prNumber, comment });
 }
 
 export interface GitHubCommentResult {

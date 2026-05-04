@@ -116,7 +116,9 @@
     use:autoFocus
   ></textarea>
   <div class="comment-editor-hint">
-    <span>{readOnly ? 'Read-only · Esc to close' : 'Enter to save · Esc to cancel'}</span>
+    <span class="comment-editor-help">
+      {readOnly ? 'Read-only · Esc to close' : 'Enter to save · Esc to cancel'}
+    </span>
     {#if existingComment && (onNote || onCommit || onGithub)}
       <div class="comment-action-buttons">
         {#if onNote}
@@ -144,7 +146,11 @@
             class="comment-action-btn github-btn"
             class:github-btn-sent={githubState === 'sent'}
             onclick={() => onGithub?.()}
-            title={githubState === 'sent' ? 'Sent to GitHub' : githubState === 'stale' ? 'Update on GitHub' : 'Send to GitHub'}
+            title={githubState === 'sent'
+              ? 'Sent to GitHub'
+              : githubState === 'stale'
+                ? 'Update on GitHub'
+                : 'Send to GitHub'}
             disabled={githubState === 'sending' || githubState === 'sent'}
           >
             {#if githubState === 'sending'}
@@ -218,16 +224,20 @@
   .comment-editor-hint {
     display: flex;
     align-items: center;
+    gap: 6px;
     padding: 4px 12px 8px;
     font-size: var(--size-xs);
     color: var(--text-faint);
+  }
+
+  .comment-editor-help {
+    margin-right: auto;
   }
 
   .comment-action-buttons {
     display: flex;
     align-items: center;
     gap: 4px;
-    margin-left: auto;
   }
 
   .comment-action-btn {
@@ -298,15 +308,18 @@
   }
 
   @keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .delete-comment-btn {
     display: flex;
     align-items: center;
     justify-content: center;
-    margin-left: auto;
     padding: 4px;
     background: none;
     border: none;

@@ -26,6 +26,7 @@
   import * as commands from '../../api/commands';
   import BranchTimeline from '../timeline/BranchTimeline.svelte';
   import ImageViewerModal from '../timeline/ImageViewerModal.svelte';
+  import { countUserComments, shouldWarnBeforeDeletingReview } from '../timeline/reviewState';
   import DiffModal from '../diff/DiffModal.svelte';
   import SessionModal from '../sessions/SessionModal.svelte';
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
@@ -98,12 +99,14 @@
   let error = $state<string | null>(null);
   let showBranchDiff = $state(false);
   let loadedTimelineKey = $state<string | null>(null);
+  type TimelineFullReview = NonNullable<Awaited<ReturnType<typeof commands.getReview>>>;
   type TimelineReviewDetails = {
     commitSha: string;
     scope: 'branch' | 'commit';
     comments: number;
     annotations: number;
     warnings: number;
+    userComments: number;
   };
   let timelineReviewDetailsById = $state<Record<string, TimelineReviewDetails>>({});
 
@@ -649,6 +652,31 @@
     }
   }
 
+  function getTimelineReviewDetails(fullReview: TimelineFullReview): TimelineReviewDetails {
+    let comments = 0;
+    let annotations = 0;
+    let warnings = 0;
+    for (const comment of fullReview.comments) {
+      if (comment.commentType === 'information') {
+        annotations += 1;
+      } else {
+        comments += 1;
+        if (comment.commentType === 'warning') {
+          warnings += 1;
+        }
+      }
+    }
+
+    return {
+      commitSha: fullReview.commitSha,
+      scope: fullReview.scope,
+      comments,
+      annotations,
+      warnings,
+      userComments: countUserComments(fullReview.comments),
+    };
+  }
+
   async function loadTimelineReviewDetails(reviews: BranchTimelineData['reviews']) {
     const loadVersion = ++reviewDetailsLoadVersion;
     if (reviews.length === 0) {
@@ -662,28 +690,7 @@
           const fullReview = await commands.getReview(review.id);
           if (!fullReview) return null;
 
-          let comments = 0;
-          let annotations = 0;
-          let warnings = 0;
-          for (const comment of fullReview.comments) {
-            if (comment.commentType === 'information') {
-              annotations += 1;
-            } else {
-              comments += 1;
-              if (comment.commentType === 'warning') {
-                warnings += 1;
-              }
-            }
-          }
-
-          const details: TimelineReviewDetails = {
-            commitSha: fullReview.commitSha,
-            scope: fullReview.scope,
-            comments,
-            annotations,
-            warnings,
-          };
-          return { id: review.id, details };
+          return { id: review.id, details: getTimelineReviewDetails(fullReview) };
         } catch (e) {
           console.error(`Failed to load review details for ${review.id}:`, e);
           return null;
@@ -835,17 +842,53 @@
         notifyError('Failed to delete review', e);
       }
     };
+    const showConfirmDelete = () => {
+      confirmDelete = {
+        title: 'Delete Review',
+        message:
+          'Are you sure you want to delete this review and all its comments?' +
+          (sessionId ? ' The linked session will also be deleted.' : ''),
+        onConfirm: doDelete,
+      };
+    };
+    const decideDelete = async () => {
+      let details = timelineReviewDetailsById[reviewId] ?? null;
+      try {
+        if (!details) {
+          const review = await commands.getReview(reviewId);
+          if (review) {
+            details = getTimelineReviewDetails(review);
+            timelineReviewDetailsById = { ...timelineReviewDetailsById, [reviewId]: details };
+          }
+        }
+      } catch (e) {
+        console.error('Failed to check review before delete:', e);
+        showConfirmDelete();
+        return;
+      }
+
+      // Conservative fallback: if we couldn't load review details, always warn
+      if (!details) {
+        showConfirmDelete();
+        return;
+      }
+
+      const shouldWarn = shouldWarnBeforeDeletingReview({
+        review: details,
+        commits: timeline?.commits ?? [],
+        userCommentCount: details.userComments,
+      });
+      if (shouldWarn) {
+        showConfirmDelete();
+      } else {
+        doDelete();
+      }
+    };
     if (opts?.altKey) {
       doDelete();
       return;
     }
-    confirmDelete = {
-      title: 'Delete Review',
-      message:
-        'Are you sure you want to delete this review and all its comments?' +
-        (sessionId ? ' The linked session will also be deleted.' : ''),
-      onConfirm: doDelete,
-    };
+    void decideDelete();
   }
 
   async function handleDeletePendingCommit(commitId: string, sessionId?: string) {

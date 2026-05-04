@@ -26,6 +26,9 @@ pub(crate) mod terminal_output;
 pub mod timeline;
 pub mod util_commands;
 
+#[cfg(test)]
+pub mod test_utils;
+
 use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -436,6 +436,9 @@
       commentType: null,
       createdAt: Date.now(),
       deletedAt: null,
+      githubCommentId: null,
+      githubCommentType: null,
+      githubCommentStale: false,
     };
     localComments = [...localComments, comment];
   }

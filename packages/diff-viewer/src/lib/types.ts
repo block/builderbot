@@ -100,6 +100,8 @@ export interface Review {
   updatedAt: number;
   /** When the AI session finished producing this review. `null` while running. */
   completedAt: number | null;
+  /** The AI provider used by the session that created this review. */
+  sessionProvider?: string | null;
 }
 
 // =============================================================================

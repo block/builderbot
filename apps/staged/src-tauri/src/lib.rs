@@ -153,6 +153,7 @@ pub struct ReviewTimelineItem {
     pub scope: String,
     pub session_id: Option<String>,
     pub session_status: Option<String>,
+    pub session_provider: Option<String>,
     pub completion_reason: Option<String>,
     pub title: Option<String>,
     pub comment_count: usize,

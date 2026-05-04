@@ -188,6 +188,9 @@ pub fn start_session(
     registry: Arc<SessionRegistry>,
 ) -> Result<(), String> {
     // Create the driver eagerly so we fail fast if the agent isn't found.
+    // When no provider is specified, resolve the first available one and
+    // persist it on the session so downstream consumers (e.g. auto-review
+    // adoption) always see a concrete provider ID.
     let driver = if let Some(ref ws_name) = config.workspace_name {
         let mut d = AcpDriver::for_workspace(ws_name, config.provider.as_deref())?;
         if let Some(ref remote_dir) = config.remote_working_dir {
@@ -197,7 +200,22 @@ pub fn start_session(
     } else {
         match &config.provider {
             Some(id) => AcpDriver::new(id)?,
-            None => AcpDriver::first_available()?,
+            None => {
+                // Resolve the first available provider and backfill it on the
+                // session record so the provider is never NULL for sessions
+                // that actually ran an agent.
+                let providers = crate::agent::discover_providers();
+                let first = providers.first().ok_or_else(|| {
+                    "No ACP agent found. Install Goose, Claude Code, Codex, Pi, or Amp and ensure it's on your PATH.".to_string()
+                })?;
+                if let Err(e) = store.set_session_provider(&config.session_id, &first.id) {
+                    log::warn!(
+                        "Failed to backfill provider on session {}: {e}",
+                        config.session_id
+                    );
+                }
+                AcpDriver::new(&first.id)?
+            }
         }
     };
 
@@ -446,12 +464,16 @@ pub fn start_session(
                             if let Some(auto_review_branch_id) =
                                 auto_review_branch_id.filter(|_| auto_review_enabled)
                             {
+                                // Use the completing session's provider so the
+                                // auto-review runs on the same agent the user
+                                // chose for the commit.
+                                let provider = config.provider.clone();
                                 match crate::session_commands::trigger_auto_review(
                                     store_for_follow_up,
                                     registry_for_follow_up,
                                     app_handle_for_follow_up,
                                     auto_review_branch_id.clone(),
-                                    None,
+                                    provider,
                                 )
                                 .await
                                 {

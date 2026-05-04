@@ -1013,6 +1013,10 @@ pub struct Review {
     /// When the AI session finished producing this review.
     /// `None` while the session is still running.
     pub completed_at: Option<i64>,
+    /// The AI provider used by the session that created this review.
+    /// Only populated by `find_fresh_auto_review`; `None` elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_provider: Option<String>,
 }
 
 impl Review {
@@ -1032,6 +1036,7 @@ impl Review {
             created_at: now,
             updated_at: now,
             completed_at: None,
+            session_provider: None,
         }
     }
 

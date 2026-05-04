@@ -192,10 +192,23 @@ export default class BranchCardSessionManager {
     if (this.hasCommitSessionInProgress) return false;
 
     const branch = this.getBranch();
+    const isRemote = this.getIsRemote();
 
     try {
       const review = await commands.findFreshAutoReview(branch.id);
       if (!review) return false;
+
+      // Check that the autoreview's agent matches the user's current
+      // preferred agent. If they differ, skip adoption so a fresh review
+      // is started with the correct agent instead.
+      // A null reviewProvider means the session predates provider tracking —
+      // treat it as compatible to avoid discarding valid reviews.
+      const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
+      const preferredAgent = getPreferredAgent(agents);
+      const reviewProvider = review.sessionProvider ?? null;
+      if (reviewProvider !== null && preferredAgent !== reviewProvider) {
+        return false;
+      }
 
       if (this.autoReviewSessionId) {
         // We're tracking the session locally — register it before revealing

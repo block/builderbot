@@ -430,6 +430,15 @@ impl Store {
         match review {
             Some(mut r) => {
                 Self::load_review_children(&conn, &mut r)?;
+                // Fetch the session's provider so the frontend can compare
+                // it against the user's preferred agent without a stale
+                // timeline lookup.
+                if let Some(ref sid) = r.session_id {
+                    // Drop the conn lock before calling get_session_provider
+                    // which acquires its own lock.
+                    drop(conn);
+                    r.session_provider = self.get_session_provider(sid)?;
+                }
                 Ok(Some(r))
             }
             None => Ok(None),
@@ -479,6 +488,7 @@ impl Store {
             created_at: row.get(7)?,
             updated_at: row.get(8)?,
             completed_at: row.get(9)?,
+            session_provider: None,
         })
     }
 

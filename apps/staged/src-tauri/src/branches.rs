@@ -89,6 +89,7 @@ fn to_branch_with_workdir(
         pr_url: branch.pr_url,
         pr_updated_at: branch.pr_updated_at,
         pr_fetched_at: branch.pr_fetched_at,
+        pr_head_sha: branch.pr_head_sha,
         setup_complete: branch.setup_complete,
         worktree_path: workdir_path,
         created_at: branch.created_at,
@@ -773,6 +774,28 @@ pub(crate) fn infer_workspace_name(branch_name: &str) -> String {
             .to_string();
     }
     full
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_branch(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<Option<BranchWithWorkdir>, String> {
+    let store = crate::get_store(&store)?;
+    let branch = store.get_branch(&branch_id).map_err(|e| e.to_string())?;
+
+    match branch {
+        Some(branch) => {
+            let workdir = store
+                .get_workdir_for_branch(&branch.id)
+                .map_err(|e| e.to_string())?;
+            Ok(Some(to_branch_with_workdir(
+                branch,
+                workdir.map(|w| w.path),
+            )))
+        }
+        None => Ok(None),
+    }
 }
 
 #[tauri::command]

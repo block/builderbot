@@ -12,6 +12,9 @@ function createComment(overrides: Partial<Comment> = {}): Comment {
     commentType: 'suggestion',
     createdAt: 1,
     deletedAt: null,
+    githubCommentId: null,
+    githubCommentType: null,
+    githubCommentStale: false,
     ...overrides,
   };
 }

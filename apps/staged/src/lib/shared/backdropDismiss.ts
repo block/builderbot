@@ -12,14 +12,19 @@ export function createBackdropDismissHandlers(options: BackdropDismissOptions) {
 
   function handlePointerDown(event: PointerEvent) {
     pointerDownOnBackdrop = event.target === event.currentTarget;
+    if (pointerDownOnBackdrop) {
+      event.stopPropagation();
+    }
   }
 
   function handleClick(event: MouseEvent) {
-    if (
-      event.target === event.currentTarget &&
-      pointerDownOnBackdrop &&
-      (options.canDismiss?.() ?? true)
-    ) {
+    const clickedBackdrop = event.target === event.currentTarget;
+
+    if (clickedBackdrop) {
+      event.stopPropagation();
+    }
+
+    if (clickedBackdrop && pointerDownOnBackdrop && (options.canDismiss?.() ?? true)) {
       options.onDismiss();
     }
 

@@ -24,12 +24,14 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
+  import { alerts } from '../../shared/alerts.svelte';
   import { formatRelativeTimeSeconds } from '../../shared/relativeTime.svelte';
   import { DiffViewer, CrossFileSearchBar } from '@builderbot/diff-viewer/components';
   import DiffCommentsSection from './DiffCommentsSection.svelte';
   import DiffFileTreeSection from './DiffFileTreeSection.svelte';
   import DiffCommitSessionLauncher from './DiffCommitSessionLauncher.svelte';
   import DiffReferenceSection from './DiffReferenceSection.svelte';
+  import NewSessionModal from '../sessions/NewSessionModal.svelte';
   import { createDiffViewerState } from './diffViewerState.svelte';
   import { createReviewState } from './reviewState.svelte';
   import { createSearchState } from '@builderbot/diff-viewer/state';
@@ -39,11 +41,20 @@
     createSearchInitializationTracker,
     createFileSelectionWithSearch,
   } from '@builderbot/diff-viewer/utils';
-  import type { Comment, CommitTimelineItem, SmartDiffAnnotation, Span } from '../../types';
+  import type {
+    Branch,
+    BranchSessionType,
+    Comment,
+    CommitTimelineItem,
+    SmartDiffAnnotation,
+    Span,
+  } from '../../types';
   import { findFreshAutoReview, getSession } from '../../commands';
+  import * as commands from '../../api/commands';
   import {
     buildFileEntries,
     buildTree,
+    buildGithubCommentUrl,
     compactTree,
     formatLineRange,
     pathsMatch,
@@ -368,6 +379,252 @@
   onDestroy(() => {
     stopAutoReviewPolling();
   });
+
+  // ==========================================================================
+  // Branch data (for PR info and session launching)
+  // ==========================================================================
+
+  let branch = $state<Branch | null>(null);
+
+  onMount(() => {
+    commands
+      .getBranch(branchId)
+      .then((b) => {
+        if (b) branch = b;
+      })
+      .catch((e) => console.warn('Failed to load branch:', e));
+  });
+
+  let hasPr = $derived(branch?.prNumber != null);
+
+  // ==========================================================================
+  // New Session Modal state
+  // ==========================================================================
+
+  let showNewSessionModal = $state(false);
+  let newSessionMode = $state<BranchSessionType>('note');
+  let newSessionPrefill = $state('');
+
+  function buildCommentPrompt(comment: Comment, mode: 'note' | 'commit'): string {
+    const reviewId = reviewHandle?.state.review?.id ?? activeReviewId;
+    const reviewRef = reviewId ? `Re: #review:${reviewId}\n` : '';
+    const tail = mode === 'note' ? 'Plan a fix for this' : 'Fix this';
+    return `${reviewRef}Code review comment:\n> ${comment.path} ${formatLineRange(comment.span)}\n> ${comment.content}\n\n${tail}`;
+  }
+
+  async function launchSessionDirectly(comment: Comment, mode: BranchSessionType) {
+    const prompt = buildCommentPrompt(comment, mode as 'note' | 'commit');
+    const launchContext = {
+      source: 'diff_viewer' as const,
+      scope: activeScope,
+      commitSha: diffViewer.state.commitSha ?? '',
+      reviewId: activeReviewId ?? null,
+    };
+
+    try {
+      // Check if there's a running session to decide queue vs start
+      const timeline = await commands.getBranchTimeline(branchId, { force: true });
+      const hasRunning =
+        timeline.commits.some(
+          (c) => c.sessionStatus === 'running' || c.sessionStatus === 'queued'
+        ) ||
+        timeline.notes.some((n) => n.sessionStatus === 'running' || n.sessionStatus === 'queued') ||
+        timeline.reviews.some(
+          (r) => !r.isAuto && (r.sessionStatus === 'running' || r.sessionStatus === 'queued')
+        );
+
+      if (hasRunning) {
+        await commands.queueBranchSession(
+          branchId,
+          prompt,
+          mode,
+          undefined,
+          undefined,
+          launchContext
+        );
+      } else {
+        await commands.startBranchSession(
+          branchId,
+          prompt,
+          mode,
+          undefined,
+          undefined,
+          launchContext
+        );
+      }
+
+      const label = mode === 'note' ? 'Note' : 'Commit';
+      alerts.show({
+        tone: 'success',
+        message: `${label} session ${hasRunning ? 'queued' : 'started'}`,
+      });
+    } catch (e) {
+      alerts.show({
+        tone: 'error',
+        title: `Unable to start ${mode} session`,
+        message: e instanceof Error ? e.message : String(e),
+        durationMs: 0,
+      });
+    }
+  }
+
+  function handleNewNote(comment: Comment, event: MouseEvent) {
+    if (event.altKey) {
+      launchSessionDirectly(comment, 'note');
+      return;
+    }
+    newSessionMode = 'note';
+    newSessionPrefill = buildCommentPrompt(comment, 'note');
+    showNewSessionModal = true;
+  }
+
+  function handleNewCommit(comment: Comment, event: MouseEvent) {
+    if (event.altKey) {
+      launchSessionDirectly(comment, 'commit');
+      return;
+    }
+    newSessionMode = 'commit';
+    newSessionPrefill = buildCommentPrompt(comment, 'commit');
+    showNewSessionModal = true;
+  }
+
+  async function handleSessionModalSubmit(data: {
+    prompt: string;
+    mode: BranchSessionType;
+    imageIds: string[];
+  }) {
+    showNewSessionModal = false;
+    const launchContext = {
+      source: 'diff_viewer' as const,
+      scope: activeScope,
+      commitSha: diffViewer.state.commitSha ?? '',
+      reviewId: activeReviewId ?? null,
+    };
+
+    try {
+      const timeline = await commands.getBranchTimeline(branchId, { force: true });
+      const hasRunning =
+        timeline.commits.some(
+          (c) => c.sessionStatus === 'running' || c.sessionStatus === 'queued'
+        ) ||
+        timeline.notes.some((n) => n.sessionStatus === 'running' || n.sessionStatus === 'queued') ||
+        timeline.reviews.some(
+          (r) => !r.isAuto && (r.sessionStatus === 'running' || r.sessionStatus === 'queued')
+        );
+
+      if (hasRunning) {
+        await commands.queueBranchSession(
+          branchId,
+          data.prompt,
+          data.mode,
+          undefined,
+          data.imageIds,
+          launchContext
+        );
+      } else {
+        await commands.startBranchSession(
+          branchId,
+          data.prompt,
+          data.mode,
+          undefined,
+          data.imageIds,
+          launchContext
+        );
+      }
+
+      const label = data.mode === 'note' ? 'Note' : data.mode === 'commit' ? 'Commit' : 'Review';
+      alerts.show({
+        tone: 'success',
+        message: `${label} session ${hasRunning ? 'queued' : 'started'}`,
+      });
+    } catch (e) {
+      alerts.show({
+        tone: 'error',
+        title: `Unable to start ${data.mode} session`,
+        message: e instanceof Error ? e.message : String(e),
+        durationMs: 0,
+      });
+    }
+  }
+
+  /** Track which comments are currently being sent/updated on GitHub. */
+  let sendingCommentIds = $state(new Set<string>());
+  let githubCommentUrls = $state(new Map<string, string>());
+
+  function getGithubCommentUrl(comment: Comment): string | null {
+    return (
+      githubCommentUrls.get(comment.id) ??
+      buildGithubCommentUrl(comment, {
+        prUrl: branch?.prUrl,
+        githubRepo,
+        prNumber: branch?.prNumber,
+      })
+    );
+  }
+
+  async function handleSendToGithub(comment: Comment) {
+    if (!branch?.prNumber) return;
+
+    if (comment.githubCommentId != null && !comment.githubCommentStale) {
+      const url = getGithubCommentUrl(comment);
+      if (!url) {
+        alerts.show({
+          tone: 'error',
+          title: 'Unable to open GitHub comment',
+          message: 'The comment URL is not available.',
+        });
+        return;
+      }
+
+      try {
+        await commands.openUrl(url);
+      } catch (e) {
+        alerts.show({
+          tone: 'error',
+          title: 'Unable to open GitHub comment',
+          message: e instanceof Error ? e.message : String(e),
+        });
+      }
+      return;
+    }
+
+    sendingCommentIds = new Set([...sendingCommentIds, comment.id]);
+
+    try {
+      const result = await commands.postCommentToGithub(branchId, branch.prNumber, comment);
+      githubCommentUrls = new Map(githubCommentUrls).set(comment.id, result.commentUrl);
+      // Optimistically update the comment's GitHub tracking fields
+      if (reviewHandle) {
+        reviewHandle.state.comments = reviewHandle.state.comments.map((c) =>
+          c.id === comment.id
+            ? {
+                ...c,
+                githubCommentId: result.commentId,
+                githubCommentType: result.commentType,
+                githubCommentStale: false,
+              }
+            : c
+        );
+      }
+    } catch (e) {
+      alerts.show({
+        tone: 'error',
+        title: 'Failed to post comment',
+        message: e instanceof Error ? e.message : String(e),
+        durationMs: 0,
+      });
+    } finally {
+      sendingCommentIds = new Set([...sendingCommentIds].filter((id) => id !== comment.id));
+    }
+  }
+
+  function getCommentGithubState(comment: Comment): 'idle' | 'sending' | 'sent' | 'stale' {
+    if (sendingCommentIds.has(comment.id)) return 'sending';
+    if (comment.githubCommentId != null) {
+      return comment.githubCommentStale ? 'stale' : 'sent';
+    }
+    return 'idle';
+  }
 
   // Create tracker for search initialization
   const checkSearchInitialization = createSearchInitializationTracker({
@@ -1006,6 +1263,10 @@
           onAddComment={readonly ? undefined : handleAddComment}
           onUpdateComment={readonly ? undefined : handleUpdateComment}
           onDeleteComment={readonly ? undefined : handleDeleteCommentFromViewer}
+          onCommentNote={readonly ? undefined : handleNewNote}
+          onCommentCommit={readonly ? undefined : handleNewCommit}
+          onCommentGithub={readonly || !hasPr ? undefined : handleSendToGithub}
+          commentGithubState={readonly || !hasPr ? undefined : getCommentGithubState}
         />
       </div>
 
@@ -1037,6 +1298,20 @@
         </div>
       </div>
     </div>
+  {/if}
+
+  {#if showNewSessionModal && branch}
+    <NewSessionModal
+      {branch}
+      mode={newSessionMode}
+      initialPrompt={newSessionPrefill}
+      prefilled
+      prefillSelection="last-line"
+      onClose={() => {
+        showNewSessionModal = false;
+      }}
+      onSubmit={handleSessionModalSubmit}
+    />
   {/if}
 </div>
 

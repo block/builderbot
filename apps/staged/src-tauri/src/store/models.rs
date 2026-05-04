@@ -1126,6 +1126,12 @@ pub struct Comment {
     pub created_at: i64,
     /// When the comment was soft-deleted. `None` means active.
     pub deleted_at: Option<i64>,
+    /// The GitHub API comment ID, set after posting to GitHub.
+    pub github_comment_id: Option<i64>,
+    /// The type of GitHub comment: "review" (inline) or "issue" (fallback).
+    pub github_comment_type: Option<String>,
+    /// Whether the local content has been edited since the last GitHub sync.
+    pub github_comment_stale: bool,
 }
 
 impl Comment {
@@ -1139,6 +1145,9 @@ impl Comment {
             comment_type: None,
             created_at: now_timestamp(),
             deleted_at: None,
+            github_comment_id: None,
+            github_comment_type: None,
+            github_comment_stale: false,
         }
     }
 

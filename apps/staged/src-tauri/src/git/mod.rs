@@ -17,11 +17,12 @@ pub use github::{
     fetch_pr, fetch_pr_status, fetch_pr_status_for_repo, fetch_pr_url, get_pr_for_branch,
     invalidate_cache as invalidate_pr_cache, list_branches_for_repo, list_github_orgs,
     list_github_repos, list_issues, list_issues_for_repo, list_pull_requests,
-    list_pull_requests_for_repo, list_repo_directories, list_user_repos, prune_remote_for_repo,
-    push_branch, resolve_default_branch, search_github_repos, search_issues, search_pull_requests,
-    sync_review_to_github, update_clone_to_remote_head, update_pull_request,
-    validate_subpath_in_repo, ChecksSummary, CreatePrResult, GitHubAuthStatus, GitHubRepo,
-    GitHubSyncResult, Issue, PrStatus, PullRequest, PullRequestInfo,
+    list_pull_requests_for_repo, list_repo_directories, list_user_repos,
+    post_single_comment_to_github, prune_remote_for_repo, push_branch, resolve_default_branch,
+    search_github_repos, search_issues, search_pull_requests, sync_review_to_github,
+    update_clone_to_remote_head, update_comment_on_github, update_pull_request,
+    validate_subpath_in_repo, ChecksSummary, CreatePrResult, GitHubAuthStatus, GitHubCommentResult,
+    GitHubRepo, GitHubSyncResult, Issue, PrStatus, PullRequest, PullRequestInfo,
 };
 pub use refs::{
     detect_default_branch, get_current_branch, get_remote_url, get_repo_root, list_branches,

@@ -19,6 +19,8 @@ static MIGRATIONS: OnceLock<Migrations<'static>> = OnceLock::new();
 pub(super) fn initialize(conn: &mut Connection) -> Result<(), StoreError> {
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
 
+    repair_github_comment_tracking_user_version(conn)?;
+
     let migrations = migrations();
     let pending = migrations
         .pending_migrations(conn)
@@ -68,6 +70,62 @@ fn update_app_metadata(conn: &Connection) -> Result<(), StoreError> {
 fn current_user_version(conn: &Connection) -> Result<i64, StoreError> {
     conn.query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(StoreError::from)
+}
+
+fn repair_github_comment_tracking_user_version(conn: &Connection) -> Result<(), StoreError> {
+    if current_user_version(conn)? != 12 || !comments_table_exists(conn)? {
+        return Ok(());
+    }
+
+    let columns = comment_column_names(conn)?;
+    let github_columns = [
+        "github_comment_id",
+        "github_comment_type",
+        "github_comment_stale",
+    ];
+
+    if !github_columns
+        .iter()
+        .any(|name| columns.iter().any(|c| c == name))
+    {
+        return Ok(());
+    }
+
+    if !columns.iter().any(|name| name == "github_comment_id") {
+        conn.execute_batch("ALTER TABLE comments ADD COLUMN github_comment_id INTEGER;")?;
+    }
+    if !columns.iter().any(|name| name == "github_comment_type") {
+        conn.execute_batch("ALTER TABLE comments ADD COLUMN github_comment_type TEXT;")?;
+    }
+    if !columns.iter().any(|name| name == "github_comment_stale") {
+        conn.execute_batch(
+            "ALTER TABLE comments ADD COLUMN github_comment_stale INTEGER NOT NULL DEFAULT 0;",
+        )?;
+    }
+
+    conn.execute_batch("PRAGMA user_version = 13;")?;
+    Ok(())
+}
+
+fn comments_table_exists(conn: &Connection) -> Result<bool, StoreError> {
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'comments'
+        )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )
+    .map_err(StoreError::from)
+}
+
+fn comment_column_names(conn: &Connection) -> Result<Vec<String>, StoreError> {
+    let mut stmt = conn.prepare("PRAGMA table_info(comments)")?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(names)
 }
 
 fn map_migration_error(error: rusqlite_migration::Error) -> StoreError {

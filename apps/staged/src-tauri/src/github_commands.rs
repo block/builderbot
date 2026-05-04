@@ -2,7 +2,8 @@
 
 use crate::git;
 use crate::paths;
-use crate::store::Store;
+use crate::store::{self, Store};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// List the authenticated user's GitHub organization memberships.
@@ -184,4 +185,112 @@ pub async fn list_issues(github_repo: String) -> Result<Vec<git::github::Issue>,
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Post or update a single review comment on a GitHub PR.
+///
+/// If the comment already has a `github_comment_id` (i.e. it was previously
+/// posted), the existing GitHub comment is updated. Otherwise a new comment
+/// is created. The resulting GitHub comment ID is persisted in the local DB
+/// so subsequent edits can update in-place.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn post_comment_to_github(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+    pr_number: u64,
+    comment: store::Comment,
+) -> Result<git::GitHubCommentResult, String> {
+    let store = crate::get_store(&store)?;
+    let branch = store
+        .get_branch(&branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+    let project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+
+    let repo_slug = if let Some(repo_id) = &branch.project_repo_id {
+        store
+            .get_project_repo(repo_id)
+            .map_err(|e| e.to_string())?
+            .map(|r| r.github_repo)
+            .unwrap_or_else(|| project.primary_repo().unwrap_or_default().to_string())
+    } else {
+        project
+            .primary_repo()
+            .ok_or_else(|| format!("Project '{}' has no repository attached", project.name))?
+            .to_string()
+    };
+
+    let repo_path = paths::clone_path_for(&repo_slug)
+        .ok_or_else(|| "Cannot determine clone path".to_string())?;
+
+    let comment_id = comment.id.clone();
+
+    let result = if let (Some(gh_id), Some(gh_type)) = (
+        comment.github_comment_id,
+        comment.github_comment_type.as_deref(),
+    ) {
+        let body = git::github::github_single_comment_body(&comment);
+        let body = if gh_type == "issue" {
+            git::github::github_issue_comment_body(&comment, &body)
+        } else {
+            body
+        };
+
+        git::update_comment_on_github(&repo_path, pr_number, gh_id, gh_type, &body)
+            .await
+            .map_err(|e| e.to_string())?
+    } else {
+        let current_head_sha = current_branch_head_sha(&store, &branch).await?;
+        git::post_single_comment_to_github(&repo_path, pr_number, &comment, &current_head_sha)
+            .await
+            .map_err(|e| e.to_string())?
+    };
+
+    // Persist the GitHub comment ID so future edits can update in-place
+    store
+        .set_github_comment(&comment_id, result.comment_id, &result.comment_type)
+        .map_err(|e| e.to_string())?;
+
+    Ok(result)
+}
+
+async fn current_branch_head_sha(
+    store: &Arc<Store>,
+    branch: &store::Branch,
+) -> Result<String, String> {
+    if branch.branch_type == store::BranchType::Remote {
+        let workspace_name = branch
+            .workspace_name
+            .as_deref()
+            .ok_or_else(|| format!("Branch has no workspace name: {}", branch.id))?
+            .to_string();
+        let repo_subpath = crate::branches::resolve_branch_workspace_subpath(store, branch)?;
+
+        let head_sha = tauri::async_runtime::spawn_blocking(move || {
+            crate::branches::run_workspace_git(
+                &workspace_name,
+                repo_subpath.as_deref(),
+                &["rev-parse", "HEAD"],
+            )
+        })
+        .await
+        .map_err(|e| format!("get remote HEAD task failed: {e}"))?
+        .map_err(|e| format!("Failed to get remote HEAD SHA: {e}"))?;
+
+        return Ok(head_sha.trim().to_string());
+    }
+
+    let workdir = store
+        .get_workdir_for_branch(&branch.id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("No worktree for branch: {}", branch.id))?;
+    let worktree_path = PathBuf::from(workdir.path);
+
+    tauri::async_runtime::spawn_blocking(move || git::get_head_sha(&worktree_path))
+        .await
+        .map_err(|e| format!("get local HEAD task failed: {e}"))?
+        .map_err(|e| format!("Failed to get local HEAD SHA: {e}"))
 }

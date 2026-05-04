@@ -643,6 +643,25 @@
           {/if}
 
           {#if selectedContext}
+            <div class="repo-setting-row">
+              <label class="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={selectedContext.copyBuildDirsEnabled}
+                  onchange={async (e) => {
+                    if (!selectedContext) return;
+                    const enabled = (e.target as HTMLInputElement).checked;
+                    await commands.setCopyBuildDirsEnabled(selectedContext.id, enabled);
+                    contexts = contexts.map((c) =>
+                      c.id === selectedContext!.id ? { ...c, copyBuildDirsEnabled: enabled } : c
+                    );
+                  }}
+                />
+                Copy build dirs to new worktrees
+              </label>
+              <span class="experimental-badge">Experimental</span>
+            </div>
+
             {#if selectedContextAttachments.length > 0}
               <div class="repo-attachments">
                 {#each selectedContextAttachments as attachment (attachment.projectRepoId)}
@@ -1108,6 +1127,27 @@
     font-size: calc(var(--size-xs) - 1px);
     color: var(--text-muted);
     background: var(--bg-primary);
+  }
+
+  .repo-setting-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--size-sm);
+    color: var(--text-primary);
+  }
+
+  .experimental-badge {
+    font-size: calc(var(--size-xs) - 1px);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--ui-warning, #e6a200) 15%, transparent);
+    color: var(--ui-warning, #e6a200);
+    border: 1px solid color-mix(in srgb, var(--ui-warning, #e6a200) 30%, transparent);
+    white-space: nowrap;
   }
 
   .repo-empty-attachments {

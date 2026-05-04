@@ -145,7 +145,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
         )
         .unwrap();
 
-    assert_eq!(version, 14);
+    assert_eq!(version, 16);
     assert_eq!(app_version, super::APP_VERSION);
     assert!(table_exists(&conn, "projects"));
     assert!(table_exists(&conn, "project_notes"));
@@ -169,22 +169,14 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
 #[test]
 fn test_store_repairs_github_comment_tracking_user_version() {
     let path = temp_db_path("github-comment-tracking-repair");
-    let conn = Connection::open(&path).unwrap();
+
+    let mut conn = Connection::open(&path).unwrap();
+    migrations::migrate_to(&mut conn, 12).unwrap();
     conn.execute_batch(
         "
-        PRAGMA user_version = 12;
-        CREATE TABLE app_metadata (
-            id          INTEGER PRIMARY KEY CHECK (id = 1),
-            app_version TEXT NOT NULL
-        );
-        INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
-        CREATE TABLE sessions (id TEXT PRIMARY KEY);
-        CREATE TABLE comments (
-            id                    TEXT PRIMARY KEY,
-            github_comment_id     INTEGER,
-            github_comment_type   TEXT,
-            github_comment_stale  INTEGER NOT NULL DEFAULT 0
-        );
+        ALTER TABLE comments ADD COLUMN github_comment_id INTEGER;
+        ALTER TABLE comments ADD COLUMN github_comment_type TEXT;
+        ALTER TABLE comments ADD COLUMN github_comment_stale INTEGER NOT NULL DEFAULT 0;
         ",
     )
     .unwrap();
@@ -197,8 +189,18 @@ fn test_store_repairs_github_comment_tracking_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 14);
+    assert_eq!(version, 16);
     assert!(column_exists(&conn, "sessions", "pipeline"));
+    assert!(column_exists(
+        &conn,
+        "action_contexts",
+        "last_run_worktree_path"
+    ));
+    assert!(column_exists(
+        &conn,
+        "action_contexts",
+        "copy_build_dirs_enabled"
+    ));
 
     cleanup_db(&path);
 }
@@ -206,20 +208,13 @@ fn test_store_repairs_github_comment_tracking_user_version() {
 #[test]
 fn test_store_repairs_pipeline_user_version() {
     let path = temp_db_path("pipeline-version-repair");
-    let conn = Connection::open(&path).unwrap();
+
+    let mut conn = Connection::open(&path).unwrap();
+    migrations::migrate_to(&mut conn, 12).unwrap();
     conn.execute_batch(
         "
+        ALTER TABLE sessions ADD COLUMN pipeline TEXT;
         PRAGMA user_version = 13;
-        CREATE TABLE app_metadata (
-            id          INTEGER PRIMARY KEY CHECK (id = 1),
-            app_version TEXT NOT NULL
-        );
-        INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
-        CREATE TABLE sessions (
-            id       TEXT PRIMARY KEY,
-            pipeline TEXT
-        );
-        CREATE TABLE comments (id TEXT PRIMARY KEY);
         ",
     )
     .unwrap();
@@ -232,10 +227,20 @@ fn test_store_repairs_pipeline_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 14);
+    assert_eq!(version, 16);
     assert!(column_exists(&conn, "comments", "github_comment_id"));
     assert!(column_exists(&conn, "comments", "github_comment_type"));
     assert!(column_exists(&conn, "comments", "github_comment_stale"));
+    assert!(column_exists(
+        &conn,
+        "action_contexts",
+        "last_run_worktree_path"
+    ));
+    assert!(column_exists(
+        &conn,
+        "action_contexts",
+        "copy_build_dirs_enabled"
+    ));
 
     cleanup_db(&path);
 }

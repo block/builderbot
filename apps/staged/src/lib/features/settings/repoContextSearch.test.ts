@@ -8,6 +8,7 @@ const context: ActionContext = {
   subpath: 'apps/staged',
   hasDetectedActions: false,
   detectingActions: false,
+  copyBuildDirsEnabled: false,
   createdAt: 0,
   updatedAt: 0,
 };

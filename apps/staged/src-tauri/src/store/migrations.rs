@@ -53,6 +53,13 @@ pub(super) fn validate() -> Result<(), StoreError> {
     migrations().validate().map_err(map_migration_error)
 }
 
+#[cfg(test)]
+pub(super) fn migrate_to(conn: &mut Connection, version: usize) -> Result<(), StoreError> {
+    migrations()
+        .to_version(conn, version)
+        .map_err(map_migration_error)
+}
+
 fn migrations() -> &'static Migrations<'static> {
     MIGRATIONS.get_or_init(|| {
         Migrations::from_directory(&MIGRATION_DIR).expect("staged store migrations should be valid")

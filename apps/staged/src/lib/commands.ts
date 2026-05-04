@@ -439,6 +439,7 @@ export interface ActionContext {
   subpath: string | null;
   hasDetectedActions: boolean;
   detectingActions: boolean;
+  copyBuildDirsEnabled: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -477,6 +478,10 @@ export function deleteAllRepoActions(contextId: string): Promise<void> {
 
 export function deleteActionContext(contextId: string): Promise<void> {
   return invoke('delete_action_context', { contextId });
+}
+
+export function setCopyBuildDirsEnabled(contextId: string, enabled: boolean): Promise<void> {
+  return invoke('set_copy_build_dirs_enabled', { contextId, enabled });
 }
 
 // =============================================================================

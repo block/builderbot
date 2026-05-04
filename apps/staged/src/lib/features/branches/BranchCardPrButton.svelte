@@ -16,9 +16,15 @@
   import Spinner from '../../shared/Spinner.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import { listen } from '@tauri-apps/api/event';
-  import type { Branch, BranchTimeline as BranchTimelineData } from '../../types';
+  import type { Branch, BranchTimeline as BranchTimelineData, Session } from '../../types';
   import * as commands from '../../api/commands';
-  import { extractPrNumber, extractPrUrl, isPushRejectedNonFastForward } from './branchCardHelpers';
+  import {
+    classifyCompletedPushSession,
+    classifyPipelinePushCompletion,
+    extractPrNumber,
+    extractPrUrl,
+    type CompletedPushOutcome,
+  } from './branchCardHelpers';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { prStateStore, type PrState } from '../../stores/prState.svelte';
@@ -199,7 +205,7 @@
       try {
         const session = await commands.getSession(sid);
         if (session && session.status !== 'running') {
-          handlePushSessionComplete(session.status);
+          handlePushSessionComplete(session.status, session);
         }
       } catch (err) {
         console.error(
@@ -402,7 +408,36 @@
 
   let pushCompletionInFlight = false;
 
-  export async function handlePushSessionComplete(status: string) {
+  async function classifyPushSessionOutcome(
+    sid: string,
+    completedSession?: Session | null
+  ): Promise<CompletedPushOutcome> {
+    let pipeline = completedSession?.pipeline ?? null;
+
+    if (!completedSession) {
+      try {
+        const session = await commands.getSession(sid);
+        pipeline = session?.pipeline ?? null;
+      } catch {
+        // Fall back to message markers below.
+      }
+    }
+
+    try {
+      const messages = await commands.getSessionMessages(sid);
+      const pipelineOutcome = classifyPipelinePushCompletion(pipeline, messages);
+      if (pipelineOutcome) return pipelineOutcome;
+      return classifyCompletedPushSession(pipeline, messages);
+    } catch {
+      // If messages can't be fetched, try pipeline-only classification (without
+      // the force-push false-positive guard) then fall back to succeeded.
+      const pipelineOutcome = classifyPipelinePushCompletion(pipeline);
+      if (pipelineOutcome) return pipelineOutcome;
+      return 'succeeded';
+    }
+  }
+
+  export async function handlePushSessionComplete(status: string, completedSession?: Session) {
     if (pushCompletionInFlight) return;
     const sid = pushSessionId;
     pushCompletionInFlight = true;
@@ -410,17 +445,16 @@
 
     try {
       if (status === 'completed' && sid) {
-        let rejected = false;
-        try {
-          const messages = await commands.getSessionMessages(sid);
-          rejected = isPushRejectedNonFastForward(messages);
-        } catch {
-          // If we can't read messages, treat as success (original behavior)
-        }
+        const outcome = await classifyPushSessionOutcome(sid, completedSession);
 
-        if (rejected) {
+        if (outcome === 'rejected_non_fast_forward') {
           pushStateStore.setPushError(branch.id, '', true);
         } else {
+          try {
+            await commands.clearBranchPrStatus(branch.id);
+          } catch (e) {
+            console.warn('[Staged] Failed to clear PR status after push:', e);
+          }
           pushStateStore.setPushDone(branch.id);
           // Optimistically update prHeadSha to the latest timeline commit
           // so hasUnpushed becomes false immediately, before the next PR

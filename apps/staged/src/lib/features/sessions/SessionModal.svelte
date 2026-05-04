@@ -81,6 +81,7 @@
     type VerbGroup,
   } from './sessionModalHelpers';
   import InContentSearch from '../../shared/InContentSearch.svelte';
+  import PipelineSteps from './PipelineSteps.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
 
@@ -868,6 +869,8 @@
     return groups;
   });
 
+  let isPipelinePrelude = $derived(isLive && !!session?.pipeline && grouped.length === 0);
+
   /** For each index in `grouped`, whether a user message exists at a later index.
    *  Pre-computed in O(N) so the template can do an O(1) lookup instead of
    *  scanning with `findIndex` per tool group (which was O(N²) total). */
@@ -980,6 +983,9 @@
       onscroll={handleScroll}
       onclick={handleExternalLinkClick}
     >
+      {#if session?.pipeline}
+        <PipelineSteps {sessionId} pipeline={session.pipeline} />
+      {/if}
       {#if loading}
         <div class="center-state">
           <Spinner size={24} />
@@ -990,15 +996,17 @@
           <AlertCircle size={24} />
           <span>{error}</span>
         </div>
-      {:else if grouped.length === 0 && isLive}
+      {:else if grouped.length === 0 && isLive && !session?.pipeline}
         <div class="center-state">
           <Spinner size={20} />
           <span>Waiting for response…</span>
         </div>
-      {:else if grouped.length === 0}
+      {:else if grouped.length === 0 && !session?.pipeline}
         <div class="center-state">
           <span>No messages</span>
         </div>
+      {:else if grouped.length === 0}
+        <!-- Pipeline is present but no messages yet — pipeline steps are the entire view -->
       {:else}
         <div class="messages">
           {#each grouped as group, groupIdx (groupKey(group))}
@@ -1253,89 +1261,13 @@
 
     <!-- Input area with queued messages and image previews -->
     <div class="input-wrapper">
-      {#if hasQueuedMessages}
-        <div class="queue-popover">
-          {#each messageQueue as msg, i}
-            <div class="queue-item">
-              <span class="queue-item-label">Queued</span>
-              <span class="queue-item-text">{msg}</span>
-              <button
-                class="queue-item-remove"
-                onclick={() => {
-                  messageQueue = messageQueue.filter((_, idx) => idx !== i);
-                }}
-                title="Remove from queue"
-              >
-                <X size={10} />
-              </button>
-            </div>
-          {/each}
-        </div>
-      {/if}
-      {#if canAttachImages && replyImageIds.length > 0}
-        <div class="reply-images">
-          {#each replyImageIds as imageId}
-            <div class="reply-image-thumb">
-              {#if imagePreviews.get(imageId)}
-                <img src={imagePreviews.get(imageId)} alt="attached" />
-              {:else}
-                <div class="reply-image-placeholder"><ImagePlus size={16} /></div>
-              {/if}
-              {#if !isLive}
-                <button
-                  class="reply-image-remove"
-                  onclick={() => removeReplyImage(imageId)}
-                  title="Remove image"
-                >
-                  <X size={10} />
-                </button>
-              {/if}
-            </div>
-          {/each}
-          {#if !isLive}
-            <button class="reply-image-add" onclick={openImagePicker} title="Add image">
-              <Plus size={16} />
-            </button>
-          {/if}
-        </div>
-      {/if}
-      <div class="input-area">
-        {#if canAttachImages}
-          <input
-            bind:this={imageFileInput}
-            type="file"
-            accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
-            multiple
-            class="file-input-hidden"
-            onchange={handleImageFileSelect}
-          />
-          {#if replyImageIds.length === 0}
-            <button
-              class="attach-btn"
-              onclick={openImagePicker}
-              disabled={isLive}
-              title="Attach image"
-            >
-              <Paperclip size={16} />
-            </button>
-          {/if}
-        {/if}
-        <HashtagInput
-          bind:textareaEl={inputEl}
-          bind:value={inputText}
-          class="message-input"
-          placeholder={isLive ? 'Type to queue a follow-up…' : 'Send a message…'}
-          rows={1}
-          onkeydown={handleInputKeydown}
-          oninput={autoResize}
-          items={hashtagItems}
-        />
-        {#if isLive}
+      {#if isPipelinePrelude}
+        <div class="input-area pipeline-stop-area">
           <button
-            class="action-btn stop-btn"
+            class="action-btn stop-btn pipeline-stop-btn"
             onclick={handleCancel}
             disabled={cancelling}
-            title="Stop session"
+            title="Stop workflow"
           >
             {#if cancelling}
               <Spinner size={16} />
@@ -1343,22 +1275,115 @@
               <CircleStop size={16} />
             {/if}
           </button>
-        {:else}
-          <button
-            class="action-btn send-btn"
-            class:sending
-            onclick={handleSend}
-            disabled={sending || !inputText.trim()}
-            title="Send message"
-          >
-            {#if sending}
-              <Spinner size={16} />
-            {:else}
-              <Send size={16} />
-            {/if}
-          </button>
+        </div>
+      {:else}
+        {#if hasQueuedMessages}
+          <div class="queue-popover">
+            {#each messageQueue as msg, i}
+              <div class="queue-item">
+                <span class="queue-item-label">Queued</span>
+                <span class="queue-item-text">{msg}</span>
+                <button
+                  class="queue-item-remove"
+                  onclick={() => {
+                    messageQueue = messageQueue.filter((_, idx) => idx !== i);
+                  }}
+                  title="Remove from queue"
+                >
+                  <X size={10} />
+                </button>
+              </div>
+            {/each}
+          </div>
         {/if}
-      </div>
+        {#if canAttachImages && replyImageIds.length > 0}
+          <div class="reply-images">
+            {#each replyImageIds as imageId}
+              <div class="reply-image-thumb">
+                {#if imagePreviews.get(imageId)}
+                  <img src={imagePreviews.get(imageId)} alt="attached" />
+                {:else}
+                  <div class="reply-image-placeholder"><ImagePlus size={16} /></div>
+                {/if}
+                {#if !isLive}
+                  <button
+                    class="reply-image-remove"
+                    onclick={() => removeReplyImage(imageId)}
+                    title="Remove image"
+                  >
+                    <X size={10} />
+                  </button>
+                {/if}
+              </div>
+            {/each}
+            {#if !isLive}
+              <button class="reply-image-add" onclick={openImagePicker} title="Add image">
+                <Plus size={16} />
+              </button>
+            {/if}
+          </div>
+        {/if}
+        <div class="input-area">
+          {#if canAttachImages}
+            <input
+              bind:this={imageFileInput}
+              type="file"
+              accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+              multiple
+              class="file-input-hidden"
+              onchange={handleImageFileSelect}
+            />
+            {#if replyImageIds.length === 0}
+              <button
+                class="attach-btn"
+                onclick={openImagePicker}
+                disabled={isLive}
+                title="Attach image"
+              >
+                <Paperclip size={16} />
+              </button>
+            {/if}
+          {/if}
+          <HashtagInput
+            bind:textareaEl={inputEl}
+            bind:value={inputText}
+            class="message-input"
+            placeholder={isLive ? 'Type to queue a follow-up…' : 'Send a message…'}
+            rows={1}
+            onkeydown={handleInputKeydown}
+            oninput={autoResize}
+            items={hashtagItems}
+          />
+          {#if isLive}
+            <button
+              class="action-btn stop-btn"
+              onclick={handleCancel}
+              disabled={cancelling}
+              title="Stop session"
+            >
+              {#if cancelling}
+                <Spinner size={16} />
+              {:else}
+                <CircleStop size={16} />
+              {/if}
+            </button>
+          {:else}
+            <button
+              class="action-btn send-btn"
+              class:sending
+              onclick={handleSend}
+              disabled={sending || !inputText.trim()}
+              title="Send message"
+            >
+              {#if sending}
+                <Spinner size={16} />
+              {:else}
+                <Send size={16} />
+              {/if}
+            </button>
+          {/if}
+        </div>
+      {/if}
     </div>
   </div>
 </div>
@@ -2112,6 +2137,15 @@
     border-top: 1px solid var(--border-subtle);
     background: var(--bg-chrome);
     flex-shrink: 0;
+  }
+
+  .pipeline-stop-area {
+    justify-content: flex-end;
+  }
+
+  .stop-btn.pipeline-stop-btn {
+    background: var(--ui-danger);
+    color: var(--bg-deepest);
   }
 
   .attach-btn {

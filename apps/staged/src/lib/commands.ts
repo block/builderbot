@@ -909,6 +909,26 @@ export interface GitHubCommentResult {
   commentType: string;
 }
 
+/** Rebase a branch onto its base branch via a pipeline.
+ *  Fetches the latest base, then runs git rebase. AI handles conflicts if any.
+ *  Returns the session ID so the frontend can track progress. */
+export function rebaseBranch(branchId: string, provider?: string): Promise<string> {
+  return invoke('rebase_branch', {
+    branchId,
+    provider: provider ?? null,
+  });
+}
+
+/** Squash all commits on a branch into a single commit via a pipeline.
+ *  Uses git reset --soft then hands off to AI to write the commit message.
+ *  Returns the session ID so the frontend can track progress. */
+export function squashCommits(branchId: string, provider?: string): Promise<string> {
+  return invoke('squash_commits', {
+    branchId,
+    provider: provider ?? null,
+  });
+}
+
 // =============================================================================
 // Doctor (Health Check)
 // =============================================================================

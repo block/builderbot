@@ -259,6 +259,46 @@ export interface Session {
   completionReason: CompletionReason | null;
   createdAt: number;
   updatedAt: number;
+  /** Pipeline execution state. Present when the session was started via a command pipeline. */
+  pipeline?: PipelineExecution | null;
+}
+
+// =============================================================================
+// Pipelines
+// =============================================================================
+
+export type StepStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped';
+export type StepType = 'command' | 'ai_handoff';
+export type PipelineKind = 'rebase' | 'squash';
+
+export interface PipelineStepStatus {
+  label: string;
+  stepType: StepType;
+  status: StepStatus;
+  output: string | null;
+  error: string | null;
+  startedAt: number | null;
+  completedAt: number | null;
+}
+
+export interface PipelineExecution {
+  kind?: PipelineKind | null;
+  steps: PipelineStepStatus[];
+  currentStep: number;
+  completedWithoutAi: boolean;
+}
+
+/** Payload emitted by the `pipeline-step-changed` Tauri event. */
+export interface PipelineStepPayload {
+  sessionId: string;
+  stepIndex: number;
+  label: string;
+  stepType: StepType;
+  status: StepStatus;
+  output: string | null;
+  error: string | null;
+  startedAt: number | null;
+  completedAt: number | null;
 }
 
 export type MessageRole = 'user' | 'assistant' | 'tool_call' | 'tool_result';

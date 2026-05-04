@@ -1,4 +1,5 @@
 import type { ProjectAction } from '../../api/commands';
+import type { PipelineExecution } from '../../types';
 
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
 
@@ -112,13 +113,62 @@ export function extractPrNumber(url: string): number | null {
   return match ? parseInt(match[1], 10) : null;
 }
 
-export function isPushRejectedNonFastForward(
-  messages: { content: string; role: string }[]
-): boolean {
+type MessageLike = { content: string; role: string };
+
+export type CompletedPushOutcome = 'succeeded' | 'rejected_non_fast_forward';
+
+function containsNonFastForwardPushMarker(content: string): boolean {
+  const lowerContent = content.toLowerCase();
+  return (
+    content.includes('PUSH_REJECTED: NON_FAST_FORWARD') || lowerContent.includes('non-fast-forward')
+  );
+}
+
+export function isPushRejectedNonFastForward(messages: MessageLike[]): boolean {
   return messages.some(
     (msg) =>
       (msg.role === 'assistant' || msg.role === 'tool_result') &&
-      msg.content.includes('PUSH_REJECTED: NON_FAST_FORWARD')
+      containsNonFastForwardPushMarker(msg.content)
+  );
+}
+
+export function classifyPipelinePushCompletion(
+  pipeline: PipelineExecution | null | undefined,
+  messages?: MessageLike[]
+): CompletedPushOutcome | null {
+  if (!pipeline) return null;
+
+  const hasNonFastForward = pipeline.steps.some(
+    (step) =>
+      step.status === 'failed' &&
+      step.output !== null &&
+      containsNonFastForwardPushMarker(step.output)
+  );
+  if (hasNonFastForward) {
+    // If AI ran after the pipeline failure (e.g. a force-push that failed with
+    // --force-with-lease and the error happened to contain "non-fast-forward"),
+    // the AI handled recovery — don't classify as rejected. Only treat it as
+    // rejected when no AI session ran (the pipeline aborted immediately).
+    const aiRan = messages && messages.some((m) => m.role === 'assistant');
+    if (aiRan) return 'succeeded';
+    return 'rejected_non_fast_forward';
+  }
+
+  const allStepsPassedOrSkipped = pipeline.steps.every(
+    (step) => step.status === 'succeeded' || step.status === 'skipped'
+  );
+  if (pipeline.completedWithoutAi || allStepsPassedOrSkipped) return 'succeeded';
+
+  return null;
+}
+
+export function classifyCompletedPushSession(
+  pipeline: PipelineExecution | null | undefined,
+  messages: MessageLike[]
+): CompletedPushOutcome {
+  return (
+    classifyPipelinePushCompletion(pipeline, messages) ??
+    (isPushRejectedNonFastForward(messages) ? 'rejected_non_fast_forward' : 'succeeded')
   );
 }
 

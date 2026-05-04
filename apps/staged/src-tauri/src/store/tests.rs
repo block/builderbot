@@ -394,6 +394,54 @@ fn test_transition_from_active_does_not_overwrite_completed_session() {
 }
 
 #[test]
+fn test_queued_pipeline_commit_owns_branch_queue_position() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let mut session = Session::new_queued("Rebase branch");
+    session.pipeline = Some(PipelineExecution::from_steps(&[]).with_kind(PipelineKind::Rebase));
+    store.create_session(&session).unwrap();
+    let commit = Commit::new_pending(&branch.id).with_session(&session.id);
+    store.create_commit(&commit).unwrap();
+
+    let queued = store.get_queued_sessions_for_branch(&branch.id).unwrap();
+
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].id, session.id);
+    assert_eq!(
+        queued[0].pipeline.as_ref().and_then(|p| p.kind.as_ref()),
+        Some(&PipelineKind::Rebase)
+    );
+}
+
+#[test]
+fn test_running_pipeline_commit_marks_branch_busy_and_resolves_branch() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let mut session = Session::new_running("Squash commits", Path::new("/tmp"));
+    session.pipeline = Some(PipelineExecution::from_steps(&[]).with_kind(PipelineKind::Squash));
+    store.create_session(&session).unwrap();
+    let commit = Commit::new_pending(&branch.id).with_session(&session.id);
+    store.create_commit(&commit).unwrap();
+
+    assert!(store.has_running_session_for_branch(&branch.id).unwrap());
+    assert_eq!(
+        store
+            .get_branch_id_for_session(&session.id)
+            .unwrap()
+            .as_deref(),
+        Some(branch.id.as_str())
+    );
+}
+
+#[test]
 fn test_completion_reason_round_trips() {
     let store = Store::in_memory().unwrap();
 
@@ -664,6 +712,48 @@ fn test_commit_unique_sha_per_branch() {
     let p2 = Commit::new_pending(&branch.id);
     store.create_commit(&p1).unwrap();
     store.create_commit(&p2).unwrap();
+}
+
+#[test]
+fn test_complete_pending_commit_sha_resolves_duplicate_without_unique_error() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let existing = Commit::new_with_sha(&branch.id, "aaa111");
+    let pending = Commit::new_pending(&branch.id);
+    store.create_commit(&existing).unwrap();
+    store.create_commit(&pending).unwrap();
+
+    let updated = store
+        .complete_pending_commit_sha(&pending.id, &branch.id, "aaa111")
+        .unwrap();
+
+    assert!(!updated);
+    assert!(store.get_commit(&existing.id).unwrap().is_some());
+    assert!(store.get_commit(&pending.id).unwrap().is_none());
+}
+
+#[test]
+fn test_complete_pending_commit_sha_updates_pending_row() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let pending = Commit::new_pending(&branch.id);
+    store.create_commit(&pending).unwrap();
+
+    let updated = store
+        .complete_pending_commit_sha(&pending.id, &branch.id, "bbb222")
+        .unwrap();
+
+    assert!(updated);
+    let commit = store.get_commit(&pending.id).unwrap().unwrap();
+    assert_eq!(commit.sha.as_deref(), Some("bbb222"));
 }
 
 #[test]

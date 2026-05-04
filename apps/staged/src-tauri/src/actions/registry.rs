@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
+use crate::terminal_output::TerminalOutputProcessor;
+
 /// Information about a running action
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,7 +37,7 @@ pub enum RunPhase {
 pub struct ActionRegistry {
     running: Mutex<HashMap<String, RunningActionInfo>>,
     run_phases: Mutex<HashMap<String, RunPhase>>,
-    output_buffers: Mutex<HashMap<String, Arc<Mutex<Vec<String>>>>>,
+    output_buffers: Mutex<HashMap<String, Arc<Mutex<TerminalOutputProcessor>>>>,
     /// Cancellation senders for regex matcher tasks — dropping or sending
     /// `true` stops the background task.
     cancel_senders: Mutex<HashMap<String, watch::Sender<bool>>>,
@@ -135,37 +137,34 @@ impl ActionRegistry {
 
     /// Create (or retrieve) a shared output buffer for an execution and return
     /// a reference to it.
-    pub fn register_output_buffer(&self, execution_id: &str) -> Arc<Mutex<Vec<String>>> {
+    pub(crate) fn register_output_buffer(
+        &self,
+        execution_id: &str,
+    ) -> Arc<Mutex<TerminalOutputProcessor>> {
         let mut buffers = self.output_buffers.lock().unwrap();
         buffers
             .entry(execution_id.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(Vec::new())))
+            .or_insert_with(|| Arc::new(Mutex::new(TerminalOutputProcessor::default())))
             .clone()
     }
 
-    /// Append a line to the output buffer for the given execution.
+    /// Append a raw output chunk to the normalized buffer for the given execution.
     /// Creates the buffer lazily if it does not yet exist.
-    pub fn append_output(&self, execution_id: &str, line: &str) {
-        let buf = {
-            let mut buffers = self.output_buffers.lock().unwrap();
-            buffers
-                .entry(execution_id.to_string())
-                .or_insert_with(|| Arc::new(Mutex::new(Vec::new())))
-                .clone()
-        };
+    pub(crate) fn append_output_chunk(&self, execution_id: &str, chunk: &str) {
+        let buf = self.register_output_buffer(execution_id);
         let mut buf = buf.lock().unwrap();
-        buf.push(line.to_string());
+        buf.process_chunk(chunk);
     }
 
     /// Get a snapshot of all output lines for an execution.
-    pub fn get_output_lines(&self, execution_id: &str) -> Option<Vec<String>> {
+    pub(crate) fn get_output_lines(&self, execution_id: &str) -> Option<Vec<String>> {
         let buf = {
             let buffers = self.output_buffers.lock().unwrap();
             buffers.get(execution_id).cloned()
         };
         buf.map(|b| {
             let b = b.lock().unwrap();
-            b.clone()
+            b.snapshot_lines()
         })
     }
 
@@ -175,5 +174,36 @@ impl ActionRegistry {
     pub fn store_cancel_sender(&self, execution_id: &str, sender: watch::Sender<bool>) {
         let mut senders = self.cancel_senders.lock().unwrap();
         senders.insert(execution_id.to_string(), sender);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn output_buffer_renders_progress_across_chunks() {
+        let registry = ActionRegistry::new();
+
+        registry.append_output_chunk("run", "10%\r");
+        assert_eq!(registry.get_output_lines("run").unwrap(), vec!["10%"]);
+
+        registry.append_output_chunk("run", "20%\r");
+        registry.append_output_chunk("run", "done\n");
+
+        assert_eq!(registry.get_output_lines("run").unwrap(), vec!["done"]);
+    }
+
+    #[test]
+    fn output_buffer_handles_crlf_split_across_chunks() {
+        let registry = ActionRegistry::new();
+
+        registry.append_output_chunk("run", "hello\r");
+        registry.append_output_chunk("run", "\nworld\n");
+
+        assert_eq!(
+            registry.get_output_lines("run").unwrap(),
+            vec!["hello", "world"]
+        );
     }
 }

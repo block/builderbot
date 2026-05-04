@@ -20,6 +20,7 @@ pub(super) fn initialize(conn: &mut Connection) -> Result<(), StoreError> {
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
 
     repair_github_comment_tracking_user_version(conn)?;
+    repair_pipeline_user_version(conn)?;
 
     let migrations = migrations();
     let pending = migrations
@@ -91,6 +92,35 @@ fn repair_github_comment_tracking_user_version(conn: &Connection) -> Result<(), 
         return Ok(());
     }
 
+    ensure_github_comment_tracking_columns(conn, &columns)?;
+
+    conn.execute_batch("PRAGMA user_version = 13;")?;
+    Ok(())
+}
+
+fn repair_pipeline_user_version(conn: &Connection) -> Result<(), StoreError> {
+    if current_user_version(conn)? != 13 || !sessions_table_exists(conn)? {
+        return Ok(());
+    }
+
+    let columns = session_column_names(conn)?;
+    if !columns.iter().any(|name| name == "pipeline") {
+        return Ok(());
+    }
+
+    if comments_table_exists(conn)? {
+        let comment_columns = comment_column_names(conn)?;
+        ensure_github_comment_tracking_columns(conn, &comment_columns)?;
+    }
+
+    conn.execute_batch("PRAGMA user_version = 14;")?;
+    Ok(())
+}
+
+fn ensure_github_comment_tracking_columns(
+    conn: &Connection,
+    columns: &[String],
+) -> Result<(), StoreError> {
     if !columns.iter().any(|name| name == "github_comment_id") {
         conn.execute_batch("ALTER TABLE comments ADD COLUMN github_comment_id INTEGER;")?;
     }
@@ -102,8 +132,6 @@ fn repair_github_comment_tracking_user_version(conn: &Connection) -> Result<(), 
             "ALTER TABLE comments ADD COLUMN github_comment_stale INTEGER NOT NULL DEFAULT 0;",
         )?;
     }
-
-    conn.execute_batch("PRAGMA user_version = 13;")?;
     Ok(())
 }
 
@@ -120,8 +148,29 @@ fn comments_table_exists(conn: &Connection) -> Result<bool, StoreError> {
     .map_err(StoreError::from)
 }
 
+fn sessions_table_exists(conn: &Connection) -> Result<bool, StoreError> {
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'sessions'
+        )",
+        [],
+        |row| row.get::<_, bool>(0),
+    )
+    .map_err(StoreError::from)
+}
+
 fn comment_column_names(conn: &Connection) -> Result<Vec<String>, StoreError> {
     let mut stmt = conn.prepare("PRAGMA table_info(comments)")?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(names)
+}
+
+fn session_column_names(conn: &Connection) -> Result<Vec<String>, StoreError> {
+    let mut stmt = conn.prepare("PRAGMA table_info(sessions)")?;
     let names = stmt
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<Result<Vec<_>, _>>()?;

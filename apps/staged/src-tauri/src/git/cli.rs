@@ -20,23 +20,43 @@ pub enum GitError {
     InvalidPath(String),
 }
 
+const GIT_LOCAL_ENV_VARS: &[&str] = &[
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+];
+
 /// Run a git command and return stdout as a string
 pub fn run(repo: &Path, args: &[&str]) -> Result<String, GitError> {
     let repo_str = repo
         .to_str()
         .ok_or_else(|| GitError::InvalidPath(repo.display().to_string()))?;
 
-    let output = Command::new("git")
-        .args(["-C", repo_str])
-        .args(args)
-        .output()
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                GitError::GitNotFound
-            } else {
-                GitError::CommandFailed(e.to_string())
-            }
-        })?;
+    let mut command = Command::new("git");
+    command.args(["-C", repo_str]).args(args);
+    for key in GIT_LOCAL_ENV_VARS {
+        command.env_remove(key);
+    }
+
+    let output = command.output().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            GitError::GitNotFound
+        } else {
+            GitError::CommandFailed(e.to_string())
+        }
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

@@ -22,6 +22,7 @@ pub mod review_commands;
 pub mod session_commands;
 pub mod session_runner;
 pub mod store;
+pub(crate) mod terminal_output;
 pub mod timeline;
 pub mod util_commands;
 
@@ -296,7 +297,8 @@ pub(crate) async fn maybe_trigger_auto_review_for_new_repo(
             _ => return,
         };
         let worktree = std::path::PathBuf::from(path);
-        match git::get_commits_since_base(&worktree, &branch.base_branch) {
+        let base_ref = git::origin_ref_for_branch(&branch.base_branch);
+        match git::get_commits_since_base(&worktree, &base_ref) {
             Ok(commits) if commits.is_empty() => {
                 log::info!(
                     "[auto_review] branch {branch_id} has no commits yet — skipping auto review"
@@ -1832,6 +1834,8 @@ pub fn run() {
             prs::refresh_all_pr_statuses,
             prs::has_unpushed_commits,
             prs::push_branch,
+            prs::rebase_branch,
+            prs::squash_commits,
             prs::clear_branch_pr_status,
             prs::recover_branch_pr,
             // Utilities

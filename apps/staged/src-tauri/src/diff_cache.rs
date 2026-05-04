@@ -563,13 +563,14 @@ pub fn collect_branch_diff(
     head_sha: &str,
     commit_shas: &[String],
 ) -> Result<CollectedDiffs> {
+    let base_ref = crate::git::origin_ref_for_branch(base_branch);
     let start = std::time::Instant::now();
     log::info!(
         "collect_branch_diff: branch={branch_id} workspace={workspace_name} commits={}",
         commit_shas.len()
     );
     // Execute the collection script in a single remote call.
-    let script = build_collect_script(repo_subpath, base_branch, head_sha, commit_shas);
+    let script = build_collect_script(repo_subpath, &base_ref, head_sha, commit_shas);
     let t_exec = std::time::Instant::now();
     let output = crate::blox::ws_exec(workspace_name, &["bash", "-c", &script])
         .map_err(|e| anyhow::anyhow!("remote diff collection script failed: {e}"))?;
@@ -756,7 +757,7 @@ fn cache_branch_diff_background(
         branch_id,
         workspace_name,
         repo_subpath.as_deref(),
-        &branch.base_branch,
+        &crate::git::origin_ref_for_branch(&branch.base_branch),
         head_sha,
         commit_shas,
     )?;

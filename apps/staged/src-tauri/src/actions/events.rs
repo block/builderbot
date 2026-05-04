@@ -104,10 +104,10 @@ impl ExecutionListener for TauriExecutionListener {
                 stream,
                 ..
             } => {
-                // Feed output lines into the shared buffer for regex matching.
-                for line in chunk.lines() {
-                    self.registry.append_output(&execution_id, line);
-                }
+                // Feed normalized terminal output into the shared buffer for
+                // regex matching and autodetect prompts. The frontend still
+                // receives the original chunk for live display.
+                self.registry.append_output_chunk(&execution_id, &chunk);
 
                 let _ = self.app.emit(
                     "action_output",

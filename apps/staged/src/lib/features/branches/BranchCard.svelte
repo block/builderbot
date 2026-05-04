@@ -48,6 +48,8 @@
   import { alerts } from '../../shared/alerts.svelte';
   import { timelineToHashtagItems, projectNotesToHashtagItems } from '../sessions/hashtagItems';
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
+  import { getPreferredAgent } from '../settings/preferences.svelte';
+  import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
 
   interface Props {
     branch: Branch;
@@ -244,6 +246,27 @@
         (r) => !r.isAuto && (r.sessionStatus === 'queued' || r.sessionStatus === 'running')
       )
     );
+  }
+  let commandPipelinePending = $state(false);
+  let branchSessionBusy = $derived(timeline ? hasActiveSessions(timeline) : false);
+
+  async function startBranchCommandPipeline(kind: 'rebase' | 'squash') {
+    if (commandPipelinePending || branchSessionBusy) return;
+    commandPipelinePending = true;
+    const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
+    const provider = getPreferredAgent(agents) ?? undefined;
+    try {
+      if (kind === 'rebase') {
+        await commands.rebaseBranch(branch.id, provider);
+      } else {
+        await commands.squashCommits(branch.id, provider);
+      }
+      await loadTimeline();
+    } catch (e) {
+      notifyError(kind === 'rebase' ? 'Rebase failed' : 'Squash failed', e);
+    } finally {
+      commandPipelinePending = false;
+    }
   }
 
   // Compute suggested prefill prompts from the latest visible timeline entry.
@@ -1110,17 +1133,11 @@
           {onDelete}
           {onRename}
           onNoteCreated={() => loadTimeline()}
-          onRebaseBranch={() =>
-            sessionMgr.startOrQueueSession(
-              'commit',
-              `Rebase this branch onto ${branch.baseBranch}. Run \`git fetch origin\` first, then \`git merge-base ${branch.baseBranch} HEAD\` to find the fork point, then \`git rebase --onto ${branch.baseBranch} <merge-base> HEAD\`. Do not push.`
-            )}
-          onSquashCommits={() =>
-            sessionMgr.startOrQueueSession(
-              'commit',
-              `Squash this branch's commits. Run \`git merge-base ${branch.baseBranch} HEAD\` to find the branch-off point, then \`git reset --soft <result> && git commit\` to squash. Do not squash beyond the merge-base.`
-            )}
-          newCommitDisabled={sessionMgr.isNewSessionDisabled}
+          onRebaseBranch={() => startBranchCommandPipeline('rebase')}
+          onSquashCommits={() => startBranchCommandPipeline('squash')}
+          newCommitDisabled={sessionMgr.isNewSessionDisabled ||
+            commandPipelinePending ||
+            branchSessionBusy}
           {commitCount}
         />
       </div>
@@ -1402,7 +1419,7 @@
         try {
           const session = await commands.getSession(closedSessionId);
           if (session && session.status !== 'running') {
-            prButton.handlePushSessionComplete(session.status);
+            prButton.handlePushSessionComplete(session.status, session);
           }
         } catch {
           // Ignore — the polling fallback will catch it

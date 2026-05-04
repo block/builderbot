@@ -43,7 +43,7 @@ pub(crate) fn resolve_branch_context(
         let repo_subpath = branches::resolve_branch_clone_dir(store, &branch)?;
 
         return Ok(BranchDiffContext {
-            base_branch: branch.base_branch,
+            base_branch: git::origin_ref_for_branch(&branch.base_branch),
             project_id: project.id,
             project_location: project.location,
             worktree_path: None,
@@ -58,7 +58,7 @@ pub(crate) fn resolve_branch_context(
         .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
 
     Ok(BranchDiffContext {
-        base_branch: branch.base_branch,
+        base_branch: git::origin_ref_for_branch(&branch.base_branch),
         project_id: project.id,
         project_location: project.location,
         worktree_path: Some(workdir.path),
@@ -113,8 +113,9 @@ fn build_diff_spec(
                 Some(sha) => sha.to_string(),
                 None => git::get_head_sha(worktree).map_err(|e| e.to_string())?,
             };
+            let base_ref = git::origin_ref_for_branch(base_branch);
             let spec = git::DiffSpec {
-                base: git::GitRef::MergeBaseOf([base_branch.to_string(), resolved_sha.clone()]),
+                base: git::GitRef::MergeBaseOf([base_ref, resolved_sha.clone()]),
                 head: git::GitRef::Rev(resolved_sha.clone()),
             };
             Ok((spec, resolved_sha))

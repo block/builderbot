@@ -1,5 +1,5 @@
 import * as commands from '../../api/commands';
-import type { BranchTimeline, SessionMessage } from '../../types';
+import type { BranchTimeline, PipelineExecution, SessionMessage } from '../../types';
 import { formatToolDisplay, stripXmlTags } from '../sessions/sessionModalHelpers';
 
 const HINT_POLL_INTERVAL_MS = 750;
@@ -109,6 +109,17 @@ function deriveHint(messages: SessionMessage[], repoDir?: string | null): string
   return undefined;
 }
 
+function derivePipelineHint(pipeline: PipelineExecution | null | undefined): string | undefined {
+  if (!pipeline?.steps.length) return undefined;
+  const runningStep = pipeline.steps.find((step) => step.status === 'running');
+  const currentStep = pipeline.steps[pipeline.currentStep];
+  const nextStep =
+    runningStep ?? currentStep ?? pipeline.steps.find((step) => step.status === 'pending');
+  if (!nextStep) return undefined;
+  if (nextStep.status === 'succeeded' || nextStep.status === 'failed') return undefined;
+  return normalizeHintText(withTrailingEllipsis(nextStep.label));
+}
+
 function mergeHintMessages(
   previous: SessionMessage[],
   updated: SessionMessage[],
@@ -212,7 +223,9 @@ export function createLiveSessionHints(
         tracker.lastMessageId = latestMessage?.id ?? tracker.lastMessageId;
       }
 
-      const nextHint = deriveHint(tracker.messages, getRepoDir?.());
+      const nextHint =
+        deriveHint(tracker.messages, getRepoDir?.()) ??
+        (tracker.messages.length === 0 ? derivePipelineHint(session.pipeline) : undefined);
       if (nextHint) {
         setHint(sessionId, nextHint);
       } else {

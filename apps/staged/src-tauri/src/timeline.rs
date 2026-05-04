@@ -25,6 +25,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
     let mut commits = Vec::new();
     if let Some(ref ws_name) = branch.workspace_name {
         let repo_subpath = branches::resolve_branch_workspace_subpath(store, &branch)?;
+        let base_ref = git::origin_ref_for_branch(&branch.base_branch);
         // Remote branch: fetch commits via ws_exec.
         // Use merge-base to find the fork point so that only the branch's
         // own commits are shown, even after a rebase or when the base ref
@@ -32,14 +33,14 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         let range = if let Ok(mb_output) = branches::run_workspace_git(
             ws_name,
             repo_subpath.as_deref(),
-            &["merge-base", &branch.base_branch, "HEAD"],
+            &["merge-base", &base_ref, "HEAD"],
         ) {
             let mb = mb_output.trim().to_string();
             format!("{mb}..HEAD")
         } else {
             // Fallback: if merge-base fails (e.g. shallow clone), use
-            // the raw base ref.
-            format!("{}..HEAD", &branch.base_branch)
+            // the remote-tracking base ref.
+            format!("{base_ref}..HEAD")
         };
         let format_arg = "--format=%H|%h|%s|%an|%ct";
         let output = branches::run_workspace_git(
@@ -83,8 +84,9 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         // Local branch: fetch commits from the local worktree
         let worktree_path = Path::new(&wd.path);
         if worktree_path.exists() {
-            let git_commits = git::get_commits_since_base(worktree_path, &branch.base_branch)
-                .map_err(|e| {
+            let base_ref = git::origin_ref_for_branch(&branch.base_branch);
+            let git_commits =
+                git::get_commits_since_base(worktree_path, &base_ref).map_err(|e| {
                     format!("Failed to get commits since base for branch {branch_id}: {e:?}")
                 })?;
 

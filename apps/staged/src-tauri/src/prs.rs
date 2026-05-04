@@ -182,15 +182,11 @@ fn start_pipeline_for_branch(
 
 /// Derive the base branch name, stripping the `origin/` prefix if present.
 ///
-/// We use `origin/{base}` in git commands (e.g. `git log origin/main..HEAD`)
-/// rather than the bare branch name because the local tracking branch may be
-/// stale — it only updates on fetch/pull, while `origin/` refs reflect the
-/// last fetch and are what we actually diff against.
+/// GitHub's PR API expects the bare branch name, while local comparison
+/// commands should use `git::origin_ref_for_branch` so the stale local base
+/// branch is never consulted.
 fn base_branch_name(branch: &store::Branch) -> &str {
-    branch
-        .base_branch
-        .strip_prefix("origin/")
-        .unwrap_or(&branch.base_branch)
+    git::branch_name_without_origin(&branch.base_branch)
 }
 
 fn commit_pipeline_prompt(kind: &PipelineKind) -> &'static str {
@@ -473,6 +469,7 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
 fn create_pr_handoff_prompt(
     pr_type: &str,
     base_branch: &str,
+    base_ref: &str,
     draft_flag: &str,
     opening: &str,
 ) -> String {
@@ -485,6 +482,8 @@ fn create_pr_handoff_prompt(
 Use the context below as a starting point, and inspect the branch changes as needed.
 
 Requirements:
+- Treat `{base_ref}` as the comparison base. The local `{base_branch}` branch may be stale; do not use it for diff or log comparisons.
+- If you inspect branch changes, compare `$(git merge-base {base_ref} HEAD)..HEAD`.
 - Choose a conventional-commit-style PR title, using the most appropriate type (feat, fix, refactor, docs, style, test, chore, perf, ci, or build) based on the actual changes.
 - Write a concise PR body that summarizes the changes.
 - Run `gh pr create --base {base_branch} --title <title> --body <body>{draft_flag}` to create the {pr_type}.
@@ -497,6 +496,72 @@ Context from prior steps:
 {{step_outputs}}
 </action>"#
     )
+}
+
+fn build_create_pr_pipeline_steps(
+    pr_type: &str,
+    base_branch: &str,
+    draft_flag: &str,
+    branch_name: &str,
+) -> Vec<PipelineStep> {
+    let base_ref = git::origin_ref_for_branch(base_branch);
+
+    vec![
+        PipelineStep::Command {
+            label: "Fetch latest base".to_string(),
+            command: format!("git fetch origin {base_branch}"),
+            on_failure: FailureStrategy::HandoffToAi {
+                prompt_template: create_pr_handoff_prompt(
+                    pr_type,
+                    base_branch,
+                    &base_ref,
+                    draft_flag,
+                    &format!(
+                        "The fetch failed while creating a {pr_type}. Diagnose and fix the issue if needed, then inspect this branch against `{base_ref}`, push the branch, and create or recover the {pr_type}."
+                    ),
+                ),
+            },
+        },
+        PipelineStep::Command {
+            label: "View commit history".to_string(),
+            command: format!(
+                r#"base_commit=$(git merge-base {base_ref} HEAD) && git log --oneline "$base_commit"..HEAD"#
+            ),
+            on_failure: FailureStrategy::Continue,
+        },
+        PipelineStep::Command {
+            label: "View changed files".to_string(),
+            command: format!(
+                r#"base_commit=$(git merge-base {base_ref} HEAD) && git diff "$base_commit"..HEAD --stat"#
+            ),
+            on_failure: FailureStrategy::Continue,
+        },
+        PipelineStep::Command {
+            label: "Push to remote".to_string(),
+            command: format!("git push -u origin {branch_name}"),
+            on_failure: FailureStrategy::HandoffToAi {
+                prompt_template: create_pr_handoff_prompt(
+                    pr_type,
+                    base_branch,
+                    &base_ref,
+                    draft_flag,
+                    &format!(
+                        "The push failed while creating a {pr_type}. Diagnose and fix the issue, then retry the push. After the push succeeds, create or recover the {pr_type}."
+                    ),
+                ),
+            },
+        },
+        PipelineStep::AiHandoff {
+            label: "Create PR".to_string(),
+            prompt_template: create_pr_handoff_prompt(
+                pr_type,
+                base_branch,
+                &base_ref,
+                draft_flag,
+                &format!("Create a {pr_type} for the current branch."),
+            ),
+        },
+    ]
 }
 
 // =============================================================================
@@ -526,41 +591,8 @@ pub async fn create_pr(
     };
 
     // Build the pipeline steps for PR creation.
-    let steps = vec![
-        PipelineStep::Command {
-            label: "View commit history".to_string(),
-            command: format!("git log --oneline origin/{base_branch}..HEAD"),
-            on_failure: FailureStrategy::Continue,
-        },
-        PipelineStep::Command {
-            label: "View changed files".to_string(),
-            command: format!("git diff origin/{base_branch}...HEAD --stat"),
-            on_failure: FailureStrategy::Continue,
-        },
-        PipelineStep::Command {
-            label: "Push to remote".to_string(),
-            command: format!("git push -u origin {}", ctx.branch.branch_name),
-            on_failure: FailureStrategy::HandoffToAi {
-                prompt_template: create_pr_handoff_prompt(
-                    pr_type,
-                    base_branch,
-                    draft_flag,
-                    &format!(
-                        "The push failed while creating a {pr_type}. Diagnose and fix the issue, then retry the push. After the push succeeds, create or recover the {pr_type}."
-                    ),
-                ),
-            },
-        },
-        PipelineStep::AiHandoff {
-            label: "Create PR".to_string(),
-            prompt_template: create_pr_handoff_prompt(
-                pr_type,
-                base_branch,
-                draft_flag,
-                &format!("Create a {pr_type} for the current branch."),
-            ),
-        },
-    ];
+    let steps =
+        build_create_pr_pipeline_steps(pr_type, base_branch, draft_flag, &ctx.branch.branch_name);
 
     let prompt = format!("Create a {pr_type} for the current branch");
 
@@ -1065,4 +1097,66 @@ pub async fn squash_commits(
         provider,
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn command_at(steps: &[PipelineStep], index: usize) -> (&str, &str, &FailureStrategy) {
+        match &steps[index] {
+            PipelineStep::Command {
+                label,
+                command,
+                on_failure,
+            } => (label, command, on_failure),
+            PipelineStep::AiHandoff { .. } => panic!("expected command step at index {index}"),
+        }
+    }
+
+    fn ai_prompt_at(steps: &[PipelineStep], index: usize) -> (&str, &str) {
+        match &steps[index] {
+            PipelineStep::AiHandoff {
+                label,
+                prompt_template,
+            } => (label, prompt_template),
+            PipelineStep::Command { .. } => panic!("expected AI handoff step at index {index}"),
+        }
+    }
+
+    #[test]
+    fn create_pr_pipeline_fetches_base_and_uses_origin_merge_base_for_context() {
+        let steps = build_create_pr_pipeline_steps("pull request", "main", "", "feature-branch");
+
+        assert_eq!(steps.len(), 5);
+
+        let (label, command, on_failure) = command_at(&steps, 0);
+        assert_eq!(label, "Fetch latest base");
+        assert_eq!(command, "git fetch origin main");
+        assert!(matches!(on_failure, FailureStrategy::HandoffToAi { .. }));
+
+        let (_, command, _) = command_at(&steps, 1);
+        assert_eq!(
+            command,
+            r#"base_commit=$(git merge-base origin/main HEAD) && git log --oneline "$base_commit"..HEAD"#
+        );
+        assert!(!command.contains("git log --oneline main"));
+
+        let (_, command, _) = command_at(&steps, 2);
+        assert_eq!(
+            command,
+            r#"base_commit=$(git merge-base origin/main HEAD) && git diff "$base_commit"..HEAD --stat"#
+        );
+        assert!(!command.contains("git diff main"));
+
+        let (label, command, _) = command_at(&steps, 3);
+        assert_eq!(label, "Push to remote");
+        assert_eq!(command, "git push -u origin feature-branch");
+
+        let (label, prompt) = ai_prompt_at(&steps, 4);
+        assert_eq!(label, "Create PR");
+        assert!(prompt.contains("local `main` branch may be stale"));
+        assert!(prompt.contains("$(git merge-base origin/main HEAD)..HEAD"));
+        assert!(prompt.contains("gh pr create --base main"));
+    }
 }

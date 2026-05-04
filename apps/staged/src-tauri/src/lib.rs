@@ -297,7 +297,8 @@ pub(crate) async fn maybe_trigger_auto_review_for_new_repo(
             _ => return,
         };
         let worktree = std::path::PathBuf::from(path);
-        match git::get_commits_since_base(&worktree, &branch.base_branch) {
+        let base_ref = git::origin_ref_for_branch(&branch.base_branch);
+        match git::get_commits_since_base(&worktree, &base_ref) {
             Ok(commits) if commits.is_empty() => {
                 log::info!(
                     "[auto_review] branch {branch_id} has no commits yet — skipping auto review"

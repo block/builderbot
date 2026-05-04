@@ -65,6 +65,25 @@ pub struct BranchRef {
     pub remote: Option<String>,
 }
 
+/// Return the branch name without Staged's preferred `origin/` prefix.
+///
+/// Stored base branches can be either bare names (`main`) or remote-tracking
+/// refs (`origin/main`) depending on when the branch was created. GitHub APIs
+/// want the bare base name, while local diff/log commands should use
+/// [`origin_ref_for_branch`] so a stale local base branch is never consulted.
+pub fn branch_name_without_origin(branch: &str) -> &str {
+    branch.strip_prefix("origin/").unwrap_or(branch)
+}
+
+/// Return the `origin/<branch>` remote-tracking ref for a stored branch name.
+///
+/// This intentionally prefers `origin/` refs for comparisons because Staged
+/// does not keep local base branches up to date. Callers should fetch before
+/// relying on freshness when the exact remote tip matters.
+pub fn origin_ref_for_branch(branch: &str) -> String {
+    format!("origin/{}", branch_name_without_origin(branch.trim()))
+}
+
 /// Prune stale remote-tracking refs (branches deleted on the remote).
 ///
 /// This is a network operation that can be slow, so callers should run it
@@ -186,4 +205,29 @@ pub fn detect_default_branch(repo: &Path) -> Result<String, GitError> {
 
     // Last resort: use "origin/main" so we always branch from the remote
     Ok("origin/main".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{branch_name_without_origin, origin_ref_for_branch};
+
+    #[test]
+    fn branch_name_without_origin_strips_origin_prefix() {
+        assert_eq!(branch_name_without_origin("origin/main"), "main");
+        assert_eq!(
+            branch_name_without_origin("origin/release/2026-05"),
+            "release/2026-05"
+        );
+        assert_eq!(branch_name_without_origin("main"), "main");
+    }
+
+    #[test]
+    fn origin_ref_for_branch_normalizes_stored_base_branch() {
+        assert_eq!(origin_ref_for_branch("main"), "origin/main");
+        assert_eq!(origin_ref_for_branch("origin/main"), "origin/main");
+        assert_eq!(
+            origin_ref_for_branch("origin/release/2026-05"),
+            "origin/release/2026-05"
+        );
+    }
 }

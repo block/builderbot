@@ -25,8 +25,9 @@ pub use github::{
     GitHubRepo, GitHubSyncResult, Issue, PrStatus, PullRequest, PullRequestInfo,
 };
 pub use refs::{
-    detect_default_branch, get_current_branch, get_remote_url, get_repo_root, list_branches,
-    list_refs, merge_base, prune_remote, resolve_ref, BranchRef,
+    branch_name_without_origin, detect_default_branch, get_current_branch, get_remote_url,
+    get_repo_root, list_branches, list_refs, merge_base, origin_ref_for_branch, prune_remote,
+    resolve_ref, BranchRef,
 };
 pub use types::*;
 pub use worktree::{

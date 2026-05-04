@@ -1457,7 +1457,8 @@ fn latest_git_commit_ms(store: &Arc<Store>, branch_id: &str) -> i64 {
     if !worktree_path.exists() {
         return 0;
     }
-    let commits = match git::get_commits_since_base(worktree_path, &branch.base_branch) {
+    let base_ref = git::origin_ref_for_branch(&branch.base_branch);
+    let commits = match git::get_commits_since_base(worktree_path, &base_ref) {
         Ok(c) => c,
         Err(_) => return 0,
     };
@@ -1558,8 +1559,10 @@ pub(crate) fn build_branch_context(
     let mut timeline: Vec<TimelineEntry> = Vec::new();
     let mut commit_error = None;
 
-    // Commits from git log
-    match git::get_full_commit_log(worktree, base_branch) {
+    // Commits from git log. Always compare against the remote-tracking base;
+    // Staged does not keep local base branches fresh.
+    let base_ref = git::origin_ref_for_branch(base_branch);
+    match git::get_full_commit_log(worktree, &base_ref) {
         Ok(log) if !log.trim().is_empty() => {
             timeline.extend(parse_timestamped_log(&log));
         }
@@ -1606,13 +1609,14 @@ pub(crate) fn build_remote_branch_context(
     // Use merge-base to find the fork point so that only the branch's own
     // commits are included, even after a rebase or when the base ref has
     // moved forward.
+    let base_ref = git::origin_ref_for_branch(base_branch);
     let range = if let Ok(mb_output) =
-        blox::ws_exec(workspace_name, &["git", "merge-base", base_branch, "HEAD"])
+        blox::ws_exec(workspace_name, &["git", "merge-base", &base_ref, "HEAD"])
     {
         let mb = mb_output.trim().to_string();
         format!("{mb}..HEAD")
     } else {
-        format!("{base_branch}..HEAD")
+        format!("{base_ref}..HEAD")
     };
     match blox::ws_exec(
         workspace_name,
@@ -1921,7 +1925,8 @@ fn build_branch_timeline_summary(
     if let Ok(Some(workdir)) = store.get_workdir_for_branch(&branch.id) {
         let worktree = std::path::Path::new(&workdir.path);
         if worktree.exists() {
-            match git::get_full_commit_log(worktree, &branch.base_branch) {
+            let base_ref = git::origin_ref_for_branch(&branch.base_branch);
+            match git::get_full_commit_log(worktree, &base_ref) {
                 Ok(log) if !log.trim().is_empty() => {
                     timeline.extend(parse_timestamped_log(&log));
                 }
@@ -2594,8 +2599,9 @@ was requested and how it was fulfilled."
         BranchSessionType::Review => {
             "The user is requesting an AI code review of the current branch.
 
-Review the code changes on this branch by running `git diff $(git merge-base origin/HEAD HEAD)..HEAD` \
-(or the appropriate base branch) and provide feedback as structured comments.
+Review the code changes on this branch by running a diff from the remote-tracking base ref, \
+for example `git diff $(git merge-base origin/main HEAD)..HEAD`. Do not compare against the \
+local base branch, which may be stale.
 
 Do NOT create any commits or modify any files.
 

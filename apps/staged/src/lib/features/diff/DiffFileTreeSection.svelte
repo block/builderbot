@@ -7,9 +7,9 @@
     ChevronDown,
     Folder,
     MessageSquare,
-    CirclePlus,
-    CircleMinus,
-    CircleArrowUp,
+    MoveRight,
+    Plus,
+    X,
   } from 'lucide-svelte';
   import { FileSearchResults } from '@builderbot/diff-viewer/components';
   import { getMatchSnippet, getTextLines, type SearchMatch } from '@builderbot/diff-viewer/utils';
@@ -109,6 +109,10 @@
     return Math.round(4 + fileChangeScale(total, maxFileChangeTotal) * 12);
   }
 
+  function hasLineChanges(file: FileEntry): boolean {
+    return (fileChangeTotal(file) ?? 0) > 0;
+  }
+
   // Helper to get snippet for a search result
   function getSnippet(match: SearchMatch, filePath: string): string {
     if (!diffViewerState) return '';
@@ -146,20 +150,24 @@
 
 {#snippet fileIcon(file: FileEntry, showReviewedSection: boolean)}
   {#if isReadonly}
-    <span class="status-icon status-icon-static">
+    <span
+      class="status-icon status-icon-static"
+      class:status-icon-added={file.status === 'added'}
+      class:status-icon-deleted={file.status === 'deleted'}
+      class:status-icon-renamed={file.status === 'renamed' && !hasLineChanges(file)}
+      class:status-icon-renamed-modified={file.status === 'renamed' && hasLineChanges(file)}
+    >
       <span class="icon-default">
-        {#if file.status === 'added'}
-          <CirclePlus size={16} />
-        {:else if file.status === 'deleted'}
-          <CircleMinus size={16} />
-        {:else}
-          <CircleArrowUp size={16} />
-        {/if}
+        {@render fileStatusVisual(file)}
       </span>
     </span>
   {:else}
     <span
       class="status-icon"
+      class:status-icon-added={file.status === 'added'}
+      class:status-icon-deleted={file.status === 'deleted'}
+      class:status-icon-renamed={file.status === 'renamed' && !hasLineChanges(file)}
+      class:status-icon-renamed-modified={file.status === 'renamed' && hasLineChanges(file)}
       onclick={(e) => onToggleReviewed(e, file)}
       onkeydown={(e) => e.key === 'Enter' && onToggleReviewed(e, file)}
       role="button"
@@ -167,13 +175,7 @@
       title={showReviewedSection ? 'Mark as needs review' : 'Mark as reviewed'}
     >
       <span class="icon-default">
-        {#if file.status === 'added'}
-          <CirclePlus size={16} />
-        {:else if file.status === 'deleted'}
-          <CircleMinus size={16} />
-        {:else}
-          <CircleArrowUp size={16} />
-        {/if}
+        {@render fileStatusVisual(file)}
       </span>
       <span class="icon-hover" class:icon-hover-unreview={showReviewedSection}>
         {#if showReviewedSection}
@@ -183,6 +185,18 @@
         {/if}
       </span>
     </span>
+  {/if}
+{/snippet}
+
+{#snippet fileStatusVisual(file: FileEntry)}
+  {#if file.status === 'added'}
+    <Plus size={16} />
+  {:else if file.status === 'deleted'}
+    <X size={16} />
+  {:else if file.status === 'renamed'}
+    <MoveRight size={16} />
+  {:else}
+    {@render changeIndicator(file)}
   {/if}
 {/snippet}
 
@@ -211,6 +225,8 @@
           ></span>
         {/if}
       </span>
+    {:else}
+      <span class="change-indicator-empty"></span>
     {/if}
   </span>
 {/snippet}
@@ -279,7 +295,6 @@
             {/if}
           {/if}
           {@render fileIcon(node.file, showReviewedSection)}
-          {@render changeIndicator(node.file)}
           <span class="file-name">{node.name}</span>
           {#if node.file.commentCount > 0}
             <span
@@ -543,9 +558,28 @@
     cursor: pointer;
     color: var(--text-muted);
     border-radius: 3px;
+    box-sizing: border-box;
+    width: 20px;
+    height: 20px;
     transition:
       color 0.1s,
       background-color 0.1s;
+  }
+
+  .status-icon-added {
+    color: var(--status-added);
+  }
+
+  .status-icon-deleted {
+    color: var(--status-deleted);
+  }
+
+  .status-icon-renamed {
+    color: var(--status-renamed);
+  }
+
+  .status-icon-renamed-modified {
+    color: var(--status-modified);
   }
 
   .status-icon:not(.status-icon-static):hover {
@@ -585,7 +619,7 @@
     align-items: flex-end;
     justify-content: center;
     flex-shrink: 0;
-    width: 8px;
+    width: 4px;
     height: 16px;
     overflow: hidden;
     border-radius: 2px;
@@ -601,6 +635,13 @@
     width: 100%;
     overflow: hidden;
     border-radius: inherit;
+  }
+
+  .change-indicator-empty {
+    width: 100%;
+    height: 6px;
+    border-radius: inherit;
+    background: var(--status-modified);
   }
 
   .change-segment {

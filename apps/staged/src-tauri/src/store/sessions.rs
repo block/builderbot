@@ -164,6 +164,36 @@ impl Store {
         Ok(rows > 0)
     }
 
+    /// Restamp the queued artifact stub linked to a session when it starts running.
+    ///
+    /// `sessions.created_at` is intentionally left unchanged so branch queues
+    /// still drain FIFO by enqueue time. Empty failed artifacts use their own
+    /// `created_at` as the timeline fallback, so this records when queued work
+    /// was actually claimed.
+    pub fn mark_session_artifact_started(&self, session_id: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_timestamp();
+        conn.execute(
+            "UPDATE commits
+             SET created_at = ?1, updated_at = ?1
+             WHERE session_id = ?2 AND sha IS NULL",
+            params![now, session_id],
+        )?;
+        conn.execute(
+            "UPDATE notes
+             SET created_at = ?1, updated_at = ?1
+             WHERE session_id = ?2 AND completed_at IS NULL AND content = ''",
+            params![now, session_id],
+        )?;
+        conn.execute(
+            "UPDATE reviews
+             SET created_at = ?1, updated_at = ?1
+             WHERE session_id = ?2 AND completed_at IS NULL",
+            params![now, session_id],
+        )?;
+        Ok(())
+    }
+
     pub fn get_running_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(

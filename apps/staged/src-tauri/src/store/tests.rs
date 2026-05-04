@@ -418,6 +418,136 @@ fn test_queued_pipeline_commit_owns_branch_queue_position() {
 }
 
 #[test]
+fn test_mark_session_artifact_started_restamps_empty_note_and_preserves_session_created_at() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let mut session = Session::new_queued("queued note");
+    session.created_at = 1_000;
+    session.updated_at = 1_000;
+    store.create_session(&session).unwrap();
+
+    let mut note = Note::new(&branch.id, "queued note", "").with_session(&session.id);
+    note.created_at = 1_000;
+    note.updated_at = 1_000;
+    store.create_note(&note).unwrap();
+
+    assert!(store.transition_to_running(&session.id).unwrap());
+    store.mark_session_artifact_started(&session.id).unwrap();
+
+    let started_note = store.get_note(&note.id).unwrap().unwrap();
+    assert!(started_note.created_at > note.created_at);
+    assert_eq!(started_note.updated_at, started_note.created_at);
+    assert!(started_note.completed_at.is_none());
+
+    let started_session = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(started_session.status, SessionStatus::Running);
+    assert_eq!(started_session.created_at, session.created_at);
+}
+
+#[test]
+fn test_mark_session_artifact_started_restamps_incomplete_review() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let mut session = Session::new_queued("queued review");
+    session.created_at = 1_000;
+    session.updated_at = 1_000;
+    store.create_session(&session).unwrap();
+
+    let mut review = Review::new(&branch.id, "", ReviewScope::Branch).with_session(&session.id);
+    review.created_at = 1_000;
+    review.updated_at = 1_000;
+    store.create_review(&review).unwrap();
+
+    assert!(store.transition_to_running(&session.id).unwrap());
+    store.mark_session_artifact_started(&session.id).unwrap();
+
+    let started_review = store.get_review(&review.id).unwrap().unwrap();
+    assert!(started_review.created_at > review.created_at);
+    assert_eq!(started_review.updated_at, started_review.created_at);
+    assert!(started_review.completed_at.is_none());
+}
+
+#[test]
+fn test_mark_session_artifact_started_restamps_queued_pipeline_pending_commit() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let mut session = Session::new_queued("Rebase branch");
+    session.created_at = 1_000;
+    session.updated_at = 1_000;
+    session.pipeline = Some(PipelineExecution::from_steps(&[]).with_kind(PipelineKind::Rebase));
+    store.create_session(&session).unwrap();
+
+    let mut commit = Commit::new_pending(&branch.id).with_session(&session.id);
+    commit.created_at = 1_000;
+    commit.updated_at = 1_000;
+    store.create_commit(&commit).unwrap();
+
+    assert!(store.transition_to_running(&session.id).unwrap());
+    store.mark_session_artifact_started(&session.id).unwrap();
+
+    let started_commit = store.get_commit(&commit.id).unwrap().unwrap();
+    assert!(started_commit.created_at > commit.created_at);
+    assert_eq!(started_commit.updated_at, started_commit.created_at);
+    assert!(started_commit.sha.is_none());
+}
+
+#[test]
+fn test_failed_empty_note_orders_after_commit_completed_before_note_started() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let mut session = Session::new_queued("queued note");
+    session.created_at = 1_000;
+    session.updated_at = 1_000;
+    store.create_session(&session).unwrap();
+
+    let mut note = Note::new(&branch.id, "queued note", "").with_session(&session.id);
+    note.created_at = 1_000;
+    note.updated_at = 1_000;
+    store.create_note(&note).unwrap();
+
+    let mut commit = Commit::new_with_sha(&branch.id, "abc123");
+    commit.created_at = 2_000;
+    commit.updated_at = 2_000;
+    store.create_commit(&commit).unwrap();
+
+    assert!(store.transition_to_running(&session.id).unwrap());
+    store.mark_session_artifact_started(&session.id).unwrap();
+    assert!(store
+        .transition_from_running(
+            &session.id,
+            SessionStatus::Error,
+            Some("app quit"),
+            Some(&CompletionReason::AppQuit),
+        )
+        .unwrap());
+
+    let failed_note = store.get_note(&note.id).unwrap().unwrap();
+    let failed_note_time = failed_note.completed_at.unwrap_or(failed_note.created_at);
+    let commit_time = commit.created_at;
+    let mut timeline = vec![("failed-note", failed_note_time), ("commit", commit_time)];
+    timeline.sort_by_key(|(_, timestamp)| *timestamp);
+
+    assert_eq!(timeline[0].0, "commit");
+    assert_eq!(timeline[1].0, "failed-note");
+}
+
+#[test]
 fn test_running_pipeline_commit_marks_branch_busy_and_resolves_branch() {
     let store = Store::in_memory().unwrap();
     let project = Project::new("test-owner/test-repo");

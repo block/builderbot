@@ -9,20 +9,11 @@
   import { onMount, onDestroy } from 'svelte';
   import { Copy, MessageSquarePlus } from 'lucide-svelte';
   import type { ContextMenuEvent } from './TimelineRow.svelte';
-
-  // ── Module-level close-all signal ─────────────────────────────────────
-  // Multiple TimelineContextMenu instances exist (one per BranchTimeline,
-  // one in ProjectSection). Because TimelineRow stops propagation on
-  // contextmenu events, a right-click in one timeline can't reach the
-  // window handler of another instance's menu. This Set of callbacks lets
-  // any instance broadcast "close" to all others before opening itself.
-  const closeAllListeners = new Set<() => void>();
-
-  function broadcastCloseAll() {
-    for (const fn of closeAllListeners) {
-      fn();
-    }
-  }
+  import {
+    registerCloseListener,
+    unregisterCloseListener,
+    broadcastCloseAll,
+  } from './contextMenuCoordination';
 
   interface Props {
     onNewSessionReferring?: (hashtagRef: string) => void;
@@ -41,11 +32,15 @@
   }
 
   onMount(() => {
-    closeAllListeners.add(handleCloseAll);
+    registerCloseListener(handleCloseAll);
   });
 
   onDestroy(() => {
-    closeAllListeners.delete(handleCloseAll);
+    unregisterCloseListener(handleCloseAll);
+    if (pendingRaf !== null) {
+      cancelAnimationFrame(pendingRaf);
+      pendingRaf = null;
+    }
   });
 
   /** Open the context menu. Called by the parent when a row emits onContextMenu. */

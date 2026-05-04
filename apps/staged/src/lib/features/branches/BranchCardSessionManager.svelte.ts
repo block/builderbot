@@ -16,6 +16,7 @@ import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
 import { alerts } from '../../shared/alerts.svelte';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
+import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
 
 type PendingSessionItemType =
   | 'pending-commit'
@@ -387,12 +388,9 @@ export default class BranchCardSessionManager {
   }
 
   openNewSessionReferring(hashtagRef: string) {
-    if (this.showNewSession && this.draftPrompt.trim()) {
-      // Dialog already open with user content — append the reference
-      this.draftPrompt = this.draftPrompt.trimEnd() + '\n' + hashtagRef;
-    } else {
-      // Open fresh dialog with "Re: #type:id\n"
-      this.draftPrompt = `Re: ${hashtagRef}\n`;
+    const hadContent = this.showNewSession && this.draftPrompt.trim();
+    this.draftPrompt = buildReferringPrompt(this.draftPrompt, hashtagRef);
+    if (!hadContent) {
       this.newSessionMode = 'commit';
       this.showNewSession = true;
     }

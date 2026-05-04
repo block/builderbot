@@ -59,6 +59,7 @@
   import { createImage, createImageFromData, deleteImage, getImageData } from '../../api/commands';
   import { formatRelativeTime, minuteNow } from '../../shared/relativeTime.svelte';
   import { focusAtEnd } from '../../shared/focusAtEnd';
+  import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
   import { createLiveSessionHints } from '../timeline/liveSessionHints';
 
   interface Props {
@@ -727,11 +728,7 @@
 <TimelineContextMenu
   bind:this={projectContextMenuRef}
   onNewSessionReferring={(ref) => {
-    if (promptText.trim()) {
-      promptText = promptText.trimEnd() + '\n' + ref;
-    } else {
-      promptText = `Re: ${ref}\n`;
-    }
+    promptText = buildReferringPrompt(promptText, ref);
     focusAtEnd(promptTextarea);
   }}
 />

@@ -204,16 +204,16 @@ fn build_commit_pipeline_steps(kind: &PipelineKind, base_branch: &str) -> Vec<Pi
                 command: format!("git fetch origin {base_branch}"),
                 on_failure: FailureStrategy::HandoffToAi {
                     prompt_template: format!(
-                        "The fetch failed. Diagnose and fix the issue, then rebase this branch onto `origin/{base_branch}`. Resolve conflicts if present and continue the rebase. Do not push the branch.\n\n{{step_outputs}}"
+                        "The fetch failed. Diagnose and fix the issue, then rebase this branch onto `origin/{base_branch}` with DCO signoffs. Resolve conflicts if present and continue the rebase. Do not push the branch.\n\n{{step_outputs}}"
                     ),
                 },
             },
             PipelineStep::Command {
                 label: "Rebase onto base".to_string(),
-                command: format!("git rebase origin/{base_branch}"),
+                command: format!("git rebase --signoff origin/{base_branch}"),
                 on_failure: FailureStrategy::HandoffToAi {
                     prompt_template: format!(
-                        "The rebase failed. Inspect the output, recover from the actual failure, resolve conflicts if present, then continue the rebase onto `origin/{base_branch}`. Do not push the branch.\n\n{{step_outputs}}"
+                        "The rebase failed. Inspect the output, recover from the actual failure, resolve conflicts if present, then continue the rebase onto `origin/{base_branch}` with DCO signoffs. Do not push the branch.\n\n{{step_outputs}}"
                     ),
                 },
             },
@@ -227,7 +227,7 @@ fn build_commit_pipeline_steps(kind: &PipelineKind, base_branch: &str) -> Vec<Pi
                 command: format!("git fetch origin {base_branch}"),
                 on_failure: FailureStrategy::HandoffToAi {
                     prompt_template: format!(
-                        "The fetch failed. Diagnose and fix the issue, then squash only this branch's commits manually. Do not squash beyond the merge-base with `origin/{base_branch}`. Create one conventional-commit from the staged changes and do not push the branch.\n\n{{step_outputs}}"
+                        "The fetch failed. Diagnose and fix the issue, then squash only this branch's commits manually. Do not squash beyond the merge-base with `origin/{base_branch}`. Create one signed-off conventional commit from the staged changes and do not push the branch.\n\n{{step_outputs}}"
                     ),
                 },
             },
@@ -243,7 +243,7 @@ fn build_commit_pipeline_steps(kind: &PipelineKind, base_branch: &str) -> Vec<Pi
                 ),
                 on_failure: FailureStrategy::HandoffToAi {
                     prompt_template: format!(
-                        "The soft reset failed. Diagnose and fix the issue, then squash only this branch's commits manually. Do not squash beyond the merge-base with `origin/{base_branch}`. Create one conventional-commit from the staged changes and do not push the branch.\n\n{{step_outputs}}"
+                        "The soft reset failed. Diagnose and fix the issue, then squash only this branch's commits manually. Do not squash beyond the merge-base with `origin/{base_branch}`. Create one signed-off conventional commit from the staged changes and do not push the branch.\n\n{{step_outputs}}"
                     ),
                 },
             },
@@ -255,6 +255,8 @@ Create a single conventional-commit from the staged changes.
 The branch's commits have been soft-reset to the merge-base and are staged. Now create one commit:
 - The commit message MUST use conventional commit style (e.g., "feat: add user authentication", "fix: resolve null pointer in parser")
 - Choose the most appropriate conventional commit type (feat, fix, refactor, docs, style, test, chore, perf, ci, build) based on the actual changes
+- Use the user's global git identity for author and committer
+- Create the commit with DCO signoff (`git commit --signoff`)
 - Use the original commit history (from step 2) as context to write a meaningful message
 - Do NOT push the branch
 
@@ -1048,7 +1050,7 @@ pub async fn push_branch(
 
 /// Rebase a branch onto its base branch via a pipeline.
 ///
-/// Fetches the latest base branch, then runs `git rebase origin/{base}`.
+/// Fetches the latest base branch, then runs `git rebase --signoff origin/{base}`.
 /// If the rebase succeeds (no conflicts), the pipeline completes without AI.
 /// If the rebase fails, AI is handed off to recover and resolve conflicts when
 /// present.
@@ -1158,5 +1160,22 @@ mod tests {
         assert!(prompt.contains("local `main` branch may be stale"));
         assert!(prompt.contains("$(git merge-base origin/main HEAD)..HEAD"));
         assert!(prompt.contains("gh pr create --base main"));
+    }
+
+    #[test]
+    fn rebase_pipeline_uses_signoff() {
+        let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main");
+
+        let (_, command, _) = command_at(&steps, 1);
+        assert_eq!(command, "git rebase --signoff origin/main");
+    }
+
+    #[test]
+    fn squash_pipeline_prompt_requires_signoff() {
+        let steps = build_commit_pipeline_steps(&PipelineKind::Squash, "main");
+
+        let (_, prompt) = ai_prompt_at(&steps, 3);
+        assert!(prompt.contains("Use the user's global git identity"));
+        assert!(prompt.contains("git commit --signoff"));
     }
 }

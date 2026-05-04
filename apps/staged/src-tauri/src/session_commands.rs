@@ -345,7 +345,11 @@ pub async fn resume_session(
             pre_head_sha,
             provider,
             workspace_name,
-            extra_env: vec![],
+            extra_env: if linked_commit.is_some() {
+                session_runner::git_identity_env_from_global_config()
+            } else {
+                vec![]
+            },
             mcp_project_id: mcp_project_id.clone(),
             action_executor: if mcp_project_id.is_some() {
                 Some(Arc::clone(&action_executor))
@@ -448,6 +452,14 @@ pub enum BranchSessionType {
     Review,
 }
 
+fn extra_env_for_branch_session(session_type: &BranchSessionType) -> Vec<(String, String)> {
+    if matches!(session_type, BranchSessionType::Commit) {
+        session_runner::git_identity_env_from_global_config()
+    } else {
+        vec![]
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchSessionLaunchContext {
@@ -523,8 +535,8 @@ This is a remote-workspace project. Use the project MCP tools to orchestrate wor
         "- start_repo_session: Use this to make changes or run tasks in one of the project's \
 repositories. It enqueues work and returns a `repo_session_id` immediately. Use \
 `expected_outcome=\"note_in_repo\"` for repo notes and `expected_outcome=\"commit\"` for \
-code changes/commits. For remote branches this subagent runs on the remote workspace, where \
-file access, notes, and commits must happen.\n\
+code changes/commits; commit sessions create signed-off conventional commits. For remote branches \
+this subagent runs on the remote workspace, where file access, notes, and commits must happen.\n\
 - wait_for_repo_session: Use this to wait on a previously started repo session by passing the \
 `repo_session_id`. It returns the queue state (`queued`, `running`, `completed`, `cancelled`, \
 or `failed`) and any available artifacts.\n\
@@ -533,10 +545,11 @@ or `failed`) and any available artifacts.\n\
         "- start_repo_session: Use this to make changes or run tasks in one of the project's \
 repositories. It enqueues work and returns a `repo_session_id` immediately. Use \
 `expected_outcome=\"note_in_repo\"` for repo notes and `expected_outcome=\"commit\"` for \
-code changes/commits. Do not ask for both a note and a commit in a single start_repo_session \
-request — choose one outcome per call. All reasoning specific to a repo must be done within a \
-repo session rather than in this project-wide context. You MUST NOT write files directly — all \
-file writes MUST go through start_repo_session with expected_outcome=\"commit\".\n\
+code changes/commits; commit sessions create signed-off conventional commits. Do not ask for both \
+a note and a commit in a single start_repo_session request — choose one outcome per call. All \
+reasoning specific to a repo must be done within a repo session rather than in this project-wide \
+context. You MUST NOT write files directly — all file writes MUST go through start_repo_session \
+with expected_outcome=\"commit\".\n\
 - wait_for_repo_session: Use this to wait on a previously started repo session by passing the \
 `repo_session_id`. It returns the queue state (`queued`, `running`, `completed`, `cancelled`, \
 or `failed`) and any available artifacts.\n\
@@ -849,7 +862,7 @@ pub async fn start_branch_session(
             pre_head_sha,
             provider: effective_provider,
             workspace_name: branch.workspace_name.clone(),
-            extra_env: vec![],
+            extra_env: extra_env_for_branch_session(&session_type),
             mcp_project_id: None,
             action_executor: None,
             action_registry: None,
@@ -1236,7 +1249,7 @@ pub async fn drain_queued_sessions_for_branch(
             pre_head_sha,
             provider: effective_provider,
             workspace_name: branch.workspace_name.clone(),
-            extra_env: vec![],
+            extra_env: extra_env_for_branch_session(&session_type),
             mcp_project_id: None,
             action_executor: None,
             action_registry: None,
@@ -2594,7 +2607,13 @@ Formatting requirements:
             "The user is requesting you make a commit based on the prompt below. Make the necessary \
 code changes, following any verification or formatting steps as instructed, and then \
 create a commit with a conventional commit message. This commit should describe what \
-was requested and how it was fulfilled."
+was requested and how it was fulfilled.
+
+Before creating the commit:
+- Use the user's global git identity (`git config --global user.name` and `git config --global user.email`) \
+for both the author and committer. Do not use placeholder identities.
+- Create the commit with a DCO signoff (`git commit --signoff`) so the commit message includes a \
+matching `Signed-off-by` trailer."
         }
         BranchSessionType::Review => {
             "The user is requesting an AI code review of the current branch.
@@ -3092,6 +3111,21 @@ mod tests {
         assert!(prompt.contains(
             "Viewed diff before starting this session: review review-42 on commit abc123 (scope: commit)."
         ));
+    }
+
+    #[test]
+    fn commit_prompt_requires_global_identity_and_signoff() {
+        let prompt = build_full_prompt(
+            "user prompt",
+            "project info",
+            "branch context",
+            &BranchSessionType::Commit,
+            None,
+        );
+
+        assert!(prompt.contains("Use the user's global git identity"));
+        assert!(prompt.contains("git commit --signoff"));
+        assert!(prompt.contains("Signed-off-by"));
     }
 
     #[test]

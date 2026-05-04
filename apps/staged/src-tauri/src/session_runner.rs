@@ -36,7 +36,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
-use std::process::{Output, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -56,6 +56,39 @@ use crate::store::{
 };
 
 const PIPELINE_STEP_PROMPT_OUTPUT_MAX_CHARS: usize = 30_000;
+
+pub fn git_identity_env_from_global_config() -> Vec<(String, String)> {
+    let Some(name) = global_git_config_value("user.name") else {
+        return vec![];
+    };
+    let Some(email) = global_git_config_value("user.email") else {
+        return vec![];
+    };
+
+    vec![
+        ("GIT_AUTHOR_NAME".to_string(), name.clone()),
+        ("GIT_AUTHOR_EMAIL".to_string(), email.clone()),
+        ("GIT_COMMITTER_NAME".to_string(), name),
+        ("GIT_COMMITTER_EMAIL".to_string(), email),
+    ]
+}
+
+fn global_git_config_value(key: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args(["config", "--global", key])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
 
 // =============================================================================
 // Event types
@@ -629,6 +662,16 @@ pub fn start_pipeline_session(
                 // window where the session has no token registered (during which a
                 // cancel request would be silently lost).
                 let pre_head_sha = pre_head_for_pipeline_handoff(&config);
+                let extra_env = if store_for_status
+                    .get_commit_by_session(&session_id)
+                    .ok()
+                    .flatten()
+                    .is_some()
+                {
+                    git_identity_env_from_global_config()
+                } else {
+                    vec![]
+                };
 
                 // Try to start the AI session now.
                 let ai_config = SessionConfig {
@@ -639,7 +682,7 @@ pub fn start_pipeline_session(
                     pre_head_sha,
                     provider: config.provider.clone(),
                     workspace_name: config.workspace_name.clone(),
-                    extra_env: vec![],
+                    extra_env,
                     mcp_project_id: None,
                     action_executor: None,
                     action_registry: None,

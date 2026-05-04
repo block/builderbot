@@ -28,7 +28,8 @@ enum RepoSessionOutcome {
     /// the agent is instructed to output note content after a horizontal rule (---).
     NoteInRepo,
     /// The session should make code changes and create a commit. A pending commit record
-    /// is created and the agent is instructed to commit with a conventional commit message.
+    /// is created and the agent is instructed to commit with a signed-off conventional
+    /// commit message.
     Commit,
 }
 
@@ -51,7 +52,7 @@ struct StartRepoSessionParams {
     ///   later by other sessions or by the user. Useful for architecture overviews, plans,
     ///   research, reviews.
     /// - `"commit"`: Use this to request code changes. Agent makes code changes and
-    ///   creates a commit with a conventional commit message.
+    ///   creates a signed-off commit with a conventional commit message.
     pub expected_outcome: RepoSessionOutcome,
     /// Optional ACP provider ID (e.g. "claude", "goose").
     pub provider: Option<String>,
@@ -342,7 +343,7 @@ impl ProjectToolsHandler {
 #[tool_router]
 impl ProjectToolsHandler {
     #[tool(
-        description = "Enqueue an agent session in one of the project's repositories and return immediately with an opaque `repo_session_id`. Use `expected_outcome=\"note_in_repo\"` for repo notes or `expected_outcome=\"commit\"` for code changes and a conventional commit. The `repo` + `subpath` combination must exactly match an entry already in the project."
+        description = "Enqueue an agent session in one of the project's repositories and return immediately with an opaque `repo_session_id`. Use `expected_outcome=\"note_in_repo\"` for repo notes or `expected_outcome=\"commit\"` for code changes and a signed-off conventional commit. The `repo` + `subpath` combination must exactly match an entry already in the project."
     )]
     async fn start_repo_session(
         &self,

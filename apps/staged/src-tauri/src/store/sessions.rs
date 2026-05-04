@@ -196,7 +196,7 @@ impl Store {
     /// Backfill the provider on a session that was created without one.
     ///
     /// This is called by `start_session` when the caller didn't specify a
-    /// provider and the system resolved one via `first_available()`.
+    /// provider and the system resolved one before launching the local agent.
     pub fn set_session_provider(&self, id: &str, provider: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(

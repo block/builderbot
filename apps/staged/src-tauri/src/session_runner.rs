@@ -188,9 +188,9 @@ pub fn start_session(
     registry: Arc<SessionRegistry>,
 ) -> Result<(), String> {
     // Create the driver eagerly so we fail fast if the agent isn't found.
-    // When no provider is specified, resolve the first available one and
-    // persist it on the session so downstream consumers (e.g. auto-review
-    // adoption) always see a concrete provider ID.
+    // Local sessions without an explicit provider resolve the first available
+    // provider and persist it on the session. Review-producing callers resolve
+    // a concrete provider before creating their session/review rows.
     let driver = if let Some(ref ws_name) = config.workspace_name {
         let mut d = AcpDriver::for_workspace(ws_name, config.provider.as_deref())?;
         if let Some(ref remote_dir) = config.remote_working_dir {
@@ -202,8 +202,8 @@ pub fn start_session(
             Some(id) => AcpDriver::new(id)?,
             None => {
                 // Resolve the first available provider and backfill it on the
-                // session record so the provider is never NULL for sessions
-                // that actually ran an agent.
+                // local session record so consumers see the provider that
+                // actually ran the agent.
                 let providers = crate::agent::discover_providers();
                 let first = providers.first().ok_or_else(|| {
                     "No ACP agent found. Install Goose, Claude Code, Codex, Pi, or Amp and ensure it's on your PATH.".to_string()

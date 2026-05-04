@@ -1161,6 +1161,10 @@ pub async fn drain_queued_sessions_for_branch(
         return Ok(false);
     }
 
+    store
+        .mark_session_artifact_started(&session_id)
+        .map_err(|e| e.to_string())?;
+
     // Update the session's working_dir and prompt now that we have context.
     store
         .prepare_queued_session(&session_id, &working_dir.to_string_lossy(), &full_prompt)

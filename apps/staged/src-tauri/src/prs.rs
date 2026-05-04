@@ -434,6 +434,10 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
     }
 
     store
+        .mark_session_artifact_started(&session.id)
+        .map_err(|e| e.to_string())?;
+
+    store
         .prepare_queued_session(&session.id, &ctx.working_dir.to_string_lossy(), prompt)
         .map_err(|e| e.to_string())?;
     store

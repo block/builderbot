@@ -488,13 +488,13 @@ fn decode_file(b64: &str, path: &str) -> git_diff::File {
 }
 
 fn supports_line_stats(file: &Option<git_diff::File>) -> bool {
-    match file {
+    !matches!(
+        file,
         Some(git_diff::File {
             content: git_diff::FileContent::Binary | git_diff::FileContent::ImageBase64 { .. },
             ..
-        }) => false,
-        _ => true,
-    }
+        })
+    )
 }
 
 fn line_stats_from_patch(
@@ -509,7 +509,7 @@ fn line_stats_from_patch(
     let mut added = 0;
     let mut deleted = 0;
     for line in patch.lines() {
-        if line.starts_with("+++") || line.starts_with("---") {
+        if line.starts_with("+++ ") || line.starts_with("--- ") {
             continue;
         }
         if line.starts_with('+') {

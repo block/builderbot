@@ -14,6 +14,7 @@
   import type { BranchTimeline as BranchTimelineData, HashtagItem } from '../../types';
   import TimelineRow from './TimelineRow.svelte';
   import type { TimelineItemType, TimelineBadge } from './TimelineRow.svelte';
+  import TimelineContextMenu from './TimelineContextMenu.svelte';
   import { hasHashtagTokens, renderHashtagTokens } from '../sessions/hashtagItems';
   import {
     formatRelativeTime,
@@ -73,6 +74,7 @@
     onNewNote?: () => void;
     onNewCommit?: () => void;
     onNewReview?: (e: MouseEvent) => void;
+    onNewSessionReferring?: (hashtagRef: string) => void;
     newSessionDisabled?: boolean;
     /** Whether the timeline is being revalidated in the background. */
     revalidating?: boolean;
@@ -112,6 +114,7 @@
     onNewNote,
     onNewCommit,
     onNewReview,
+    onNewSessionReferring,
     newSessionDisabled = false,
     revalidating = false,
     error,
@@ -203,6 +206,8 @@
     /** When set, delete button is shown but disabled with this tooltip. */
     deleteDisabledReason?: string;
     completionReason?: string | null;
+    /** Hashtag reference token for context menu (e.g. "#commit:abc123"). */
+    hashtagRef?: string;
   };
 
   let runningSessionIds = $derived.by(() => collectRunningSessionIds(timeline, pendingItems));
@@ -290,6 +295,7 @@
         commitId: commit.id ?? undefined,
         deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
         completionReason: commit.completionReason,
+        hashtagRef: type === 'commit' ? `#commit:${commit.sha}` : undefined,
       });
     }
 
@@ -332,6 +338,7 @@
         noteContent: note.content,
         deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
         completionReason: note.completionReason,
+        hashtagRef: type === 'note' ? `#note:${note.id}` : undefined,
       });
     }
 
@@ -395,6 +402,7 @@
         reviewId: review.id,
         deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
         completionReason: review.completionReason,
+        hashtagRef: type === 'review' ? `#review:${review.id}` : undefined,
       });
     }
 
@@ -481,6 +489,9 @@
     items.length === 0 && pendingDropNotes.length === 0 && pendingItems.length === 0
   );
 
+  // ── Context menu (single instance for all rows) ───────────────────────
+  let contextMenuRef: TimelineContextMenu | undefined = $state();
+
   // ── Handlers ──────────────────────────────────────────────────────────
 
   function handleItemClick(item: DisplayItem) {
@@ -558,6 +569,9 @@
             !error}
           sessionId={item.sessionId}
           deleteDisabledReason={item.deleteDisabledReason}
+          commitSha={item.commitSha}
+          hashtagRef={item.hashtagRef}
+          onContextMenu={(e) => contextMenuRef?.open(e)}
           {onSessionClick}
           onItemClick={() => handleItemClick(item)}
           onDeleteClick={item.deleteDisabledReason
@@ -681,6 +695,8 @@
     {/if}
   </div>
 {/if}
+
+<TimelineContextMenu bind:this={contextMenuRef} {onNewSessionReferring} />
 
 <style>
   /* ── Timeline ────────────────────────────────────────────────────────── */

@@ -23,6 +23,7 @@
   import type { HashtagItem } from '../../types';
   import { FileText, GitCommitVertical, FileSearch, Image as ImageLucide } from 'lucide-svelte';
   import { HASHTAG_TOKEN_RE, hashtagTypeIconSvg, escapeHtml } from './hashtagItems';
+  import { focusAtEndSync } from '../../shared/focusAtEnd';
 
   type DropdownIconComponent = typeof FileText;
 
@@ -121,17 +122,22 @@
     const _items = itemsById;
     if (hasUnresolvedTokens && _items.size > 0 && editorEl) {
       const shouldRestoreSelectAll = selectionCoversContents(editorEl);
+      const sel = window.getSelection();
+      const hadCaret = sel && sel.isCollapsed && editorEl.contains(sel.anchorNode);
 
       renderContent(value);
 
       if (shouldRestoreSelectAll) {
-        const sel = window.getSelection();
         const range = document.createRange();
         range.selectNodeContents(editorEl);
         if (sel) {
           sel.removeAllRanges();
           sel.addRange(range);
         }
+      } else if (hadCaret) {
+        // Restore collapsed cursor to end after re-render.
+        // DOM is already fresh (renderContent just ran), so use the sync variant.
+        focusAtEndSync(editorEl);
       }
     }
   });

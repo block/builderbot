@@ -386,6 +386,18 @@ export default class BranchCardSessionManager {
     this.showNewSession = true;
   }
 
+  openNewSessionReferring(hashtagRef: string) {
+    if (this.showNewSession && this.draftPrompt.trim()) {
+      // Dialog already open with user content — append the reference
+      this.draftPrompt = this.draftPrompt.trimEnd() + '\n' + hashtagRef;
+    } else {
+      // Open fresh dialog with "Re: #type:id\n"
+      this.draftPrompt = `Re: ${hashtagRef}\n`;
+      this.newSessionMode = 'commit';
+      this.showNewSession = true;
+    }
+  }
+
   async startReviewSessionWithoutDialog() {
     this.newSessionMode = 'review';
     this.showNewSession = false;

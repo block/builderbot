@@ -867,10 +867,16 @@
         return;
       }
 
+      // Conservative fallback: if we couldn't load review details, always warn
+      if (!details) {
+        showConfirmDelete();
+        return;
+      }
+
       const shouldWarn = shouldWarnBeforeDeletingReview({
         review: details,
         commits: timeline?.commits ?? [],
-        userCommentCount: details?.userComments,
+        userCommentCount: details.userComments,
       });
       if (shouldWarn) {
         showConfirmDelete();

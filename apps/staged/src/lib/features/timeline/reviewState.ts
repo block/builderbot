@@ -22,7 +22,7 @@ export function hasCommitAfterReview(
   const reviewCommit = commits.find((commit) => commit.sha === reviewCommitSha);
   if (!reviewCommit) return false;
 
-  return commits.some((commit) => !!commit.sha && commit.order > reviewCommit.order);
+  return commits.some((commit) => commit.order > reviewCommit.order);
 }
 
 export function countUserComments(

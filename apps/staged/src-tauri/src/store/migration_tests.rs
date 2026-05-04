@@ -133,7 +133,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
         )
         .unwrap();
 
-    assert_eq!(version, 12);
+    assert_eq!(version, 13);
     assert_eq!(app_version, super::APP_VERSION);
     assert!(table_exists(&conn, "projects"));
     assert!(table_exists(&conn, "project_notes"));
@@ -150,6 +150,28 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
         )
         .unwrap();
     assert_eq!(trigger_count, 5);
+
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_store_repairs_github_comment_tracking_user_version() {
+    let path = temp_db_path("github-comment-tracking-repair");
+    let store = Store::new(&path).unwrap();
+    drop(store);
+
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("PRAGMA user_version = 12;").unwrap();
+    drop(conn);
+
+    let store = Store::new(&path).unwrap();
+    drop(store);
+
+    let conn = Connection::open(&path).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 13);
 
     cleanup_db(&path);
 }

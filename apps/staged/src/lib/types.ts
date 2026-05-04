@@ -132,6 +132,7 @@ export interface ReviewTimelineItem {
   scope: string;
   sessionId: string | null;
   sessionStatus: string | null;
+  sessionProvider: string | null;
   completionReason: string | null;
   title: string | null;
   commentCount: number;
@@ -254,6 +255,7 @@ export interface Session {
   id: string;
   prompt: string;
   status: SessionStatus;
+  provider: string | null;
   agentId: string | null;
   errorMessage: string | null;
   completionReason: CompletionReason | null;

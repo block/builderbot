@@ -48,7 +48,7 @@
   import SessionModal from '../sessions/SessionModal.svelte';
   import AgentSelector from '../agents/AgentSelector.svelte';
   import { agentState } from '../agents/agent.svelte';
-  import { getPreferredAgentForProject } from '../settings/preferences.svelte';
+  import { getPreferredAgent } from '../settings/preferences.svelte';
   import { subscribeDragDrop } from '../branches/dragDrop';
   import {
     isImageFile,
@@ -160,9 +160,7 @@
   let promptText = $state('');
   let promptTextarea = $state<HTMLElement | null>(null);
   let availableAgents = $derived(agentState.providers);
-  let preferredProvider = $derived(
-    getPreferredAgentForProject(project.id, availableAgents) ?? undefined
-  );
+  let preferredProvider = $derived(getPreferredAgent(availableAgents) ?? undefined);
   let canSubmitPrompt = $derived(!!promptText.trim() && !!preferredProvider);
   let sendButtonTitle = $derived(
     preferredProvider ? 'Start project session' : 'No AI agent available'
@@ -569,7 +567,7 @@
           items={hashtagItems}
         />
         <div class="prompt-actions">
-          <AgentSelector projectId={project.id} />
+          <AgentSelector />
           <button
             class="send-button"
             onclick={handleSubmitPrompt}

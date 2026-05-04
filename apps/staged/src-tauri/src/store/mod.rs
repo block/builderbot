@@ -180,6 +180,22 @@ pub fn remove_db_files(path: &Path) -> Result<(), StoreError> {
 }
 
 // =============================================================================
+// ResolvedSession
+// =============================================================================
+
+/// Session metadata resolved from an optional session ID.
+///
+/// Returned by [`Store::resolve_session_status`] to avoid an unwieldy
+/// positional tuple.
+#[derive(Debug, Default)]
+pub struct ResolvedSession {
+    pub session_id: Option<String>,
+    pub status: Option<String>,
+    pub completion_reason: Option<String>,
+    pub provider: Option<String>,
+}
+
+// =============================================================================
 // Store
 // =============================================================================
 
@@ -213,24 +229,25 @@ impl Store {
         Ok(store)
     }
 
-    /// Resolve an optional session_id into (session_id, session_status, completion_reason).
+    /// Resolve an optional session_id into its associated metadata.
     ///
-    /// Returns `(None, None, None)` when `session_id` is `None`, otherwise
-    /// looks up the session and returns its status and completion reason strings.
-    pub fn resolve_session_status(
-        &self,
-        session_id: Option<&str>,
-    ) -> (Option<String>, Option<String>, Option<String>) {
+    /// Returns a default (all-`None`) [`ResolvedSession`] when `session_id` is
+    /// `None`, otherwise looks up the session and populates its status,
+    /// completion reason, and provider.
+    pub fn resolve_session_status(&self, session_id: Option<&str>) -> ResolvedSession {
         match session_id {
             Some(sid) => {
                 let session = self.get_session(sid).ok().flatten();
-                let status = session.as_ref().map(|s| s.status.as_str().to_string());
-                let reason = session
-                    .as_ref()
-                    .and_then(|s| s.completion_reason.as_ref().map(|r| r.as_str().to_string()));
-                (Some(sid.to_string()), status, reason)
+                ResolvedSession {
+                    session_id: Some(sid.to_string()),
+                    status: session.as_ref().map(|s| s.status.as_str().to_string()),
+                    completion_reason: session
+                        .as_ref()
+                        .and_then(|s| s.completion_reason.as_ref().map(|r| r.as_str().to_string())),
+                    provider: session.as_ref().and_then(|s| s.provider.clone()),
+                }
             }
-            None => (None, None, None),
+            None => ResolvedSession::default(),
         }
     }
 

@@ -440,7 +440,7 @@ pub fn delete_session(
 }
 
 // =============================================================================
-// Branch-scoped sessions (note / commit)
+// Branch-scoped sessions (note / commit / review)
 // =============================================================================
 
 /// The type of branch session to start.
@@ -678,6 +678,11 @@ pub async fn start_branch_session(
         .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
 
     let is_remote = branch.workspace_name.is_some();
+    let provider = if matches!(session_type, BranchSessionType::Review) {
+        Some(resolve_review_provider(provider, is_remote)?)
+    } else {
+        provider
+    };
 
     // Resolve working directory and branch context.
     // Remote branches use ws_exec for git operations; local branches use the worktree directly.
@@ -824,7 +829,8 @@ pub async fn start_branch_session(
         }
     };
 
-    // For remote branches, use the user's UI selection.
+    // Review sessions have a required provider by this point; other session
+    // types keep the caller's optional selection.
     let effective_provider = provider;
 
     // Resolve the actual workspace path for remote branches so the remote agent
@@ -911,10 +917,16 @@ pub fn queue_branch_session(
     }
 
     // Validate that the branch exists.
-    let _branch = store
+    let branch = store
         .get_branch(&branch_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+    let is_remote = branch.workspace_name.is_some();
+    let provider = if matches!(session_type, BranchSessionType::Review) {
+        Some(resolve_review_provider(provider, is_remote)?)
+    } else {
+        provider
+    };
 
     // Create the queued session — prompt is stored raw (not enriched with
     // context) since context will be built when the session is drained.
@@ -1066,6 +1078,17 @@ pub async fn drain_queued_sessions_for_branch(
         .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
 
     let is_remote = branch.workspace_name.is_some();
+    let effective_provider = if matches!(session_type, BranchSessionType::Review) {
+        let resolved = resolve_review_provider(session.provider.clone().or(provider), is_remote)?;
+        if session.provider.as_deref() != Some(resolved.as_str()) {
+            store
+                .set_session_provider(&session_id, &resolved)
+                .map_err(|e| e.to_string())?;
+        }
+        Some(resolved)
+    } else {
+        session.provider.clone().or(provider)
+    };
 
     // Resolve working directory and branch context.
     let (working_dir, branch_context) = if is_remote {
@@ -1212,9 +1235,6 @@ pub async fn drain_queued_sessions_for_branch(
         None
     };
 
-    // Use the provider from the queued session, falling back to the one passed in.
-    let effective_provider = session.provider.or(provider);
-
     // Retrieve image IDs linked to this session at queue time.
     let image_ids = store
         .get_image_ids_for_session(&session_id)
@@ -1268,11 +1288,102 @@ pub async fn drain_queued_sessions_for_branch(
 // Auto review commands
 // =============================================================================
 
+/// Agents known to be available on remote Blox workstations.
+///
+/// Must stay in sync with the frontend's `REMOTE_AGENTS` filter in
+/// `agent.svelte.ts`.  See the "Why REMOTE_PROVIDER_IDS Exists" note in
+/// the branch history for the rationale and future cleanup path.
+const REMOTE_PROVIDER_IDS: &[&str] = &["goose", "claude"];
+
+fn available_provider_ids(is_remote: bool) -> Vec<String> {
+    if is_remote {
+        REMOTE_PROVIDER_IDS.iter().map(|s| s.to_string()).collect()
+    } else {
+        agent::discover_providers()
+            .into_iter()
+            .map(|p| p.id)
+            .collect()
+    }
+}
+
+fn read_recent_agent_ids() -> Vec<String> {
+    crate::preferences_store_path_buf()
+        .and_then(|path| std::fs::read_to_string(&path).ok())
+        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+        .and_then(|json| {
+            json.get("recent-agents")
+                .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+        })
+        .unwrap_or_default()
+}
+
+fn select_preferred_provider(available_ids: &[String], recent_ids: &[String]) -> Option<String> {
+    for agent_id in recent_ids {
+        if available_ids.contains(agent_id) {
+            return Some(agent_id.clone());
+        }
+    }
+
+    available_ids.first().cloned()
+}
+
+fn missing_review_provider_error(is_remote: bool) -> String {
+    if is_remote {
+        "No remote ACP provider is configured for review sessions.".to_string()
+    } else {
+        "No ACP agent found. Install Goose, Claude Code, Codex, Pi, or Amp and ensure it's on your PATH."
+            .to_string()
+    }
+}
+
+fn resolve_provider_from_ids(
+    provider: Option<String>,
+    available_ids: &[String],
+    recent_ids: &[String],
+    is_remote: bool,
+) -> Result<String, String> {
+    if available_ids.is_empty() {
+        return Err(missing_review_provider_error(is_remote));
+    }
+
+    if let Some(provider) = provider {
+        if available_ids.contains(&provider) {
+            return Ok(provider);
+        }
+
+        let scope = if is_remote { "remote" } else { "local" };
+        return Err(format!(
+            "Selected agent provider `{provider}` is not available for {scope} review sessions."
+        ));
+    }
+
+    select_preferred_provider(available_ids, recent_ids)
+        .ok_or_else(|| missing_review_provider_error(is_remote))
+}
+
+/// Resolve or validate the provider for an agent-backed review.
+///
+/// When no provider is supplied, mirrors the frontend's `getPreferredAgent`
+/// logic: read `recent-agents`, filter against available providers, then fall
+/// back to the first available provider.
+fn resolve_review_provider(provider: Option<String>, is_remote: bool) -> Result<String, String> {
+    resolve_provider_from_ids(
+        provider,
+        &available_provider_ids(is_remote),
+        &read_recent_agent_ids(),
+        is_remote,
+    )
+}
+
 /// Core logic for starting an automatic review for a branch.
 ///
 /// Creates a review with `is_auto = true`, starts a session, and emits
 /// `session-status-changed` with `isAutoReview: true` so the frontend
 /// can track it.
+///
+/// When `provider` is `None`, resolves the user's current preferred agent
+/// from persisted preferences so that auto-reviews match what the user
+/// would get if they clicked "Review" manually.
 ///
 /// This is called both from the Tauri command and from the session runner
 /// when a commit session completes.
@@ -1295,6 +1406,17 @@ pub async fn trigger_auto_review(
         .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
 
     let is_remote = branch.workspace_name.is_some();
+
+    // Resolve the provider before inserting session/review rows. Auto reviews
+    // should only create agent-backed records when the provider is concrete.
+    let provider_was_explicit = provider.is_some();
+    let provider = resolve_review_provider(provider, is_remote).map_err(|e| {
+        log::warn!("[auto_review] no provider available for branch {branch_id}: {e}");
+        e
+    })?;
+    if !provider_was_explicit {
+        log::info!("[auto_review] resolved preferred provider: {provider}");
+    }
 
     // Resolve working directory and branch context.
     let (working_dir, branch_context) = if is_remote {
@@ -1371,10 +1493,7 @@ pub async fn trigger_auto_review(
     );
 
     // Create the session
-    let mut session = store::Session::new_running(&full_prompt, &working_dir);
-    if let Some(ref p) = provider {
-        session = session.with_provider(p);
-    }
+    let session = store::Session::new_running(&full_prompt, &working_dir).with_provider(&provider);
     store.create_session(&session).map_err(|e| e.to_string())?;
 
     // Create auto review
@@ -1430,7 +1549,7 @@ pub async fn trigger_auto_review(
             working_dir,
             agent_session_id: None,
             pre_head_sha: None,
-            provider,
+            provider: Some(provider),
             workspace_name: branch.workspace_name.clone(),
             extra_env: vec![],
             mcp_project_id: None,
@@ -2802,6 +2921,10 @@ mod tests {
         (store, branch)
     }
 
+    fn ids(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
     fn create_auto_review(
         store: &Arc<Store>,
         branch_id: &str,
@@ -2852,6 +2975,45 @@ mod tests {
             .with_comment_type(comment_type);
         store.add_comment(review_id, &comment).unwrap();
         comment
+    }
+
+    #[test]
+    fn select_preferred_provider_uses_first_recent_available_provider() {
+        let available = ids(&["goose", "claude"]);
+        let recent = ids(&["codex", "claude", "goose"]);
+
+        assert_eq!(
+            select_preferred_provider(&available, &recent),
+            Some("claude".to_string())
+        );
+    }
+
+    #[test]
+    fn select_preferred_provider_falls_back_to_first_available_provider() {
+        let available = ids(&["goose", "claude"]);
+        let recent = ids(&["codex"]);
+
+        assert_eq!(
+            select_preferred_provider(&available, &recent),
+            Some("goose".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_provider_from_ids_rejects_unavailable_provider() {
+        let available = ids(&["goose", "claude"]);
+
+        let err = resolve_provider_from_ids(Some("codex".to_string()), &available, &[], true)
+            .unwrap_err();
+
+        assert!(err.contains("Selected agent provider `codex` is not available"));
+    }
+
+    #[test]
+    fn resolve_provider_from_ids_requires_at_least_one_available_provider() {
+        let err = resolve_provider_from_ids(None, &[], &[], false).unwrap_err();
+
+        assert!(err.contains("No ACP agent found"));
     }
 
     #[test]

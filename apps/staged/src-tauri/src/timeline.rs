@@ -58,7 +58,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             if parts.len() >= 5 {
                 let sha = parts[0].to_string();
                 let our_commit = store.get_commit_by_sha(branch_id, &sha).unwrap_or(None);
-                let (session_id, session_status, completion_reason) = store.resolve_session_status(
+                let resolved = store.resolve_session_status(
                     our_commit.as_ref().and_then(|c| c.session_id.as_deref()),
                 );
 
@@ -70,9 +70,9 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                     author: parts[3].to_string(),
                     timestamp: parts[4].parse().unwrap_or(0),
                     order: 0, // placeholder, assigned below
-                    session_id,
-                    session_status,
-                    completion_reason,
+                    session_id: resolved.session_id,
+                    session_status: resolved.status,
+                    completion_reason: resolved.completion_reason,
                 });
             }
         }
@@ -93,7 +93,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             // For each git commit, look up our metadata (session linkage)
             for gc in git_commits {
                 let our_commit = store.get_commit_by_sha(branch_id, &gc.sha).unwrap_or(None);
-                let (session_id, session_status, completion_reason) = store.resolve_session_status(
+                let resolved = store.resolve_session_status(
                     our_commit.as_ref().and_then(|c| c.session_id.as_deref()),
                 );
 
@@ -105,9 +105,9 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                     author: gc.author,
                     timestamp: gc.timestamp,
                     order: gc.order,
-                    session_id,
-                    session_status,
-                    completion_reason,
+                    session_id: resolved.session_id,
+                    session_status: resolved.status,
+                    completion_reason: resolved.completion_reason,
                 });
             }
         }
@@ -119,14 +119,14 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         .map_err(|e| e.to_string())?;
     for dc in db_commits {
         if dc.sha.is_none() {
-            let (session_id, session_status, completion_reason) =
-                store.resolve_session_status(dc.session_id.as_deref());
+            let resolved = store.resolve_session_status(dc.session_id.as_deref());
 
             commits.push(CommitTimelineItem {
                 id: Some(dc.id.clone()),
                 sha: String::new(),
                 short_sha: String::new(),
-                subject: session_id
+                subject: resolved
+                    .session_id
                     .as_deref()
                     .and_then(|sid| {
                         store
@@ -139,9 +139,9 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 author: String::new(),
                 timestamp: dc.created_at / 1000, // convert ms to seconds
                 order: 0, // created_at is ms divided by 1000, so two pending commits in the same second could tie; rare in practice since they're created one at a time
-                session_id,
-                session_status,
-                completion_reason,
+                session_id: resolved.session_id,
+                session_status: resolved.status,
+                completion_reason: resolved.completion_reason,
             });
         }
     }
@@ -153,15 +153,14 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
     let notes: Vec<NoteTimelineItem> = db_notes
         .into_iter()
         .map(|n| {
-            let (session_id, session_status, completion_reason) =
-                store.resolve_session_status(n.session_id.as_deref());
+            let resolved = store.resolve_session_status(n.session_id.as_deref());
             NoteTimelineItem {
                 id: n.id,
                 title: n.title,
                 content: n.content,
-                session_id,
-                session_status,
-                completion_reason,
+                session_id: resolved.session_id,
+                session_status: resolved.status,
+                completion_reason: resolved.completion_reason,
                 created_at: n.created_at,
                 updated_at: n.updated_at,
                 completed_at: n.completed_at,
@@ -177,16 +176,16 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
     let reviews: Vec<ReviewTimelineItem> = db_reviews
         .into_iter()
         .map(|r| {
-            let (session_id, session_status, completion_reason) =
-                store.resolve_session_status(r.session_id.as_deref());
+            let resolved = store.resolve_session_status(r.session_id.as_deref());
             let comment_count = r.comments.len();
             ReviewTimelineItem {
                 id: r.id,
                 commit_sha: r.commit_sha,
                 scope: r.scope.as_str().to_string(),
-                session_id,
-                session_status,
-                completion_reason,
+                session_id: resolved.session_id,
+                session_status: resolved.status,
+                session_provider: resolved.provider,
+                completion_reason: resolved.completion_reason,
                 title: r.title,
                 comment_count,
                 is_auto: r.is_auto,
@@ -204,16 +203,15 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
     let images: Vec<ImageTimelineItem> = db_images
         .into_iter()
         .map(|img| {
-            let (session_id, session_status, completion_reason) =
-                store.resolve_session_status(img.session_id.as_deref());
+            let resolved = store.resolve_session_status(img.session_id.as_deref());
             ImageTimelineItem {
                 id: img.id,
                 filename: img.filename,
                 mime_type: img.mime_type,
                 size_bytes: img.size_bytes,
-                session_id,
-                session_status,
-                completion_reason,
+                session_id: resolved.session_id,
+                session_status: resolved.status,
+                completion_reason: resolved.completion_reason,
                 created_at: img.created_at,
             }
         })

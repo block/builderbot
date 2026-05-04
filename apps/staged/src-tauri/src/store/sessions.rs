@@ -187,6 +187,32 @@ impl Store {
         Ok(())
     }
 
+    /// Look up just the provider for a session (lightweight single-column query).
+    pub fn get_session_provider(&self, id: &str) -> Result<Option<String>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT provider FROM sessions WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map(|opt| opt.flatten())
+        .map_err(Into::into)
+    }
+
+    /// Backfill the provider on a session that was created without one.
+    ///
+    /// This is called by `start_session` when the caller didn't specify a
+    /// provider and the system resolved one before launching the local agent.
+    pub fn set_session_provider(&self, id: &str, provider: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET provider = ?1, updated_at = ?2 WHERE id = ?3",
+            params![provider, now_timestamp(), id],
+        )?;
+        Ok(())
+    }
+
     /// Update a queued session's working directory, prompt, and owner PID
     /// when it is being drained (started for real).
     pub fn prepare_queued_session(

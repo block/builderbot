@@ -36,7 +36,6 @@ const SIZE_DEFAULT = 13;
 const SIZE_STORE_KEY = 'size-base';
 const SYNTAX_THEME_STORE_KEY = 'syntax-theme';
 const RECENT_AGENTS_STORE_KEY = 'recent-agents';
-const PROJECT_AGENTS_STORE_KEY = 'project-agents';
 const AUTO_REVIEW_STORE_KEY = 'auto-start-code-reviews';
 /** Maximum number of recent agents to remember. */
 const RECENT_AGENTS_MAX = 10;
@@ -71,11 +70,6 @@ export const preferences = $state({
    * Used to pick the best available agent for a given context (local vs remote).
    */
   recentAgents: [] as string[],
-  /**
-   * Per-project preferred AI agent (projectId -> agentId).
-   * Used by project-level chat so changing one project does not affect others.
-   */
-  projectAgents: {} as Record<string, string>,
   /** Whether auto code reviews are triggered after commits */
   autoReviewMode: 'after-changes' as AutoReviewMode,
   /** Whether all preferences have been loaded from storage */
@@ -149,12 +143,6 @@ export async function initPreferences(): Promise<void> {
       preferences.recentAgents = [legacyAgent];
       await setStoreValue(RECENT_AGENTS_STORE_KEY, [legacyAgent]);
     }
-  }
-
-  // Load per-project agent preferences
-  const savedProjectAgents = await getStoreValue<Record<string, string>>(PROJECT_AGENTS_STORE_KEY);
-  if (savedProjectAgents && typeof savedProjectAgents === 'object') {
-    preferences.projectAgents = savedProjectAgents;
   }
 
   // Load auto-review mode
@@ -264,27 +252,4 @@ export function getPreferredAgent(available: { id: string }[]): string | null {
     if (ids.has(agentId)) return agentId;
   }
   return available[0]?.id ?? null;
-}
-
-/**
- * Set preferred agent for a specific project.
- */
-export function setProjectAiAgent(projectId: string, agentId: string): void {
-  if (!projectId) return;
-  preferences.projectAgents = { ...preferences.projectAgents, [projectId]: agentId };
-  setStoreValue(PROJECT_AGENTS_STORE_KEY, preferences.projectAgents);
-}
-
-/**
- * Return the preferred agent for a project, falling back to global preference.
- */
-export function getPreferredAgentForProject(
-  projectId: string,
-  available: { id: string }[]
-): string | null {
-  const scoped = preferences.projectAgents[projectId];
-  if (scoped && available.some((a) => a.id === scoped)) {
-    return scoped;
-  }
-  return getPreferredAgent(available);
 }

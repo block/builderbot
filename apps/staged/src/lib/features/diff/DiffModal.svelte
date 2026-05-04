@@ -54,6 +54,7 @@
   import {
     buildFileEntries,
     buildTree,
+    buildGithubCommentUrl,
     compactTree,
     formatLineRange,
     pathsMatch,
@@ -548,14 +549,50 @@
 
   /** Track which comments are currently being sent/updated on GitHub. */
   let sendingCommentIds = $state(new Set<string>());
+  let githubCommentUrls = $state(new Map<string, string>());
+
+  function getGithubCommentUrl(comment: Comment): string | null {
+    return (
+      githubCommentUrls.get(comment.id) ??
+      buildGithubCommentUrl(comment, {
+        prUrl: branch?.prUrl,
+        githubRepo,
+        prNumber: branch?.prNumber,
+      })
+    );
+  }
 
   async function handleSendToGithub(comment: Comment) {
     if (!branch?.prNumber) return;
+
+    if (comment.githubCommentId != null && !comment.githubCommentStale) {
+      const url = getGithubCommentUrl(comment);
+      if (!url) {
+        alerts.show({
+          tone: 'error',
+          title: 'Unable to open GitHub comment',
+          message: 'The comment URL is not available.',
+        });
+        return;
+      }
+
+      try {
+        await commands.openUrl(url);
+      } catch (e) {
+        alerts.show({
+          tone: 'error',
+          title: 'Unable to open GitHub comment',
+          message: e instanceof Error ? e.message : String(e),
+        });
+      }
+      return;
+    }
 
     sendingCommentIds = new Set([...sendingCommentIds, comment.id]);
 
     try {
       const result = await commands.postCommentToGithub(branchId, branch.prNumber, comment);
+      githubCommentUrls = new Map(githubCommentUrls).set(comment.id, result.commentUrl);
       // Optimistically update the comment's GitHub tracking fields
       if (reviewHandle) {
         reviewHandle.state.comments = reviewHandle.state.comments.map((c) =>

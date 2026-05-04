@@ -147,22 +147,23 @@
             class:github-btn-sent={githubState === 'sent'}
             onclick={() => onGithub?.()}
             title={githubState === 'sent'
-              ? 'Sent to GitHub'
+              ? 'Open GitHub comment'
               : githubState === 'stale'
                 ? 'Update on GitHub'
                 : 'Send to GitHub'}
-            disabled={githubState === 'sending' || githubState === 'sent'}
+            disabled={githubState === 'sending'}
           >
             {#if githubState === 'sending'}
               <Loader2 size={12} class="spinner" />
             {:else if githubState === 'sent'}
-              <Check size={12} />
+              <Check size={12} class="github-sent-check" />
+              <Github size={12} />
             {:else}
               <Github size={12} />
             {/if}
             {#if githubState === 'stale'}
               <span>Update on GitHub</span>
-            {:else if githubState !== 'sent'}
+            {:else}
               <span>GitHub</span>
             {/if}
           </button>
@@ -295,11 +296,11 @@
 
   .comment-action-btn.github-btn-sent {
     border-style: solid;
-    color: var(--status-added, #3fb950);
+    color: var(--text-primary);
     border-color: var(--status-added, #3fb950);
   }
 
-  .comment-action-btn.github-btn-sent :global(svg) {
+  .comment-action-btn.github-btn-sent :global(.github-sent-check) {
     color: var(--status-added, #3fb950) !important;
   }
 

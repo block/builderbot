@@ -3,6 +3,8 @@ export {
   buildFileEntries,
   buildTree,
   compactTree,
+  fileChangeScale,
+  fileChangeTotal,
   formatLineRange,
   pathsMatch,
   truncateText,

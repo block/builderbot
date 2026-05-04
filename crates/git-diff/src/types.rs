@@ -137,12 +137,26 @@ pub struct File {
 /// Status inferred: Added (before=None), Deleted (after=None),
 /// Renamed (both Some, different paths), Modified (both Some, same path)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileDiffSummary {
     pub before: Option<PathBuf>,
     pub after: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added_lines: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_lines: Option<u32>,
 }
 
 impl FileDiffSummary {
+    pub fn new(before: Option<PathBuf>, after: Option<PathBuf>) -> Self {
+        Self {
+            before,
+            after,
+            added_lines: None,
+            deleted_lines: None,
+        }
+    }
+
     /// The primary path to use for this file (after if exists, else before)
     pub fn path(&self) -> &PathBuf {
         self.after.as_ref().or(self.before.as_ref()).unwrap()

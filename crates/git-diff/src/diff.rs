@@ -3,6 +3,7 @@ use crate::refs;
 use crate::types::*;
 use git2::{DiffOptions, Repository};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// Resolve a GitRef, converting MergeBase/MergeBaseOf to a concrete SHA.
@@ -100,13 +101,25 @@ pub fn list_diff_files(repo: &Path, spec: &DiffSpec) -> Result<Vec<FileDiffSumma
             // Staged changes: diff between a rev and the index
             let args = ["diff", "--cached", "--name-status", "-z", base.as_str()];
             let output = cli::run(repo, &args)?;
-            parse_name_status(&output)
+            let mut files = parse_name_status(&output)?;
+            enrich_with_numstat(
+                repo,
+                &["diff", "--cached", "--numstat", "-z", base.as_str()],
+                &mut files,
+            );
+            Ok(files)
         }
         (GitRef::Rev(base), GitRef::Rev(head)) => {
             // Commit range - use git diff
             let args = ["diff", "--name-status", "-z", base.as_str(), head.as_str()];
             let output = cli::run(repo, &args)?;
-            parse_name_status(&output)
+            let mut files = parse_name_status(&output)?;
+            enrich_with_numstat(
+                repo,
+                &["diff", "--numstat", "-z", base.as_str(), head.as_str()],
+                &mut files,
+            );
+            Ok(files)
         }
         (GitRef::WorkingTree, _) | (GitRef::Index, _) => Err(GitError::CommandFailed(
             "Cannot use working tree or index as base".to_string(),
@@ -130,6 +143,8 @@ fn list_working_tree_changes(repo: &Path, base: &str) -> Result<Vec<FileDiffSumm
 
     // If base is HEAD, status gives us exactly what we need
     if base == "HEAD" {
+        let mut status_files = status_files;
+        enrich_with_numstat(repo, &["diff", "--numstat", "-z", base], &mut status_files);
         return Ok(status_files);
     }
 
@@ -154,7 +169,75 @@ fn list_working_tree_changes(repo: &Path, base: &str) -> Result<Vec<FileDiffSumm
         result_map.insert(path, file);
     }
 
-    Ok(result_map.into_values().collect())
+    let mut files: Vec<_> = result_map.into_values().collect();
+    enrich_with_numstat(repo, &["diff", "--numstat", "-z", base], &mut files);
+    Ok(files)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LineStats {
+    added: Option<u32>,
+    deleted: Option<u32>,
+}
+
+fn enrich_with_numstat(repo: &Path, args: &[&str], files: &mut [FileDiffSummary]) {
+    match cli::run(repo, args) {
+        Ok(output) => apply_numstat_output(files, &output),
+        Err(e) => log::warn!("git-diff: failed to enrich file list with numstat: {e}"),
+    }
+}
+
+fn parse_numstat_count(value: &str) -> Option<u32> {
+    if value == "-" {
+        None
+    } else {
+        value.parse().ok()
+    }
+}
+
+fn parse_numstat(output: &str) -> HashMap<std::path::PathBuf, LineStats> {
+    let mut stats = HashMap::new();
+    let mut parts = output.split('\0').peekable();
+
+    while let Some(record) = parts.next() {
+        if record.is_empty() {
+            continue;
+        }
+
+        let mut columns = record.split('\t');
+        let added = match columns.next() {
+            Some(value) => parse_numstat_count(value),
+            None => continue,
+        };
+        let deleted = match columns.next() {
+            Some(value) => parse_numstat_count(value),
+            None => continue,
+        };
+        let path_field = columns.next().unwrap_or_default();
+
+        let path = if path_field.is_empty() {
+            let _old = parts.next();
+            parts.next()
+        } else {
+            Some(path_field)
+        };
+
+        if let Some(path) = path.filter(|p| !p.is_empty()) {
+            stats.insert(path.into(), LineStats { added, deleted });
+        }
+    }
+
+    stats
+}
+
+fn apply_numstat_output(files: &mut [FileDiffSummary], output: &str) {
+    let stats = parse_numstat(output);
+    for file in files {
+        if let Some(line_stats) = stats.get(file.path()) {
+            file.added_lines = line_stats.added;
+            file.deleted_lines = line_stats.deleted;
+        }
+    }
 }
 
 /// Parse `git status --porcelain -z` output.
@@ -202,42 +285,30 @@ fn parse_porcelain_status(repo: &Path, output: &str) -> Result<Vec<FileDiffSumma
                         // It's a directory - expand into individual files
                         let files = expand_untracked_dir(repo, p)?;
                         for file in files {
-                            results.push(FileDiffSummary {
-                                before: None,
-                                after: Some(file.into()),
-                            });
+                            results.push(FileDiffSummary::new(None, Some(file.into())));
                         }
                     } else {
-                        results.push(FileDiffSummary {
-                            before: None,
-                            after: Some(p.clone().into()),
-                        });
+                        results.push(FileDiffSummary::new(None, Some(p.clone().into())));
                     }
                 }
             }
             ('A', _) | (_, 'A') => {
-                results.push(FileDiffSummary {
-                    before: None,
-                    after: new_path.map(Into::into),
-                });
+                results.push(FileDiffSummary::new(None, new_path.map(Into::into)));
             }
             ('D', _) | (_, 'D') => {
-                results.push(FileDiffSummary {
-                    before: new_path.map(Into::into),
-                    after: None,
-                });
+                results.push(FileDiffSummary::new(new_path.map(Into::into), None));
             }
             ('R', _) | ('C', _) => {
-                results.push(FileDiffSummary {
-                    before: old_path.map(Into::into),
-                    after: new_path.map(Into::into),
-                });
+                results.push(FileDiffSummary::new(
+                    old_path.map(Into::into),
+                    new_path.map(Into::into),
+                ));
             }
             _ => {
-                results.push(FileDiffSummary {
-                    before: new_path.clone().map(Into::into),
-                    after: new_path.map(Into::into),
-                });
+                results.push(FileDiffSummary::new(
+                    new_path.clone().map(Into::into),
+                    new_path.map(Into::into),
+                ));
             }
         };
     }
@@ -277,38 +348,26 @@ pub fn parse_name_status(output: &str) -> Result<Vec<FileDiffSummary>, GitError>
             'A' => {
                 // Added: just one path
                 if let Some(path) = parts.next() {
-                    results.push(FileDiffSummary {
-                        before: None,
-                        after: Some(path.into()),
-                    });
+                    results.push(FileDiffSummary::new(None, Some(path.into())));
                 }
             }
             'D' => {
                 // Deleted: just one path
                 if let Some(path) = parts.next() {
-                    results.push(FileDiffSummary {
-                        before: Some(path.into()),
-                        after: None,
-                    });
+                    results.push(FileDiffSummary::new(Some(path.into()), None));
                 }
             }
             'M' | 'T' => {
                 // Modified or Type changed: just one path
                 if let Some(path) = parts.next() {
-                    results.push(FileDiffSummary {
-                        before: Some(path.into()),
-                        after: Some(path.into()),
-                    });
+                    results.push(FileDiffSummary::new(Some(path.into()), Some(path.into())));
                 }
             }
             'R' | 'C' => {
                 // Renamed or Copied: two paths (old, new)
                 // Status might include similarity percentage like R100
                 if let (Some(old), Some(new)) = (parts.next(), parts.next()) {
-                    results.push(FileDiffSummary {
-                        before: Some(old.into()),
-                        after: Some(new.into()),
-                    });
+                    results.push(FileDiffSummary::new(Some(old.into()), Some(new.into())));
                 }
             }
             _ => {
@@ -753,6 +812,46 @@ mod tests {
         let output = "A\0added.txt\0M\0modified.txt\0D\0deleted.txt\0";
         let result = parse_name_status(output).unwrap();
         assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_apply_numstat_added() {
+        let mut result = parse_name_status("A\0new_file.txt\0").unwrap();
+        apply_numstat_output(&mut result, "12\t0\tnew_file.txt\0");
+        assert_eq!(result[0].added_lines, Some(12));
+        assert_eq!(result[0].deleted_lines, Some(0));
+    }
+
+    #[test]
+    fn test_apply_numstat_deleted() {
+        let mut result = parse_name_status("D\0old_file.txt\0").unwrap();
+        apply_numstat_output(&mut result, "0\t8\told_file.txt\0");
+        assert_eq!(result[0].added_lines, Some(0));
+        assert_eq!(result[0].deleted_lines, Some(8));
+    }
+
+    #[test]
+    fn test_apply_numstat_modified() {
+        let mut result = parse_name_status("M\0changed.txt\0").unwrap();
+        apply_numstat_output(&mut result, "3\t2\tchanged.txt\0");
+        assert_eq!(result[0].added_lines, Some(3));
+        assert_eq!(result[0].deleted_lines, Some(2));
+    }
+
+    #[test]
+    fn test_apply_numstat_renamed() {
+        let mut result = parse_name_status("R100\0old_name.txt\0new_name.txt\0").unwrap();
+        apply_numstat_output(&mut result, "4\t1\t\0old_name.txt\0new_name.txt\0");
+        assert_eq!(result[0].added_lines, Some(4));
+        assert_eq!(result[0].deleted_lines, Some(1));
+    }
+
+    #[test]
+    fn test_apply_numstat_binary() {
+        let mut result = parse_name_status("M\0image.png\0").unwrap();
+        apply_numstat_output(&mut result, "-\t-\timage.png\0");
+        assert_eq!(result[0].added_lines, None);
+        assert_eq!(result[0].deleted_lines, None);
     }
 
     #[test]

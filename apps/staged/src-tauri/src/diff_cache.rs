@@ -487,6 +487,41 @@ fn decode_file(b64: &str, path: &str) -> git_diff::File {
     }
 }
 
+fn supports_line_stats(file: &Option<git_diff::File>) -> bool {
+    !matches!(
+        file,
+        Some(git_diff::File {
+            content: git_diff::FileContent::Binary | git_diff::FileContent::ImageBase64 { .. },
+            ..
+        })
+    )
+}
+
+fn line_stats_from_patch(
+    patch: &str,
+    before: &Option<git_diff::File>,
+    after: &Option<git_diff::File>,
+) -> (Option<u32>, Option<u32>) {
+    if !supports_line_stats(before) || !supports_line_stats(after) {
+        return (None, None);
+    }
+
+    let mut added = 0;
+    let mut deleted = 0;
+    for line in patch.lines() {
+        if line.starts_with("+++ ") || line.starts_with("--- ") {
+            continue;
+        }
+        if line.starts_with('+') {
+            added += 1;
+        } else if line.starts_with('-') {
+            deleted += 1;
+        }
+    }
+
+    (Some(added), Some(deleted))
+}
+
 /// Parse file entries from the collection script into summaries and full diffs.
 fn parse_script_files(
     entries: &[CollectScriptFile],
@@ -511,11 +546,6 @@ fn parse_script_files(
             Some(entry.after_path.clone())
         };
 
-        files.push(git_diff::FileDiffSummary {
-            before: before_path.as_deref().map(PathBuf::from),
-            after: after_path.as_deref().map(PathBuf::from),
-        });
-
         let canonical_path = after_path.as_deref().or(before_path.as_deref());
         let canonical_path = match canonical_path {
             Some(p) if !p.is_empty() => p,
@@ -530,6 +560,14 @@ fn parse_script_files(
         let after = entry.after_content_b64.as_deref().map(|b64| {
             let path = after_path.as_deref().unwrap_or(canonical_path);
             decode_file(b64, path)
+        });
+
+        let (added_lines, deleted_lines) = line_stats_from_patch(&entry.patch, &before, &after);
+        files.push(git_diff::FileDiffSummary {
+            before: before_path.as_deref().map(PathBuf::from),
+            after: after_path.as_deref().map(PathBuf::from),
+            added_lines,
+            deleted_lines,
         });
 
         let hunks = parse_unified_hunks(&entry.patch);
@@ -763,4 +801,62 @@ fn cache_branch_diff_background(
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cached_branch_index_deserializes_summaries_without_line_stats() {
+        let json = r#"{
+            "branch_id": "branch-1",
+            "base_sha": "base",
+            "head_sha": "head",
+            "files": [
+                { "before": "src/old.ts", "after": "src/new.ts" }
+            ],
+            "cached_at": 0
+        }"#;
+
+        let index: CachedBranchIndex = serde_json::from_str(json).unwrap();
+        assert_eq!(index.files.len(), 1);
+        assert_eq!(index.files[0].added_lines, None);
+        assert_eq!(index.files[0].deleted_lines, None);
+    }
+
+    #[test]
+    fn line_stats_from_patch_counts_text_changes() {
+        let patch = "\
+diff --git a/file.txt b/file.txt
+--- a/file.txt
++++ b/file.txt
+@@ -1,2 +1,3 @@
+-old
++new
++added
+ unchanged";
+
+        let before = Some(git_diff::File {
+            path: "file.txt".to_string(),
+            content: git_diff::FileContent::Text { lines: vec![] },
+        });
+        let after = before.clone();
+
+        assert_eq!(
+            line_stats_from_patch(patch, &before, &after),
+            (Some(2), Some(1))
+        );
+    }
+
+    #[test]
+    fn line_stats_from_patch_skips_binary_content() {
+        let before = Some(git_diff::File {
+            path: "image.png".to_string(),
+            content: git_diff::FileContent::Binary,
+        });
+        let after = before.clone();
+
+        assert_eq!(line_stats_from_patch("", &before, &after), (None, None));
+    }
 }

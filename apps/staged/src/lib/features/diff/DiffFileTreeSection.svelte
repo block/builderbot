@@ -7,13 +7,18 @@
     ChevronDown,
     Folder,
     MessageSquare,
-    CirclePlus,
-    CircleMinus,
-    CircleArrowUp,
+    MoveRight,
+    Plus,
+    X,
   } from 'lucide-svelte';
   import { FileSearchResults } from '@builderbot/diff-viewer/components';
   import { getMatchSnippet, getTextLines, type SearchMatch } from '@builderbot/diff-viewer/utils';
-  import type { FileEntry, TreeNode } from './diffModalHelpers';
+  import {
+    fileChangeScale,
+    fileChangeTotal,
+    type FileEntry,
+    type TreeNode,
+  } from './diffModalHelpers';
   import type { FileDiff, FileDiffSummary } from '@builderbot/diff-viewer/types';
   import type { FileSearchResult } from '@builderbot/diff-viewer/state';
   import '@builderbot/diff-viewer/components/search.css';
@@ -83,8 +88,30 @@
     fileEntries.map((entry) => ({
       before: entry.status === 'added' ? null : entry.path,
       after: entry.status === 'deleted' ? null : entry.path,
+      addedLines: entry.addedLines,
+      deletedLines: entry.deletedLines,
     }))
   );
+
+  const maxFileChangeTotal = $derived(
+    fileEntries.reduce((max, entry) => Math.max(max, fileChangeTotal(entry) ?? 0), 0)
+  );
+
+  function lineCount(value: number | null | undefined): number {
+    return typeof value === 'number' ? Math.max(0, value) : 0;
+  }
+
+  function changeIndicatorTitle(added: number, deleted: number): string {
+    return `+${added} / -${deleted}`;
+  }
+
+  function changeIndicatorHeight(total: number): number {
+    return Math.round(4 + fileChangeScale(total, maxFileChangeTotal) * 12);
+  }
+
+  function hasLineChanges(file: FileEntry): boolean {
+    return (fileChangeTotal(file) ?? 0) > 0;
+  }
 
   // Helper to get snippet for a search result
   function getSnippet(match: SearchMatch, filePath: string): string {
@@ -123,20 +150,24 @@
 
 {#snippet fileIcon(file: FileEntry, showReviewedSection: boolean)}
   {#if isReadonly}
-    <span class="status-icon status-icon-static">
+    <span
+      class="status-icon status-icon-static"
+      class:status-icon-added={file.status === 'added'}
+      class:status-icon-deleted={file.status === 'deleted'}
+      class:status-icon-renamed={file.status === 'renamed' && !hasLineChanges(file)}
+      class:status-icon-renamed-modified={file.status === 'renamed' && hasLineChanges(file)}
+    >
       <span class="icon-default">
-        {#if file.status === 'added'}
-          <CirclePlus size={16} />
-        {:else if file.status === 'deleted'}
-          <CircleMinus size={16} />
-        {:else}
-          <CircleArrowUp size={16} />
-        {/if}
+        {@render fileStatusVisual(file)}
       </span>
     </span>
   {:else}
     <span
       class="status-icon"
+      class:status-icon-added={file.status === 'added'}
+      class:status-icon-deleted={file.status === 'deleted'}
+      class:status-icon-renamed={file.status === 'renamed' && !hasLineChanges(file)}
+      class:status-icon-renamed-modified={file.status === 'renamed' && hasLineChanges(file)}
       onclick={(e) => onToggleReviewed(e, file)}
       onkeydown={(e) => e.key === 'Enter' && onToggleReviewed(e, file)}
       role="button"
@@ -144,13 +175,7 @@
       title={showReviewedSection ? 'Mark as needs review' : 'Mark as reviewed'}
     >
       <span class="icon-default">
-        {#if file.status === 'added'}
-          <CirclePlus size={16} />
-        {:else if file.status === 'deleted'}
-          <CircleMinus size={16} />
-        {:else}
-          <CircleArrowUp size={16} />
-        {/if}
+        {@render fileStatusVisual(file)}
       </span>
       <span class="icon-hover" class:icon-hover-unreview={showReviewedSection}>
         {#if showReviewedSection}
@@ -161,6 +186,49 @@
       </span>
     </span>
   {/if}
+{/snippet}
+
+{#snippet fileStatusVisual(file: FileEntry)}
+  {#if file.status === 'added'}
+    <Plus size={16} />
+  {:else if file.status === 'deleted'}
+    <X size={16} />
+  {:else if file.status === 'renamed'}
+    <MoveRight size={16} />
+  {:else}
+    {@render changeIndicator(file)}
+  {/if}
+{/snippet}
+
+{#snippet changeIndicator(file: FileEntry)}
+  {@const total = fileChangeTotal(file)}
+  {@const added = lineCount(file.addedLines)}
+  {@const deleted = lineCount(file.deletedLines)}
+  <span
+    class="change-indicator"
+    class:change-indicator-visible={total !== null}
+    title={total !== null && total > 0 ? changeIndicatorTitle(added, deleted) : undefined}
+    aria-hidden="true"
+  >
+    {#if total !== null && total > 0}
+      <span class="change-indicator-fill" style:height={`${changeIndicatorHeight(total)}px`}>
+        {#if added > 0}
+          <span
+            class="change-segment change-segment-added"
+            style:height={`${(added / total) * 100}%`}
+          ></span>
+        {/if}
+        {#if deleted > 0}
+          <span
+            class="change-segment change-segment-deleted"
+            style:height={`${(deleted / total) * 100}%`}
+          ></span>
+        {/if}
+      </span>
+    {:else}
+      <span class="change-indicator-empty"></span>
+    {/if}
+  </span>
 {/snippet}
 
 {#snippet treeNodes(nodes: TreeNode[], depth: number, showReviewedSection: boolean)}
@@ -490,9 +558,28 @@
     cursor: pointer;
     color: var(--text-muted);
     border-radius: 3px;
+    box-sizing: border-box;
+    width: 20px;
+    height: 20px;
     transition:
       color 0.1s,
       background-color 0.1s;
+  }
+
+  .status-icon-added {
+    color: var(--status-added);
+  }
+
+  .status-icon-deleted {
+    color: var(--status-deleted);
+  }
+
+  .status-icon-renamed {
+    color: var(--status-renamed);
+  }
+
+  .status-icon-renamed-modified {
+    color: var(--status-modified);
   }
 
   .status-icon:not(.status-icon-static):hover {
@@ -525,6 +612,48 @@
 
   .icon-hover-unreview {
     color: var(--text-muted);
+  }
+
+  .change-indicator {
+    display: inline-flex;
+    align-items: flex-end;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 4px;
+    height: 16px;
+    overflow: hidden;
+    border-radius: 2px;
+  }
+
+  .change-indicator-visible {
+    background: color-mix(in srgb, var(--border-muted) 35%, transparent);
+  }
+
+  .change-indicator-fill {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    overflow: hidden;
+    border-radius: inherit;
+  }
+
+  .change-indicator-empty {
+    width: 100%;
+    height: 6px;
+    border-radius: inherit;
+    background: var(--status-modified);
+  }
+
+  .change-segment {
+    width: 100%;
+  }
+
+  .change-segment-added {
+    background: var(--status-added);
+  }
+
+  .change-segment-deleted {
+    background: var(--status-deleted);
   }
 
   .comment-indicator {

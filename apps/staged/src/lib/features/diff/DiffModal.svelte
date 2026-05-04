@@ -637,6 +637,11 @@
   // ==========================================================================
 
   let currentDiff = $derived(diffViewer.getCurrentDiff());
+  let diffViewerEmptyMessage = $derived(
+    diffViewer.state.loading || diffViewer.state.loadingFile !== null
+      ? 'Loading changes...'
+      : undefined
+  );
   let rawComments = $derived(reviewHandle?.state.comments ?? []);
 
   /** Normalize comment paths so they match the file list used by the diff viewer.
@@ -1254,7 +1259,8 @@
           comments={readonly ? [] : currentComments}
           {jumpToComment}
           {jumpToLine}
-          loading={diffViewer.state.loadingFile !== null}
+          loading={diffViewer.state.loadingFile !== null && !diffViewer.state.loading}
+          emptyMessage={diffViewerEmptyMessage}
           beforeLabel={activeBeforeLabel}
           afterLabel={activeAfterLabel}
           annotations={revealedAnnotations}

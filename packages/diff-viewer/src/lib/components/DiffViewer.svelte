@@ -93,6 +93,8 @@
     syntaxThemeVersion?: number;
     /** Whether a new file is loading (show subtle indicator, keep old content). */
     loading?: boolean;
+    /** Message shown when no diff content is currently available. */
+    emptyMessage?: string;
     /** Whether this is a reference file (not part of the diff). */
     isReferenceFile?: boolean;
     /** Label for the before pane header (e.g. base branch name). */
@@ -126,6 +128,7 @@
     jumpToLine = null,
     syntaxThemeVersion = 0,
     loading = false,
+    emptyMessage = 'Select a file to view changes',
     isReferenceFile = false,
     beforeLabel = 'before',
     afterLabel = 'after',
@@ -552,7 +555,12 @@
       const afterCode = afterLines.join('\n');
       beforeTokens = beforeCode ? highlightLines(beforeCode, language) : [];
       afterTokens = afterCode ? highlightLines(afterCode, language) : [];
-      console.info('[diff] syntax highlight', { language, beforeLines: beforeLines.length, afterLines: afterLines.length, elapsed: `${(performance.now() - t0).toFixed(1)}ms` });
+      console.info('[diff] syntax highlight', {
+        language,
+        beforeLines: beforeLines.length,
+        afterLines: afterLines.length,
+        elapsed: `${(performance.now() - t0).toFixed(1)}ms`,
+      });
     } else {
       beforeTokens = beforeLines.map((line) => [{ content: line, color: 'inherit' }]);
       afterTokens = afterLines.map((line) => [{ content: line, color: 'inherit' }]);
@@ -868,9 +876,7 @@
       const segEnd = charIndex + segment.content.length;
 
       // Find highlights that overlap with this segment
-      const overlapping = highlights.filter(
-        (h) => h.start < segEnd && h.end > segStart
-      );
+      const overlapping = highlights.filter((h) => h.start < segEnd && h.end > segStart);
 
       if (overlapping.length === 0) {
         result.push(segment);
@@ -919,10 +925,7 @@
   /**
    * Get highlighted token segments for a line, with search matches and char-level diff applied.
    */
-  function getHighlightedTokens(
-    lineIndex: number,
-    side: 'before' | 'after'
-  ): HighlightedSegment[] {
+  function getHighlightedTokens(lineIndex: number, side: 'before' | 'after'): HighlightedSegment[] {
     const tokens = side === 'before' ? getBeforeTokens(lineIndex) : getAfterTokens(lineIndex);
     const matches = getSearchMatchesForLine(lineIndex, side);
     let segments = applySearchHighlights(tokens, matches);
@@ -948,7 +951,10 @@
     );
   }
 
-  function getLineClassForLine(side: 'before' | 'after', lineIndex: number): BeforeLineClass | AfterLineClass | null {
+  function getLineClassForLine(
+    side: 'before' | 'after',
+    lineIndex: number
+  ): BeforeLineClass | AfterLineClass | null {
     return helperGetLineClass(
       side,
       lineIndex,
@@ -961,7 +967,10 @@
     );
   }
 
-  function getCharHighlightsForLine(side: 'before' | 'after', lineIndex: number): CharHighlight[] | null {
+  function getCharHighlightsForLine(
+    side: 'before' | 'after',
+    lineIndex: number
+  ): CharHighlight[] | null {
     return helperGetCharHighlights(
       side,
       lineIndex,
@@ -1828,7 +1837,7 @@
 
   {#if diff === null}
     <div class="empty-state">
-      <p>Select a file to view changes</p>
+      <p>{emptyMessage}</p>
     </div>
   {:else if isEmptyDiff}
     <div class="empty-state">

@@ -72,6 +72,56 @@ impl Store {
         Ok(())
     }
 
+    /// Complete a pending commit row with a git SHA.
+    ///
+    /// If another metadata row on the same branch already owns the target SHA,
+    /// the pending row is deleted instead of violating the branch/SHA unique
+    /// index. Returns `true` when this row now owns the SHA, or `false` when it
+    /// was resolved by removing the duplicate pending row.
+    pub fn complete_pending_commit_sha(
+        &self,
+        id: &str,
+        branch_id: &str,
+        sha: &str,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+
+        let existing_id = conn
+            .query_row(
+                "SELECT id FROM commits WHERE branch_id = ?1 AND sha = ?2",
+                params![branch_id, sha],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+
+        if let Some(existing_id) = existing_id {
+            if existing_id == id {
+                return Ok(true);
+            }
+            conn.execute(
+                "DELETE FROM commits WHERE id = ?1 AND branch_id = ?2 AND sha IS NULL",
+                params![id, branch_id],
+            )?;
+            return Ok(false);
+        }
+
+        let rows = conn.execute(
+            "UPDATE commits SET sha = ?1, updated_at = ?2 WHERE id = ?3 AND branch_id = ?4 AND sha IS NULL",
+            params![sha, now_timestamp(), id, branch_id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// Delete a linked pending commit row if it has not landed.
+    pub fn delete_pending_commit_for_session(&self, session_id: &str) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "DELETE FROM commits WHERE session_id = ?1 AND sha IS NULL",
+            params![session_id],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// Find any commit linked to a given session (regardless of SHA status).
     pub fn get_commit_by_session(&self, session_id: &str) -> Result<Option<Commit>, StoreError> {
         let conn = self.conn.lock().unwrap();

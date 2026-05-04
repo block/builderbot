@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { extractPrNumber, extractPrUrl, isImageFile, isMaybeTextFile } from './branchCardHelpers';
+import {
+  classifyCompletedPushSession,
+  classifyPipelinePushCompletion,
+  extractPrNumber,
+  extractPrUrl,
+  isImageFile,
+  isMaybeTextFile,
+  isPushRejectedNonFastForward,
+} from './branchCardHelpers';
+import type { PipelineExecution } from '../../types';
 
 describe('extractPrUrl', () => {
   it('returns the canonical GitHub PR URL from a PR_URL marker', () => {
@@ -59,5 +68,147 @@ describe('file type helpers', () => {
       expect(isImageFile(filePath)).toBe(false);
       expect(isMaybeTextFile(filePath)).toBe(true);
     }
+  });
+});
+
+describe('isPushRejectedNonFastForward', () => {
+  it('recognizes the legacy assistant marker', () => {
+    expect(
+      isPushRejectedNonFastForward([
+        {
+          role: 'assistant',
+          content: 'PUSH_REJECTED: NON_FAST_FORWARD',
+        },
+      ])
+    ).toBe(true);
+  });
+
+  it('recognizes git non-fast-forward output from tool results', () => {
+    expect(
+      isPushRejectedNonFastForward([
+        {
+          role: 'tool_result',
+          content: '! [rejected] feature -> feature (non-fast-forward)',
+        },
+      ])
+    ).toBe(true);
+  });
+
+  it('ignores user prompt text that mentions non-fast-forward pushes', () => {
+    expect(
+      isPushRejectedNonFastForward([
+        {
+          role: 'user',
+          content: 'If this push is non-fast-forward, do not force push.',
+        },
+      ])
+    ).toBe(false);
+  });
+});
+
+describe('classifyPipelinePushCompletion', () => {
+  function pipeline(overrides: Partial<PipelineExecution> = {}): PipelineExecution {
+    return {
+      completedWithoutAi: false,
+      currentStep: 0,
+      steps: [],
+      ...overrides,
+    };
+  }
+
+  it('classifies a failed pipeline push with non-fast-forward output as rejected', () => {
+    expect(
+      classifyPipelinePushCompletion(
+        pipeline({
+          steps: [
+            {
+              label: 'Push',
+              stepType: 'command',
+              status: 'failed',
+              output: '! [rejected] feature -> feature (non-fast-forward)',
+              error: null,
+              startedAt: 1,
+              completedAt: 2,
+            },
+          ],
+        })
+      )
+    ).toBe('rejected_non_fast_forward');
+  });
+
+  it('classifies a pipeline that completed without AI as succeeded', () => {
+    expect(
+      classifyPipelinePushCompletion(
+        pipeline({
+          completedWithoutAi: true,
+          steps: [
+            {
+              label: 'Push',
+              stepType: 'command',
+              status: 'succeeded',
+              output: 'To github.com:block/builderbot.git',
+              error: null,
+              startedAt: 1,
+              completedAt: 2,
+            },
+          ],
+        })
+      )
+    ).toBe('succeeded');
+  });
+
+  it('treats non-fast-forward as succeeded when AI handled recovery', () => {
+    // A force-push with --force-with-lease can fail with output containing
+    // "non-fast-forward" on some git server implementations. If AI ran after
+    // the failure and the session completed, the push was handled successfully.
+    expect(
+      classifyPipelinePushCompletion(
+        pipeline({
+          steps: [
+            {
+              label: 'Push',
+              stepType: 'command',
+              status: 'failed',
+              output: '! [rejected] feature -> feature (non-fast-forward)',
+              error: null,
+              startedAt: 1,
+              completedAt: 2,
+            },
+          ],
+        }),
+        [
+          {
+            role: 'assistant',
+            content: 'The force push failed because the remote ref moved. Retrying...',
+          },
+        ]
+      )
+    ).toBe('succeeded');
+  });
+
+  it('falls back to messages for AI handoff sessions', () => {
+    expect(
+      classifyCompletedPushSession(
+        pipeline({
+          steps: [
+            {
+              label: 'Push',
+              stepType: 'command',
+              status: 'failed',
+              output: 'pre-push hook failed',
+              error: 'Command failed with exit code 1',
+              startedAt: 1,
+              completedAt: 2,
+            },
+          ],
+        }),
+        [
+          {
+            role: 'assistant',
+            content: 'Fixed the hook failure and pushed successfully.',
+          },
+        ]
+      )
+    ).toBe('succeeded');
   });
 });

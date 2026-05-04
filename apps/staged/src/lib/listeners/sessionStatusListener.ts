@@ -12,9 +12,9 @@
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import * as commands from '../api/commands';
 import {
+  classifyCompletedPushSession,
   extractPrUrl,
   extractPrNumber,
-  isPushRejectedNonFastForward,
 } from '../features/branches/branchCardHelpers';
 import { navigation } from '../features/layout/navigation.svelte';
 import { projectStateStore } from '../stores/projectState.svelte';
@@ -90,8 +90,25 @@ async function handleSessionEnd(sessionId: string, status: string) {
 async function handlePrCompletion(sessionId: string, branchId: string, status: string) {
   if (status === 'completed') {
     try {
+      // Try session messages first (AI session writes PR_URL: marker).
       const messages = await commands.getSessionMessages(sessionId);
-      const foundUrl = extractPrUrl(messages);
+      let foundUrl = extractPrUrl(messages);
+
+      // Also check pipeline step outputs for older or partially migrated PR sessions.
+      if (!foundUrl) {
+        const session = await commands.getSession(sessionId);
+        if (session?.pipeline) {
+          for (const step of session.pipeline.steps) {
+            if (step.output) {
+              const match = step.output.match(/https:\/\/github\.com\/[^\s/]+\/[^\s/]+\/pull\/\d+/);
+              if (match) {
+                foundUrl = match[0];
+                break;
+              }
+            }
+          }
+        }
+      }
 
       if (foundUrl) {
         const prNumber = extractPrNumber(foundUrl);
@@ -131,8 +148,12 @@ async function handlePrCompletion(sessionId: string, branchId: string, status: s
 async function handlePushCompletion(sessionId: string, branchId: string, status: string) {
   if (status === 'completed') {
     try {
+      const session = await commands.getSession(sessionId);
+      const pipeline = session?.pipeline;
       const messages = await commands.getSessionMessages(sessionId);
-      if (isPushRejectedNonFastForward(messages)) {
+      const outcome = classifyCompletedPushSession(pipeline, messages);
+
+      if (outcome === 'rejected_non_fast_forward') {
         pushStateStore.setPushError(branchId, '', true);
       } else {
         try {

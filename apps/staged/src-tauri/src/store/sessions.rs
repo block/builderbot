@@ -2,15 +2,21 @@
 
 use rusqlite::{params, OptionalExtension};
 
-use super::models::{CompletionReason, Session, SessionStatus};
+use super::models::{CompletionReason, PipelineExecution, Session, SessionStatus};
 use super::{now_timestamp, Store, StoreError};
 
 impl Store {
     pub fn create_session(&self, session: &Session) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        let pipeline_json = session
+            .pipeline
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| StoreError(format!("Failed to serialize pipeline: {e}")))?;
         conn.execute(
-            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 session.id,
                 session.prompt,
@@ -23,6 +29,7 @@ impl Store {
                 session.created_at,
                 session.updated_at,
                 session.owner_pid,
+                pipeline_json,
             ],
         )?;
         Ok(())
@@ -31,7 +38,7 @@ impl Store {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline
              FROM sessions WHERE id = ?1",
             params![id],
             Self::row_to_session,
@@ -160,7 +167,7 @@ impl Store {
     pub fn get_running_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline
              FROM sessions WHERE status = 'running'",
         )?;
         let sessions = stmt
@@ -207,7 +214,7 @@ impl Store {
     ) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT s.id, s.prompt, s.status, s.working_dir, s.provider, s.agent_id, s.error_message, s.completion_reason, s.created_at, s.updated_at, s.owner_pid
+            "SELECT s.id, s.prompt, s.status, s.working_dir, s.provider, s.agent_id, s.error_message, s.completion_reason, s.created_at, s.updated_at, s.owner_pid, s.pipeline
              FROM sessions s
              WHERE s.status = 'queued'
                AND (
@@ -275,9 +282,31 @@ impl Store {
         Ok(())
     }
 
+    /// Update the pipeline execution state for a session.
+    pub fn update_session_pipeline(
+        &self,
+        id: &str,
+        pipeline: &PipelineExecution,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let json = serde_json::to_string(pipeline)
+            .map_err(|e| StoreError(format!("Failed to serialize pipeline: {e}")))?;
+        conn.execute(
+            "UPDATE sessions SET pipeline = ?1, updated_at = ?2 WHERE id = ?3",
+            params![json, now_timestamp(), id],
+        )?;
+        Ok(())
+    }
+
     fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
         let status_str: String = row.get(2)?;
         let reason_str: Option<String> = row.get(7)?;
+        let pipeline_json: Option<String> = row.get(11)?;
+        let pipeline = pipeline_json.as_deref().and_then(|s| {
+            serde_json::from_str(s)
+                .map_err(|e| log::warn!("Failed to deserialize pipeline JSON: {e}"))
+                .ok()
+        });
         Ok(Session {
             id: row.get(0)?,
             prompt: row.get(1)?,
@@ -290,6 +319,7 @@ impl Store {
             created_at: row.get(8)?,
             updated_at: row.get(9)?,
             owner_pid: row.get(10)?,
+            pipeline,
         })
     }
 }

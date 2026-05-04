@@ -34,11 +34,15 @@
 //!   `log::error!`, so FK failures are swallowed gracefully.
 
 use std::collections::HashMap;
+use std::io;
 use std::path::PathBuf;
+use std::process::{Output, Stdio};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::sync::CancellationToken;
 
 use acp_client::{McpServer, McpServerHttp};
@@ -47,12 +51,30 @@ use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::agent::{AcpDriver, AgentDriver, MessageWriter};
 use crate::git::Span;
 use crate::store::{
-    Comment, CommentAuthor, CommentType, CompletionReason, MessageRole, SessionStatus, Store,
+    Comment, CommentAuthor, CommentType, CompletionReason, FailureStrategy, MessageRole,
+    PipelineExecution, PipelineKind, PipelineStep, SessionStatus, StepStatus, StepType, Store,
 };
+
+const PIPELINE_STEP_PROMPT_OUTPUT_MAX_CHARS: usize = 30_000;
 
 // =============================================================================
 // Event types
 // =============================================================================
+
+/// Emitted when an individual pipeline step changes status.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineStepEvent {
+    pub session_id: String,
+    pub step_index: usize,
+    pub label: String,
+    pub step_type: StepType,
+    pub status: StepStatus,
+    pub output: Option<String>,
+    pub error: Option<String>,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+}
 
 /// Emitted when a session's status changes. The only event the frontend needs.
 #[derive(Debug, Clone, Serialize)]
@@ -485,6 +507,849 @@ pub fn start_session(
 }
 
 // =============================================================================
+// Pipeline execution
+// =============================================================================
+
+/// Configuration for a pipeline-driven session.
+pub struct PipelineConfig {
+    pub session_id: String,
+    /// Original user-facing session prompt. Used when a command failure falls
+    /// through to a generic AI handoff without a step-specific prompt.
+    pub prompt: String,
+    pub steps: Vec<PipelineStep>,
+    /// The pipeline execution state persisted with the session. Passed in so
+    /// `run_pipeline` doesn't reconstruct it from scratch (the caller already
+    /// built and persisted one via `PipelineExecution::from_steps`).
+    pub pipeline: PipelineExecution,
+    pub working_dir: PathBuf,
+    /// HEAD before the deterministic pipeline began. Used by rebase pipelines
+    /// when they hand off to AI after conflicts.
+    pub pre_head_sha: Option<String>,
+    /// ACP provider ID (e.g. "goose", "claude").
+    pub provider: Option<String>,
+    /// Workspace name for remote branches.
+    pub workspace_name: Option<String>,
+    /// Remote working directory for remote branches.
+    pub remote_working_dir: Option<PathBuf>,
+}
+
+/// Result of running a pipeline — tells the caller what happened.
+pub enum PipelineOutcome {
+    /// All steps succeeded without needing AI.
+    CompletedWithoutAi,
+    /// An AI handoff occurred; a normal AI session was started with this prompt.
+    /// `ai_step_index` is `Some(idx)` when the handoff originated from an
+    /// explicit `AiHandoff` step (so we can mark it failed if `start_session`
+    /// errors). It is `None` when the handoff came from a failed Command step's
+    /// `HandoffToAi` failure strategy — in that case remaining steps are already
+    /// marked as skipped and no further pipeline updates are needed.
+    HandedOffToAi {
+        prompt: String,
+        ai_step_index: Option<usize>,
+    },
+    /// The pipeline was aborted because a step failed AND the configured abort
+    /// marker was found in the output. This signals a known, expected failure
+    /// (e.g. non-fast-forward rejection) that the frontend handles specially.
+    ///
+    /// Note: if a step uses `Abort { marker: Some(m) }` but the marker is NOT
+    /// found in the output, the pipeline falls through to `HandedOffToAi`
+    /// instead — only marker-matched failures produce this variant.
+    Aborted { step_index: usize },
+    /// The pipeline was cancelled externally.
+    Cancelled,
+}
+
+enum PipelineCommandResult {
+    Completed(Output),
+    Cancelled { stdout: Vec<u8>, stderr: Vec<u8> },
+}
+
+/// Start a pipeline-driven session. Runs deterministic command steps first,
+/// then hands off to AI if needed.
+///
+/// Like `start_session`, this returns immediately and runs in the background.
+pub fn start_pipeline_session(
+    config: PipelineConfig,
+    store: Arc<Store>,
+    app_handle: AppHandle,
+    registry: Arc<SessionRegistry>,
+) -> Result<(), String> {
+    let cancel_token = registry.register(&config.session_id);
+    let session_id = config.session_id.clone();
+    let store_for_status = Arc::clone(&store);
+
+    // We use a dedicated OS thread + single-threaded runtime (matching start_session)
+    // because the pipeline may hand off to an AI session that uses !Send futures
+    // (via the agent protocol's LocalSet requirement). Keeping the same threading
+    // model avoids mixing runtime contexts.
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("Failed to create runtime for pipeline session");
+
+        let local = tokio::task::LocalSet::new();
+        let outcome = local.block_on(&rt, async {
+            run_pipeline(&config, &store, &app_handle, &cancel_token).await
+        });
+
+        match outcome {
+            PipelineOutcome::CompletedWithoutAi => {
+                // Pipeline completed successfully — transition session to completed.
+                let branch_id = store_for_status
+                    .get_branch_id_for_session(&session_id)
+                    .ok()
+                    .flatten();
+                resolve_pipeline_artifacts_without_ai(&config, &store_for_status, true);
+                let status_enum = SessionStatus::Completed;
+                let reason = CompletionReason::TurnComplete;
+                registry.deregister(&session_id);
+                let transitioned = store_for_status
+                    .transition_from_running(&session_id, status_enum, None, Some(&reason))
+                    .unwrap_or(false);
+                emit_status(&app_handle, &session_id, "completed", None, Some(&reason));
+                if transitioned {
+                    drain_queued_after_pipeline_terminal(
+                        Arc::clone(&store_for_status),
+                        Arc::clone(&registry),
+                        app_handle.clone(),
+                        branch_id,
+                    );
+                }
+            }
+            PipelineOutcome::HandedOffToAi {
+                prompt,
+                ai_step_index,
+            } => {
+                // The pipeline wants to start an AI session with the built prompt.
+                // We reuse the same session_id. The session is still "running".
+                //
+                // We intentionally skip deregister here: start_session's register()
+                // call will atomically replace the old cancel token. This avoids a
+                // window where the session has no token registered (during which a
+                // cancel request would be silently lost).
+                let pre_head_sha = pre_head_for_pipeline_handoff(&config);
+
+                // Try to start the AI session now.
+                let ai_config = SessionConfig {
+                    session_id: session_id.clone(),
+                    prompt,
+                    working_dir: config.working_dir.clone(),
+                    agent_session_id: None,
+                    pre_head_sha,
+                    provider: config.provider.clone(),
+                    workspace_name: config.workspace_name.clone(),
+                    extra_env: vec![],
+                    mcp_project_id: None,
+                    action_executor: None,
+                    action_registry: None,
+                    remote_working_dir: config.remote_working_dir.clone(),
+                    image_ids: vec![],
+                };
+                if let Err(e) = start_session(
+                    ai_config,
+                    store_for_status.clone(),
+                    app_handle.clone(),
+                    Arc::clone(&registry),
+                ) {
+                    log::error!("Failed to start AI session after pipeline handoff: {e}");
+                    // If the handoff came from an explicit AiHandoff step, mark
+                    // it as failed so the UI doesn't show a perpetual spinner.
+                    if let Some(step_idx) = ai_step_index {
+                        if let Ok(Some(session)) = store_for_status.get_session(&session_id) {
+                            if let Some(mut pipeline) = session.pipeline {
+                                if step_idx < pipeline.steps.len() {
+                                    pipeline.steps[step_idx].status = StepStatus::Failed;
+                                    pipeline.steps[step_idx].error =
+                                        Some(format!("Failed to start AI session: {e}"));
+                                    pipeline.steps[step_idx].completed_at =
+                                        Some(crate::store::now_timestamp());
+                                    let _ = store_for_status
+                                        .update_session_pipeline(&session_id, &pipeline);
+                                    emit_pipeline_step(
+                                        &app_handle,
+                                        &session_id,
+                                        step_idx,
+                                        &pipeline.steps[step_idx],
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    let branch_id = store_for_status
+                        .get_branch_id_for_session(&session_id)
+                        .ok()
+                        .flatten();
+                    resolve_pipeline_artifacts_without_ai(&config, &store_for_status, false);
+                    let transitioned = finish_failed_pipeline_handoff_start(
+                        &store_for_status,
+                        &registry,
+                        &session_id,
+                        &e,
+                    );
+                    emit_status(
+                        &app_handle,
+                        &session_id,
+                        "error",
+                        Some(e),
+                        Some(&CompletionReason::Crashed),
+                    );
+                    if transitioned {
+                        drain_queued_after_pipeline_terminal(
+                            Arc::clone(&store_for_status),
+                            Arc::clone(&registry),
+                            app_handle.clone(),
+                            branch_id,
+                        );
+                    }
+                }
+            }
+            PipelineOutcome::Aborted { .. } => {
+                // Pipeline aborted (e.g. non-fast-forward). Mark as completed so
+                // the frontend can inspect the pipeline steps for the failure.
+                let branch_id = store_for_status
+                    .get_branch_id_for_session(&session_id)
+                    .ok()
+                    .flatten();
+                resolve_pipeline_artifacts_without_ai(&config, &store_for_status, false);
+                let reason = CompletionReason::TurnComplete;
+                registry.deregister(&session_id);
+                let transitioned = store_for_status
+                    .transition_from_running(
+                        &session_id,
+                        SessionStatus::Completed,
+                        None,
+                        Some(&reason),
+                    )
+                    .unwrap_or(false);
+                emit_status(&app_handle, &session_id, "completed", None, Some(&reason));
+                if transitioned {
+                    drain_queued_after_pipeline_terminal(
+                        Arc::clone(&store_for_status),
+                        Arc::clone(&registry),
+                        app_handle.clone(),
+                        branch_id,
+                    );
+                }
+            }
+            PipelineOutcome::Cancelled => {
+                let branch_id = store_for_status
+                    .get_branch_id_for_session(&session_id)
+                    .ok()
+                    .flatten();
+                resolve_pipeline_artifacts_without_ai(&config, &store_for_status, false);
+                let reason = CompletionReason::Interrupted;
+                registry.deregister(&session_id);
+                let transitioned = store_for_status
+                    .transition_from_running(
+                        &session_id,
+                        SessionStatus::Cancelled,
+                        None,
+                        Some(&reason),
+                    )
+                    .unwrap_or(false);
+                emit_status(&app_handle, &session_id, "cancelled", None, Some(&reason));
+                if transitioned {
+                    drain_queued_after_pipeline_terminal(
+                        Arc::clone(&store_for_status),
+                        Arc::clone(&registry),
+                        app_handle.clone(),
+                        branch_id,
+                    );
+                }
+            }
+        }
+    });
+
+    Ok(())
+}
+
+fn finish_failed_pipeline_handoff_start(
+    store: &Store,
+    registry: &SessionRegistry,
+    session_id: &str,
+    error: &str,
+) -> bool {
+    registry.deregister(session_id);
+    store
+        .transition_from_running(
+            session_id,
+            SessionStatus::Error,
+            Some(error),
+            Some(&CompletionReason::Crashed),
+        )
+        .unwrap_or(false)
+}
+
+fn pre_head_for_pipeline_handoff(config: &PipelineConfig) -> Option<String> {
+    match config.pipeline.kind.as_ref() {
+        Some(PipelineKind::Rebase) => config.pre_head_sha.clone(),
+        Some(PipelineKind::Squash) => match current_pipeline_head(config) {
+            Ok(head) => Some(head),
+            Err(e) => {
+                log::warn!("Failed to capture squash handoff HEAD: {e}");
+                None
+            }
+        },
+        None => None,
+    }
+}
+
+fn current_pipeline_head(config: &PipelineConfig) -> Result<String, String> {
+    if let Some(ws_name) = config.workspace_name.as_deref() {
+        crate::blox::ws_exec(ws_name, &["git", "rev-parse", "HEAD"])
+            .map(|s| s.trim().to_string())
+            .map_err(|e| e.to_string())
+    } else {
+        crate::git::get_head_sha(&config.working_dir).map_err(|e| e.to_string())
+    }
+}
+
+fn resolve_pipeline_artifacts_without_ai(config: &PipelineConfig, store: &Store, completed: bool) {
+    match config.pipeline.kind.as_ref() {
+        Some(PipelineKind::Rebase) if completed => {
+            finalize_rebase_pipeline_without_ai(config, store);
+        }
+        Some(PipelineKind::Rebase | PipelineKind::Squash) => {
+            if let Err(e) = store.delete_pending_commit_for_session(&config.session_id) {
+                log::warn!(
+                    "Failed to resolve pending commit for terminal pipeline session {}: {e}",
+                    config.session_id
+                );
+            }
+        }
+        None => {}
+    }
+}
+
+fn finalize_rebase_pipeline_without_ai(config: &PipelineConfig, store: &Store) {
+    let Some(pre_head_sha) = config.pre_head_sha.as_deref() else {
+        let _ = store.delete_pending_commit_for_session(&config.session_id);
+        return;
+    };
+
+    let commit = match store.get_commit_by_session(&config.session_id) {
+        Ok(Some(commit)) => commit,
+        Ok(None) => return,
+        Err(e) => {
+            log::warn!(
+                "Failed to load pending commit for rebase pipeline session {}: {e}",
+                config.session_id
+            );
+            return;
+        }
+    };
+
+    let current_head = match current_pipeline_head(config) {
+        Ok(head) => head,
+        Err(e) => {
+            log::error!(
+                "Failed to get HEAD after rebase pipeline session {}: {e}",
+                config.session_id
+            );
+            return;
+        }
+    };
+
+    if current_head == pre_head_sha {
+        if let Err(e) = store.delete_pending_commit_for_session(&config.session_id) {
+            log::warn!(
+                "Failed to remove no-op rebase pending commit for session {}: {e}",
+                config.session_id
+            );
+        }
+        return;
+    }
+
+    match store.complete_pending_commit_sha(&commit.id, &commit.branch_id, &current_head) {
+        Ok(true) => log::info!(
+            "Rebase pipeline session {} updated pending commit to {}",
+            config.session_id,
+            &current_head[..7.min(current_head.len())]
+        ),
+        Ok(false) => log::info!(
+            "Rebase pipeline session {} resolved duplicate commit SHA {}",
+            config.session_id,
+            &current_head[..7.min(current_head.len())]
+        ),
+        Err(e) => log::error!(
+            "Failed to complete rebase pending commit for session {}: {e}",
+            config.session_id
+        ),
+    }
+}
+
+fn drain_queued_after_pipeline_terminal(
+    store: Arc<Store>,
+    registry: Arc<SessionRegistry>,
+    app_handle: AppHandle,
+    branch_id: Option<String>,
+) {
+    let Some(branch_id) = branch_id else {
+        return;
+    };
+
+    tauri::async_runtime::spawn(async move {
+        match crate::session_commands::drain_queued_sessions_for_branch(
+            store,
+            registry,
+            app_handle,
+            branch_id.clone(),
+            None,
+        )
+        .await
+        {
+            Ok(true) => log::info!("Drained next queued session for branch {branch_id}"),
+            Ok(false) => {}
+            Err(e) => log::error!(
+                "Failed to drain queued sessions after pipeline terminal state for branch {branch_id}: {e}"
+            ),
+        }
+    });
+}
+
+/// Execute pipeline steps sequentially, emitting events as each step progresses.
+async fn run_pipeline(
+    config: &PipelineConfig,
+    store: &Arc<Store>,
+    app_handle: &AppHandle,
+    cancel_token: &CancellationToken,
+) -> PipelineOutcome {
+    // Use the pipeline execution state that was already persisted with the
+    // session, rather than reconstructing from step definitions. This keeps
+    // the data flow clear: callers build + persist the pipeline, and we
+    // mutate that same instance as steps progress.
+    let mut execution = config.pipeline.clone();
+
+    // Collect outputs from prior steps for template substitution.
+    let mut step_outputs: Vec<String> = Vec::new();
+
+    for (idx, step) in config.steps.iter().enumerate() {
+        if cancel_token.is_cancelled() {
+            // Mark remaining steps as skipped.
+            for remaining in execution.steps[idx..].iter_mut() {
+                remaining.status = StepStatus::Skipped;
+            }
+            let _ = store.update_session_pipeline(&config.session_id, &execution);
+            return PipelineOutcome::Cancelled;
+        }
+
+        execution.current_step = idx;
+
+        match step {
+            PipelineStep::Command {
+                label,
+                command,
+                on_failure,
+            } => {
+                // Mark step as running.
+                execution.steps[idx].status = StepStatus::Running;
+                execution.steps[idx].started_at = Some(crate::store::now_timestamp());
+                let _ = store.update_session_pipeline(&config.session_id, &execution);
+                emit_pipeline_step(app_handle, &config.session_id, idx, &execution.steps[idx]);
+
+                // Execute the shell command.
+                let result = run_pipeline_command(command, &config.working_dir, cancel_token).await;
+
+                match result {
+                    Ok(PipelineCommandResult::Completed(output)) => {
+                        let combined =
+                            combine_normalized_command_output(&output.stdout, &output.stderr);
+
+                        if output.status.success() {
+                            execution.steps[idx].status = StepStatus::Succeeded;
+                            execution.steps[idx].output = Some(combined.clone());
+                            execution.steps[idx].completed_at = Some(crate::store::now_timestamp());
+                            let _ = store.update_session_pipeline(&config.session_id, &execution);
+                            emit_pipeline_step(
+                                app_handle,
+                                &config.session_id,
+                                idx,
+                                &execution.steps[idx],
+                            );
+                            step_outputs
+                                .push(format_step_output_for_prompt(label, &combined, false));
+                        } else {
+                            // Command failed — apply failure strategy.
+                            execution.steps[idx].status = StepStatus::Failed;
+                            execution.steps[idx].output = Some(combined.clone());
+                            execution.steps[idx].error =
+                                Some(format!("Exit code: {}", output.status));
+                            execution.steps[idx].completed_at = Some(crate::store::now_timestamp());
+
+                            step_outputs
+                                .push(format_step_output_for_prompt(label, &combined, true));
+
+                            match on_failure {
+                                FailureStrategy::Abort { marker } => {
+                                    if let Some(m) = marker {
+                                        // combined is already display-normalized, so only
+                                        // strip hostile chars for marker matching.
+                                        let marker_output =
+                                            crate::terminal_output::strip_prompt_hostile_chars(
+                                                &combined,
+                                            );
+                                        if marker_output.contains(m.as_str()) {
+                                            // Mark remaining steps as skipped.
+                                            for remaining in execution.steps[idx + 1..].iter_mut() {
+                                                remaining.status = StepStatus::Skipped;
+                                            }
+                                            let _ = store.update_session_pipeline(
+                                                &config.session_id,
+                                                &execution,
+                                            );
+                                            emit_pipeline_step(
+                                                app_handle,
+                                                &config.session_id,
+                                                idx,
+                                                &execution.steps[idx],
+                                            );
+                                            return PipelineOutcome::Aborted { step_index: idx };
+                                        }
+                                        // Marker not found — fall through to AI handoff.
+                                        let prompt = format!(
+                                            "{}\n\nStep '{}' failed. Diagnose and fix using the output below:\n\n{}",
+                                            config.prompt,
+                                            label,
+                                            step_outputs.join("\n\n")
+                                        );
+                                        for remaining in execution.steps[idx + 1..].iter_mut() {
+                                            remaining.status = StepStatus::Skipped;
+                                        }
+                                        let _ = store.update_session_pipeline(
+                                            &config.session_id,
+                                            &execution,
+                                        );
+                                        emit_pipeline_step(
+                                            app_handle,
+                                            &config.session_id,
+                                            idx,
+                                            &execution.steps[idx],
+                                        );
+                                        return PipelineOutcome::HandedOffToAi {
+                                            prompt,
+                                            ai_step_index: None,
+                                        };
+                                    }
+                                    // No marker — always abort.
+                                    for remaining in execution.steps[idx + 1..].iter_mut() {
+                                        remaining.status = StepStatus::Skipped;
+                                    }
+                                    let _ = store
+                                        .update_session_pipeline(&config.session_id, &execution);
+                                    emit_pipeline_step(
+                                        app_handle,
+                                        &config.session_id,
+                                        idx,
+                                        &execution.steps[idx],
+                                    );
+                                    return PipelineOutcome::Aborted { step_index: idx };
+                                }
+                                FailureStrategy::HandoffToAi { prompt_template } => {
+                                    let prompt = prompt_template
+                                        .replace("{step_outputs}", &step_outputs.join("\n\n"));
+                                    for remaining in execution.steps[idx + 1..].iter_mut() {
+                                        remaining.status = StepStatus::Skipped;
+                                    }
+                                    let _ = store
+                                        .update_session_pipeline(&config.session_id, &execution);
+                                    emit_pipeline_step(
+                                        app_handle,
+                                        &config.session_id,
+                                        idx,
+                                        &execution.steps[idx],
+                                    );
+                                    return PipelineOutcome::HandedOffToAi {
+                                        prompt,
+                                        ai_step_index: None,
+                                    };
+                                }
+                                FailureStrategy::Continue => {
+                                    let _ = store
+                                        .update_session_pipeline(&config.session_id, &execution);
+                                    emit_pipeline_step(
+                                        app_handle,
+                                        &config.session_id,
+                                        idx,
+                                        &execution.steps[idx],
+                                    );
+                                    // Continue to next step.
+                                }
+                            }
+                        }
+                    }
+                    Ok(PipelineCommandResult::Cancelled { stdout, stderr }) => {
+                        let combined = combine_normalized_command_output(&stdout, &stderr);
+                        execution.steps[idx].status = StepStatus::Skipped;
+                        execution.steps[idx].output = if combined.is_empty() {
+                            None
+                        } else {
+                            Some(combined)
+                        };
+                        execution.steps[idx].error = Some("Cancelled by user".to_string());
+                        execution.steps[idx].completed_at = Some(crate::store::now_timestamp());
+                        for remaining in execution.steps[idx + 1..].iter_mut() {
+                            remaining.status = StepStatus::Skipped;
+                        }
+                        let _ = store.update_session_pipeline(&config.session_id, &execution);
+                        emit_pipeline_step(
+                            app_handle,
+                            &config.session_id,
+                            idx,
+                            &execution.steps[idx],
+                        );
+                        return PipelineOutcome::Cancelled;
+                    }
+                    Err(e) => {
+                        // Failed to even spawn the command. Always hand off to AI
+                        // regardless of the step's configured `on_failure` strategy
+                        // — spawn failures (e.g. missing shell, permission denied)
+                        // are environmental issues that need AI/human diagnosis,
+                        // and the step's failure strategy is designed for command
+                        // *output* classification, not spawn-level errors.
+                        execution.steps[idx].status = StepStatus::Failed;
+                        execution.steps[idx].error = Some(format!("Failed to execute: {e}"));
+                        execution.steps[idx].completed_at = Some(crate::store::now_timestamp());
+                        let prompt = format!(
+                            "{}\n\nStep '{}' failed to execute: {e}\n\n{}",
+                            config.prompt,
+                            label,
+                            step_outputs.join("\n\n")
+                        );
+                        for remaining in execution.steps[idx + 1..].iter_mut() {
+                            remaining.status = StepStatus::Skipped;
+                        }
+                        let _ = store.update_session_pipeline(&config.session_id, &execution);
+                        emit_pipeline_step(
+                            app_handle,
+                            &config.session_id,
+                            idx,
+                            &execution.steps[idx],
+                        );
+                        return PipelineOutcome::HandedOffToAi {
+                            prompt,
+                            ai_step_index: None,
+                        };
+                    }
+                }
+            }
+            PipelineStep::AiHandoff {
+                prompt_template, ..
+            } => {
+                // Build the prompt and hand off to AI.
+                execution.steps[idx].status = StepStatus::Running;
+                execution.steps[idx].started_at = Some(crate::store::now_timestamp());
+                let _ = store.update_session_pipeline(&config.session_id, &execution);
+                emit_pipeline_step(app_handle, &config.session_id, idx, &execution.steps[idx]);
+
+                let prompt = prompt_template.replace("{step_outputs}", &step_outputs.join("\n\n"));
+
+                // Mark the step as succeeded — the handoff itself completed.
+                // The AI session's success/failure is tracked by the session
+                // status, not this pipeline step. If start_session later fails,
+                // start_pipeline_session will mark this step as failed.
+                execution.steps[idx].status = StepStatus::Succeeded;
+                execution.steps[idx].completed_at = Some(crate::store::now_timestamp());
+                let _ = store.update_session_pipeline(&config.session_id, &execution);
+                emit_pipeline_step(app_handle, &config.session_id, idx, &execution.steps[idx]);
+
+                return PipelineOutcome::HandedOffToAi {
+                    prompt,
+                    ai_step_index: Some(idx),
+                };
+            }
+        }
+    }
+
+    // All steps completed without AI handoff.
+    execution.completed_without_ai = true;
+    let _ = store.update_session_pipeline(&config.session_id, &execution);
+    PipelineOutcome::CompletedWithoutAi
+}
+
+async fn run_pipeline_command(
+    command: &str,
+    working_dir: &PathBuf,
+    cancel_token: &CancellationToken,
+) -> io::Result<PipelineCommandResult> {
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.args(["-lc", command])
+        .current_dir(working_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let mut child = cmd.spawn()?;
+    let stdout_task = child.stdout.take().map(spawn_pipe_reader);
+    let stderr_task = child.stderr.take().map(spawn_pipe_reader);
+
+    // Wait for either the child to exit or cancellation. Using `child.wait()`
+    // directly (instead of a polling loop with `try_wait()`) avoids both the
+    // 50ms poll latency and a potential pipe deadlock: the pipe readers run as
+    // spawned tasks on the same single-threaded runtime, so they only make
+    // progress when the main task yields. `child.wait()` yields properly,
+    // allowing the pipe readers to drain output concurrently.
+    tokio::select! {
+        result = child.wait() => {
+            let status = result?;
+            let stdout = collect_pipe_output(stdout_task, "stdout").await;
+            let stderr = collect_pipe_output(stderr_task, "stderr").await;
+            Ok(PipelineCommandResult::Completed(Output {
+                status,
+                stdout,
+                stderr,
+            }))
+        }
+        _ = cancel_token.cancelled() => {
+            terminate_pipeline_child(&mut child);
+            match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    log::warn!("Failed to wait for cancelled pipeline command: {e}");
+                }
+                Err(_) => {
+                    force_kill_pipeline_child(&mut child);
+                    if let Err(e) = child.wait().await {
+                        log::warn!("Failed to wait for killed pipeline command: {e}");
+                    }
+                }
+            }
+
+            let stdout = collect_pipe_output(stdout_task, "stdout").await;
+            let stderr = collect_pipe_output(stderr_task, "stderr").await;
+            Ok(PipelineCommandResult::Cancelled { stdout, stderr })
+        }
+    }
+}
+
+fn combine_normalized_command_output(stdout: &[u8], stderr: &[u8]) -> String {
+    let stdout = crate::terminal_output::normalize_display_bytes(stdout);
+    let stderr = crate::terminal_output::normalize_display_bytes(stderr);
+    if stderr.is_empty() {
+        stdout
+    } else if stdout.is_empty() {
+        stderr
+    } else {
+        format!("{stdout}\n{stderr}")
+    }
+}
+
+fn format_step_output_for_prompt(label: &str, output: &str, failed: bool) -> String {
+    // Input is already display-normalized (from combine_normalized_command_output),
+    // so only strip hostile control chars without re-running CR/ANSI processing.
+    let output = crate::terminal_output::strip_prompt_hostile_chars(output);
+    let output =
+        crate::terminal_output::truncate_for_prompt(&output, PIPELINE_STEP_PROMPT_OUTPUT_MAX_CHARS);
+    let status = if failed { " (FAILED)" } else { "" };
+    format!("### {label}{status}\n```\n{output}\n```")
+}
+
+fn spawn_pipe_reader<R>(mut pipe: R) -> tokio::task::JoinHandle<io::Result<Vec<u8>>>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut output = Vec::new();
+        pipe.read_to_end(&mut output).await?;
+        Ok(output)
+    })
+}
+
+async fn collect_pipe_output(
+    handle: Option<tokio::task::JoinHandle<io::Result<Vec<u8>>>>,
+    stream_name: &str,
+) -> Vec<u8> {
+    let Some(mut handle) = handle else {
+        return Vec::new();
+    };
+
+    match tokio::time::timeout(Duration::from_secs(2), &mut handle).await {
+        Ok(Ok(Ok(output))) => output,
+        Ok(Ok(Err(e))) => {
+            log::warn!("Failed to read pipeline command {stream_name}: {e}");
+            Vec::new()
+        }
+        Ok(Err(e)) => {
+            log::warn!("Pipeline command {stream_name} reader task failed: {e}");
+            Vec::new()
+        }
+        Err(_) => {
+            handle.abort();
+            log::warn!("Timed out reading pipeline command {stream_name}");
+            Vec::new()
+        }
+    }
+}
+
+fn terminate_pipeline_child(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        if send_signal_to_pipeline_process_group(pid, "TERM").is_ok() {
+            return;
+        }
+    }
+
+    if let Err(e) = child.start_kill() {
+        log::debug!("Failed to terminate pipeline command process: {e}");
+    }
+}
+
+fn force_kill_pipeline_child(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        if send_signal_to_pipeline_process_group(pid, "KILL").is_ok() {
+            return;
+        }
+    }
+
+    if let Err(e) = child.start_kill() {
+        log::debug!("Failed to kill pipeline command process: {e}");
+    }
+}
+
+#[cfg(unix)]
+fn send_signal_to_pipeline_process_group(pid: u32, signal: &str) -> io::Result<()> {
+    let status = std::process::Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(format!("-{pid}"))
+        .status()?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "kill -{signal} -{pid} exited with {status}"
+        )))
+    }
+}
+
+fn emit_pipeline_step(
+    app_handle: &AppHandle,
+    session_id: &str,
+    step_index: usize,
+    step: &crate::store::PipelineStepStatus,
+) {
+    let event = PipelineStepEvent {
+        session_id: session_id.to_string(),
+        step_index,
+        label: step.label.clone(),
+        step_type: step.step_type.clone(),
+        status: step.status.clone(),
+        output: step.output.clone(),
+        error: step.error.clone(),
+        started_at: step.started_at,
+        completed_at: step.completed_at,
+    };
+    if let Err(e) = app_handle.emit("pipeline-step-changed", &event) {
+        log::warn!("Failed to emit pipeline-step-changed: {e}");
+    }
+}
+
+// =============================================================================
 // Orphaned session recovery
 // =============================================================================
 
@@ -629,26 +1494,61 @@ fn run_post_completion_hooks(
                         &pre_sha[..7.min(pre_sha.len())],
                         &current_head[..7.min(current_head.len())]
                     );
-                    if let Err(e) = store.update_commit_sha(&commit.id, &current_head) {
-                        log::error!("Failed to update commit SHA: {e}");
-                    }
-                    committed_branch_id = Some(commit.branch_id.clone());
+                    let recorded = if commit.sha.is_none() {
+                        match store.complete_pending_commit_sha(
+                            &commit.id,
+                            &commit.branch_id,
+                            &current_head,
+                        ) {
+                            Ok(recorded) => recorded,
+                            Err(e) => {
+                                log::error!("Failed to update pending commit SHA: {e}");
+                                false
+                            }
+                        }
+                    } else {
+                        match store.get_commit_by_sha(&commit.branch_id, &current_head) {
+                            Ok(Some(existing)) if existing.id != commit.id => {
+                                log::warn!(
+                                    "Session {session_id}: target commit SHA already has metadata row {}, skipping update",
+                                    existing.id
+                                );
+                                false
+                            }
+                            Ok(_) => {
+                                if let Err(e) = store.update_commit_sha(&commit.id, &current_head) {
+                                    log::error!("Failed to update commit SHA: {e}");
+                                    false
+                                } else {
+                                    true
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Failed to check existing commit SHA: {e}");
+                                false
+                            }
+                        }
+                    };
 
-                    // Spawn background diff caching for remote branches.
-                    if let Some(ws_name) = workspace_name {
-                        let commit_shas: Vec<String> = store
-                            .list_commits_for_branch(&commit.branch_id)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .filter_map(|c| c.sha)
-                            .collect();
-                        crate::diff_cache::spawn_cache_branch_diff(
-                            Arc::clone(store),
-                            commit.branch_id.clone(),
-                            ws_name.to_string(),
-                            current_head.clone(),
-                            commit_shas,
-                        );
+                    if recorded {
+                        committed_branch_id = Some(commit.branch_id.clone());
+
+                        // Spawn background diff caching for remote branches.
+                        if let Some(ws_name) = workspace_name {
+                            let commit_shas: Vec<String> = store
+                                .list_commits_for_branch(&commit.branch_id)
+                                .unwrap_or_default()
+                                .into_iter()
+                                .filter_map(|c| c.sha)
+                                .collect();
+                            crate::diff_cache::spawn_cache_branch_diff(
+                                Arc::clone(store),
+                                commit.branch_id.clone(),
+                                ws_name.to_string(),
+                                current_head.clone(),
+                                commit_shas,
+                            );
+                        }
                     }
                 }
                 Ok(_) => {
@@ -1251,6 +2151,167 @@ pub fn emit_session_running(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pipeline_command_cancellation_stops_current_step() {
+        let cancel_token = CancellationToken::new();
+        let cancel_after_start = cancel_token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cancel_after_start.cancel();
+        });
+
+        let started = std::time::Instant::now();
+        let result =
+            run_pipeline_command("sleep 5 & wait", &std::env::temp_dir(), &cancel_token).await;
+
+        assert!(matches!(
+            result,
+            Ok(PipelineCommandResult::Cancelled { .. })
+        ));
+        assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    #[test]
+    fn pipeline_command_output_collapses_progress_for_prompt() {
+        let output = combine_normalized_command_output(b"10%\r20%\rdone\n", b"");
+        assert_eq!(output, "done");
+
+        let prompt_output = format_step_output_for_prompt("Build", &output, false);
+        assert!(prompt_output.contains("```\ndone\n```"));
+        assert!(!prompt_output.contains("10%"));
+        assert!(!prompt_output.contains("20%"));
+    }
+
+    #[test]
+    fn failed_pipeline_handoff_start_cleans_running_state() {
+        let store = Store::in_memory().unwrap();
+        let session = crate::store::Session::new_running("handoff", std::path::Path::new("/tmp"));
+        store.create_session(&session).unwrap();
+
+        let registry = SessionRegistry::new();
+        registry.register(&session.id);
+        assert!(registry.is_running(&session.id));
+
+        finish_failed_pipeline_handoff_start(
+            &store,
+            &registry,
+            &session.id,
+            "provider unavailable",
+        );
+
+        assert!(!registry.is_running(&session.id));
+        let failed = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(failed.status, SessionStatus::Error);
+        assert_eq!(
+            failed.error_message.as_deref(),
+            Some("provider unavailable")
+        );
+        assert_eq!(failed.completion_reason, Some(CompletionReason::Crashed));
+    }
+
+    fn make_git_repo(test_name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "staged-{test_name}-{}",
+            crate::store::now_timestamp()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        run_git(&dir, &["init"]);
+        run_git(&dir, &["config", "user.email", "test@example.com"]);
+        run_git(&dir, &["config", "user.name", "Test User"]);
+        std::fs::write(dir.join("file.txt"), "one\n").unwrap();
+        run_git(&dir, &["add", "file.txt"]);
+        run_git(&dir, &["commit", "-m", "initial"]);
+        dir
+    }
+
+    fn run_git(dir: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn rebase_pipeline_config(
+        session_id: &str,
+        repo: &std::path::Path,
+        pre_head: &str,
+    ) -> PipelineConfig {
+        PipelineConfig {
+            session_id: session_id.to_string(),
+            prompt: "Rebase branch".to_string(),
+            steps: vec![],
+            pipeline: PipelineExecution::from_steps(&[]).with_kind(PipelineKind::Rebase),
+            working_dir: repo.to_path_buf(),
+            pre_head_sha: Some(pre_head.to_string()),
+            provider: None,
+            workspace_name: None,
+            remote_working_dir: None,
+        }
+    }
+
+    #[test]
+    fn rebase_pipeline_completion_updates_pending_commit_when_head_changes() {
+        let repo = make_git_repo("rebase-updates-pending");
+        let pre_head = run_git(&repo, &["rev-parse", "HEAD"]);
+        let store = Store::in_memory().unwrap();
+        let project = crate::store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = crate::store::Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+        let mut session = crate::store::Session::new_running("Rebase branch", &repo);
+        session.pipeline = Some(PipelineExecution::from_steps(&[]).with_kind(PipelineKind::Rebase));
+        store.create_session(&session).unwrap();
+        let commit = crate::store::Commit::new_pending(&branch.id).with_session(&session.id);
+        store.create_commit(&commit).unwrap();
+
+        std::fs::write(repo.join("file.txt"), "two\n").unwrap();
+        run_git(&repo, &["add", "file.txt"]);
+        run_git(&repo, &["commit", "-m", "second"]);
+        let new_head = run_git(&repo, &["rev-parse", "HEAD"]);
+
+        finalize_rebase_pipeline_without_ai(
+            &rebase_pipeline_config(&session.id, &repo, &pre_head),
+            &store,
+        );
+
+        let updated = store.get_commit(&commit.id).unwrap().unwrap();
+        assert_eq!(updated.sha.as_deref(), Some(new_head.as_str()));
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn rebase_pipeline_completion_deletes_noop_pending_commit() {
+        let repo = make_git_repo("rebase-noop");
+        let pre_head = run_git(&repo, &["rev-parse", "HEAD"]);
+        let store = Store::in_memory().unwrap();
+        let project = crate::store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = crate::store::Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+        let mut session = crate::store::Session::new_running("Rebase branch", &repo);
+        session.pipeline = Some(PipelineExecution::from_steps(&[]).with_kind(PipelineKind::Rebase));
+        store.create_session(&session).unwrap();
+        let commit = crate::store::Commit::new_pending(&branch.id).with_session(&session.id);
+        store.create_commit(&commit).unwrap();
+
+        finalize_rebase_pipeline_without_ai(
+            &rebase_pipeline_config(&session.id, &repo, &pre_head),
+            &store,
+        );
+
+        assert!(store.get_commit(&commit.id).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(repo);
+    }
 
     // ── find_closing_fence ──────────────────────────────────────────────
 

@@ -6,11 +6,10 @@
 //!   derive a regex pattern from terminal output, then hands off to the regex
 //!   matcher once a valid pattern is found.
 
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-
 use regex::Regex;
 use serde::Deserialize;
+use std::path::PathBuf;
+use std::sync::Arc;
 use tauri::AppHandle;
 use tokio::sync::watch;
 use tokio::time::{self, Duration};
@@ -22,13 +21,6 @@ use super::events::RunPhaseChangedEvent;
 use super::registry::{ActionRegistry, RunPhase};
 
 use crate::store::Store;
-
-/// Strip ANSI escape sequences so regexes written against plain text can match
-/// terminal output that includes colour/style codes.
-fn strip_ansi_codes(s: &str) -> String {
-    let stripped = strip_ansi_escapes::strip(s);
-    String::from_utf8_lossy(&stripped).into_owned()
-}
 
 /// Spawns a background task that polls the shared output buffer every 2 seconds,
 /// applies the given regex against new lines, and transitions `RunPhase` to
@@ -81,8 +73,8 @@ pub fn spawn_regex_matcher(
             },
         );
 
-        // Get the shared output buffer.
-        let buffer: Arc<Mutex<Vec<String>>> = registry.register_output_buffer(&execution_id);
+        // Ensure the shared output buffer exists before polling.
+        registry.register_output_buffer(&execution_id);
 
         let mut last_checked_index: usize = 0;
         let mut interval = time::interval(Duration::from_secs(2));
@@ -98,20 +90,25 @@ pub fn spawn_regex_matcher(
                 }
             }
 
-            // Read new lines since last check.
+            // Read new lines since last check. Re-check the previous line too:
+            // it may have been an in-progress line that gained more text since
+            // the last poll.
             let new_lines: Vec<String> = {
-                let buf = buffer.lock().unwrap();
-                if buf.len() <= last_checked_index {
+                let Some(lines) = registry.get_output_lines(&execution_id) else {
+                    continue;
+                };
+                let start_index = last_checked_index.saturating_sub(1);
+                if lines.len() <= start_index {
                     continue;
                 }
-                let lines = buf[last_checked_index..].to_vec();
-                last_checked_index = buf.len();
-                lines
+                let new_lines = lines[start_index..].to_vec();
+                last_checked_index = lines.len();
+                new_lines
             };
 
-            // Apply regex to each new line (strip ANSI codes before matching).
+            // Apply regex to each normalized plain-text line.
             for line in &new_lines {
-                let clean = strip_ansi_codes(line);
+                let clean = crate::terminal_output::normalize_for_prompt(line);
                 if let Some(caps) = re.captures(&clean) {
                     let endpoint = if has_endpoint_capture {
                         caps.name("endpoint").map(|m| m.as_str().to_string())
@@ -226,8 +223,11 @@ pub fn spawn_autodetect_poller(
                 continue;
             }
 
-            // Strip ANSI codes before sending to AI and before regex matching.
-            let clean_lines: Vec<String> = tail.iter().map(|s| strip_ansi_codes(s)).collect();
+            // Keep AI prompts and regex validation on normalized plain text.
+            let clean_lines: Vec<String> = tail
+                .iter()
+                .map(|s| crate::terminal_output::normalize_for_prompt(s))
+                .collect();
             let output = clean_lines.join("\n");
 
             // ---- Build and send the AI prompt ----

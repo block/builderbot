@@ -516,6 +516,10 @@ pub struct Session {
     /// PID of the Staged process that owns this session while it is running.
     /// Used on startup to detect sessions orphaned by a dead process.
     pub owner_pid: Option<u32>,
+    /// Pipeline execution state. When present, the session was started via a
+    /// command pipeline (deterministic steps before/instead of AI).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline: Option<PipelineExecution>,
 }
 
 impl Session {
@@ -533,6 +537,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             owner_pid: Some(std::process::id()),
+            pipeline: None,
         }
     }
 
@@ -553,6 +558,7 @@ impl Session {
             created_at: now,
             updated_at: now,
             owner_pid: None,
+            pipeline: None,
         }
     }
 
@@ -1159,6 +1165,174 @@ impl Comment {
     pub fn with_comment_type(mut self, comment_type: CommentType) -> Self {
         self.comment_type = Some(comment_type);
         self
+    }
+}
+
+// =============================================================================
+// Pipelines
+// =============================================================================
+
+/// A step in a command pipeline — either a deterministic shell command or an
+/// AI handoff. Pipelines run before (and sometimes instead of) an AI session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum PipelineStep {
+    /// Run a shell command deterministically.
+    #[serde(rename_all = "camelCase")]
+    Command {
+        /// Human-readable label shown in UI (e.g. "Push to remote").
+        label: String,
+        /// The shell command to execute.
+        command: String,
+        /// What to do when this command fails.
+        on_failure: FailureStrategy,
+    },
+    /// Hand off to an AI session with context from prior steps.
+    #[serde(rename_all = "camelCase")]
+    AiHandoff {
+        /// Human-readable label (e.g. "Write PR title and body").
+        label: String,
+        /// Prompt template — can reference `{step_outputs}` to inject
+        /// stdout/stderr from prior command steps.
+        prompt_template: String,
+    },
+}
+
+/// What to do when a command step fails.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum FailureStrategy {
+    /// Stop the pipeline immediately, mark it as failed.
+    /// If `marker` is set, the pipeline only aborts when the output contains
+    /// that string (otherwise falls through to AI handoff).
+    #[serde(rename_all = "camelCase")]
+    Abort { marker: Option<String> },
+    /// Hand off to AI to diagnose and fix the failure.
+    #[serde(rename_all = "camelCase")]
+    HandoffToAi { prompt_template: String },
+    /// Skip this step and continue to the next.
+    Continue,
+}
+
+/// Status of an individual pipeline step.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StepStatus {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+    Skipped,
+}
+
+/// Whether a step is a deterministic command or an AI handoff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepType {
+    Command,
+    #[serde(alias = "aihandoff", alias = "aiHandoff")]
+    AiHandoff,
+}
+
+/// Execution status of a single pipeline step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineStepStatus {
+    pub label: String,
+    pub step_type: StepType,
+    pub status: StepStatus,
+    pub output: Option<String>,
+    pub error: Option<String>,
+    pub started_at: Option<i64>,
+    pub completed_at: Option<i64>,
+}
+
+/// Persisted alongside the session. Tracks the execution state of each step.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PipelineExecution {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<PipelineKind>,
+    pub steps: Vec<PipelineStepStatus>,
+    pub current_step: usize,
+    /// Set when pipeline completes without needing AI.
+    pub completed_without_ai: bool,
+}
+
+impl PipelineExecution {
+    /// Create a new pipeline execution from a list of step definitions.
+    pub fn from_steps(steps: &[PipelineStep]) -> Self {
+        let step_statuses = steps
+            .iter()
+            .map(|step| match step {
+                PipelineStep::Command { label, .. } => PipelineStepStatus {
+                    label: label.clone(),
+                    step_type: StepType::Command,
+                    status: StepStatus::Pending,
+                    output: None,
+                    error: None,
+                    started_at: None,
+                    completed_at: None,
+                },
+                PipelineStep::AiHandoff { label, .. } => PipelineStepStatus {
+                    label: label.clone(),
+                    step_type: StepType::AiHandoff,
+                    status: StepStatus::Pending,
+                    output: None,
+                    error: None,
+                    started_at: None,
+                    completed_at: None,
+                },
+            })
+            .collect();
+
+        Self {
+            kind: None,
+            steps: step_statuses,
+            current_step: 0,
+            completed_without_ai: false,
+        }
+    }
+
+    pub fn with_kind(mut self, kind: PipelineKind) -> Self {
+        self.kind = Some(kind);
+        self
+    }
+}
+
+/// Durable identity for commit-producing command pipelines.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PipelineKind {
+    Rebase,
+    Squash,
+}
+
+#[cfg(test)]
+mod pipeline_tests {
+    use super::*;
+
+    #[test]
+    fn step_type_serializes_ai_handoff_as_snake_case() {
+        let serialized = serde_json::to_string(&StepType::AiHandoff).unwrap();
+        assert_eq!(serialized, "\"ai_handoff\"");
+        assert_eq!(
+            serde_json::from_str::<StepType>("\"ai_handoff\"").unwrap(),
+            StepType::AiHandoff
+        );
+        assert_eq!(
+            serde_json::from_str::<StepType>("\"aihandoff\"").unwrap(),
+            StepType::AiHandoff
+        );
+    }
+
+    #[test]
+    fn pipeline_kind_is_optional_for_legacy_pipeline_json() {
+        let execution: PipelineExecution =
+            serde_json::from_str(r#"{"steps":[],"currentStep":0,"completedWithoutAi":false}"#)
+                .unwrap();
+
+        assert_eq!(execution.kind, None);
     }
 }
 

@@ -998,6 +998,29 @@ pub async fn drain_queued_sessions_for_branch(
         None => return Ok(false),
     };
 
+    if session
+        .pipeline
+        .as_ref()
+        .and_then(|pipeline| pipeline.kind.as_ref())
+        .is_some()
+    {
+        if store
+            .get_commit_by_session(&session.id)
+            .map_err(|e| e.to_string())?
+            .is_none()
+        {
+            return Err(format!(
+                "Queued pipeline session {} has no linked commit",
+                session.id
+            ));
+        }
+
+        return crate::prs::start_queued_commit_pipeline_for_branch(
+            store, registry, app_handle, branch_id, session, provider,
+        )
+        .await;
+    }
+
     // Look up which artifact type is linked to this session so we know
     // what kind of branch session to start.
     let (session_type, review_id) =

@@ -1032,8 +1032,9 @@ async fn run_pipeline(
                                 idx,
                                 &execution.steps[idx],
                             );
-                            step_outputs
-                                .push(format_step_output_for_prompt(label, &combined, false));
+                            step_outputs.push(format_step_output_for_prompt(
+                                label, command, &combined, false,
+                            ));
                         } else {
                             // Command failed — apply failure strategy.
                             execution.steps[idx].status = StepStatus::Failed;
@@ -1042,8 +1043,9 @@ async fn run_pipeline(
                                 Some(format!("Exit code: {}", output.status));
                             execution.steps[idx].completed_at = Some(crate::store::now_timestamp());
 
-                            step_outputs
-                                .push(format_step_output_for_prompt(label, &combined, true));
+                            step_outputs.push(format_step_output_for_prompt(
+                                label, command, &combined, true,
+                            ));
 
                             match on_failure {
                                 FailureStrategy::Abort { marker } => {
@@ -1303,14 +1305,14 @@ fn combine_normalized_command_output(stdout: &[u8], stderr: &[u8]) -> String {
     }
 }
 
-fn format_step_output_for_prompt(label: &str, output: &str, failed: bool) -> String {
+fn format_step_output_for_prompt(label: &str, command: &str, output: &str, failed: bool) -> String {
     // Input is already display-normalized (from combine_normalized_command_output),
     // so only strip hostile control chars without re-running CR/ANSI processing.
     let output = crate::terminal_output::strip_prompt_hostile_chars(output);
     let output =
         crate::terminal_output::truncate_for_prompt(&output, PIPELINE_STEP_PROMPT_OUTPUT_MAX_CHARS);
     let status = if failed { " (FAILED)" } else { "" };
-    format!("### {label}{status}\n```\n{output}\n```")
+    format!("### {label}{status}\nCommand: {command}\n```\n{output}\n```")
 }
 
 fn spawn_pipe_reader<R>(mut pipe: R) -> tokio::task::JoinHandle<io::Result<Vec<u8>>>
@@ -2242,7 +2244,12 @@ mod tests {
         let output = combine_normalized_command_output(b"10%\r20%\rdone\n", b"");
         assert_eq!(output, "done");
 
-        let prompt_output = format_step_output_for_prompt("Build", &output, false);
+        let prompt_output =
+            format_step_output_for_prompt("Build", "just build --verbose", &output, false);
+        assert!(prompt_output.contains("### Build\nCommand: just build --verbose\n```\ndone\n```"));
+        let command_position = prompt_output.find("Command: just build --verbose").unwrap();
+        let output_position = prompt_output.find("done").unwrap();
+        assert!(command_position < output_position);
         assert!(prompt_output.contains("```\ndone\n```"));
         assert!(!prompt_output.contains("10%"));
         assert!(!prompt_output.contains("20%"));

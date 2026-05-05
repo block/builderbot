@@ -818,7 +818,6 @@
           <div class="submenu-container" bind:this={actionsSubmenuContainer}>
             <button
               class="more-menu-item submenu-trigger"
-              class:open-left={actionsSubmenuPlacement === 'left'}
               onmouseenter={handleActionsSubmenuEnter}
               onmouseleave={handleActionsSubmenuLeave}
             >
@@ -861,7 +860,6 @@
           <div class="submenu-container" bind:this={openInSubmenuContainer}>
             <button
               class="more-menu-item submenu-trigger"
-              class:open-left={openInSubmenuPlacement === 'left'}
               onmouseenter={handleOpenInSubmenuEnter}
               onmouseleave={handleOpenInSubmenuLeave}
             >
@@ -1090,10 +1088,6 @@
   .submenu-trigger :global(.submenu-chevron) {
     margin-left: auto;
     transform: rotate(-90deg);
-  }
-
-  .submenu-trigger.open-left :global(.submenu-chevron) {
-    transform: rotate(90deg);
   }
 
   .submenu {

@@ -943,13 +943,11 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
                             buf.finalize_current();
                             buf.try_match("tool_call")
                         }
-                        SessionUpdate::ToolCallUpdate(update) => {
-                            if update.fields.content.is_some() {
-                                buf.finalize_current();
-                                buf.try_match("tool_result")
-                            } else {
-                                false
-                            }
+                        SessionUpdate::ToolCallUpdate(update)
+                            if update.fields.content.is_some() =>
+                        {
+                            buf.finalize_current();
+                            buf.try_match("tool_result")
                         }
                         SessionUpdate::AgentThoughtChunk(_) => {
                             // Thinking is not persisted — ignore.

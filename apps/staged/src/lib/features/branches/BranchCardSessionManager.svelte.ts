@@ -16,6 +16,7 @@ import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
 import { alerts } from '../../shared/alerts.svelte';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
+import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
 
 type PendingSessionItemType =
   | 'pending-commit'
@@ -384,6 +385,15 @@ export default class BranchCardSessionManager {
     }
     this.newSessionMode = mode;
     this.showNewSession = true;
+  }
+
+  openNewSessionReferring(hashtagRef: string) {
+    const hadContent = this.showNewSession && this.draftPrompt.trim();
+    this.draftPrompt = buildReferringPrompt(this.draftPrompt, hashtagRef);
+    if (!hadContent) {
+      this.newSessionMode = 'commit';
+      this.showNewSession = true;
+    }
   }
 
   async startReviewSessionWithoutDialog() {

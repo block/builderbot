@@ -44,6 +44,7 @@
   import SuggestedRepos from './SuggestedRepos.svelte';
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
   import TimelineRow from '../timeline/TimelineRow.svelte';
+  import TimelineContextMenu from '../timeline/TimelineContextMenu.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
   import SessionModal from '../sessions/SessionModal.svelte';
   import AgentSelector from '../agents/AgentSelector.svelte';
@@ -57,6 +58,8 @@
   } from '../branches/branchCardHelpers';
   import { createImage, createImageFromData, deleteImage, getImageData } from '../../api/commands';
   import { formatRelativeTime, minuteNow } from '../../shared/relativeTime.svelte';
+  import { focusAtEnd } from '../../shared/focusAtEnd';
+  import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
   import { createLiveSessionHints } from '../timeline/liveSessionHints';
 
   interface Props {
@@ -403,6 +406,7 @@
 
   let openNote = $state<{ title: string; content: string; sessionId?: string } | null>(null);
   let openSessionId = $state<string | null>(null);
+  let projectContextMenuRef: TimelineContextMenu | undefined = $state();
 
   // ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -647,6 +651,8 @@
               openSessionId = sid;
             }}
             onDeleteClick={() => handleDeleteNote(note.id)}
+            hashtagRef={noteType === 'note' ? `#project-note:${note.id}` : undefined}
+            onContextMenu={(e) => projectContextMenuRef?.open(e)}
           />
         {/each}
       </div>
@@ -718,6 +724,14 @@
     }}
   />
 {/if}
+
+<TimelineContextMenu
+  bind:this={projectContextMenuRef}
+  onNewSessionReferring={(ref) => {
+    promptText = buildReferringPrompt(promptText, ref);
+    focusAtEnd(promptTextarea);
+  }}
+/>
 
 <style>
   .project-section {

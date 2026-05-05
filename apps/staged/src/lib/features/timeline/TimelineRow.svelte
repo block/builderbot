@@ -40,6 +40,14 @@
     count: number;
   };
 
+  /** Data passed to the parent when the user right-clicks a row with context menu actions. */
+  export type ContextMenuEvent = {
+    x: number;
+    y: number;
+    commitSha?: string;
+    hashtagRef?: string;
+  };
+
   interface Props {
     type: TimelineItemType;
     title: string;
@@ -59,6 +67,12 @@
     onRetryClick?: () => void;
     onStartClick?: () => void;
     onResumeClick?: () => void;
+    /** Full commit SHA for the context menu "Copy SHA" action. */
+    commitSha?: string;
+    /** Hashtag reference token (e.g. "#commit:abc123") for "New session referring to this". */
+    hashtagRef?: string;
+    /** Callback when the user right-clicks and this row has context menu actions. */
+    onContextMenu?: (event: ContextMenuEvent) => void;
   }
 
   let {
@@ -78,6 +92,9 @@
     onRetryClick,
     onStartClick,
     onResumeClick,
+    commitSha,
+    hashtagRef,
+    onContextMenu,
   }: Props = $props();
 
   let isNote = $derived(
@@ -147,6 +164,16 @@
     e.stopPropagation();
     onResumeClick?.();
   }
+
+  // ── Context menu ────────────────────────────────────────────────────
+  let hasContextMenu = $derived(!!commitSha || !!hashtagRef);
+
+  function handleContextMenu(e: MouseEvent) {
+    if (!hasContextMenu || !onContextMenu) return;
+    e.preventDefault();
+    e.stopPropagation();
+    onContextMenu({ x: e.clientX, y: e.clientY, commitSha, hashtagRef });
+  }
 </script>
 
 <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -158,6 +185,7 @@
   class:clickable={isClickable}
   class:compact={type === 'revalidating' || type === 'load-error'}
   onclick={handleRowClick}
+  oncontextmenu={handleContextMenu}
 >
   <div class="timeline-marker">
     <div

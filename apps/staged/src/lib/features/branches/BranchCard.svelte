@@ -1208,6 +1208,7 @@
           onNewReview={hasCodeChanges || sessionMgr.hasCommitSessionInProgress
             ? (e) => sessionMgr.openNewSession('review', e)
             : undefined}
+          onNewSessionReferring={(ref) => sessionMgr.openNewSessionReferring(ref)}
           newSessionDisabled={sessionMgr.isNewSessionDisabled}
           {provisioningLabel}
           {provisioningDetail}

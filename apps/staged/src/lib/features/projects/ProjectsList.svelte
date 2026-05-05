@@ -462,6 +462,7 @@
 
     try {
       await commands.deleteProject(id);
+      projectStateStore.markAsRead(id);
       commands.invalidateProjectBranchTimelines(branchesToClear.map((branch) => branch.id));
       await loadProjects();
     } catch (e) {

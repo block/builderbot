@@ -480,6 +480,7 @@
 
     try {
       await commands.deleteProject(id);
+      projectStateStore.markAsRead(id);
       projects = projects.filter((p) => p.id !== id);
       setProjects(projects);
       const nextBranches = new Map(branchesByProject);

@@ -3,6 +3,24 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use uuid::Uuid;
 
+const GIT_LOCAL_ENV_VARS: &[&str] = &[
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CONFIG",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_GRAFT_FILE",
+    "GIT_INDEX_FILE",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_PREFIX",
+    "GIT_SHALLOW_FILE",
+    "GIT_COMMON_DIR",
+];
+
 /// A temporary git repository for use in tests.
 ///
 /// Creates a fresh git repo in a temp directory and cleans it up on drop.
@@ -37,12 +55,18 @@ impl TempGitRepo {
     }
 
     pub fn run_git(&self, args: &[&str]) -> String {
-        let output = Command::new("git")
+        let mut command = Command::new("git");
+        command
+            .arg("-c")
+            .arg("core.hooksPath=/dev/null")
             .arg("-C")
             .arg(&self.path)
-            .args(args)
-            .output()
-            .unwrap();
+            .args(args);
+        for key in GIT_LOCAL_ENV_VARS {
+            command.env_remove(key);
+        }
+
+        let output = command.output().unwrap();
 
         assert!(
             output.status.success(),

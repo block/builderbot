@@ -32,6 +32,8 @@
       Math.min(y, window.innerHeight - rect.height - viewportPadding)
     );
     positioned = true;
+    await tick();
+    focusItem(0);
   }
 
   function handlePointerDown(event: PointerEvent) {
@@ -39,10 +41,54 @@
     onClose();
   }
 
+  function getMenuItems(): HTMLButtonElement[] {
+    if (!menuEl) return [];
+    return Array.from(menuEl.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'));
+  }
+
+  function focusItem(index: number) {
+    const items = getMenuItems();
+    if (items.length === 0) return;
+    const clamped = Math.max(0, Math.min(index, items.length - 1));
+    items[clamped].focus();
+  }
+
   function handleKeydown(event: KeyboardEvent) {
     if (event.key === 'Escape') {
       event.preventDefault();
       onClose();
+      return;
+    }
+
+    const items = getMenuItems();
+    if (items.length === 0) return;
+    const active = document.activeElement as HTMLElement;
+    const currentIndex = items.indexOf(active as HTMLButtonElement);
+
+    switch (event.key) {
+      case 'ArrowDown':
+        event.preventDefault();
+        focusItem(currentIndex < 0 ? 0 : (currentIndex + 1) % items.length);
+        break;
+      case 'ArrowUp':
+        event.preventDefault();
+        focusItem(
+          currentIndex < 0 ? items.length - 1 : (currentIndex - 1 + items.length) % items.length
+        );
+        break;
+      case 'Home':
+        event.preventDefault();
+        focusItem(0);
+        break;
+      case 'End':
+        event.preventDefault();
+        focusItem(items.length - 1);
+        break;
+      case 'Tab':
+        // Trap focus within menu; close instead of tabbing out
+        event.preventDefault();
+        onClose();
+        break;
     }
   }
 
@@ -87,11 +133,23 @@
   style:opacity={positioned ? '1' : '0'}
   bind:this={menuEl}
 >
-  <button type="button" class="menu-item" role="menuitem" onclick={handleMarkAsUnread}>
+  <button
+    type="button"
+    class="menu-item"
+    role="menuitem"
+    tabindex="-1"
+    onclick={handleMarkAsUnread}
+  >
     <Mail size={14} />
     Mark as Unread
   </button>
-  <button type="button" class="menu-item danger" role="menuitem" onclick={handleRemoveProject}>
+  <button
+    type="button"
+    class="menu-item danger"
+    role="menuitem"
+    tabindex="-1"
+    onclick={handleRemoveProject}
+  >
     <Trash2 size={14} />
     Remove Project
   </button>

@@ -3,23 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use uuid::Uuid;
 
-const GIT_LOCAL_ENV_VARS: &[&str] = &[
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_CONFIG",
-    "GIT_CONFIG_PARAMETERS",
-    "GIT_CONFIG_COUNT",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_IMPLICIT_WORK_TREE",
-    "GIT_GRAFT_FILE",
-    "GIT_INDEX_FILE",
-    "GIT_NO_REPLACE_OBJECTS",
-    "GIT_REPLACE_REF_BASE",
-    "GIT_PREFIX",
-    "GIT_SHALLOW_FILE",
-    "GIT_COMMON_DIR",
-];
+use crate::git::strip_git_env;
 
 /// A temporary git repository for use in tests.
 ///
@@ -62,9 +46,7 @@ impl TempGitRepo {
             .arg("-C")
             .arg(&self.path)
             .args(args);
-        for key in GIT_LOCAL_ENV_VARS {
-            command.env_remove(key);
-        }
+        strip_git_env(&mut command);
 
         let output = command.output().unwrap();
 

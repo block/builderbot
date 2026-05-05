@@ -2,6 +2,8 @@ use std::path::Path;
 use std::process::Command;
 use thiserror::Error;
 
+use super::strip_git_env;
+
 #[derive(Error, Debug)]
 pub enum GitError {
     #[error("git not found - is git installed?")]
@@ -20,24 +22,6 @@ pub enum GitError {
     InvalidPath(String),
 }
 
-const GIT_LOCAL_ENV_VARS: &[&str] = &[
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_CONFIG",
-    "GIT_CONFIG_PARAMETERS",
-    "GIT_CONFIG_COUNT",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_IMPLICIT_WORK_TREE",
-    "GIT_GRAFT_FILE",
-    "GIT_INDEX_FILE",
-    "GIT_NO_REPLACE_OBJECTS",
-    "GIT_REPLACE_REF_BASE",
-    "GIT_PREFIX",
-    "GIT_SHALLOW_FILE",
-    "GIT_COMMON_DIR",
-];
-
 /// Run a git command and return stdout as a string
 pub fn run(repo: &Path, args: &[&str]) -> Result<String, GitError> {
     let repo_str = repo
@@ -46,9 +30,7 @@ pub fn run(repo: &Path, args: &[&str]) -> Result<String, GitError> {
 
     let mut command = Command::new("git");
     command.args(["-C", repo_str]).args(args);
-    for key in GIT_LOCAL_ENV_VARS {
-        command.env_remove(key);
-    }
+    strip_git_env(&mut command);
 
     let output = command.output().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {

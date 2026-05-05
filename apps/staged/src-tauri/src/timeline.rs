@@ -2,11 +2,12 @@
 
 use crate::git;
 use crate::session_runner;
-use crate::store::Store;
+use crate::store::{CommentAuthor, Review, Store};
 use crate::{
     blox, branches, BranchTimeline, CommitTimelineItem, ImageTimelineItem, NoteTimelineItem,
     ReviewTimelineItem,
 };
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -146,6 +147,12 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         }
     }
 
+    let visible_shas: HashSet<&str> = commits
+        .iter()
+        .filter(|c| !c.sha.is_empty())
+        .map(|c| c.sha.as_str())
+        .collect();
+
     // Get notes
     let db_notes = store
         .list_notes_for_branch(branch_id)
@@ -175,6 +182,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         .map_err(|e| e.to_string())?;
     let reviews: Vec<ReviewTimelineItem> = db_reviews
         .into_iter()
+        .filter(|r| review_is_visible_in_timeline(r, &visible_shas))
         .map(|r| {
             let resolved = store.resolve_session_status(r.session_id.as_deref());
             let comment_count = r.comments.len();
@@ -223,6 +231,15 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         reviews,
         images,
     })
+}
+
+fn review_is_visible_in_timeline(review: &Review, visible_shas: &HashSet<&str>) -> bool {
+    review.commit_sha.is_empty()
+        || visible_shas.contains(review.commit_sha.as_str())
+        || review
+            .comments
+            .iter()
+            .any(|comment| comment.author == CommentAuthor::User)
 }
 
 #[tauri::command]
@@ -446,4 +463,110 @@ pub async fn delete_commit(
     })
     .await
     .map_err(|e| format!("Delete task failed: {e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::git::Span;
+    use crate::store::models::{Branch, Comment, Project, ReviewScope, Workdir};
+    use crate::test_utils::TempGitRepo;
+
+    fn repo_with_visible_and_stale_commit() -> (TempGitRepo, String, String) {
+        let repo = TempGitRepo::new();
+        repo.write_file("file.txt", "base\n");
+        repo.commit("base");
+        repo.run_git(&["update-ref", "refs/remotes/origin/main", "main"]);
+        repo.run_git(&["checkout", "-b", "feature"]);
+        repo.write_file("file.txt", "base\nvisible\n");
+        let visible_sha = repo.commit("visible change");
+        repo.write_file("file.txt", "base\nvisible\nstale\n");
+        let stale_sha = repo.commit("stale change");
+        repo.run_git(&["reset", "--hard", &visible_sha]);
+
+        (repo, visible_sha, stale_sha)
+    }
+
+    fn store_with_branch(repo: &TempGitRepo) -> (Arc<Store>, Branch) {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let project = Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+        let workdir =
+            Workdir::new(&project.id, repo.path().to_str().unwrap()).with_branch(&branch.id);
+        store.create_workdir(&workdir).unwrap();
+
+        (store, branch)
+    }
+
+    #[test]
+    fn build_branch_timeline_hides_reviews_for_commits_missing_from_git_history() {
+        let (repo, visible_sha, stale_sha) = repo_with_visible_and_stale_commit();
+        let (store, branch) = store_with_branch(&repo);
+
+        let visible_review = Review::new(&branch.id, &visible_sha, ReviewScope::Commit);
+        let stale_review = Review::new(&branch.id, &stale_sha, ReviewScope::Commit);
+        store.create_review(&visible_review).unwrap();
+        store.create_review(&stale_review).unwrap();
+
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+
+        assert_eq!(timeline.commits.len(), 1);
+        assert_eq!(timeline.commits[0].sha, visible_sha);
+        assert_eq!(timeline.reviews.len(), 1);
+        assert_eq!(timeline.reviews[0].id, visible_review.id);
+    }
+
+    #[test]
+    fn build_branch_timeline_hides_stale_reviews_with_only_agent_comments() {
+        let (repo, _visible_sha, stale_sha) = repo_with_visible_and_stale_commit();
+        let (store, branch) = store_with_branch(&repo);
+
+        let stale_review = Review::new(&branch.id, &stale_sha, ReviewScope::Commit);
+        let agent_comment = Comment::new("file.txt", Span::new(2, 3), "Agent note")
+            .with_author(CommentAuthor::Agent);
+        store.create_review(&stale_review).unwrap();
+        store.add_comment(&stale_review.id, &agent_comment).unwrap();
+
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+
+        assert_eq!(timeline.commits.len(), 1);
+        assert!(timeline.reviews.is_empty());
+    }
+
+    #[test]
+    fn build_branch_timeline_keeps_stale_reviews_with_user_comments() {
+        let (repo, _visible_sha, stale_sha) = repo_with_visible_and_stale_commit();
+        let (store, branch) = store_with_branch(&repo);
+
+        let stale_review = Review::new(&branch.id, &stale_sha, ReviewScope::Commit);
+        let user_comment = Comment::new("file.txt", Span::new(2, 3), "Please follow up");
+        store.create_review(&stale_review).unwrap();
+        store.add_comment(&stale_review.id, &user_comment).unwrap();
+
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+
+        assert_eq!(timeline.commits.len(), 1);
+        assert_eq!(timeline.reviews.len(), 1);
+        assert_eq!(timeline.reviews[0].id, stale_review.id);
+        assert_eq!(timeline.reviews[0].comment_count, 1);
+    }
+
+    #[test]
+    fn build_branch_timeline_hides_stale_reviews_with_deleted_user_comments() {
+        let (repo, _visible_sha, stale_sha) = repo_with_visible_and_stale_commit();
+        let (store, branch) = store_with_branch(&repo);
+
+        let stale_review = Review::new(&branch.id, &stale_sha, ReviewScope::Commit);
+        let user_comment = Comment::new("file.txt", Span::new(2, 3), "Please follow up");
+        store.create_review(&stale_review).unwrap();
+        store.add_comment(&stale_review.id, &user_comment).unwrap();
+        store.delete_comment(&user_comment.id).unwrap();
+
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+
+        assert_eq!(timeline.commits.len(), 1);
+        assert!(timeline.reviews.is_empty());
+    }
 }

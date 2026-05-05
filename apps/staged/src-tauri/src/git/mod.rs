@@ -1,6 +1,7 @@
 mod cli;
 mod commit;
 mod diff;
+mod env;
 mod files;
 pub mod github;
 mod refs;
@@ -10,6 +11,7 @@ mod worktree;
 pub use cli::GitError;
 pub use commit::commit;
 pub use diff::{get_file_diff, get_unified_diff, list_diff_files};
+pub(crate) use env::strip_git_env;
 pub use files::{get_file_at_ref, search_files};
 pub use github::{
     check_github_auth, check_monorepo_modules, create_pull_request, detect_default_branch_for_repo,

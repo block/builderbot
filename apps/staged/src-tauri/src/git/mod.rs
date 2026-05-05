@@ -23,8 +23,9 @@ pub use github::{
     post_single_comment_to_github, prune_remote_for_repo, push_branch, resolve_default_branch,
     search_github_repos, search_issues, search_pull_requests, sync_review_to_github,
     update_clone_to_remote_head, update_comment_on_github, update_pull_request,
-    validate_subpath_in_repo, ChecksSummary, CreatePrResult, GitHubAuthStatus, GitHubCommentResult,
-    GitHubRepo, GitHubSyncResult, Issue, PrStatus, PullRequest, PullRequestInfo,
+    validate_subpath_in_repo, ChecksSummary, CreatePrResult, FailedCheck, GitHubAuthStatus,
+    GitHubCommentResult, GitHubRepo, GitHubSyncResult, Issue, PrStatus, PullRequest,
+    PullRequestInfo,
 };
 pub use refs::{
     branch_name_without_origin, detect_default_branch, get_current_branch, get_remote_url,

@@ -42,6 +42,8 @@ struct PrStatusEvent {
     pr_mergeable: bool,
     pr_draft: bool,
     pr_head_sha: Option<String>,
+    pr_fetched_at: i64,
+    failed_checks: Vec<git::FailedCheck>,
 }
 
 // =============================================================================
@@ -703,6 +705,7 @@ pub async fn refresh_pr_status(
         }
     };
     let mergeable = pr_status.mergeable == "MERGEABLE";
+    let pr_fetched_at = store::now_timestamp();
 
     store
         .update_branch_pr_status(
@@ -729,6 +732,8 @@ pub async fn refresh_pr_status(
                 pr_mergeable: mergeable,
                 pr_draft: pr_status.is_draft,
                 pr_head_sha: pr_status.head_sha,
+                pr_fetched_at,
+                failed_checks: pr_status.failed_checks,
             },
         )
         .map_err(|e| format!("Failed to emit event: {}", e))?;
@@ -784,6 +789,7 @@ pub async fn refresh_all_pr_statuses(
         match pr_result {
             Ok(pr_status) => {
                 let mergeable = pr_status.mergeable == "MERGEABLE";
+                let pr_fetched_at = store::now_timestamp();
 
                 if let Err(e) = store.update_branch_pr_status(
                     &branch.id,
@@ -812,6 +818,8 @@ pub async fn refresh_all_pr_statuses(
                         pr_mergeable: mergeable,
                         pr_draft: pr_status.is_draft,
                         pr_head_sha: pr_status.head_sha,
+                        pr_fetched_at,
+                        failed_checks: pr_status.failed_checks,
                     },
                 ) {
                     log::warn!("Failed to emit pr-status-changed event: {}", e);

@@ -1,3 +1,8 @@
+import {
+  formatRelativeTime as formatRelativeTimeBase,
+  formatRelativeTimeSeconds as formatRelativeTimeSecondsBase,
+} from './relativeTime';
+
 class MinuteNowStore {
   private value = $state(Date.now());
 
@@ -27,22 +32,12 @@ class MinuteNowStore {
 export const minuteNow = new MinuteNowStore();
 
 export function formatRelativeTime(timestampMs: number, nowMs = minuteNow.now()): string {
-  const date = new Date(timestampMs);
-  const diffMs = nowMs - date.getTime();
-  const diffMins = Math.floor(diffMs / 60000);
-  const diffHours = Math.floor(diffMins / 60);
-  const diffDays = Math.floor(diffHours / 24);
-
-  if (diffMins < 1) return 'just now';
-  if (diffMins < 60) return `${diffMins}m ago`;
-  if (diffHours < 24) return `${diffHours}h ago`;
-  if (diffDays < 7) return `${diffDays}d ago`;
-  return date.toLocaleDateString();
+  return formatRelativeTimeBase(timestampMs, nowMs);
 }
 
 export function formatRelativeTimeSeconds(
   timestampSeconds: number,
   nowMs = minuteNow.now()
 ): string {
-  return formatRelativeTime(timestampSeconds * 1000, nowMs);
+  return formatRelativeTimeSecondsBase(timestampSeconds, nowMs);
 }

@@ -94,6 +94,26 @@ export interface PrStatus {
     pending: number;
     state: string; // "SUCCESS", "FAILURE", "PENDING", "EXPECTED"
   };
+  headSha: string | null;
+  failedChecks: PrFailedCheck[];
+}
+
+export interface PrFailedCheck {
+  name: string;
+  state: string;
+  detailsUrl: string | null;
+}
+
+export interface PrStatusChangedEvent {
+  branchId: string;
+  prState: string;
+  prChecksStatus: string;
+  prReviewDecision: string | null;
+  prMergeable: boolean;
+  prDraft: boolean;
+  prHeadSha: string | null;
+  prFetchedAt: number | null;
+  failedChecks: PrFailedCheck[];
 }
 
 export interface CommitTimelineItem {

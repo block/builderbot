@@ -8,7 +8,13 @@
   import { onMount } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-  import type { Project, ProjectRepo, Branch, StoreIncompatibility } from '../../types';
+  import type {
+    Project,
+    ProjectRepo,
+    Branch,
+    PrStatusChangedEvent,
+    StoreIncompatibility,
+  } from '../../types';
   import * as commands from '../../api/commands';
   import { listenToRepoActionsDetection } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
@@ -154,15 +160,7 @@
 
     // Listen for PR status changes to update branch state
     let unlistenPrStatus: UnlistenFn | undefined;
-    listen<{
-      branchId: string;
-      prState: string;
-      prChecksStatus: string;
-      prReviewDecision: string | null;
-      prMergeable: boolean;
-      prDraft: boolean;
-      prHeadSha: string | null;
-    }>('pr-status-changed', (event) => {
+    listen<PrStatusChangedEvent>('pr-status-changed', (event) => {
       const payload = event.payload;
       // Find the project that contains this branch and update it
       for (const [projectId, branches] of branchesByProject.entries()) {
@@ -178,6 +176,7 @@
             prMergeable: payload.prMergeable,
             prDraft: payload.prDraft,
             prHeadSha: payload.prHeadSha,
+            prFetchedAt: payload.prFetchedAt,
           };
           branchesByProject = new Map(branchesByProject).set(projectId, updatedBranches);
           break;

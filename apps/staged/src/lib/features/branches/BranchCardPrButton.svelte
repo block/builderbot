@@ -15,8 +15,15 @@
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
+  import { minuteNow } from '../../shared/relativeTime.svelte';
   import { listen } from '@tauri-apps/api/event';
-  import type { Branch, BranchTimeline as BranchTimelineData, Session } from '../../types';
+  import type {
+    Branch,
+    BranchTimeline as BranchTimelineData,
+    PrFailedCheck,
+    PrStatusChangedEvent,
+    Session,
+  } from '../../types';
   import * as commands from '../../api/commands';
   import {
     classifyCompletedPushSession,
@@ -25,6 +32,7 @@
     extractPrUrl,
     type CompletedPushOutcome,
   } from './branchCardHelpers';
+  import { buildPrButtonTitle } from './prButtonTooltip';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { prStateStore, type PrState } from '../../stores/prState.svelte';
@@ -83,9 +91,11 @@
 
   // PR head SHA — updated from events and branch prop
   let prHeadSha = $state<string | null>(null);
+  let prFetchedAt = $state<number | null>(null);
 
   // Stale-data indicator (set by the centralized polling service)
   let prStatusStale = $state(false);
+  let prStatusCleared = $state(false);
 
   // PR status fields (local state, updated via events)
   let prStatusState = $state<string | null>(null);
@@ -93,6 +103,7 @@
   let prStatusReviewDecision = $state<string | null>(null);
   let prStatusMergeable = $state<boolean | null>(null);
   let prStatusDraft = $state<boolean | null>(null);
+  let failedChecks = $state<PrFailedCheck[]>([]);
 
   // Derive hasUnpushed by comparing the latest timeline commit SHA with the PR head SHA.
   // This replaces the old approach of shelling out to `git rev-list`.
@@ -107,13 +118,26 @@
   });
 
   // Sync local PR status state when branch prop changes
+  let syncedBranchId = $state<string | null>(null);
   $effect(() => {
+    if (branch.id !== syncedBranchId) {
+      syncedBranchId = branch.id;
+      failedChecks = [];
+      prStatusCleared = false;
+    }
     prStatusState = branch.prState;
     prStatusChecks = branch.prChecksStatus;
     prStatusReviewDecision = branch.prReviewDecision;
     prStatusMergeable = branch.prMergeable;
     prStatusDraft = branch.prDraft;
     prHeadSha = branch.prHeadSha;
+    prFetchedAt = branch.prFetchedAt;
+    if (branch.prChecksStatus !== 'FAILURE') {
+      failedChecks = [];
+    }
+    if (branch.prChecksStatus) {
+      prStatusCleared = false;
+    }
   });
 
   // =========================================================================
@@ -133,15 +157,7 @@
   $effect(() => {
     const branchId = branch.id;
 
-    const unlistenStatusPromise = listen<{
-      branchId: string;
-      prState: string;
-      prChecksStatus: string;
-      prReviewDecision: string | null;
-      prMergeable: boolean;
-      prDraft: boolean;
-      prHeadSha: string | null;
-    }>('pr-status-changed', (event) => {
+    const unlistenStatusPromise = listen<PrStatusChangedEvent>('pr-status-changed', (event) => {
       const payload = event.payload;
       if (payload.branchId === branchId) {
         prStatusState = payload.prState;
@@ -150,6 +166,9 @@
         prStatusMergeable = payload.prMergeable;
         prStatusDraft = payload.prDraft;
         prHeadSha = payload.prHeadSha;
+        prFetchedAt = payload.prFetchedAt;
+        failedChecks = payload.failedChecks ?? [];
+        prStatusCleared = false;
         // Update the polling service with the new checks status
         prPollingService.updateChecksStatus(
           branchId,
@@ -167,6 +186,10 @@
         prStatusMergeable = null;
         prStatusDraft = null;
         prHeadSha = null;
+        prFetchedAt = null;
+        failedChecks = [];
+        prStatusCleared = true;
+        prPollingService.updateChecksStatus(branchId, branch.projectId, false);
       }
     });
 
@@ -315,6 +338,42 @@
   }
 
   let prStatusIndicator = $derived(getPrStatusIndicator());
+
+  function getPrButtonActionTitle(): string {
+    if (pushState === 'pushing') return 'Pushing… (click to view)';
+    if (pushState === 'error') return 'Push failed — click for details';
+    if (prState === 'created' && hasUnpushed) {
+      return optionHeld ? 'Force push to remote' : 'Push changes to remote';
+    }
+    if (prState === 'created') {
+      if (prStatusState === 'MERGED') return 'Merged';
+      if (prStatusState === 'CLOSED') return 'Closed';
+      if (prStatusDraft) return 'Draft';
+      if (prStatusChecks === 'FAILURE') return 'Checks failing';
+      if (prStatusChecks === 'PENDING') return 'Checks pending';
+      if (prStatusReviewDecision === 'CHANGES_REQUESTED') return 'Changes requested';
+      if (prStatusMergeable === false) return 'Has conflicts';
+      return `View PR${branch.prNumber ? ` #${branch.prNumber}` : ''}`;
+    }
+    if (prState === 'error') return 'PR creation failed — click for details';
+    if (prState === 'creating') return 'Creating PR… (click to view)';
+    return optionHeld ? 'Create draft PR' : 'Create PR';
+  }
+
+  let prButtonTitle = $derived(
+    buildPrButtonTitle({
+      actionTitle: getPrButtonActionTitle(),
+      prNumber: branch.prNumber,
+      prHeadSha,
+      prFetchedAt,
+      checksStatus: prStatusChecks,
+      statusStale: prStatusStale,
+      hasUnpushed: prState === 'created' && hasUnpushed && pushState === 'idle',
+      failedChecks,
+      statusCleared: prStatusCleared,
+      nowMs: minuteNow.now(),
+    })
+  );
 
   // =========================================================================
   // PR creation
@@ -576,23 +635,7 @@
     class:merged={prState === 'created' && prStatusState === 'MERGED'}
     onclick={handlePrButtonClick}
     disabled={showPushErrorDialog || showForcePushDialog || showPrErrorDialog}
-    title={pushState === 'pushing'
-      ? 'Pushing… (click to view)'
-      : pushState === 'error'
-        ? 'Push failed — click for details'
-        : prState === 'created' && hasUnpushed
-          ? optionHeld
-            ? 'Force push to remote'
-            : 'Push changes to remote'
-          : prState === 'created'
-            ? 'View PR'
-            : prState === 'error'
-              ? 'PR creation failed — click for details'
-              : prState === 'creating'
-                ? 'Creating PR… (click to view)'
-                : optionHeld
-                  ? 'Create draft PR'
-                  : 'Create PR'}
+    title={prButtonTitle}
   >
     {#if pushState === 'pushing'}
       <Spinner size={13} />

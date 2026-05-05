@@ -24,6 +24,8 @@
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
+  import { projectStateStore } from '../../stores/projectState.svelte';
+  import { canDeleteProjectWithoutConfirmation } from './projectDeleteSafety';
 
   /**
    * Merge incoming branches with existing ones, preserving worktreePath when
@@ -376,29 +378,14 @@
           continue;
         }
 
-        // Check if all branches have merged PRs and no unpushed changes.
-        // Skip the expensive hasUnpushedCommits check for remote branches —
-        // their commits live on the workspace and the SSH round-trip (~5s)
-        // blocks the UI. Treat merged remote branches as safe.
-        if (branches.length > 0) {
-          const allSafe = await Promise.all(
-            branches.map(async (branch) => {
-              const isMerged = branch.prState === 'MERGED';
-              if (!isMerged) return false;
-              if (branch.branchType === 'remote') return true;
+        const safe = await canDeleteProjectWithoutConfirmation({
+          branches,
+          repoCount,
+          hasUnpushedCommits: commands.hasUnpushedCommits,
+        });
 
-              try {
-                const hasUnpushed = await commands.hasUnpushedCommits(branch.id);
-                return !hasUnpushed;
-              } catch (e) {
-                return false;
-              }
-            })
-          );
-
-          if (allSafe.every((safe) => safe)) {
-            nextSafe.add(project.id);
-          }
+        if (safe) {
+          nextSafe.add(project.id);
         }
       }
 
@@ -418,6 +405,11 @@
 
   function handleNewProject() {
     showNewProjectModal = true;
+  }
+
+  function handleMarkProjectUnread(project: Project) {
+    if (deletingProjectNames.has(project.id)) return;
+    projectStateStore.markAsUnread(project.id);
   }
 
   async function handleProjectCreated(project: Project) {
@@ -444,35 +436,12 @@
     const branches = branchesByProject.get(project.id) || [];
     const repoCount = repoCountsByProject.get(project.id) || 0;
 
-    // If no repos, safe to delete without confirmation
-    if (repoCount === 0) {
-      projectToDelete = project;
-      // Immediately confirm since it's safe
-      await confirmDeleteProject();
-      return;
-    }
-
-    // Check if all branches have merged PRs and no unpushed changes.
-    // Skip the expensive hasUnpushedCommits check for remote branches —
-    // their commits live on the workspace and the SSH round-trip blocks the UI.
-    const allSafe = await Promise.all(
-      branches.map(async (branch) => {
-        const isMerged = branch.prState === 'MERGED';
-        if (!isMerged) return false;
-        if (branch.branchType === 'remote') return true;
-
-        // Check for unpushed commits
-        try {
-          const hasUnpushed = await commands.hasUnpushedCommits(branch.id);
-          return !hasUnpushed;
-        } catch (e) {
-          console.error('Failed to check unpushed commits:', e);
-          return false;
-        }
-      })
-    );
-
-    const isSafeToDelete = branches.length > 0 && allSafe.every((safe) => safe);
+    const isSafeToDelete = await canDeleteProjectWithoutConfirmation({
+      branches,
+      repoCount,
+      hasUnpushedCommits: commands.hasUnpushedCommits,
+      onCheckError: (e) => console.error('Failed to check unpushed commits:', e),
+    });
 
     if (isSafeToDelete) {
       // Safe to delete without confirmation
@@ -690,6 +659,8 @@
     {reposByProject}
     projectBranches={branchesByProject}
     showAllProjectsRow={true}
+    onMarkProjectUnread={handleMarkProjectUnread}
+    onRemoveProject={handleDeleteProjectRequest}
   />
 
   <div class="main-panel" class:no-pad={!loading && !hasContent}>

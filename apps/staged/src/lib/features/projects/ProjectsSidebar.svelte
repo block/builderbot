@@ -35,6 +35,7 @@
     SIDEBAR_MIN_WIDTH,
   } from './projectsSidebarState.svelte';
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
+  import ProjectContextMenu from './ProjectContextMenu.svelte';
 
   const devBranch = import.meta.env.VITE_DEV_BRANCH as string | undefined;
 
@@ -47,6 +48,8 @@
     reposByProject?: Map<string, ProjectRepo[]>;
     showAllProjectsRow?: boolean;
     projectBranches?: Map<string, Branch[]>;
+    onMarkProjectUnread?: (project: Project) => void;
+    onRemoveProject?: (project: Project) => void | Promise<void>;
   }
 
   let {
@@ -58,9 +61,15 @@
     reposByProject = new Map(),
     showAllProjectsRow = true,
     projectBranches = new Map(),
+    onMarkProjectUnread,
+    onRemoveProject,
   }: Props = $props();
 
+  let projectMenu = $state<{ project: Project; x: number; y: number } | null>(null);
+  let lastNavigationKey = `${navigation.activeView}:${navigation.selectedProjectId ?? ''}`;
+
   function openProject(projectId: string) {
+    closeProjectMenu();
     const status = getProjectStatus(
       projectId,
       deletingProjectNames,
@@ -71,11 +80,24 @@
   }
 
   function openAllProjects() {
+    closeProjectMenu();
     goHome();
   }
 
   function openNewProject() {
+    closeProjectMenu();
     window.dispatchEvent(new CustomEvent('staged:new-project'));
+  }
+
+  function closeProjectMenu() {
+    projectMenu = null;
+  }
+
+  function openProjectMenu(event: MouseEvent, project: Project, deleting: boolean) {
+    if (deleting || !onMarkProjectUnread || !onRemoveProject) return;
+    event.preventDefault();
+    event.stopPropagation();
+    projectMenu = { project, x: event.clientX, y: event.clientY };
   }
 
   function scrollIfActive(node: HTMLElement, active: boolean) {
@@ -205,6 +227,14 @@
       setProjectsSidebarWidth(SIDEBAR_MAX_WIDTH);
     }
   }
+
+  $effect(() => {
+    const nextNavigationKey = `${navigation.activeView}:${navigation.selectedProjectId ?? ''}`;
+    if (nextNavigationKey !== lastNavigationKey) {
+      closeProjectMenu();
+      lastNavigationKey = nextNavigationKey;
+    }
+  });
 </script>
 
 {#if sidebarVisible}
@@ -268,6 +298,8 @@
                 class:active={navigation.selectedProjectId === project.id}
                 class:deleting={status.kind === 'deleting'}
                 onclick={() => openProject(project.id)}
+                oncontextmenu={(event: MouseEvent) =>
+                  openProjectMenu(event, project, status.kind === 'deleting')}
                 disabled={status.kind === 'deleting'}
                 title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
               >
@@ -373,6 +405,17 @@
       onkeydown={handleResizeHandleKeydown}
     ></button>
   </aside>
+{/if}
+
+{#if projectMenu && onMarkProjectUnread && onRemoveProject}
+  {@const menuProject = projectMenu.project}
+  <ProjectContextMenu
+    x={projectMenu.x}
+    y={projectMenu.y}
+    onMarkAsUnread={() => onMarkProjectUnread(menuProject)}
+    onRemoveProject={() => onRemoveProject(menuProject)}
+    onClose={closeProjectMenu}
+  />
 {/if}
 
 <style>

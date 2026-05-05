@@ -5,7 +5,7 @@
   and the "more" dropdown menu with Actions and Open In submenus.
 -->
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { slide, fade } from 'svelte/transition';
   import { cubicOut } from 'svelte/easing';
   import {
@@ -191,10 +191,18 @@
   let endpointCopiedTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 
   // Dropdown state
+  type SubmenuPlacement = 'right' | 'left';
+
   let showMoreMenu = $state(false);
   let showActionsSubmenu = $state(false);
+  let actionsSubmenuPlacement = $state<SubmenuPlacement>('right');
+  let actionsSubmenuContainer = $state<HTMLDivElement | null>(null);
+  let actionsSubmenu = $state<HTMLDivElement | null>(null);
   let actionsSubmenuTimeout = $state<ReturnType<typeof setTimeout> | null>(null);
   let showOpenInSubmenu = $state(false);
+  let openInSubmenuPlacement = $state<SubmenuPlacement>('right');
+  let openInSubmenuContainer = $state<HTMLDivElement | null>(null);
+  let openInSubmenu = $state<HTMLDivElement | null>(null);
   let openInSubmenuTimeout = $state<ReturnType<typeof setTimeout> | null>(null);
   let openerApps = $state<OpenerApp[]>([]);
 
@@ -308,6 +316,7 @@
     loadRunningActions();
     getAvailableOpeners().then((apps) => (openerApps = apps));
     window.addEventListener('project-actions-changed', handleActionsChanged as EventListener);
+    window.addEventListener('resize', updateVisibleSubmenuPlacements);
 
     listenToRepoActionsDetection((event) => {
       if (!event.detecting) {
@@ -326,6 +335,7 @@
     unlistenRunPhaseChanged?.();
     unlistenRepoActionsDetection?.();
     window.removeEventListener('project-actions-changed', handleActionsChanged as EventListener);
+    window.removeEventListener('resize', updateVisibleSubmenuPlacements);
     window.removeEventListener('keydown', handleAltDown);
     window.removeEventListener('keyup', handleAltUp);
     for (const timer of Object.values(endpointCopiedTimers)) clearTimeout(timer);
@@ -395,12 +405,41 @@
     });
   });
 
-  function handleActionsSubmenuEnter() {
+  function getSubmenuPlacement(
+    container: HTMLDivElement | null,
+    submenu: HTMLDivElement | null
+  ): SubmenuPlacement {
+    if (!container || !submenu) return 'right';
+
+    const viewportPadding = 8;
+    const submenuGap = 2;
+    const containerRect = container.getBoundingClientRect();
+    const submenuRect = submenu.getBoundingClientRect();
+    const rightEdge = containerRect.right + submenuGap + submenuRect.width;
+
+    return rightEdge > window.innerWidth - viewportPadding ? 'left' : 'right';
+  }
+
+  function updateVisibleSubmenuPlacements() {
+    if (!showMoreMenu) return;
+    if (showActionsSubmenu) {
+      actionsSubmenuPlacement = getSubmenuPlacement(actionsSubmenuContainer, actionsSubmenu);
+    }
+    if (showOpenInSubmenu) {
+      openInSubmenuPlacement = getSubmenuPlacement(openInSubmenuContainer, openInSubmenu);
+    }
+  }
+
+  async function handleActionsSubmenuEnter() {
     if (actionsSubmenuTimeout) {
       clearTimeout(actionsSubmenuTimeout);
       actionsSubmenuTimeout = null;
     }
     showActionsSubmenu = true;
+    await tick();
+    if (showActionsSubmenu) {
+      actionsSubmenuPlacement = getSubmenuPlacement(actionsSubmenuContainer, actionsSubmenu);
+    }
   }
 
   function handleActionsSubmenuLeave() {
@@ -410,12 +449,16 @@
     }, 100);
   }
 
-  function handleOpenInSubmenuEnter() {
+  async function handleOpenInSubmenuEnter() {
     if (openInSubmenuTimeout) {
       clearTimeout(openInSubmenuTimeout);
       openInSubmenuTimeout = null;
     }
     showOpenInSubmenu = true;
+    await tick();
+    if (showOpenInSubmenu) {
+      openInSubmenuPlacement = getSubmenuPlacement(openInSubmenuContainer, openInSubmenu);
+    }
   }
 
   function handleOpenInSubmenuLeave() {
@@ -772,9 +815,10 @@
 
         <!-- Actions submenu -->
         {#if hasActionsForSubmenu}
-          <div class="submenu-container">
+          <div class="submenu-container" bind:this={actionsSubmenuContainer}>
             <button
               class="more-menu-item submenu-trigger"
+              class:open-left={actionsSubmenuPlacement === 'left'}
               onmouseenter={handleActionsSubmenuEnter}
               onmouseleave={handleActionsSubmenuLeave}
             >
@@ -785,6 +829,8 @@
             {#if showActionsSubmenu}
               <div
                 class="submenu"
+                class:open-left={actionsSubmenuPlacement === 'left'}
+                bind:this={actionsSubmenu}
                 role="group"
                 onmouseenter={handleActionsSubmenuEnter}
                 onmouseleave={handleActionsSubmenuLeave}
@@ -812,9 +858,10 @@
         <!-- Local-only: Open In submenu -->
         {#if isLocal && branch.worktreePath && openerApps.length > 0}
           <div class="menu-separator"></div>
-          <div class="submenu-container">
+          <div class="submenu-container" bind:this={openInSubmenuContainer}>
             <button
               class="more-menu-item submenu-trigger"
+              class:open-left={openInSubmenuPlacement === 'left'}
               onmouseenter={handleOpenInSubmenuEnter}
               onmouseleave={handleOpenInSubmenuLeave}
             >
@@ -825,6 +872,8 @@
             {#if showOpenInSubmenu}
               <div
                 class="submenu"
+                class:open-left={openInSubmenuPlacement === 'left'}
+                bind:this={openInSubmenu}
                 role="group"
                 onmouseenter={handleOpenInSubmenuEnter}
                 onmouseleave={handleOpenInSubmenuLeave}
@@ -1043,6 +1092,10 @@
     transform: rotate(-90deg);
   }
 
+  .submenu-trigger.open-left :global(.submenu-chevron) {
+    transform: rotate(90deg);
+  }
+
   .submenu {
     position: absolute;
     left: 100%;
@@ -1057,6 +1110,13 @@
     min-width: 160px;
     display: flex;
     flex-direction: column;
+  }
+
+  .submenu.open-left {
+    left: auto;
+    right: 100%;
+    margin-left: 0;
+    margin-right: 2px;
   }
 
   /* Enable scrolling for actions submenu */

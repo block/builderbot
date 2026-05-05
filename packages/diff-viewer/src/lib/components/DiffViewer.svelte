@@ -70,11 +70,13 @@
   import type { BeforeLineClass, AfterLineClass, CharHighlight } from '../utils/inlineDiff.js';
   import { setupDiffKeyboardNav } from '../utils/diffKeyboard';
   import { pathsMatch } from '../utils/diffModalHelpers';
+  import { getActiveStructuralStack, getStructuralDeclarations } from '../utils/structuralHeaders';
   import CommentEditor, { type GithubButtonState } from './CommentEditor.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import BeforeAnnotationOverlay from './BeforeAnnotationOverlay.svelte';
   import Scrollbar from './Scrollbar.svelte';
   import HorizontalScrollbar from './HorizontalScrollbar.svelte';
+  import StructuralHeaderStack from './StructuralHeaderStack.svelte';
 
   // ==========================================================================
   // Props
@@ -367,6 +369,21 @@
   scrollApi = {
     scrollBy: (side, deltaY) => scrollController.scrollBy(side, deltaY),
   };
+
+  let afterStructuralDeclarations = $derived.by(() => {
+    if (!afterPath || isDeletedFile || afterLines.length === 0) return [];
+    return getStructuralDeclarations(afterPath, afterLines);
+  });
+
+  let topVisibleAfterLine = $derived.by(() => {
+    const lineHeight = scrollController.getDimensions('after').lineHeight || 20;
+    return Math.max(0, Math.floor(scrollController.afterScrollY / lineHeight));
+  });
+
+  let activeStructuralStack = $derived.by(() => {
+    if (!afterPath || isDeletedFile || (isMarkdownFile && markdownPreview)) return [];
+    return getActiveStructuralStack(afterStructuralDeclarations, topVisibleAfterLine);
+  });
 
   // Update scroll controller with active alignments
   $effect(() => {
@@ -2074,6 +2091,7 @@
               </button>
             {/if}
           </div>
+          <StructuralHeaderStack stack={activeStructuralStack} />
           <div
             class="code-area"
             class:markdown-mode={isMarkdownFile && markdownPreview}
@@ -2180,6 +2198,7 @@
             <span class="pane-label">{afterLabel}</span>
             <span class="pane-path" title={afterPath}>{afterPath ?? 'No file'}</span>
           </div>
+          <StructuralHeaderStack stack={activeStructuralStack} />
           <div class="code-area" onwheel={handleAfterWheel}>
             <div class="code-container" bind:this={afterPane}>
               <div

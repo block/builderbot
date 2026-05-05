@@ -70,6 +70,12 @@ export { ConnectorRendererCanvas, type CommentHighlightInfo } from './connectorR
 export { setupDiffKeyboardNav } from './diffKeyboard';
 export { setupMarkdownScrollSync } from './markdownScrollSync';
 export { sanitize } from './sanitize';
+export {
+  getActiveStructuralStack,
+  getStructuralDeclarations,
+  type ScopeMode,
+  type StructuralDeclaration,
+} from './structuralHeaders';
 
 export {
 	findMatches,

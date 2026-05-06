@@ -1,12 +1,15 @@
 <script lang="ts">
-  import type { StructuralDeclaration } from '../utils/structuralHeaders';
+  import {
+    DEFAULT_STRUCTURAL_HEADER_MAX_ROWS,
+    type StructuralDeclaration,
+  } from '../utils/structuralHeaders';
 
   interface Props {
     stack?: StructuralDeclaration[];
     maxRows?: number;
   }
 
-  let { stack = [], maxRows = 5 }: Props = $props();
+  let { stack = [], maxRows = DEFAULT_STRUCTURAL_HEADER_MAX_ROWS }: Props = $props();
 
   const INDENT_WIDTH = 6;
   const BASE_PADDING = 12;

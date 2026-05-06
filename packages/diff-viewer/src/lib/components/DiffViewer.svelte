@@ -70,7 +70,11 @@
   import type { BeforeLineClass, AfterLineClass, CharHighlight } from '../utils/inlineDiff.js';
   import { setupDiffKeyboardNav } from '../utils/diffKeyboard';
   import { pathsMatch } from '../utils/diffModalHelpers';
-  import { getActiveStructuralStack, getStructuralDeclarations } from '../utils/structuralHeaders';
+  import {
+    DEFAULT_STRUCTURAL_HEADER_MAX_ROWS,
+    getHeaderAwareActiveStructuralStack,
+    getStructuralDeclarations,
+  } from '../utils/structuralHeaders';
   import CommentEditor, { type GithubButtonState } from './CommentEditor.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import BeforeAnnotationOverlay from './BeforeAnnotationOverlay.svelte';
@@ -382,7 +386,11 @@
 
   let activeStructuralStack = $derived.by(() => {
     if (!afterPath || isDeletedFile || (isMarkdownFile && markdownPreview)) return [];
-    return getActiveStructuralStack(afterStructuralDeclarations, topVisibleAfterLine);
+    return getHeaderAwareActiveStructuralStack(
+      afterStructuralDeclarations,
+      topVisibleAfterLine,
+      DEFAULT_STRUCTURAL_HEADER_MAX_ROWS
+    );
   });
 
   // Update scroll controller with active alignments
@@ -2104,7 +2112,10 @@
                 </div>
               </div>
             {:else}
-              <StructuralHeaderStack stack={activeStructuralStack} />
+              <StructuralHeaderStack
+                stack={activeStructuralStack}
+                maxRows={DEFAULT_STRUCTURAL_HEADER_MAX_ROWS}
+              />
               <div class="code-container" bind:this={afterPane}>
                 <div
                   class="lines-wrapper"
@@ -2199,7 +2210,10 @@
             <span class="pane-path" title={afterPath}>{afterPath ?? 'No file'}</span>
           </div>
           <div class="code-area" onwheel={handleAfterWheel}>
-            <StructuralHeaderStack stack={activeStructuralStack} />
+            <StructuralHeaderStack
+              stack={activeStructuralStack}
+              maxRows={DEFAULT_STRUCTURAL_HEADER_MAX_ROWS}
+            />
             <div class="code-container" bind:this={afterPane}>
               <div
                 class="lines-wrapper"

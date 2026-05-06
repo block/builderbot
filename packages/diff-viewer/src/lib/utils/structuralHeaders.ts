@@ -9,6 +9,8 @@ export interface StructuralDeclaration {
   endLineIndex?: number;
 }
 
+export const DEFAULT_STRUCTURAL_HEADER_MAX_ROWS = 5;
+
 type DeclarationPattern = {
   kind:
     | StructuralDeclaration['kind']
@@ -185,6 +187,50 @@ export function getActiveStructuralStack(
       return declaration.lineIndex <= line && line < endLineIndex;
     })
     .sort((a, b) => a.lineIndex - b.lineIndex || a.indent - b.indent);
+}
+
+export function getHeaderAwareActiveStructuralStack(
+  declarations: StructuralDeclaration[],
+  topVisibleLine: number,
+  maxRenderedHeaderRows: number
+): StructuralDeclaration[] {
+  const maxRows = normalizeHeaderMaxRows(maxRenderedHeaderRows);
+  let activeStack = getActiveStructuralStack(declarations, topVisibleLine);
+  let coveredRows = getRenderedHeaderRowCount(activeStack, maxRows);
+  const stackByCoveredRows = new Map<number, StructuralDeclaration[]>();
+
+  for (let iteration = 0; iteration <= maxRows + 1; iteration++) {
+    const repeatedStack = stackByCoveredRows.get(coveredRows);
+    if (repeatedStack) {
+      return repeatedStack;
+    }
+
+    activeStack = getActiveStructuralStack(declarations, topVisibleLine + coveredRows);
+    stackByCoveredRows.set(coveredRows, activeStack);
+    const nextCoveredRows = getRenderedHeaderRowCount(activeStack, maxRows);
+    if (nextCoveredRows === coveredRows) {
+      return activeStack;
+    }
+
+    coveredRows = nextCoveredRows;
+  }
+
+  return activeStack;
+}
+
+function getRenderedHeaderRowCount(
+  stack: StructuralDeclaration[],
+  maxRenderedHeaderRows: number
+): number {
+  return Math.min(stack.length, maxRenderedHeaderRows);
+}
+
+function normalizeHeaderMaxRows(maxRenderedHeaderRows: number): number {
+  if (!Number.isFinite(maxRenderedHeaderRows)) {
+    return DEFAULT_STRUCTURAL_HEADER_MAX_ROWS;
+  }
+
+  return Math.max(0, Math.floor(maxRenderedHeaderRows));
 }
 
 function getLanguageConfig(filePath: string | null | undefined): LanguageConfig | null {

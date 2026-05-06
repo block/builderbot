@@ -1,7 +1,82 @@
 import { describe, expect, it } from 'vitest';
-import { getActiveStructuralStack, getStructuralDeclarations } from './structuralHeaders';
+import {
+  DEFAULT_STRUCTURAL_HEADER_MAX_ROWS,
+  getActiveStructuralStack,
+  getHeaderAwareActiveStructuralStack,
+  getStructuralDeclarations,
+  type StructuralDeclaration,
+} from './structuralHeaders';
+
+function structuralDeclaration(
+  name: string,
+  lineIndex: number,
+  endLineIndex: number,
+  indent = 0
+): StructuralDeclaration {
+  return {
+    lineIndex,
+    indent,
+    kind: 'function',
+    name,
+    displayText: name,
+    endLineIndex,
+  };
+}
 
 describe('structural headers', () => {
+  it('activates declarations hidden behind rendered structural headers', () => {
+    const declarations = [
+      structuralDeclaration('Outer', 0, 30),
+      structuralDeclaration('visibleParent', 5, 30, 2),
+      structuralDeclaration('hiddenChild', 10, 20, 4),
+    ];
+
+    expect(getActiveStructuralStack(declarations, 8).map((d) => d.name)).toEqual([
+      'Outer',
+      'visibleParent',
+    ]);
+    expect(
+      getHeaderAwareActiveStructuralStack(declarations, 8, DEFAULT_STRUCTURAL_HEADER_MAX_ROWS).map(
+        (d) => d.name
+      )
+    ).toEqual(['Outer', 'visibleParent', 'hiddenChild']);
+  });
+
+  it('does not activate declarations below rendered structural headers', () => {
+    const declarations = [
+      structuralDeclaration('Outer', 0, 30),
+      structuralDeclaration('visibleParent', 5, 30, 2),
+      structuralDeclaration('nextChild', 11, 20, 4),
+    ];
+
+    expect(
+      getHeaderAwareActiveStructuralStack(declarations, 8, DEFAULT_STRUCTURAL_HEADER_MAX_ROWS).map(
+        (d) => d.name
+      )
+    ).toEqual(['Outer', 'visibleParent']);
+  });
+
+  it('caps covered rows to rendered structural header rows', () => {
+    const declarations = [
+      structuralDeclaration('Scope0', 0, 50),
+      structuralDeclaration('Scope1', 1, 50, 2),
+      structuralDeclaration('Scope2', 2, 50, 4),
+      structuralDeclaration('Scope3', 3, 50, 6),
+      structuralDeclaration('Scope4', 4, 50, 8),
+      structuralDeclaration('Scope5', 5, 50, 10),
+      structuralDeclaration('belowRenderedRows', 14, 30, 12),
+    ];
+
+    expect(getHeaderAwareActiveStructuralStack(declarations, 10, 3).map((d) => d.name)).toEqual([
+      'Scope0',
+      'Scope1',
+      'Scope2',
+      'Scope3',
+      'Scope4',
+      'Scope5',
+    ]);
+  });
+
   it('detects a TypeScript class with a nested method', () => {
     const lines = [
       'class Example {',

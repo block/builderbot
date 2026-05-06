@@ -71,7 +71,9 @@ export { setupDiffKeyboardNav } from './diffKeyboard';
 export { setupMarkdownScrollSync } from './markdownScrollSync';
 export { sanitize } from './sanitize';
 export {
+  DEFAULT_STRUCTURAL_HEADER_MAX_ROWS,
   getActiveStructuralStack,
+  getHeaderAwareActiveStructuralStack,
   getStructuralDeclarations,
   type ScopeMode,
   type StructuralDeclaration,

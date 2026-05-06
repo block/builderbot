@@ -533,4 +533,50 @@ describe('structural headers', () => {
       getActiveStructuralStack(declarations, 7).map((d) => d.name)
     ).toEqual(['top_level']);
   });
+
+  it('renders displayText correctly for destructured parameters', () => {
+    const lines = [
+      'function selectUser({ id, name }: User) {',
+      '  return { id, name };',
+      '}',
+    ];
+    const declarations = getStructuralDeclarations('selectUser.ts', lines);
+
+    expect(declarations[0].displayText).toBe('function selectUser({ id, name }: User)');
+  });
+
+  it('renders displayText correctly for return type braces', () => {
+    const lines = [
+      'function findBrace(lines: string[]): { lineIndex: number } | null {',
+      '  return null;',
+      '}',
+    ];
+    const declarations = getStructuralDeclarations('Example.ts', lines);
+
+    expect(declarations[0].displayText).toBe(
+      'function findBrace(lines: string[]): { lineIndex: number } | null'
+    );
+  });
+
+  it('does not match callback call expressions as method declarations', () => {
+    const lines = [
+      'class Example {',
+      "  describe('test', () => {",
+      '    return true;',
+      '  });',
+      '  onMount(() => {',
+      '    setup();',
+      '  });',
+      '  $effect(() => {',
+      '    update();',
+      '  });',
+      '  realMethod() {',
+      '    return 1;',
+      '  }',
+      '}',
+    ];
+    const declarations = getStructuralDeclarations('Example.ts', lines);
+
+    expect(declarations.map((d) => d.name)).toEqual(['Example', 'realMethod']);
+  });
 });

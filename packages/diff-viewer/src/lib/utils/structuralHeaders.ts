@@ -59,7 +59,7 @@ const tsLikePatterns: DeclarationPattern[] = [
   {
     kind: 'method',
     regex: new RegExp(
-      String.raw`^\s*(?!(?:if|for|while|switch|catch|function)\b)(?:(?:public|private|protected|static|async|override|abstract|readonly|get|set)\s+)*(?<name>${IDENT}|constructor)\s*(?:<[^>]+>)?\([^)]*\)\s*(?::[^({=>]+)?(?:=>\s*)?\{`
+      String.raw`^\s*(?!(?:if|for|while|switch|catch|function)\b)(?:(?:public|private|protected|static|async|override|abstract|readonly|get|set)\s+)*(?<name>${IDENT}|constructor)\s*(?:<[^>]+>)?\([^)]*\)\s*(?::[^({=>]+)?\{`
     ),
   },
 ];
@@ -293,9 +293,9 @@ function getIndent(line: string): number {
 
 function getDisplayText(line: string, kind: StructuralDeclaration['kind'], name: string): string {
   let displayText = removeTrailingLineComment(line).trim();
-  const openingBraceIndex = displayText.indexOf('{');
-  if (openingBraceIndex !== -1) {
-    displayText = displayText.slice(0, openingBraceIndex).trimEnd();
+  const bodyBraceIndex = findDisplayBodyBraceIndex(displayText);
+  if (bodyBraceIndex !== -1) {
+    displayText = displayText.slice(0, bodyBraceIndex).trimEnd();
   }
   if (displayText.endsWith(':') || displayText.endsWith(';')) {
     displayText = displayText.slice(0, -1).trimEnd();
@@ -303,6 +303,32 @@ function getDisplayText(line: string, kind: StructuralDeclaration['kind'], name:
   displayText = displayText.replace(/\s+/g, ' ');
 
   return displayText || `${kind} ${name}`;
+}
+
+/**
+ * Find the body brace index for display text truncation.
+ * Returns the last `{` at paren balance 0 (the body brace), or falls back
+ * to the first `{` if no brace exists at paren balance 0 (multiline signatures
+ * where the destructuring `{` is inside unclosed parens).
+ */
+function findDisplayBodyBraceIndex(line: string): number {
+  let parenBalance = 0;
+  let lastBraceAtZeroParen = -1;
+  let firstBrace = -1;
+
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (char === '(') {
+      parenBalance++;
+    } else if (char === ')') {
+      parenBalance--;
+    } else if (char === '{') {
+      if (firstBrace === -1) firstBrace = i;
+      if (parenBalance === 0) lastBraceAtZeroParen = i;
+    }
+  }
+
+  return lastBraceAtZeroParen !== -1 ? lastBraceAtZeroParen : firstBrace;
 }
 
 function removeTrailingLineComment(line: string): string {

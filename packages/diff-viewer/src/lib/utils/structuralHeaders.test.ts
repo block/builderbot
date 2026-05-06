@@ -169,9 +169,7 @@ describe('structural headers', () => {
     expect(getActiveStructuralStack(declarations, 6)).toEqual([]);
   });
 
-  // Bug: findOpeningBrace picks the farthest-reaching `{` candidate, so in
-  // .svelte files the last declaration's scope leaks into template/style braces.
-  it.fails('does not extend svelte script function scope into template braces', () => {
+  it('does not extend svelte script function scope into template braces', () => {
     const lines = [
       '<script lang="ts">',
       '  function paddingForIndent(indent: number): number {',

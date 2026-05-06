@@ -368,9 +368,11 @@ function findOpeningBrace(
 
   for (let lineIndex = startLineIndex; lineIndex < stopLineIndex; lineIndex++) {
     const sanitizedLine = sanitizeBraceLine(lines[lineIndex], state);
+    let foundOnLine = false;
 
     for (let columnIndex = 0; columnIndex < sanitizedLine.length; columnIndex++) {
       if (sanitizedLine[columnIndex] !== '{') continue;
+      foundOnLine = true;
 
       const candidate = {
         lineIndex,
@@ -382,6 +384,8 @@ function findOpeningBrace(
         openingBrace = candidate;
       }
     }
+
+    if (foundOnLine) break;
   }
 
   if (!openingBrace) return null;

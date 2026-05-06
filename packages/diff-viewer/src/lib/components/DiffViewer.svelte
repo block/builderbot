@@ -2091,7 +2091,6 @@
               </button>
             {/if}
           </div>
-          <StructuralHeaderStack stack={activeStructuralStack} />
           <div
             class="code-area"
             class:markdown-mode={isMarkdownFile && markdownPreview}
@@ -2105,6 +2104,7 @@
                 </div>
               </div>
             {:else}
+              <StructuralHeaderStack stack={activeStructuralStack} />
               <div class="code-container" bind:this={afterPane}>
                 <div
                   class="lines-wrapper"
@@ -2198,8 +2198,8 @@
             <span class="pane-label">{afterLabel}</span>
             <span class="pane-path" title={afterPath}>{afterPath ?? 'No file'}</span>
           </div>
-          <StructuralHeaderStack stack={activeStructuralStack} />
           <div class="code-area" onwheel={handleAfterWheel}>
+            <StructuralHeaderStack stack={activeStructuralStack} />
             <div class="code-container" bind:this={afterPane}>
               <div
                 class="lines-wrapper"

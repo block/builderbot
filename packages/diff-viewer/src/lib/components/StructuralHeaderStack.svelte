@@ -35,12 +35,17 @@
 
 <style>
   .structural-header-stack {
-    flex-shrink: 0;
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 12px;
+    z-index: 20;
     padding: 2px 0;
     border-top: 1px solid var(--border-subtle);
     border-bottom: 1px solid var(--border-subtle);
     background-color: color-mix(in srgb, var(--bg-primary) 88%, var(--bg-elevated));
     font-family: var(--font-mono, 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace);
+    pointer-events: none;
   }
 
   .structural-header-row {

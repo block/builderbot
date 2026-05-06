@@ -59,7 +59,7 @@ const tsLikePatterns: DeclarationPattern[] = [
   {
     kind: 'method',
     regex: new RegExp(
-      String.raw`^\s*(?!(?:if|for|while|switch|catch|function)\b)(?:(?:public|private|protected|static|async|override|abstract|readonly|get|set)\s+)*(?<name>${IDENT}|constructor)\s*(?:<[^>]+>)?\([^)]*\)\s*(?::[^({=>]+)?\{`
+      String.raw`^\s*(?!(?:if|for|while|switch|catch|function)\b)(?:(?:public|private|protected|static|async|override|abstract|readonly|get|set)\s+)*(?<name>${IDENT}|constructor)\s*(?:<[^>]+>)?\((?:(?!\bfunction\b\s*(?:\w+\s*)?\()[^)])*\)\s*(?::[^({=>]+)?\{`
     ),
   },
 ];

@@ -2743,12 +2743,12 @@ for both the author and committer. Do not use placeholder identities.
 matching `Signed-off-by` trailer.".to_string()
         }
         BranchSessionType::Review => {
-            let base = base_branch.unwrap_or("main");
+            let base_ref = git::origin_ref_for_branch(base_branch.unwrap_or("main"));
             format!(
                 "The user is requesting an AI code review of the current branch.\n\
 \n\
 Review the code changes on this branch by running a diff from the remote-tracking base ref: \
-`git diff $(git merge-base origin/{base} HEAD)..HEAD`. Do not compare against the \
+`git diff $(git merge-base {base_ref} HEAD)..HEAD`. Do not compare against the \
 local base branch, which may be stale.\n\
 \n\
 Do NOT create any commits or modify any files.\n\

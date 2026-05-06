@@ -22,6 +22,16 @@ type LanguageConfig = {
   patterns: DeclarationPattern[];
 };
 
+type BraceSanitizerState = {
+  inBlockComment: boolean;
+  quote: '"' | "'" | '`' | null;
+};
+
+type BraceLocation = {
+  lineIndex: number;
+  columnIndex: number;
+};
+
 const IDENT = String.raw`[A-Za-z_$][\w$]*`;
 const BASIC_IDENT = String.raw`[A-Za-z_]\w*`;
 
@@ -320,10 +330,14 @@ function getBraceScopeEndLine(
     return Math.min(lines.length, declaration.lineIndex + 1);
   }
 
-  const state = { inBlockComment: false };
+  return getBraceMatchEndLine(lines, openingBrace);
+}
+
+function getBraceMatchEndLine(lines: string[], openingBrace: BraceLocation): number {
+  const state = createBraceSanitizerState();
   let balance = 0;
 
-  for (let lineIndex = declaration.lineIndex; lineIndex < lines.length; lineIndex++) {
+  for (let lineIndex = openingBrace.lineIndex; lineIndex < lines.length; lineIndex++) {
     const sanitizedLine = sanitizeBraceLine(lines[lineIndex], state);
     const startColumn = lineIndex === openingBrace.lineIndex ? openingBrace.columnIndex : 0;
 
@@ -348,23 +362,41 @@ function findOpeningBrace(
   lines: string[],
   startLineIndex: number,
   stopLineIndex: number
-): { lineIndex: number; columnIndex: number } | null {
-  const state = { inBlockComment: false };
+): BraceLocation | null {
+  const state = createBraceSanitizerState();
+  let openingBrace: (BraceLocation & { endLineIndex: number }) | null = null;
 
   for (let lineIndex = startLineIndex; lineIndex < stopLineIndex; lineIndex++) {
     const sanitizedLine = sanitizeBraceLine(lines[lineIndex], state);
-    const columnIndex = sanitizedLine.indexOf('{');
-    if (columnIndex !== -1) {
-      return { lineIndex, columnIndex };
+
+    for (let columnIndex = 0; columnIndex < sanitizedLine.length; columnIndex++) {
+      if (sanitizedLine[columnIndex] !== '{') continue;
+
+      const candidate = {
+        lineIndex,
+        columnIndex,
+        endLineIndex: getBraceMatchEndLine(lines, { lineIndex, columnIndex }),
+      };
+
+      if (!openingBrace || candidate.endLineIndex > openingBrace.endLineIndex) {
+        openingBrace = candidate;
+      }
     }
   }
 
-  return null;
+  if (!openingBrace) return null;
+  return { lineIndex: openingBrace.lineIndex, columnIndex: openingBrace.columnIndex };
 }
 
-function sanitizeBraceLine(line: string, state: { inBlockComment: boolean }): string {
+function createBraceSanitizerState(): BraceSanitizerState {
+  return {
+    inBlockComment: false,
+    quote: null,
+  };
+}
+
+function sanitizeBraceLine(line: string, state: BraceSanitizerState): string {
   let sanitized = '';
-  let quote: '"' | "'" | '`' | null = null;
 
   for (let i = 0; i < line.length; i++) {
     const char = line[i];
@@ -381,7 +413,7 @@ function sanitizeBraceLine(line: string, state: { inBlockComment: boolean }): st
       continue;
     }
 
-    if (quote) {
+    if (state.quote) {
       if (char === '\\') {
         sanitized += ' ';
         if (nextChar !== undefined) {
@@ -390,8 +422,8 @@ function sanitizeBraceLine(line: string, state: { inBlockComment: boolean }): st
         }
         continue;
       }
-      if (char === quote) {
-        quote = null;
+      if (char === state.quote) {
+        state.quote = null;
       }
       sanitized += ' ';
       continue;
@@ -409,8 +441,8 @@ function sanitizeBraceLine(line: string, state: { inBlockComment: boolean }): st
       break;
     }
 
-    if ((char === '"' || char === "'" || char === '`') && hasClosingQuote(line, i, char)) {
-      quote = char;
+    if ((char === '"' || char === "'" || char === '`') && startsQuote(line, i, char)) {
+      state.quote = char;
       sanitized += ' ';
       continue;
     }
@@ -419,6 +451,10 @@ function sanitizeBraceLine(line: string, state: { inBlockComment: boolean }): st
   }
 
   return sanitized;
+}
+
+function startsQuote(line: string, startIndex: number, quote: '"' | "'" | '`'): boolean {
+  return quote === '`' || hasClosingQuote(line, startIndex, quote);
 }
 
 function hasClosingQuote(line: string, startIndex: number, quote: '"' | "'" | '`'): boolean {

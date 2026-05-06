@@ -121,4 +121,51 @@ describe('structural headers', () => {
       getActiveStructuralStack(declarations, 4).map((declaration) => declaration.name)
     ).toEqual(['outside']);
   });
+
+  it('keeps a TypeScript function active past return type braces', () => {
+    const lines = [
+      'function findOpeningBrace(',
+      '  lines: string[],',
+      '  startLineIndex: number,',
+      '  stopLineIndex: number',
+      '): { lineIndex: number; columnIndex: number } | null {',
+      '  const state = { inBlockComment: false };',
+      '',
+      '  for (let lineIndex = startLineIndex; lineIndex < stopLineIndex; lineIndex++) {',
+      "    const columnIndex = lines[lineIndex].indexOf('{');",
+      '    if (columnIndex !== -1) {',
+      '      return { lineIndex, columnIndex };',
+      '    }',
+      '  }',
+      '',
+      '  return null;',
+      '}',
+    ];
+    const declarations = getStructuralDeclarations('Example.ts', lines);
+
+    expect(
+      getActiveStructuralStack(declarations, 5).map((declaration) => declaration.name)
+    ).toEqual(['findOpeningBrace']);
+    expect(
+      getActiveStructuralStack(declarations, 14).map((declaration) => declaration.name)
+    ).toEqual(['findOpeningBrace']);
+  });
+
+  it('ignores braces inside multiline TypeScript template strings', () => {
+    const lines = [
+      'function renderTemplate() {',
+      '  const template = `',
+      '    }',
+      '  `;',
+      '  return template;',
+      '}',
+      'after();',
+    ];
+    const declarations = getStructuralDeclarations('Example.ts', lines);
+
+    expect(
+      getActiveStructuralStack(declarations, 4).map((declaration) => declaration.name)
+    ).toEqual(['renderTemplate']);
+    expect(getActiveStructuralStack(declarations, 6)).toEqual([]);
+  });
 });

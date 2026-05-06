@@ -216,6 +216,7 @@
   let imageFileInput = $state<HTMLInputElement>();
   let dragOver = $state(false);
   let promptWrapperEl: HTMLDivElement | undefined = $state();
+  let promptExpanded = $state(false);
 
   // Load previews for attached images
   $effect(() => {
@@ -237,6 +238,21 @@
 
   function openImagePicker() {
     imageFileInput?.click();
+  }
+
+  function handlePromptFocusIn() {
+    promptExpanded = true;
+  }
+
+  function handlePromptFocusOut(e: FocusEvent) {
+    if (
+      promptWrapperEl &&
+      e.relatedTarget instanceof Node &&
+      promptWrapperEl.contains(e.relatedTarget)
+    ) {
+      return;
+    }
+    promptExpanded = false;
   }
 
   async function handleImageFileSelect(e: Event) {
@@ -552,7 +568,14 @@
       class="file-input-hidden"
       onchange={handleImageFileSelect}
     />
-    <div class="prompt-input-wrapper" class:drag-over={dragOver} bind:this={promptWrapperEl}>
+    <div
+      class="prompt-input-wrapper"
+      class:drag-over={dragOver}
+      class:expanded={promptExpanded}
+      bind:this={promptWrapperEl}
+      onfocusin={handlePromptFocusIn}
+      onfocusout={handlePromptFocusOut}
+    >
       <div class="prompt-input-row">
         {#if imageIds.length === 0}
           <button class="attach-btn" onclick={openImagePicker} title="Attach image">
@@ -984,6 +1007,7 @@
     display: flex;
     align-items: flex-end;
     gap: 8px;
+    min-width: 0;
     padding: 6px 8px;
   }
 
@@ -1038,6 +1062,11 @@
 
   .prompt-input-row :global(.hashtag-input-wrapper) {
     flex: 1;
+    min-width: 0;
+  }
+
+  .prompt-input-row :global(.hashtag-input-container) {
+    min-width: 0;
   }
 
   .prompt-actions {
@@ -1243,46 +1272,109 @@
     }
 
     .prompt-input-row {
+      align-items: center;
+      flex-wrap: nowrap;
+      gap: 4px;
+      padding: 4px 6px;
+    }
+
+    .attach-btn {
+      width: 32px;
+      height: 32px;
+    }
+
+    .prompt-input-row :global(.hashtag-input-wrapper) {
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+
+    .prompt-input-row :global(.prompt-input) {
+      height: 32px;
+      max-height: 32px;
+      padding: 5px 0;
+      font-size: var(--size-sm);
+      overflow: hidden;
+      white-space: nowrap;
+    }
+
+    .prompt-actions {
+      width: auto;
+      justify-content: flex-end;
+      gap: 2px;
+      min-width: 0;
+    }
+
+    .prompt-actions :global(.agent-selector) {
+      min-width: 0;
+    }
+
+    .prompt-actions :global(.selector-btn) {
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      min-height: 32px;
+      padding: 0;
+    }
+
+    .prompt-actions :global(.selector-label) {
+      display: none;
+    }
+
+    .send-button {
+      width: 32px;
+      height: 32px;
+      border-radius: 6px;
+    }
+
+    .prompt-input-wrapper.expanded .prompt-input-row {
       align-items: stretch;
       flex-wrap: wrap;
       padding: 6px;
     }
 
-    .attach-btn {
+    .prompt-input-wrapper.expanded .attach-btn {
       width: 40px;
       height: 40px;
     }
 
-    .prompt-input-row :global(.hashtag-input-wrapper) {
-      min-width: 0;
+    .prompt-input-wrapper.expanded .prompt-input-row :global(.hashtag-input-wrapper) {
       flex: 1 1 calc(100% - 48px);
     }
 
-    .prompt-input-row :global(.prompt-input) {
+    .prompt-input-wrapper.expanded .prompt-input-row :global(.prompt-input) {
+      height: auto;
+      max-height: 120px;
       padding: 4px 2px;
-      min-height: 40px;
-      font-size: var(--size-sm);
+      overflow-y: auto;
+      white-space: pre-wrap;
     }
 
-    .prompt-actions {
+    .prompt-input-wrapper.expanded .prompt-actions {
       width: 100%;
-      justify-content: flex-end;
       gap: 4px;
     }
 
-    .prompt-actions :global(.selector-btn) {
+    .prompt-input-wrapper.expanded .prompt-actions :global(.selector-btn) {
+      justify-content: flex-start;
+      width: auto;
+      height: auto;
       min-height: 40px;
       max-width: calc(100vw - 112px);
+      padding: 4px 8px;
+      overflow: hidden;
     }
 
-    .prompt-actions :global(.selector-label) {
+    .prompt-input-wrapper.expanded .prompt-actions :global(.selector-label) {
+      display: inline-block;
+      min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
     }
 
-    .send-button {
+    .prompt-input-wrapper.expanded .send-button {
       width: 40px;
       height: 40px;
+      border-radius: 8px;
     }
   }
 </style>

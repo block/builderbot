@@ -231,7 +231,7 @@
     border: 1px solid var(--border-muted);
     border-radius: 6px;
     color: var(--text-primary);
-    font-size: var(--size-sm);
+    font-size: var(--size-md);
     font-family: inherit;
     line-height: 1.5;
     resize: none;

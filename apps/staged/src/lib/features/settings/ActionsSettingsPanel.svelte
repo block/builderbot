@@ -904,7 +904,7 @@
     min-width: 0;
     min-height: 36px;
     padding: 8px 12px;
-    font-size: var(--size-sm);
+    font-size: var(--size-md);
   }
 
   .context-list {
@@ -1035,7 +1035,7 @@
     background: var(--bg-chrome);
     color: var(--text-primary);
     font-family: 'SF Mono', Menlo, Consolas, monospace;
-    font-size: var(--size-xs);
+    font-size: var(--size-md);
   }
 
   .badge-input-error {

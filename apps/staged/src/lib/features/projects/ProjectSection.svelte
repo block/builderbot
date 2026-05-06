@@ -1050,7 +1050,7 @@
     border: none;
     background: none;
     color: var(--text-primary);
-    font-size: var(--size-sm);
+    font-size: var(--size-md);
     font-family: inherit;
     line-height: 1.5;
     resize: none;
@@ -1345,6 +1345,8 @@
       height: auto;
       max-height: 120px;
       padding: 4px 2px;
+      min-height: 40px;
+      font-size: var(--size-md);
       overflow-y: auto;
       white-space: pre-wrap;
     }

@@ -285,7 +285,7 @@
     border: 1px solid var(--border-muted);
     border-radius: 6px;
     color: var(--text-primary);
-    font-size: var(--size-xs);
+    font-size: var(--size-md);
   }
 
   .create-input::placeholder {

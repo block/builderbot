@@ -113,7 +113,7 @@
     background: transparent;
     border: none;
     outline: none;
-    font-size: var(--size-sm);
+    font-size: var(--size-md);
     color: var(--text-primary);
     width: 200px;
     font-family: inherit;

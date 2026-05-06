@@ -14,7 +14,13 @@
     GitPullRequestDraft,
     Plus,
   } from 'lucide-svelte';
-  import type { Project, ProjectRepo, Branch, WorkspaceStatus } from '../../types';
+  import type {
+    Project,
+    ProjectRepo,
+    Branch,
+    PrStatusChangedEvent,
+    WorkspaceStatus,
+  } from '../../types';
   import * as commands from '../../api/commands';
   import {
     projectDisplayName,
@@ -287,15 +293,7 @@
 
     // Listen for PR status changes to update branch state
     let unlistenPrStatus: UnlistenFn | undefined;
-    listen<{
-      branchId: string;
-      prState: string;
-      prChecksStatus: string;
-      prReviewDecision: string | null;
-      prMergeable: boolean;
-      prDraft: boolean;
-      prHeadSha: string | null;
-    }>('pr-status-changed', (event) => {
+    listen<PrStatusChangedEvent>('pr-status-changed', (event) => {
       const payload = event.payload;
       // Find the project that contains this branch
       for (const [projectId, branches] of projectBranches.entries()) {
@@ -311,6 +309,7 @@
             prMergeable: payload.prMergeable,
             prDraft: payload.prDraft,
             prHeadSha: payload.prHeadSha,
+            prFetchedAt: payload.prFetchedAt,
           };
           projectBranches = new Map(projectBranches).set(projectId, updatedBranches);
           break;

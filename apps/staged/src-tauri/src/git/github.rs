@@ -59,6 +59,8 @@ pub struct PrStatus {
     pub checks_summary: ChecksSummary,
     /// The SHA of the PR's head commit on GitHub
     pub head_sha: Option<String>,
+    /// Failed checks from the most recent GitHub status rollup.
+    pub failed_checks: Vec<FailedCheck>,
 }
 
 /// Summary of CI/status checks for a PR
@@ -75,6 +77,15 @@ pub struct ChecksSummary {
     pub pending: u32,
     /// Overall state (SUCCESS, FAILURE, PENDING, or EXPECTED if no checks)
     pub state: String,
+}
+
+/// A failed check from GitHub's PR status rollup.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FailedCheck {
+    pub name: String,
+    pub state: String,
+    pub details_url: Option<String>,
 }
 
 /// A GitHub issue (for display in picker)
@@ -2157,11 +2168,105 @@ struct GhStatusCheck {
     #[serde(rename = "__typename")]
     typename: String,
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    context: Option<String>,
+    #[serde(default)]
     state: Option<String>,
     #[serde(default)]
     status: Option<String>,
     #[serde(default)]
     conclusion: Option<String>,
+    #[serde(rename = "detailsUrl", default)]
+    details_url: Option<String>,
+    #[serde(rename = "targetUrl", default)]
+    target_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CheckRollupAnalysis {
+    total: u32,
+    passed: u32,
+    failed: u32,
+    pending: u32,
+    state: String,
+    failed_checks: Vec<FailedCheck>,
+}
+
+fn check_rollup_state(check: &GhStatusCheck) -> Option<String> {
+    let state = if check.typename == "StatusContext" {
+        check.state.as_deref()
+    } else if check.typename == "CheckRun" {
+        check.conclusion.as_deref().or(check.status.as_deref())
+    } else {
+        None
+    };
+
+    state.map(str::to_ascii_uppercase)
+}
+
+fn check_rollup_name(check: &GhStatusCheck) -> String {
+    check
+        .name
+        .as_deref()
+        .or(check.context.as_deref())
+        .unwrap_or("Unnamed check")
+        .to_string()
+}
+
+fn check_rollup_details_url(check: &GhStatusCheck) -> Option<String> {
+    check
+        .details_url
+        .as_ref()
+        .or(check.target_url.as_ref())
+        .cloned()
+}
+
+fn analyze_status_check_rollup(checks: &[GhStatusCheck]) -> CheckRollupAnalysis {
+    let mut total = 0u32;
+    let mut passed = 0u32;
+    let mut failed = 0u32;
+    let mut pending = 0u32;
+    let mut failed_checks = Vec::new();
+
+    for check in checks {
+        total += 1;
+
+        match check_rollup_state(check).as_deref() {
+            Some("SUCCESS") | Some("COMPLETED") => passed += 1,
+            Some(state @ ("FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED")) => {
+                failed += 1;
+                failed_checks.push(FailedCheck {
+                    name: check_rollup_name(check),
+                    state: state.to_string(),
+                    details_url: check_rollup_details_url(check),
+                });
+            }
+            Some("PENDING") | Some("IN_PROGRESS") | Some("QUEUED") | Some("WAITING") => {
+                pending += 1
+            }
+            _ => pending += 1,
+        }
+    }
+
+    let state = if total == 0 {
+        "EXPECTED".to_string()
+    } else if failed > 0 {
+        "FAILURE".to_string()
+    } else if pending > 0 {
+        "PENDING".to_string()
+    } else {
+        "SUCCESS".to_string()
+    };
+
+    CheckRollupAnalysis {
+        total,
+        passed,
+        failed,
+        pending,
+        state,
+        failed_checks,
+    }
 }
 
 /// Fetch detailed status information for a PR by number.
@@ -2180,50 +2285,7 @@ pub fn fetch_pr_status(repo: &Path, pr_number: u64) -> Result<PrStatus, GitError
     let item: GhPrStatusItem =
         serde_json::from_str(&output).map_err(|e| GitError::CommandFailed(e.to_string()))?;
 
-    // Analyze status checks
-    let mut total = 0u32;
-    let mut passed = 0u32;
-    let mut failed = 0u32;
-    let mut pending = 0u32;
-
-    for check in &item.status_check_rollup {
-        total += 1;
-
-        // GitHub status checks have different types and fields
-        // StatusContext uses 'state', CheckRun uses 'status' and 'conclusion'
-        let check_state = if check.typename == "StatusContext" {
-            check.state.as_deref()
-        } else if check.typename == "CheckRun" {
-            // For CheckRun, check conclusion first, then status
-            check.conclusion.as_deref().or(check.status.as_deref())
-        } else {
-            None
-        };
-
-        match check_state {
-            Some("SUCCESS") | Some("COMPLETED") => passed += 1,
-            Some("FAILURE")
-            | Some("ERROR")
-            | Some("CANCELLED")
-            | Some("TIMED_OUT")
-            | Some("ACTION_REQUIRED") => failed += 1,
-            Some("PENDING") | Some("IN_PROGRESS") | Some("QUEUED") | Some("WAITING") => {
-                pending += 1
-            }
-            _ => pending += 1, // Unknown states treated as pending
-        }
-    }
-
-    // Determine overall checks state
-    let checks_state = if total == 0 {
-        "EXPECTED".to_string()
-    } else if failed > 0 {
-        "FAILURE".to_string()
-    } else if pending > 0 {
-        "PENDING".to_string()
-    } else {
-        "SUCCESS".to_string()
-    };
+    let checks = analyze_status_check_rollup(&item.status_check_rollup);
 
     Ok(PrStatus {
         state: item.state.to_uppercase(),
@@ -2231,13 +2293,14 @@ pub fn fetch_pr_status(repo: &Path, pr_number: u64) -> Result<PrStatus, GitError
         mergeable: item.mergeable.to_uppercase(),
         review_decision: item.review_decision,
         checks_summary: ChecksSummary {
-            total,
-            passed,
-            failed,
-            pending,
-            state: checks_state,
+            total: checks.total,
+            passed: checks.passed,
+            failed: checks.failed,
+            pending: checks.pending,
+            state: checks.state,
         },
         head_sha: item.head_ref_oid,
+        failed_checks: checks.failed_checks,
     })
 }
 
@@ -2279,46 +2342,7 @@ pub fn fetch_pr_status_for_repo(github_repo: &str, pr_number: u64) -> Result<PrS
         }
     };
 
-    // Analyze status checks (same logic as fetch_pr_status)
-    let mut total = 0u32;
-    let mut passed = 0u32;
-    let mut failed = 0u32;
-    let mut pending = 0u32;
-
-    for check in &item.status_check_rollup {
-        total += 1;
-
-        let check_state = if check.typename == "StatusContext" {
-            check.state.as_deref()
-        } else if check.typename == "CheckRun" {
-            check.conclusion.as_deref().or(check.status.as_deref())
-        } else {
-            None
-        };
-
-        match check_state {
-            Some("SUCCESS") | Some("COMPLETED") => passed += 1,
-            Some("FAILURE")
-            | Some("ERROR")
-            | Some("CANCELLED")
-            | Some("TIMED_OUT")
-            | Some("ACTION_REQUIRED") => failed += 1,
-            Some("PENDING") | Some("IN_PROGRESS") | Some("QUEUED") | Some("WAITING") => {
-                pending += 1
-            }
-            _ => pending += 1,
-        }
-    }
-
-    let checks_state = if total == 0 {
-        "EXPECTED".to_string()
-    } else if failed > 0 {
-        "FAILURE".to_string()
-    } else if pending > 0 {
-        "PENDING".to_string()
-    } else {
-        "SUCCESS".to_string()
-    };
+    let checks = analyze_status_check_rollup(&item.status_check_rollup);
 
     Ok(PrStatus {
         state: item.state.to_uppercase(),
@@ -2326,13 +2350,14 @@ pub fn fetch_pr_status_for_repo(github_repo: &str, pr_number: u64) -> Result<PrS
         mergeable: item.mergeable.to_uppercase(),
         review_decision: item.review_decision,
         checks_summary: ChecksSummary {
-            total,
-            passed,
-            failed,
-            pending,
-            state: checks_state,
+            total: checks.total,
+            passed: checks.passed,
+            failed: checks.failed,
+            pending: checks.pending,
+            state: checks.state,
         },
         head_sha: item.head_ref_oid,
+        failed_checks: checks.failed_checks,
     })
 }
 
@@ -2736,6 +2761,37 @@ mod tests {
         }
     }
 
+    fn check_run(
+        name: &str,
+        status: &str,
+        conclusion: &str,
+        details_url: Option<&str>,
+    ) -> GhStatusCheck {
+        GhStatusCheck {
+            typename: "CheckRun".to_string(),
+            name: Some(name.to_string()),
+            context: None,
+            state: None,
+            status: Some(status.to_string()),
+            conclusion: Some(conclusion.to_string()),
+            details_url: details_url.map(ToString::to_string),
+            target_url: None,
+        }
+    }
+
+    fn status_context(context: &str, state: &str, target_url: Option<&str>) -> GhStatusCheck {
+        GhStatusCheck {
+            typename: "StatusContext".to_string(),
+            name: None,
+            context: Some(context.to_string()),
+            state: Some(state.to_string()),
+            status: None,
+            conclusion: None,
+            details_url: None,
+            target_url: target_url.map(ToString::to_string),
+        }
+    }
+
     #[test]
     fn test_check_github_auth_returns_status() {
         // This test just verifies the function runs without panicking
@@ -2785,6 +2841,64 @@ mod tests {
 
         drop(lock_map);
         clear_clone_lock_map();
+    }
+
+    #[test]
+    fn test_analyze_status_check_rollup_captures_failed_check_run() {
+        let checks = vec![
+            check_run(
+                "unit-tests",
+                "COMPLETED",
+                "FAILURE",
+                Some("https://github.com/owner/repo/actions/runs/1"),
+            ),
+            check_run(
+                "lint",
+                "COMPLETED",
+                "SUCCESS",
+                Some("https://github.com/owner/repo/actions/runs/2"),
+            ),
+        ];
+
+        let analysis = analyze_status_check_rollup(&checks);
+
+        assert_eq!(analysis.total, 2);
+        assert_eq!(analysis.passed, 1);
+        assert_eq!(analysis.failed, 1);
+        assert_eq!(analysis.pending, 0);
+        assert_eq!(analysis.state, "FAILURE");
+        assert_eq!(
+            analysis.failed_checks,
+            vec![FailedCheck {
+                name: "unit-tests".to_string(),
+                state: "FAILURE".to_string(),
+                details_url: Some("https://github.com/owner/repo/actions/runs/1".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn test_analyze_status_check_rollup_captures_failed_status_context() {
+        let checks = vec![
+            status_context("lint", "TIMED_OUT", Some("https://ci.example.com/lint/1")),
+            status_context("build", "PENDING", Some("https://ci.example.com/build/1")),
+        ];
+
+        let analysis = analyze_status_check_rollup(&checks);
+
+        assert_eq!(analysis.total, 2);
+        assert_eq!(analysis.passed, 0);
+        assert_eq!(analysis.failed, 1);
+        assert_eq!(analysis.pending, 1);
+        assert_eq!(analysis.state, "FAILURE");
+        assert_eq!(
+            analysis.failed_checks,
+            vec![FailedCheck {
+                name: "lint".to_string(),
+                state: "TIMED_OUT".to_string(),
+                details_url: Some("https://ci.example.com/lint/1".to_string()),
+            }]
+        );
     }
 
     #[test]

@@ -15,6 +15,7 @@ import { refreshAllPrStatuses } from '../commands';
 // ---------------------------------------------------------------------------
 
 type StaleCallback = (projectId: string, isStale: boolean) => void;
+type RefreshingCallback = (projectId: string, isRefreshing: boolean) => void;
 
 // ---------------------------------------------------------------------------
 // Intervals
@@ -46,6 +47,12 @@ const failures = new Map<string, number>();
 
 /** Registered stale-data callbacks. */
 const staleCallbacks = new Set<StaleCallback>();
+
+/** Registered refresh-state callbacks. */
+const refreshingCallbacks = new Set<RefreshingCallback>();
+
+/** Projects currently being refreshed. */
+const refreshingProjects = new Set<string>();
 
 let timerId: ReturnType<typeof setTimeout> | null = null;
 let refreshInFlight = false;
@@ -98,6 +105,7 @@ async function poll() {
   const due = getProjectsDue();
 
   for (const projectId of due) {
+    setProjectRefreshing(projectId, true);
     try {
       await refreshAllPrStatuses(projectId);
       lastPolledAt.set(projectId, Date.now());
@@ -117,6 +125,8 @@ async function poll() {
       if (count === MAX_CONSECUTIVE_FAILURES) {
         notifyStale(projectId, true);
       }
+    } finally {
+      setProjectRefreshing(projectId, false);
     }
   }
 
@@ -156,6 +166,28 @@ function notifyStale(projectId: string, isStale: boolean) {
     } catch {
       // ignore callback errors
     }
+  }
+}
+
+function notifyRefreshing(projectId: string, isRefreshing: boolean) {
+  for (const cb of refreshingCallbacks) {
+    try {
+      cb(projectId, isRefreshing);
+    } catch {
+      // ignore callback errors
+    }
+  }
+}
+
+function setProjectRefreshing(projectId: string, isRefreshing: boolean) {
+  const wasRefreshing = refreshingProjects.has(projectId);
+  if (isRefreshing) {
+    refreshingProjects.add(projectId);
+  } else {
+    refreshingProjects.delete(projectId);
+  }
+  if (wasRefreshing !== isRefreshing) {
+    notifyRefreshing(projectId, isRefreshing);
   }
 }
 
@@ -206,6 +238,7 @@ export function setProjects(projectIds: string[]): void {
       allProjectIds.delete(id);
       lastPolledAt.delete(id);
       failures.delete(id);
+      setProjectRefreshing(id, false);
     }
   }
 
@@ -229,6 +262,9 @@ export function setProjects(projectIds: string[]): void {
     stopTimer();
     removeWindowListeners();
     failures.clear();
+    for (const projectId of [...refreshingProjects]) {
+      setProjectRefreshing(projectId, false);
+    }
   }
 }
 
@@ -267,6 +303,19 @@ export function onStale(callback: StaleCallback): () => void {
   return () => staleCallbacks.delete(callback);
 }
 
+/** Register a callback for PR refresh-state notifications. Returns an unsubscribe function. */
+export function onRefreshing(callback: RefreshingCallback): () => void {
+  refreshingCallbacks.add(callback);
+  for (const projectId of refreshingProjects) {
+    callback(projectId, true);
+  }
+  return () => refreshingCallbacks.delete(callback);
+}
+
+export function isRefreshing(projectId: string): boolean {
+  return refreshingProjects.has(projectId);
+}
+
 // ---------------------------------------------------------------------------
 // PR recovery coordination
 // ---------------------------------------------------------------------------
@@ -303,6 +352,7 @@ export function refreshNow(projectId: string): void {
     return;
   }
   refreshInFlight = true;
+  setProjectRefreshing(projectId, true);
   refreshAllPrStatuses(projectId)
     .then(() => {
       lastPolledAt.set(projectId, Date.now());
@@ -317,6 +367,7 @@ export function refreshNow(projectId: string): void {
       console.error(`[PrPollingService] immediate refresh failed for project=${projectId}:`, e)
     )
     .finally(() => {
+      setProjectRefreshing(projectId, false);
       refreshInFlight = false;
       // Drain queued immediate-refresh requests one at a time.
       if (pendingRefreshProjectIds.size > 0) {

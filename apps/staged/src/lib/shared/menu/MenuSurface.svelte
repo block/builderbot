@@ -286,7 +286,11 @@
         class="submenu-container"
         role="none"
         use:trackSubmenuContainer={path}
-        onmouseenter={() => openSubmenu(path)}
+        onmouseenter={() => {
+          if (!item.disabled && item.children.length > 0) {
+            openSubmenu(path);
+          }
+        }}
         onmouseleave={() => closeSubmenuSoon(path)}
       >
         <button

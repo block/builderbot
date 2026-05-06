@@ -118,6 +118,13 @@
     triggerEl?.focus();
   }
 
+  function handleScroll(event: Event) {
+    if (!open) return;
+    const target = event.target as Node | null;
+    if (target && (triggerEl?.contains(target) || surfaceRef?.contains(target))) return;
+    close();
+  }
+
   function closeForViewportChange() {
     if (open) close();
   }
@@ -126,14 +133,14 @@
     registerMenuCloseListener(closeFromCoordinator);
     window.addEventListener('pointerdown', handlePointerDown, true);
     window.addEventListener('keydown', handleKeydown, true);
-    window.addEventListener('scroll', closeForViewportChange, true);
+    window.addEventListener('scroll', handleScroll, true);
     window.addEventListener('resize', closeForViewportChange);
 
     return () => {
       unregisterMenuCloseListener(closeFromCoordinator);
       window.removeEventListener('pointerdown', handlePointerDown, true);
       window.removeEventListener('keydown', handleKeydown, true);
-      window.removeEventListener('scroll', closeForViewportChange, true);
+      window.removeEventListener('scroll', handleScroll, true);
       window.removeEventListener('resize', closeForViewportChange);
     };
   });

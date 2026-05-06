@@ -435,6 +435,13 @@
     projectSessions: projectSessionsInFlight,
   });
   let workInFlight = $derived(branchSessionsInFlight > 0 || projectSessionsInFlight > 0);
+  let revertCommitDisabledReason = $derived(
+    commandPipelinePending
+      ? 'Starting command...'
+      : branchSessionBusy
+        ? 'Wait for the current branch work to finish'
+        : undefined
+  );
 
   /** Timeline label the backend gives a queued rebase/squash pipeline session. */
   const branchCommandLabels = { rebase: 'Rebase branch', squash: 'Squash commits' } as const;
@@ -479,6 +486,21 @@
       await loadTimeline();
     } catch (e) {
       notifyError(kind === 'rebase' ? 'Rebase failed' : 'Squash failed', e);
+    } finally {
+      commandPipelinePending = false;
+    }
+  }
+
+  async function handleRevertCommit(commitSha: string) {
+    if (commandPipelinePending || branchSessionBusy) return;
+    commandPipelinePending = true;
+    const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
+    const provider = getPreferredAgent(agents) ?? undefined;
+    try {
+      await commands.revertCommit(branch.id, commitSha, provider);
+      await loadTimeline();
+    } catch (e) {
+      notifyError('Revert failed', e);
     } finally {
       commandPipelinePending = false;
     }
@@ -2275,6 +2297,8 @@
               onReviewClick={handleReviewClick}
               onDeleteCommit={handleDeleteCommit}
               onDeletePendingCommit={handleDeletePendingCommit}
+              onRevertCommit={handleRevertCommit}
+              {revertCommitDisabledReason}
               onDeleteNote={handleDeleteNote}
               onSetNoteRead={(noteId, read) =>
                 void setNoteReadState({ kind: 'branch', noteId }, read)}

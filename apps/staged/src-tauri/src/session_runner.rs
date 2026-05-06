@@ -3455,8 +3455,11 @@ fn aborted_pipeline_error(
 }
 
 fn pre_head_for_pipeline_handoff(config: &PipelineConfig) -> Option<String> {
+    if config.pre_head_sha.is_some() {
+        return config.pre_head_sha.clone();
+    }
+
     match config.pipeline.kind.as_ref() {
-        Some(PipelineKind::Rebase) => config.pre_head_sha.clone(),
         Some(PipelineKind::Squash) => match current_pipeline_head(config) {
             Ok(head) => Some(head),
             Err(e) => {
@@ -3464,9 +3467,11 @@ fn pre_head_for_pipeline_handoff(config: &PipelineConfig) -> Option<String> {
                 None
             }
         },
-        // A push never rewrites local history and a pull never hands off, so
-        // neither has a pre-pipeline HEAD to compare against.
-        Some(PipelineKind::Push | PipelineKind::Pull) | None => None,
+        // A rebase always carries its pre-pipeline HEAD explicitly, so the early
+        // return above already answered for it. A push never rewrites local
+        // history and a pull never hands off, so neither has a pre-pipeline HEAD
+        // to compare against.
+        Some(PipelineKind::Rebase | PipelineKind::Push | PipelineKind::Pull) | None => None,
     }
 }
 
@@ -3550,25 +3555,34 @@ fn reassociate_rebased_commits(
 }
 
 fn resolve_pipeline_artifacts_without_ai(config: &PipelineConfig, store: &Store, completed: bool) {
-    match config.pipeline.kind.as_ref() {
-        Some(PipelineKind::Rebase) if completed => {
-            finalize_rebase_pipeline_without_ai(config, store);
+    let linked_commit = match store.get_commit_by_session(&config.session_id) {
+        Ok(Some(commit)) => commit,
+        Ok(None) => return,
+        Err(e) => {
+            log::warn!(
+                "Failed to load linked commit for terminal pipeline session {}: {e}",
+                config.session_id
+            );
+            return;
         }
-        Some(PipelineKind::Rebase | PipelineKind::Squash) => {
-            if let Err(e) = store.delete_pending_commit_for_session(&config.session_id) {
-                log::warn!(
-                    "Failed to resolve pending commit for terminal pipeline session {}: {e}",
-                    config.session_id
-                );
-            }
+    };
+
+    if completed && config.pre_head_sha.is_some() {
+        finalize_head_moving_commit_pipeline_without_ai(config, store);
+        return;
+    }
+
+    if linked_commit.sha.is_none() {
+        if let Err(e) = store.delete_pending_commit_for_session(&config.session_id) {
+            log::warn!(
+                "Failed to resolve pending commit for terminal pipeline session {}: {e}",
+                config.session_id
+            );
         }
-        // Push and pull pipelines create no artifact, so there is nothing to
-        // resolve.
-        Some(PipelineKind::Push | PipelineKind::Pull) | None => {}
     }
 }
 
-fn finalize_rebase_pipeline_without_ai(config: &PipelineConfig, store: &Store) {
+fn finalize_head_moving_commit_pipeline_without_ai(config: &PipelineConfig, store: &Store) {
     let Some(pre_head_sha) = config.pre_head_sha.as_deref() else {
         let _ = store.delete_pending_commit_for_session(&config.session_id);
         return;
@@ -3579,7 +3593,7 @@ fn finalize_rebase_pipeline_without_ai(config: &PipelineConfig, store: &Store) {
         Ok(None) => return,
         Err(e) => {
             log::warn!(
-                "Failed to load pending commit for rebase pipeline session {}: {e}",
+                "Failed to load pending commit for pipeline session {}: {e}",
                 config.session_id
             );
             return;
@@ -3593,7 +3607,7 @@ fn finalize_rebase_pipeline_without_ai(config: &PipelineConfig, store: &Store) {
         Ok(head) => head,
         Err(e) => {
             log::error!(
-                "Failed to get HEAD after rebase pipeline session {}: {e}",
+                "Failed to get HEAD after pipeline session {}: {e}",
                 config.session_id
             );
             return;
@@ -3603,7 +3617,7 @@ fn finalize_rebase_pipeline_without_ai(config: &PipelineConfig, store: &Store) {
     if current_head == pre_head_sha {
         if let Err(e) = store.delete_pending_commit_for_session(&config.session_id) {
             log::warn!(
-                "Failed to remove no-op rebase pending commit for session {}: {e}",
+                "Failed to remove no-op pending commit for session {}: {e}",
                 config.session_id
             );
         }
@@ -3627,17 +3641,17 @@ fn finalize_rebase_pipeline_without_ai(config: &PipelineConfig, store: &Store) {
 
     match store.complete_pending_commit_sha(&commit.id, &commit.branch_id, &current_head) {
         Ok(true) => log::info!(
-            "Rebase pipeline session {} updated pending commit to {}",
+            "Pipeline session {} updated pending commit to {}",
             config.session_id,
             &current_head[..7.min(current_head.len())]
         ),
         Ok(false) => log::info!(
-            "Rebase pipeline session {} resolved duplicate commit SHA {}",
+            "Pipeline session {} resolved duplicate commit SHA {}",
             config.session_id,
             &current_head[..7.min(current_head.len())]
         ),
         Err(e) => log::error!(
-            "Failed to complete rebase pending commit for session {}: {e}",
+            "Failed to complete pending commit for session {}: {e}",
             config.session_id
         ),
     }
@@ -5802,7 +5816,7 @@ fn detect_session_commit(
                 Ok(current_head) if current_head != pre_sha => {
                     // A rebase pipeline that handed off to AI (conflicts, a
                     // failed fetch) lands here instead of
-                    // `finalize_rebase_pipeline_without_ai`. If its turn ended
+                    // `finalize_head_moving_commit_pipeline_without_ai`. If its turn ended
                     // with the rebase still stopped on a conflict, HEAD is
                     // detached on a partially applied commit — a SHA `git
                     // rebase --abort` erases — so nothing may claim it: not
@@ -5822,7 +5836,7 @@ fn detect_session_commit(
                     // before it repoints anything, so it reports which way it
                     // went. That also keeps the load-bearing ordering — reattach
                     // the orphaned rows before the pending row below claims the
-                    // new HEAD, see `finalize_rebase_pipeline_without_ai` for
+                    // new HEAD, see `finalize_head_moving_commit_pipeline_without_ai` for
                     // why — true by construction.
                     let rebase_pipeline = session_is_rebase_pipeline(store, session_id);
                     let mid_rebase = rebase_pipeline
@@ -9270,11 +9284,25 @@ mod tests {
         repo: &std::path::Path,
         pre_head: &str,
     ) -> PipelineConfig {
+        head_moving_pipeline_config(session_id, repo, pre_head, Some(PipelineKind::Rebase))
+    }
+
+    fn head_moving_pipeline_config(
+        session_id: &str,
+        repo: &std::path::Path,
+        pre_head: &str,
+        kind: Option<PipelineKind>,
+    ) -> PipelineConfig {
+        let mut pipeline = PipelineExecution::from_steps(&[]);
+        if let Some(kind) = kind {
+            pipeline = pipeline.with_kind(kind);
+        }
+
         PipelineConfig {
             session_id: session_id.to_string(),
-            prompt: "Rebase branch".to_string(),
+            prompt: "Commit-producing pipeline".to_string(),
             steps: vec![],
-            pipeline: PipelineExecution::from_steps(&[]).with_kind(PipelineKind::Rebase),
+            pipeline,
             working_dir: repo.to_path_buf(),
             pre_head_sha: Some(pre_head.to_string()),
             provider: None,
@@ -9305,7 +9333,7 @@ mod tests {
         run_git(&repo, &["commit", "-m", "second"]);
         let new_head = run_git(&repo, &["rev-parse", "HEAD"]);
 
-        finalize_rebase_pipeline_without_ai(
+        finalize_head_moving_commit_pipeline_without_ai(
             &rebase_pipeline_config(&session.id, &repo, &pre_head),
             &store,
         );
@@ -9418,7 +9446,7 @@ mod tests {
         let commit = crate::store::Commit::new_pending(&branch.id).with_session(&session.id);
         store.create_commit(&commit).unwrap();
 
-        finalize_rebase_pipeline_without_ai(
+        finalize_head_moving_commit_pipeline_without_ai(
             &rebase_pipeline_config(&session.id, &repo, &pre_head),
             &store,
         );
@@ -9541,7 +9569,7 @@ mod tests {
     fn rebase_pipeline_completion_reassociates_pre_existing_commits() {
         let fixture = rebased_branch();
 
-        finalize_rebase_pipeline_without_ai(
+        finalize_head_moving_commit_pipeline_without_ai(
             &rebase_pipeline_config(
                 &fixture.rebase_session_id,
                 fixture.repo.path(),
@@ -9819,6 +9847,46 @@ mod tests {
                 .is_none(),
             "the deferred pending row must drop as a duplicate of the restored head"
         );
+    }
+
+    #[test]
+    fn head_moving_pipeline_completion_updates_pending_commit_without_kind() {
+        let repo = make_git_repo("generic-head-moving-updates-pending");
+        let pre_head = run_git(&repo, &["rev-parse", "HEAD"]);
+        let store = Store::in_memory().unwrap();
+        let project = crate::store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = crate::store::Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+        let mut session = crate::store::Session::new_running("Revert commit", &repo);
+        session.pipeline = Some(PipelineExecution::from_steps(&[]));
+        store.create_session(&session).unwrap();
+        let commit = crate::store::Commit::new_pending(&branch.id).with_session(&session.id);
+        store.create_commit(&commit).unwrap();
+
+        std::fs::write(repo.join("file.txt"), "two\n").unwrap();
+        run_git(&repo, &["add", "file.txt"]);
+        run_git(&repo, &["commit", "-m", "second"]);
+        let new_head = run_git(&repo, &["rev-parse", "HEAD"]);
+
+        finalize_head_moving_commit_pipeline_without_ai(
+            &head_moving_pipeline_config(&session.id, &repo, &pre_head, None),
+            &store,
+        );
+
+        let updated = store.get_commit(&commit.id).unwrap().unwrap();
+        assert_eq!(updated.sha.as_deref(), Some(new_head.as_str()));
+        let _ = std::fs::remove_dir_all(repo);
+    }
+
+    #[test]
+    fn pipeline_handoff_uses_explicit_pre_head_without_kind() {
+        let repo = make_git_repo("handoff-explicit-pre-head");
+        let pre_head = run_git(&repo, &["rev-parse", "HEAD"]);
+        let config = head_moving_pipeline_config("session-1", &repo, &pre_head, None);
+
+        assert_eq!(pre_head_for_pipeline_handoff(&config), Some(pre_head));
+        let _ = std::fs::remove_dir_all(repo);
     }
 
     // ── find_closing_fence ──────────────────────────────────────────────

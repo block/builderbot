@@ -22,6 +22,7 @@ use super::pr_status::{
     PR_REFRESH_CONCURRENCY,
 };
 use super::pull::pull_or_queue_branch_for_branch;
+use super::revert::revert_commit_for_branch;
 use super::push::{
     has_unpushed_commits_impl, start_or_queue_push_pipeline_for_branch, PushVariant,
 };
@@ -294,6 +295,28 @@ pub async fn squash_commits(
         provider,
         None,
         false,
+    )
+    .await
+}
+
+/// Revert a completed commit by creating a new signed-off revert commit.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn revert_commit(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    commit_sha: String,
+    provider: Option<String>,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
+    revert_commit_for_branch(
+        store,
+        Arc::clone(&registry),
+        app_handle,
+        branch_id,
+        commit_sha,
+        provider,
     )
     .await
 }

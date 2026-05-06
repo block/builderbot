@@ -2478,6 +2478,7 @@ pub fn run() {
             prs::commands::pull_or_queue_branch,
             prs::commands::rebase_branch,
             prs::commands::squash_commits,
+            prs::commands::revert_commit,
             prs::commands::clear_branch_pr_status,
             pr_detection::recover_branch_pr,
             pr_detection::detect_branch_pr,

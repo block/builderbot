@@ -105,6 +105,8 @@
     onImageClick?: (imageId: string) => void;
     onDeleteCommit?: (sha: string, sessionId?: string, opts?: { altKey: boolean }) => void;
     onDeletePendingCommit?: (commitId: string, sessionId?: string) => void;
+    onRevertCommit?: (sha: string) => void;
+    revertCommitDisabledReason?: string;
     onDeleteNote?: (noteId: string, sessionId?: string, opts?: { altKey: boolean }) => void;
     /** Mark a note read or unread from its context menu. */
     onSetNoteRead?: (noteId: string, read: boolean) => void;
@@ -208,6 +210,8 @@
     onImageClick,
     onDeleteCommit,
     onDeletePendingCommit,
+    onRevertCommit,
+    revertCommitDisabledReason,
     onDeleteNote,
     onSetNoteRead,
     onDeleteReview,
@@ -1280,7 +1284,12 @@
   <p class="no-items">No commits or notes yet</p>
 {:else}
   <!-- Unified timeline (vertical) -->
-  <TimelineContextMenu actions={timelineContextMenuActions} {onNewSessionReferring}>
+  <TimelineContextMenu
+    actions={timelineContextMenuActions}
+    {onNewSessionReferring}
+    {onRevertCommit}
+    {revertCommitDisabledReason}
+  >
     <div class="timeline" bind:this={timelineEl}>
       {#each normalItems as item, index (item.key)}
         <div>

@@ -25,6 +25,7 @@ use super::pull::{
     build_pull_pipeline_steps, claim_or_queue_pull_for_branch, finish_immediate_pull_session,
     pull_or_queue_branch_with, PullDisposition,
 };
+use super::revert::build_revert_pipeline_steps;
 use super::push::{
     build_push_pipeline_steps, insert_running_push_pipeline_session,
     queue_push_pipeline_if_branch_busy, queue_push_pipeline_locked, PushVariant,
@@ -43,6 +44,7 @@ mod git_pipeline;
 mod pr_status;
 mod pull;
 mod push;
+mod revert;
 
 fn command_at(steps: &[PipelineStep], index: usize) -> (&str, &str, &FailureStrategy) {
     match &steps[index] {

@@ -2677,6 +2677,10 @@ fn image_timeline_entries(
         .collect()
 }
 
+fn shell_quote_arg(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 /// Assemble the full prompt from action instructions + branch context + user prompt.
 fn build_full_prompt(
     user_prompt: &str,
@@ -2744,11 +2748,12 @@ matching `Signed-off-by` trailer.".to_string()
         }
         BranchSessionType::Review => {
             let base_ref = git::origin_ref_for_branch(base_branch.unwrap_or("main"));
+            let quoted_base_ref = shell_quote_arg(&base_ref);
             format!(
                 "The user is requesting an AI code review of the current branch.\n\
 \n\
 Review the code changes on this branch by running a diff from the remote-tracking base ref: \
-`git diff $(git merge-base '{base_ref}' HEAD)..HEAD`. Do not compare against the \
+`git diff $(git merge-base {quoted_base_ref} HEAD)..HEAD`. Do not compare against the \
 local base branch, which may be stale.\n\
 \n\
 Do NOT create any commits or modify any files.\n\
@@ -3125,6 +3130,20 @@ mod tests {
         // origin/main should NOT become origin/origin/main
         assert!(prompt.contains("git merge-base 'origin/main' HEAD"));
         assert!(!prompt.contains("origin/origin/main"));
+    }
+
+    #[test]
+    fn review_prompt_shell_quotes_base_branch_with_single_quote() {
+        let prompt = build_full_prompt(
+            "user prompt",
+            "project info",
+            "branch context",
+            &BranchSessionType::Review,
+            None,
+            Some("feature/it's-good"),
+        );
+        assert!(prompt.contains("git merge-base 'origin/feature/it'\\''s-good' HEAD"));
+        assert!(!prompt.contains("git merge-base 'origin/feature/it's-good' HEAD"));
     }
 
     #[test]

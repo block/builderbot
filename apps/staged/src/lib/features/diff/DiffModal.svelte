@@ -3,13 +3,13 @@
 
   Opened from a branch card or timeline item. Contains:
   - DiffViewer (renders the selected file's diff)
-  - File sidebar on the right with tree view, review status, reference files, comments
+  - File sidebar on the right with tree view, review status, comments
 
   Props: branchId, commitSha (optional), scope, onClose.
 
   State management:
   - diffViewerState: file list + on-demand diff cache
-  - reviewState: lazy review creation, comments, reviewed paths, reference files
+  - reviewState: lazy review creation, comments, reviewed paths
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
@@ -30,7 +30,6 @@
   import DiffCommentsSection from './DiffCommentsSection.svelte';
   import DiffFileTreeSection from './DiffFileTreeSection.svelte';
   import DiffCommitSessionLauncher from './DiffCommitSessionLauncher.svelte';
-  import DiffReferenceSection from './DiffReferenceSection.svelte';
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
   import { createDiffViewerState } from './diffViewerState.svelte';
   import { createReviewState } from './reviewState.svelte';
@@ -81,7 +80,7 @@
     beforeLabel?: string;
     /** Label for the after pane header. */
     afterLabel?: string;
-    /** When true, hides commenting, reference files, and review status. */
+    /** When true, hides commenting and review status. */
     readonly?: boolean;
     /** Available commits for the context switcher dropdown. */
     commits?: CommitTimelineItem[];
@@ -809,10 +808,6 @@
     }
   }
 
-  async function handleRemoveReferenceFile(path: string) {
-    await reviewHandle?.removeReferenceFile(path);
-  }
-
   /** Resolve a comment's path to a file-list path.
    *  Falls back to the comment's own path if no match is found. */
   function resolveCommentPath(commentPath: string): string {
@@ -1144,17 +1139,6 @@
           diffViewerState={diffViewer}
         />
         {#if !readonly}
-          <DiffReferenceSection
-            referenceFiles={reviewHandle?.state.referenceFiles ?? []}
-            selectedFile={diffViewer.state.selectedFile}
-            onSelectFile={(path) => {
-              selectedCommentId = null;
-              if (isSmallDiffViewport) showMobileSidebar = false;
-              diffViewer.selectFile(path);
-            }}
-            onRemoveReferenceFile={handleRemoveReferenceFile}
-          />
-
           <DiffCommentsSection
             comments={currentComments}
             deletedComments={reviewHandle?.state.deletedComments ?? []}

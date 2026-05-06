@@ -5,7 +5,7 @@
   and the "more" dropdown menu with Actions and Open In submenus.
 -->
 <script lang="ts">
-  import { onMount, onDestroy, tick } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { slide, fade } from 'svelte/transition';
   import { cubicOut } from 'svelte/easing';
   import {
@@ -19,10 +19,8 @@
     AlertCircle,
     StopCircle,
     Copy,
-    ChevronDown,
     Zap,
     Wand2,
-    MoreVertical,
     ExternalLink,
     Trash2,
   } from 'lucide-svelte';
@@ -55,6 +53,8 @@
   } from './branchCardHelpers';
   import { alerts } from '../../shared/alerts.svelte';
   import { bloxEnv } from '../../stores/bloxEnv.svelte';
+  import MoreMenu from '../../shared/menu/MoreMenu.svelte';
+  import type { MenuItem } from '../../shared/menu/types';
 
   interface Props {
     branch: Branch;
@@ -87,6 +87,8 @@
     newCommitDisabled = false,
     commitCount = 0,
   }: Props = $props();
+
+  const actionMenuTypes = ['run', 'build', 'format', 'check', 'test', 'cleanUp', 'prerun'] as const;
 
   // Custom transition combining slide and fade effects
   function slideAndFade(
@@ -190,20 +192,7 @@
   let endpointCopied = $state<Record<string, boolean>>({});
   let endpointCopiedTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 
-  // Dropdown state
-  type SubmenuPlacement = 'right' | 'left';
-
-  let showMoreMenu = $state(false);
-  let showActionsSubmenu = $state(false);
-  let actionsSubmenuPlacement = $state<SubmenuPlacement>('right');
-  let actionsSubmenuContainer = $state<HTMLDivElement | null>(null);
-  let actionsSubmenu = $state<HTMLDivElement | null>(null);
-  let actionsSubmenuTimeout = $state<ReturnType<typeof setTimeout> | null>(null);
-  let showOpenInSubmenu = $state(false);
-  let openInSubmenuPlacement = $state<SubmenuPlacement>('right');
-  let openInSubmenuContainer = $state<HTMLDivElement | null>(null);
-  let openInSubmenu = $state<HTMLDivElement | null>(null);
-  let openInSubmenuTimeout = $state<ReturnType<typeof setTimeout> | null>(null);
+  // More menu state
   let openerApps = $state<OpenerApp[]>([]);
 
   let unlistenActionStatus: UnlistenFn | null = null;
@@ -316,7 +305,6 @@
     loadRunningActions();
     getAvailableOpeners().then((apps) => (openerApps = apps));
     window.addEventListener('project-actions-changed', handleActionsChanged as EventListener);
-    window.addEventListener('resize', updateVisibleSubmenuPlacements);
 
     listenToRepoActionsDetection((event) => {
       if (!event.detecting) {
@@ -335,7 +323,6 @@
     unlistenRunPhaseChanged?.();
     unlistenRepoActionsDetection?.();
     window.removeEventListener('project-actions-changed', handleActionsChanged as EventListener);
-    window.removeEventListener('resize', updateVisibleSubmenuPlacements);
     window.removeEventListener('keydown', handleAltDown);
     window.removeEventListener('keyup', handleAltUp);
     for (const timer of Object.values(endpointCopiedTimers)) clearTimeout(timer);
@@ -398,87 +385,19 @@
   });
 
   let hasActionsForSubmenu = $derived.by(() => {
-    const actionTypes = ['run', 'build', 'format', 'check', 'test', 'cleanUp', 'prerun'] as const;
-    return actionTypes.some((type) => {
+    return actionMenuTypes.some((type) => {
       const typeActions = type === 'run' ? remainingRunActions : groupedActions[type];
       return typeActions && typeActions.length > 0;
     });
   });
 
-  function getSubmenuPlacement(
-    container: HTMLDivElement | null,
-    submenu: HTMLDivElement | null
-  ): SubmenuPlacement {
-    if (!container || !submenu) return 'right';
-
-    const viewportPadding = 8;
-    const submenuGap = 2;
-    const containerRect = container.getBoundingClientRect();
-    const submenuRect = submenu.getBoundingClientRect();
-    const rightEdge = containerRect.right + submenuGap + submenuRect.width;
-
-    return rightEdge > window.innerWidth - viewportPadding ? 'left' : 'right';
-  }
-
-  function updateVisibleSubmenuPlacements() {
-    if (!showMoreMenu) return;
-    if (showActionsSubmenu) {
-      actionsSubmenuPlacement = getSubmenuPlacement(actionsSubmenuContainer, actionsSubmenu);
-    }
-    if (showOpenInSubmenu) {
-      openInSubmenuPlacement = getSubmenuPlacement(openInSubmenuContainer, openInSubmenu);
-    }
-  }
-
-  async function handleActionsSubmenuEnter() {
-    if (actionsSubmenuTimeout) {
-      clearTimeout(actionsSubmenuTimeout);
-      actionsSubmenuTimeout = null;
-    }
-    showActionsSubmenu = true;
-    await tick();
-    if (showActionsSubmenu) {
-      actionsSubmenuPlacement = getSubmenuPlacement(actionsSubmenuContainer, actionsSubmenu);
-    }
-  }
-
-  function handleActionsSubmenuLeave() {
-    actionsSubmenuTimeout = setTimeout(() => {
-      showActionsSubmenu = false;
-      actionsSubmenuTimeout = null;
-    }, 100);
-  }
-
-  async function handleOpenInSubmenuEnter() {
-    if (openInSubmenuTimeout) {
-      clearTimeout(openInSubmenuTimeout);
-      openInSubmenuTimeout = null;
-    }
-    showOpenInSubmenu = true;
-    await tick();
-    if (showOpenInSubmenu) {
-      openInSubmenuPlacement = getSubmenuPlacement(openInSubmenuContainer, openInSubmenu);
-    }
-  }
-
-  function handleOpenInSubmenuLeave() {
-    openInSubmenuTimeout = setTimeout(() => {
-      showOpenInSubmenu = false;
-      openInSubmenuTimeout = null;
-    }, 100);
-  }
-
   async function handleOpenInApp(appId: string) {
-    showMoreMenu = false;
-    showOpenInSubmenu = false;
     if (branch.worktreePath) {
       await openInApp(branch.worktreePath, appId);
     }
   }
 
   async function handleCopyPath() {
-    showMoreMenu = false;
-    showOpenInSubmenu = false;
     if (branch.worktreePath) {
       await copyPathToClipboard(branch.worktreePath);
     }
@@ -493,8 +412,6 @@
   });
 
   async function handleRunAction(action: ProjectAction) {
-    showMoreMenu = false;
-
     const staleExecutions = runningActions.filter(
       (a) => a.actionId === action.id && a.status !== 'running'
     );
@@ -554,25 +471,11 @@
     };
   }
 
-  export function handleClickOutside(e: MouseEvent) {
-    const target = e.target as HTMLElement;
-    if (!target.closest('.more-menu-container')) {
-      showMoreMenu = false;
-    }
-  }
-
-  function toggleMoreMenu(e: MouseEvent) {
-    e.stopPropagation();
-    showMoreMenu = !showMoreMenu;
-  }
-
   function handleDeleteFromMenu() {
-    showMoreMenu = false;
     onDelete?.();
   }
 
   function handleRenameFromMenu() {
-    showMoreMenu = false;
     const next = window.prompt('Rename branch', branch.branchName);
     if (!next) return;
     const trimmed = next.trim();
@@ -600,6 +503,125 @@
         return Wrench;
     }
   }
+
+  function buildActionMenuItems(): MenuItem[] {
+    return actionMenuTypes.flatMap((type) => {
+      const typeActions = type === 'run' ? remainingRunActions : groupedActions[type];
+      return typeActions.map((action) => ({
+        type: 'action' as const,
+        label: action.name,
+        icon: getActionIcon(type),
+        onSelect: () => handleRunAction(action),
+      }));
+    });
+  }
+
+  function buildOpenInMenuItems(): MenuItem[] {
+    const items: MenuItem[] = openerApps.map((app) => ({
+      type: 'action',
+      label: app.name,
+      onSelect: () => handleOpenInApp(app.id),
+    }));
+
+    items.push(
+      { type: 'separator' },
+      {
+        type: 'action',
+        label: 'Copy Path',
+        icon: Copy,
+        onSelect: handleCopyPath,
+      }
+    );
+
+    return items;
+  }
+
+  let moreMenuItems = $derived.by<MenuItem[]>(() => {
+    const items: MenuItem[] = [];
+
+    if (!isSettingUp) {
+      if (isRemote && branch.workspaceName) {
+        items.push({
+          type: 'action',
+          label: 'Copy Workspace Name',
+          icon: Copy,
+          onSelect: () => {
+            navigator.clipboard.writeText(branch.workspaceName!);
+          },
+        });
+      }
+
+      if (hasActionsForSubmenu) {
+        items.push({
+          type: 'submenu',
+          label: 'Actions',
+          icon: Play,
+          children: buildActionMenuItems(),
+        });
+      }
+
+      if (isLocal && branch.worktreePath && openerApps.length > 0) {
+        items.push(
+          { type: 'separator' },
+          {
+            type: 'submenu',
+            label: 'Open In',
+            icon: ExternalLink,
+            children: buildOpenInMenuItems(),
+          }
+        );
+      } else if (isLocal && branch.worktreePath) {
+        items.push(
+          { type: 'separator' },
+          {
+            type: 'action',
+            label: 'Copy Worktree Path',
+            icon: Copy,
+            onSelect: handleCopyPath,
+          }
+        );
+      }
+
+      items.push(
+        { type: 'separator' },
+        {
+          type: 'action',
+          label: 'Rename Branch',
+          icon: GitBranch,
+          onSelect: handleRenameFromMenu,
+        },
+        {
+          type: 'action',
+          label: 'Rebase Branch',
+          icon: GitBranch,
+          disabled: newCommitDisabled,
+          onSelect: () => onRebaseBranch?.(),
+        }
+      );
+
+      if (commitCount >= 2) {
+        items.push({
+          type: 'action',
+          label: 'Squash Commits',
+          icon: GitBranch,
+          disabled: newCommitDisabled,
+          onSelect: () => onSquashCommits?.(),
+        });
+      }
+
+      items.push({ type: 'separator' });
+    }
+
+    items.push({
+      type: 'action',
+      label: 'Delete Repo',
+      icon: Trash2,
+      danger: true,
+      onSelect: handleDeleteFromMenu,
+    });
+
+    return items;
+  });
 </script>
 
 <!-- Running actions (excluding primary action) -->
@@ -792,149 +814,7 @@
     </div>
   {/if}
 {/if}
-<div class="more-menu-container">
-  <button class="more-button" onclick={toggleMoreMenu} title="More options">
-    <MoreVertical size={16} />
-  </button>
-  {#if showMoreMenu}
-    <div class="more-menu">
-      {#if !isSettingUp}
-        <!-- Remote-only: Copy workspace name -->
-        {#if isRemote && branch.workspaceName}
-          <button
-            class="more-menu-item"
-            onclick={() => {
-              showMoreMenu = false;
-              navigator.clipboard.writeText(branch.workspaceName!);
-            }}
-          >
-            <Copy size={14} />
-            Copy Workspace Name
-          </button>
-        {/if}
-
-        <!-- Actions submenu -->
-        {#if hasActionsForSubmenu}
-          <div class="submenu-container" bind:this={actionsSubmenuContainer}>
-            <button
-              class="more-menu-item submenu-trigger"
-              onmouseenter={handleActionsSubmenuEnter}
-              onmouseleave={handleActionsSubmenuLeave}
-            >
-              <Play size={14} />
-              Actions
-              <ChevronDown size={12} class="submenu-chevron" />
-            </button>
-            {#if showActionsSubmenu}
-              <div
-                class="submenu"
-                class:open-left={actionsSubmenuPlacement === 'left'}
-                bind:this={actionsSubmenu}
-                role="group"
-                onmouseenter={handleActionsSubmenuEnter}
-                onmouseleave={handleActionsSubmenuLeave}
-              >
-                {#each ['run', 'build', 'format', 'check', 'test', 'cleanUp', 'prerun'] as type}
-                  {@const typeActions = type === 'run' ? remainingRunActions : groupedActions[type]}
-                  {#if typeActions.length > 0}
-                    {#each typeActions as action (action.id)}
-                      {@const Icon = getActionIcon(type)}
-                      <button
-                        class="more-menu-item action-item"
-                        onclick={() => handleRunAction(action)}
-                      >
-                        <Icon size={14} />
-                        {action.name}
-                      </button>
-                    {/each}
-                  {/if}
-                {/each}
-              </div>
-            {/if}
-          </div>
-        {/if}
-
-        <!-- Local-only: Open In submenu -->
-        {#if isLocal && branch.worktreePath && openerApps.length > 0}
-          <div class="menu-separator"></div>
-          <div class="submenu-container" bind:this={openInSubmenuContainer}>
-            <button
-              class="more-menu-item submenu-trigger"
-              onmouseenter={handleOpenInSubmenuEnter}
-              onmouseleave={handleOpenInSubmenuLeave}
-            >
-              <ExternalLink size={14} />
-              Open In
-              <ChevronDown size={12} class="submenu-chevron" />
-            </button>
-            {#if showOpenInSubmenu}
-              <div
-                class="submenu"
-                class:open-left={openInSubmenuPlacement === 'left'}
-                bind:this={openInSubmenu}
-                role="group"
-                onmouseenter={handleOpenInSubmenuEnter}
-                onmouseleave={handleOpenInSubmenuLeave}
-              >
-                {#each openerApps as app (app.id)}
-                  <button class="more-menu-item" onclick={() => handleOpenInApp(app.id)}>
-                    {app.name}
-                  </button>
-                {/each}
-                <div class="menu-separator"></div>
-                <button class="more-menu-item" onclick={handleCopyPath}>
-                  <Copy size={14} />
-                  Copy Path
-                </button>
-              </div>
-            {/if}
-          </div>
-        {:else if isLocal && branch.worktreePath}
-          <div class="menu-separator"></div>
-          <button class="more-menu-item" onclick={handleCopyPath}>
-            <Copy size={14} />
-            Copy Worktree Path
-          </button>
-        {/if}
-
-        <div class="menu-separator"></div>
-        <button class="more-menu-item" onclick={handleRenameFromMenu}>
-          <GitBranch size={14} />
-          Rename Branch
-        </button>
-        <button
-          class="more-menu-item"
-          disabled={newCommitDisabled}
-          onclick={() => {
-            showMoreMenu = false;
-            onRebaseBranch?.();
-          }}
-        >
-          <GitBranch size={14} />
-          Rebase Branch
-        </button>
-        {#if commitCount >= 2}
-          <button
-            class="more-menu-item"
-            disabled={newCommitDisabled}
-            onclick={() => {
-              showMoreMenu = false;
-              onSquashCommits?.();
-            }}
-          >
-            <GitBranch size={14} />
-            Squash Commits
-          </button>
-        {/if}
-        <div class="menu-separator"></div>
-      {/if}
-      <button class="more-menu-item danger" onclick={handleDeleteFromMenu}>
-        <Trash2 size={14} />
-        Delete Repo
-      </button>
-    </div>
-  {/if}
-</div>
+<MoreMenu items={moreMenuItems} ariaLabel="Branch actions" title="More options" minWidth={160} />
 
 {#if actionOutputModal}
   <ActionOutputModal
@@ -991,134 +871,6 @@
 {/if}
 
 <style>
-  /* More menu */
-  .more-menu-container {
-    position: relative;
-  }
-
-  .more-button {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 6px;
-    background: transparent;
-    border: none;
-    border-radius: 6px;
-    color: var(--text-faint);
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .more-button:hover {
-    background-color: var(--bg-hover);
-    color: var(--text-primary);
-  }
-
-  .more-menu {
-    position: absolute;
-    top: 100%;
-    right: 0;
-    margin-top: 4px;
-    background-color: var(--bg-elevated);
-    border: 1px solid var(--border-muted);
-    border-radius: 8px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-    overflow: visible;
-    z-index: 100;
-    min-width: 160px;
-  }
-
-  .more-menu-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 10px 14px;
-    background: transparent;
-    border: none;
-    color: var(--text-primary);
-    font-size: var(--size-sm);
-    cursor: pointer;
-    transition: background-color 0.15s ease;
-    text-align: left;
-  }
-
-  .more-menu-item:hover {
-    background-color: var(--bg-hover);
-  }
-
-  .more-menu-item :global(svg) {
-    color: var(--text-muted);
-    flex-shrink: 0;
-  }
-
-  .more-menu-item:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-  }
-
-  .more-menu-item:disabled:hover {
-    background-color: transparent;
-  }
-
-  .more-menu-item.danger:hover {
-    background-color: var(--ui-danger-bg);
-    color: var(--ui-danger);
-  }
-
-  .more-menu-item.danger:hover :global(svg) {
-    color: var(--ui-danger);
-  }
-
-  .menu-separator {
-    height: 1px;
-    background-color: var(--border-subtle);
-    margin: 4px 0;
-  }
-
-  /* Submenu styles */
-  .submenu-container {
-    position: relative;
-  }
-
-  .submenu-trigger {
-    justify-content: space-between;
-  }
-
-  .submenu-trigger :global(.submenu-chevron) {
-    margin-left: auto;
-    transform: rotate(-90deg);
-  }
-
-  .submenu {
-    position: absolute;
-    left: 100%;
-    top: 0;
-    margin-left: 2px;
-    background-color: var(--bg-elevated);
-    border: 1px solid var(--border-muted);
-    border-radius: 8px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
-    max-height: 400px;
-    z-index: 101;
-    min-width: 160px;
-    display: flex;
-    flex-direction: column;
-  }
-
-  .submenu.open-left {
-    left: auto;
-    right: 100%;
-    margin-left: 0;
-    margin-right: 2px;
-  }
-
-  /* Enable scrolling for actions submenu */
-  .more-menu > .submenu-container > .submenu {
-    overflow-y: auto;
-    overflow-x: visible;
-  }
-
   /* Primary action button — circular icon-only */
   .primary-action-container {
     display: flex;

@@ -550,11 +550,6 @@
   let prButton = $state<ReturnType<typeof BranchCardPrButton> | undefined>();
 
   // =========================================================================
-  // Actions bar ref
-  // =========================================================================
-  let actionsBar = $state<ReturnType<typeof BranchCardActionsBar> | undefined>();
-
-  // =========================================================================
   // Event listeners
   // =========================================================================
 
@@ -1068,8 +1063,6 @@
   });
 </script>
 
-<svelte:window onclick={(e) => actionsBar?.handleClickOutside(e)} />
-
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
   bind:this={cardElement}
@@ -1123,7 +1116,6 @@
           <RemoteWorkspaceStatusBadge status={remoteWorkspaceStatus} />
         {/if}
         <BranchCardActionsBar
-          bind:this={actionsBar}
           {branch}
           {repoLabel}
           {isLocal}

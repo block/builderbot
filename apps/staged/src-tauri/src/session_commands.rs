@@ -2748,7 +2748,7 @@ matching `Signed-off-by` trailer.".to_string()
                 "The user is requesting an AI code review of the current branch.\n\
 \n\
 Review the code changes on this branch by running a diff from the remote-tracking base ref: \
-`git diff $(git merge-base {base_ref} HEAD)..HEAD`. Do not compare against the \
+`git diff $(git merge-base '{base_ref}' HEAD)..HEAD`. Do not compare against the \
 local base branch, which may be stale.\n\
 \n\
 Do NOT create any commits or modify any files.\n\
@@ -3095,7 +3095,7 @@ mod tests {
             None,
             Some("develop"),
         );
-        assert!(prompt.contains("git merge-base origin/develop HEAD"));
+        assert!(prompt.contains("git merge-base 'origin/develop' HEAD"));
         assert!(!prompt.contains("origin/main"));
     }
 
@@ -3109,7 +3109,22 @@ mod tests {
             None,
             None,
         );
-        assert!(prompt.contains("git merge-base origin/main HEAD"));
+        assert!(prompt.contains("git merge-base 'origin/main' HEAD"));
+    }
+
+    #[test]
+    fn review_prompt_normalizes_origin_prefixed_base_branch() {
+        let prompt = build_full_prompt(
+            "user prompt",
+            "project info",
+            "branch context",
+            &BranchSessionType::Review,
+            None,
+            Some("origin/main"),
+        );
+        // origin/main should NOT become origin/origin/main
+        assert!(prompt.contains("git merge-base 'origin/main' HEAD"));
+        assert!(!prompt.contains("origin/origin/main"));
     }
 
     #[test]

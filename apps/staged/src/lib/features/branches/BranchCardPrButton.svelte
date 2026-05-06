@@ -95,6 +95,7 @@
 
   // Stale-data indicator (set by the centralized polling service)
   let prStatusStale = $state(false);
+  let prStatusRefreshing = $state(false);
   let prStatusCleared = $state(false);
 
   // PR status fields (local state, updated via events)
@@ -256,6 +257,19 @@
     return () => unsub();
   });
 
+  // Subscribe to per-project refresh-state notifications so the tooltip can
+  // distinguish "last checked" from "checking right now".
+  $effect(() => {
+    const projectId = branch.projectId;
+    prStatusRefreshing = prPollingService.isRefreshing(projectId);
+    const unsub = prPollingService.onRefreshing((refreshingProjectId, isRefreshing) => {
+      if (refreshingProjectId === projectId) {
+        prStatusRefreshing = isRefreshing;
+      }
+    });
+    return () => unsub();
+  });
+
   onMount(() => {
     window.addEventListener('keydown', handleOptionDown);
     window.addEventListener('keyup', handleOptionUp);
@@ -368,6 +382,7 @@
       prFetchedAt,
       checksStatus: prStatusChecks,
       statusStale: prStatusStale,
+      statusRefreshing: prStatusRefreshing,
       hasUnpushed: prState === 'created' && hasUnpushed && pushState === 'idle',
       failedChecks,
       statusCleared: prStatusCleared,

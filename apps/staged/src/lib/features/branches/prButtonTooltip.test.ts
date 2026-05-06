@@ -12,6 +12,7 @@ function title(overrides: Partial<Parameters<typeof buildPrButtonTitle>[0]> = {}
     prFetchedAt: NOW - 4 * 60_000,
     checksStatus: 'SUCCESS',
     statusStale: false,
+    statusRefreshing: false,
     hasUnpushed: false,
     failedChecks: [],
     statusCleared: false,
@@ -79,6 +80,22 @@ describe('buildPrButtonTitle', () => {
         'Last checked: 4m ago',
         'Checks: failed',
         'Status refresh may be outdated',
+      ].join('\n')
+    );
+  });
+
+  it('calls out a refresh in progress', () => {
+    expect(
+      title({
+        statusRefreshing: true,
+      })
+    ).toBe(
+      [
+        'View PR #123',
+        'Latest PR SHA: abcdef1',
+        'Last checked: 4m ago',
+        'Status refresh in progress',
+        'Checks: succeeded',
       ].join('\n')
     );
   });

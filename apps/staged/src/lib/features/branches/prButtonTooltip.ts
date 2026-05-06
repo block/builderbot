@@ -8,6 +8,7 @@ export interface PrButtonTooltipInput {
   prFetchedAt: number | null;
   checksStatus: string | null;
   statusStale: boolean;
+  statusRefreshing: boolean;
   hasUnpushed: boolean;
   failedChecks: PrFailedCheck[];
   statusCleared: boolean;
@@ -52,6 +53,9 @@ export function buildPrButtonTitle(input: PrButtonTooltipInput): string {
     } else {
       lines.push('Last checked: unknown');
     }
+    if (input.statusRefreshing) {
+      lines.push('Status refresh in progress');
+    }
     return lines.join('\n');
   }
 
@@ -59,6 +63,10 @@ export function buildPrButtonTitle(input: PrButtonTooltipInput): string {
     lines.push(`Last checked: ${formatRelativeTime(input.prFetchedAt, input.nowMs)}`);
   } else {
     lines.push('Last checked: unknown');
+  }
+
+  if (input.statusRefreshing) {
+    lines.push('Status refresh in progress');
   }
 
   if (input.statusCleared) {

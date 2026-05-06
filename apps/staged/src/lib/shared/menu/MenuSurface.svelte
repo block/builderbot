@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import { ChevronRight } from 'lucide-svelte';
+  import { selectMenuAction } from './actions';
   import type { MenuActionItem, MenuItem, MenuSubmenuItem } from './types';
 
   type SubmenuPlacement = 'right' | 'left';
@@ -234,11 +235,7 @@
   }
 
   function handleAction(item: MenuActionItem) {
-    if (item.disabled) return;
-    if (item.closeOnSelect !== false) {
-      onClose();
-    }
-    void item.onSelect();
+    selectMenuAction(item, onClose);
   }
 
   export function getRect(): DOMRect | null {

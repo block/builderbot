@@ -151,6 +151,77 @@ describe('structural headers', () => {
     ).toEqual(['findOpeningBrace']);
   });
 
+  it('keeps a TypeScript function active past multiline destructured parameters', () => {
+    const lines = [
+      'export function useChatSessionController({',
+      '  sessionId,',
+      '  onMessageAccepted,',
+      '}: UseChatSessionControllerOptions) {',
+      '  return acceptMessage(sessionId, onMessageAccepted);',
+      '}',
+      'after();',
+    ];
+    const declarations = getStructuralDeclarations('useChatSessionController.ts', lines);
+
+    expect(
+      getActiveStructuralStack(declarations, 4).map((declaration) => declaration.name)
+    ).toEqual(['useChatSessionController']);
+    expect(getActiveStructuralStack(declarations, 6)).toEqual([]);
+  });
+
+  it('keeps a TypeScript function active past multiline parameters', () => {
+    const lines = [
+      'function formatMessage(',
+      '  message: string,',
+      '  repeatCount: number',
+      ') {',
+      '  return message.repeat(repeatCount);',
+      '}',
+      'after();',
+    ];
+    const declarations = getStructuralDeclarations('formatMessage.ts', lines);
+
+    expect(
+      getActiveStructuralStack(declarations, 4).map((declaration) => declaration.name)
+    ).toEqual(['formatMessage']);
+    expect(getActiveStructuralStack(declarations, 6)).toEqual([]);
+  });
+
+  it('keeps a TypeScript function active past multiline return type braces', () => {
+    const lines = [
+      'function loadUser(',
+      '  id: string',
+      '): {',
+      '  user: User;',
+      '  meta: { cached: boolean };',
+      '} {',
+      '  return { user: getUser(id), meta: { cached: false } };',
+      '}',
+      'after();',
+    ];
+    const declarations = getStructuralDeclarations('loadUser.ts', lines);
+
+    expect(
+      getActiveStructuralStack(declarations, 6).map((declaration) => declaration.name)
+    ).toEqual(['loadUser']);
+    expect(getActiveStructuralStack(declarations, 8)).toEqual([]);
+  });
+
+  it('keeps a TypeScript function active past single-line destructured parameters', () => {
+    const lines = [
+      'function selectUser({ id, name }: User) {',
+      '  return { id, name };',
+      '}',
+      'after();',
+    ];
+    const declarations = getStructuralDeclarations('selectUser.ts', lines);
+
+    expect(
+      getActiveStructuralStack(declarations, 1).map((declaration) => declaration.name)
+    ).toEqual(['selectUser']);
+    expect(getActiveStructuralStack(declarations, 3)).toEqual([]);
+  });
+
   it('ignores braces inside multiline TypeScript template strings', () => {
     const lines = [
       'function renderTemplate() {',

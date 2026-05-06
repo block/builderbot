@@ -365,13 +365,57 @@ function findOpeningBrace(
 ): BraceLocation | null {
   const state = createBraceSanitizerState();
   let openingBrace: (BraceLocation & { endLineIndex: number }) | null = null;
+  let parenBalance = 0;
+  let typeBraceBalance = 0;
+  let awaitingTypeLiteralBrace = false;
 
   for (let lineIndex = startLineIndex; lineIndex < stopLineIndex; lineIndex++) {
     const sanitizedLine = sanitizeBraceLine(lines[lineIndex], state);
     let foundOnLine = false;
 
     for (let columnIndex = 0; columnIndex < sanitizedLine.length; columnIndex++) {
-      if (sanitizedLine[columnIndex] !== '{') continue;
+      const char = sanitizedLine[columnIndex];
+
+      if (parenBalance > 0) {
+        if (char === '(') {
+          parenBalance += 1;
+        } else if (char === ')') {
+          parenBalance -= 1;
+        }
+        continue;
+      }
+
+      if (typeBraceBalance > 0) {
+        if (char === '{') {
+          typeBraceBalance += 1;
+        } else if (char === '}') {
+          typeBraceBalance -= 1;
+        }
+        continue;
+      }
+
+      if (char === '(') {
+        parenBalance += 1;
+        continue;
+      }
+
+      if (char === ':') {
+        awaitingTypeLiteralBrace = true;
+        continue;
+      }
+
+      if (awaitingTypeLiteralBrace) {
+        if (/\s/.test(char)) continue;
+
+        awaitingTypeLiteralBrace = false;
+        if (char === '{') {
+          typeBraceBalance = 1;
+          continue;
+        }
+      }
+
+      if (char !== '{') continue;
+      awaitingTypeLiteralBrace = false;
       foundOnLine = true;
 
       const candidate = {

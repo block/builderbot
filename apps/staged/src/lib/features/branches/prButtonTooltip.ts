@@ -1,5 +1,5 @@
 import type { PrFailedCheck } from '../../types';
-import { formatRelativeTime } from '../../shared/relativeTime';
+import { formatPreciseRelativeTime } from '../../shared/relativeTime';
 
 export interface PrButtonTooltipInput {
   actionTitle: string;
@@ -49,7 +49,7 @@ export function buildPrButtonTitle(input: PrButtonTooltipInput): string {
   if (input.hasUnpushed) {
     lines.push('Local branch has newer commits than the PR');
     if (input.prFetchedAt) {
-      lines.push(`Last checked: ${formatRelativeTime(input.prFetchedAt, input.nowMs)}`);
+      lines.push(`Last checked: ${formatPreciseRelativeTime(input.prFetchedAt, input.nowMs)}`);
     } else {
       lines.push('Last checked: unknown');
     }
@@ -60,7 +60,7 @@ export function buildPrButtonTitle(input: PrButtonTooltipInput): string {
   }
 
   if (input.prFetchedAt) {
-    lines.push(`Last checked: ${formatRelativeTime(input.prFetchedAt, input.nowMs)}`);
+    lines.push(`Last checked: ${formatPreciseRelativeTime(input.prFetchedAt, input.nowMs)}`);
   } else {
     lines.push('Last checked: unknown');
   }

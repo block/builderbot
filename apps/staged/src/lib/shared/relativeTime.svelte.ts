@@ -29,7 +29,30 @@ class MinuteNowStore {
   }
 }
 
+class SecondNowStore {
+  private value = $state(Date.now());
+
+  constructor() {
+    if (typeof window !== 'undefined') {
+      this.start();
+    }
+  }
+
+  now(): number {
+    return this.value;
+  }
+
+  private start(): void {
+    this.value = Date.now();
+
+    setInterval(() => {
+      this.value = Date.now();
+    }, 1000);
+  }
+}
+
 export const minuteNow = new MinuteNowStore();
+export const secondNow = new SecondNowStore();
 
 export function formatRelativeTime(timestampMs: number, nowMs = minuteNow.now()): string {
   return formatRelativeTimeBase(timestampMs, nowMs);

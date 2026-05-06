@@ -15,7 +15,7 @@
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
-  import { minuteNow } from '../../shared/relativeTime.svelte';
+  import { minuteNow, secondNow } from '../../shared/relativeTime.svelte';
   import { listen } from '@tauri-apps/api/event';
   import type {
     Branch,
@@ -374,6 +374,13 @@
     return optionHeld ? 'Create draft PR' : 'Create PR';
   }
 
+  let prButtonTitleNowMs = $derived.by(() => {
+    if (!prFetchedAt) return undefined;
+
+    const nowMs = minuteNow.now();
+    return nowMs - prFetchedAt < 60_000 ? secondNow.now() : nowMs;
+  });
+
   let prButtonTitle = $derived(
     buildPrButtonTitle({
       actionTitle: getPrButtonActionTitle(),
@@ -386,7 +393,7 @@
       hasUnpushed: prState === 'created' && hasUnpushed && pushState === 'idle',
       failedChecks,
       statusCleared: prStatusCleared,
-      nowMs: minuteNow.now(),
+      nowMs: prButtonTitleNowMs,
     })
   );
 

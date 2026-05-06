@@ -30,6 +30,18 @@ describe('buildPrButtonTitle', () => {
     );
   });
 
+  it('formats last checked with seconds during the first minute', () => {
+    expect(
+      title({
+        prFetchedAt: NOW - 27_000,
+      })
+    ).toBe(
+      ['View PR #123', 'Latest PR SHA: abcdef1', 'Last checked: 27s ago', 'Checks: succeeded'].join(
+        '\n'
+      )
+    );
+  });
+
   it('formats failed checks with failed check details', () => {
     const failedChecks: PrFailedCheck[] = [
       { name: 'unit-tests', state: 'FAILURE', detailsUrl: 'https://github.com/checks/1' },

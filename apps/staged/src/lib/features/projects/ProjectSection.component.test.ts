@@ -1,35 +1,40 @@
-import { flushSync, mount, tick, unmount } from 'svelte';
+import { flushSync, mount, tick, unmount, type ComponentProps } from 'svelte';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Project, ProjectNote } from '../../types';
 import type { ResumeSessionOutcome } from '../../commands';
 
-const { writer, loadDraftMock, commandMocks, eventHandlers, toastError } = vi.hoisted(() => ({
-  writer: {
-    scheduleSave: vi.fn(),
-    saveNow: vi.fn(async () => {}),
-    clearNow: vi.fn(async () => {}),
-    flush: vi.fn(async () => {}),
-  },
-  loadDraftMock: vi.fn(async (_key: string): Promise<string | null> => null),
-  commandMocks: {
-    listProjectNotes: vi.fn(async (_projectId: string): Promise<ProjectNote[]> => []),
-    getProjectNoteBySession: vi.fn(async (_sessionId: string): Promise<ProjectNote | null> => null),
-    resumeSession: vi.fn(
-      async (
-        _sessionId: string,
-        _prompt: string,
-        _imageIds?: string[],
-        _branchId?: string | null
-      ): Promise<ResumeSessionOutcome> => ({ outcome: 'started' })
-    ),
-    deleteProjectNote: vi.fn(async (_noteId: string): Promise<void> => {}),
-    cancelSession: vi.fn(async (_sessionId: string): Promise<void> => {}),
-    listChildSessions: vi.fn(async (_sessionId: string) => []),
-  },
-  /** The section's transport listeners, keyed by event name. */
-  eventHandlers: new Map<string, (payload: unknown) => unknown>(),
-  toastError: vi.fn(),
-}));
+const { writer, loadDraftMock, commandMocks, eventHandlers, toastError, toastDismiss } = vi.hoisted(
+  () => ({
+    writer: {
+      scheduleSave: vi.fn(),
+      saveNow: vi.fn(async () => {}),
+      clearNow: vi.fn(async () => {}),
+      flush: vi.fn(async () => {}),
+    },
+    loadDraftMock: vi.fn(async (_key: string): Promise<string | null> => null),
+    commandMocks: {
+      listProjectNotes: vi.fn(async (_projectId: string): Promise<ProjectNote[]> => []),
+      getProjectNoteBySession: vi.fn(
+        async (_sessionId: string): Promise<ProjectNote | null> => null
+      ),
+      resumeSession: vi.fn(
+        async (
+          _sessionId: string,
+          _prompt: string,
+          _imageIds?: string[],
+          _branchId?: string | null
+        ): Promise<ResumeSessionOutcome> => ({ outcome: 'started' })
+      ),
+      deleteProjectNote: vi.fn(async (_noteId: string): Promise<void> => {}),
+      cancelSession: vi.fn(async (_sessionId: string): Promise<void> => {}),
+      listChildSessions: vi.fn(async (_sessionId: string) => []),
+    },
+    /** The section's transport listeners, keyed by event name. */
+    eventHandlers: new Map<string, (payload: unknown) => unknown>(),
+    toastError: vi.fn(),
+    toastDismiss: vi.fn(),
+  })
+);
 
 // Heavy leaf components are stubbed out: the tests exercise the section's
 // project-session draft wiring and the state it hands its note rows, not the
@@ -85,7 +90,7 @@ vi.mock('../../transport', async (importOriginal) => ({
     return () => eventHandlers.delete(event);
   },
 }));
-vi.mock('svelte-sonner', () => ({ toast: { error: toastError } }));
+vi.mock('svelte-sonner', () => ({ toast: { error: toastError, dismiss: toastDismiss } }));
 vi.mock('../../shared/draftCache', () => ({
   createDraftWriteScheduler: () => writer,
   loadDraft: (key: string) => loadDraftMock(key),
@@ -98,6 +103,7 @@ vi.mock('../../commands', async (importOriginal) => ({
 }));
 
 import ProjectSection from './ProjectSection.svelte';
+import { reactiveProps } from '../sessions/testStubs/reactiveProps.svelte';
 
 const project = {
   id: 'project-1',
@@ -130,10 +136,10 @@ const completedNote: ProjectNote = {
 const REF = `#project-note:${completedNote.id}`;
 const DRAFT_KEY = `draft:project-session:${project.id}`;
 
-function mountSection() {
+function mountSection(extra: Partial<ComponentProps<typeof ProjectSection>> = {}) {
   const target = document.createElement('div');
   document.body.appendChild(target);
-  return mount(ProjectSection, { target, props: { project, branches: [] } });
+  return mount(ProjectSection, { target, props: { project, branches: [], ...extra } });
 }
 
 /** Let the section's async note/draft loads and effect flushes run to completion. */
@@ -241,6 +247,7 @@ beforeEach(() => {
   document.body.innerHTML = '';
   eventHandlers.clear();
   toastError.mockReset();
+  toastDismiss.mockReset();
   for (const mock of Object.values(commandMocks)) mock.mockReset();
   listNotes(completedNote);
   commandMocks.getProjectNoteBySession.mockImplementation(async () => null);
@@ -614,6 +621,380 @@ describe('ProjectSection note rows', () => {
       duration: Infinity,
     });
     expect(rowFor('session-1').dataset.deleting).toBe('false');
+
+    unmount(section);
+  });
+});
+
+// ── Inline project rename ──
+
+function renameButton(): HTMLButtonElement | null {
+  return document.querySelector<HTMLButtonElement>('[aria-label="Rename project"]');
+}
+
+function nameInput(): HTMLInputElement | null {
+  return document.querySelector<HTMLInputElement>('[aria-label="Project name"]');
+}
+
+async function openRename() {
+  const btn = renameButton();
+  if (!btn) throw new Error('rename button not rendered');
+  btn.click();
+  flushSync();
+  await settle();
+  const input = nameInput();
+  if (!input) throw new Error('project name input not rendered');
+  return input;
+}
+
+function typeName(input: HTMLInputElement, value: string) {
+  input.value = value;
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  flushSync();
+}
+
+function pressKey(input: HTMLInputElement, key: string, init: KeyboardEventInit = {}) {
+  input.dispatchEvent(
+    new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...init })
+  );
+  flushSync();
+}
+
+function blur(input: HTMLInputElement) {
+  input.dispatchEvent(new FocusEvent('blur'));
+}
+
+const RENAME_TOAST_ID = `rename-project-${project.id}`;
+
+describe('ProjectSection inline rename', () => {
+  it('disables the pencil when no rename handler is wired', async () => {
+    const section = mountSection();
+    await settle();
+
+    expect(renameButton()?.disabled).toBe(true);
+    expect(document.querySelector('.project-title')?.textContent).toContain('Project');
+
+    unmount(section);
+  });
+
+  it('keeps the pencil out of the heading so its accessible name is the project name', async () => {
+    const section = mountSection({ onRenameProject: vi.fn() });
+    await settle();
+
+    const heading = document.querySelector<HTMLHeadingElement>('h2.project-title');
+    expect(heading?.textContent?.trim()).toBe('Project');
+    expect(heading?.querySelector('button')).toBeNull();
+    const button = renameButton();
+    expect(button?.parentElement).toBe(heading?.parentElement);
+    expect(heading?.nextElementSibling).toBe(button);
+
+    unmount(section);
+  });
+
+  it('edits the current name in place and saves a changed name on Enter', async () => {
+    const onRenameProject = vi.fn(async (_id: string, _name: string) => {});
+    const section = mountSection({ onRenameProject });
+    await settle();
+
+    const input = await openRename();
+    expect(input.value).toBe('Project');
+    // The heading stays mounted around the editor so ProjectHome's measured
+    // title element keeps its identity.
+    expect(input.closest('h2.project-title')).not.toBeNull();
+
+    typeName(input, '  Renamed  ');
+    pressKey(input, 'Enter');
+    await settle();
+
+    expect(onRenameProject).toHaveBeenCalledWith(project.id, 'Renamed');
+    expect(nameInput()).toBeNull();
+    expect(toastError).not.toHaveBeenCalled();
+
+    unmount(section);
+  });
+
+  it('cancels on Escape or an unchanged name without calling the handler', async () => {
+    const onRenameProject = vi.fn(async (_id: string, _name: string) => {});
+    const section = mountSection({ onRenameProject });
+    await settle();
+
+    let input = await openRename();
+    typeName(input, 'Something else');
+    pressKey(input, 'Escape');
+    expect(nameInput()).toBeNull();
+
+    input = await openRename();
+    typeName(input, ' Project ');
+    pressKey(input, 'Enter');
+    await settle();
+    expect(nameInput()).toBeNull();
+
+    expect(onRenameProject).not.toHaveBeenCalled();
+
+    unmount(section);
+  });
+
+  it('rejects a blank name inline and keeps editing', async () => {
+    const onRenameProject = vi.fn(async (_id: string, _name: string) => {});
+    const section = mountSection({ onRenameProject });
+    await settle();
+
+    const input = await openRename();
+    typeName(input, '   ');
+    pressKey(input, 'Enter');
+    await settle();
+
+    expect(onRenameProject).not.toHaveBeenCalled();
+    expect(nameInput()).not.toBeNull();
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe('Project name is required');
+
+    unmount(section);
+  });
+
+  it('reports a failed rename with a toast and keeps the editor open', async () => {
+    const onRenameProject = vi.fn(async (_id: string, _name: string) => {
+      throw new Error('database is locked');
+    });
+    const section = mountSection({ onRenameProject });
+    await settle();
+
+    const input = await openRename();
+    typeName(input, 'Renamed');
+    pressKey(input, 'Enter');
+    await settle();
+
+    expect(onRenameProject).toHaveBeenCalledWith(project.id, 'Renamed');
+    expect(toastError).toHaveBeenCalledWith('Unable to rename project', {
+      id: RENAME_TOAST_ID,
+      description: 'database is locked',
+      duration: Infinity,
+    });
+    const stillEditing = nameInput();
+    expect(stillEditing).not.toBeNull();
+    expect(stillEditing?.disabled).toBe(false);
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe('database is locked');
+
+    unmount(section);
+  });
+
+  it('cancels on blur after a failed save instead of re-submitting the same name', async () => {
+    const onRenameProject = vi.fn(async (_id: string, _name: string) => {
+      throw new Error('database is locked');
+    });
+    const section = mountSection({ onRenameProject });
+    await settle();
+
+    const input = await openRename();
+    typeName(input, 'Renamed');
+    pressKey(input, 'Enter');
+    await settle();
+    expect(onRenameProject).toHaveBeenCalledTimes(1);
+    expect(toastError).toHaveBeenCalledTimes(1);
+
+    // The editor refocused after the failure; the user clicks away.
+    blur(input);
+    await settle();
+
+    expect(onRenameProject).toHaveBeenCalledTimes(1);
+    expect(toastError).toHaveBeenCalledTimes(1);
+    // Giving up takes the pinned failure toast down with the editor.
+    expect(toastDismiss).toHaveBeenCalledWith(RENAME_TOAST_ID);
+    expect(nameInput()).toBeNull();
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(document.querySelector('.project-title-text')?.textContent).toBe('Project');
+
+    unmount(section);
+  });
+
+  it('retries a failed name on Enter and replaces the toast rather than stacking one', async () => {
+    const onRenameProject = vi.fn(async (_id: string, _name: string) => {
+      throw new Error('database is locked');
+    });
+    const section = mountSection({ onRenameProject });
+    await settle();
+
+    const input = await openRename();
+    typeName(input, 'Renamed');
+    pressKey(input, 'Enter');
+    await settle();
+    pressKey(input, 'Enter');
+    await settle();
+
+    expect(onRenameProject).toHaveBeenCalledTimes(2);
+    expect(toastError).toHaveBeenCalledTimes(2);
+    const ids = new Set(toastError.mock.calls.map(([, opts]) => (opts as { id: string }).id));
+    expect(ids).toEqual(new Set([RENAME_TOAST_ID]));
+    expect(nameInput()).not.toBeNull();
+
+    unmount(section);
+  });
+
+  it('cancels a blank draft on blur and restores the old name', async () => {
+    const onRenameProject = vi.fn(async (_id: string, _name: string) => {});
+    const section = mountSection({ onRenameProject });
+    await settle();
+
+    const input = await openRename();
+    typeName(input, '   ');
+    blur(input);
+    await settle();
+
+    expect(onRenameProject).not.toHaveBeenCalled();
+    expect(nameInput()).toBeNull();
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(document.querySelector('.project-title-text')?.textContent).toBe('Project');
+
+    unmount(section);
+  });
+
+  it('disables the editor while a rename is pending and closes it exactly once', async () => {
+    let resolveRename!: () => void;
+    const onRenameProject = vi.fn(
+      (_id: string, _name: string) =>
+        new Promise<void>((resolve) => {
+          resolveRename = resolve;
+        })
+    );
+    const section = mountSection({ onRenameProject });
+    await settle();
+
+    const input = await openRename();
+    typeName(input, 'Renamed');
+    pressKey(input, 'Enter');
+    await settle();
+
+    expect(onRenameProject).toHaveBeenCalledTimes(1);
+    expect(input.disabled).toBe(true);
+    expect(document.querySelector('.project-name-editor .spinner')).not.toBeNull();
+
+    // A second Enter, a blur and an Escape are all ignored until it settles.
+    pressKey(input, 'Enter');
+    blur(input);
+    pressKey(input, 'Escape');
+    await settle();
+    expect(onRenameProject).toHaveBeenCalledTimes(1);
+    expect(nameInput()).toBe(input);
+    expect(input.disabled).toBe(true);
+
+    resolveRename();
+    await settle();
+
+    expect(nameInput()).toBeNull();
+    expect(document.querySelector('.project-name-editor')).toBeNull();
+    expect(onRenameProject).toHaveBeenCalledTimes(1);
+    expect(toastError).not.toHaveBeenCalled();
+
+    unmount(section);
+  });
+
+  it('saves a changed draft on blur and closes the editor', async () => {
+    const onRenameProject = vi.fn(async (_id: string, _name: string) => {});
+    const section = mountSection({ onRenameProject });
+    await settle();
+
+    const input = await openRename();
+    typeName(input, ' Renamed on blur ');
+    blur(input);
+    await settle();
+
+    expect(onRenameProject).toHaveBeenCalledWith(project.id, 'Renamed on blur');
+    expect(nameInput()).toBeNull();
+    expect(document.querySelector('.project-name-editor')).toBeNull();
+    expect(toastError).not.toHaveBeenCalled();
+
+    unmount(section);
+  });
+
+  it('closes the editor without renaming when a delete starts while it is open', async () => {
+    const onRenameProject = vi.fn(async (_id: string, _name: string) => {});
+    const props = reactiveProps({ project, branches: [], deleting: false, onRenameProject });
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const section = mount(ProjectSection, { target, props });
+    await settle();
+
+    const input = await openRename();
+    typeName(input, 'Renamed');
+
+    props.deleting = true;
+    flushSync();
+    // Disabling the input blurs it in a real browser; that blur must not save.
+    blur(input);
+    await settle();
+
+    expect(onRenameProject).not.toHaveBeenCalled();
+    expect(nameInput()).toBeNull();
+    expect(document.querySelector('.project-title-text')?.textContent).toBe('Project');
+    expect(renameButton()?.disabled).toBe(true);
+
+    unmount(section);
+  });
+
+  it('ignores the Enter that confirms an IME composition', async () => {
+    const onRenameProject = vi.fn(async (_id: string, _name: string) => {});
+    const section = mountSection({ onRenameProject });
+    await settle();
+
+    const input = await openRename();
+    typeName(input, 'にほ');
+    pressKey(input, 'Enter', { isComposing: true });
+    await settle();
+
+    expect(onRenameProject).not.toHaveBeenCalled();
+    expect(nameInput()).toBe(input);
+
+    // The real Enter after the composition has ended still submits.
+    typeName(input, '日本');
+    pressKey(input, 'Enter');
+    await settle();
+    expect(onRenameProject).toHaveBeenCalledWith(project.id, '日本');
+    expect(nameInput()).toBeNull();
+
+    unmount(section);
+  });
+
+  it('dismisses the pinned failure toast once a retry succeeds', async () => {
+    const onRenameProject = vi
+      .fn(async (_id: string, _name: string) => {})
+      .mockRejectedValueOnce(new Error('database is locked'));
+    const section = mountSection({ onRenameProject });
+    await settle();
+
+    const input = await openRename();
+    typeName(input, 'Renamed');
+    pressKey(input, 'Enter');
+    await settle();
+    expect(toastError).toHaveBeenCalledTimes(1);
+    expect(toastDismiss).not.toHaveBeenCalled();
+
+    pressKey(input, 'Enter');
+    await settle();
+
+    expect(onRenameProject).toHaveBeenCalledTimes(2);
+    expect(toastDismiss).toHaveBeenCalledWith(RENAME_TOAST_ID);
+    expect(nameInput()).toBeNull();
+
+    unmount(section);
+  });
+
+  it('dismisses the pinned failure toast when the editor is cancelled with Escape', async () => {
+    const onRenameProject = vi.fn(async (_id: string, _name: string) => {
+      throw new Error('database is locked');
+    });
+    const section = mountSection({ onRenameProject });
+    await settle();
+
+    const input = await openRename();
+    typeName(input, 'Renamed');
+    pressKey(input, 'Enter');
+    await settle();
+    expect(toastError).toHaveBeenCalledTimes(1);
+
+    pressKey(input, 'Escape');
+    await settle();
+
+    expect(toastDismiss).toHaveBeenCalledWith(RENAME_TOAST_ID);
+    expect(nameInput()).toBeNull();
 
     unmount(section);
   });

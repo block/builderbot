@@ -845,6 +845,37 @@ describe('projectCreated', () => {
   });
 });
 
+describe('projectRenamed', () => {
+  it('paints the new name at once and lets the project-changed refetch confirm it', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    store.startListeners();
+
+    store.projectRenamed('p1', 'Alpha Prime');
+
+    const renamed = project({ name: 'Alpha Prime' });
+    expect(store.projects).toEqual([renamed]);
+    expect(listProjects).toHaveBeenCalledTimes(1);
+
+    listProjects.mockResolvedValue(swr([renamed]));
+    emit('project-changed', { projectId: 'p1' });
+    await vi.waitFor(() => {
+      expect(listProjects).toHaveBeenCalledTimes(2);
+    });
+    expect(listProjects).toHaveBeenLastCalledWith({ force: true });
+    expect(store.projects).toEqual([renamed]);
+  });
+
+  it('ignores a project the store does not know', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+
+    store.projectRenamed('p9', 'Ghost');
+
+    expect(store.projects).toEqual([project()]);
+  });
+});
+
 describe('setBranchesByProject', () => {
   it('replaces the branch map for view-driven updates', async () => {
     const store = await importStore();

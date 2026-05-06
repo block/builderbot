@@ -120,6 +120,28 @@ fn test_list_projects_breaks_created_at_ties_by_insert_order() {
 }
 
 #[test]
+fn test_rename_project_moves_only_the_name() {
+    let store = Store::in_memory().unwrap();
+    let mut project = Project::new("test-owner/test-repo");
+    project.subpath = Some("apps/one".to_string());
+    store.create_project(&project).unwrap();
+
+    store.rename_project(&project.id, "Renamed").unwrap();
+
+    let fetched = store.get_project(&project.id).unwrap().unwrap();
+    assert_eq!(fetched.name, "Renamed");
+    assert_eq!(fetched.github_repo, project.github_repo);
+    assert_eq!(fetched.location, project.location);
+    assert_eq!(fetched.subpath.as_deref(), Some("apps/one"));
+    assert_eq!(fetched.created_at, project.created_at);
+    assert!(fetched.updated_at >= project.updated_at);
+    assert_eq!(store.list_projects().unwrap()[0].name, "Renamed");
+
+    let err = store.rename_project("missing", "Nope").unwrap_err();
+    assert!(err.to_string().contains("Project not found"), "{err}");
+}
+
+#[test]
 fn test_project_note_sets_completed_at_when_created_with_content() {
     let note = ProjectNote::new("project-1", "Title", "Body");
     assert_eq!(note.completed_at, Some(note.created_at));

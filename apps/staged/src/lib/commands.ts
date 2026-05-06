@@ -230,6 +230,12 @@ export async function createProject(
   return project;
 }
 
+export async function renameProject(projectId: string, name: string): Promise<Project> {
+  const project = await invokeCommand<Project>('rename_project', { projectId, name });
+  await invalidateCacheByCommand('list_projects');
+  return project;
+}
+
 export async function deleteProject(id: string): Promise<void> {
   await invokeCommand('delete_project', { id });
   await Promise.all([

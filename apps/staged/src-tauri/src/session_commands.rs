@@ -750,6 +750,7 @@ pub async fn start_branch_session(
         &branch_context,
         &session_type,
         launch_context.as_ref(),
+        Some(&branch.base_branch),
     );
 
     // Create the session
@@ -1150,6 +1151,7 @@ pub async fn drain_queued_sessions_for_branch(
         &branch_context,
         &session_type,
         launch_context.as_ref(),
+        Some(&branch.base_branch),
     );
 
     // Atomically transition session from queued to running.
@@ -1494,6 +1496,7 @@ pub async fn trigger_auto_review(
         &branch_context,
         &BranchSessionType::Review,
         None,
+        Some(&branch.base_branch),
     );
 
     // Create the session
@@ -2674,6 +2677,10 @@ fn image_timeline_entries(
         .collect()
 }
 
+fn shell_quote_arg(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 /// Assemble the full prompt from action instructions + branch context + user prompt.
 fn build_full_prompt(
     user_prompt: &str,
@@ -2681,6 +2688,7 @@ fn build_full_prompt(
     branch_context: &str,
     session_type: &BranchSessionType,
     launch_context: Option<&BranchSessionLaunchContext>,
+    base_branch: Option<&str>,
 ) -> String {
     let action_instructions = match session_type {
         BranchSessionType::Note => {
@@ -2724,7 +2732,7 @@ Formatting requirements:
 - Do not wrap the block in any additional code fences.
 - `---` must be on its own line, with a newline immediately before and after it.
 - The note content must start immediately after `---` with a markdown H1 (`# Title`).
-- Do not wrap the note in code fences."
+- Do not wrap the note in code fences.".to_string()
         }
         BranchSessionType::Commit => {
             "The user is requesting you make a commit based on the prompt below. Make the necessary \
@@ -2736,92 +2744,95 @@ Before creating the commit:
 - Use the user's global git identity (`git config --global user.name` and `git config --global user.email`) \
 for both the author and committer. Do not use placeholder identities.
 - Create the commit with a DCO signoff (`git commit --signoff`) so the commit message includes a \
-matching `Signed-off-by` trailer."
+matching `Signed-off-by` trailer.".to_string()
         }
         BranchSessionType::Review => {
-            "The user is requesting an AI code review of the current branch.
-
-Review the code changes on this branch by running a diff from the remote-tracking base ref, \
-for example `git diff $(git merge-base origin/main HEAD)..HEAD`. Do not compare against the \
-local base branch, which may be stale.
-
-Do NOT create any commits or modify any files.
-
-## Review philosophy
-
+            let base_ref = git::origin_ref_for_branch(base_branch.unwrap_or("main"));
+            let quoted_base_ref = shell_quote_arg(&base_ref);
+            format!(
+                "The user is requesting an AI code review of the current branch.\n\
+\n\
+Review the code changes on this branch by running a diff from the remote-tracking base ref: \
+`git diff $(git merge-base {quoted_base_ref} HEAD)..HEAD`. Do not compare against the \
+local base branch, which may be stale.\n\
+\n\
+Do NOT create any commits or modify any files.\n\
+\n\
+## Review philosophy\n\
+\n\
 Your comments should tell the story of the change — focus on the \"why\", potential issues, \
 and non-obvious implications. Do NOT exhaustively document every line or restate what the code \
 obviously does. It's fine to have no comments for trivial or self-explanatory files. \
-Aim for quality over quantity: a few insightful comments are better than many shallow ones.
-
-## Comment types
-
-Each comment MUST include a `type` field. Choose the type carefully:
-
+Aim for quality over quantity: a few insightful comments are better than many shallow ones.\n\
+\n\
+## Comment types\n\
+\n\
+Each comment MUST include a `type` field. Choose the type carefully:\n\
+\n\
 - `\"information\"` — Contextual explanation, \"why\" behind a change, or architectural observation. \
 Use this for comments that help a reader understand the change but don't require action. \
 These are shown as subtle hold-to-reveal annotations, not inline comments. \
 Examples: explaining a non-obvious design decision, noting how a change fits into the broader architecture, \
-describing what the old code was doing and why it changed.
-
+describing what the old code was doing and why it changed.\n\
+\n\
 - `\"suggestion\"` — A recommended improvement that isn't strictly necessary. \
 The code works but could be better. \
-Examples: a more idiomatic approach, better naming, a simplification.
-
+Examples: a more idiomatic approach, better naming, a simplification.\n\
+\n\
 - `\"warning\"` — A potential issue or concern that deserves attention. \
 Not a definite bug, but something that could cause problems. \
-Examples: missing edge case handling, potential performance issue, fragile assumption.
-
+Examples: missing edge case handling, potential performance issue, fragile assumption.\n\
+\n\
 - `\"issue\"` — A bug or correctness problem that should be fixed. \
-Examples: off-by-one error, null pointer risk, logic error, security vulnerability.
-
+Examples: off-by-one error, null pointer risk, logic error, security vulnerability.\n\
+\n\
 Most comments in a typical review should be `\"information\"` or `\"suggestion\"`. \
-Reserve `\"warning\"` and `\"issue\"` for genuine concerns.
-
-## Output format
-
+Reserve `\"warning\"` and `\"issue\"` for genuine concerns.\n\
+\n\
+## Output format\n\
+\n\
 Your response must start directly with the review-title fenced block below — \
-do not output any preamble, commentary, or thinking before it.
-
+do not output any preamble, commentary, or thinking before it.\n\
+\n\
 Provide a single-sentence title (max 15 words) that conveys your overall \
 confidence level in the changes. Do not describe what the changes do — instead focus on \
-how confident you are that they are correct and safe. Wrap it in a fenced block:
-
-```review-title
-Looks solid overall with one minor edge case worth checking
-```
-
-Then return your review comments as exactly one fenced JSON block:
-
-```review-comments
-[
-  {
-    \"path\": \"src/foo.ts\",
-    \"span\": { \"start\": 10, \"end\": 15 },
-    \"type\": \"information\",
-    \"content\": \"This refactors the error handling from panicking to returning Results, which aligns with the broader error-handling migration across the codebase.\"
-  },
-  {
-    \"path\": \"src/bar.rs\",
-    \"span\": { \"start\": 42, \"end\": 45 },
-    \"type\": \"warning\",
-    \"content\": \"This unwrap() could panic if the connection pool is exhausted under load.\"
-  }
-]
-```
-
-Formatting requirements:
-- The opening fence line for the title must be exactly: ```review-title
-- The opening fence line for comments must be exactly: ```review-comments
-- Each closing fence line must be exactly: ```
-- Put only plain text (no markdown) inside the review-title block.
-- Put only the JSON array inside the review-comments block (no prose or markdown).
-- Do not wrap these blocks in any additional code fences.
-
-Rules:
-- `span` uses 0-indexed line numbers from the \"after\" side of the diff (exclusive end).
-- Only comment on changed files.
-- Be specific and actionable — reference the actual code, not generic advice."
+how confident you are that they are correct and safe. Wrap it in a fenced block:\n\
+\n\
+```review-title\n\
+Looks solid overall with one minor edge case worth checking\n\
+```\n\
+\n\
+Then return your review comments as exactly one fenced JSON block:\n\
+\n\
+```review-comments\n\
+[\n\
+  {{\n\
+    \"path\": \"src/foo.ts\",\n\
+    \"span\": {{ \"start\": 10, \"end\": 15 }},\n\
+    \"type\": \"information\",\n\
+    \"content\": \"This refactors the error handling from panicking to returning Results, which aligns with the broader error-handling migration across the codebase.\"\n\
+  }},\n\
+  {{\n\
+    \"path\": \"src/bar.rs\",\n\
+    \"span\": {{ \"start\": 42, \"end\": 45 }},\n\
+    \"type\": \"warning\",\n\
+    \"content\": \"This unwrap() could panic if the connection pool is exhausted under load.\"\n\
+  }}\n\
+]\n\
+```\n\
+\n\
+Formatting requirements:\n\
+- The opening fence line for the title must be exactly: ```review-title\n\
+- The opening fence line for comments must be exactly: ```review-comments\n\
+- Each closing fence line must be exactly: ```\n\
+- Put only plain text (no markdown) inside the review-title block.\n\
+- Put only the JSON array inside the review-comments block (no prose or markdown).\n\
+- Do not wrap these blocks in any additional code fences.\n\
+\n\
+Rules:\n\
+- `span` uses 0-indexed line numbers from the \"after\" side of the diff (exclusive end).\n\
+- Only comment on changed files.\n\
+- Be specific and actionable — reference the actual code, not generic advice.")
         }
     };
 
@@ -3062,6 +3073,7 @@ mod tests {
             "branch context",
             &BranchSessionType::Review,
             None,
+            None,
         );
 
         assert!(
@@ -3076,6 +3088,62 @@ mod tests {
             "Put only the JSON array inside the review-comments block (no prose or markdown)."
         ));
         assert!(prompt.contains("do not output any preamble, commentary, or thinking before it"));
+    }
+
+    #[test]
+    fn review_prompt_includes_base_branch_in_diff_command() {
+        let prompt = build_full_prompt(
+            "user prompt",
+            "project info",
+            "branch context",
+            &BranchSessionType::Review,
+            None,
+            Some("develop"),
+        );
+        assert!(prompt.contains("git merge-base 'origin/develop' HEAD"));
+        assert!(!prompt.contains("origin/main"));
+    }
+
+    #[test]
+    fn review_prompt_defaults_to_main_when_no_base_branch() {
+        let prompt = build_full_prompt(
+            "user prompt",
+            "project info",
+            "branch context",
+            &BranchSessionType::Review,
+            None,
+            None,
+        );
+        assert!(prompt.contains("git merge-base 'origin/main' HEAD"));
+    }
+
+    #[test]
+    fn review_prompt_normalizes_origin_prefixed_base_branch() {
+        let prompt = build_full_prompt(
+            "user prompt",
+            "project info",
+            "branch context",
+            &BranchSessionType::Review,
+            None,
+            Some("origin/main"),
+        );
+        // origin/main should NOT become origin/origin/main
+        assert!(prompt.contains("git merge-base 'origin/main' HEAD"));
+        assert!(!prompt.contains("origin/origin/main"));
+    }
+
+    #[test]
+    fn review_prompt_shell_quotes_base_branch_with_single_quote() {
+        let prompt = build_full_prompt(
+            "user prompt",
+            "project info",
+            "branch context",
+            &BranchSessionType::Review,
+            None,
+            Some("feature/it's-good"),
+        );
+        assert!(prompt.contains("git merge-base 'origin/feature/it'\\''s-good' HEAD"));
+        assert!(!prompt.contains("git merge-base 'origin/feature/it's-good' HEAD"));
     }
 
     #[test]
@@ -3272,6 +3340,7 @@ mod tests {
                 commit_sha: "abc123".to_string(),
                 review_id: Some("review-42".to_string()),
             }),
+            None,
         );
 
         assert!(prompt.contains(
@@ -3286,6 +3355,7 @@ mod tests {
             "project info",
             "branch context",
             &BranchSessionType::Commit,
+            None,
             None,
         );
 
@@ -3307,6 +3377,7 @@ mod tests {
                 commit_sha: "abc123".to_string(),
                 review_id: None,
             }),
+            None,
         );
 
         assert!(prompt.contains("Viewed diff before starting this session: commit abc123."));

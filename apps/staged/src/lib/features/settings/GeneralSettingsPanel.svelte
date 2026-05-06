@@ -228,7 +228,7 @@
     border: 1px solid var(--border-muted);
     border-radius: 5px;
     color: var(--text-primary);
-    font-size: var(--size-xs);
+    font-size: var(--size-md);
     cursor: pointer;
     transition:
       border-color 0.1s,

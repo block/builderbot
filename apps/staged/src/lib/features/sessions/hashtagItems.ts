@@ -1,5 +1,6 @@
 import type { BranchTimeline, HashtagItem, ProjectNote, Branch, ProjectRepo } from '../../types';
 import { getBranchTimeline, listProjectNotes } from '../../commands';
+import { branchTimelineReadyKey } from '../branches/branchTimelineReady';
 
 /** Regex matching `#type:id` hashtag tokens in plain text. Use with `new RegExp(source, 'g')` for stateful iteration. */
 export const HASHTAG_TOKEN_RE = /#(note|commit|review|project-note|image):([^\s]+)/g;
@@ -63,10 +64,11 @@ export async function buildProjectHashtagItems(
   reposById?: Map<string, ProjectRepo>
 ): Promise<HashtagItem[]> {
   const items: HashtagItem[] = [];
+  const readyBranches = branches.filter((branch) => branchTimelineReadyKey(branch) !== null);
 
   const [timelines, projectNotes] = await Promise.all([
     Promise.all(
-      branches.map((b) => getBranchTimeline(b.id).then((t) => ({ branch: b, timeline: t })))
+      readyBranches.map((b) => getBranchTimeline(b.id).then((t) => ({ branch: b, timeline: t })))
     ),
     listProjectNotes(projectId),
   ]);

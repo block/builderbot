@@ -45,6 +45,7 @@
   import ReasonBanner from './ReasonBanner.svelte';
   import RemoteWorkspaceStatusBadge from './RemoteWorkspaceStatusBadge.svelte';
   import RemoteWorkspaceStatusView from './RemoteWorkspaceStatusView.svelte';
+  import { branchTimelineReadyKey } from './branchTimelineReady';
   import { alerts } from '../../shared/alerts.svelte';
   import { timelineToHashtagItems, projectNotesToHashtagItems } from '../sessions/hashtagItems';
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
@@ -450,26 +451,12 @@
     getTimeline: () => timeline,
   });
 
+  let requestedTimelineKey: string | null = null;
+  let timelineLoadVersion = 0;
   let revalidationVersion = 0;
 
-  /**
-   * Compute the timeline cache key for a branch, or null if the branch is
-   * not yet ready for timeline loading.
-   *
-   * Shared between the synchronous hydration block and the $effect that
-   * triggers loadTimeline(), so the readiness conditions and key format
-   * stay in sync.
-   */
-  function getTimelineKey(
-    branchId: string,
-    isLocalVal: boolean,
-    isRemoteVal: boolean,
-    worktreePath: string | undefined | null,
-    remoteStatus: string | null | undefined
-  ): string | null {
-    if (isLocalVal && !worktreePath) return null;
-    if (!isLocalVal && (!isRemoteVal || remoteStatus !== 'running')) return null;
-    return isRemoteVal ? `${branchId}:<remote>` : `${branchId}:${worktreePath}`;
+  function isCurrentTimelineLoad(loadVersion: number, timelineKey: string): boolean {
+    return loadVersion === timelineLoadVersion && branchTimelineReadyKey(branch) === timelineKey;
   }
 
   /**
@@ -482,9 +469,11 @@
    */
   function applyCachedTimeline(
     cached: BranchTimelineData,
-    fresh: Promise<BranchTimelineData> | null
+    fresh: Promise<BranchTimelineData> | null,
+    timelineKey: string
   ) {
     timeline = cached;
+    loadedTimelineKey = timelineKey;
     loading = false;
     prunedSessionIds = sessionMgr.prunePendingSessionItems(cached);
     if (fresh) {
@@ -492,18 +481,25 @@
       const version = ++revalidationVersion;
       fresh
         .then((next) => {
-          if (version !== revalidationVersion) return;
+          if (version !== revalidationVersion || branchTimelineReadyKey(branch) !== timelineKey) {
+            return;
+          }
           error = null;
           timeline = next;
+          loadedTimelineKey = timelineKey;
           prunedSessionIds = sessionMgr.prunePendingSessionItems(next);
           void loadTimelineReviewDetails(next.reviews);
         })
         .catch((e) => {
-          if (version !== revalidationVersion) return;
+          if (version !== revalidationVersion || branchTimelineReadyKey(branch) !== timelineKey) {
+            return;
+          }
           error = e instanceof Error ? e.message : String(e);
         })
         .finally(() => {
-          if (version !== revalidationVersion) return;
+          if (version !== revalidationVersion || branchTimelineReadyKey(branch) !== timelineKey) {
+            return;
+          }
           revalidating = false;
         });
     } else {
@@ -516,26 +512,13 @@
   // flash and the slide-in animation for already-cached rows.
   {
     // svelte-ignore state_referenced_locally
-    const initIsLocal = isLocal;
-    // svelte-ignore state_referenced_locally
-    const initIsRemote = isRemote;
-    // svelte-ignore state_referenced_locally
     const initBranch = branch;
-    // svelte-ignore state_referenced_locally
-    const initRemoteWorkspaceStatus = remoteWorkspaceStatus;
     untrack(() => {
-      const key = getTimelineKey(
-        initBranch.id,
-        initIsLocal,
-        initIsRemote,
-        initBranch.worktreePath,
-        initRemoteWorkspaceStatus
-      );
+      const key = branchTimelineReadyKey(initBranch);
       if (key) {
         const { cached, fresh } = commands.getBranchTimelineWithRevalidation(initBranch.id);
         if (cached) {
-          loadedTimelineKey = key;
-          applyCachedTimeline(cached, fresh);
+          applyCachedTimeline(cached, fresh, key);
         }
       }
     });
@@ -617,56 +600,74 @@
 
   // Load timeline when a branch becomes timeline-ready
   $effect(() => {
-    const timelineKey = getTimelineKey(
-      branch.id,
-      isLocal,
-      isRemote,
-      branch.worktreePath,
-      remoteWorkspaceStatus
-    );
-    if (!timelineKey || timelineKey === loadedTimelineKey) return;
+    const timelineKey = branchTimelineReadyKey(branch);
+    if (!timelineKey) return;
+    if (timelineKey === loadedTimelineKey || timelineKey === requestedTimelineKey) return;
 
-    loadedTimelineKey = timelineKey;
-    void loadTimeline();
+    void loadTimeline({ timelineKey });
   });
 
   // Re-fetch timeline when the cache is invalidated (e.g. after project-setup-progress)
   $effect(() => {
     const handler = (e: Event) => {
       const { branchIds } = (e as CustomEvent<{ branchIds: string[] }>).detail;
-      if (branchIds.includes(branch.id) && (branch.worktreePath || isRemote)) {
-        void loadTimeline();
+      const timelineKey = branchTimelineReadyKey(branch);
+      if (branchIds.includes(branch.id) && timelineKey) {
+        loadedTimelineKey = null;
+        void loadTimeline({ timelineKey, force: true });
       }
     };
     window.addEventListener('timeline-invalidated', handler);
     return () => window.removeEventListener('timeline-invalidated', handler);
   });
 
-  async function loadTimeline() {
-    const isInitialLoad = !timeline;
+  async function loadTimeline({
+    timelineKey = branchTimelineReadyKey(branch),
+    force = false,
+  }: { timelineKey?: string | null; force?: boolean } = {}) {
+    if (!timelineKey) return;
+
+    const loadVersion = ++timelineLoadVersion;
+    requestedTimelineKey = timelineKey;
+    const isInitialLoad = !timeline || loadedTimelineKey !== timelineKey;
     error = null;
     // Cancel any in-flight revalidation so it can't overwrite fresher data
     revalidationVersion++;
-
-    if (isInitialLoad) {
-      const { cached, fresh } = commands.getBranchTimelineWithRevalidation(branch.id);
-      if (cached) {
-        applyCachedTimeline(cached, fresh);
-        return;
-      }
-      // No cache — show loading spinner as before
-      loading = true;
-    }
+    revalidating = false;
 
     try {
-      const nextTimeline = await commands.getBranchTimeline(branch.id, { force: !isInitialLoad });
+      if (isInitialLoad) {
+        if (!force) {
+          const { cached, fresh } = commands.getBranchTimelineWithRevalidation(branch.id);
+          if (cached) {
+            if (isCurrentTimelineLoad(loadVersion, timelineKey)) {
+              applyCachedTimeline(cached, fresh, timelineKey);
+            }
+            return;
+          }
+        }
+        // No cache — show loading spinner as before
+        loading = true;
+      }
+
+      const nextTimeline = await commands.getBranchTimeline(branch.id, {
+        force: force || !isInitialLoad,
+      });
+      if (!isCurrentTimelineLoad(loadVersion, timelineKey)) return;
       timeline = nextTimeline;
+      loadedTimelineKey = timelineKey;
       prunedSessionIds = sessionMgr.prunePendingSessionItems(nextTimeline);
       void loadTimelineReviewDetails(nextTimeline.reviews);
     } catch (e) {
+      if (!isCurrentTimelineLoad(loadVersion, timelineKey)) return;
       error = e instanceof Error ? e.message : String(e);
     } finally {
-      loading = false;
+      if (requestedTimelineKey === timelineKey) {
+        requestedTimelineKey = null;
+      }
+      if (isCurrentTimelineLoad(loadVersion, timelineKey)) {
+        loading = false;
+      }
     }
   }
 

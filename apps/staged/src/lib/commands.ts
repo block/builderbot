@@ -329,6 +329,7 @@ const inFlightTimelines = new Map<string, Promise<BranchTimeline>>();
 
 export function invalidateBranchTimeline(branchId: string): void {
   timelineCache.delete(branchId);
+  inFlightTimelines.delete(branchId);
   window.dispatchEvent(
     new CustomEvent('timeline-invalidated', { detail: { branchIds: [branchId] } })
   );
@@ -347,16 +348,18 @@ export function getBranchTimeline(
     if (cached) {
       return Promise.resolve(cached.timeline);
     }
-  }
 
-  const existing = inFlightTimelines.get(branchId);
-  if (existing) {
-    return existing;
+    const existing = inFlightTimelines.get(branchId);
+    if (existing) {
+      return existing;
+    }
   }
 
   const request = invoke<BranchTimeline>('get_branch_timeline', { branchId })
     .then((timeline) => {
-      timelineCache.set(branchId, { timeline, fetchedAt: Date.now() });
+      if (inFlightTimelines.get(branchId) === request) {
+        timelineCache.set(branchId, { timeline, fetchedAt: Date.now() });
+      }
       return timeline;
     })
     .finally(() => {
@@ -384,6 +387,7 @@ export function getBranchTimelineWithRevalidation(branchId: string): {
 export function invalidateProjectBranchTimelines(branchIds: string[]): void {
   for (const id of branchIds) {
     timelineCache.delete(id);
+    inFlightTimelines.delete(id);
   }
   window.dispatchEvent(new CustomEvent('timeline-invalidated', { detail: { branchIds } }));
 }

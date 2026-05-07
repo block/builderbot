@@ -21,7 +21,7 @@ import { projectStateStore } from '../stores/projectState.svelte';
 import { prStateStore } from '../stores/prState.svelte';
 import { pushStateStore } from '../stores/pushState.svelte';
 import { sessionRegistry, type SessionType } from '../stores/sessionRegistry.svelte';
-import type { SessionStatusPayload } from '../types';
+import type { SessionStatus, SessionStatusPayload } from '../types';
 
 export function listenForSessionStatus(): Promise<UnlistenFn> {
   return listen<SessionStatusPayload>('session-status-changed', async (event) => {
@@ -58,7 +58,7 @@ export function listenForSessionStatus(): Promise<UnlistenFn> {
 // Completion sub-handlers
 // ---------------------------------------------------------------------------
 
-async function handleSessionEnd(sessionId: string, status: string) {
+async function handleSessionEnd(sessionId: string, status: SessionStatus) {
   const sessionProjectId = sessionRegistry.getProjectId(sessionId);
   const sessionType = sessionRegistry.getType(sessionId);
   const branchId = sessionRegistry.getBranchId(sessionId);
@@ -87,7 +87,7 @@ async function handleSessionEnd(sessionId: string, status: string) {
   sessionRegistry.cleanupSession(sessionId);
 }
 
-async function handlePrCompletion(sessionId: string, branchId: string, status: string) {
+async function handlePrCompletion(sessionId: string, branchId: string, status: SessionStatus) {
   if (status === 'completed') {
     try {
       // Try session messages first (AI session writes PR_URL: marker).
@@ -145,7 +145,7 @@ async function handlePrCompletion(sessionId: string, branchId: string, status: s
   }
 }
 
-async function handlePushCompletion(sessionId: string, branchId: string, status: string) {
+async function handlePushCompletion(sessionId: string, branchId: string, status: SessionStatus) {
   if (status === 'completed') {
     try {
       const session = await commands.getSession(sessionId);

@@ -398,7 +398,7 @@ export interface BranchSessionResponse {
 /** Payload emitted by the `session-status-changed` Tauri event. */
 export interface SessionStatusPayload {
   sessionId: string;
-  status: string;
+  status: SessionStatus;
   errorMessage?: string | null;
   completionReason?: string | null;
   branchId?: string;

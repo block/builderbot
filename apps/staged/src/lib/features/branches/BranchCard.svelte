@@ -572,7 +572,8 @@
           return;
         }
 
-        // Clear push/force-push session tracking on completion
+        // Clear push/force-push session tracking on terminal status only
+        // (guarded by the outer completed/error/cancelled check above)
         if (eventSessionId === pushSessionId) {
           pushSessionId = null;
         }

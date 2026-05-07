@@ -53,7 +53,7 @@
         if (s.id === sessionId) {
           return {
             ...s,
-            status: status as SessionStatus,
+            status,
             errorMessage: errorMessage ?? s.errorMessage,
             updatedAt: Date.now(),
           };

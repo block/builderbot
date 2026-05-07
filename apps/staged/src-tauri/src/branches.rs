@@ -213,6 +213,26 @@ pub(crate) fn run_workspace_git(
     blox::ws_exec(workspace_name, &borrowed)
 }
 
+/// Execute a shell script inside a Blox workspace via `sh -c`.
+///
+/// Positional arguments are passed as `$1`, `$2`, etc. This allows batching
+/// multiple git commands into a single `ws_exec` round-trip.
+pub(crate) fn run_workspace_shell(
+    workspace_name: &str,
+    script: &str,
+    args: &[&str],
+) -> Result<String, blox::BloxError> {
+    let mut owned = Vec::<String>::with_capacity(3 + args.len());
+    owned.push("sh".to_string());
+    owned.push("-c".to_string());
+    owned.push(script.to_string());
+    // $0 placeholder (conventional for sh -c)
+    owned.push("_".to_string());
+    owned.extend(args.iter().map(|arg| (*arg).to_string()));
+    let borrowed = owned.iter().map(String::as_str).collect::<Vec<_>>();
+    blox::ws_exec(workspace_name, &borrowed)
+}
+
 pub(crate) fn run_workspace_git_bytes(
     workspace_name: &str,
     repo_subpath: Option<&str>,

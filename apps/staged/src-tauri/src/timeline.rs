@@ -35,12 +35,13 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             &branch.branch_name,
             &branch.base_branch,
         );
-        git_state = Some(git::compute_branch_git_state(
+        let resolved_path = resolve_repo_path(ws_name, repo_subpath.as_deref())?;
+        git_state = Some(git::compute_branch_git_state_batched(
             &cache_key,
-            |args| {
-                branches::run_workspace_git(ws_name, repo_subpath.as_deref(), args)
-                    .map_err(|e| e.to_string())
+            |script, args| {
+                branches::run_workspace_shell(ws_name, script, args).map_err(|e| e.to_string())
             },
+            &resolved_path,
             &branch.branch_name,
             &branch.base_branch,
             git::FetchMode::Ttl,
@@ -261,6 +262,15 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
     })
 }
 
+fn resolve_repo_path(ws_name: &str, repo_subpath: Option<&str>) -> Result<String, String> {
+    match repo_subpath.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(subpath) => {
+            branches::resolve_workspace_repo_path(ws_name, subpath).map_err(|e| e.to_string())
+        }
+        None => Ok(".".to_string()),
+    }
+}
+
 fn remote_git_state_cache_key(
     workspace_name: &str,
     repo_subpath: Option<&str>,
@@ -309,18 +319,19 @@ pub async fn pull_branch_ff_only(
 
         if let Some(ref ws_name) = branch.workspace_name {
             let repo_subpath = branches::resolve_branch_workspace_subpath(&store, &branch)?;
+            let resolved_path = resolve_repo_path(ws_name, repo_subpath.as_deref())?;
             let cache_key = remote_git_state_cache_key(
                 ws_name,
                 repo_subpath.as_deref(),
                 &branch.branch_name,
                 &branch.base_branch,
             );
-            let state = git::compute_branch_git_state(
+            let state = git::compute_branch_git_state_batched(
                 &cache_key,
-                |args| {
-                    branches::run_workspace_git(ws_name, repo_subpath.as_deref(), args)
-                        .map_err(|e| e.to_string())
+                |script, args| {
+                    branches::run_workspace_shell(ws_name, script, args).map_err(|e| e.to_string())
                 },
+                &resolved_path,
                 &branch.branch_name,
                 &branch.base_branch,
                 git::FetchMode::Force,
@@ -489,18 +500,19 @@ pub async fn discard_worktree_changes(
 
         if let Some(ref ws_name) = branch.workspace_name {
             let repo_subpath = branches::resolve_branch_workspace_subpath(&store, &branch)?;
+            let resolved_path = resolve_repo_path(ws_name, repo_subpath.as_deref())?;
             let cache_key = remote_git_state_cache_key(
                 ws_name,
                 repo_subpath.as_deref(),
                 &branch.branch_name,
                 &branch.base_branch,
             );
-            let state = git::compute_branch_git_state(
+            let state = git::compute_branch_git_state_batched(
                 &cache_key,
-                |args| {
-                    branches::run_workspace_git(ws_name, repo_subpath.as_deref(), args)
-                        .map_err(|e| e.to_string())
+                |script, args| {
+                    branches::run_workspace_shell(ws_name, script, args).map_err(|e| e.to_string())
                 },
+                &resolved_path,
                 &branch.branch_name,
                 &branch.base_branch,
                 git::FetchMode::Never,

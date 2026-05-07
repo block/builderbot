@@ -479,12 +479,7 @@ impl WorktreeChangePaths {
     }
 }
 
-fn is_conflicted_status(x: char, y: char) -> bool {
-    matches!(
-        (x, y),
-        ('D', 'D') | ('A', 'U') | ('U', 'D') | ('U', 'A') | ('D', 'U') | ('A', 'A') | ('U', 'U')
-    )
-}
+use super::status_parse::is_conflicted_status;
 
 fn literal_pathspec(path: &str) -> String {
     format!(":(literal){path}")
@@ -528,6 +523,8 @@ pub fn parse_worktree_status_paths(output: &str) -> WorktreeChangePaths {
         if matches!(x, 'A' | 'C') || matches!(y, 'A' | 'C') {
             remove_paths.push(path);
         } else if let Some(original) = original_path {
+            // Display-only: this arrow format is used for the WorktreeChangesPreview
+            // shown to the user. It is never passed back to git commands as a pathspec.
             revert_paths.push(format!("{original} -> {path}"));
         } else {
             revert_paths.push(path);

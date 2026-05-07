@@ -8,6 +8,7 @@ mod refs;
 mod state;
 #[cfg(test)]
 mod state_tests;
+mod status_parse;
 mod types;
 mod worktree;
 

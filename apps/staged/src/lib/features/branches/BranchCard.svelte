@@ -825,8 +825,12 @@
   }
 
   async function confirmForcePush() {
+    if (commandPipelinePending || branchSessionBusy) {
+      // Another operation is in progress — keep the dialog open so the user
+      // understands why the action didn't proceed.
+      return;
+    }
     showForcePushDialog = false;
-    if (commandPipelinePending || branchSessionBusy) return;
     commandPipelinePending = true;
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
     const provider = getPreferredAgent(agents) ?? undefined;

@@ -1,5 +1,6 @@
 use super::cli::{self, GitError};
 use super::refs::{branch_name_without_origin, origin_ref_for_branch};
+use super::status_parse::is_conflicted_status;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
@@ -170,24 +171,36 @@ where
     }
 
     let base_refspec = refspec_for(base_branch);
-    if let Err(error) = run_git(&["fetch", "--prune", "origin", base_refspec.as_str()]) {
-        return RefreshOutcome {
-            fetch: FetchGitState {
-                status: FetchStatus::Failed,
-                fetched_at: previous.map(|entry| entry.fetched_at),
-                error: Some(error.trim().to_string()),
-            },
-            upstream_known_missing: false,
-        };
-    }
-
-    let mut upstream_known_missing = false;
     let branch_refspec = refspec_for(branch_name);
+    let mut upstream_known_missing = false;
+
+    // Fetch both refspecs in a single network call when they differ.
     if branch_refspec != base_refspec {
-        if let Err(error) = run_git(&["fetch", "--prune", "origin", branch_refspec.as_str()]) {
-            if is_missing_remote_ref(&error) {
+        match run_git(&[
+            "fetch",
+            "--prune",
+            "origin",
+            base_refspec.as_str(),
+            branch_refspec.as_str(),
+        ]) {
+            Err(error) if is_missing_remote_ref(&error) => {
+                // The branch refspec is missing on the remote. Re-fetch with
+                // just the base refspec so we still get base branch updates.
+                if let Err(base_err) =
+                    run_git(&["fetch", "--prune", "origin", base_refspec.as_str()])
+                {
+                    return RefreshOutcome {
+                        fetch: FetchGitState {
+                            status: FetchStatus::Failed,
+                            fetched_at: previous.map(|entry| entry.fetched_at),
+                            error: Some(base_err.trim().to_string()),
+                        },
+                        upstream_known_missing: false,
+                    };
+                }
                 upstream_known_missing = true;
-            } else {
+            }
+            Err(error) => {
                 return RefreshOutcome {
                     fetch: FetchGitState {
                         status: FetchStatus::Failed,
@@ -197,7 +210,17 @@ where
                     upstream_known_missing: false,
                 };
             }
+            Ok(_) => {}
         }
+    } else if let Err(error) = run_git(&["fetch", "--prune", "origin", base_refspec.as_str()]) {
+        return RefreshOutcome {
+            fetch: FetchGitState {
+                status: FetchStatus::Failed,
+                fetched_at: previous.map(|entry| entry.fetched_at),
+                error: Some(error.trim().to_string()),
+            },
+            upstream_known_missing: false,
+        };
     }
 
     if let Ok(mut cache) = fetch_cache().lock() {
@@ -335,13 +358,6 @@ where
         sha,
         commits_since_fork,
     }
-}
-
-fn is_conflicted_status(x: char, y: char) -> bool {
-    matches!(
-        (x, y),
-        ('D', 'D') | ('A', 'U') | ('U', 'D') | ('U', 'A') | ('D', 'U') | ('A', 'A') | ('U', 'U')
-    )
 }
 
 fn compute_worktree_state<F>(run_git: &F) -> WorktreeGitState

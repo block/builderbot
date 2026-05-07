@@ -384,24 +384,6 @@
     if (!note) return null;
     if (!note.suggestedNextCommitStep && !note.suggestedNextNoteStep) return null;
 
-    if (hasActiveSessions(timeline)) return null;
-
-    // Check this note is the latest completed item using the same approach
-    // as suggestedPrefill: collect all timestamps and compare.
-    const noteTs = Math.floor((note.completedAt ?? note.createdAt) / 1000);
-    const timestamps: number[] = [];
-    for (const c of timeline.commits) {
-      if (c.sha) timestamps.push(c.timestamp);
-    }
-    for (const n of timeline.notes) {
-      if (n.id !== note.id) timestamps.push(Math.floor((n.completedAt ?? n.createdAt) / 1000));
-    }
-    for (const r of timeline.reviews) {
-      if (r.isAuto) continue;
-      timestamps.push(Math.floor((r.completedAt ?? r.createdAt) / 1000));
-    }
-    if (timestamps.some((ts) => ts > noteTs)) return null;
-
     return {
       commitStep: note.suggestedNextCommitStep,
       noteStep: note.suggestedNextNoteStep,

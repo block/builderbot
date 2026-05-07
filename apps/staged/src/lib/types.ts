@@ -178,6 +178,44 @@ export interface BranchTimeline {
   notes: NoteTimelineItem[];
   reviews: ReviewTimelineItem[];
   images: ImageTimelineItem[];
+  gitState?: BranchGitState | null;
+}
+
+export type UpstreamRelation = 'missing' | 'inSync' | 'localAhead' | 'originAhead' | 'diverged';
+
+export type FetchStatus = 'fresh' | 'stale' | 'failed';
+
+export interface BranchGitState {
+  headSha: string | null;
+  currentBranch: string | null;
+  detachedHead: boolean;
+  expectedBranchMatches: boolean;
+  upstream: {
+    ref: string;
+    exists: boolean;
+    sha: string | null;
+    relation: UpstreamRelation;
+    ahead: number;
+    behind: number;
+    mergeBaseSha: string | null;
+  };
+  base: {
+    ref: string;
+    sha: string | null;
+    commitsSinceFork: number;
+  };
+  worktree: {
+    dirty: boolean;
+    staged: number;
+    unstaged: number;
+    untracked: number;
+    conflicted: number;
+  };
+  fetch: {
+    status: FetchStatus;
+    fetchedAt: number | null;
+    error: string | null;
+  };
 }
 
 export interface Image {

@@ -191,6 +191,17 @@ fn base_branch_name(branch: &store::Branch) -> &str {
     git::branch_name_without_origin(&branch.base_branch)
 }
 
+/// Determine the remote ref to rebase onto based on the `target` parameter.
+///
+/// - `None` or `Some("base")` → base branch name (e.g. `main`)
+/// - `Some("origin")` → the branch's own name (e.g. `feature-xyz`)
+fn rebase_ref_for_target<'a>(branch: &'a store::Branch, target: Option<&str>) -> String {
+    match target {
+        Some("origin") => branch.branch_name.clone(),
+        _ => base_branch_name(branch).to_string(),
+    }
+}
+
 fn commit_pipeline_prompt(kind: &PipelineKind) -> &'static str {
     match kind {
         PipelineKind::Rebase => "Rebase branch",
@@ -349,6 +360,7 @@ async fn start_or_queue_commit_pipeline_for_branch(
     branch_id: String,
     kind: PipelineKind,
     provider: Option<String>,
+    target: Option<String>,
 ) -> Result<String, String> {
     let prompt = commit_pipeline_prompt(&kind);
 
@@ -361,15 +373,12 @@ async fn start_or_queue_commit_pipeline_for_branch(
         .is_empty();
 
     if branch_has_running_session || branch_has_queued_session {
-        // Only need the branch model (for base_branch) to build pipeline steps.
-        // Defer the full context resolution (worktree lookup, remote path
-        // resolution) until the session actually starts running.
         let branch = store
             .get_branch(&branch_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-        let base_branch = base_branch_name(&branch);
-        let steps = build_commit_pipeline_steps(&kind, base_branch);
+        let rebase_ref = rebase_ref_for_target(&branch, target.as_deref());
+        let steps = build_commit_pipeline_steps(&kind, &rebase_ref);
         let pipeline = PipelineExecution::from_steps(&steps).with_kind(kind);
         let mut session = store::Session::new_queued(prompt);
         if let Some(ref p) = provider {
@@ -384,11 +393,9 @@ async fn start_or_queue_commit_pipeline_for_branch(
         return Ok(session.id);
     }
 
-    // Resolve the full pipeline context (working directory, remote paths)
-    // only when the session will run immediately.
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
-    let base_branch = base_branch_name(&ctx.branch);
-    let steps = build_commit_pipeline_steps(&kind, base_branch);
+    let rebase_ref = rebase_ref_for_target(&ctx.branch, target.as_deref());
+    let steps = build_commit_pipeline_steps(&kind, &rebase_ref);
 
     start_running_commit_pipeline_for_branch(
         ctx,
@@ -1060,12 +1067,12 @@ pub async fn push_branch(
     )
 }
 
-/// Rebase a branch onto its base branch via a pipeline.
+/// Rebase a branch via a pipeline.
 ///
-/// Fetches the latest base branch, then runs `git rebase --signoff origin/{base}`.
-/// If the rebase succeeds (no conflicts), the pipeline completes without AI.
-/// If the rebase fails, AI is handed off to recover and resolve conflicts when
-/// present.
+/// When `target` is `None` or `"base"`, rebases onto `origin/{base_branch}`
+/// (the default behaviour used by the base-moved row and the `…` menu).
+/// When `target` is `"origin"`, rebases onto `origin/{branch_name}` so that
+/// the local branch incorporates remote-only commits (used by the diverged row).
 #[tauri::command(rename_all = "camelCase")]
 pub async fn rebase_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -1073,6 +1080,7 @@ pub async fn rebase_branch(
     app_handle: tauri::AppHandle,
     branch_id: String,
     provider: Option<String>,
+    target: Option<String>,
 ) -> Result<String, String> {
     let store = get_store(&store)?;
     start_or_queue_commit_pipeline_for_branch(
@@ -1082,6 +1090,7 @@ pub async fn rebase_branch(
         branch_id,
         PipelineKind::Rebase,
         provider,
+        target,
     )
     .await
 }
@@ -1109,6 +1118,7 @@ pub async fn squash_commits(
         branch_id,
         PipelineKind::Squash,
         provider,
+        None,
     )
     .await
 }

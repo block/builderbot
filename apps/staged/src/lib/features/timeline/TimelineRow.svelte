@@ -7,6 +7,7 @@
 <script lang="ts">
   import {
     GitCommitVertical,
+    FileDiff,
     FileText,
     FileSearch,
     Image as ImageLucide,
@@ -14,6 +15,9 @@
     Trash2,
     AlertTriangle,
     Clock,
+    GitBranch,
+    GitMerge,
+    ChevronsDown,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
 
@@ -31,6 +35,13 @@
     | 'queued-review'
     | 'failed-review'
     | 'image'
+    | 'git-info'
+    | 'git-warning'
+    | 'git-merge'
+    | 'git-merge-warning'
+    | 'git-pull'
+    | 'git-push'
+    | 'git-diff'
     | 'revalidating'
     | 'provisioning'
     | 'load-error';
@@ -67,6 +78,20 @@
     onRetryClick?: () => void;
     onStartClick?: () => void;
     onResumeClick?: () => void;
+    onPullClick?: () => void;
+    pullDisabledReason?: string;
+    onPushClick?: () => void;
+    pushDisabledReason?: string;
+    onRebaseClick?: () => void;
+    rebaseDisabledReason?: string;
+    onForcePushClick?: () => void;
+    forcePushDisabledReason?: string;
+    onViewDiffClick?: () => void;
+    onCommitChangesClick?: () => void;
+    commitChangesDisabledReason?: string;
+    onDiscardChangesClick?: () => void;
+    discardChangesDisabledReason?: string;
+    showConnector?: boolean;
     /** Full commit SHA for the context menu "Copy SHA" action. */
     commitSha?: string;
     /** Hashtag reference token (e.g. "#commit:abc123") for "New session referring to this". */
@@ -92,6 +117,20 @@
     onRetryClick,
     onStartClick,
     onResumeClick,
+    onPullClick,
+    pullDisabledReason,
+    onPushClick,
+    pushDisabledReason,
+    onRebaseClick,
+    rebaseDisabledReason,
+    onForcePushClick,
+    forcePushDisabledReason,
+    onViewDiffClick,
+    onCommitChangesClick,
+    commitChangesDisabledReason,
+    onDiscardChangesClick,
+    discardChangesDisabledReason,
+    showConnector = true,
     commitSha,
     hashtagRef,
     onContextMenu,
@@ -110,6 +149,15 @@
       type === 'failed-review'
   );
   let isImage = $derived(type === 'image');
+  let isGitState = $derived(
+    type === 'git-info' ||
+      type === 'git-warning' ||
+      type === 'git-merge' ||
+      type === 'git-merge-warning' ||
+      type === 'git-pull' ||
+      type === 'git-push' ||
+      type === 'git-diff'
+  );
   let isQueued = $derived(
     type === 'queued-commit' || type === 'queued-note' || type === 'queued-review'
   );
@@ -165,6 +213,41 @@
     onResumeClick?.();
   }
 
+  function handlePullClick(e: MouseEvent) {
+    e.stopPropagation();
+    onPullClick?.();
+  }
+
+  function handlePushClick(e: MouseEvent) {
+    e.stopPropagation();
+    onPushClick?.();
+  }
+
+  function handleRebaseClick(e: MouseEvent) {
+    e.stopPropagation();
+    onRebaseClick?.();
+  }
+
+  function handleForcePushClick(e: MouseEvent) {
+    e.stopPropagation();
+    onForcePushClick?.();
+  }
+
+  function handleViewDiffClick(e: MouseEvent) {
+    e.stopPropagation();
+    onViewDiffClick?.();
+  }
+
+  function handleCommitChangesClick(e: MouseEvent) {
+    e.stopPropagation();
+    onCommitChangesClick?.();
+  }
+
+  function handleDiscardChangesClick(e: MouseEvent) {
+    e.stopPropagation();
+    onDiscardChangesClick?.();
+  }
+
   // ── Context menu ────────────────────────────────────────────────────
   let hasContextMenu = $derived(!!commitSha || !!hashtagRef);
 
@@ -183,6 +266,7 @@
   class:pending={isPending}
   class:failed={isFailed}
   class:clickable={isClickable}
+  class:git-state={isGitState}
   class:compact={type === 'revalidating' || type === 'load-error'}
   onclick={handleRowClick}
   oncontextmenu={handleContextMenu}
@@ -196,6 +280,8 @@
         type === 'generating-review' ||
         type === 'queued-review'}
       class:image-icon={isImage}
+      class:branch-icon={isGitState}
+      class:warning-icon={type === 'git-warning' || type === 'git-merge-warning'}
       class:failed-icon={isFailed}
     >
       {#if isQueued}
@@ -204,6 +290,16 @@
         <Spinner size={12} />
       {:else if isFailed}
         <AlertTriangle size={12} />
+      {:else if type === 'git-warning'}
+        <AlertTriangle size={12} />
+      {:else if type === 'git-merge' || type === 'git-merge-warning'}
+        <GitMerge size={12} />
+      {:else if type === 'git-pull'}
+        <ChevronsDown size={12} />
+      {:else if type === 'git-push'}
+        <ChevronsDown size={12} />
+      {:else if type === 'git-diff'}
+        <FileDiff size={12} />
       {:else if type === 'commit'}
         <GitCommitVertical size={12} />
       {:else if isNote}
@@ -212,9 +308,11 @@
         <FileSearch size={12} />
       {:else if isImage}
         <ImageLucide size={12} />
+      {:else if isGitState}
+        <GitBranch size={12} />
       {/if}
     </div>
-    {#if !isLast}
+    {#if showConnector && !isLast}
       <div class="timeline-line"></div>
     {/if}
   </div>
@@ -254,7 +352,22 @@
     </div>
     <div
       class="timeline-actions"
-      class:always-visible={!!onRetryClick || !!onStartClick || !!onResumeClick}
+      class:always-visible={!!onRetryClick ||
+        !!onStartClick ||
+        !!onResumeClick ||
+        !!onPullClick ||
+        !!pullDisabledReason ||
+        !!onPushClick ||
+        !!pushDisabledReason ||
+        !!onRebaseClick ||
+        !!rebaseDisabledReason ||
+        !!onForcePushClick ||
+        !!forcePushDisabledReason ||
+        !!onViewDiffClick ||
+        !!onCommitChangesClick ||
+        !!commitChangesDisabledReason ||
+        !!onDiscardChangesClick ||
+        !!discardChangesDisabledReason}
     >
       {#if onStartClick}
         <button class="action-btn start-btn" onclick={handleStartClick} title="Start">
@@ -269,6 +382,71 @@
       {#if onResumeClick}
         <button class="action-btn resume-btn" onclick={handleResumeClick} title="Resume session">
           Resume
+        </button>
+      {/if}
+      {#if onPullClick || pullDisabledReason}
+        <button
+          class="action-btn resume-btn"
+          onclick={handlePullClick}
+          disabled={!!pullDisabledReason}
+          title={pullDisabledReason ?? 'Pull'}
+        >
+          Pull
+        </button>
+      {/if}
+      {#if onPushClick || pushDisabledReason}
+        <button
+          class="action-btn resume-btn"
+          onclick={handlePushClick}
+          disabled={!!pushDisabledReason}
+          title={pushDisabledReason ?? 'Push'}
+        >
+          Push
+        </button>
+      {/if}
+      {#if onForcePushClick || forcePushDisabledReason}
+        <button
+          class="action-btn danger-btn"
+          onclick={handleForcePushClick}
+          disabled={!!forcePushDisabledReason}
+          title={forcePushDisabledReason ?? 'Force push local branch to origin'}
+        >
+          Force Push
+        </button>
+      {/if}
+      {#if onRebaseClick || rebaseDisabledReason}
+        <button
+          class="action-btn resume-btn"
+          onclick={handleRebaseClick}
+          disabled={!!rebaseDisabledReason}
+          title={rebaseDisabledReason ?? 'Rebase'}
+        >
+          Rebase
+        </button>
+      {/if}
+      {#if onViewDiffClick}
+        <button class="action-btn resume-btn" onclick={handleViewDiffClick} title="View diff">
+          Diff
+        </button>
+      {/if}
+      {#if onCommitChangesClick || commitChangesDisabledReason}
+        <button
+          class="action-btn resume-btn"
+          onclick={handleCommitChangesClick}
+          disabled={!!commitChangesDisabledReason}
+          title={commitChangesDisabledReason ?? 'Commit changes'}
+        >
+          Commit
+        </button>
+      {/if}
+      {#if onDiscardChangesClick || discardChangesDisabledReason}
+        <button
+          class="action-btn resume-btn"
+          onclick={handleDiscardChangesClick}
+          disabled={!!discardChangesDisabledReason}
+          title={discardChangesDisabledReason ?? 'Discard changes'}
+        >
+          Discard
         </button>
       {/if}
       {#if hasSession && !onStartClick && !isQueued}
@@ -339,6 +517,13 @@
     margin-top: 6px;
   }
 
+  .timeline-row.git-state .timeline-line {
+    flex: none;
+    height: 6px;
+    min-height: 0;
+    margin-top: 6px;
+  }
+
   .timeline-content {
     flex: 1;
     display: flex;
@@ -380,6 +565,18 @@
   .timeline-icon.image-icon {
     color: var(--image-color);
     background-color: var(--image-bg);
+    border-color: transparent;
+  }
+
+  .timeline-icon.branch-icon {
+    color: var(--text-muted);
+    background-color: var(--bg-hover);
+    border-color: transparent;
+  }
+
+  .timeline-icon.warning-icon {
+    color: var(--ui-danger);
+    background-color: var(--ui-danger-bg);
     border-color: transparent;
   }
 
@@ -443,6 +640,29 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     line-height: 1.4;
+  }
+
+  .timeline-row.git-state .timeline-title {
+    color: var(--text-muted);
+    font-weight: 400;
+  }
+
+  .timeline-title :global(.git-ref-badge) {
+    display: inline;
+    padding: 1px 6px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 999px;
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    font: inherit;
+    font-weight: 600;
+    line-height: inherit;
+    vertical-align: baseline;
+  }
+
+  .timeline-row.git-state .timeline-title :global(.git-ref-badge) {
+    color: var(--text-muted);
+    font-weight: inherit;
   }
 
   .skeleton-title {
@@ -531,7 +751,8 @@
     background: var(--bg-hover);
   }
 
-  .delete-btn:disabled {
+  .delete-btn:disabled,
+  .action-btn:disabled {
     opacity: 0.3;
     cursor: not-allowed;
   }
@@ -559,6 +780,21 @@
     border-color: var(--border-muted);
     color: var(--text-primary);
     background: var(--bg-hover);
+  }
+
+  .danger-btn {
+    width: auto;
+    padding: 0 8px;
+    font-size: var(--size-xs);
+    font-weight: 500;
+    border: 1px solid var(--ui-danger-bg, var(--ui-danger));
+    border-radius: 6px;
+    color: var(--ui-danger);
+  }
+
+  .danger-btn:not(:disabled):hover {
+    background: var(--ui-danger-bg, rgba(255, 59, 48, 0.1));
+    border-color: var(--ui-danger);
   }
 
   .start-btn {

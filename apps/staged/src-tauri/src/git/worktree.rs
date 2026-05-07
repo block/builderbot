@@ -463,6 +463,119 @@ pub fn reset_to_commit(worktree: &Path, commit_sha: &str) -> Result<(), GitError
     Ok(())
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeChangePaths {
+    pub revert_paths: Vec<String>,
+    pub remove_paths: Vec<String>,
+    pub conflicted_paths: Vec<String>,
+    pub reset_required: bool,
+}
+
+impl WorktreeChangePaths {
+    pub fn is_empty(&self) -> bool {
+        self.revert_paths.is_empty()
+            && self.remove_paths.is_empty()
+            && self.conflicted_paths.is_empty()
+    }
+}
+
+fn is_conflicted_status(x: char, y: char) -> bool {
+    matches!(
+        (x, y),
+        ('D', 'D') | ('A', 'U') | ('U', 'D') | ('U', 'A') | ('D', 'U') | ('A', 'A') | ('U', 'U')
+    )
+}
+
+fn literal_pathspec(path: &str) -> String {
+    format!(":(literal){path}")
+}
+
+/// Parse `git status --porcelain=1 -z --untracked-files=all` into paths that
+/// will be reverted by reset and paths that must be removed with clean.
+pub fn parse_worktree_status_paths(output: &str) -> WorktreeChangePaths {
+    let mut revert_paths = Vec::new();
+    let mut remove_paths = Vec::new();
+    let mut conflicted_paths = Vec::new();
+    let mut reset_required = false;
+
+    let mut parts = output.split('\0').filter(|part| !part.is_empty());
+    while let Some(record) = parts.next() {
+        let mut chars = record.chars();
+        let x = chars.next().unwrap_or(' ');
+        let y = chars.next().unwrap_or(' ');
+        let path = record.get(3..).unwrap_or("").to_string();
+        if path.is_empty() {
+            continue;
+        }
+
+        let original_path = if matches!(x, 'R' | 'C') || matches!(y, 'R' | 'C') {
+            parts.next().map(str::to_string)
+        } else {
+            None
+        };
+
+        if x == '?' && y == '?' {
+            remove_paths.push(path);
+            continue;
+        }
+
+        if is_conflicted_status(x, y) {
+            conflicted_paths.push(path);
+            continue;
+        }
+
+        reset_required = true;
+        if matches!(x, 'A' | 'C') || matches!(y, 'A' | 'C') {
+            remove_paths.push(path);
+        } else if let Some(original) = original_path {
+            revert_paths.push(format!("{original} -> {path}"));
+        } else {
+            revert_paths.push(path);
+        }
+    }
+
+    revert_paths.sort();
+    remove_paths.sort();
+    conflicted_paths.sort();
+
+    WorktreeChangePaths {
+        revert_paths,
+        remove_paths,
+        conflicted_paths,
+        reset_required,
+    }
+}
+
+pub fn list_worktree_change_paths(worktree: &Path) -> Result<WorktreeChangePaths, GitError> {
+    let output = cli::run(
+        worktree,
+        &["status", "--porcelain=1", "-z", "--untracked-files=all"],
+    )?;
+    Ok(parse_worktree_status_paths(&output))
+}
+
+pub fn discard_worktree_changes(
+    worktree: &Path,
+    changes: &WorktreeChangePaths,
+) -> Result<(), GitError> {
+    if changes.reset_required {
+        cli::run(worktree, &["reset", "--hard", "HEAD"])?;
+    }
+
+    if !changes.remove_paths.is_empty() {
+        let pathspecs = changes
+            .remove_paths
+            .iter()
+            .map(|path| literal_pathspec(path))
+            .collect::<Vec<_>>();
+        let mut args = vec!["clean", "-fd", "--"];
+        args.extend(pathspecs.iter().map(String::as_str));
+        cli::run(worktree, &args)?;
+    }
+
+    Ok(())
+}
+
 /// Get the parent commit SHA of a given commit.
 /// Returns None if the commit has no parent (initial commit).
 pub fn get_parent_commit(worktree: &Path, commit_sha: &str) -> Result<Option<String>, GitError> {
@@ -710,5 +823,40 @@ mod tests {
 
         assert_eq!(projects_root, "projects");
         assert_eq!(project_dir, "project-123");
+    }
+
+    #[test]
+    fn parses_worktree_status_paths_for_preview_and_discard() {
+        let status = " M tracked.txt\0A  staged-new.txt\0?? untracked.txt\0UU conflicted.txt\0";
+
+        let paths = parse_worktree_status_paths(status);
+
+        assert_eq!(paths.revert_paths, vec!["tracked.txt"]);
+        assert_eq!(paths.remove_paths, vec!["staged-new.txt", "untracked.txt"]);
+        assert_eq!(paths.conflicted_paths, vec!["conflicted.txt"]);
+        assert!(paths.reset_required);
+    }
+
+    #[test]
+    fn discard_worktree_changes_resets_tracked_and_removes_new_files() {
+        let repo = crate::test_utils::TempGitRepo::new();
+        repo.write_file("tracked.txt", "base\n");
+        repo.commit("base");
+
+        repo.write_file("tracked.txt", "modified\n");
+        repo.write_file("staged-new.txt", "new\n");
+        repo.run_git(&["add", "staged-new.txt"]);
+        repo.write_file("untracked.txt", "untracked\n");
+
+        let changes = list_worktree_change_paths(repo.path()).unwrap();
+        discard_worktree_changes(repo.path(), &changes).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("tracked.txt")).unwrap(),
+            "base\n"
+        );
+        assert!(!repo.path().join("staged-new.txt").exists());
+        assert!(!repo.path().join("untracked.txt").exists());
+        assert!(repo.run_git(&["status", "--porcelain"]).trim().is_empty());
     }
 }

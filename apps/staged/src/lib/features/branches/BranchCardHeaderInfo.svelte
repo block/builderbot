@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { GitBranch } from 'lucide-svelte';
+  import { AlertTriangle, GitBranch } from 'lucide-svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import type { ProjectRepo } from '../../types';
 
@@ -7,9 +7,10 @@
     branchName: string;
     repoLabel?: ProjectRepo | null;
     secondaryLabel?: string | null;
+    warning?: string | null;
   }
 
-  let { branchName, repoLabel = null, secondaryLabel = null }: Props = $props();
+  let { branchName, repoLabel = null, secondaryLabel = null, warning = null }: Props = $props();
 </script>
 
 <div class="header-left">
@@ -22,6 +23,12 @@
     >
     <div class="header-meta">
       <span class="branch-name">{branchName}</span>
+      {#if warning}
+        <span class="branch-warning" title={warning}>
+          <AlertTriangle size={12} />
+          <span>{warning}</span>
+        </span>
+      {/if}
       {#if secondaryLabel}
         <span class="meta-separator" aria-hidden="true">&middot;</span>
         <GitBranch size={12} />
@@ -30,9 +37,17 @@
     </div>
   {:else}
     <span class="repo-name">{branchName}</span>
-    {#if secondaryLabel}
+    {#if secondaryLabel || warning}
       <div class="header-meta">
-        <span class="base-branch-name" title={secondaryLabel}>{secondaryLabel}</span>
+        {#if secondaryLabel}
+          <span class="base-branch-name" title={secondaryLabel}>{secondaryLabel}</span>
+        {/if}
+        {#if warning}
+          <span class="branch-warning" title={warning}>
+            <AlertTriangle size={12} />
+            <span>{warning}</span>
+          </span>
+        {/if}
       </div>
     {/if}
   {/if}
@@ -79,6 +94,22 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .branch-warning {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+    max-width: 180px;
+    color: var(--ui-warning, var(--status-modified));
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .branch-warning span {
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .base-branch-name {

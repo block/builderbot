@@ -191,6 +191,9 @@
     font-size: var(--size-sm);
     color: var(--text-muted);
     line-height: 1.5;
+    max-height: 42vh;
+    overflow: auto;
+    white-space: pre-line;
   }
 
   .text-content .error-text {

@@ -49,6 +49,7 @@
     SmartDiffAnnotation,
     Span,
   } from '../../types';
+  import type { DiffScope } from '../../commands';
   import { findFreshAutoReview, getSession } from '../../commands';
   import * as commands from '../../api/commands';
   import {
@@ -73,7 +74,7 @@
     projectId?: string | null;
     /** Optional — for branch scope, resolved automatically. */
     commitSha?: string;
-    scope?: 'branch' | 'commit';
+    scope?: DiffScope;
     /** When set, opens a specific existing review by ID instead of searching by triple. */
     reviewId?: string;
     /** Label for the before pane header. */
@@ -143,15 +144,15 @@
   // be needed to keep the effect firing on context switches.
   $effect(() => {
     const sha = diffViewer.state.commitSha;
-    if (sha && !reviewHandle && !readonly) {
+    if (sha && !reviewHandle && !readonly && activeScope !== 'worktree') {
       // svelte-ignore state_referenced_locally
-      reviewHandle = createReviewState(branchId, sha, activeScope, activeReviewId);
+      reviewHandle = createReviewState(branchId, sha, reviewableScope(), activeReviewId);
     }
   });
 
   // Context switcher state
   // svelte-ignore state_referenced_locally
-  let activeScope = $state<'branch' | 'commit'>(scope);
+  let activeScope = $state<DiffScope>(scope);
   // svelte-ignore state_referenced_locally
   let activeCommitSha = $state<string | undefined>(commitSha);
   // svelte-ignore state_referenced_locally
@@ -166,15 +167,21 @@
   /** Tracks the active auto-review reload promise so it can be ignored on stale switches. */
   let contextSwitchGeneration = 0;
 
+  function reviewableScope(): 'branch' | 'commit' {
+    return activeScope === 'worktree' ? 'branch' : activeScope;
+  }
+
   /** Label for the current context shown in the dropdown trigger. */
   let contextLabel = $derived(
-    activeScope === 'branch'
-      ? 'All changes'
-      : (commits?.find((c) => c.sha === activeCommitSha)?.subject ?? 'Commit')
+    activeScope === 'worktree'
+      ? 'Uncommitted changes'
+      : activeScope === 'branch'
+        ? 'All changes'
+        : (commits?.find((c) => c.sha === activeCommitSha)?.subject ?? 'Commit')
   );
 
   /** Whether the context switcher should be shown. */
-  let showContextSwitcher = $derived((commits?.length ?? 0) > 0);
+  let showContextSwitcher = $derived(activeScope !== 'worktree' && (commits?.length ?? 0) > 0);
 
   async function switchDiffContext(newScope: 'branch' | 'commit', newCommitSha?: string) {
     showContextDropdown = false;
@@ -420,7 +427,7 @@
     const prompt = buildCommentPrompt(comment, mode as 'note' | 'commit');
     const launchContext = {
       source: 'diff_viewer' as const,
-      scope: activeScope,
+      scope: reviewableScope(),
       commitSha: diffViewer.state.commitSha ?? '',
       reviewId: activeReviewId ?? null,
     };
@@ -500,7 +507,7 @@
     showNewSessionModal = false;
     const launchContext = {
       source: 'diff_viewer' as const,
-      scope: activeScope,
+      scope: reviewableScope(),
       commitSha: diffViewer.state.commitSha ?? '',
       reviewId: activeReviewId ?? null,
     };
@@ -1167,7 +1174,7 @@
           {branchId}
           {projectId}
           commitSha={diffViewer.state.commitSha}
-          scope={activeScope}
+          scope={reviewableScope()}
           reviewId={activeReviewId}
           visibleCommentCount={currentComments.length}
           onStarted={onClose}

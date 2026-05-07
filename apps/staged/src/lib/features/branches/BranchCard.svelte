@@ -18,6 +18,7 @@
   import { subscribeDragDrop } from './dragDrop';
   import type {
     Branch,
+    BranchGitState,
     BranchTimeline as BranchTimelineData,
     HashtagItem,
     ProjectRepo,
@@ -51,6 +52,7 @@
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
+  import type { WorktreeChangesPreview } from '../../commands';
 
   interface Props {
     branch: Branch;
@@ -100,7 +102,10 @@
   let loading = $state(true);
   let revalidating = $state(false);
   let error = $state<string | null>(null);
+  let pullingOrigin = $state(false);
+  let discardingWorktreeChanges = $state(false);
   let showBranchDiff = $state(false);
+  let showWorktreeDiff = $state(false);
   let loadedTimelineKey = $state<string | null>(null);
   type TimelineFullReview = NonNullable<Awaited<ReturnType<typeof commands.getReview>>>;
   type TimelineReviewDetails = {
@@ -153,7 +158,13 @@
   );
 
   /** Empty timeline used during provisioning so the action buttons render. */
-  const emptyTimeline: BranchTimelineData = { commits: [], notes: [], reviews: [], images: [] };
+  const emptyTimeline: BranchTimelineData = {
+    commits: [],
+    notes: [],
+    reviews: [],
+    images: [],
+    gitState: null,
+  };
 
   // =========================================================================
   // Worktree setup progress (event-driven phases)
@@ -251,14 +262,17 @@
   let commandPipelinePending = $state(false);
   let branchSessionBusy = $derived(timeline ? hasActiveSessions(timeline) : false);
 
-  async function startBranchCommandPipeline(kind: 'rebase' | 'squash') {
+  async function startBranchCommandPipeline(
+    kind: 'rebase' | 'squash',
+    rebaseTarget?: 'base' | 'origin'
+  ) {
     if (commandPipelinePending || branchSessionBusy) return;
     commandPipelinePending = true;
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
     const provider = getPreferredAgent(agents) ?? undefined;
     try {
       if (kind === 'rebase') {
-        await commands.rebaseBranch(branch.id, provider);
+        await commands.rebaseBranch(branch.id, provider, rebaseTarget);
       } else {
         await commands.squashCommits(branch.id, provider);
       }
@@ -419,6 +433,7 @@
   let confirmDelete = $state<{
     title: string;
     message: string;
+    confirmLabel?: string;
     onConfirm: () => void;
   } | null>(null);
 
@@ -508,6 +523,26 @@
 
   /** Number of finalized commits on this branch. */
   let commitCount = $derived(timeline?.commits.filter((c) => c.sha).length ?? 0);
+
+  function gitIdentityWarning(state: BranchGitState | null | undefined): string | null {
+    if (!state) return null;
+    if (state.detachedHead) return 'Detached HEAD';
+    if (!state.expectedBranchMatches) {
+      return state.currentBranch ? `Checked out ${state.currentBranch}` : 'Wrong branch';
+    }
+    return null;
+  }
+
+  let branchIdentityWarning = $derived(gitIdentityWarning(timeline?.gitState));
+  let gitUnsafeActionsDisabled = $derived(!!branchIdentityWarning);
+  let branchCommandDisabledReason = $derived(
+    branchIdentityWarning ??
+      (commandPipelinePending
+        ? 'Command in progress'
+        : branchSessionBusy
+          ? 'Session in progress'
+          : null)
+  );
 
   // =========================================================================
   // PR button ref
@@ -751,6 +786,121 @@
       console.error('Failed to open review:', e);
       notifyError('Failed to open review', e);
     }
+  }
+
+  async function handlePullOrigin() {
+    if (pullingOrigin) return;
+    pullingOrigin = true;
+    try {
+      await commands.pullBranchFastForward(branch.id);
+      await loadTimeline();
+    } catch (e) {
+      notifyError('Pull failed', e);
+    } finally {
+      pullingOrigin = false;
+    }
+  }
+
+  let pushingOrigin = $state(false);
+
+  async function handlePushOrigin() {
+    if (pushingOrigin) return;
+    pushingOrigin = true;
+    const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
+    const provider = getPreferredAgent(agents) ?? undefined;
+    try {
+      await commands.pushBranch(branch.id, provider, false);
+      await loadTimeline();
+    } catch (e) {
+      notifyError('Push failed', e);
+    } finally {
+      pushingOrigin = false;
+    }
+  }
+
+  let showForcePushDialog = $state(false);
+
+  function handleForcePush() {
+    showForcePushDialog = true;
+  }
+
+  async function confirmForcePush() {
+    showForcePushDialog = false;
+    if (commandPipelinePending || branchSessionBusy) return;
+    commandPipelinePending = true;
+    const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
+    const provider = getPreferredAgent(agents) ?? undefined;
+    try {
+      await commands.pushBranch(branch.id, provider, true);
+      await loadTimeline();
+    } catch (e) {
+      notifyError('Force push failed', e);
+    } finally {
+      commandPipelinePending = false;
+    }
+  }
+
+  function formatDiscardPreview(preview: WorktreeChangesPreview): string {
+    const sections: string[] = [];
+    if (preview.revertPaths.length > 0) {
+      sections.push(
+        `Revert tracked changes:\n${preview.revertPaths.map((path) => `- ${path}`).join('\n')}`
+      );
+    }
+    if (preview.removePaths.length > 0) {
+      sections.push(
+        `Remove untracked/new files:\n${preview.removePaths.map((path) => `- ${path}`).join('\n')}`
+      );
+    }
+    return `This will discard uncommitted worktree changes.\n\n${sections.join('\n\n')}`;
+  }
+
+  async function handleDiscardWorktreeChanges() {
+    if (discardingWorktreeChanges) return;
+
+    let preview: WorktreeChangesPreview;
+    try {
+      preview = await commands.getWorktreeChangesPreview(branch.id);
+    } catch (e) {
+      notifyError('Could not inspect changes', e);
+      return;
+    }
+
+    if (preview.conflictedPaths.length > 0) {
+      alerts.show({
+        tone: 'error',
+        title: 'Conflicts need manual recovery',
+        message: preview.conflictedPaths.join('\n'),
+        durationMs: 0,
+      });
+      return;
+    }
+
+    if (preview.revertPaths.length === 0 && preview.removePaths.length === 0) {
+      await loadTimeline();
+      return;
+    }
+
+    const doDiscard = async () => {
+      confirmDelete = null;
+      discardingWorktreeChanges = true;
+      try {
+        await commands.discardWorktreeChanges(branch.id, preview);
+        commands.invalidateBranchTimeline(branch.id);
+        await loadTimeline();
+      } catch (e) {
+        notifyError('Discard failed', e);
+      } finally {
+        discardingWorktreeChanges = false;
+      }
+    };
+
+    confirmDelete = {
+      title: 'Discard Changes',
+      message: formatDiscardPreview(preview),
+      confirmLabel: 'Discard',
+      onConfirm: doDiscard,
+    };
   }
 
   function handleDeleteCommit(sha: string, sessionId?: string, opts?: { altKey: boolean }) {
@@ -1093,6 +1243,7 @@
         secondaryLabel={isRemote
           ? (branch.workspaceName ?? formatBaseBranch(branch.baseBranch))
           : formatBaseBranch(branch.baseBranch)}
+        warning={branchIdentityWarning}
       />
       <div class="header-actions">
         {#if isRemote && remoteWorkspaceStatus !== 'running' && remoteWorkspaceStatus !== 'starting'}
@@ -1112,7 +1263,8 @@
           onSquashCommits={() => startBranchCommandPipeline('squash')}
           newCommitDisabled={sessionMgr.isNewSessionDisabled ||
             commandPipelinePending ||
-            branchSessionBusy}
+            branchSessionBusy ||
+            gitUnsafeActionsDisabled}
           {commitCount}
         />
       </div>
@@ -1146,6 +1298,7 @@
           {prunedSessionIds}
           {revalidating}
           {error}
+          gitActionDisabledReason={branchIdentityWarning}
           onRetry={() => loadTimeline()}
           deletingItems={timelineDeletingItems}
           reviewCommentBreakdown={timelineReviewDetailsById}
@@ -1183,8 +1336,21 @@
           onNewReview={hasCodeChanges || sessionMgr.hasCommitSessionInProgress
             ? (e) => sessionMgr.openNewSession('review', e)
             : undefined}
+          onPullOrigin={handlePullOrigin}
+          onPushOrigin={handlePushOrigin}
+          onRebaseBranch={() => startBranchCommandPipeline('rebase')}
+          onRebaseBranchOntoOrigin={() => startBranchCommandPipeline('rebase', 'origin')}
+          onForcePush={handleForcePush}
+          rebaseBranchDisabledReason={branchCommandDisabledReason}
+          onViewWorktreeDiff={isLocal ? () => (showWorktreeDiff = true) : undefined}
+          onCommitWorktreeChanges={() =>
+            sessionMgr.startOrQueueSession('commit', 'Commit uncommitted changes')}
+          onDiscardWorktreeChanges={handleDiscardWorktreeChanges}
           onNewSessionReferring={(ref) => sessionMgr.openNewSessionReferring(ref)}
-          newSessionDisabled={sessionMgr.isNewSessionDisabled}
+          newSessionDisabled={sessionMgr.isNewSessionDisabled || gitUnsafeActionsDisabled}
+          {pullingOrigin}
+          {pushingOrigin}
+          {discardingWorktreeChanges}
           {provisioningLabel}
           {provisioningDetail}
         >
@@ -1244,6 +1410,26 @@
     onClose={() => {
       showBranchDiff = false;
       reviewDiffTarget = null;
+      loadTimeline();
+    }}
+  />
+{/if}
+
+{#if showWorktreeDiff}
+  <DiffModal
+    branchId={branch.id}
+    projectId={branch.projectId}
+    scope="worktree"
+    readonly
+    beforeLabel="HEAD"
+    afterLabel="worktree"
+    baseBranchLabel={formatBaseBranch(branch.baseBranch)}
+    branchLabel={branch.branchName}
+    {projectName}
+    githubRepo={repoLabel?.headRepo ?? repoLabel?.githubRepo}
+    subpath={repoLabel?.subpath}
+    onClose={() => {
+      showWorktreeDiff = false;
       loadTimeline();
     }}
   />
@@ -1405,11 +1591,22 @@
   />
 {/if}
 
+{#if showForcePushDialog}
+  <ConfirmDialog
+    title="Force Push"
+    message="The remote branch has commits that would be lost. Do you want to force push? This will overwrite the remote branch with your local version."
+    confirmLabel="Force Push"
+    danger
+    onConfirm={confirmForcePush}
+    onCancel={() => (showForcePushDialog = false)}
+  />
+{/if}
+
 {#if confirmDelete}
   <ConfirmDialog
     title={confirmDelete.title}
     message={confirmDelete.message}
-    confirmLabel="Delete"
+    confirmLabel={confirmDelete.confirmLabel ?? 'Delete'}
     danger
     onConfirm={confirmDelete.onConfirm}
     onCancel={() => (confirmDelete = null)}

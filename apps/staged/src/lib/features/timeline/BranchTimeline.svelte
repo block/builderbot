@@ -2,7 +2,8 @@
   BranchTimeline.svelte - Renders the unified timeline for a branch
 
   Commits, notes, and reviews are merged by timestamp into a single linear list.
-  Active pending items (running sessions, generating notes) appear at the bottom.
+  Active pending items (running sessions, generating notes) appear near the bottom.
+  Bottom git status rows appear below active and queued work.
   Failed sessions appear in chronological order with completed items.
 -->
 <script lang="ts">
@@ -11,11 +12,15 @@
   import { slide } from 'svelte/transition';
   import { FileText, GitCommitVertical, FileSearch, Plus } from 'lucide-svelte';
   import { isResumableReason } from '../../types';
-  import type { BranchTimeline as BranchTimelineData, HashtagItem } from '../../types';
+  import type {
+    BranchGitState,
+    BranchTimeline as BranchTimelineData,
+    HashtagItem,
+  } from '../../types';
   import TimelineRow from './TimelineRow.svelte';
   import type { TimelineItemType, TimelineBadge } from './TimelineRow.svelte';
   import TimelineContextMenu from './TimelineContextMenu.svelte';
-  import { hasHashtagTokens, renderHashtagTokens } from '../sessions/hashtagItems';
+  import { escapeHtml, hasHashtagTokens, renderHashtagTokens } from '../sessions/hashtagItems';
   import {
     formatRelativeTime,
     formatRelativeTimeSeconds,
@@ -74,12 +79,26 @@
     onNewNote?: () => void;
     onNewCommit?: () => void;
     onNewReview?: (e: MouseEvent) => void;
+    onPullOrigin?: () => void;
+    onPushOrigin?: () => void;
+    onRebaseBranch?: () => void;
+    onRebaseBranchOntoOrigin?: () => void;
+    onForcePush?: () => void;
+    rebaseBranchDisabledReason?: string | null;
+    onViewWorktreeDiff?: () => void;
+    onCommitWorktreeChanges?: () => void;
+    onDiscardWorktreeChanges?: () => void;
     onNewSessionReferring?: (hashtagRef: string) => void;
     newSessionDisabled?: boolean;
+    pullingOrigin?: boolean;
+    pushingOrigin?: boolean;
+    discardingWorktreeChanges?: boolean;
     /** Whether the timeline is being revalidated in the background. */
     revalidating?: boolean;
     /** Error message from a failed load/revalidation. */
     error?: string | null;
+    /** When set, git-mutating row actions are disabled with this reason. */
+    gitActionDisabledReason?: string | null;
     /** Callback to retry loading the timeline. */
     onRetry?: () => void;
     /** When set, a provisioning row is shown at the start of the timeline. */
@@ -114,10 +133,23 @@
     onNewNote,
     onNewCommit,
     onNewReview,
+    onPullOrigin,
+    onPushOrigin,
+    onRebaseBranch,
+    onRebaseBranchOntoOrigin,
+    onForcePush,
+    rebaseBranchDisabledReason,
+    onViewWorktreeDiff,
+    onCommitWorktreeChanges,
+    onDiscardWorktreeChanges,
     onNewSessionReferring,
     newSessionDisabled = false,
+    pullingOrigin = false,
+    pushingOrigin = false,
+    discardingWorktreeChanges = false,
     revalidating = false,
     error,
+    gitActionDisabledReason,
     onRetry,
     provisioningLabel,
     hashtagItems = [],
@@ -203,11 +235,38 @@
     imageId?: string;
     imageFilename?: string;
     badges?: TimelineBadge[];
+    onPull?: () => void;
+    pullDisabledReason?: string;
+    onPush?: () => void;
+    pushDisabledReason?: string;
+    onRebase?: () => void;
+    rebaseDisabledReason?: string;
+    onForcePush?: () => void;
+    forcePushDisabledReason?: string;
+    onViewDiff?: () => void;
+    onCommitChanges?: () => void;
+    commitChangesDisabledReason?: string;
+    onDiscardChanges?: () => void;
+    discardChangesDisabledReason?: string;
     /** When set, delete button is shown but disabled with this tooltip. */
     deleteDisabledReason?: string;
     completionReason?: string | null;
     /** Hashtag reference token for context menu (e.g. "#commit:abc123"). */
     hashtagRef?: string;
+    showConnector?: boolean;
+    placement?: 'git-footer';
+  };
+
+  type CommitAnchor = {
+    timestamp: number;
+    order: number;
+    shortSha?: string;
+  };
+
+  type TimelinePlacement = {
+    timestamp: number;
+    order: number;
+    anchor?: CommitAnchor;
   };
 
   let runningSessionIds = $derived.by(() => collectRunningSessionIds(timeline, pendingItems));
@@ -229,6 +288,16 @@
     return false;
   });
 
+  let hasActiveCommitSession = $derived.by(() => {
+    for (const commit of timeline.commits) {
+      if (commit.sessionStatus === 'running') return true;
+    }
+    for (const item of pendingItems) {
+      if (item.type === 'pending-commit' && item.sessionId) return true;
+    }
+    return false;
+  });
+
   $effect(() => {
     liveSessionHintPoller.syncRunningSessionIds(runningSessionIds);
   });
@@ -237,10 +306,210 @@
     liveSessionHintPoller.destroy();
   });
 
+  function plural(count: number, noun: string): string {
+    return `${count} ${noun}${count === 1 ? '' : 's'}`;
+  }
+
+  function worktreeSummary(state: BranchGitState): string {
+    const parts: string[] = [];
+    if (state.worktree.conflicted > 0) parts.push(plural(state.worktree.conflicted, 'conflict'));
+    if (state.worktree.staged > 0) parts.push(`${state.worktree.staged} staged`);
+    if (state.worktree.unstaged > 0) parts.push(`${state.worktree.unstaged} unstaged`);
+    if (state.worktree.untracked > 0) parts.push(`${state.worktree.untracked} untracked`);
+    return parts.join(', ');
+  }
+
+  function withDetail(title: string, detail: string): string {
+    return detail ? `${title}: ${detail}` : title;
+  }
+
+  function pullDisabledReason(state: BranchGitState): string | undefined {
+    if (pullingOrigin) return 'Pulling...';
+    if (state.detachedHead) return 'Detached HEAD';
+    if (!state.expectedBranchMatches) {
+      return state.currentBranch ? `Checked out ${state.currentBranch}` : 'Wrong branch';
+    }
+    if (state.worktree.dirty) return 'Clean worktree required';
+    if (state.upstream.relation !== 'originAhead') return 'Not fast-forwardable';
+    return undefined;
+  }
+
+  function timelinePlacementAfter(
+    commitAnchors: Map<string, CommitAnchor>,
+    sha: string | null | undefined,
+    fallbackTimestamp: number,
+    fallbackOrder: number,
+    offset = 0.25
+  ): TimelinePlacement {
+    const anchor = sha ? commitAnchors.get(sha) : undefined;
+    if (!anchor) {
+      return { timestamp: fallbackTimestamp, order: fallbackOrder };
+    }
+    return {
+      timestamp: anchor.timestamp,
+      order: anchor.order + offset,
+      anchor,
+    };
+  }
+
+  function baseDisplayName(ref: string): string {
+    return ref.replace(/^refs\/remotes\/origin\//, '').replace(/^origin\//, '');
+  }
+
+  function baseMovedTitleHtml(ref: string, count: number): string {
+    const branchName = baseDisplayName(ref);
+    return `<span class="git-ref-badge">${escapeHtml(branchName)}</span> has ${escapeHtml(
+      plural(count, 'new commit')
+    )}`;
+  }
+
+  function gitStateRows(
+    state: BranchGitState,
+    commitAnchors: Map<string, CommitAnchor>
+  ): DisplayItem[] {
+    const rows: DisplayItem[] = [];
+    const topTimestamp = 0;
+    const bottomTimestamp = Number.MAX_SAFE_INTEGER - 1000;
+    const commitChangesDisabledReason = gitActionDisabledReason
+      ? gitActionDisabledReason
+      : newSessionDisabled
+        ? 'Session in progress'
+        : undefined;
+    const discardChangesDisabledReason = discardingWorktreeChanges
+      ? 'Discarding...'
+      : gitActionDisabledReason
+        ? gitActionDisabledReason
+        : hasActiveSession
+          ? 'Session in progress'
+          : undefined;
+
+    if (state.fetch.status === 'failed') {
+      rows.push({
+        key: 'git-fetch-failed',
+        type: 'git-warning',
+        title: 'Could not refresh git state',
+        timestamp: topTimestamp,
+        order: 0,
+      });
+    }
+
+    if (state.base.commitsSinceFork > 0) {
+      rows.push({
+        key: 'git-base-moved',
+        type: 'git-merge',
+        title: `${baseDisplayName(state.base.ref)} has ${plural(state.base.commitsSinceFork, 'new commit')}`,
+        titleHtml: baseMovedTitleHtml(state.base.ref, state.base.commitsSinceFork),
+        timestamp: topTimestamp,
+        order: 1,
+        onRebase: rebaseBranchDisabledReason ? undefined : onRebaseBranch,
+        rebaseDisabledReason: onRebaseBranch
+          ? (rebaseBranchDisabledReason ?? undefined)
+          : undefined,
+      });
+    }
+
+    switch (state.upstream.relation) {
+      case 'missing':
+        break;
+      case 'localAhead':
+        {
+          const placement = timelinePlacementAfter(
+            commitAnchors,
+            state.upstream.sha,
+            topTimestamp,
+            2
+          );
+          const summary = `is ${plural(state.upstream.ahead, 'commit')} behind`;
+          const disabledReason = pushingOrigin
+            ? 'Pushing...'
+            : (rebaseBranchDisabledReason ?? undefined);
+          rows.push({
+            key: 'git-local-ahead',
+            type: 'git-push',
+            title: `origin ${summary}`,
+            titleHtml: `<span class="git-ref-badge">origin</span> ${escapeHtml(summary)}`,
+            timestamp: placement.timestamp,
+            order: placement.order,
+            onPush: disabledReason ? undefined : onPushOrigin,
+            pushDisabledReason: disabledReason,
+          });
+        }
+        break;
+      case 'originAhead': {
+        const disabledReason = pullDisabledReason(state);
+        rows.push({
+          key: 'git-origin-ahead',
+          type: 'git-pull',
+          title: `Origin has ${plural(state.upstream.behind, 'new commit')}`,
+          timestamp: bottomTimestamp,
+          order: 1,
+          placement: 'git-footer',
+          onPull: disabledReason ? undefined : onPullOrigin,
+          pullDisabledReason: disabledReason,
+        });
+        break;
+      }
+      case 'diverged': {
+        const placement = timelinePlacementAfter(
+          commitAnchors,
+          state.upstream.mergeBaseSha,
+          topTimestamp,
+          2
+        );
+        const behindCount = state.upstream.behind;
+        rows.push({
+          key: 'git-diverged',
+          type: 'git-merge-warning',
+          title: `origin diverges here and has ${plural(behindCount, 'more commit')}`,
+          titleHtml: `<span class="git-ref-badge">origin</span> diverges here and has ${escapeHtml(plural(behindCount, 'more commit'))}`,
+          timestamp: placement.timestamp,
+          order: placement.order,
+          onRebase: rebaseBranchDisabledReason ? undefined : onRebaseBranchOntoOrigin,
+          rebaseDisabledReason: onRebaseBranchOntoOrigin
+            ? (rebaseBranchDisabledReason ?? undefined)
+            : undefined,
+          onForcePush: rebaseBranchDisabledReason ? undefined : onForcePush,
+          forcePushDisabledReason: onForcePush
+            ? (rebaseBranchDisabledReason ?? undefined)
+            : undefined,
+        });
+        break;
+      }
+    }
+
+    if (state.worktree.conflicted > 0 && !hasActiveCommitSession) {
+      rows.push({
+        key: 'git-conflicted',
+        type: 'git-warning',
+        title: withDetail('Merge conflicts in worktree', worktreeSummary(state)),
+        timestamp: bottomTimestamp,
+        order: 2,
+        placement: 'git-footer',
+      });
+    } else if (state.worktree.dirty && !hasActiveCommitSession) {
+      rows.push({
+        key: 'git-dirty',
+        type: 'git-diff',
+        title: withDetail('Uncommitted changes', worktreeSummary(state)),
+        timestamp: bottomTimestamp,
+        order: 2,
+        placement: 'git-footer',
+        onViewDiff: onViewWorktreeDiff,
+        onCommitChanges: commitChangesDisabledReason ? undefined : onCommitWorktreeChanges,
+        commitChangesDisabledReason,
+        onDiscardChanges: discardChangesDisabledReason ? undefined : onDiscardWorktreeChanges,
+        discardChangesDisabledReason,
+      });
+    }
+
+    return rows;
+  }
+
   // Merge commits, notes, and reviews into a single sorted list
   let items = $derived.by(() => {
     const nowMs = minuteNow.now();
     const all: DisplayItem[] = [];
+    const commitAnchors = new Map<string, CommitAnchor>();
     const deletingCommitIds = new Set(
       deletingItems.filter((item) => item.type === 'commit').map((item) => item.id)
     );
@@ -293,10 +562,22 @@
         sessionId: commit.sessionId ?? undefined,
         commitSha: commit.sha || undefined,
         commitId: commit.id ?? undefined,
-        deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
+        deleteDisabledReason: isDeleting
+          ? 'Deleting...'
+          : type === 'commit'
+            ? (gitActionDisabledReason ?? undefined)
+            : undefined,
         completionReason: commit.completionReason,
         hashtagRef: type === 'commit' ? `#commit:${commit.sha}` : undefined,
       });
+
+      if (type === 'commit' && commit.sha) {
+        commitAnchors.set(commit.sha, {
+          timestamp: commit.timestamp,
+          order: commit.order,
+          shortSha: commit.shortSha || undefined,
+        });
+      }
     }
 
     for (const note of timeline.notes) {
@@ -424,6 +705,10 @@
       });
     }
 
+    if (timeline.gitState) {
+      all.push(...gitStateRows(timeline.gitState, commitAnchors));
+    }
+
     // Provisioning row appears at the very start of the timeline
     if (provisioningLabel) {
       all.unshift({
@@ -484,6 +769,12 @@
     return all;
   });
 
+  let normalItems = $derived(items.filter((item) => item.placement !== 'git-footer'));
+  let gitFooterItems = $derived(items.filter((item) => item.placement === 'git-footer'));
+  let actionFooterVisible = $derived(
+    !!onNewNote || !!onNewCommit || !!onNewReview || !!footerActions
+  );
+
   /** True when the timeline has no content and action buttons should be enlarged. */
   let actionButtonsEnlarged = $derived(
     items.length === 0 && pendingDropNotes.length === 0 && pendingItems.length === 0
@@ -543,14 +834,43 @@
       onDeleteImage(item.imageId, opts);
     }
   }
+
+  function isDeletable(item: DisplayItem): boolean {
+    if (item.type === 'commit') return !!item.commitSha && !!onDeleteCommit;
+    if (
+      item.type === 'failed-commit' ||
+      item.type === 'pending-commit' ||
+      item.type === 'queued-commit'
+    ) {
+      return !!item.commitId && !!onDeletePendingCommit;
+    }
+    if (
+      item.type === 'note' ||
+      item.type === 'failed-note' ||
+      item.type === 'generating-note' ||
+      item.type === 'queued-note'
+    ) {
+      return !!item.noteId && !!onDeleteNote;
+    }
+    if (
+      item.type === 'review' ||
+      item.type === 'failed-review' ||
+      item.type === 'generating-review' ||
+      item.type === 'queued-review'
+    ) {
+      return !!item.reviewId && !!onDeleteReview;
+    }
+    if (item.type === 'image') return !!item.imageId && !!onDeleteImage;
+    return false;
+  }
 </script>
 
-{#if items.length === 0 && !onNewNote && !onNewCommit && !onNewReview && pendingDropNotes.length === 0 && pendingItems.length === 0}
+{#if items.length === 0 && !actionFooterVisible && pendingDropNotes.length === 0 && pendingItems.length === 0}
   <p class="no-items">No commits or notes yet</p>
 {:else}
   <!-- Unified timeline (vertical) -->
   <div class="timeline">
-    {#each items as item, index (item.key)}
+    {#each normalItems as item, index (item.key)}
       <div in:maybeSlide={{ sessionId: item.sessionId }} out:slide={{ duration: 200 }}>
         <TimelineRow
           type={item.type}
@@ -559,22 +879,36 @@
           meta={item.meta}
           secondaryMeta={item.secondaryMeta}
           badges={item.badges}
+          onPullClick={item.onPull}
+          pullDisabledReason={item.pullDisabledReason}
+          onPushClick={item.onPush}
+          pushDisabledReason={item.pushDisabledReason}
+          onRebaseClick={item.onRebase}
+          rebaseDisabledReason={item.rebaseDisabledReason}
+          onForcePushClick={item.onForcePush}
+          forcePushDisabledReason={item.forcePushDisabledReason}
+          onViewDiffClick={item.onViewDiff}
+          onCommitChangesClick={item.onCommitChanges}
+          commitChangesDisabledReason={item.commitChangesDisabledReason}
+          onDiscardChangesClick={item.onDiscardChanges}
+          discardChangesDisabledReason={item.discardChangesDisabledReason}
           deleting={item.deleting}
-          isLast={index === items.length - 1 &&
-            !onNewNote &&
-            !onNewCommit &&
+          isLast={index === normalItems.length - 1 &&
             pendingDropNotes.length === 0 &&
             pendingItems.length === 0 &&
+            gitFooterItems.length === 0 &&
             !revalidating &&
-            !error}
+            !error &&
+            !actionFooterVisible}
           sessionId={item.sessionId}
-          deleteDisabledReason={item.deleteDisabledReason}
+          deleteDisabledReason={isDeletable(item) ? item.deleteDisabledReason : undefined}
           commitSha={item.commitSha}
           hashtagRef={item.hashtagRef}
+          showConnector={item.showConnector}
           onContextMenu={(e) => contextMenuRef?.open(e)}
           {onSessionClick}
           onItemClick={() => handleItemClick(item)}
-          onDeleteClick={item.deleteDisabledReason
+          onDeleteClick={!isDeletable(item) || item.deleteDisabledReason
             ? undefined
             : (opts) => handleDeleteClick(item, opts)}
           onStartClick={item.type.startsWith('queued-') && !hasActiveSession
@@ -594,10 +928,10 @@
           secondaryMeta="adding..."
           isLast={index === pendingDropNotes.length - 1 &&
             pendingItems.length === 0 &&
+            gitFooterItems.length === 0 &&
             !revalidating &&
             !error &&
-            !onNewNote &&
-            !onNewCommit}
+            !actionFooterVisible}
         />
       </div>
     {/each}
@@ -615,10 +949,54 @@
               fallbackHintForPendingType(item.type))
             : item.secondaryMeta}
           isLast={index === pendingItems.length - 1 &&
+            gitFooterItems.length === 0 &&
             !revalidating &&
             !error &&
-            !onNewNote &&
-            !onNewCommit}
+            !actionFooterVisible}
+        />
+      </div>
+    {/each}
+    {#each gitFooterItems as item, index (item.key)}
+      <div transition:slide={{ duration: 200 }}>
+        <TimelineRow
+          type={item.type}
+          title={item.title}
+          titleHtml={item.titleHtml}
+          meta={item.meta}
+          secondaryMeta={item.secondaryMeta}
+          badges={item.badges}
+          onPullClick={item.onPull}
+          pullDisabledReason={item.pullDisabledReason}
+          onPushClick={item.onPush}
+          pushDisabledReason={item.pushDisabledReason}
+          onRebaseClick={item.onRebase}
+          rebaseDisabledReason={item.rebaseDisabledReason}
+          onForcePushClick={item.onForcePush}
+          forcePushDisabledReason={item.forcePushDisabledReason}
+          onViewDiffClick={item.onViewDiff}
+          onCommitChangesClick={item.onCommitChanges}
+          commitChangesDisabledReason={item.commitChangesDisabledReason}
+          onDiscardChangesClick={item.onDiscardChanges}
+          discardChangesDisabledReason={item.discardChangesDisabledReason}
+          deleting={item.deleting}
+          isLast={index === gitFooterItems.length - 1 && !revalidating && !error}
+          sessionId={item.sessionId}
+          deleteDisabledReason={isDeletable(item) ? item.deleteDisabledReason : undefined}
+          commitSha={item.commitSha}
+          hashtagRef={item.hashtagRef}
+          showConnector={item.showConnector}
+          onContextMenu={(e) => contextMenuRef?.open(e)}
+          {onSessionClick}
+          onItemClick={() => handleItemClick(item)}
+          onDeleteClick={!isDeletable(item) || item.deleteDisabledReason
+            ? undefined
+            : (opts) => handleDeleteClick(item, opts)}
+          onStartClick={item.type.startsWith('queued-') && !hasActiveSession
+            ? onStartQueued
+            : undefined}
+          onResumeClick={isResumable(item) && onResumeClick && item.sessionId && !hasActiveSession
+            ? () => onResumeClick!(item.sessionId!)
+            : undefined}
         />
       </div>
     {/each}
@@ -627,7 +1005,7 @@
         <TimelineRow
           type="revalidating"
           title="Looking for changes..."
-          isLast={!error && !onNewNote && !onNewCommit}
+          isLast={!actionFooterVisible}
         />
       </div>
     {/if}
@@ -637,12 +1015,12 @@
           type="load-error"
           title="Failed to load commits"
           secondaryMeta={error}
-          isLast={true}
+          isLast={!actionFooterVisible}
           onRetryClick={onRetry}
         />
       </div>
     {/if}
-    {#if onNewNote || onNewCommit || onNewReview || footerActions}
+    {#if actionFooterVisible}
       <div class="footer-row" class:footer-row-enlarged={actionButtonsEnlarged}>
         <div class="footer-left-actions" class:footer-left-actions-enlarged={actionButtonsEnlarged}>
           {#if onNewNote}

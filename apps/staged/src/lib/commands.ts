@@ -33,6 +33,14 @@ import type {
   SuggestedRepo,
 } from './types';
 
+export type DiffScope = 'branch' | 'commit' | 'worktree';
+
+export interface WorktreeChangesPreview {
+  revertPaths: string[];
+  removePaths: string[];
+  conflictedPaths: string[];
+}
+
 // =============================================================================
 // Store status
 // =============================================================================
@@ -392,6 +400,10 @@ export function invalidateProjectBranchTimelines(branchIds: string[]): void {
   window.dispatchEvent(new CustomEvent('timeline-invalidated', { detail: { branchIds } }));
 }
 
+export function pullBranchFastForward(branchId: string): Promise<void> {
+  return invoke('pull_branch_ff_only', { branchId });
+}
+
 // =============================================================================
 // Actions
 // =============================================================================
@@ -654,6 +666,19 @@ export function deletePendingCommit(commitId: string, deleteSession = true): Pro
   return invoke('delete_pending_commit', { commitId, deleteSession });
 }
 
+/** Preview the exact worktree paths that would be reverted or removed. */
+export function getWorktreeChangesPreview(branchId: string): Promise<WorktreeChangesPreview> {
+  return invoke('get_worktree_changes_preview', { branchId });
+}
+
+/** Discard all uncommitted worktree changes after backend safety checks. */
+export function discardWorktreeChanges(
+  branchId: string,
+  expectedPreview?: WorktreeChangesPreview
+): Promise<void> {
+  return invoke('discard_worktree_changes', { branchId, expectedPreview });
+}
+
 /** Delete a review and all its comments, optionally its linked session. */
 export function deleteReview(reviewId: string, deleteSession = true): Promise<void> {
   return invoke('delete_review', { reviewId, deleteSession });
@@ -675,7 +700,7 @@ export function deleteReview(reviewId: string, deleteSession = true): Promise<vo
 export function getDiffFiles(
   branchId: string,
   commitSha?: string,
-  scope: 'branch' | 'commit' = 'branch'
+  scope: DiffScope = 'branch'
 ): Promise<DiffFilesResponse> {
   return invoke('get_diff_files', { branchId, commitSha, scope });
 }
@@ -684,7 +709,7 @@ export function getDiffFiles(
 export function getFileDiff(
   branchId: string,
   commitSha: string,
-  scope: 'branch' | 'commit',
+  scope: DiffScope,
   path: string
 ): Promise<FileDiff> {
   return invoke('get_file_diff', { branchId, commitSha, scope, path });
@@ -913,13 +938,19 @@ export interface GitHubCommentResult {
   commentType: string;
 }
 
-/** Rebase a branch onto its base branch via a pipeline.
- *  Fetches the latest base, then runs git rebase. AI handles conflicts if any.
+/** Rebase a branch via a pipeline.
+ *  When target is 'base' (default), rebases onto origin/{base_branch}.
+ *  When target is 'origin', rebases onto origin/{branch_name}.
  *  Returns the session ID so the frontend can track progress. */
-export function rebaseBranch(branchId: string, provider?: string): Promise<string> {
+export function rebaseBranch(
+  branchId: string,
+  provider?: string,
+  target?: 'base' | 'origin'
+): Promise<string> {
   return invoke('rebase_branch', {
     branchId,
     provider: provider ?? null,
+    target: target ?? null,
   });
 }
 

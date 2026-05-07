@@ -301,6 +301,10 @@
   let mobileDiffStartY = 0;
   let mobileDiffStartDragX = 0;
   let mobileDiffIsDragging = $state(false);
+  let mobileDiffIsScrolling = false;
+  let mobileDiffLastY = 0;
+  let diffViewerScrollApi: { scrollBy: (side: 'before' | 'after', deltaY: number) => void } | null =
+    $state(null);
   let mobileDiffStyle = $derived(
     `--mobile-diff-drag-x: ${mobileDiffDragX}px;` +
       `--mobile-diff-rest-offset: ${MOBILE_DIFF_REST_OFFSET}px;` +
@@ -1010,6 +1014,7 @@
   function resetMobileDiffDrag() {
     mobileDiffPointerId = null;
     mobileDiffIsDragging = false;
+    mobileDiffIsScrolling = false;
     mobileDiffDragX = 0;
   }
 
@@ -1030,9 +1035,10 @@
     mobileDiffPointerId = event.pointerId;
     mobileDiffStartX = event.clientX;
     mobileDiffStartY = event.clientY;
+    mobileDiffLastY = event.clientY;
     mobileDiffStartDragX = mobileDiffDragX;
     mobileDiffIsDragging = false;
-    diffViewerContainerEl?.setPointerCapture(event.pointerId);
+    mobileDiffIsScrolling = false;
   }
 
   function handleMobileDiffPointerMove(event: PointerEvent) {
@@ -1040,10 +1046,32 @@
 
     const deltaX = event.clientX - mobileDiffStartX;
     const deltaY = event.clientY - mobileDiffStartY;
+
+    // Already in vertical scroll mode — translate touch delta to scroll
+    if (mobileDiffIsScrolling) {
+      event.preventDefault();
+      const moveDeltaY = event.clientY - mobileDiffLastY;
+      mobileDiffLastY = event.clientY;
+      diffViewerScrollApi?.scrollBy('after', -moveDeltaY);
+      return;
+    }
+
     if (!mobileDiffIsDragging) {
-      const horizontalIntent = Math.abs(deltaX) > 8 && Math.abs(deltaX) > Math.abs(deltaY);
-      if (!horizontalIntent) return;
-      mobileDiffIsDragging = true;
+      // Determine gesture direction once past dead zone
+      if (Math.abs(deltaX) > 8 && Math.abs(deltaX) > Math.abs(deltaY)) {
+        // Horizontal intent — capture pointer and start drag
+        mobileDiffIsDragging = true;
+        diffViewerContainerEl?.setPointerCapture(event.pointerId);
+      } else if (Math.abs(deltaY) > 8 && Math.abs(deltaY) > Math.abs(deltaX)) {
+        // Vertical intent — start scroll mode
+        mobileDiffIsScrolling = true;
+        mobileDiffLastY = event.clientY;
+        event.preventDefault();
+        diffViewerScrollApi?.scrollBy('after', -deltaY);
+        return;
+      } else {
+        return;
+      }
     }
 
     event.preventDefault();
@@ -1273,6 +1301,7 @@
           onCommentCommit={readonly ? undefined : handleNewCommit}
           onCommentGithub={readonly || !hasPr ? undefined : handleSendToGithub}
           commentGithubState={readonly || !hasPr ? undefined : getCommentGithubState}
+          bind:scrollApi={diffViewerScrollApi}
         />
       </div>
 

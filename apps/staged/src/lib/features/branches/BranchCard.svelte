@@ -572,6 +572,14 @@
           return;
         }
 
+        // Clear push/force-push session tracking on completion
+        if (eventSessionId === pushSessionId) {
+          pushSessionId = null;
+        }
+        if (eventSessionId === forcePushSessionId) {
+          forcePushSessionId = null;
+        }
+
         // Skip normal completion handling for any auto review session
         if (isAutoReview) {
           return;
@@ -801,20 +809,24 @@
     }
   }
 
-  let pushingOrigin = $state(false);
+  let pushSessionId = $state<string | null>(null);
+  let pushingOrigin = $derived(!!pushSessionId);
 
   async function handlePushOrigin() {
-    if (pushingOrigin) return;
-    pushingOrigin = true;
+    if (pushSessionId || commandPipelinePending || branchSessionBusy) return;
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
     const provider = getPreferredAgent(agents) ?? undefined;
     try {
-      await commands.pushBranch(branch.id, provider, false);
-      await loadTimeline();
+      pushSessionId = await commands.pushBranch(branch.id, provider, false);
     } catch (e) {
+      pushSessionId = null;
       notifyError('Push failed', e);
-    } finally {
-      pushingOrigin = false;
+    }
+  }
+
+  function openPushSession() {
+    if (pushSessionId) {
+      sessionMgr.openSessionId = pushSessionId;
     }
   }
 
@@ -824,23 +836,29 @@
     showForcePushDialog = true;
   }
 
+  let forcePushSessionId = $state<string | null>(null);
+  let forcePushingOrigin = $derived(!!forcePushSessionId);
+
   async function confirmForcePush() {
-    if (commandPipelinePending || branchSessionBusy) {
+    if (forcePushSessionId || commandPipelinePending || branchSessionBusy) {
       // Another operation is in progress — keep the dialog open so the user
       // understands why the action didn't proceed.
       return;
     }
     showForcePushDialog = false;
-    commandPipelinePending = true;
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
     const provider = getPreferredAgent(agents) ?? undefined;
     try {
-      await commands.pushBranch(branch.id, provider, true);
-      await loadTimeline();
+      forcePushSessionId = await commands.pushBranch(branch.id, provider, true);
     } catch (e) {
+      forcePushSessionId = null;
       notifyError('Force push failed', e);
-    } finally {
-      commandPipelinePending = false;
+    }
+  }
+
+  function openForcePushSession() {
+    if (forcePushSessionId) {
+      sessionMgr.openSessionId = forcePushSessionId;
     }
   }
 
@@ -1342,9 +1360,12 @@
             : undefined}
           onPullOrigin={handlePullOrigin}
           onPushOrigin={handlePushOrigin}
+          onOpenPushSession={pushSessionId ? openPushSession : undefined}
           onRebaseBranch={() => startBranchCommandPipeline('rebase')}
           onRebaseBranchOntoOrigin={() => startBranchCommandPipeline('rebase', 'origin')}
           onForcePush={handleForcePush}
+          onOpenForcePushSession={forcePushSessionId ? openForcePushSession : undefined}
+          {forcePushingOrigin}
           rebaseBranchDisabledReason={branchCommandDisabledReason}
           onViewWorktreeDiff={isLocal ? () => (showWorktreeDiff = true) : undefined}
           onCommitWorktreeChanges={() =>

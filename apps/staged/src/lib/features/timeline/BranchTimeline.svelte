@@ -84,6 +84,9 @@
     onRebaseBranch?: () => void;
     onRebaseBranchOntoOrigin?: () => void;
     onForcePush?: () => void;
+    onOpenForcePushSession?: () => void;
+    forcePushingOrigin?: boolean;
+    onOpenPushSession?: () => void;
     rebaseBranchDisabledReason?: string | null;
     onViewWorktreeDiff?: () => void;
     onCommitWorktreeChanges?: () => void;
@@ -138,6 +141,9 @@
     onRebaseBranch,
     onRebaseBranchOntoOrigin,
     onForcePush,
+    onOpenForcePushSession,
+    forcePushingOrigin = false,
+    onOpenPushSession,
     rebaseBranchDisabledReason,
     onViewWorktreeDiff,
     onCommitWorktreeChanges,
@@ -243,6 +249,8 @@
     rebaseDisabledReason?: string;
     onForcePush?: () => void;
     forcePushDisabledReason?: string;
+    forcePushing?: boolean;
+    pushing?: boolean;
     onViewDiff?: () => void;
     onCommitChanges?: () => void;
     commitChangesDisabledReason?: string;
@@ -421,7 +429,7 @@
           );
           const summary = `is ${plural(state.upstream.ahead, 'commit')} behind`;
           const disabledReason = pushingOrigin
-            ? 'Pushing...'
+            ? undefined // button is clickable during push (opens session)
             : (rebaseBranchDisabledReason ?? undefined);
           rows.push({
             key: 'git-local-ahead',
@@ -430,8 +438,9 @@
             titleHtml: `<span class="git-ref-badge">origin</span> ${escapeHtml(summary)}`,
             timestamp: placement.timestamp,
             order: placement.order,
-            onPush: disabledReason ? undefined : onPushOrigin,
+            onPush: pushingOrigin ? onOpenPushSession : disabledReason ? undefined : onPushOrigin,
             pushDisabledReason: disabledReason,
+            pushing: pushingOrigin,
           });
         }
         break;
@@ -464,14 +473,24 @@
           titleHtml: `<span class="git-ref-badge">origin</span> diverges here and has ${escapeHtml(plural(behindCount, 'more commit'))}`,
           timestamp: placement.timestamp,
           order: placement.order,
-          onRebase: rebaseBranchDisabledReason ? undefined : onRebaseBranchOntoOrigin,
-          rebaseDisabledReason: onRebaseBranchOntoOrigin
-            ? (rebaseBranchDisabledReason ?? undefined)
-            : undefined,
-          onForcePush: rebaseBranchDisabledReason ? undefined : onForcePush,
-          forcePushDisabledReason: onForcePush
-            ? (rebaseBranchDisabledReason ?? undefined)
-            : undefined,
+          onRebase:
+            rebaseBranchDisabledReason || forcePushingOrigin ? undefined : onRebaseBranchOntoOrigin,
+          rebaseDisabledReason: forcePushingOrigin
+            ? 'Force push in progress'
+            : onRebaseBranchOntoOrigin
+              ? (rebaseBranchDisabledReason ?? undefined)
+              : undefined,
+          onForcePush: forcePushingOrigin
+            ? onOpenForcePushSession
+            : rebaseBranchDisabledReason
+              ? undefined
+              : onForcePush,
+          forcePushDisabledReason: forcePushingOrigin
+            ? undefined
+            : onForcePush
+              ? (rebaseBranchDisabledReason ?? undefined)
+              : undefined,
+          forcePushing: forcePushingOrigin,
         });
         break;
       }
@@ -887,6 +906,8 @@
           rebaseDisabledReason={item.rebaseDisabledReason}
           onForcePushClick={item.onForcePush}
           forcePushDisabledReason={item.forcePushDisabledReason}
+          forcePushing={item.forcePushing}
+          pushing={item.pushing}
           onViewDiffClick={item.onViewDiff}
           onCommitChangesClick={item.onCommitChanges}
           commitChangesDisabledReason={item.commitChangesDisabledReason}
@@ -973,6 +994,8 @@
           rebaseDisabledReason={item.rebaseDisabledReason}
           onForcePushClick={item.onForcePush}
           forcePushDisabledReason={item.forcePushDisabledReason}
+          forcePushing={item.forcePushing}
+          pushing={item.pushing}
           onViewDiffClick={item.onViewDiff}
           onCommitChangesClick={item.onCommitChanges}
           commitChangesDisabledReason={item.commitChangesDisabledReason}

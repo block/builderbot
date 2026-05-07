@@ -86,6 +86,8 @@
     rebaseDisabledReason?: string;
     onForcePushClick?: () => void;
     forcePushDisabledReason?: string;
+    forcePushing?: boolean;
+    pushing?: boolean;
     onViewDiffClick?: () => void;
     onCommitChangesClick?: () => void;
     commitChangesDisabledReason?: string;
@@ -125,6 +127,8 @@
     rebaseDisabledReason,
     onForcePushClick,
     forcePushDisabledReason,
+    forcePushing = false,
+    pushing = false,
     onViewDiffClick,
     onCommitChangesClick,
     commitChangesDisabledReason,
@@ -399,19 +403,20 @@
           class="action-btn resume-btn"
           onclick={handlePushClick}
           disabled={!!pushDisabledReason}
-          title={pushDisabledReason ?? 'Push'}
+          title={pushDisabledReason ?? (pushing ? 'View push session' : 'Push')}
         >
-          Push
+          {pushing ? 'Pushing\u2026' : 'Push'}
         </button>
       {/if}
       {#if onForcePushClick || forcePushDisabledReason}
         <button
-          class="action-btn danger-btn"
+          class="action-btn {forcePushing ? 'resume-btn' : 'danger-btn'}"
           onclick={handleForcePushClick}
           disabled={!!forcePushDisabledReason}
-          title={forcePushDisabledReason ?? 'Force push local branch to origin'}
+          title={forcePushDisabledReason ??
+            (forcePushing ? 'View push session' : 'Force push local branch to origin')}
         >
-          Force Push
+          {forcePushing ? 'Pushing\u2026' : 'Force Push'}
         </button>
       {/if}
       {#if onRebaseClick || rebaseDisabledReason}

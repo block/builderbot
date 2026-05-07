@@ -195,7 +195,7 @@ fn base_branch_name(branch: &store::Branch) -> &str {
 ///
 /// - `None` or `Some("base")` → base branch name (e.g. `main`)
 /// - `Some("origin")` → the branch's own name (e.g. `feature-xyz`)
-fn rebase_ref_for_target<'a>(branch: &'a store::Branch, target: Option<&str>) -> String {
+fn rebase_ref_for_target(branch: &store::Branch, target: Option<&str>) -> String {
     match target {
         Some("origin") => branch.branch_name.clone(),
         _ => base_branch_name(branch).to_string(),

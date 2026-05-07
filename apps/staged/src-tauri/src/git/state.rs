@@ -316,9 +316,9 @@ where
     let counts_range = format!("HEAD...{upstream_ref}");
     let (ahead, behind) = run_git(&["rev-list", "--left-right", "--count", counts_range.as_str()])
         .ok()
-        .and_then(|output| {
+        .map(|output| {
             let mut parts = output.split_whitespace();
-            Some((parse_u32(parts.next()), parse_u32(parts.next())))
+            (parse_u32(parts.next()), parse_u32(parts.next()))
         })
         .unwrap_or((0, 0));
     let relation = match (ahead, behind) {
@@ -507,24 +507,26 @@ pub fn compute_local_branch_git_state(
 /// Arguments: $1=repo_path  $2=base_refspec  $3=branch_refspec (empty if same as base)
 const BATCH_FETCH_SCRIPT: &str = concat!(
     "cd \"$1\" || exit 1\n",
-    // Fetch — capture stderr for missing-ref detection
+    // Fetch — capture stderr for missing-ref detection using unique temp files
     "fetch_err=''\n",
     "upstream_missing=''\n",
+    "_ferr=$(mktemp) || exit 1\n",
+    "trap 'rm -f \"$_ferr\"' EXIT\n",
     "if [ -n \"$3\" ]; then\n",
-    "  if ! git fetch --prune origin \"$2\" \"$3\" 2>/tmp/_staged_fetch_err; then\n",
-    "    if grep -qi 'could.not.find.remote.ref\\|couldn.t.find.remote.ref' /tmp/_staged_fetch_err; then\n",
-    "      if ! git fetch --prune origin \"$2\" 2>/tmp/_staged_fetch_err2; then\n",
-    "        fetch_err=$(cat /tmp/_staged_fetch_err2)\n",
+    "  if ! git fetch --prune origin \"$2\" \"$3\" 2>\"$_ferr\"; then\n",
+    "    if grep -qi 'could.not.find.remote.ref\\|couldn.t.find.remote.ref' \"$_ferr\"; then\n",
+    "      if ! git fetch --prune origin \"$2\" 2>\"$_ferr\"; then\n",
+    "        fetch_err=$(cat \"$_ferr\")\n",
     "      else\n",
     "        upstream_missing=true\n",
     "      fi\n",
     "    else\n",
-    "      fetch_err=$(cat /tmp/_staged_fetch_err)\n",
+    "      fetch_err=$(cat \"$_ferr\")\n",
     "    fi\n",
     "  fi\n",
     "else\n",
-    "  if ! git fetch --prune origin \"$2\" 2>/tmp/_staged_fetch_err; then\n",
-    "    fetch_err=$(cat /tmp/_staged_fetch_err)\n",
+    "  if ! git fetch --prune origin \"$2\" 2>\"$_ferr\"; then\n",
+    "    fetch_err=$(cat \"$_ferr\")\n",
     "  fi\n",
     "fi\n",
     // Local state (unaffected by fetch)

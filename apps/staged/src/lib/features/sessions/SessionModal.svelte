@@ -515,7 +515,14 @@
   function autoResize() {
     if (!inputEl) return;
     inputEl.style.height = 'auto';
-    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+    inputEl.style.overflow = 'hidden';
+    const borderY = inputEl.offsetHeight - inputEl.clientHeight;
+    const maxHeight = 120;
+    const height = Math.min(inputEl.scrollHeight + borderY, maxHeight);
+    inputEl.style.height = height + 'px';
+    if (height >= maxHeight) {
+      inputEl.style.overflow = 'auto';
+    }
   }
 
   // =========================================================================
@@ -2178,7 +2185,7 @@
 
   .input-area :global(.message-input) {
     flex: 1;
-    padding: 8px 12px;
+    padding: 7px 12px;
     background: var(--bg-primary);
     border: 1px solid var(--border-muted);
     border-radius: 10px;

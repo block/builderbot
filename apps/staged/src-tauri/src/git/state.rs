@@ -410,34 +410,66 @@ pub fn compute_branch_git_state<F>(
     fetch_mode: FetchMode,
 ) -> BranchGitState
 where
-    F: Fn(&[&str]) -> Result<String, String>,
+    F: Fn(&[&str]) -> Result<String, String> + Sync,
 {
-    let refresh = refresh_refs_if_needed(cache_key, &run_git, branch_name, base_branch, fetch_mode);
-    let head_sha = run_git(&["rev-parse", "HEAD"])
-        .ok()
-        .and_then(trim_non_empty);
-    let current_branch = current_branch(&run_git);
-    let detached_head = head_sha.is_some() && current_branch.is_none();
+    // Phase 1: Fetch runs in parallel with local-only commands (HEAD, branch
+    // name, worktree status) since those read local state unaffected by fetch.
+    let (refresh, head_sha, branch, worktree) = std::thread::scope(|s| {
+        let fetch_handle = s.spawn(|| {
+            refresh_refs_if_needed(cache_key, &run_git, branch_name, base_branch, fetch_mode)
+        });
+        let head_handle = s.spawn(|| {
+            run_git(&["rev-parse", "HEAD"])
+                .ok()
+                .and_then(trim_non_empty)
+        });
+        let branch_handle = s.spawn(|| current_branch(&run_git));
+        let worktree_handle = s.spawn(|| compute_worktree_state(&run_git));
+
+        (
+            fetch_handle.join().expect("fetch thread panicked"),
+            head_handle.join().expect("head thread panicked"),
+            branch_handle.join().expect("branch thread panicked"),
+            worktree_handle.join().expect("worktree thread panicked"),
+        )
+    });
+
+    let detached_head = head_sha.is_some() && branch.is_none();
     let expected_branch = branch_name_without_origin(branch_name);
-    let expected_branch_matches = current_branch
+    let expected_branch_matches = branch
         .as_deref()
         .map(|current| current == expected_branch)
         .unwrap_or(false);
     let upstream_ref = origin_ref_for_branch(branch_name);
     let base_ref = origin_ref_for_branch(base_branch);
 
+    // Phase 2: Upstream and base state computations are independent of each
+    // other but both need fetch to have completed (for up-to-date remote refs)
+    // and head_sha.
+    let (upstream, base) = std::thread::scope(|s| {
+        let upstream_handle = s.spawn(|| {
+            compute_upstream_state(
+                &run_git,
+                upstream_ref,
+                head_sha.as_deref(),
+                refresh.upstream_known_missing,
+            )
+        });
+        let base_handle = s.spawn(|| compute_base_state(&run_git, base_ref, head_sha.as_deref()));
+
+        (
+            upstream_handle.join().expect("upstream thread panicked"),
+            base_handle.join().expect("base thread panicked"),
+        )
+    });
+
     BranchGitState {
-        upstream: compute_upstream_state(
-            &run_git,
-            upstream_ref,
-            head_sha.as_deref(),
-            refresh.upstream_known_missing,
-        ),
-        base: compute_base_state(&run_git, base_ref, head_sha.as_deref()),
-        worktree: compute_worktree_state(&run_git),
+        upstream,
+        base,
+        worktree,
         fetch: refresh.fetch,
         head_sha,
-        current_branch,
+        current_branch: branch,
         detached_head,
         expected_branch_matches,
     }

@@ -364,42 +364,17 @@ fn compute_worktree_state<F>(run_git: &F) -> WorktreeGitState
 where
     F: Fn(&[&str]) -> Result<String, String>,
 {
-    let mut state = WorktreeGitState {
-        dirty: false,
-        staged: 0,
-        unstaged: 0,
-        untracked: 0,
-        conflicted: 0,
-    };
-
     let Ok(output) = run_git(&["status", "--porcelain=1", "--untracked-files=all"]) else {
-        return state;
+        return WorktreeGitState {
+            dirty: false,
+            staged: 0,
+            unstaged: 0,
+            untracked: 0,
+            conflicted: 0,
+        };
     };
 
-    for line in output.lines() {
-        let mut chars = line.chars();
-        let x = chars.next().unwrap_or(' ');
-        let y = chars.next().unwrap_or(' ');
-
-        if x == '?' && y == '?' {
-            state.untracked += 1;
-            continue;
-        }
-        if is_conflicted_status(x, y) {
-            state.conflicted += 1;
-            continue;
-        }
-        if x != ' ' {
-            state.staged += 1;
-        }
-        if y != ' ' {
-            state.unstaged += 1;
-        }
-    }
-
-    state.dirty =
-        state.staged > 0 || state.unstaged > 0 || state.untracked > 0 || state.conflicted > 0;
-    state
+    parse_worktree_from_status(&output)
 }
 
 pub fn compute_branch_git_state<F>(

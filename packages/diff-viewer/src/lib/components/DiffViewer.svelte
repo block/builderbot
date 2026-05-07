@@ -119,6 +119,9 @@
     onCommentGithub?: (comment: Comment) => void;
     /** Returns the GitHub button state for a given comment. */
     commentGithubState?: (comment: Comment) => GithubButtonState;
+
+    /** Bindable API object exposing scroll control for external callers (e.g. mobile touch scroll). */
+    scrollApi?: { scrollBy: (side: 'before' | 'after', deltaY: number) => void } | null;
   }
 
   let {
@@ -142,6 +145,7 @@
     onCommentCommit,
     onCommentGithub,
     commentGithubState,
+    scrollApi = $bindable(null),
   }: Props = $props();
 
   // ==========================================================================
@@ -358,6 +362,11 @@
   // ==========================================================================
 
   const scrollController = createScrollController();
+
+  // Expose scroll API for external callers (e.g. mobile touch scroll in DiffModal)
+  scrollApi = {
+    scrollBy: (side, deltaY) => scrollController.scrollBy(side, deltaY),
+  };
 
   // Update scroll controller with active alignments
   $effect(() => {

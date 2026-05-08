@@ -270,12 +270,21 @@
     commandPipelinePending = true;
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
     const provider = getPreferredAgent(agents) ?? undefined;
+    const pendingKey = `pipeline-${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     try {
+      let sessionId: string;
       if (kind === 'rebase') {
-        await commands.rebaseBranch(branch.id, provider, rebaseTarget);
+        sessionId = await commands.rebaseBranch(branch.id, provider, rebaseTarget);
       } else {
-        await commands.squashCommits(branch.id, provider);
+        sessionId = await commands.squashCommits(branch.id, provider);
       }
+      // Add a pending session item so the session stub appears instantly
+      // instead of waiting for the full timeline refresh.
+      const title = kind === 'rebase' ? 'Rebasing…' : 'Squashing…';
+      sessionMgr.pendingSessionItems = [
+        ...sessionMgr.pendingSessionItems,
+        { key: pendingKey, type: 'pending-commit', title, sessionId },
+      ];
       await loadTimeline();
     } catch (e) {
       notifyError(kind === 'rebase' ? 'Rebase failed' : 'Squash failed', e);
@@ -640,8 +649,7 @@
       const { branchIds } = (e as CustomEvent<{ branchIds: string[] }>).detail;
       const timelineKey = branchTimelineReadyKey(branch);
       if (branchIds.includes(branch.id) && timelineKey) {
-        loadedTimelineKey = null;
-        void loadTimeline({ timelineKey, force: true });
+        void loadTimeline({ force: true });
       }
     };
     window.addEventListener('timeline-invalidated', handler);

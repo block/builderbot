@@ -283,20 +283,6 @@ Here is the context from the prior steps:
     }
 }
 
-async fn current_head_for_pipeline_context(ctx: &BranchPipelineContext) -> Result<String, String> {
-    if let Some(workspace_name) = ctx.workspace_name.clone() {
-        tauri::async_runtime::spawn_blocking(move || {
-            crate::blox::ws_exec(&workspace_name, &["git", "rev-parse", "HEAD"])
-        })
-        .await
-        .map_err(|e| format!("HEAD lookup task failed: {e}"))?
-        .map(|s| s.trim().to_string())
-        .map_err(|e| e.to_string())
-    } else {
-        git::get_head_sha(&ctx.working_dir).map_err(|e| format!("Failed to get HEAD SHA: {e}"))
-    }
-}
-
 async fn start_running_commit_pipeline_for_branch(
     ctx: BranchPipelineContext,
     kind: PipelineKind,
@@ -307,11 +293,6 @@ async fn start_running_commit_pipeline_for_branch(
     registry: &Arc<session_runner::SessionRegistry>,
 ) -> Result<String, String> {
     let prompt = commit_pipeline_prompt(&kind);
-    let pre_head_sha = if kind == PipelineKind::Rebase {
-        Some(current_head_for_pipeline_context(&ctx).await?)
-    } else {
-        None
-    };
     let pipeline = PipelineExecution::from_steps(&steps).with_kind(kind);
 
     let mut session = store::Session::new_running(prompt, &ctx.working_dir);
@@ -339,7 +320,7 @@ async fn start_running_commit_pipeline_for_branch(
             steps,
             pipeline,
             working_dir: ctx.working_dir,
-            pre_head_sha,
+            pre_head_sha: None,
             provider,
             workspace_name: ctx.workspace_name,
             remote_working_dir: ctx.remote_working_dir,
@@ -427,11 +408,6 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
     let base_branch = base_branch_name(&ctx.branch);
     let steps = build_commit_pipeline_steps(&kind, base_branch);
     let prompt = commit_pipeline_prompt(&kind);
-    let pre_head_sha = if kind == PipelineKind::Rebase {
-        Some(current_head_for_pipeline_context(&ctx).await?)
-    } else {
-        None
-    };
     let pipeline = PipelineExecution::from_steps(&steps).with_kind(kind);
     let effective_provider = session.provider.clone().or(provider);
 
@@ -468,7 +444,7 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
             steps,
             pipeline,
             working_dir: ctx.working_dir,
-            pre_head_sha,
+            pre_head_sha: None,
             provider: effective_provider,
             workspace_name: ctx.workspace_name,
             remote_working_dir: ctx.remote_working_dir,

@@ -643,9 +643,10 @@ pub fn start_pipeline_session(
             .build()
             .expect("Failed to create runtime for pipeline session");
 
+        let mut config = config;
         let local = tokio::task::LocalSet::new();
         let outcome = local.block_on(&rt, async {
-            run_pipeline(&config, &store, &app_handle, &cancel_token).await
+            run_pipeline(&mut config, &store, &app_handle, &cancel_token).await
         });
 
         match outcome {
@@ -975,11 +976,22 @@ fn drain_queued_after_pipeline_terminal(
 
 /// Execute pipeline steps sequentially, emitting events as each step progresses.
 async fn run_pipeline(
-    config: &PipelineConfig,
+    config: &mut PipelineConfig,
     store: &Arc<Store>,
     app_handle: &AppHandle,
     cancel_token: &CancellationToken,
 ) -> PipelineOutcome {
+    // Capture HEAD before the first step for rebase pipelines. This is deferred
+    // from session creation so the (potentially slow) remote HEAD lookup doesn't
+    // block session visibility in the UI.
+    if config.pre_head_sha.is_none() && config.pipeline.kind.as_ref() == Some(&PipelineKind::Rebase)
+    {
+        match current_pipeline_head(config) {
+            Ok(head) => config.pre_head_sha = Some(head),
+            Err(e) => log::warn!("Failed to capture pre-rebase HEAD: {e}"),
+        }
+    }
+
     // Use the pipeline execution state that was already persisted with the
     // session, rather than reconstructing from step definitions. This keeps
     // the data flow clear: callers build + persist the pipeline, and we

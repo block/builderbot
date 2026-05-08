@@ -1025,8 +1025,21 @@ async fn run_pipeline(
                 let _ = store.update_session_pipeline(&config.session_id, &execution);
                 emit_pipeline_step(app_handle, &config.session_id, idx, &execution.steps[idx]);
 
-                // Execute the shell command.
-                let result = run_pipeline_command(command, &config.working_dir, cancel_token).await;
+                // Execute the shell command — locally or on a remote workspace.
+                let result = if let Some(ref ws_name) = config.workspace_name {
+                    run_remote_pipeline_command(
+                        command,
+                        ws_name,
+                        config
+                            .remote_working_dir
+                            .as_deref()
+                            .and_then(|p| p.to_str()),
+                        cancel_token,
+                    )
+                    .await
+                } else {
+                    run_pipeline_command(command, &config.working_dir, cancel_token).await
+                };
 
                 match result {
                     Ok(PipelineCommandResult::Completed(output)) => {
@@ -1301,6 +1314,80 @@ async fn run_pipeline_command(
             let stdout = collect_pipe_output(stdout_task, "stdout").await;
             let stderr = collect_pipe_output(stderr_task, "stderr").await;
             Ok(PipelineCommandResult::Cancelled { stdout, stderr })
+        }
+    }
+}
+
+/// Execute a pipeline command on a remote Blox workspace via `ws_exec`.
+///
+/// Wraps the command in `cd <remote_dir> && sh -lc '<command>'` so it runs
+/// in the correct working directory on the remote, mirroring how the local
+/// path runs `sh -lc` with `current_dir`.
+async fn run_remote_pipeline_command(
+    command: &str,
+    workspace_name: &str,
+    remote_working_dir: Option<&str>,
+    cancel_token: &CancellationToken,
+) -> io::Result<PipelineCommandResult> {
+    // Build the remote shell command.
+    let shell_command = if let Some(dir) = remote_working_dir {
+        // Escape single quotes in the directory and command for the outer sh -c.
+        let escaped_dir = dir.replace('\'', "'\\''");
+        let escaped_cmd = command.replace('\'', "'\\''");
+        format!("cd '{escaped_dir}' && sh -lc '{escaped_cmd}'")
+    } else {
+        let escaped_cmd = command.replace('\'', "'\\''");
+        format!("sh -lc '{escaped_cmd}'")
+    };
+
+    let ws = workspace_name.to_string();
+    let handle = tokio::task::spawn_blocking(move || {
+        crate::blox::ws_exec_output(&ws, &["sh", "-c", &shell_command])
+    });
+
+    // Check for pre-existing cancellation before waiting.
+    if cancel_token.is_cancelled() {
+        handle.abort();
+        return Ok(PipelineCommandResult::Cancelled {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        });
+    }
+
+    tokio::select! {
+        result = handle => {
+            match result {
+                Ok(Ok(output)) => {
+                    use std::os::unix::process::ExitStatusExt;
+                    let status = if output.success {
+                        std::process::ExitStatus::from_raw(0)
+                    } else {
+                        // Encode exit code 1 in wait-status format (exit code << 8).
+                        std::process::ExitStatus::from_raw(1 << 8)
+                    };
+                    Ok(PipelineCommandResult::Completed(Output {
+                        status,
+                        stdout: output.stdout,
+                        stderr: output.stderr,
+                    }))
+                }
+                Ok(Err(e)) => {
+                    // Infrastructure error (CLI not found, timeout, auth failure).
+                    Err(io::Error::other(e.to_string()))
+                }
+                Err(e) => {
+                    // spawn_blocking panicked or was cancelled.
+                    Err(io::Error::other(e.to_string()))
+                }
+            }
+        }
+        _ = cancel_token.cancelled() => {
+            // ws_exec is blocking and not cancellable — the background thread
+            // will finish naturally, but we return immediately.
+            Ok(PipelineCommandResult::Cancelled {
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            })
         }
     }
 }

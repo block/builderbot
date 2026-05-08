@@ -5,7 +5,7 @@
 
 use std::sync::OnceLock;
 
-pub use blox_cli::{BloxError, WorkspaceCommand, WorkspaceInfo, WorkspaceListEntry};
+pub use blox_cli::{BloxError, WorkspaceCommand, WorkspaceInfo, WorkspaceListEntry, WsExecOutput};
 
 static SQ_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
@@ -66,6 +66,12 @@ pub fn ws_exec(name: &str, args: &[&str]) -> Result<String, BloxError> {
 /// Use this when the command may produce binary output (e.g. `git show` on image files).
 pub fn ws_exec_bytes(name: &str, args: &[&str]) -> Result<Vec<u8>, BloxError> {
     blox_cli::ws_exec_bytes(name, args)
+}
+
+/// Execute a command inside a Blox workspace, returning full output regardless
+/// of exit code. Infrastructure errors still return `Err`.
+pub fn ws_exec_output(name: &str, args: &[&str]) -> Result<WsExecOutput, BloxError> {
+    blox_cli::ws_exec_output(name, args)
 }
 
 /// Quick authentication check — runs `sq blox ws list` and inspects the result.

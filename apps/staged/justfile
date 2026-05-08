@@ -148,7 +148,7 @@ lint:
 
 # Run Rust unit tests
 test:
-    cd src-tauri && cargo test
+    cd src-tauri && cargo test --lib --bins --tests
 
 # Run frontend unit tests
 test-frontend:

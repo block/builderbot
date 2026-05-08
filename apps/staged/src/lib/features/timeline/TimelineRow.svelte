@@ -270,7 +270,7 @@
   class:pending={isPending}
   class:failed={isFailed}
   class:clickable={isClickable}
-  class:git-state={isGitState}
+  class:git-state={isGitState || type === 'revalidating'}
   class:compact={type === 'revalidating' || type === 'load-error'}
   onclick={handleRowClick}
   oncontextmenu={handleContextMenu}

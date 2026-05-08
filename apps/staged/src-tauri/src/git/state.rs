@@ -512,6 +512,7 @@ const BATCH_FETCH_SCRIPT: &str = concat!(
     "echo STATUS_END\n",
     "[ -n \"$upstream_missing\" ] && echo 'UPSTREAM_MISSING=true'\n",
     "[ -n \"$fetch_err\" ] && printf 'FETCH_ERR=%s\\n' \"$fetch_err\"\n",
+    "exit 0\n",
 );
 
 /// Shell script that computes upstream and base ref state in one round-trip.

@@ -526,6 +526,7 @@
 
   function gitIdentityWarning(state: BranchGitState | null | undefined): string | null {
     if (!state) return null;
+    if (state.fetch.status === 'failed') return null; // branch info unreliable when fetch failed
     if (state.detachedHead) return 'Detached HEAD';
     if (!state.expectedBranchMatches) {
       return state.currentBranch ? `Checked out ${state.currentBranch}` : 'Wrong branch';

@@ -32,6 +32,8 @@
   import DiffCommitSessionLauncher from './DiffCommitSessionLauncher.svelte';
   import DiffReferenceSection from './DiffReferenceSection.svelte';
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
+  import { getPreferredAgent } from '../settings/preferences.svelte';
+  import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { createDiffViewerState } from './diffViewerState.svelte';
   import { createReviewState } from './reviewState.svelte';
   import { createSearchState } from '@builderbot/diff-viewer/state';
@@ -406,6 +408,7 @@
       .catch((e) => console.warn('Failed to load branch:', e));
   });
 
+  let isRemote = $derived(branch?.branchType === 'remote');
   let hasPr = $derived(branch?.prNumber != null);
 
   // ==========================================================================
@@ -444,12 +447,15 @@
           (r) => !r.isAuto && (r.sessionStatus === 'running' || r.sessionStatus === 'queued')
         );
 
+      const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
+      const provider = getPreferredAgent(agents) ?? undefined;
+
       if (hasRunning) {
         await commands.queueBranchSession(
           branchId,
           prompt,
           mode,
-          undefined,
+          provider,
           undefined,
           launchContext
         );
@@ -458,7 +464,7 @@
           branchId,
           prompt,
           mode,
-          undefined,
+          provider,
           undefined,
           launchContext
         );
@@ -523,12 +529,15 @@
           (r) => !r.isAuto && (r.sessionStatus === 'running' || r.sessionStatus === 'queued')
         );
 
+      const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
+      const provider = getPreferredAgent(agents) ?? undefined;
+
       if (hasRunning) {
         await commands.queueBranchSession(
           branchId,
           data.prompt,
           data.mode,
-          undefined,
+          provider,
           data.imageIds,
           launchContext
         );
@@ -537,7 +546,7 @@
           branchId,
           data.prompt,
           data.mode,
-          undefined,
+          provider,
           data.imageIds,
           launchContext
         );

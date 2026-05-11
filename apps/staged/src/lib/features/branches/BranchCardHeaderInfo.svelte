@@ -127,8 +127,8 @@
     gap: 4px;
     padding: 2px 8px;
     border-radius: 999px;
-    background: var(--bg-secondary);
-    color: var(--text-secondary);
+    background: var(--bg-elevated);
+    color: var(--text-muted);
     font-size: var(--size-xs);
     max-width: 160px;
     overflow: hidden;
@@ -142,23 +142,33 @@
   }
 
   .rebase-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 22px;
+    padding: 0 8px;
     font-size: var(--size-xs);
-    padding: 2px 8px;
-    border-radius: 999px;
-    border: 1px solid var(--border-primary);
-    background: var(--bg-primary);
-    color: var(--text-secondary);
+    font-weight: 500;
+    color: var(--text-muted);
+    background: none;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
     cursor: pointer;
     white-space: nowrap;
+    transition:
+      color 0.15s,
+      border-color 0.15s,
+      background-color 0.15s;
   }
 
   .rebase-btn:hover:not(:disabled) {
-    background: var(--bg-secondary);
+    border-color: var(--border-muted);
     color: var(--text-primary);
+    background: var(--bg-hover);
   }
 
   .rebase-btn:disabled {
-    opacity: 0.5;
+    opacity: 0.3;
     cursor: not-allowed;
   }
 

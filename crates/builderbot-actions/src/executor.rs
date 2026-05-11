@@ -663,35 +663,37 @@ impl ActionExecutor {
         if let Some(pid) = pid {
             #[cfg(unix)]
             {
-                // Send SIGTERM to the entire process group (negative PID).
+                // Send SIGTERM to every process in the session.
                 //
-                // Because we used `setsid()` in pre_exec, the shell and all its
-                // children share a process group whose PGID equals the shell's PID.
-                // Sending the signal to `-pid` reaches every process in the group,
-                // ensuring child processes (npm, cargo, etc.) are also terminated.
+                // Because we used `setsid()` in pre_exec, the shell is the
+                // session leader and all descendant processes share its SID.
+                // However, the interactive shell (`-i`) uses job control and
+                // places child commands in their own process groups. A simple
+                // `kill(-pid, SIGTERM)` only reaches the shell's process group,
+                // missing child process groups entirely. Additionally,
+                // interactive shells ignore SIGTERM by default.
                 //
-                // SAFETY: Calling `libc::kill` with a negative PID targets a process
-                // group. The PID came from `Child::id()` at spawn time. If the group
-                // no longer exists, kill() returns ESRCH which we safely ignore.
-                // After SIGTERM, we spawn a background thread that waits briefly and
-                // escalates to SIGKILL if the group is still alive.
-                unsafe {
-                    libc::kill(-(pid as i32), libc::SIGTERM);
-                }
+                // `pkill -s <sid>` targets every process in the session
+                // regardless of process group, which reliably reaches the
+                // shell, its child commands, and their descendants.
+                let pid_str = pid.to_string();
+                let _ = Command::new("pkill")
+                    .args(["-TERM", "-s", &pid_str])
+                    .status();
 
                 if let Some(force_kill_after) = options.force_kill_after {
-                    // Escalate to SIGKILL after a short grace period in case the
-                    // process group ignores SIGTERM (e.g. a process traps the signal).
+                    // Escalate to SIGKILL after a short grace period in case
+                    // processes ignore SIGTERM (e.g. a process traps the signal).
                     thread::spawn(move || {
                         thread::sleep(force_kill_after);
-                        // SAFETY: Same considerations as above. If the process group
-                        // already exited, kill() harmlessly returns ESRCH.
-                        unsafe {
-                            // Check if the process group still exists before sending SIGKILL
-                            let ret = libc::kill(-(pid as i32), 0);
-                            if ret == 0 {
-                                libc::kill(-(pid as i32), libc::SIGKILL);
-                            }
+                        // Check if any process in the session still exists
+                        // before escalating. pkill exits 0 when it matches
+                        // at least one process.
+                        let probe = Command::new("pkill").args(["-0", "-s", &pid_str]).status();
+                        if probe.map(|s| s.success()).unwrap_or(false) {
+                            let _ = Command::new("pkill")
+                                .args(["-KILL", "-s", &pid_str])
+                                .status();
                         }
                     });
                 }

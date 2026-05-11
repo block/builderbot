@@ -663,37 +663,41 @@ impl ActionExecutor {
         if let Some(pid) = pid {
             #[cfg(unix)]
             {
-                // Send SIGTERM to the entire process group (negative PID).
+                // Send SIGHUP to the shell's process group.
                 //
-                // Because we used `setsid()` in pre_exec, the shell and all its
-                // children share a process group whose PGID equals the shell's PID.
-                // Sending the signal to `-pid` reaches every process in the group,
-                // ensuring child processes (npm, cargo, etc.) are also terminated.
+                // We used `setsid()` in pre_exec, so the shell is the session
+                // leader and its PID equals the PGID of its initial process
+                // group. Interactive shells (`-i`) use job control, placing
+                // child commands in separate process groups, so
+                // `kill(-pid, SIGTERM)` misses them. Interactive shells also
+                // ignore SIGTERM by default.
                 //
-                // SAFETY: Calling `libc::kill` with a negative PID targets a process
-                // group. The PID came from `Child::id()` at spawn time. If the group
-                // no longer exists, kill() returns ESRCH which we safely ignore.
-                // After SIGTERM, we spawn a background thread that waits briefly and
-                // escalates to SIGKILL if the group is still alive.
-                unsafe {
-                    libc::kill(-(pid as i32), libc::SIGTERM);
-                }
+                // SIGHUP is the correct signal here: interactive shells handle
+                // it by forwarding SIGHUP+SIGCONT to every job they manage,
+                // then exiting. This is POSIX-standard behavior across
+                // bash/zsh/fish and works on both macOS and Linux.
+                // The child's PID equals its session ID (we used setsid()).
+                let sid = pid as i32;
+                // SAFETY: kill(2) does not dereference pointers. A negative
+                // pid targets the process group.
+                let hup_result = unsafe { libc::kill(-sid, libc::SIGHUP) };
 
                 if let Some(force_kill_after) = options.force_kill_after {
-                    // Escalate to SIGKILL after a short grace period in case the
-                    // process group ignores SIGTERM (e.g. a process traps the signal).
-                    thread::spawn(move || {
-                        thread::sleep(force_kill_after);
-                        // SAFETY: Same considerations as above. If the process group
-                        // already exited, kill() harmlessly returns ESRCH.
-                        unsafe {
-                            // Check if the process group still exists before sending SIGKILL
-                            let ret = libc::kill(-(pid as i32), 0);
-                            if ret == 0 {
-                                libc::kill(-(pid as i32), libc::SIGKILL);
-                            }
-                        }
-                    });
+                    // If SIGHUP failed with ESRCH, the process group is
+                    // already gone — no need to escalate.
+                    let already_dead = hup_result == -1
+                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+
+                    if !already_dead {
+                        // Escalate to SIGKILL after a grace period. Use
+                        // session-based kill to reach child commands that
+                        // the shell may have placed in separate process
+                        // groups via job control.
+                        thread::spawn(move || {
+                            thread::sleep(force_kill_after);
+                            kill_session(sid, libc::SIGKILL);
+                        });
+                    }
                 }
             }
 
@@ -776,4 +780,154 @@ fn now_timestamp() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as i64
+}
+
+// =============================================================================
+// Session-based kill (unix only)
+// =============================================================================
+
+/// Send `signal` to every process in session `sid`.
+///
+/// The child was started with `setsid()`, so its PID equals the session ID.
+/// Interactive shells may place child commands in separate process groups,
+/// so `kill(-pgid, sig)` can miss them. This function enumerates all PIDs
+/// in the session and signals each one individually.
+///
+/// Returns the number of processes successfully signalled.
+#[cfg(target_os = "macos")]
+fn kill_session(sid: i32, signal: i32) -> usize {
+    // On macOS, sysctl(KERN_PROC_SESSION) returns an array of kinfo_proc
+    // structs. The libc crate doesn't expose kinfo_proc for macOS, so we
+    // work with raw bytes. On 64-bit macOS (both arm64 and x86_64):
+    //   sizeof(struct kinfo_proc) = 648
+    //   offsetof(kinfo_proc, kp_proc.p_pid) = 40
+    const KINFO_PROC_SIZE: usize = 648;
+    const P_PID_OFFSET: usize = 40;
+
+    let mut mib: [libc::c_int; 4] = [
+        libc::CTL_KERN,
+        libc::KERN_PROC,
+        libc::KERN_PROC_SESSION,
+        sid,
+    ];
+    let mut size: libc::size_t = 0;
+
+    // First call: get the buffer size needed.
+    // SAFETY: sysctl with a null buffer just returns the needed size.
+    let ret = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ret != 0 || size < KINFO_PROC_SIZE {
+        return 0;
+    }
+
+    let mut buf: Vec<u8> = vec![0u8; size];
+    let mut actual_size = size;
+
+    // Second call: fill the buffer.
+    // SAFETY: buf is a properly sized byte buffer.
+    let ret = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            4,
+            buf.as_mut_ptr().cast(),
+            &mut actual_size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if ret != 0 {
+        return 0;
+    }
+
+    let count = actual_size / KINFO_PROC_SIZE;
+    let mut signalled = 0usize;
+    for i in 0..count {
+        let offset = i * KINFO_PROC_SIZE + P_PID_OFFSET;
+        if offset + 4 > actual_size {
+            break;
+        }
+        let pid = i32::from_ne_bytes([
+            buf[offset],
+            buf[offset + 1],
+            buf[offset + 2],
+            buf[offset + 3],
+        ]);
+        // SAFETY: kill(2) does not dereference pointers.
+        if unsafe { libc::kill(pid, signal) } == 0 {
+            signalled += 1;
+        }
+    }
+    signalled
+}
+
+/// Send `signal` to every process in session `sid`.
+///
+/// On Linux, enumerates `/proc/*/stat` and parses field 6 (session ID)
+/// to find matching processes.
+///
+/// Returns the number of processes successfully signalled.
+#[cfg(target_os = "linux")]
+fn kill_session(sid: i32, signal: i32) -> usize {
+    let mut signalled = 0usize;
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        let Ok(pid) = name_str.parse::<i32>() else {
+            continue;
+        };
+        let stat_path = format!("/proc/{pid}/stat");
+        let Ok(stat) = std::fs::read_to_string(&stat_path) else {
+            continue;
+        };
+        // The stat format is: pid (comm) state ppid pgrp session ...
+        // comm can contain spaces and parens, so find the last ')' first.
+        let Some(close_paren) = stat.rfind(')') else {
+            continue;
+        };
+        let fields_after_comm = &stat[close_paren + 2..]; // skip ") "
+                                                          // fields_after_comm: state ppid pgrp session ...
+                                                          //                    [0]   [1]  [2]  [3]
+        let mut fields = fields_after_comm.split_whitespace();
+        if let Some(session_str) = fields.nth(3) {
+            if let Ok(proc_sid) = session_str.parse::<i32>() {
+                if proc_sid == sid {
+                    // SAFETY: kill(2) does not dereference pointers.
+                    if unsafe { libc::kill(pid, signal) } == 0 {
+                        signalled += 1;
+                    }
+                }
+            }
+        }
+    }
+    signalled
+}
+
+/// Send `signal` to every process in session `sid`.
+///
+/// Fallback for unix platforms other than macOS and Linux: sends the signal
+/// to the session leader's process group via `kill(-sid, signal)`, which may
+/// miss child commands in separate process groups under job control.
+///
+/// Returns 1 if the signal was delivered, 0 otherwise.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn kill_session(sid: i32, signal: i32) -> usize {
+    // SAFETY: kill(2) does not dereference pointers.
+    if unsafe { libc::kill(-sid, signal) } == 0 {
+        1
+    } else {
+        0
+    }
 }

@@ -481,8 +481,11 @@
   const sessionMgr = new BranchCardSessionManager({
     getBranch: () => branch,
     getIsRemote: () => isRemote,
-    loadTimeline: () => loadTimeline(),
+    loadTimeline: (opts) => loadTimeline(opts),
     getTimeline: () => timeline,
+    setTimeline: (tl) => {
+      timeline = tl;
+    },
   });
 
   let requestedTimelineKey: string | null = null;
@@ -625,8 +628,18 @@
           return;
         }
 
+        // Skip reload for the adopted auto-review session completing —
+        // the timeline was already updated optimistically during adoption.
+        if (eventSessionId === sessionMgr.adoptedSessionId) {
+          sessionMgr.adoptedSessionId = null;
+          return;
+        }
+
+        // Only reload if this session belongs to our branch
+        if (eventBranchId && eventBranchId !== branchId) return;
+
         commands.invalidateBranchTimeline(branch.id);
-        loadTimeline();
+        loadTimeline({ skipFetch: true });
         // Handle PR session completion
         if (prButton && eventSessionId === prButton.getPrSessionId()) {
           prButton.handlePrSessionComplete(status);
@@ -740,7 +753,8 @@
   async function loadTimeline({
     timelineKey = branchTimelineReadyKey(branch),
     force = false,
-  }: { timelineKey?: string | null; force?: boolean } = {}) {
+    skipFetch = false,
+  }: { timelineKey?: string | null; force?: boolean; skipFetch?: boolean } = {}) {
     if (!timelineKey) return;
 
     const loadVersion = ++timelineLoadVersion;
@@ -768,6 +782,7 @@
 
       const nextTimeline = await commands.getBranchTimeline(branch.id, {
         force: force || !isInitialLoad,
+        skipFetch,
       });
       if (!isCurrentTimelineLoad(loadVersion, timelineKey)) return;
       timeline = nextTimeline;

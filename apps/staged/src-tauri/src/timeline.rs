@@ -135,6 +135,7 @@ fn build_branch_timeline(
     store: &Arc<Store>,
     branch_id: &str,
     app: Option<&tauri::AppHandle>,
+    fetch_mode: git::FetchMode,
 ) -> Result<BranchTimeline, String> {
     // Get the branch and its workdir for git operations
     let branch = store
@@ -161,7 +162,7 @@ fn build_branch_timeline(
         let resolved_path = resolve_repo_path(ws_name, repo_subpath.as_deref())?;
         let base_ref = git::origin_ref_for_branch(&branch.base_branch);
 
-        if app.is_some() && git::needs_fetch(&cache_key, git::FetchMode::Ttl) {
+        if app.is_some() && git::needs_fetch(&cache_key, fetch_mode) {
             // Two-stream: run fast + slow scripts concurrently.
             // The fast script returns local state + commits in one round-trip.
             // The slow script performs fetch + ref comparisons in another.
@@ -176,7 +177,7 @@ fn build_branch_timeline(
                         &resolved_path,
                         &branch.branch_name,
                         &branch.base_branch,
-                        git::FetchMode::Ttl,
+                        fetch_mode,
                     )
                 });
 
@@ -229,7 +230,7 @@ fn build_branch_timeline(
                 &resolved_path,
                 &branch.branch_name,
                 &branch.base_branch,
-                git::FetchMode::Ttl,
+                fetch_mode,
             ));
             commits = fetch_remote_commits(
                 ws_name,
@@ -250,7 +251,7 @@ fn build_branch_timeline(
                 &branch.base_branch,
             );
 
-            if app.is_some() && git::needs_fetch(&cache_key, git::FetchMode::Ttl) {
+            if app.is_some() && git::needs_fetch(&cache_key, fetch_mode) {
                 // Two-stream: fast state + commits → emit partial → slow state
                 let fast = git::compute_fast_local_git_state(worktree_path, &branch.branch_name);
                 let git_commits =
@@ -277,7 +278,7 @@ fn build_branch_timeline(
                     &fast,
                     &branch.branch_name,
                     &branch.base_branch,
-                    git::FetchMode::Ttl,
+                    fetch_mode,
                 ));
             } else {
                 // Single stream: fetch cache is fresh
@@ -285,7 +286,7 @@ fn build_branch_timeline(
                     worktree_path,
                     &branch.branch_name,
                     &branch.base_branch,
-                    git::FetchMode::Ttl,
+                    fetch_mode,
                 ));
                 let git_commits =
                     git::get_commits_since_base(worktree_path, &base_ref).map_err(|e| {
@@ -446,16 +447,22 @@ fn review_is_visible_in_timeline(review: &Review, visible_shas: &HashSet<&str>) 
             .any(|comment| comment.author == CommentAuthor::User)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn get_branch_timeline(
     app: tauri::AppHandle,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
+    skip_fetch: Option<bool>,
 ) -> Result<BranchTimeline, String> {
     let store = crate::get_store(&store)?;
+    let fetch_mode = if skip_fetch.unwrap_or(false) {
+        git::FetchMode::Never
+    } else {
+        git::FetchMode::Ttl
+    };
 
     tauri::async_runtime::spawn_blocking(move || {
-        build_branch_timeline(&store, &branch_id, Some(&app))
+        build_branch_timeline(&store, &branch_id, Some(&app), fetch_mode)
     })
     .await
     .map_err(|e| format!("Timeline task failed: {e}"))?
@@ -969,7 +976,8 @@ mod tests {
         store.create_review(&visible_review).unwrap();
         store.create_review(&stale_review).unwrap();
 
-        let timeline = build_branch_timeline(&store, &branch.id, None).unwrap();
+        let timeline =
+            build_branch_timeline(&store, &branch.id, None, git::FetchMode::Ttl).unwrap();
 
         assert_eq!(timeline.commits.len(), 1);
         assert_eq!(timeline.commits[0].sha, visible_sha);
@@ -988,7 +996,8 @@ mod tests {
         store.create_review(&stale_review).unwrap();
         store.add_comment(&stale_review.id, &agent_comment).unwrap();
 
-        let timeline = build_branch_timeline(&store, &branch.id, None).unwrap();
+        let timeline =
+            build_branch_timeline(&store, &branch.id, None, git::FetchMode::Ttl).unwrap();
 
         assert_eq!(timeline.commits.len(), 1);
         assert!(timeline.reviews.is_empty());
@@ -1004,7 +1013,8 @@ mod tests {
         store.create_review(&stale_review).unwrap();
         store.add_comment(&stale_review.id, &user_comment).unwrap();
 
-        let timeline = build_branch_timeline(&store, &branch.id, None).unwrap();
+        let timeline =
+            build_branch_timeline(&store, &branch.id, None, git::FetchMode::Ttl).unwrap();
 
         assert_eq!(timeline.commits.len(), 1);
         assert_eq!(timeline.reviews.len(), 1);
@@ -1023,7 +1033,8 @@ mod tests {
         store.add_comment(&stale_review.id, &user_comment).unwrap();
         store.delete_comment(&user_comment.id).unwrap();
 
-        let timeline = build_branch_timeline(&store, &branch.id, None).unwrap();
+        let timeline =
+            build_branch_timeline(&store, &branch.id, None, git::FetchMode::Ttl).unwrap();
 
         assert_eq!(timeline.commits.len(), 1);
         assert!(timeline.reviews.is_empty());

@@ -345,11 +345,12 @@ export function invalidateBranchTimeline(branchId: string): void {
 
 interface GetBranchTimelineOptions {
   force?: boolean;
+  skipFetch?: boolean;
 }
 
 export function getBranchTimeline(
   branchId: string,
-  { force = false }: GetBranchTimelineOptions = {}
+  { force = false, skipFetch = false }: GetBranchTimelineOptions = {}
 ): Promise<BranchTimeline> {
   if (!force) {
     const cached = timelineCache.get(branchId);
@@ -363,7 +364,10 @@ export function getBranchTimeline(
     }
   }
 
-  const request = invoke<BranchTimeline>('get_branch_timeline', { branchId })
+  const request = invoke<BranchTimeline>('get_branch_timeline', {
+    branchId,
+    skipFetch: skipFetch || undefined,
+  })
     .then((timeline) => {
       if (inFlightTimelines.get(branchId) === request) {
         timelineCache.set(branchId, { timeline, fetchedAt: Date.now() });

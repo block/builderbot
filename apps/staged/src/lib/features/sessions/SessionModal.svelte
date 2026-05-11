@@ -2194,7 +2194,7 @@
     font-family: inherit;
     line-height: 1.5;
     resize: none;
-    overflow-y: auto;
+    overflow-y: hidden;
     min-height: 36px;
     max-height: 120px;
   }

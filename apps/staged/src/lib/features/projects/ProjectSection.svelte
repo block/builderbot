@@ -345,7 +345,13 @@
 
   function autoResize(el: HTMLElement) {
     el.style.height = 'auto';
-    el.style.height = `${el.scrollHeight}px`;
+    el.style.overflow = 'hidden';
+    const maxHeight = 120; // matches CSS max-height
+    const height = Math.min(el.scrollHeight, maxHeight);
+    el.style.height = height + 'px';
+    if (height >= maxHeight) {
+      el.style.overflow = 'auto';
+    }
   }
 
   async function handleSubmitPrompt() {
@@ -1057,7 +1063,7 @@
     outline: none;
     min-height: 28px;
     max-height: 120px;
-    overflow-y: auto;
+    overflow-y: hidden;
   }
 
   .prompt-input-row :global(.hashtag-input-wrapper) {

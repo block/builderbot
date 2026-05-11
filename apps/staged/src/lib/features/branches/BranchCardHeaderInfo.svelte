@@ -24,6 +24,24 @@
   }: Props = $props();
 </script>
 
+{#snippet parentPill()}
+  {#if baseBranch}
+    <span class="branch-capsule" title={baseBranch}>
+      {baseBranch}{#if parentAheadCount > 0}<span class="ahead-count">
+          +{parentAheadCount}</span
+        >{/if}
+    </span>
+    {#if parentAheadCount > 0 && onRebase}
+      <button
+        class="rebase-btn"
+        disabled={rebaseDisabled}
+        title={rebaseDisabled ? 'Rebase unavailable' : 'Rebase onto parent'}
+        onclick={onRebase}>Rebase</button
+      >
+    {/if}
+  {/if}
+{/snippet}
+
 <div class="header-left">
   {#if repoLabel}
     <span class="repo-name"
@@ -36,20 +54,8 @@
       <span class="branch-capsule" title={branchName}>{branchName}</span>
       {#if baseBranch}
         <ChevronRight size={12} />
-        <span class="branch-capsule" title={baseBranch}>
-          {baseBranch}{#if parentAheadCount > 0}<span class="ahead-count">
-              +{parentAheadCount}</span
-            >{/if}
-        </span>
-        {#if parentAheadCount > 0 && onRebase}
-          <button
-            class="rebase-btn"
-            disabled={rebaseDisabled}
-            title={rebaseDisabled ? 'Rebase unavailable' : 'Rebase onto parent'}
-            onclick={onRebase}>Rebase</button
-          >
-        {/if}
       {/if}
+      {@render parentPill()}
       {#if warning}
         <span class="branch-warning" title={warning}>
           <AlertTriangle size={12} />
@@ -61,21 +67,7 @@
     <span class="repo-name">{branchName}</span>
     {#if baseBranch || warning}
       <div class="header-meta">
-        {#if baseBranch}
-          <span class="branch-capsule" title={baseBranch}>
-            {baseBranch}{#if parentAheadCount > 0}<span class="ahead-count">
-                +{parentAheadCount}</span
-              >{/if}
-          </span>
-          {#if parentAheadCount > 0 && onRebase}
-            <button
-              class="rebase-btn"
-              disabled={rebaseDisabled}
-              title={rebaseDisabled ? 'Rebase unavailable' : 'Rebase onto parent'}
-              onclick={onRebase}>Rebase</button
-            >
-          {/if}
-        {/if}
+        {@render parentPill()}
         {#if warning}
           <span class="branch-warning" title={warning}>
             <AlertTriangle size={12} />

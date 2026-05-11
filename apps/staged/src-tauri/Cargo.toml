@@ -28,6 +28,7 @@ tauri-plugin-log = "2.8.0"
 thiserror = "2.0"
 anyhow = "1.0"
 base64 = "0.22"
+tempfile = "3"
 sha2 = "0.11"
 
 # Review storage

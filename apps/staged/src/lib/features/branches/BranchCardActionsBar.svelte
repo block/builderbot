@@ -516,22 +516,59 @@
     });
   }
 
-  function buildOpenInMenuItems(): MenuItem[] {
-    const items: MenuItem[] = openerApps.map((app) => ({
-      type: 'action',
-      label: app.name,
-      onSelect: () => handleOpenInApp(app.id),
-    }));
+  const terminalAppIds = new Set([
+    'terminal',
+    'warp',
+    'iterm',
+    'hyper',
+    'kitty',
+    'alacritty',
+    'ghostty',
+  ]);
+  const fileBrowserAppIds = new Set(['finder']);
 
-    items.push(
-      { type: 'separator' },
-      {
+  function buildOpenInMenuItems(): MenuItem[] {
+    const terminals: MenuItem[] = [];
+    const editors: MenuItem[] = [];
+    const fileBrowsers: MenuItem[] = [];
+
+    for (const app of openerApps) {
+      const item: MenuItem = {
         type: 'action',
-        label: 'Copy Path',
-        icon: Copy,
-        onSelect: handleCopyPath,
+        label: app.name,
+        iconSrc: app.icon ?? undefined,
+        onSelect: () => handleOpenInApp(app.id),
+      };
+      if (terminalAppIds.has(app.id)) {
+        terminals.push(item);
+      } else if (fileBrowserAppIds.has(app.id)) {
+        fileBrowsers.push(item);
+      } else {
+        editors.push(item);
       }
-    );
+    }
+
+    const sortByLabel = (a: MenuItem, b: MenuItem) =>
+      (a.type === 'action' ? a.label : '').localeCompare(b.type === 'action' ? b.label : '');
+
+    const items: MenuItem[] = [];
+    if (terminals.length > 0) items.push(...terminals.sort(sortByLabel));
+    if (editors.length > 0) {
+      if (items.length > 0) items.push({ type: 'separator' });
+      items.push(...editors.sort(sortByLabel));
+    }
+    if (fileBrowsers.length > 0) {
+      if (items.length > 0) items.push({ type: 'separator' });
+      items.push(...fileBrowsers.sort(sortByLabel));
+    }
+
+    if (items.length > 0) items.push({ type: 'separator' });
+    items.push({
+      type: 'action',
+      label: 'Copy Path',
+      icon: Copy,
+      onSelect: handleCopyPath,
+    });
 
     return items;
   }

@@ -5,6 +5,7 @@ import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 export interface OpenerApp {
   id: string;
   name: string;
+  icon: string | null;
 }
 
 // Cache for performance

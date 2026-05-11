@@ -273,7 +273,16 @@
           handleAction(item);
         }}
       >
-        {#if item.icon}
+        {#if item.iconSrc}
+          <img
+            src={item.iconSrc}
+            alt=""
+            width="14"
+            height="14"
+            draggable="false"
+            class="menu-item-icon"
+          />
+        {:else if item.icon}
           <item.icon size={14} />
         {/if}
         <span class="menu-item-label">{item.label}</span>
@@ -353,7 +362,7 @@
     padding: 4px;
     border: 1px solid var(--border-muted);
     border-radius: 8px;
-    background: var(--bg-elevated);
+    background: var(--bg-primary);
     box-shadow: var(--shadow-elevated);
     color: var(--text-primary);
   }
@@ -403,6 +412,11 @@
     flex-shrink: 0;
   }
 
+  .menu-item-icon {
+    flex-shrink: 0;
+    border-radius: 3px;
+  }
+
   .menu-item.danger {
     color: var(--ui-danger);
   }
@@ -425,7 +439,7 @@
   .menu-separator {
     height: 1px;
     margin: 4px 0;
-    background: var(--border-subtle);
+    background: var(--border-muted);
   }
 
   .submenu-container {

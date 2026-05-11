@@ -125,7 +125,8 @@
     display: inline-block;
     padding: 2px 8px;
     border-radius: 999px;
-    background: var(--bg-elevated);
+    background: none;
+    border: 1px solid var(--border-subtle);
     color: var(--text-muted);
     font-size: var(--size-xs);
     max-width: 240px;

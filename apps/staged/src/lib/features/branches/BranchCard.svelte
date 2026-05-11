@@ -127,7 +127,8 @@
 
   let timeline = $state<BranchTimelineData | null>(null);
   let loading = $state(true);
-  let revalidating = $state(false);
+  /** True from the start of any timeline load until the full (slow) git state arrives. */
+  let refreshingGitState = $state(true);
   let error = $state<string | null>(null);
   let pullingOrigin = $state(false);
   let discardingWorktreeChanges = $state(false);
@@ -510,7 +511,7 @@
     loading = false;
     prunedSessionIds = sessionMgr.prunePendingSessionItems(cached);
     if (fresh) {
-      revalidating = true;
+      refreshingGitState = true;
       const version = ++revalidationVersion;
       fresh
         .then((next) => {
@@ -533,9 +534,10 @@
           if (version !== revalidationVersion || branchTimelineReadyKey(branch) !== timelineKey) {
             return;
           }
-          revalidating = false;
+          refreshingGitState = false;
         });
     } else {
+      refreshingGitState = false;
       void loadTimelineReviewDetails(cached.reviews);
     }
   }
@@ -747,7 +749,7 @@
     error = null;
     // Cancel any in-flight revalidation so it can't overwrite fresher data
     revalidationVersion++;
-    revalidating = false;
+    refreshingGitState = true;
 
     try {
       if (isInitialLoad) {
@@ -781,6 +783,7 @@
       }
       if (isCurrentTimelineLoad(loadVersion, timelineKey)) {
         loading = false;
+        refreshingGitState = false;
       }
     }
   }
@@ -1345,7 +1348,7 @@
     </div>
   {:else}
     <div class="card-header">
-      {#if revalidating}
+      {#if refreshingGitState}
         <Spinner size={14} />
       {:else if isRemote}
         <Cloud size={14} class="header-icon {cloudStatusClass(remoteWorkspaceStatus)}" />

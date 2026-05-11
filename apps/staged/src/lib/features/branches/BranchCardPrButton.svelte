@@ -647,7 +647,7 @@
   }
 </script>
 
-{#if hasCodeChanges}
+{#if hasCodeChanges || branch.prNumber}
   <button
     class="pr-btn"
     class:creating={prState === 'creating'}

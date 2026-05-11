@@ -355,7 +355,7 @@
     padding: 4px;
     border: 1px solid var(--border-muted);
     border-radius: 8px;
-    background: var(--bg-elevated);
+    background: var(--bg-primary);
     box-shadow: var(--shadow-elevated);
     color: var(--text-primary);
   }
@@ -432,7 +432,7 @@
   .menu-separator {
     height: 1px;
     margin: 4px 0;
-    background: var(--border-subtle);
+    background: var(--border-muted);
   }
 
   .submenu-container {

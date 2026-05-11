@@ -1186,6 +1186,7 @@
           scope={reviewableScope()}
           reviewId={activeReviewId}
           visibleCommentCount={currentComments.length}
+          {isRemote}
           onStarted={onClose}
         />
       {/if}

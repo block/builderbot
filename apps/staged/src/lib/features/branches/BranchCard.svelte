@@ -28,7 +28,6 @@
     Branch,
     BranchGitState,
     BranchTimeline as BranchTimelineData,
-    CommitTimelineItem,
     HashtagItem,
     ProjectRepo,
     SessionStatusPayload,
@@ -127,8 +126,8 @@
 
   let timeline = $state<BranchTimelineData | null>(null);
   let loading = $state(true);
-  /** True from the start of any timeline load until the full (slow) git state arrives. */
-  let refreshingGitState = $state(true);
+  /** True while a background git-state refresh (fetch + ref comparison) is in flight. */
+  let refreshingGitState = $state(false);
   let error = $state<string | null>(null);
   let pullingOrigin = $state(false);
   let discardingWorktreeChanges = $state(false);
@@ -514,7 +513,6 @@
     loading = false;
     prunedSessionIds = sessionMgr.prunePendingSessionItems(cached);
     if (fresh) {
-      refreshingGitState = true;
       const version = ++revalidationVersion;
       fresh
         .then((next) => {
@@ -532,17 +530,16 @@
             return;
           }
           error = e instanceof Error ? e.message : String(e);
-        })
-        .finally(() => {
-          if (version !== revalidationVersion || branchTimelineReadyKey(branch) !== timelineKey) {
-            return;
-          }
-          refreshingGitState = false;
         });
     } else {
-      refreshingGitState = false;
       void loadTimelineReviewDetails(cached.reviews);
     }
+
+    // Kick off a background git-state refresh (TTL-gated fetch).
+    refreshingGitState = true;
+    commands.refreshBranchGitState(branch.id).catch(() => {
+      refreshingGitState = false;
+    });
   }
 
   // Synchronously hydrate timeline from cache so isSettingUp is never true
@@ -639,7 +636,7 @@
         if (eventBranchId && eventBranchId !== branchId) return;
 
         commands.invalidateBranchTimeline(branch.id);
-        loadTimeline({ skipFetch: true });
+        loadTimeline();
         // Handle PR session completion
         if (prButton && eventSessionId === prButton.getPrSessionId()) {
           prButton.handlePrSessionComplete(status);
@@ -676,55 +673,24 @@
     };
   });
 
-  // Listen for partial timeline events emitted by the fast stream.
-  // When the backend needs to fetch, it emits commits + fast git state
-  // (worktree, HEAD, branch identity) before the slow fetch completes.
-  // This lets the UI show commits and worktree state immediately.
-  let unlistenPartial: UnlistenFn | null = null;
+  // Listen for git-state-updated events emitted by refresh_branch_git_state.
+  // Merges the fresh git state into the existing timeline without a full reload.
+  let unlistenGitState: UnlistenFn | null = null;
   $effect(() => {
     const branchId = branch.id;
 
-    listen<{ branchId: string; commits: CommitTimelineItem[]; gitState: BranchGitState }>(
-      'timeline-partial',
-      (event) => {
-        if (event.payload.branchId !== branchId) return;
-        const { commits: partialCommits, gitState: partialGitState } = event.payload;
-
-        if (!timeline) {
-          // No existing timeline — create a minimal one from the partial data
-          timeline = {
-            commits: partialCommits,
-            notes: [],
-            reviews: [],
-            images: [],
-            gitState: partialGitState,
-          };
-          loading = false;
-        } else {
-          // Merge: update commits and fast git state fields, preserve
-          // existing upstream/base data so those rows don't flash away
-          timeline = {
-            ...timeline,
-            commits: partialCommits,
-            gitState: timeline.gitState
-              ? {
-                  ...timeline.gitState,
-                  headSha: partialGitState.headSha,
-                  currentBranch: partialGitState.currentBranch,
-                  detachedHead: partialGitState.detachedHead,
-                  expectedBranchMatches: partialGitState.expectedBranchMatches,
-                  worktree: partialGitState.worktree,
-                }
-              : partialGitState,
-          };
-        }
+    listen<{ branchId: string; gitState: BranchGitState }>('git-state-updated', (event) => {
+      if (event.payload.branchId !== branchId) return;
+      if (timeline) {
+        timeline = { ...timeline, gitState: event.payload.gitState };
       }
-    ).then((unlisten) => {
-      unlistenPartial = unlisten;
+      refreshingGitState = false;
+    }).then((unlisten) => {
+      unlistenGitState = unlisten;
     });
 
     return () => {
-      unlistenPartial?.();
+      unlistenGitState?.();
     };
   });
 
@@ -753,8 +719,7 @@
   async function loadTimeline({
     timelineKey = branchTimelineReadyKey(branch),
     force = false,
-    skipFetch = false,
-  }: { timelineKey?: string | null; force?: boolean; skipFetch?: boolean } = {}) {
+  }: { timelineKey?: string | null; force?: boolean } = {}) {
     if (!timelineKey) return;
 
     const loadVersion = ++timelineLoadVersion;
@@ -763,7 +728,6 @@
     error = null;
     // Cancel any in-flight revalidation so it can't overwrite fresher data
     revalidationVersion++;
-    refreshingGitState = true;
 
     try {
       if (isInitialLoad) {
@@ -782,7 +746,6 @@
 
       const nextTimeline = await commands.getBranchTimeline(branch.id, {
         force: force || !isInitialLoad,
-        skipFetch,
       });
       if (!isCurrentTimelineLoad(loadVersion, timelineKey)) return;
       timeline = nextTimeline;
@@ -798,9 +761,15 @@
       }
       if (isCurrentTimelineLoad(loadVersion, timelineKey)) {
         loading = false;
-        refreshingGitState = false;
       }
     }
+
+    // Kick off a background git-state refresh (TTL-gated fetch).
+    // The result arrives via the `git-state-updated` event listener above.
+    refreshingGitState = true;
+    commands.refreshBranchGitState(branch.id).catch(() => {
+      refreshingGitState = false;
+    });
   }
 
   function getTimelineReviewDetails(fullReview: TimelineFullReview): TimelineReviewDetails {

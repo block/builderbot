@@ -38,7 +38,7 @@ export default class BranchCardSessionManager {
   // Private callback refs — declared first so $derived fields can reference them
   private getBranch: () => Branch = undefined!;
   private getIsRemote: () => boolean = undefined!;
-  private loadTimeline: (opts?: { skipFetch?: boolean }) => void = undefined!;
+  private loadTimeline: () => void = undefined!;
   private getTimeline: () => BranchTimelineData | null = () => null;
   private setTimeline: (tl: BranchTimelineData) => void = undefined!;
 
@@ -99,7 +99,7 @@ export default class BranchCardSessionManager {
   constructor(opts: {
     getBranch: () => Branch;
     getIsRemote: () => boolean;
-    loadTimeline: (opts?: { skipFetch?: boolean }) => void;
+    loadTimeline: () => void;
     getTimeline: () => BranchTimelineData | null;
     setTimeline: (tl: BranchTimelineData) => void;
   }) {
@@ -264,7 +264,7 @@ export default class BranchCardSessionManager {
       this.autoReviewSessionId = null;
       this.autoReviewId = null;
 
-      this.loadTimeline({ skipFetch: true });
+      this.loadTimeline();
       return true;
     } catch (e) {
       console.error('[BranchCard] Failed to adopt auto review:', e);

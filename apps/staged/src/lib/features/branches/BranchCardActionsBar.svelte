@@ -548,15 +548,18 @@
       }
     }
 
+    const sortByLabel = (a: MenuItem, b: MenuItem) =>
+      (a.type === 'action' ? a.label : '').localeCompare(b.type === 'action' ? b.label : '');
+
     const items: MenuItem[] = [];
-    if (terminals.length > 0) items.push(...terminals);
+    if (terminals.length > 0) items.push(...terminals.sort(sortByLabel));
     if (editors.length > 0) {
       if (items.length > 0) items.push({ type: 'separator' });
-      items.push(...editors);
+      items.push(...editors.sort(sortByLabel));
     }
     if (fileBrowsers.length > 0) {
       if (items.length > 0) items.push({ type: 'separator' });
-      items.push(...fileBrowsers);
+      items.push(...fileBrowsers.sort(sortByLabel));
     }
 
     if (items.length > 0) items.push({ type: 'separator' });

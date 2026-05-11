@@ -56,7 +56,6 @@ struct BranchPipelineContext {
     working_dir: PathBuf,
     workspace_name: Option<String>,
     remote_working_dir: Option<PathBuf>,
-    github_repo: String,
 }
 
 /// Resolve branch, project, and working directory for a pipeline command.
@@ -125,7 +124,6 @@ fn resolve_branch_pipeline_context(
         working_dir,
         workspace_name,
         remote_working_dir,
-        github_repo: repo_slug,
     })
 }
 
@@ -211,30 +209,24 @@ fn commit_pipeline_prompt(kind: &PipelineKind) -> &'static str {
     }
 }
 
-fn git_fetch_with_fallback(github_repo: &str, refspec: &str) -> String {
-    let https_url = format!("https://github.com/{github_repo}.git");
+const HTTPS_FALLBACK_CONFIG: &str = "url.https://github.com/.insteadOf=git@github.com:";
+
+fn git_fetch_with_fallback(refspec: &str) -> String {
     format!(
-        "if ! git fetch origin {refspec}; then git remote set-url origin '{https_url}' && git fetch origin {refspec}; fi"
+        "if ! git fetch origin {refspec}; then git -c '{HTTPS_FALLBACK_CONFIG}' fetch origin {refspec}; fi"
     )
 }
 
-fn git_push_with_fallback(github_repo: &str, args: &str) -> String {
-    let https_url = format!("https://github.com/{github_repo}.git");
-    format!(
-        "if ! git push {args}; then git remote set-url origin '{https_url}' && git push {args}; fi"
-    )
+fn git_push_with_fallback(args: &str) -> String {
+    format!("if ! git push {args}; then git -c '{HTTPS_FALLBACK_CONFIG}' push {args}; fi")
 }
 
-fn build_commit_pipeline_steps(
-    kind: &PipelineKind,
-    base_branch: &str,
-    github_repo: &str,
-) -> Vec<PipelineStep> {
+fn build_commit_pipeline_steps(kind: &PipelineKind, base_branch: &str) -> Vec<PipelineStep> {
     match kind {
         PipelineKind::Rebase => vec![
             PipelineStep::Command {
                 label: "Fetch latest base".to_string(),
-                command: git_fetch_with_fallback(github_repo, base_branch),
+                command: git_fetch_with_fallback(base_branch),
                 on_failure: FailureStrategy::HandoffToAi {
                     prompt_template: format!(
                         "The fetch failed. Diagnose and fix the issue, then rebase this branch onto `origin/{base_branch}` with DCO signoffs. Resolve conflicts if present and continue the rebase. Do not push the branch.\n\n{{step_outputs}}"
@@ -257,7 +249,7 @@ fn build_commit_pipeline_steps(
             // remote-tracking ref could cause the reset to target the wrong commit.
             PipelineStep::Command {
                 label: "Fetch latest base".to_string(),
-                command: git_fetch_with_fallback(github_repo, base_branch),
+                command: git_fetch_with_fallback(base_branch),
                 on_failure: FailureStrategy::HandoffToAi {
                     prompt_template: format!(
                         "The fetch failed. Diagnose and fix the issue, then squash only this branch's commits manually. Do not squash beyond the merge-base with `origin/{base_branch}`. Create one signed-off conventional commit from the staged changes and do not push the branch.\n\n{{step_outputs}}"
@@ -378,13 +370,8 @@ async fn start_or_queue_commit_pipeline_for_branch(
             .get_branch(&branch_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-        let project = store
-            .get_project(&branch.project_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
-        let (github_repo, _) = resolve_branch_repo_and_subpath(&store, &project, &branch)?;
         let rebase_ref = rebase_ref_for_target(&branch, target.as_deref());
-        let steps = build_commit_pipeline_steps(&kind, &rebase_ref, &github_repo);
+        let steps = build_commit_pipeline_steps(&kind, &rebase_ref);
         let pipeline = PipelineExecution::from_steps(&steps).with_kind(kind);
         let mut session = store::Session::new_queued(prompt);
         if let Some(ref p) = provider {
@@ -401,7 +388,7 @@ async fn start_or_queue_commit_pipeline_for_branch(
 
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
     let rebase_ref = rebase_ref_for_target(&ctx.branch, target.as_deref());
-    let steps = build_commit_pipeline_steps(&kind, &rebase_ref, &ctx.github_repo);
+    let steps = build_commit_pipeline_steps(&kind, &rebase_ref);
 
     start_running_commit_pipeline_for_branch(
         ctx,
@@ -431,7 +418,7 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
 
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
     let base_branch = base_branch_name(&ctx.branch);
-    let steps = build_commit_pipeline_steps(&kind, base_branch, &ctx.github_repo);
+    let steps = build_commit_pipeline_steps(&kind, base_branch);
     let prompt = commit_pipeline_prompt(&kind);
     let pipeline = PipelineExecution::from_steps(&steps).with_kind(kind);
     let effective_provider = session.provider.clone().or(provider);
@@ -519,14 +506,13 @@ fn build_create_pr_pipeline_steps(
     base_branch: &str,
     draft_flag: &str,
     branch_name: &str,
-    github_repo: &str,
 ) -> Vec<PipelineStep> {
     let base_ref = git::origin_ref_for_branch(base_branch);
 
     vec![
         PipelineStep::Command {
             label: "Fetch latest base".to_string(),
-            command: git_fetch_with_fallback(github_repo, base_branch),
+            command: git_fetch_with_fallback(base_branch),
             on_failure: FailureStrategy::HandoffToAi {
                 prompt_template: create_pr_handoff_prompt(
                     pr_type,
@@ -555,7 +541,7 @@ fn build_create_pr_pipeline_steps(
         },
         PipelineStep::Command {
             label: "Push to remote".to_string(),
-            command: git_push_with_fallback(github_repo, &format!("-u origin {branch_name}")),
+            command: git_push_with_fallback(&format!("-u origin {branch_name}")),
             on_failure: FailureStrategy::HandoffToAi {
                 prompt_template: create_pr_handoff_prompt(
                     pr_type,
@@ -608,13 +594,8 @@ pub async fn create_pr(
     };
 
     // Build the pipeline steps for PR creation.
-    let steps = build_create_pr_pipeline_steps(
-        pr_type,
-        base_branch,
-        draft_flag,
-        &ctx.branch.branch_name,
-        &ctx.github_repo,
-    );
+    let steps =
+        build_create_pr_pipeline_steps(pr_type, base_branch, draft_flag, &ctx.branch.branch_name);
 
     let prompt = format!("Create a {pr_type} for the current branch");
 
@@ -1023,15 +1004,12 @@ pub async fn push_branch(
     let force = force.unwrap_or(false);
 
     let push_command = if force {
-        git_push_with_fallback(
-            &ctx.github_repo,
-            &format!("-u origin {} --force-with-lease", ctx.branch.branch_name),
-        )
+        git_push_with_fallback(&format!(
+            "-u origin {} --force-with-lease",
+            ctx.branch.branch_name
+        ))
     } else {
-        git_push_with_fallback(
-            &ctx.github_repo,
-            &format!("-u origin {}", ctx.branch.branch_name),
-        )
+        git_push_with_fallback(&format!("-u origin {}", ctx.branch.branch_name))
     };
 
     let on_failure = if force {

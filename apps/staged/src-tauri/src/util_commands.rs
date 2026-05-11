@@ -38,6 +38,8 @@ const KNOWN_OPENERS: &[(&str, &str)] = &[
     ("goland", "com.jetbrains.goland"),
     ("fleet", "fleet.app"),
     ("zed", "dev.zed.Zed"),
+    // IDEs
+    ("xcode", "com.apple.dt.Xcode"),
     // File browsers
     ("finder", "com.apple.finder"),
 ];
@@ -167,6 +169,7 @@ fn prettify_app_name(id: &str) -> String {
         "goland" => "GoLand",
         "fleet" => "Fleet",
         "zed" => "Zed",
+        "xcode" => "Xcode",
         "terminal" => "Terminal",
         "warp" => "Warp",
         "iterm" => "iTerm",

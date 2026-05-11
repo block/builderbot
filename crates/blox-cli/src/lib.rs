@@ -308,6 +308,78 @@ fn run_bytes(args: &[&str], timeout: Duration) -> Result<Vec<u8>, BloxError> {
     Ok(stdout)
 }
 
+/// Run `sq blox <args…>` and return stdout, stderr, and exit status.
+///
+/// Unlike `run_bytes`, a non-zero exit from the remote command does NOT
+/// produce an `Err` — only infrastructure failures (CLI missing, timeout,
+/// auth) do. This lets callers inspect both streams on command failure.
+fn run_bytes_full(args: &[&str], timeout: Duration) -> Result<WsExecOutput, BloxError> {
+    let sq = sq_binary()?;
+
+    let mut full_args = vec!["blox"];
+    full_args.extend_from_slice(args);
+
+    let mut child = Command::new(&sq)
+        .args(&full_args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| BloxError::CommandFailed(e.to_string()))?;
+
+    let stdout_handle = child
+        .stdout
+        .take()
+        .ok_or_else(|| BloxError::CommandFailed("Failed to capture stdout".to_string()))?;
+    let stderr_handle = child
+        .stderr
+        .take()
+        .ok_or_else(|| BloxError::CommandFailed("Failed to capture stderr".to_string()))?;
+
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut reader = stdout_handle;
+        let _ = reader.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let mut reader = stderr_handle;
+        let _ = reader.read_to_end(&mut buf);
+        buf
+    });
+
+    let status = match child
+        .wait_timeout(timeout)
+        .map_err(|e| BloxError::CommandFailed(e.to_string()))?
+    {
+        Some(status) => status,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(BloxError::Timeout(timeout.as_secs()));
+        }
+    };
+
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+
+    // Check for auth errors even in the full-output path.
+    if !status.success() {
+        let stderr_str = strip_ansi_escape_sequences(&String::from_utf8_lossy(&stderr));
+        if is_auth_error(&stderr_str) {
+            return Err(BloxError::NotAuthenticated);
+        }
+    }
+
+    Ok(WsExecOutput {
+        stdout,
+        stderr,
+        success: status.success(),
+    })
+}
+
 /// Run `sq blox <args…>` and return stdout as a string.
 fn run(args: &[&str], timeout: Duration) -> Result<String, BloxError> {
     let bytes = run_bytes(args, timeout)?;
@@ -425,6 +497,24 @@ pub fn ws_exec_bytes(name: &str, args: &[&str]) -> Result<Vec<u8>, BloxError> {
     let mut full_args = vec!["ws", "exec", name, "--"];
     full_args.extend_from_slice(args);
     run_bytes(&full_args, EXEC_TIMEOUT)
+}
+
+/// Output from a workspace command that preserves stdout, stderr, and exit
+/// status separately — unlike `ws_exec` which discards stdout on failure.
+pub struct WsExecOutput {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub success: bool,
+}
+
+/// Execute a command inside a Blox workspace, returning full output regardless
+/// of exit code. Infrastructure errors (CLI not found, timeout, auth failure)
+/// still return `Err`, but a non-zero exit from the remote command returns
+/// `Ok(WsExecOutput { success: false, .. })`.
+pub fn ws_exec_output(name: &str, args: &[&str]) -> Result<WsExecOutput, BloxError> {
+    let mut full_args = vec!["ws", "exec", name, "--"];
+    full_args.extend_from_slice(args);
+    run_bytes_full(&full_args, EXEC_TIMEOUT)
 }
 
 /// A bootstrap command returned by `sq blox ws commands <name> --json`.

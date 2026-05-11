@@ -5,6 +5,10 @@ mod env;
 mod files;
 pub mod github;
 mod refs;
+mod state;
+#[cfg(test)]
+mod state_tests;
+mod status_parse;
 mod types;
 mod worktree;
 
@@ -32,13 +36,21 @@ pub use refs::{
     get_repo_root, list_branches, list_refs, merge_base, origin_ref_for_branch, prune_remote,
     resolve_ref, BranchRef,
 };
+pub use state::{
+    complete_local_git_state, compute_branch_git_state, compute_branch_git_state_batched,
+    compute_fast_git_state_batched, compute_fast_local_git_state, compute_local_branch_git_state,
+    ensure_fast_forward_pullable, fast_forward_to_ref, local_git_state_cache_key, needs_fetch,
+    BaseGitState, BranchGitState, FastGitState, FetchGitState, FetchMode, FetchStatus,
+    UpstreamGitState, UpstreamRelation, WorktreeGitState,
+};
 pub use types::*;
 pub use worktree::{
     branch_exists, create_worktree, create_worktree_at_path, create_worktree_for_existing_branch,
     create_worktree_for_existing_branch_at_path, create_worktree_from_pr,
-    create_worktree_from_pr_at_path, fetch_pr_head_sha, get_commits_since_base,
-    get_full_commit_log, get_head_sha, get_parent_commit, has_unpushed_commits, list_worktrees,
+    create_worktree_from_pr_at_path, discard_worktree_changes, fetch_pr_head_sha,
+    get_commits_since_base, get_full_commit_log, get_head_sha, get_parent_commit,
+    has_unpushed_commits, list_worktree_change_paths, list_worktrees, parse_worktree_status_paths,
     project_worktree_path_for, project_worktree_root_for, remote_branch_exists, remove_worktree,
     reset_to_commit, set_upstream_to_origin, switch_branch, update_branch_from_pr,
-    worktree_path_for, CommitInfo, UpdateFromPrResult,
+    worktree_path_for, CommitInfo, UpdateFromPrResult, WorktreeChangePaths,
 };

@@ -1,4 +1,19 @@
 //! Timeline — branch timeline construction and related delete commands.
+//!
+//! When a fetch is needed (TTL expired), the timeline is built using a
+//! **two-stream** approach:
+//!
+//! - **Fast stream**: local-only git commands (HEAD, branch, status, commits)
+//!   complete in <1ms (local) or ~2s (one remote round-trip). A partial timeline
+//!   event is emitted so the frontend can show commits and worktree state
+//!   immediately.
+//!
+//! - **Slow stream**: `git fetch` + ref comparisons. Runs concurrently with
+//!   the fast stream for remote projects. The full `BranchTimeline` returned
+//!   by the command includes the complete git state from this stream.
+//!
+//! When the fetch cache is fresh, everything runs as a single fast stream
+//! and no partial event is emitted.
 
 use crate::git;
 use crate::session_runner;
@@ -7,11 +22,120 @@ use crate::{
     blox, branches, BranchTimeline, CommitTimelineItem, ImageTimelineItem, NoteTimelineItem,
     ReviewTimelineItem,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use tauri::Emitter;
 
-fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTimeline, String> {
+/// Payload for the `timeline-partial` event emitted by the fast stream.
+/// Contains commits and a placeholder git state (worktree populated,
+/// upstream/base set to loading defaults). The frontend merges this
+/// into the existing timeline while waiting for the full result.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TimelinePartialPayload {
+    branch_id: String,
+    commits: Vec<CommitTimelineItem>,
+    git_state: git::BranchGitState,
+}
+
+/// Parse `%H|%h|%s|%an|%ct` formatted commit lines into timeline items,
+/// looking up DB metadata for session linkage.
+fn parse_commit_lines(
+    store: &Arc<Store>,
+    branch_id: &str,
+    lines: &[String],
+) -> Vec<CommitTimelineItem> {
+    let mut commits = Vec::new();
+    for line in lines {
+        let parts: Vec<&str> = line.splitn(5, '|').collect();
+        if parts.len() >= 5 {
+            let sha = parts[0].to_string();
+            let our_commit = store.get_commit_by_sha(branch_id, &sha).unwrap_or(None);
+            let resolved = store
+                .resolve_session_status(our_commit.as_ref().and_then(|c| c.session_id.as_deref()));
+            commits.push(CommitTimelineItem {
+                id: our_commit.as_ref().map(|c| c.id.clone()),
+                sha,
+                short_sha: parts[1].to_string(),
+                subject: parts[2].to_string(),
+                author: parts[3].to_string(),
+                timestamp: parts[4].parse().unwrap_or(0),
+                order: 0,
+                session_id: resolved.session_id,
+                session_status: resolved.status,
+                completion_reason: resolved.completion_reason,
+            });
+        }
+    }
+    let len = commits.len() as i64;
+    for (i, commit) in commits.iter_mut().enumerate() {
+        commit.order = len - 1 - i as i64;
+    }
+    commits
+}
+
+/// Fetch commits from a remote workspace using merge-base + git log.
+fn fetch_remote_commits(
+    ws_name: &str,
+    repo_subpath: Option<&str>,
+    store: &Arc<Store>,
+    branch_id: &str,
+    base_ref: &str,
+) -> Result<Vec<CommitTimelineItem>, String> {
+    let range = if let Ok(mb_output) =
+        branches::run_workspace_git(ws_name, repo_subpath, &["merge-base", base_ref, "HEAD"])
+    {
+        let mb = mb_output.trim().to_string();
+        format!("{mb}..HEAD")
+    } else {
+        format!("{base_ref}..HEAD")
+    };
+    let format_arg = "--format=%H|%h|%s|%an|%ct";
+    let output = branches::run_workspace_git(ws_name, repo_subpath, &["log", format_arg, &range])
+        .map_err(|e| format!("Failed to load commits from workspace: {e}"))?;
+    let lines: Vec<String> = output
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect();
+    Ok(parse_commit_lines(store, branch_id, &lines))
+}
+
+/// Map local CommitInfo entries to CommitTimelineItems with DB metadata.
+fn map_local_commits(
+    store: &Arc<Store>,
+    branch_id: &str,
+    git_commits: &[git::CommitInfo],
+) -> Vec<CommitTimelineItem> {
+    git_commits
+        .iter()
+        .map(|gc| {
+            let our_commit = store.get_commit_by_sha(branch_id, &gc.sha).unwrap_or(None);
+            let resolved = store
+                .resolve_session_status(our_commit.as_ref().and_then(|c| c.session_id.as_deref()));
+            CommitTimelineItem {
+                id: our_commit.as_ref().map(|c| c.id.clone()),
+                sha: gc.sha.clone(),
+                short_sha: gc.short_sha.clone(),
+                subject: gc.subject.clone(),
+                author: gc.author.clone(),
+                timestamp: gc.timestamp,
+                order: gc.order,
+                session_id: resolved.session_id,
+                session_status: resolved.status,
+                completion_reason: resolved.completion_reason,
+            }
+        })
+        .collect()
+}
+
+fn build_branch_timeline(
+    store: &Arc<Store>,
+    branch_id: &str,
+    app: Option<&tauri::AppHandle>,
+) -> Result<BranchTimeline, String> {
     // Get the branch and its workdir for git operations
     let branch = store
         .get_branch(branch_id)
@@ -22,94 +146,152 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         .get_workdir_for_branch(branch_id)
         .map_err(|e| e.to_string())?;
 
+    let mut git_state = None;
+
     // Get commits from git (the source of truth for commit data)
     let mut commits = Vec::new();
     if let Some(ref ws_name) = branch.workspace_name {
         let repo_subpath = branches::resolve_branch_workspace_subpath(store, &branch)?;
+        let cache_key = remote_git_state_cache_key(
+            ws_name,
+            repo_subpath.as_deref(),
+            &branch.branch_name,
+            &branch.base_branch,
+        );
+        let resolved_path = resolve_repo_path(ws_name, repo_subpath.as_deref())?;
         let base_ref = git::origin_ref_for_branch(&branch.base_branch);
-        // Remote branch: fetch commits via ws_exec.
-        // Use merge-base to find the fork point so that only the branch's
-        // own commits are shown, even after a rebase or when the base ref
-        // has moved forward.
-        let range = if let Ok(mb_output) = branches::run_workspace_git(
-            ws_name,
-            repo_subpath.as_deref(),
-            &["merge-base", &base_ref, "HEAD"],
-        ) {
-            let mb = mb_output.trim().to_string();
-            format!("{mb}..HEAD")
-        } else {
-            // Fallback: if merge-base fails (e.g. shallow clone), use
-            // the remote-tracking base ref.
-            format!("{base_ref}..HEAD")
-        };
-        let format_arg = "--format=%H|%h|%s|%an|%ct";
-        let output = branches::run_workspace_git(
-            ws_name,
-            repo_subpath.as_deref(),
-            &["log", format_arg, &range],
-        )
-        .map_err(|e| format!("Failed to load commits from workspace: {e}"))?;
-        // git log returns newest-first; parse then assign order so 0 = oldest.
-        for line in output.lines() {
-            if line.is_empty() {
-                continue;
-            }
-            let parts: Vec<&str> = line.splitn(5, '|').collect();
-            if parts.len() >= 5 {
-                let sha = parts[0].to_string();
-                let our_commit = store.get_commit_by_sha(branch_id, &sha).unwrap_or(None);
-                let resolved = store.resolve_session_status(
-                    our_commit.as_ref().and_then(|c| c.session_id.as_deref()),
-                );
 
-                commits.push(CommitTimelineItem {
-                    id: our_commit.as_ref().map(|c| c.id.clone()),
-                    sha,
-                    short_sha: parts[1].to_string(),
-                    subject: parts[2].to_string(),
-                    author: parts[3].to_string(),
-                    timestamp: parts[4].parse().unwrap_or(0),
-                    order: 0, // placeholder, assigned below
-                    session_id: resolved.session_id,
-                    session_status: resolved.status,
-                    completion_reason: resolved.completion_reason,
+        if app.is_some() && git::needs_fetch(&cache_key, git::FetchMode::Ttl) {
+            // Two-stream: run fast + slow scripts concurrently.
+            // The fast script returns local state + commits in one round-trip.
+            // The slow script performs fetch + ref comparisons in another.
+            let slow_git_state = std::thread::scope(|s| {
+                let slow_handle = s.spawn(|| {
+                    git::compute_branch_git_state_batched(
+                        &cache_key,
+                        |script, args| {
+                            branches::run_workspace_shell(ws_name, script, args)
+                                .map_err(|e| e.to_string())
+                        },
+                        &resolved_path,
+                        &branch.branch_name,
+                        &branch.base_branch,
+                        git::FetchMode::Ttl,
+                    )
                 });
+
+                // Fast stream: local state + commits (no fetch)
+                if let Ok(fast_output) = git::compute_fast_git_state_batched(
+                    &|script, args| {
+                        branches::run_workspace_shell(ws_name, script, args)
+                            .map_err(|e| e.to_string())
+                    },
+                    &resolved_path,
+                    &branch.base_branch,
+                ) {
+                    let (fast, commit_lines) = fast_output.into_fast_git_state(&branch.branch_name);
+                    commits = parse_commit_lines(store, branch_id, &commit_lines);
+                    let partial_state =
+                        fast.into_placeholder_git_state(&branch.branch_name, &branch.base_branch);
+                    if let Some(app) = app {
+                        let _ = app.emit(
+                            "timeline-partial",
+                            TimelinePartialPayload {
+                                branch_id: branch_id.to_string(),
+                                commits: commits.clone(),
+                                git_state: partial_state,
+                            },
+                        );
+                    }
+                }
+
+                slow_handle.join().expect("slow git state thread panicked")
+            });
+
+            // If fast stream failed to get commits, fall back to traditional path
+            if commits.is_empty() {
+                commits = fetch_remote_commits(
+                    ws_name,
+                    repo_subpath.as_deref(),
+                    store,
+                    branch_id,
+                    &base_ref,
+                )?;
             }
-        }
-        let len = commits.len() as i64;
-        for (i, commit) in commits.iter_mut().enumerate() {
-            commit.order = len - 1 - i as i64;
+            git_state = Some(slow_git_state);
+        } else {
+            // Single stream: fetch cache is fresh, everything is fast
+            git_state = Some(git::compute_branch_git_state_batched(
+                &cache_key,
+                |script, args| {
+                    branches::run_workspace_shell(ws_name, script, args).map_err(|e| e.to_string())
+                },
+                &resolved_path,
+                &branch.branch_name,
+                &branch.base_branch,
+                git::FetchMode::Ttl,
+            ));
+            commits = fetch_remote_commits(
+                ws_name,
+                repo_subpath.as_deref(),
+                store,
+                branch_id,
+                &base_ref,
+            )?;
         }
     } else if let Some(ref wd) = workdir {
         // Local branch: fetch commits from the local worktree
         let worktree_path = Path::new(&wd.path);
         if worktree_path.exists() {
             let base_ref = git::origin_ref_for_branch(&branch.base_branch);
-            let git_commits =
-                git::get_commits_since_base(worktree_path, &base_ref).map_err(|e| {
-                    format!("Failed to get commits since base for branch {branch_id}: {e:?}")
-                })?;
+            let cache_key = git::local_git_state_cache_key(
+                worktree_path,
+                &branch.branch_name,
+                &branch.base_branch,
+            );
 
-            // For each git commit, look up our metadata (session linkage)
-            for gc in git_commits {
-                let our_commit = store.get_commit_by_sha(branch_id, &gc.sha).unwrap_or(None);
-                let resolved = store.resolve_session_status(
-                    our_commit.as_ref().and_then(|c| c.session_id.as_deref()),
-                );
-
-                commits.push(CommitTimelineItem {
-                    id: our_commit.as_ref().map(|c| c.id.clone()),
-                    sha: gc.sha,
-                    short_sha: gc.short_sha,
-                    subject: gc.subject,
-                    author: gc.author,
-                    timestamp: gc.timestamp,
-                    order: gc.order,
-                    session_id: resolved.session_id,
-                    session_status: resolved.status,
-                    completion_reason: resolved.completion_reason,
-                });
+            if app.is_some() && git::needs_fetch(&cache_key, git::FetchMode::Ttl) {
+                // Two-stream: fast state + commits → emit partial → slow state
+                let fast = git::compute_fast_local_git_state(worktree_path, &branch.branch_name);
+                let git_commits =
+                    git::get_commits_since_base(worktree_path, &base_ref).map_err(|e| {
+                        format!("Failed to get commits since base for branch {branch_id}: {e:?}")
+                    })?;
+                commits = map_local_commits(store, branch_id, &git_commits);
+                if let Some(app) = app {
+                    let partial_state = fast
+                        .clone()
+                        .into_placeholder_git_state(&branch.branch_name, &branch.base_branch);
+                    let _ = app.emit(
+                        "timeline-partial",
+                        TimelinePartialPayload {
+                            branch_id: branch_id.to_string(),
+                            commits: commits.clone(),
+                            git_state: partial_state,
+                        },
+                    );
+                }
+                // Slow stream: fetch + ref comparisons
+                git_state = Some(git::complete_local_git_state(
+                    worktree_path,
+                    &fast,
+                    &branch.branch_name,
+                    &branch.base_branch,
+                    git::FetchMode::Ttl,
+                ));
+            } else {
+                // Single stream: fetch cache is fresh
+                git_state = Some(git::compute_local_branch_git_state(
+                    worktree_path,
+                    &branch.branch_name,
+                    &branch.base_branch,
+                    git::FetchMode::Ttl,
+                ));
+                let git_commits =
+                    git::get_commits_since_base(worktree_path, &base_ref).map_err(|e| {
+                        format!("Failed to get commits since base for branch {branch_id}: {e:?}")
+                    })?;
+                commits = map_local_commits(store, branch_id, &git_commits);
             }
         }
     }
@@ -138,8 +320,8 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                     })
                     .unwrap_or_else(|| "Pending commit".to_string()),
                 author: String::new(),
-                timestamp: dc.created_at / 1000, // convert ms to seconds
-                order: 0, // created_at is ms divided by 1000, so two pending commits in the same second could tie; rare in practice since they're created one at a time
+                timestamp: dc.created_at / 1000,
+                order: 0,
                 session_id: resolved.session_id,
                 session_status: resolved.status,
                 completion_reason: resolved.completion_reason,
@@ -230,7 +412,29 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         notes,
         reviews,
         images,
+        git_state,
     })
+}
+
+fn resolve_repo_path(ws_name: &str, repo_subpath: Option<&str>) -> Result<String, String> {
+    match repo_subpath.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(subpath) => {
+            branches::resolve_workspace_repo_path(ws_name, subpath).map_err(|e| e.to_string())
+        }
+        None => Ok(".".to_string()),
+    }
+}
+
+fn remote_git_state_cache_key(
+    workspace_name: &str,
+    repo_subpath: Option<&str>,
+    branch_name: &str,
+    base_branch: &str,
+) -> String {
+    format!(
+        "remote:{workspace_name}:{}:{branch_name}:{base_branch}",
+        repo_subpath.unwrap_or("")
+    )
 }
 
 fn review_is_visible_in_timeline(review: &Review, visible_shas: &HashSet<&str>) -> bool {
@@ -244,14 +448,269 @@ fn review_is_visible_in_timeline(review: &Review, visible_shas: &HashSet<&str>) 
 
 #[tauri::command]
 pub async fn get_branch_timeline(
+    app: tauri::AppHandle,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
 ) -> Result<BranchTimeline, String> {
     let store = crate::get_store(&store)?;
 
-    tauri::async_runtime::spawn_blocking(move || build_branch_timeline(&store, &branch_id))
-        .await
-        .map_err(|e| format!("Timeline task failed: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        build_branch_timeline(&store, &branch_id, Some(&app))
+    })
+    .await
+    .map_err(|e| format!("Timeline task failed: {e}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn pull_branch_ff_only(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<(), String> {
+    let store = crate::get_store(&store)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let branch = store
+            .get_branch(&branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+        if let Some(ref ws_name) = branch.workspace_name {
+            let repo_subpath = branches::resolve_branch_workspace_subpath(&store, &branch)?;
+            let resolved_path = resolve_repo_path(ws_name, repo_subpath.as_deref())?;
+            let cache_key = remote_git_state_cache_key(
+                ws_name,
+                repo_subpath.as_deref(),
+                &branch.branch_name,
+                &branch.base_branch,
+            );
+            let state = git::compute_branch_git_state_batched(
+                &cache_key,
+                |script, args| {
+                    branches::run_workspace_shell(ws_name, script, args).map_err(|e| e.to_string())
+                },
+                &resolved_path,
+                &branch.branch_name,
+                &branch.base_branch,
+                git::FetchMode::Force,
+            );
+            git::ensure_fast_forward_pullable(&state)?;
+            branches::run_workspace_git(
+                ws_name,
+                repo_subpath.as_deref(),
+                &["merge", "--ff-only", &state.upstream.r#ref],
+            )
+            .map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+
+        let workdir = store
+            .get_workdir_for_branch(&branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
+        let worktree = Path::new(&workdir.path);
+        let state = git::compute_local_branch_git_state(
+            worktree,
+            &branch.branch_name,
+            &branch.base_branch,
+            git::FetchMode::Force,
+        );
+        git::ensure_fast_forward_pullable(&state)?;
+        git::fast_forward_to_ref(worktree, &state.upstream.r#ref).map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Pull task failed: {e}"))?
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeChangesPreview {
+    revert_paths: Vec<String>,
+    remove_paths: Vec<String>,
+    conflicted_paths: Vec<String>,
+}
+
+fn preview_from_change_paths(paths: git::WorktreeChangePaths) -> WorktreeChangesPreview {
+    WorktreeChangesPreview {
+        revert_paths: paths.revert_paths,
+        remove_paths: paths.remove_paths,
+        conflicted_paths: paths.conflicted_paths,
+    }
+}
+
+fn ensure_preview_matches(
+    changes: &git::WorktreeChangePaths,
+    expected: Option<&WorktreeChangesPreview>,
+) -> Result<(), String> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let actual = preview_from_change_paths(changes.clone());
+    if &actual == expected {
+        Ok(())
+    } else {
+        Err("Worktree changes changed; review the discard preview again".to_string())
+    }
+}
+
+fn ensure_worktree_discardable(state: &git::BranchGitState) -> Result<(), String> {
+    if state.detached_head {
+        return Err("Cannot discard changes while HEAD is detached".to_string());
+    }
+    if !state.expected_branch_matches {
+        let current = state
+            .current_branch
+            .as_deref()
+            .unwrap_or("an unknown branch");
+        return Err(format!(
+            "Cannot discard changes while checked out on {current}"
+        ));
+    }
+    if state.worktree.conflicted > 0 {
+        return Err("Resolve merge conflicts before discarding changes".to_string());
+    }
+    Ok(())
+}
+
+fn remote_worktree_change_paths(
+    workspace_name: &str,
+    repo_subpath: Option<&str>,
+) -> Result<git::WorktreeChangePaths, String> {
+    let output = branches::run_workspace_git(
+        workspace_name,
+        repo_subpath,
+        &["status", "--porcelain=1", "-z", "--untracked-files=all"],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(git::parse_worktree_status_paths(&output))
+}
+
+fn discard_remote_worktree_changes(
+    workspace_name: &str,
+    repo_subpath: Option<&str>,
+    changes: &git::WorktreeChangePaths,
+) -> Result<(), String> {
+    if changes.reset_required {
+        branches::run_workspace_git(workspace_name, repo_subpath, &["reset", "--hard", "HEAD"])
+            .map_err(|e| e.to_string())?;
+    }
+
+    if !changes.remove_paths.is_empty() {
+        let pathspecs = changes
+            .remove_paths
+            .iter()
+            .map(|path| format!(":(literal){path}"))
+            .collect::<Vec<_>>();
+        let mut args = vec!["clean", "-fd", "--"];
+        args.extend(pathspecs.iter().map(String::as_str));
+        branches::run_workspace_git(workspace_name, repo_subpath, &args)
+            .map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_worktree_changes_preview(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<WorktreeChangesPreview, String> {
+    let store = crate::get_store(&store)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let branch = store
+            .get_branch(&branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+        if let Some(ref ws_name) = branch.workspace_name {
+            let repo_subpath = branches::resolve_branch_workspace_subpath(&store, &branch)?;
+            return remote_worktree_change_paths(ws_name, repo_subpath.as_deref())
+                .map(preview_from_change_paths);
+        }
+
+        let workdir = store
+            .get_workdir_for_branch(&branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
+        let paths =
+            git::list_worktree_change_paths(Path::new(&workdir.path)).map_err(|e| e.to_string())?;
+        Ok(preview_from_change_paths(paths))
+    })
+    .await
+    .map_err(|e| format!("Worktree preview task failed: {e}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn discard_worktree_changes(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+    expected_preview: Option<WorktreeChangesPreview>,
+) -> Result<(), String> {
+    let store = crate::get_store(&store)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let branch = store
+            .get_branch(&branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+        if let Some(ref ws_name) = branch.workspace_name {
+            let repo_subpath = branches::resolve_branch_workspace_subpath(&store, &branch)?;
+            let resolved_path = resolve_repo_path(ws_name, repo_subpath.as_deref())?;
+            let cache_key = remote_git_state_cache_key(
+                ws_name,
+                repo_subpath.as_deref(),
+                &branch.branch_name,
+                &branch.base_branch,
+            );
+            let state = git::compute_branch_git_state_batched(
+                &cache_key,
+                |script, args| {
+                    branches::run_workspace_shell(ws_name, script, args).map_err(|e| e.to_string())
+                },
+                &resolved_path,
+                &branch.branch_name,
+                &branch.base_branch,
+                git::FetchMode::Never,
+            );
+            ensure_worktree_discardable(&state)?;
+            let changes = remote_worktree_change_paths(ws_name, repo_subpath.as_deref())?;
+            ensure_preview_matches(&changes, expected_preview.as_ref())?;
+            if changes.is_empty() {
+                return Ok(());
+            }
+            if !changes.conflicted_paths.is_empty() {
+                return Err("Resolve merge conflicts before discarding changes".to_string());
+            }
+            return discard_remote_worktree_changes(ws_name, repo_subpath.as_deref(), &changes);
+        }
+
+        let workdir = store
+            .get_workdir_for_branch(&branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
+        let worktree = Path::new(&workdir.path);
+        let state = git::compute_local_branch_git_state(
+            worktree,
+            &branch.branch_name,
+            &branch.base_branch,
+            git::FetchMode::Never,
+        );
+        ensure_worktree_discardable(&state)?;
+        let changes = git::list_worktree_change_paths(worktree).map_err(|e| e.to_string())?;
+        ensure_preview_matches(&changes, expected_preview.as_ref())?;
+        if changes.is_empty() {
+            return Ok(());
+        }
+        if !changes.conflicted_paths.is_empty() {
+            return Err("Resolve merge conflicts before discarding changes".to_string());
+        }
+        git::discard_worktree_changes(worktree, &changes).map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Discard task failed: {e}"))?
 }
 
 /// Cancel and delete any reviews (auto or manual) created at or after a commit's
@@ -510,7 +969,7 @@ mod tests {
         store.create_review(&visible_review).unwrap();
         store.create_review(&stale_review).unwrap();
 
-        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+        let timeline = build_branch_timeline(&store, &branch.id, None).unwrap();
 
         assert_eq!(timeline.commits.len(), 1);
         assert_eq!(timeline.commits[0].sha, visible_sha);
@@ -529,7 +988,7 @@ mod tests {
         store.create_review(&stale_review).unwrap();
         store.add_comment(&stale_review.id, &agent_comment).unwrap();
 
-        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+        let timeline = build_branch_timeline(&store, &branch.id, None).unwrap();
 
         assert_eq!(timeline.commits.len(), 1);
         assert!(timeline.reviews.is_empty());
@@ -545,7 +1004,7 @@ mod tests {
         store.create_review(&stale_review).unwrap();
         store.add_comment(&stale_review.id, &user_comment).unwrap();
 
-        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+        let timeline = build_branch_timeline(&store, &branch.id, None).unwrap();
 
         assert_eq!(timeline.commits.len(), 1);
         assert_eq!(timeline.reviews.len(), 1);
@@ -564,7 +1023,7 @@ mod tests {
         store.add_comment(&stale_review.id, &user_comment).unwrap();
         store.delete_comment(&user_comment.id).unwrap();
 
-        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+        let timeline = build_branch_timeline(&store, &branch.id, None).unwrap();
 
         assert_eq!(timeline.commits.len(), 1);
         assert!(timeline.reviews.is_empty());

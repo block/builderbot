@@ -12,16 +12,27 @@
 -->
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { FileDiff, AlertCircle, Cloud, Trash2 } from 'lucide-svelte';
+  import {
+    FileDiff,
+    AlertCircle,
+    Cloud,
+    Trash2,
+    GitPullRequest,
+    GitPullRequestClosed,
+    GitPullRequestDraft,
+  } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { subscribeDragDrop } from './dragDrop';
   import type {
     Branch,
+    BranchGitState,
     BranchTimeline as BranchTimelineData,
+    CommitTimelineItem,
     HashtagItem,
     ProjectRepo,
     SessionStatusPayload,
+    WorkspaceStatus,
   } from '../../types';
   import * as commands from '../../api/commands';
   import BranchTimeline from '../timeline/BranchTimeline.svelte';
@@ -47,10 +58,12 @@
   import RemoteWorkspaceStatusView from './RemoteWorkspaceStatusView.svelte';
   import { branchTimelineReadyKey } from './branchTimelineReady';
   import { alerts } from '../../shared/alerts.svelte';
+  import { aggregateProjectPrStatus } from '../../shared/utils';
   import { timelineToHashtagItems, projectNotesToHashtagItems } from '../sessions/hashtagItems';
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
+  import type { WorktreeChangesPreview } from '../../commands';
 
   interface Props {
     branch: Branch;
@@ -82,6 +95,22 @@
   const isLocal = $derived(branch.branchType === 'local');
   const isRemote = $derived(branch.branchType === 'remote');
   const remoteWorkspaceStatus = $derived(branch.workspaceStatus);
+  const prStatus = $derived(aggregateProjectPrStatus([branch]));
+
+  function cloudStatusClass(status: WorkspaceStatus | null): string {
+    switch (status) {
+      case 'running':
+        return 'cloud-running';
+      case 'starting':
+        return 'cloud-starting';
+      case 'error':
+        return 'cloud-error';
+      case 'stopped':
+      case 'suspended':
+      default:
+        return 'cloud-inactive';
+    }
+  }
 
   function notifyError(title: string, e: unknown): void {
     alerts.show({
@@ -98,9 +127,13 @@
 
   let timeline = $state<BranchTimelineData | null>(null);
   let loading = $state(true);
-  let revalidating = $state(false);
+  /** True from the start of any timeline load until the full (slow) git state arrives. */
+  let refreshingGitState = $state(true);
   let error = $state<string | null>(null);
+  let pullingOrigin = $state(false);
+  let discardingWorktreeChanges = $state(false);
   let showBranchDiff = $state(false);
+  let showWorktreeDiff = $state(false);
   let loadedTimelineKey = $state<string | null>(null);
   type TimelineFullReview = NonNullable<Awaited<ReturnType<typeof commands.getReview>>>;
   type TimelineReviewDetails = {
@@ -153,7 +186,13 @@
   );
 
   /** Empty timeline used during provisioning so the action buttons render. */
-  const emptyTimeline: BranchTimelineData = { commits: [], notes: [], reviews: [], images: [] };
+  const emptyTimeline: BranchTimelineData = {
+    commits: [],
+    notes: [],
+    reviews: [],
+    images: [],
+    gitState: null,
+  };
 
   // =========================================================================
   // Worktree setup progress (event-driven phases)
@@ -251,17 +290,29 @@
   let commandPipelinePending = $state(false);
   let branchSessionBusy = $derived(timeline ? hasActiveSessions(timeline) : false);
 
-  async function startBranchCommandPipeline(kind: 'rebase' | 'squash') {
+  async function startBranchCommandPipeline(
+    kind: 'rebase' | 'squash',
+    rebaseTarget?: 'base' | 'origin'
+  ) {
     if (commandPipelinePending || branchSessionBusy) return;
     commandPipelinePending = true;
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
     const provider = getPreferredAgent(agents) ?? undefined;
+    const pendingKey = `pipeline-${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     try {
+      let sessionId: string;
       if (kind === 'rebase') {
-        await commands.rebaseBranch(branch.id, provider);
+        sessionId = await commands.rebaseBranch(branch.id, provider, rebaseTarget);
       } else {
-        await commands.squashCommits(branch.id, provider);
+        sessionId = await commands.squashCommits(branch.id, provider);
       }
+      // Add a pending session item so the session stub appears instantly
+      // instead of waiting for the full timeline refresh.
+      const title = kind === 'rebase' ? 'Rebasing…' : 'Squashing…';
+      sessionMgr.pendingSessionItems = [
+        ...sessionMgr.pendingSessionItems,
+        { key: pendingKey, type: 'pending-commit', title, sessionId },
+      ];
       await loadTimeline();
     } catch (e) {
       notifyError(kind === 'rebase' ? 'Rebase failed' : 'Squash failed', e);
@@ -419,6 +470,7 @@
   let confirmDelete = $state<{
     title: string;
     message: string;
+    confirmLabel?: string;
     onConfirm: () => void;
   } | null>(null);
 
@@ -459,7 +511,7 @@
     loading = false;
     prunedSessionIds = sessionMgr.prunePendingSessionItems(cached);
     if (fresh) {
-      revalidating = true;
+      refreshingGitState = true;
       const version = ++revalidationVersion;
       fresh
         .then((next) => {
@@ -482,16 +534,17 @@
           if (version !== revalidationVersion || branchTimelineReadyKey(branch) !== timelineKey) {
             return;
           }
-          revalidating = false;
+          refreshingGitState = false;
         });
     } else {
+      refreshingGitState = false;
       void loadTimelineReviewDetails(cached.reviews);
     }
   }
 
   // Synchronously hydrate timeline from cache so isSettingUp is never true
-  // on remount (e.g. project switch). This prevents the "Looking for changes…"
-  // flash and the slide-in animation for already-cached rows.
+  // on remount (e.g. project switch). This prevents the loading flash and
+  // the slide-in animation for already-cached rows.
   {
     // svelte-ignore state_referenced_locally
     const initBranch = branch;
@@ -508,6 +561,27 @@
 
   /** Number of finalized commits on this branch. */
   let commitCount = $derived(timeline?.commits.filter((c) => c.sha).length ?? 0);
+
+  function gitIdentityWarning(state: BranchGitState | null | undefined): string | null {
+    if (!state) return null;
+    if (state.fetch.status === 'failed') return null; // branch info unreliable when fetch failed
+    if (state.detachedHead) return 'Detached HEAD';
+    if (!state.expectedBranchMatches) {
+      return state.currentBranch ? `Checked out ${state.currentBranch}` : 'Wrong branch';
+    }
+    return null;
+  }
+
+  let branchIdentityWarning = $derived(gitIdentityWarning(timeline?.gitState));
+  let gitUnsafeActionsDisabled = $derived(!!branchIdentityWarning);
+  let branchCommandDisabledReason = $derived(
+    branchIdentityWarning ??
+      (commandPipelinePending
+        ? 'Command in progress'
+        : branchSessionBusy
+          ? 'Session in progress'
+          : null)
+  );
 
   // =========================================================================
   // PR button ref
@@ -535,6 +609,15 @@
         if (eventSessionId === sessionMgr.autoReviewSessionId) {
           sessionMgr.autoReviewSessionId = null;
           return;
+        }
+
+        // Clear push/force-push session tracking on terminal status only
+        // (guarded by the outer completed/error/cancelled check above)
+        if (eventSessionId === pushSessionId) {
+          pushSessionId = null;
+        }
+        if (eventSessionId === forcePushSessionId) {
+          forcePushSessionId = null;
         }
 
         // Skip normal completion handling for any auto review session
@@ -580,6 +663,58 @@
     };
   });
 
+  // Listen for partial timeline events emitted by the fast stream.
+  // When the backend needs to fetch, it emits commits + fast git state
+  // (worktree, HEAD, branch identity) before the slow fetch completes.
+  // This lets the UI show commits and worktree state immediately.
+  let unlistenPartial: UnlistenFn | null = null;
+  $effect(() => {
+    const branchId = branch.id;
+
+    listen<{ branchId: string; commits: CommitTimelineItem[]; gitState: BranchGitState }>(
+      'timeline-partial',
+      (event) => {
+        if (event.payload.branchId !== branchId) return;
+        const { commits: partialCommits, gitState: partialGitState } = event.payload;
+
+        if (!timeline) {
+          // No existing timeline — create a minimal one from the partial data
+          timeline = {
+            commits: partialCommits,
+            notes: [],
+            reviews: [],
+            images: [],
+            gitState: partialGitState,
+          };
+          loading = false;
+        } else {
+          // Merge: update commits and fast git state fields, preserve
+          // existing upstream/base data so those rows don't flash away
+          timeline = {
+            ...timeline,
+            commits: partialCommits,
+            gitState: timeline.gitState
+              ? {
+                  ...timeline.gitState,
+                  headSha: partialGitState.headSha,
+                  currentBranch: partialGitState.currentBranch,
+                  detachedHead: partialGitState.detachedHead,
+                  expectedBranchMatches: partialGitState.expectedBranchMatches,
+                  worktree: partialGitState.worktree,
+                }
+              : partialGitState,
+          };
+        }
+      }
+    ).then((unlisten) => {
+      unlistenPartial = unlisten;
+    });
+
+    return () => {
+      unlistenPartial?.();
+    };
+  });
+
   // Load timeline when a branch becomes timeline-ready
   $effect(() => {
     const timelineKey = branchTimelineReadyKey(branch);
@@ -595,8 +730,7 @@
       const { branchIds } = (e as CustomEvent<{ branchIds: string[] }>).detail;
       const timelineKey = branchTimelineReadyKey(branch);
       if (branchIds.includes(branch.id) && timelineKey) {
-        loadedTimelineKey = null;
-        void loadTimeline({ timelineKey, force: true });
+        void loadTimeline({ force: true });
       }
     };
     window.addEventListener('timeline-invalidated', handler);
@@ -615,7 +749,7 @@
     error = null;
     // Cancel any in-flight revalidation so it can't overwrite fresher data
     revalidationVersion++;
-    revalidating = false;
+    refreshingGitState = true;
 
     try {
       if (isInitialLoad) {
@@ -649,6 +783,7 @@
       }
       if (isCurrentTimelineLoad(loadVersion, timelineKey)) {
         loading = false;
+        refreshingGitState = false;
       }
     }
   }
@@ -751,6 +886,135 @@
       console.error('Failed to open review:', e);
       notifyError('Failed to open review', e);
     }
+  }
+
+  async function handlePullOrigin() {
+    if (pullingOrigin) return;
+    pullingOrigin = true;
+    try {
+      await commands.pullBranchFastForward(branch.id);
+      await loadTimeline();
+    } catch (e) {
+      notifyError('Pull failed', e);
+    } finally {
+      pullingOrigin = false;
+    }
+  }
+
+  let pushSessionId = $state<string | null>(null);
+  let pushingOrigin = $derived(!!pushSessionId);
+
+  async function handlePushOrigin() {
+    if (pushSessionId || commandPipelinePending || branchSessionBusy) return;
+    const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
+    const provider = getPreferredAgent(agents) ?? undefined;
+    try {
+      pushSessionId = await commands.pushBranch(branch.id, provider, false);
+    } catch (e) {
+      pushSessionId = null;
+      notifyError('Push failed', e);
+    }
+  }
+
+  function openPushSession() {
+    if (pushSessionId) {
+      sessionMgr.openSessionId = pushSessionId;
+    }
+  }
+
+  let showForcePushDialog = $state(false);
+
+  function handleForcePush() {
+    showForcePushDialog = true;
+  }
+
+  let forcePushSessionId = $state<string | null>(null);
+  let forcePushingOrigin = $derived(!!forcePushSessionId);
+
+  async function confirmForcePush() {
+    if (forcePushSessionId || commandPipelinePending || branchSessionBusy) {
+      // Another operation is in progress — keep the dialog open so the user
+      // understands why the action didn't proceed.
+      return;
+    }
+    showForcePushDialog = false;
+    const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
+    const provider = getPreferredAgent(agents) ?? undefined;
+    try {
+      forcePushSessionId = await commands.pushBranch(branch.id, provider, true);
+    } catch (e) {
+      forcePushSessionId = null;
+      notifyError('Force push failed', e);
+    }
+  }
+
+  function openForcePushSession() {
+    if (forcePushSessionId) {
+      sessionMgr.openSessionId = forcePushSessionId;
+    }
+  }
+
+  function formatDiscardPreview(preview: WorktreeChangesPreview): string {
+    const sections: string[] = [];
+    if (preview.revertPaths.length > 0) {
+      sections.push(
+        `Revert tracked changes:\n${preview.revertPaths.map((path) => `- ${path}`).join('\n')}`
+      );
+    }
+    if (preview.removePaths.length > 0) {
+      sections.push(
+        `Remove untracked/new files:\n${preview.removePaths.map((path) => `- ${path}`).join('\n')}`
+      );
+    }
+    return `This will discard uncommitted worktree changes.\n\n${sections.join('\n\n')}`;
+  }
+
+  async function handleDiscardWorktreeChanges() {
+    if (discardingWorktreeChanges) return;
+
+    let preview: WorktreeChangesPreview;
+    try {
+      preview = await commands.getWorktreeChangesPreview(branch.id);
+    } catch (e) {
+      notifyError('Could not inspect changes', e);
+      return;
+    }
+
+    if (preview.conflictedPaths.length > 0) {
+      alerts.show({
+        tone: 'error',
+        title: 'Conflicts need manual recovery',
+        message: preview.conflictedPaths.join('\n'),
+        durationMs: 0,
+      });
+      return;
+    }
+
+    if (preview.revertPaths.length === 0 && preview.removePaths.length === 0) {
+      await loadTimeline();
+      return;
+    }
+
+    const doDiscard = async () => {
+      confirmDelete = null;
+      discardingWorktreeChanges = true;
+      try {
+        await commands.discardWorktreeChanges(branch.id, preview);
+        commands.invalidateBranchTimeline(branch.id);
+        await loadTimeline();
+      } catch (e) {
+        notifyError('Discard failed', e);
+      } finally {
+        discardingWorktreeChanges = false;
+      }
+    };
+
+    confirmDelete = {
+      title: 'Discard Changes',
+      message: formatDiscardPreview(preview),
+      confirmLabel: 'Discard',
+      onConfirm: doDiscard,
+    };
   }
 
   function handleDeleteCommit(sha: string, sessionId?: string, opts?: { altKey: boolean }) {
@@ -1084,8 +1348,22 @@
     </div>
   {:else}
     <div class="card-header">
-      {#if isRemote}
-        <Cloud size={14} class="header-icon cloud-icon" />
+      {#if refreshingGitState}
+        <Spinner size={14} />
+      {:else if isRemote}
+        <Cloud size={14} class="header-icon {cloudStatusClass(remoteWorkspaceStatus)}" />
+      {:else if prStatus === 'merged'}
+        <GitPullRequest size={14} class="header-icon pr-status-merged" />
+      {:else if prStatus === 'checks_failing'}
+        <GitPullRequest size={14} class="header-icon pr-status-checks-failing" />
+      {:else if prStatus === 'open'}
+        <GitPullRequest size={14} class="header-icon" />
+      {:else if prStatus === 'closed'}
+        <GitPullRequestClosed size={14} class="header-icon" />
+      {:else if prStatus === 'conflict'}
+        <GitPullRequestClosed size={14} class="header-icon pr-status-conflict" />
+      {:else}
+        <GitPullRequestDraft size={14} class="header-icon pr-status-draft" />
       {/if}
       <BranchCardHeaderInfo
         branchName={branch.branchName}
@@ -1093,6 +1371,7 @@
         secondaryLabel={isRemote
           ? (branch.workspaceName ?? formatBaseBranch(branch.baseBranch))
           : formatBaseBranch(branch.baseBranch)}
+        warning={branchIdentityWarning}
       />
       <div class="header-actions">
         {#if isRemote && remoteWorkspaceStatus !== 'running' && remoteWorkspaceStatus !== 'starting'}
@@ -1112,7 +1391,8 @@
           onSquashCommits={() => startBranchCommandPipeline('squash')}
           newCommitDisabled={sessionMgr.isNewSessionDisabled ||
             commandPipelinePending ||
-            branchSessionBusy}
+            branchSessionBusy ||
+            gitUnsafeActionsDisabled}
           {commitCount}
         />
       </div>
@@ -1144,8 +1424,8 @@
           pendingDropNotes={isLocal ? pendingDropNotes : undefined}
           pendingItems={sessionMgr.pendingSessionItems}
           {prunedSessionIds}
-          {revalidating}
           {error}
+          gitActionDisabledReason={branchIdentityWarning}
           onRetry={() => loadTimeline()}
           deletingItems={timelineDeletingItems}
           reviewCommentBreakdown={timelineReviewDetailsById}
@@ -1183,8 +1463,24 @@
           onNewReview={hasCodeChanges || sessionMgr.hasCommitSessionInProgress
             ? (e) => sessionMgr.openNewSession('review', e)
             : undefined}
+          onPullOrigin={handlePullOrigin}
+          onPushOrigin={handlePushOrigin}
+          onOpenPushSession={pushSessionId ? openPushSession : undefined}
+          onRebaseBranch={() => startBranchCommandPipeline('rebase')}
+          onRebaseBranchOntoOrigin={() => startBranchCommandPipeline('rebase', 'origin')}
+          onForcePush={handleForcePush}
+          onOpenForcePushSession={forcePushSessionId ? openForcePushSession : undefined}
+          {forcePushingOrigin}
+          rebaseBranchDisabledReason={branchCommandDisabledReason}
+          onViewWorktreeDiff={isLocal ? () => (showWorktreeDiff = true) : undefined}
+          onCommitWorktreeChanges={() =>
+            sessionMgr.startOrQueueSession('commit', 'Commit uncommitted changes')}
+          onDiscardWorktreeChanges={handleDiscardWorktreeChanges}
           onNewSessionReferring={(ref) => sessionMgr.openNewSessionReferring(ref)}
-          newSessionDisabled={sessionMgr.isNewSessionDisabled}
+          newSessionDisabled={sessionMgr.isNewSessionDisabled || gitUnsafeActionsDisabled}
+          {pullingOrigin}
+          {pushingOrigin}
+          {discardingWorktreeChanges}
           {provisioningLabel}
           {provisioningDetail}
         >
@@ -1244,6 +1540,26 @@
     onClose={() => {
       showBranchDiff = false;
       reviewDiffTarget = null;
+      loadTimeline();
+    }}
+  />
+{/if}
+
+{#if showWorktreeDiff}
+  <DiffModal
+    branchId={branch.id}
+    projectId={branch.projectId}
+    scope="worktree"
+    readonly
+    beforeLabel="HEAD"
+    afterLabel="worktree"
+    baseBranchLabel={formatBaseBranch(branch.baseBranch)}
+    branchLabel={branch.branchName}
+    {projectName}
+    githubRepo={repoLabel?.headRepo ?? repoLabel?.githubRepo}
+    subpath={repoLabel?.subpath}
+    onClose={() => {
+      showWorktreeDiff = false;
       loadTimeline();
     }}
   />
@@ -1405,11 +1721,22 @@
   />
 {/if}
 
+{#if showForcePushDialog}
+  <ConfirmDialog
+    title="Force Push"
+    message="The remote branch has commits that would be lost. Do you want to force push? This will overwrite the remote branch with your local version."
+    confirmLabel="Force Push"
+    danger
+    onConfirm={confirmForcePush}
+    onCancel={() => (showForcePushDialog = false)}
+  />
+{/if}
+
 {#if confirmDelete}
   <ConfirmDialog
     title={confirmDelete.title}
     message={confirmDelete.message}
-    confirmLabel="Delete"
+    confirmLabel={confirmDelete.confirmLabel ?? 'Delete'}
     danger
     onConfirm={confirmDelete.onConfirm}
     onCancel={() => (confirmDelete = null)}
@@ -1467,8 +1794,36 @@
     stroke: var(--text-faint);
   }
 
-  .card-header :global(svg.cloud-icon) {
+  .card-header :global(svg.pr-status-merged) {
+    stroke: var(--ui-success);
+  }
+
+  .card-header :global(svg.pr-status-conflict) {
+    stroke: var(--ui-danger);
+  }
+
+  .card-header :global(svg.pr-status-checks-failing) {
+    stroke: var(--ui-danger);
+  }
+
+  .card-header :global(svg.pr-status-draft) {
+    stroke: var(--text-muted);
+  }
+
+  .card-header :global(svg.cloud-running) {
     stroke: var(--ui-accent);
+  }
+
+  .card-header :global(svg.cloud-starting) {
+    stroke: var(--ui-info);
+  }
+
+  .card-header :global(svg.cloud-error) {
+    stroke: var(--ui-danger);
+  }
+
+  .card-header :global(svg.cloud-inactive) {
+    stroke: var(--text-muted);
   }
 
   .more-button {

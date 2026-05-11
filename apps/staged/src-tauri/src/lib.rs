@@ -190,6 +190,7 @@ pub struct BranchTimeline {
     pub notes: Vec<NoteTimelineItem>,
     pub reviews: Vec<ReviewTimelineItem>,
     pub images: Vec<ImageTimelineItem>,
+    pub git_state: Option<git::BranchGitState>,
 }
 
 // =============================================================================
@@ -1802,6 +1803,7 @@ pub fn run() {
             delete_action_context,
             // Timeline
             timeline::get_branch_timeline,
+            timeline::pull_branch_ff_only,
             // Notes
             note_commands::create_note,
             note_commands::delete_note,
@@ -1816,6 +1818,8 @@ pub fn run() {
             image_commands::list_branch_images,
             image_commands::create_image_from_data,
             // Timeline delete commands
+            timeline::get_worktree_changes_preview,
+            timeline::discard_worktree_changes,
             timeline::delete_review,
             timeline::delete_commit,
             timeline::delete_pending_commit,

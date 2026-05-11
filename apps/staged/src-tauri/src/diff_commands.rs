@@ -4,8 +4,11 @@ use crate::branches;
 use crate::git;
 use crate::store::Store;
 use serde::Serialize;
-use std::path::Path;
+use std::path::{Component, Path};
+use std::process::Command;
 use std::sync::{Arc, Mutex};
+
+const WORKTREE_TEXT_PREVIEW_MAX_BYTES: u64 = 1024 * 1024;
 
 /// Context needed to compute diffs for a branch.
 pub(crate) struct BranchDiffContext {
@@ -108,6 +111,10 @@ fn build_diff_spec(
             };
             Ok((spec, sha.to_string()))
         }
+        "worktree" => {
+            let resolved_sha = git::get_head_sha(worktree).map_err(|e| e.to_string())?;
+            Ok((git::DiffSpec::uncommitted(), resolved_sha))
+        }
         _ => {
             let resolved_sha = match commit_sha {
                 Some(sha) => sha.to_string(),
@@ -186,6 +193,81 @@ pub(crate) fn file_content_from_bytes(bytes: &[u8], path: &str) -> git::FileCont
     git::FileContent::Text {
         lines: text.lines().map(|line| line.to_string()).collect(),
     }
+}
+
+fn file_content_from_bytes_with_text_limit(bytes: &[u8], path: &str) -> git::FileContent {
+    let check_len = bytes.len().min(8192);
+    if bytes[..check_len].contains(&0) {
+        return file_content_binary_or_image(bytes, path);
+    }
+    if bytes.len() as u64 > WORKTREE_TEXT_PREVIEW_MAX_BYTES {
+        return git::FileContent::Binary;
+    }
+    let text = String::from_utf8_lossy(bytes);
+    git::FileContent::Text {
+        lines: text.lines().map(|line| line.to_string()).collect(),
+    }
+}
+
+fn validate_relative_diff_path(path: &str) -> Result<(), String> {
+    let path = Path::new(path);
+    if path.is_absolute() {
+        return Err("Diff path must be relative".to_string());
+    }
+    for component in path.components() {
+        match component {
+            Component::Normal(_) | Component::CurDir => {}
+            _ => return Err("Diff path contains an invalid segment".to_string()),
+        }
+    }
+    Ok(())
+}
+
+fn file_exists_at_head(worktree: &Path, path: &str) -> Result<bool, String> {
+    let spec = format!("HEAD:{path}");
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(worktree)
+        .args(["cat-file", "-e", &spec]);
+    git::strip_git_env(&mut command);
+    let output = command.output().map_err(|e| e.to_string())?;
+    Ok(output.status.success())
+}
+
+fn large_added_worktree_file_diff(
+    worktree: &Path,
+    path: &str,
+) -> Result<Option<git::FileDiff>, String> {
+    validate_relative_diff_path(path)?;
+    if file_exists_at_head(worktree, path)? {
+        return Ok(None);
+    }
+
+    let full_path = worktree.join(path);
+    let Ok(metadata) = std::fs::metadata(&full_path) else {
+        return Ok(None);
+    };
+    if !metadata.is_file() || metadata.len() <= WORKTREE_TEXT_PREVIEW_MAX_BYTES {
+        return Ok(None);
+    }
+
+    let content = if metadata.len() <= git::IMAGE_PREVIEW_MAX_BYTES as u64 {
+        let bytes = std::fs::read(&full_path)
+            .map_err(|e| format!("Cannot read worktree file {path}: {e}"))?;
+        file_content_from_bytes_with_text_limit(&bytes, path)
+    } else {
+        git::FileContent::Binary
+    };
+
+    Ok(Some(git::FileDiff {
+        before: None,
+        after: Some(git::File {
+            path: path.to_string(),
+            content,
+        }),
+        alignments: Vec::new(),
+    }))
 }
 
 /// For binary content in the remote path, try to produce an ImageBase64 variant.
@@ -436,6 +518,10 @@ pub async fn get_diff_files(
         });
     }
 
+    if scope == "worktree" {
+        return Err("Worktree diff is only available for local branches".to_string());
+    }
+
     // Remote branch — check cache, then collect on miss.
     let latest_sha = store
         .list_commits_for_branch(&branch_id)
@@ -515,6 +601,11 @@ pub async fn get_file_diff(
         let worktree = Path::new(worktree_path);
         let (spec, _) = build_diff_spec(worktree, &ctx.base_branch, Some(&commit_sha), &scope)?;
         let file_path = Path::new(&path);
+        if scope == "worktree" {
+            if let Some(diff) = large_added_worktree_file_diff(worktree, &path)? {
+                return Ok(diff);
+            }
+        }
         let result = git::get_file_diff(worktree, &spec, file_path).map_err(|e| e.to_string())?;
         fn file_stats(f: &Option<git::File>) -> (usize, usize) {
             match f {
@@ -536,6 +627,10 @@ pub async fn get_file_diff(
             result.alignments.len()
         );
         return Ok(result);
+    }
+
+    if scope == "worktree" {
+        return Err("Worktree diff is only available for local branches".to_string());
     }
 
     // Check cache for branch-scope diffs.

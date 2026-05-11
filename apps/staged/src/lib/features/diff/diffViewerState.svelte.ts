@@ -1,17 +1,131 @@
-// Re-export types and helpers from shared package
-export { fileSummaryPath, type DiffViewerState } from '@builderbot/diff-viewer/state';
+// Re-export helper from shared package
+export { fileSummaryPath } from '@builderbot/diff-viewer/state';
+export type { DiffViewerState as SharedDiffViewerState } from '@builderbot/diff-viewer/state';
 
-// Re-export with Staged's Tauri commands pre-bound
 import * as commands from '../../api/commands';
-import { createDiffViewerState as _create } from '@builderbot/diff-viewer/state';
+import type { DiffScope } from '../../commands';
+import type { FileDiff, FileDiffSummary } from '../../types';
+import { fileSummaryPath as sharedFileSummaryPath } from '@builderbot/diff-viewer/state';
+
+export interface DiffViewerState {
+  branchId: string;
+  commitSha: string | null;
+  scope: DiffScope;
+  files: FileDiffSummary[];
+  diffCache: Map<string, FileDiff>;
+  selectedFile: string | null;
+  loading: boolean;
+  loadingFile: string | null;
+  error: string | null;
+}
 
 /**
  * Create a reactive diff viewer state instance, pre-bound to Staged's Tauri commands.
  */
-export function createDiffViewerState(
-  branchId: string,
-  scope: 'branch' | 'commit',
-  commitSha?: string
-) {
-  return _create(commands, branchId, scope, commitSha);
+export function createDiffViewerState(branchId: string, scope: DiffScope, commitSha?: string) {
+  const state: DiffViewerState = $state({
+    branchId,
+    commitSha: commitSha ?? null,
+    scope,
+    files: [],
+    diffCache: new Map(),
+    selectedFile: null,
+    loading: true,
+    loadingFile: null,
+    error: null,
+  });
+
+  let selectionGeneration = 0;
+  let contextGeneration = 0;
+
+  async function loadFiles(generation: number): Promise<void> {
+    state.loading = true;
+    state.error = null;
+
+    try {
+      const response = await commands.getDiffFiles(
+        state.branchId,
+        state.commitSha ?? undefined,
+        state.scope
+      );
+      if (generation !== contextGeneration) return;
+
+      state.commitSha = response.commitSha;
+      state.files = response.files;
+
+      if (state.files.length > 0) {
+        await selectFile(sharedFileSummaryPath(state.files[0]));
+      }
+    } catch (e) {
+      if (generation !== contextGeneration) return;
+      state.error = e instanceof Error ? e.message : String(e);
+      state.files = [];
+    } finally {
+      if (generation === contextGeneration) {
+        state.loading = false;
+      }
+    }
+  }
+
+  async function selectFile(path: string | null): Promise<void> {
+    const thisGeneration = ++selectionGeneration;
+    state.selectedFile = path;
+
+    if (path && !state.diffCache.has(path)) {
+      await loadFileDiff(path);
+      if (selectionGeneration !== thisGeneration) return;
+    }
+  }
+
+  async function loadFileDiff(path: string): Promise<FileDiff | null> {
+    if (!state.commitSha) return null;
+
+    const cached = state.diffCache.get(path);
+    if (cached) return cached;
+
+    state.loadingFile = path;
+
+    try {
+      const diff = await commands.getFileDiff(state.branchId, state.commitSha, state.scope, path);
+      const newCache = new Map(state.diffCache);
+      newCache.set(path, diff);
+      state.diffCache = newCache;
+      return diff;
+    } catch (e) {
+      console.error(`Failed to load diff for ${path}:`, e);
+      return null;
+    } finally {
+      state.loadingFile = null;
+    }
+  }
+
+  function getCurrentDiff(): FileDiff | null {
+    if (!state.selectedFile) return null;
+    return state.diffCache.get(state.selectedFile) ?? null;
+  }
+
+  async function switchContext(
+    newScope: 'branch' | 'commit',
+    newCommitSha?: string
+  ): Promise<void> {
+    const generation = ++contextGeneration;
+    state.scope = newScope;
+    state.commitSha = newCommitSha ?? null;
+    state.diffCache = new Map();
+    state.selectedFile = null;
+    state.loadingFile = null;
+    state.files = [];
+    state.error = null;
+    await loadFiles(generation);
+  }
+
+  loadFiles(contextGeneration);
+
+  return {
+    state,
+    selectFile,
+    loadFileDiff,
+    getCurrentDiff,
+    switchContext,
+  };
 }

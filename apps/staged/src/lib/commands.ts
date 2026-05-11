@@ -802,16 +802,6 @@ export function getDeletedComments(reviewId: string): Promise<Comment[]> {
   return invoke('get_deleted_comments', { reviewId });
 }
 
-/** Add a reference file to a review. */
-export function addReferenceFile(reviewId: string, path: string): Promise<void> {
-  return invoke('add_reference_file', { reviewId, path });
-}
-
-/** Remove a reference file from a review. */
-export function removeReferenceFile(reviewId: string, path: string): Promise<void> {
-  return invoke('remove_reference_file', { reviewId, path });
-}
-
 // =============================================================================
 // Auto review
 // =============================================================================

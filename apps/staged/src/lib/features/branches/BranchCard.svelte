@@ -515,8 +515,8 @@
   }
 
   // Synchronously hydrate timeline from cache so isSettingUp is never true
-  // on remount (e.g. project switch). This prevents the "Looking for changes…"
-  // flash and the slide-in animation for already-cached rows.
+  // on remount (e.g. project switch). This prevents the loading flash and
+  // the slide-in animation for already-cached rows.
   {
     // svelte-ignore state_referenced_locally
     const initBranch = branch;
@@ -1331,6 +1331,9 @@
         warning={branchIdentityWarning}
       />
       <div class="header-actions">
+        {#if revalidating}
+          <Spinner size={14} />
+        {/if}
         {#if isRemote && remoteWorkspaceStatus !== 'running' && remoteWorkspaceStatus !== 'starting'}
           <RemoteWorkspaceStatusBadge status={remoteWorkspaceStatus} />
         {/if}
@@ -1381,7 +1384,6 @@
           pendingDropNotes={isLocal ? pendingDropNotes : undefined}
           pendingItems={sessionMgr.pendingSessionItems}
           {prunedSessionIds}
-          {revalidating}
           {error}
           gitActionDisabledReason={branchIdentityWarning}
           onRetry={() => loadTimeline()}

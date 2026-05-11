@@ -96,8 +96,6 @@
     pullingOrigin?: boolean;
     pushingOrigin?: boolean;
     discardingWorktreeChanges?: boolean;
-    /** Whether the timeline is being revalidated in the background. */
-    revalidating?: boolean;
     /** Error message from a failed load/revalidation. */
     error?: string | null;
     /** When set, git-mutating row actions are disabled with this reason. */
@@ -153,7 +151,6 @@
     pullingOrigin = false,
     pushingOrigin = false,
     discardingWorktreeChanges = false,
-    revalidating = false,
     error,
     gitActionDisabledReason,
     onRetry,
@@ -918,7 +915,6 @@
             pendingDropNotes.length === 0 &&
             pendingItems.length === 0 &&
             gitFooterItems.length === 0 &&
-            !revalidating &&
             !error &&
             !actionFooterVisible}
           sessionId={item.sessionId}
@@ -950,7 +946,6 @@
           isLast={index === pendingDropNotes.length - 1 &&
             pendingItems.length === 0 &&
             gitFooterItems.length === 0 &&
-            !revalidating &&
             !error &&
             !actionFooterVisible}
         />
@@ -971,7 +966,6 @@
             : item.secondaryMeta}
           isLast={index === pendingItems.length - 1 &&
             gitFooterItems.length === 0 &&
-            !revalidating &&
             !error &&
             !actionFooterVisible}
         />
@@ -1002,7 +996,7 @@
           onDiscardChangesClick={item.onDiscardChanges}
           discardChangesDisabledReason={item.discardChangesDisabledReason}
           deleting={item.deleting}
-          isLast={index === gitFooterItems.length - 1 && !revalidating && !error}
+          isLast={index === gitFooterItems.length - 1 && !error}
           sessionId={item.sessionId}
           deleteDisabledReason={isDeletable(item) ? item.deleteDisabledReason : undefined}
           commitSha={item.commitSha}
@@ -1023,16 +1017,7 @@
         />
       </div>
     {/each}
-    {#if revalidating}
-      <div transition:slide={{ duration: 200 }}>
-        <TimelineRow
-          type="revalidating"
-          title="Looking for changes..."
-          isLast={!actionFooterVisible}
-        />
-      </div>
-    {/if}
-    {#if error && !revalidating}
+    {#if error}
       <div transition:slide={{ duration: 200 }}>
         <TimelineRow
           type="load-error"

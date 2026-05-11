@@ -42,7 +42,6 @@
     | 'git-pull'
     | 'git-push'
     | 'git-diff'
-    | 'revalidating'
     | 'provisioning'
     | 'load-error';
 
@@ -171,7 +170,6 @@
       type === 'pending-commit' ||
       type === 'generating-note' ||
       type === 'generating-review' ||
-      type === 'revalidating' ||
       type === 'provisioning'
   );
   let isFailed = $derived(
@@ -270,8 +268,8 @@
   class:pending={isPending}
   class:failed={isFailed}
   class:clickable={isClickable}
-  class:git-state={isGitState || type === 'revalidating'}
-  class:compact={type === 'revalidating' || type === 'load-error'}
+  class:git-state={isGitState}
+  class:compact={type === 'load-error'}
   onclick={handleRowClick}
   oncontextmenu={handleContextMenu}
 >

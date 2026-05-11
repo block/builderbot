@@ -23,6 +23,7 @@ const KNOWN_OPENERS: &[(&str, &str)] = &[
     ("hyper", "co.zeit.hyper"),
     ("kitty", "net.kovidgoyal.kitty"),
     ("alacritty", "org.alacritty"),
+    ("ghostty", "com.mitchellh.ghostty"),
     // Editors
     ("vscode", "com.microsoft.VSCode"),
     ("vscode-insiders", "com.microsoft.VSCodeInsiders"),
@@ -124,21 +125,35 @@ pub async fn get_available_openers() -> Result<Vec<OpenerApp>, String> {
         use std::process::Command;
         use std::thread;
 
-        // First, find which apps are installed and get their .app paths.
+        // Find which apps are installed by running mdfind in parallel.
+        let mdfind_handles: Vec<_> = KNOWN_OPENERS
+            .iter()
+            .map(|(id, bundle_id)| {
+                let id = *id;
+                let bundle_id = *bundle_id;
+                thread::spawn(move || {
+                    let output = Command::new("mdfind")
+                        .arg(format!("kMDItemCFBundleIdentifier == '{bundle_id}'"))
+                        .output()
+                        .ok()?;
+                    if !output.status.success() {
+                        return None;
+                    }
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let first_line = stdout.trim().lines().next().unwrap_or("").to_string();
+                    if first_line.is_empty() {
+                        None
+                    } else {
+                        Some((id, first_line))
+                    }
+                })
+            })
+            .collect();
+
         let mut installed: Vec<(&str, String)> = Vec::new();
-
-        for (id, bundle_id) in KNOWN_OPENERS {
-            let output = Command::new("mdfind")
-                .arg(format!("kMDItemCFBundleIdentifier == '{bundle_id}'"))
-                .output()
-                .map_err(|e| format!("Failed to run mdfind: {e}"))?;
-
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let first_line = stdout.trim().lines().next().unwrap_or("").to_string();
-                if !first_line.is_empty() {
-                    installed.push((id, first_line));
-                }
+        for handle in mdfind_handles {
+            if let Ok(Some((id, path))) = handle.join() {
+                installed.push((id, path));
             }
         }
 
@@ -213,13 +228,12 @@ fn extract_app_icon(app_path: &str) -> Option<String> {
     }
 
     // 3. Convert to 32×32 PNG via sips into a temp file
-    let tmp_dir = std::env::temp_dir();
-    let tmp_png = tmp_dir.join(format!(
-        "staged-icon-{}-{:?}.png",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let tmp_png_str = tmp_png.to_string_lossy().to_string();
+    let tmp_file = tempfile::Builder::new()
+        .prefix("staged-icon-")
+        .suffix(".png")
+        .tempfile()
+        .ok()?;
+    let tmp_png_str = tmp_file.path().to_string_lossy().to_string();
 
     let sips = Command::new("sips")
         .args([
@@ -237,13 +251,11 @@ fn extract_app_icon(app_path: &str) -> Option<String> {
         .ok()?;
 
     if !sips.status.success() {
-        let _ = std::fs::remove_file(&tmp_png);
         return None;
     }
 
     // 4. Read and base64-encode the PNG
-    let png_bytes = std::fs::read(&tmp_png).ok()?;
-    let _ = std::fs::remove_file(&tmp_png);
+    let png_bytes = std::fs::read(tmp_file.path()).ok()?;
 
     use base64::Engine;
     let encoded = base64::engine::general_purpose::STANDARD.encode(&png_bytes);

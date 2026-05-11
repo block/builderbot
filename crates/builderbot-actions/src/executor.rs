@@ -914,3 +914,20 @@ fn kill_session(sid: i32, signal: i32) -> usize {
     }
     signalled
 }
+
+/// Send `signal` to every process in session `sid`.
+///
+/// Fallback for unix platforms other than macOS and Linux: sends the signal
+/// to the session leader's process group via `kill(-sid, signal)`, which may
+/// miss child commands in separate process groups under job control.
+///
+/// Returns 1 if the signal was delivered, 0 otherwise.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "linux"))))]
+fn kill_session(sid: i32, signal: i32) -> usize {
+    // SAFETY: kill(2) does not dereference pointers.
+    if unsafe { libc::kill(-sid, signal) } == 0 {
+        1
+    } else {
+        0
+    }
+}

@@ -1803,6 +1803,7 @@ pub fn run() {
             delete_action_context,
             // Timeline
             timeline::get_branch_timeline,
+            timeline::refresh_branch_git_state,
             timeline::pull_branch_ff_only,
             // Notes
             note_commands::create_note,

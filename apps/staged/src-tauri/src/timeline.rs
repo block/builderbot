@@ -1,19 +1,12 @@
-//! Timeline — branch timeline construction and related delete commands.
+//! Timeline — branch timeline construction and related commands.
 //!
-//! When a fetch is needed (TTL expired), the timeline is built using a
-//! **two-stream** approach:
+//! `get_branch_timeline` always uses `FetchMode::Never` so it returns
+//! instantly from locally-cached refs. Git state rows show stale-but-present
+//! data until refreshed.
 //!
-//! - **Fast stream**: local-only git commands (HEAD, branch, status, commits)
-//!   complete in <1ms (local) or ~2s (one remote round-trip). A partial timeline
-//!   event is emitted so the frontend can show commits and worktree state
-//!   immediately.
-//!
-//! - **Slow stream**: `git fetch` + ref comparisons. Runs concurrently with
-//!   the fast stream for remote projects. The full `BranchTimeline` returned
-//!   by the command includes the complete git state from this stream.
-//!
-//! When the fetch cache is fresh, everything runs as a single fast stream
-//! and no partial event is emitted.
+//! `refresh_branch_git_state` runs a TTL-gated `git fetch` + ref comparison
+//! and emits a `git-state-updated` event that the frontend merges into the
+//! existing timeline.
 
 use crate::git;
 use crate::session_runner;
@@ -28,15 +21,11 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tauri::Emitter;
 
-/// Payload for the `timeline-partial` event emitted by the fast stream.
-/// Contains commits and a placeholder git state (worktree populated,
-/// upstream/base set to loading defaults). The frontend merges this
-/// into the existing timeline while waiting for the full result.
+/// Payload for the `git-state-updated` event emitted by `refresh_branch_git_state`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct TimelinePartialPayload {
+struct GitStateUpdatedPayload {
     branch_id: String,
-    commits: Vec<CommitTimelineItem>,
     git_state: git::BranchGitState,
 }
 
@@ -131,11 +120,7 @@ fn map_local_commits(
         .collect()
 }
 
-fn build_branch_timeline(
-    store: &Arc<Store>,
-    branch_id: &str,
-    app: Option<&tauri::AppHandle>,
-) -> Result<BranchTimeline, String> {
+fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTimeline, String> {
     // Get the branch and its workdir for git operations
     let branch = store
         .get_branch(branch_id)
@@ -161,138 +146,40 @@ fn build_branch_timeline(
         let resolved_path = resolve_repo_path(ws_name, repo_subpath.as_deref())?;
         let base_ref = git::origin_ref_for_branch(&branch.base_branch);
 
-        if app.is_some() && git::needs_fetch(&cache_key, git::FetchMode::Ttl) {
-            // Two-stream: run fast + slow scripts concurrently.
-            // The fast script returns local state + commits in one round-trip.
-            // The slow script performs fetch + ref comparisons in another.
-            let slow_git_state = std::thread::scope(|s| {
-                let slow_handle = s.spawn(|| {
-                    git::compute_branch_git_state_batched(
-                        &cache_key,
-                        |script, args| {
-                            branches::run_workspace_shell(ws_name, script, args)
-                                .map_err(|e| e.to_string())
-                        },
-                        &resolved_path,
-                        &branch.branch_name,
-                        &branch.base_branch,
-                        git::FetchMode::Ttl,
-                    )
-                });
-
-                // Fast stream: local state + commits (no fetch)
-                if let Ok(fast_output) = git::compute_fast_git_state_batched(
-                    &|script, args| {
-                        branches::run_workspace_shell(ws_name, script, args)
-                            .map_err(|e| e.to_string())
-                    },
-                    &resolved_path,
-                    &branch.base_branch,
-                ) {
-                    let (fast, commit_lines) = fast_output.into_fast_git_state(&branch.branch_name);
-                    commits = parse_commit_lines(store, branch_id, &commit_lines);
-                    let partial_state =
-                        fast.into_placeholder_git_state(&branch.branch_name, &branch.base_branch);
-                    if let Some(app) = app {
-                        let _ = app.emit(
-                            "timeline-partial",
-                            TimelinePartialPayload {
-                                branch_id: branch_id.to_string(),
-                                commits: commits.clone(),
-                                git_state: partial_state,
-                            },
-                        );
-                    }
-                }
-
-                slow_handle.join().expect("slow git state thread panicked")
-            });
-
-            // If fast stream failed to get commits, fall back to traditional path
-            if commits.is_empty() {
-                commits = fetch_remote_commits(
-                    ws_name,
-                    repo_subpath.as_deref(),
-                    store,
-                    branch_id,
-                    &base_ref,
-                )?;
-            }
-            git_state = Some(slow_git_state);
-        } else {
-            // Single stream: fetch cache is fresh, everything is fast
-            git_state = Some(git::compute_branch_git_state_batched(
-                &cache_key,
-                |script, args| {
-                    branches::run_workspace_shell(ws_name, script, args).map_err(|e| e.to_string())
-                },
-                &resolved_path,
-                &branch.branch_name,
-                &branch.base_branch,
-                git::FetchMode::Ttl,
-            ));
-            commits = fetch_remote_commits(
-                ws_name,
-                repo_subpath.as_deref(),
-                store,
-                branch_id,
-                &base_ref,
-            )?;
-        }
+        git_state = Some(git::compute_branch_git_state_batched(
+            &cache_key,
+            |script, args| {
+                branches::run_workspace_shell(ws_name, script, args).map_err(|e| e.to_string())
+            },
+            &resolved_path,
+            &branch.branch_name,
+            &branch.base_branch,
+            git::FetchMode::Never,
+        ));
+        commits = fetch_remote_commits(
+            ws_name,
+            repo_subpath.as_deref(),
+            store,
+            branch_id,
+            &base_ref,
+        )?;
     } else if let Some(ref wd) = workdir {
         // Local branch: fetch commits from the local worktree
         let worktree_path = Path::new(&wd.path);
         if worktree_path.exists() {
             let base_ref = git::origin_ref_for_branch(&branch.base_branch);
-            let cache_key = git::local_git_state_cache_key(
+
+            git_state = Some(git::compute_local_branch_git_state(
                 worktree_path,
                 &branch.branch_name,
                 &branch.base_branch,
-            );
-
-            if app.is_some() && git::needs_fetch(&cache_key, git::FetchMode::Ttl) {
-                // Two-stream: fast state + commits → emit partial → slow state
-                let fast = git::compute_fast_local_git_state(worktree_path, &branch.branch_name);
-                let git_commits =
-                    git::get_commits_since_base(worktree_path, &base_ref).map_err(|e| {
-                        format!("Failed to get commits since base for branch {branch_id}: {e:?}")
-                    })?;
-                commits = map_local_commits(store, branch_id, &git_commits);
-                if let Some(app) = app {
-                    let partial_state = fast
-                        .clone()
-                        .into_placeholder_git_state(&branch.branch_name, &branch.base_branch);
-                    let _ = app.emit(
-                        "timeline-partial",
-                        TimelinePartialPayload {
-                            branch_id: branch_id.to_string(),
-                            commits: commits.clone(),
-                            git_state: partial_state,
-                        },
-                    );
-                }
-                // Slow stream: fetch + ref comparisons
-                git_state = Some(git::complete_local_git_state(
-                    worktree_path,
-                    &fast,
-                    &branch.branch_name,
-                    &branch.base_branch,
-                    git::FetchMode::Ttl,
-                ));
-            } else {
-                // Single stream: fetch cache is fresh
-                git_state = Some(git::compute_local_branch_git_state(
-                    worktree_path,
-                    &branch.branch_name,
-                    &branch.base_branch,
-                    git::FetchMode::Ttl,
-                ));
-                let git_commits =
-                    git::get_commits_since_base(worktree_path, &base_ref).map_err(|e| {
-                        format!("Failed to get commits since base for branch {branch_id}: {e:?}")
-                    })?;
-                commits = map_local_commits(store, branch_id, &git_commits);
-            }
+                git::FetchMode::Never,
+            ));
+            let git_commits =
+                git::get_commits_since_base(worktree_path, &base_ref).map_err(|e| {
+                    format!("Failed to get commits since base for branch {branch_id}: {e:?}")
+                })?;
+            commits = map_local_commits(store, branch_id, &git_commits);
         }
     }
 
@@ -446,19 +333,88 @@ fn review_is_visible_in_timeline(review: &Review, visible_shas: &HashSet<&str>) 
             .any(|comment| comment.author == CommentAuthor::User)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub async fn get_branch_timeline(
-    app: tauri::AppHandle,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
 ) -> Result<BranchTimeline, String> {
     let store = crate::get_store(&store)?;
 
+    tauri::async_runtime::spawn_blocking(move || build_branch_timeline(&store, &branch_id))
+        .await
+        .map_err(|e| format!("Timeline task failed: {e}"))?
+}
+
+/// Run a TTL-gated `git fetch` + git state recomputation for a branch,
+/// then emit a `git-state-updated` event so the frontend can merge the
+/// fresh state into the existing timeline.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn refresh_branch_git_state(
+    app: tauri::AppHandle,
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<(), String> {
+    let store = crate::get_store(&store)?;
+
     tauri::async_runtime::spawn_blocking(move || {
-        build_branch_timeline(&store, &branch_id, Some(&app))
+        let branch = store
+            .get_branch(&branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+        let workdir = store
+            .get_workdir_for_branch(&branch_id)
+            .map_err(|e| e.to_string())?;
+
+        let git_state = if let Some(ref ws_name) = branch.workspace_name {
+            let repo_subpath = branches::resolve_branch_workspace_subpath(&store, &branch)?;
+            let cache_key = remote_git_state_cache_key(
+                ws_name,
+                repo_subpath.as_deref(),
+                &branch.branch_name,
+                &branch.base_branch,
+            );
+            let resolved_path = resolve_repo_path(ws_name, repo_subpath.as_deref())?;
+
+            Some(git::compute_branch_git_state_batched(
+                &cache_key,
+                |script, args| {
+                    branches::run_workspace_shell(ws_name, script, args).map_err(|e| e.to_string())
+                },
+                &resolved_path,
+                &branch.branch_name,
+                &branch.base_branch,
+                git::FetchMode::Ttl,
+            ))
+        } else if let Some(ref wd) = workdir {
+            let worktree_path = Path::new(&wd.path);
+            if worktree_path.exists() {
+                Some(git::compute_local_branch_git_state(
+                    worktree_path,
+                    &branch.branch_name,
+                    &branch.base_branch,
+                    git::FetchMode::Ttl,
+                ))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(state) = git_state {
+            let _ = app.emit(
+                "git-state-updated",
+                GitStateUpdatedPayload {
+                    branch_id: branch_id.to_string(),
+                    git_state: state,
+                },
+            );
+        }
+        Ok(())
     })
     .await
-    .map_err(|e| format!("Timeline task failed: {e}"))?
+    .map_err(|e| format!("Git state refresh task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -969,7 +925,7 @@ mod tests {
         store.create_review(&visible_review).unwrap();
         store.create_review(&stale_review).unwrap();
 
-        let timeline = build_branch_timeline(&store, &branch.id, None).unwrap();
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
 
         assert_eq!(timeline.commits.len(), 1);
         assert_eq!(timeline.commits[0].sha, visible_sha);
@@ -988,7 +944,7 @@ mod tests {
         store.create_review(&stale_review).unwrap();
         store.add_comment(&stale_review.id, &agent_comment).unwrap();
 
-        let timeline = build_branch_timeline(&store, &branch.id, None).unwrap();
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
 
         assert_eq!(timeline.commits.len(), 1);
         assert!(timeline.reviews.is_empty());
@@ -1004,7 +960,7 @@ mod tests {
         store.create_review(&stale_review).unwrap();
         store.add_comment(&stale_review.id, &user_comment).unwrap();
 
-        let timeline = build_branch_timeline(&store, &branch.id, None).unwrap();
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
 
         assert_eq!(timeline.commits.len(), 1);
         assert_eq!(timeline.reviews.len(), 1);
@@ -1023,7 +979,7 @@ mod tests {
         store.add_comment(&stale_review.id, &user_comment).unwrap();
         store.delete_comment(&user_comment.id).unwrap();
 
-        let timeline = build_branch_timeline(&store, &branch.id, None).unwrap();
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
 
         assert_eq!(timeline.commits.len(), 1);
         assert!(timeline.reviews.is_empty());

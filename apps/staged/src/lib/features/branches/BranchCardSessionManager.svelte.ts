@@ -38,8 +38,10 @@ export default class BranchCardSessionManager {
   // Private callback refs — declared first so $derived fields can reference them
   private getBranch: () => Branch = undefined!;
   private getIsRemote: () => boolean = undefined!;
-  private loadTimeline: () => void = undefined!;
+  private loadTimeline: (opts?: { timelineKey?: string | null; force?: boolean }) => void =
+    undefined!;
   private getTimeline: () => BranchTimelineData | null = () => null;
+  private setTimeline: (tl: BranchTimelineData) => void = undefined!;
 
   // New session modal state
   showNewSession = $state(false);
@@ -52,6 +54,9 @@ export default class BranchCardSessionManager {
   // Auto review state — tracks a background review started after each commit
   autoReviewSessionId = $state<string | null>(null);
   autoReviewId = $state<string | null>(null);
+  // Tracks the session ID of an adopted auto-review so its completion event
+  // can be ignored (it would otherwise trigger a spurious timeline reload).
+  adoptedSessionId = $state<string | null>(null);
 
   // Session modal (opened after starting a branch session, or from timeline)
   openSessionId = $state<string | null>(null);
@@ -95,13 +100,15 @@ export default class BranchCardSessionManager {
   constructor(opts: {
     getBranch: () => Branch;
     getIsRemote: () => boolean;
-    loadTimeline: () => void;
+    loadTimeline: (opts?: { timelineKey?: string | null; force?: boolean }) => void;
     getTimeline: () => BranchTimelineData | null;
+    setTimeline: (tl: BranchTimelineData) => void;
   }) {
     this.getBranch = opts.getBranch;
     this.getIsRemote = opts.getIsRemote;
     this.loadTimeline = opts.loadTimeline;
     this.getTimeline = opts.getTimeline;
+    this.setTimeline = opts.setTimeline;
   }
 
   prunePendingSessionItems(nextTimeline: BranchTimelineData): Set<string> {
@@ -242,6 +249,19 @@ export default class BranchCardSessionManager {
       // Only reveal the review after all fallible operations succeed
       await commands.setReviewAuto(review.id, false);
 
+      // Optimistically update the local timeline so the review is visible
+      // immediately, before the backend reload completes.
+      const currentTimeline = this.getTimeline();
+      if (currentTimeline) {
+        this.setTimeline({
+          ...currentTimeline,
+          reviews: currentTimeline.reviews.map((r) =>
+            r.id === review.id ? { ...r, isAuto: false } : r
+          ),
+        });
+      }
+
+      this.adoptedSessionId = this.autoReviewSessionId;
       this.autoReviewSessionId = null;
       this.autoReviewId = null;
 

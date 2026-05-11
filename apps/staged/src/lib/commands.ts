@@ -363,7 +363,9 @@ export function getBranchTimeline(
     }
   }
 
-  const request = invoke<BranchTimeline>('get_branch_timeline', { branchId })
+  const request = invoke<BranchTimeline>('get_branch_timeline', {
+    branchId,
+  })
     .then((timeline) => {
       if (inFlightTimelines.get(branchId) === request) {
         timelineCache.set(branchId, { timeline, fetchedAt: Date.now() });
@@ -390,6 +392,10 @@ export function getBranchTimelineWithRevalidation(branchId: string): {
     cached: entry?.timeline ?? null,
     fresh: isFresh ? null : getBranchTimeline(branchId, { force: true }),
   };
+}
+
+export function refreshBranchGitState(branchId: string): Promise<void> {
+  return invoke('refresh_branch_git_state', { branchId });
 }
 
 export function invalidateProjectBranchTimelines(branchIds: string[]): void {

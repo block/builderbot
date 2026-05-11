@@ -122,15 +122,13 @@
   }
 
   .branch-capsule {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
+    display: inline-block;
     padding: 2px 8px;
     border-radius: 999px;
     background: var(--bg-elevated);
     color: var(--text-muted);
     font-size: var(--size-xs);
-    max-width: 160px;
+    max-width: 240px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

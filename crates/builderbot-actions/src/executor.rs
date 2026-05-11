@@ -663,37 +663,36 @@ impl ActionExecutor {
         if let Some(pid) = pid {
             #[cfg(unix)]
             {
-                // Send SIGTERM to every process in the session.
+                // Send SIGHUP to the shell's process group.
                 //
-                // Because we used `setsid()` in pre_exec, the shell is the
-                // session leader and all descendant processes share its SID.
-                // However, the interactive shell (`-i`) uses job control and
-                // places child commands in their own process groups. A simple
-                // `kill(-pid, SIGTERM)` only reaches the shell's process group,
-                // missing child process groups entirely. Additionally,
-                // interactive shells ignore SIGTERM by default.
+                // We used `setsid()` in pre_exec, so the shell is the session
+                // leader and its PID equals the PGID of its initial process
+                // group. Interactive shells (`-i`) use job control, placing
+                // child commands in separate process groups, so
+                // `kill(-pid, SIGTERM)` misses them. Interactive shells also
+                // ignore SIGTERM by default.
                 //
-                // `pkill -s <sid>` targets every process in the session
-                // regardless of process group, which reliably reaches the
-                // shell, its child commands, and their descendants.
-                let pid_str = pid.to_string();
-                let _ = Command::new("pkill")
-                    .args(["-TERM", "-s", &pid_str])
-                    .status();
+                // SIGHUP is the correct signal here: interactive shells handle
+                // it by forwarding SIGHUP+SIGCONT to every job they manage,
+                // then exiting. This is POSIX-standard behavior across
+                // bash/zsh/fish and works on both macOS and Linux.
+                let pgid = pid as i32;
+                unsafe {
+                    libc::kill(-pgid, libc::SIGHUP);
+                }
 
                 if let Some(force_kill_after) = options.force_kill_after {
                     // Escalate to SIGKILL after a short grace period in case
-                    // processes ignore SIGTERM (e.g. a process traps the signal).
+                    // processes ignore SIGHUP or the shell fails to clean up.
                     thread::spawn(move || {
                         thread::sleep(force_kill_after);
-                        // Check if any process in the session still exists
-                        // before escalating. pkill exits 0 when it matches
-                        // at least one process.
-                        let probe = Command::new("pkill").args(["-0", "-s", &pid_str]).status();
-                        if probe.map(|s| s.success()).unwrap_or(false) {
-                            let _ = Command::new("pkill")
-                                .args(["-KILL", "-s", &pid_str])
-                                .status();
+                        // kill(-pgid, 0) checks if any process in the group
+                        // still exists (returns 0 on success).
+                        let alive = unsafe { libc::kill(-pgid, 0) } == 0;
+                        if alive {
+                            unsafe {
+                                libc::kill(-pgid, libc::SIGKILL);
+                            }
                         }
                     });
                 }

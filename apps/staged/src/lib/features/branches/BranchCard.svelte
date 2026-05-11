@@ -12,7 +12,15 @@
 -->
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { FileDiff, AlertCircle, Cloud, Trash2 } from 'lucide-svelte';
+  import {
+    FileDiff,
+    AlertCircle,
+    Cloud,
+    Trash2,
+    GitPullRequest,
+    GitPullRequestClosed,
+    GitPullRequestDraft,
+  } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { subscribeDragDrop } from './dragDrop';
@@ -24,6 +32,7 @@
     HashtagItem,
     ProjectRepo,
     SessionStatusPayload,
+    WorkspaceStatus,
   } from '../../types';
   import * as commands from '../../api/commands';
   import BranchTimeline from '../timeline/BranchTimeline.svelte';
@@ -49,6 +58,7 @@
   import RemoteWorkspaceStatusView from './RemoteWorkspaceStatusView.svelte';
   import { branchTimelineReadyKey } from './branchTimelineReady';
   import { alerts } from '../../shared/alerts.svelte';
+  import { aggregateProjectPrStatus } from '../../shared/utils';
   import { timelineToHashtagItems, projectNotesToHashtagItems } from '../sessions/hashtagItems';
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
   import { getPreferredAgent } from '../settings/preferences.svelte';
@@ -85,6 +95,22 @@
   const isLocal = $derived(branch.branchType === 'local');
   const isRemote = $derived(branch.branchType === 'remote');
   const remoteWorkspaceStatus = $derived(branch.workspaceStatus);
+  const prStatus = $derived(aggregateProjectPrStatus([branch]));
+
+  function cloudStatusClass(status: WorkspaceStatus | null): string {
+    switch (status) {
+      case 'running':
+        return 'cloud-running';
+      case 'starting':
+        return 'cloud-starting';
+      case 'error':
+        return 'cloud-error';
+      case 'stopped':
+      case 'suspended':
+      default:
+        return 'cloud-inactive';
+    }
+  }
 
   function notifyError(title: string, e: unknown): void {
     alerts.show({
@@ -1319,8 +1345,22 @@
     </div>
   {:else}
     <div class="card-header">
-      {#if isRemote}
-        <Cloud size={14} class="header-icon cloud-icon" />
+      {#if revalidating}
+        <Spinner size={14} />
+      {:else if isRemote}
+        <Cloud size={14} class="header-icon {cloudStatusClass(remoteWorkspaceStatus)}" />
+      {:else if prStatus === 'merged'}
+        <GitPullRequest size={14} class="header-icon pr-status-merged" />
+      {:else if prStatus === 'checks_failing'}
+        <GitPullRequest size={14} class="header-icon pr-status-checks-failing" />
+      {:else if prStatus === 'open'}
+        <GitPullRequest size={14} class="header-icon" />
+      {:else if prStatus === 'closed'}
+        <GitPullRequestClosed size={14} class="header-icon" />
+      {:else if prStatus === 'conflict'}
+        <GitPullRequestClosed size={14} class="header-icon pr-status-conflict" />
+      {:else}
+        <GitPullRequestDraft size={14} class="header-icon pr-status-draft" />
       {/if}
       <BranchCardHeaderInfo
         branchName={branch.branchName}
@@ -1331,9 +1371,6 @@
         warning={branchIdentityWarning}
       />
       <div class="header-actions">
-        {#if revalidating}
-          <Spinner size={14} />
-        {/if}
         {#if isRemote && remoteWorkspaceStatus !== 'running' && remoteWorkspaceStatus !== 'starting'}
           <RemoteWorkspaceStatusBadge status={remoteWorkspaceStatus} />
         {/if}
@@ -1754,8 +1791,36 @@
     stroke: var(--text-faint);
   }
 
-  .card-header :global(svg.cloud-icon) {
+  .card-header :global(svg.pr-status-merged) {
+    stroke: var(--ui-success);
+  }
+
+  .card-header :global(svg.pr-status-conflict) {
+    stroke: var(--ui-danger);
+  }
+
+  .card-header :global(svg.pr-status-checks-failing) {
+    stroke: var(--ui-danger);
+  }
+
+  .card-header :global(svg.pr-status-draft) {
+    stroke: var(--text-muted);
+  }
+
+  .card-header :global(svg.cloud-running) {
     stroke: var(--ui-accent);
+  }
+
+  .card-header :global(svg.cloud-starting) {
+    stroke: var(--ui-info);
+  }
+
+  .card-header :global(svg.cloud-error) {
+    stroke: var(--ui-danger);
+  }
+
+  .card-header :global(svg.cloud-inactive) {
+    stroke: var(--text-muted);
   }
 
   .more-button {

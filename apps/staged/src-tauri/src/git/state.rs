@@ -5,7 +5,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const FETCH_TTL_MS: i64 = 30_000;
 
@@ -438,18 +438,11 @@ pub fn compute_branch_git_state<F>(
 where
     F: Fn(&[&str]) -> Result<String, String> + Sync,
 {
-    let t_total = Instant::now();
-
     // Phase 1: Fetch runs in parallel with local-only commands (HEAD, branch
     // name, worktree status) since those read local state unaffected by fetch.
-    let t_phase1 = Instant::now();
     let (refresh, head_sha, branch, worktree) = std::thread::scope(|s| {
         let fetch_handle = s.spawn(|| {
-            let t = Instant::now();
-            let r =
-                refresh_refs_if_needed(cache_key, &run_git, branch_name, base_branch, fetch_mode);
-            log::info!("[git-state] fetch: {:?} key={}", t.elapsed(), cache_key);
-            r
+            refresh_refs_if_needed(cache_key, &run_git, branch_name, base_branch, fetch_mode)
         });
         let head_handle = s.spawn(|| {
             run_git(&["rev-parse", "HEAD"])
@@ -466,11 +459,6 @@ where
             worktree_handle.join().expect("worktree thread panicked"),
         )
     });
-    log::info!(
-        "[git-state] phase1 (fetch+local): {:?} key={}",
-        t_phase1.elapsed(),
-        cache_key
-    );
 
     let detached_head = head_sha.is_some() && branch.is_none();
     let expected_branch = branch_name_without_origin(branch_name);
@@ -484,7 +472,6 @@ where
     // Phase 2: Upstream and base state computations are independent of each
     // other but both need fetch to have completed (for up-to-date remote refs)
     // and head_sha.
-    let t_phase2 = Instant::now();
     let (upstream, base) = std::thread::scope(|s| {
         let upstream_handle = s.spawn(|| {
             compute_upstream_state(
@@ -501,16 +488,6 @@ where
             base_handle.join().expect("base thread panicked"),
         )
     });
-    log::info!(
-        "[git-state] phase2 (upstream+base): {:?} key={}",
-        t_phase2.elapsed(),
-        cache_key
-    );
-    log::info!(
-        "[git-state] total: {:?} key={}",
-        t_total.elapsed(),
-        cache_key
-    );
 
     BranchGitState {
         upstream,
@@ -662,7 +639,6 @@ pub fn local_git_state_cache_key(repo: &Path, branch_name: &str, base_branch: &s
 ///   $6 = "skip_fetch" to skip the fetch phase (cache fresh)
 const BATCH_GIT_STATE_SCRIPT: &str = concat!(
     "cd \"$1\" || exit 1\n",
-    "_t0=$(date +%s%3N 2>/dev/null || echo 0)\n",
     // --- Fetch phase (conditional) ---
     "fetch_err=''\n",
     "upstream_missing=''\n",
@@ -687,7 +663,6 @@ const BATCH_GIT_STATE_SCRIPT: &str = concat!(
     "    fi\n",
     "  fi\n",
     "fi\n",
-    "_t1=$(date +%s%3N 2>/dev/null || echo 0)\n",
     // --- Local state ---
     "head_sha=$(git rev-parse HEAD 2>/dev/null || true)\n",
     "printf 'HEAD=%s\\n' \"$head_sha\"\n",
@@ -695,7 +670,6 @@ const BATCH_GIT_STATE_SCRIPT: &str = concat!(
     "echo STATUS_START\n",
     "git status --porcelain=1 --untracked-files=all 2>/dev/null || true\n",
     "echo STATUS_END\n",
-    "_t2=$(date +%s%3N 2>/dev/null || echo 0)\n",
     "[ -n \"$upstream_missing\" ] && echo 'UPSTREAM_MISSING=true'\n",
     "[ -n \"$fetch_err\" ] && printf 'FETCH_ERR=%s\\n' \"$fetch_err\"\n",
     // --- Upstream state (skip if $4 is empty) ---
@@ -709,7 +683,6 @@ const BATCH_GIT_STATE_SCRIPT: &str = concat!(
     "  printf 'UP_COUNTS=%s\\n' \"$(git rev-list --left-right --count \"$head_sha\"...\"$4\" 2>/dev/null || echo '0 0')\"\n",
     "  printf 'UP_MB=%s\\n' \"$(git merge-base \"$head_sha\" \"$4\" 2>/dev/null || true)\"\n",
     "fi\n",
-    "_t3=$(date +%s%3N 2>/dev/null || echo 0)\n",
     // --- Base state ---
     "base_sha=$(git rev-parse --verify \"$5\" 2>/dev/null || true)\n",
     "printf 'BASE_SHA=%s\\n' \"$base_sha\"\n",
@@ -720,11 +693,6 @@ const BATCH_GIT_STATE_SCRIPT: &str = concat!(
     "    printf 'BASE_BEHIND=%s\\n' \"$(git rev-list --count \"$mb\"..\"$5\" 2>/dev/null || echo 0)\"\n",
     "  fi\n",
     "fi\n",
-    "_t4=$(date +%s%3N 2>/dev/null || echo 0)\n",
-    "printf 'TIMING_FETCH=%s\\n' \"$((_t1 - _t0))\"\n",
-    "printf 'TIMING_LOCAL=%s\\n' \"$((_t2 - _t1))\"\n",
-    "printf 'TIMING_UPSTREAM=%s\\n' \"$((_t3 - _t2))\"\n",
-    "printf 'TIMING_BASE=%s\\n' \"$((_t4 - _t3))\"\n",
     "exit 0\n",
 );
 
@@ -741,10 +709,6 @@ struct BatchGitStateOutput {
     up_merge_base: Option<String>,
     base_sha: Option<String>,
     base_behind: u32,
-    timing_fetch_ms: Option<i64>,
-    timing_local_ms: Option<i64>,
-    timing_upstream_ms: Option<i64>,
-    timing_base_ms: Option<i64>,
 }
 
 fn parse_batch_git_state_output(raw: &str) -> BatchGitStateOutput {
@@ -760,10 +724,6 @@ fn parse_batch_git_state_output(raw: &str) -> BatchGitStateOutput {
     let mut up_merge_base = None;
     let mut base_sha = None;
     let mut base_behind = 0u32;
-    let mut timing_fetch_ms = None;
-    let mut timing_local_ms = None;
-    let mut timing_upstream_ms = None;
-    let mut timing_base_ms = None;
 
     for line in raw.lines() {
         if line == "STATUS_START" {
@@ -821,14 +781,6 @@ fn parse_batch_git_state_output(raw: &str) -> BatchGitStateOutput {
             // Used internally by the script to compute BASE_BEHIND.
         } else if let Some(val) = line.strip_prefix("BASE_BEHIND=") {
             base_behind = parse_u32(Some(val.trim()));
-        } else if let Some(val) = line.strip_prefix("TIMING_FETCH=") {
-            timing_fetch_ms = val.trim().parse().ok();
-        } else if let Some(val) = line.strip_prefix("TIMING_LOCAL=") {
-            timing_local_ms = val.trim().parse().ok();
-        } else if let Some(val) = line.strip_prefix("TIMING_UPSTREAM=") {
-            timing_upstream_ms = val.trim().parse().ok();
-        } else if let Some(val) = line.strip_prefix("TIMING_BASE=") {
-            timing_base_ms = val.trim().parse().ok();
         }
     }
 
@@ -844,10 +796,6 @@ fn parse_batch_git_state_output(raw: &str) -> BatchGitStateOutput {
         up_merge_base,
         base_sha,
         base_behind,
-        timing_fetch_ms,
-        timing_local_ms,
-        timing_upstream_ms,
-        timing_base_ms,
     }
 }
 
@@ -1042,7 +990,6 @@ pub fn compute_branch_git_state_batched<F>(
 where
     F: Fn(&str, &[&str]) -> Result<String, String>,
 {
-    let t_total = Instant::now();
     let base_refspec = refspec_for(base_branch);
     let branch_refspec = refspec_for(branch_name);
     let upstream_ref = origin_ref_for_branch(branch_name);
@@ -1097,15 +1044,6 @@ where
     match raw {
         Ok(output) => {
             let parsed = parse_batch_git_state_output(&output);
-            log::info!(
-                "[git-state-remote] fetch={}ms local={}ms upstream={}ms base={}ms round-trip={:?} key={}",
-                parsed.timing_fetch_ms.unwrap_or(-1),
-                parsed.timing_local_ms.unwrap_or(-1),
-                parsed.timing_upstream_ms.unwrap_or(-1),
-                parsed.timing_base_ms.unwrap_or(-1),
-                t_total.elapsed(),
-                cache_key,
-            );
 
             let upstream_known_missing = if should_fetch {
                 parsed.upstream_missing

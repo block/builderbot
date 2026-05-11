@@ -38,7 +38,8 @@ export default class BranchCardSessionManager {
   // Private callback refs — declared first so $derived fields can reference them
   private getBranch: () => Branch = undefined!;
   private getIsRemote: () => boolean = undefined!;
-  private loadTimeline: () => void = undefined!;
+  private loadTimeline: (opts?: { timelineKey?: string | null; force?: boolean }) => void =
+    undefined!;
   private getTimeline: () => BranchTimelineData | null = () => null;
   private setTimeline: (tl: BranchTimelineData) => void = undefined!;
 
@@ -99,7 +100,7 @@ export default class BranchCardSessionManager {
   constructor(opts: {
     getBranch: () => Branch;
     getIsRemote: () => boolean;
-    loadTimeline: () => void;
+    loadTimeline: (opts?: { timelineKey?: string | null; force?: boolean }) => void;
     getTimeline: () => BranchTimelineData | null;
     setTimeline: (tl: BranchTimelineData) => void;
   }) {

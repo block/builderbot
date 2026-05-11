@@ -1474,7 +1474,7 @@
           {provisioningDetail}
         >
           {#snippet footerActions()}
-            {#if hasCodeChanges}
+            {#if hasCodeChanges || branch.prNumber}
               <div class="footer-right-actions">
                 <BranchCardPrButton
                   bind:this={prButton}
@@ -1487,17 +1487,19 @@
                     sessionMgr.openSessionId = sid;
                   }}
                 />
-                <button
-                  class="pr-btn diff-btn"
-                  onclick={() => {
-                    reviewDiffTarget = null;
-                    showBranchDiff = true;
-                  }}
-                  title="View diff"
-                >
-                  <FileDiff size={13} />
-                  <span>Diff</span>
-                </button>
+                {#if hasCodeChanges}
+                  <button
+                    class="pr-btn diff-btn"
+                    onclick={() => {
+                      reviewDiffTarget = null;
+                      showBranchDiff = true;
+                    }}
+                    title="View diff"
+                  >
+                    <FileDiff size={13} />
+                    <span>Diff</span>
+                  </button>
+                {/if}
               </div>
             {/if}
           {/snippet}

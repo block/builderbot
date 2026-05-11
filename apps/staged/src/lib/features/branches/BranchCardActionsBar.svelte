@@ -520,6 +520,7 @@
     const items: MenuItem[] = openerApps.map((app) => ({
       type: 'action',
       label: app.name,
+      iconSrc: app.icon ?? undefined,
       onSelect: () => handleOpenInApp(app.id),
     }));
 

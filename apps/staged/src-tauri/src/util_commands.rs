@@ -10,6 +10,7 @@ use std::path::Path;
 pub struct OpenerApp {
     id: String,
     name: String,
+    icon: Option<String>,
 }
 
 /// Known applications with their bundle IDs (macOS).
@@ -113,15 +114,18 @@ pub async fn check_blox_auth() -> Result<(), String> {
 
 /// Get available opener applications.
 ///
-/// On macOS, uses mdfind to detect which apps are installed.
-/// On other platforms, returns an empty list.
+/// On macOS, uses mdfind to detect which apps are installed, then extracts
+/// their icons in parallel using threads. On other platforms, returns an
+/// empty list.
 #[tauri::command]
 pub async fn get_available_openers() -> Result<Vec<OpenerApp>, String> {
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;
+        use std::thread;
 
-        let mut available = Vec::new();
+        // First, find which apps are installed and get their .app paths.
+        let mut installed: Vec<(&str, String)> = Vec::new();
 
         for (id, bundle_id) in KNOWN_OPENERS {
             let output = Command::new("mdfind")
@@ -131,12 +135,34 @@ pub async fn get_available_openers() -> Result<Vec<OpenerApp>, String> {
 
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                if !stdout.trim().is_empty() {
-                    available.push(OpenerApp {
-                        id: id.to_string(),
-                        name: prettify_app_name(id),
-                    });
+                let first_line = stdout.trim().lines().next().unwrap_or("").to_string();
+                if !first_line.is_empty() {
+                    installed.push((id, first_line));
                 }
+            }
+        }
+
+        // Extract icons in parallel using threads.
+        let handles: Vec<_> = installed
+            .into_iter()
+            .map(|(id, app_path)| {
+                let id = id.to_string();
+                thread::spawn(move || {
+                    let icon = extract_app_icon(&app_path);
+                    OpenerApp {
+                        name: prettify_app_name(&id),
+                        id,
+                        icon,
+                    }
+                })
+            })
+            .collect();
+
+        let mut available = Vec::with_capacity(handles.len());
+        for handle in handles {
+            match handle.join() {
+                Ok(app) => available.push(app),
+                Err(_) => {} // Thread panicked — skip this app
             }
         }
 
@@ -148,6 +174,80 @@ pub async fn get_available_openers() -> Result<Vec<OpenerApp>, String> {
         // On non-macOS platforms, return empty list
         Ok(Vec::new())
     }
+}
+
+/// Extract an app icon as a base64-encoded PNG data URI.
+///
+/// Reads the icon filename from Info.plist, resolves the .icns file,
+/// converts to a 32×32 PNG via `sips`, and base64-encodes the result.
+/// Returns `None` if any step fails.
+#[cfg(target_os = "macos")]
+fn extract_app_icon(app_path: &str) -> Option<String> {
+    use std::process::Command;
+
+    // 1. Read CFBundleIconFile from Info.plist
+    let output = Command::new("defaults")
+        .arg("read")
+        .arg(format!("{app_path}/Contents/Info"))
+        .arg("CFBundleIconFile")
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let mut icon_name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if icon_name.is_empty() {
+        return None;
+    }
+
+    // 2. Append .icns if missing
+    if !icon_name.ends_with(".icns") {
+        icon_name.push_str(".icns");
+    }
+
+    let icns_path = format!("{app_path}/Contents/Resources/{icon_name}");
+    if !Path::new(&icns_path).exists() {
+        return None;
+    }
+
+    // 3. Convert to 32×32 PNG via sips into a temp file
+    let tmp_dir = std::env::temp_dir();
+    let tmp_png = tmp_dir.join(format!(
+        "staged-icon-{}-{:?}.png",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let tmp_png_str = tmp_png.to_string_lossy().to_string();
+
+    let sips = Command::new("sips")
+        .args([
+            "-s",
+            "format",
+            "png",
+            "-z",
+            "32",
+            "32",
+            &icns_path,
+            "--out",
+            &tmp_png_str,
+        ])
+        .output()
+        .ok()?;
+
+    if !sips.status.success() {
+        let _ = std::fs::remove_file(&tmp_png);
+        return None;
+    }
+
+    // 4. Read and base64-encode the PNG
+    let png_bytes = std::fs::read(&tmp_png).ok()?;
+    let _ = std::fs::remove_file(&tmp_png);
+
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+    Some(format!("data:image/png;base64,{encoded}"))
 }
 
 /// Convert app ID to a human-readable name.

@@ -273,7 +273,9 @@
           handleAction(item);
         }}
       >
-        {#if item.icon}
+        {#if item.iconSrc}
+          <img src={item.iconSrc} alt="" width="14" height="14" class="menu-item-icon" />
+        {:else if item.icon}
           <item.icon size={14} />
         {/if}
         <span class="menu-item-label">{item.label}</span>
@@ -401,6 +403,11 @@
   .menu-item :global(svg) {
     color: var(--text-muted);
     flex-shrink: 0;
+  }
+
+  .menu-item-icon {
+    flex-shrink: 0;
+    border-radius: 3px;
   }
 
   .menu-item.danger {

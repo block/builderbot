@@ -4,6 +4,7 @@ export type MenuActionItem = {
   type: 'action';
   label: string;
   icon?: MenuIconComponent;
+  iconSrc?: string;
   disabled?: boolean;
   danger?: boolean;
   closeOnSelect?: boolean;

@@ -274,7 +274,14 @@
         }}
       >
         {#if item.iconSrc}
-          <img src={item.iconSrc} alt="" width="14" height="14" class="menu-item-icon" />
+          <img
+            src={item.iconSrc}
+            alt=""
+            width="14"
+            height="14"
+            draggable="false"
+            class="menu-item-icon"
+          />
         {:else if item.icon}
           <item.icon size={14} />
         {/if}

@@ -175,9 +175,8 @@ pub async fn get_available_openers() -> Result<Vec<OpenerApp>, String> {
 
         let mut available = Vec::with_capacity(handles.len());
         for handle in handles {
-            match handle.join() {
-                Ok(app) => available.push(app),
-                Err(_) => {} // Thread panicked — skip this app
+            if let Ok(app) = handle.join() {
+                available.push(app);
             }
         }
 

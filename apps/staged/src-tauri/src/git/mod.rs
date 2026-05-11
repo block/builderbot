@@ -37,9 +37,11 @@ pub use refs::{
     resolve_ref, BranchRef,
 };
 pub use state::{
-    compute_branch_git_state, compute_branch_git_state_batched, compute_local_branch_git_state,
-    ensure_fast_forward_pullable, fast_forward_to_ref, BaseGitState, BranchGitState, FetchGitState,
-    FetchMode, FetchStatus, UpstreamGitState, UpstreamRelation, WorktreeGitState,
+    complete_local_git_state, compute_branch_git_state, compute_branch_git_state_batched,
+    compute_fast_git_state_batched, compute_fast_local_git_state, compute_local_branch_git_state,
+    ensure_fast_forward_pullable, fast_forward_to_ref, local_git_state_cache_key, needs_fetch,
+    BaseGitState, BranchGitState, FastGitState, FetchGitState, FetchMode, FetchStatus,
+    UpstreamGitState, UpstreamRelation, WorktreeGitState,
 };
 pub use types::*;
 pub use worktree::{

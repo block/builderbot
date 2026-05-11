@@ -20,6 +20,7 @@
     Branch,
     BranchGitState,
     BranchTimeline as BranchTimelineData,
+    CommitTimelineItem,
     HashtagItem,
     ProjectRepo,
     SessionStatusPayload,
@@ -631,6 +632,58 @@
 
     return () => {
       unlistenStatus?.();
+    };
+  });
+
+  // Listen for partial timeline events emitted by the fast stream.
+  // When the backend needs to fetch, it emits commits + fast git state
+  // (worktree, HEAD, branch identity) before the slow fetch completes.
+  // This lets the UI show commits and worktree state immediately.
+  let unlistenPartial: UnlistenFn | null = null;
+  $effect(() => {
+    const branchId = branch.id;
+
+    listen<{ branchId: string; commits: CommitTimelineItem[]; gitState: BranchGitState }>(
+      'timeline-partial',
+      (event) => {
+        if (event.payload.branchId !== branchId) return;
+        const { commits: partialCommits, gitState: partialGitState } = event.payload;
+
+        if (!timeline) {
+          // No existing timeline — create a minimal one from the partial data
+          timeline = {
+            commits: partialCommits,
+            notes: [],
+            reviews: [],
+            images: [],
+            gitState: partialGitState,
+          };
+          loading = false;
+        } else {
+          // Merge: update commits and fast git state fields, preserve
+          // existing upstream/base data so those rows don't flash away
+          timeline = {
+            ...timeline,
+            commits: partialCommits,
+            gitState: timeline.gitState
+              ? {
+                  ...timeline.gitState,
+                  headSha: partialGitState.headSha,
+                  currentBranch: partialGitState.currentBranch,
+                  detachedHead: partialGitState.detachedHead,
+                  expectedBranchMatches: partialGitState.expectedBranchMatches,
+                  worktree: partialGitState.worktree,
+                }
+              : partialGitState,
+          };
+        }
+      }
+    ).then((unlisten) => {
+      unlistenPartial = unlisten;
+    });
+
+    return () => {
+      unlistenPartial?.();
     };
   });
 

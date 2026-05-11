@@ -70,11 +70,17 @@
   import type { BeforeLineClass, AfterLineClass, CharHighlight } from '../utils/inlineDiff.js';
   import { setupDiffKeyboardNav } from '../utils/diffKeyboard';
   import { pathsMatch } from '../utils/diffModalHelpers';
+  import {
+    DEFAULT_STRUCTURAL_HEADER_MAX_ROWS,
+    getHeaderAwareActiveStructuralStack,
+    getStructuralDeclarations,
+  } from '../utils/structuralHeaders';
   import CommentEditor, { type GithubButtonState } from './CommentEditor.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import BeforeAnnotationOverlay from './BeforeAnnotationOverlay.svelte';
   import Scrollbar from './Scrollbar.svelte';
   import HorizontalScrollbar from './HorizontalScrollbar.svelte';
+  import StructuralHeaderStack from './StructuralHeaderStack.svelte';
 
   // ==========================================================================
   // Props
@@ -367,6 +373,25 @@
   scrollApi = {
     scrollBy: (side, deltaY) => scrollController.scrollBy(side, deltaY),
   };
+
+  let afterStructuralDeclarations = $derived.by(() => {
+    if (!afterPath || isDeletedFile || afterLines.length === 0) return [];
+    return getStructuralDeclarations(afterPath, afterLines);
+  });
+
+  let topVisibleAfterLine = $derived.by(() => {
+    const lineHeight = scrollController.getDimensions('after').lineHeight || 20;
+    return Math.max(0, Math.floor(scrollController.afterScrollY / lineHeight));
+  });
+
+  let activeStructuralStack = $derived.by(() => {
+    if (!afterPath || isDeletedFile || (isMarkdownFile && markdownPreview)) return [];
+    return getHeaderAwareActiveStructuralStack(
+      afterStructuralDeclarations,
+      topVisibleAfterLine,
+      DEFAULT_STRUCTURAL_HEADER_MAX_ROWS
+    );
+  });
 
   // Update scroll controller with active alignments
   $effect(() => {
@@ -2087,6 +2112,10 @@
                 </div>
               </div>
             {:else}
+              <StructuralHeaderStack
+                stack={activeStructuralStack}
+                maxRows={DEFAULT_STRUCTURAL_HEADER_MAX_ROWS}
+              />
               <div class="code-container" bind:this={afterPane}>
                 <div
                   class="lines-wrapper"
@@ -2181,6 +2210,10 @@
             <span class="pane-path" title={afterPath}>{afterPath ?? 'No file'}</span>
           </div>
           <div class="code-area" onwheel={handleAfterWheel}>
+            <StructuralHeaderStack
+              stack={activeStructuralStack}
+              maxRows={DEFAULT_STRUCTURAL_HEADER_MAX_ROWS}
+            />
             <div class="code-container" bind:this={afterPane}>
               <div
                 class="lines-wrapper"

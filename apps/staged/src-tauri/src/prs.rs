@@ -209,12 +209,24 @@ fn commit_pipeline_prompt(kind: &PipelineKind) -> &'static str {
     }
 }
 
+const HTTPS_FALLBACK_CONFIG: &str = "url.https://github.com/.insteadOf=git@github.com:";
+
+fn git_fetch_with_fallback(refspec: &str) -> String {
+    format!(
+        "if ! git fetch origin {refspec}; then git -c '{HTTPS_FALLBACK_CONFIG}' fetch origin {refspec}; fi"
+    )
+}
+
+fn git_push_with_fallback(args: &str) -> String {
+    format!("if ! git push {args}; then git -c '{HTTPS_FALLBACK_CONFIG}' push {args}; fi")
+}
+
 fn build_commit_pipeline_steps(kind: &PipelineKind, base_branch: &str) -> Vec<PipelineStep> {
     match kind {
         PipelineKind::Rebase => vec![
             PipelineStep::Command {
                 label: "Fetch latest base".to_string(),
-                command: format!("git fetch origin {base_branch}"),
+                command: git_fetch_with_fallback(base_branch),
                 on_failure: FailureStrategy::HandoffToAi {
                     prompt_template: format!(
                         "The fetch failed. Diagnose and fix the issue, then rebase this branch onto `origin/{base_branch}` with DCO signoffs. Resolve conflicts if present and continue the rebase. Do not push the branch.\n\n{{step_outputs}}"
@@ -237,7 +249,7 @@ fn build_commit_pipeline_steps(kind: &PipelineKind, base_branch: &str) -> Vec<Pi
             // remote-tracking ref could cause the reset to target the wrong commit.
             PipelineStep::Command {
                 label: "Fetch latest base".to_string(),
-                command: format!("git fetch origin {base_branch}"),
+                command: git_fetch_with_fallback(base_branch),
                 on_failure: FailureStrategy::HandoffToAi {
                     prompt_template: format!(
                         "The fetch failed. Diagnose and fix the issue, then squash only this branch's commits manually. Do not squash beyond the merge-base with `origin/{base_branch}`. Create one signed-off conventional commit from the staged changes and do not push the branch.\n\n{{step_outputs}}"
@@ -500,7 +512,7 @@ fn build_create_pr_pipeline_steps(
     vec![
         PipelineStep::Command {
             label: "Fetch latest base".to_string(),
-            command: format!("git fetch origin {base_branch}"),
+            command: git_fetch_with_fallback(base_branch),
             on_failure: FailureStrategy::HandoffToAi {
                 prompt_template: create_pr_handoff_prompt(
                     pr_type,
@@ -529,7 +541,7 @@ fn build_create_pr_pipeline_steps(
         },
         PipelineStep::Command {
             label: "Push to remote".to_string(),
-            command: format!("git push -u origin {branch_name}"),
+            command: git_push_with_fallback(&format!("-u origin {branch_name}")),
             on_failure: FailureStrategy::HandoffToAi {
                 prompt_template: create_pr_handoff_prompt(
                     pr_type,
@@ -992,12 +1004,12 @@ pub async fn push_branch(
     let force = force.unwrap_or(false);
 
     let push_command = if force {
-        format!(
-            "git push -u origin {} --force-with-lease",
+        git_push_with_fallback(&format!(
+            "-u origin {} --force-with-lease",
             ctx.branch.branch_name
-        )
+        ))
     } else {
-        format!("git push -u origin {}", ctx.branch.branch_name)
+        git_push_with_fallback(&format!("-u origin {}", ctx.branch.branch_name))
     };
 
     let on_failure = if force {
@@ -1132,7 +1144,10 @@ mod tests {
 
         let (label, command, on_failure) = command_at(&steps, 0);
         assert_eq!(label, "Fetch latest base");
-        assert_eq!(command, "git fetch origin main");
+        assert_eq!(
+            command,
+            "if ! git fetch origin main; then git -c 'url.https://github.com/.insteadOf=git@github.com:' fetch origin main; fi"
+        );
         assert!(matches!(on_failure, FailureStrategy::HandoffToAi { .. }));
 
         let (_, command, _) = command_at(&steps, 1);
@@ -1151,7 +1166,10 @@ mod tests {
 
         let (label, command, _) = command_at(&steps, 3);
         assert_eq!(label, "Push to remote");
-        assert_eq!(command, "git push -u origin feature-branch");
+        assert_eq!(
+            command,
+            "if ! git push -u origin feature-branch; then git -c 'url.https://github.com/.insteadOf=git@github.com:' push -u origin feature-branch; fi"
+        );
 
         let (label, prompt) = ai_prompt_at(&steps, 4);
         assert_eq!(label, "Create PR");
@@ -1163,6 +1181,12 @@ mod tests {
     #[test]
     fn rebase_pipeline_uses_signoff() {
         let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main");
+
+        let (_, command, _) = command_at(&steps, 0);
+        assert_eq!(
+            command,
+            "if ! git fetch origin main; then git -c 'url.https://github.com/.insteadOf=git@github.com:' fetch origin main; fi"
+        );
 
         let (_, command, _) = command_at(&steps, 1);
         assert_eq!(command, "git rebase --signoff origin/main");

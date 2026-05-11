@@ -966,8 +966,9 @@ mod tests {
 
     #[test]
     fn test_alignments_pure_insertion() {
-        // Simulates @@ -3,0 +4,2 @@ — pure insertion after old line 3.
-        // After fix: old_start = 3 (not 2), producing an empty span at position 3.
+        // Raw unified diff: @@ -3,0 +4,2 @@ — pure insertion after old line 3.
+        // Post-conversion (0-indexed): old_start=3 (kept as-is, empty span),
+        // new_start=3 (4-1), new_lines=2.
         let hunks = vec![Hunk {
             old_start: 3,
             old_lines: 0,
@@ -996,8 +997,9 @@ mod tests {
 
     #[test]
     fn test_alignments_pure_deletion() {
-        // Simulates @@ -4,2 +3,0 @@ — pure deletion of old lines 4-5.
-        // After fix: new_start = 3 (not 2), producing an empty span at position 3.
+        // Raw unified diff: @@ -4,2 +3,0 @@ — pure deletion of old lines 4-5.
+        // Post-conversion (0-indexed): old_start=3 (4-1), old_lines=2,
+        // new_start=3 (kept as-is, empty span).
         let hunks = vec![Hunk {
             old_start: 3,
             old_lines: 2,

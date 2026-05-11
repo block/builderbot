@@ -9,6 +9,8 @@
   import type { SessionStatusPayload, HashtagItem } from '../../types';
   import HashtagInput from '../sessions/HashtagInput.svelte';
   import { buildBranchHashtagItems } from '../sessions/hashtagItems';
+  import { getPreferredAgent } from '../settings/preferences.svelte';
+  import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
 
   interface Props {
     branchId: string;
@@ -17,11 +19,20 @@
     scope: 'branch' | 'commit';
     reviewId?: string;
     visibleCommentCount: number;
+    isRemote: boolean;
     onStarted: () => void;
   }
 
-  let { branchId, projectId, commitSha, scope, reviewId, visibleCommentCount, onStarted }: Props =
-    $props();
+  let {
+    branchId,
+    projectId,
+    commitSha,
+    scope,
+    reviewId,
+    visibleCommentCount,
+    isRemote,
+    onStarted,
+  }: Props = $props();
 
   let draftPrompt = $state('');
   let isDirty = $state(false);
@@ -149,12 +160,15 @@
         reviewId: reviewId ?? null,
       };
 
+      const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
+      const provider = getPreferredAgent(agents) ?? undefined;
+
       if (hasRunningSession) {
         await commands.queueBranchSession(
           branchId,
           finalPrompt,
           'commit',
-          undefined,
+          provider,
           undefined,
           launchContext
         );
@@ -163,7 +177,7 @@
           branchId,
           finalPrompt,
           'commit',
-          undefined,
+          provider,
           undefined,
           launchContext
         );

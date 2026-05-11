@@ -630,14 +630,21 @@ fn get_hunks_libgit2(
         &mut |_delta, _progress| true, // file callback
         None,                          // binary callback
         Some(&mut |_delta, hunk| {
-            // Git uses 1-indexed line numbers, convert to 0-indexed
+            // Git uses 1-indexed line numbers, convert to 0-indexed.
+            // When a side has 0 lines (pure insertion/deletion), the start value
+            // has "after-line" semantics: it means "the line after which the change
+            // occurs", so we keep it as-is (N 1-indexed → position N 0-indexed).
             let old_start = if hunk.old_start() == 0 {
                 0
+            } else if hunk.old_lines() == 0 {
+                hunk.old_start()
             } else {
                 hunk.old_start() - 1
             };
             let new_start = if hunk.new_start() == 0 {
                 0
+            } else if hunk.new_lines() == 0 {
+                hunk.new_start()
             } else {
                 hunk.new_start() - 1
             };
@@ -946,5 +953,104 @@ mod tests {
             .collect();
         assert!(paths.contains(&"newdir/file1.txt"));
         assert!(paths.contains(&"newdir/subdir/file2.txt"));
+    }
+
+    fn text_file(num_lines: u32) -> Option<File> {
+        Some(File {
+            path: "test.txt".to_string(),
+            content: FileContent::Text {
+                lines: (0..num_lines).map(|i| format!("line {i}")).collect(),
+            },
+        })
+    }
+
+    #[test]
+    fn test_alignments_pure_insertion() {
+        // Simulates @@ -3,0 +4,2 @@ — pure insertion after old line 3.
+        // After fix: old_start = 3 (not 2), producing an empty span at position 3.
+        let hunks = vec![Hunk {
+            old_start: 3,
+            old_lines: 0,
+            new_start: 3,
+            new_lines: 2,
+        }];
+        let before = text_file(5);
+        let after = text_file(7);
+
+        let alignments = compute_alignments_from_hunks(&hunks, &before, &after);
+
+        assert_eq!(alignments.len(), 3);
+        // Unchanged lines 0..3
+        assert_eq!(alignments[0].before, Span::new(0, 3));
+        assert_eq!(alignments[0].after, Span::new(0, 3));
+        assert!(!alignments[0].changed);
+        // Insertion: empty old span at 3, new span 3..5
+        assert_eq!(alignments[1].before, Span::new(3, 3));
+        assert_eq!(alignments[1].after, Span::new(3, 5));
+        assert!(alignments[1].changed);
+        // Unchanged lines 3..5 (old) / 5..7 (new)
+        assert_eq!(alignments[2].before, Span::new(3, 5));
+        assert_eq!(alignments[2].after, Span::new(5, 7));
+        assert!(!alignments[2].changed);
+    }
+
+    #[test]
+    fn test_alignments_pure_deletion() {
+        // Simulates @@ -4,2 +3,0 @@ — pure deletion of old lines 4-5.
+        // After fix: new_start = 3 (not 2), producing an empty span at position 3.
+        let hunks = vec![Hunk {
+            old_start: 3,
+            old_lines: 2,
+            new_start: 3,
+            new_lines: 0,
+        }];
+        let before = text_file(7);
+        let after = text_file(5);
+
+        let alignments = compute_alignments_from_hunks(&hunks, &before, &after);
+
+        assert_eq!(alignments.len(), 3);
+        // Unchanged lines 0..3
+        assert_eq!(alignments[0].before, Span::new(0, 3));
+        assert_eq!(alignments[0].after, Span::new(0, 3));
+        assert!(!alignments[0].changed);
+        // Deletion: old span 3..5, empty new span at 3
+        assert_eq!(alignments[1].before, Span::new(3, 5));
+        assert_eq!(alignments[1].after, Span::new(3, 3));
+        assert!(alignments[1].changed);
+        // Unchanged lines 5..7 (old) / 3..5 (new)
+        assert_eq!(alignments[2].before, Span::new(5, 7));
+        assert_eq!(alignments[2].after, Span::new(3, 5));
+        assert!(!alignments[2].changed);
+    }
+
+    #[test]
+    fn test_alignments_normal_modification() {
+        // Simulates @@ -2,3 +2,2 @@ — normal modification (non-zero on both sides).
+        // old_start and new_start should both be 1 (2 - 1 for 0-indexing).
+        let hunks = vec![Hunk {
+            old_start: 1,
+            old_lines: 3,
+            new_start: 1,
+            new_lines: 2,
+        }];
+        let before = text_file(6);
+        let after = text_file(5);
+
+        let alignments = compute_alignments_from_hunks(&hunks, &before, &after);
+
+        assert_eq!(alignments.len(), 3);
+        // Unchanged lines 0..1
+        assert_eq!(alignments[0].before, Span::new(0, 1));
+        assert_eq!(alignments[0].after, Span::new(0, 1));
+        assert!(!alignments[0].changed);
+        // Changed region
+        assert_eq!(alignments[1].before, Span::new(1, 4));
+        assert_eq!(alignments[1].after, Span::new(1, 3));
+        assert!(alignments[1].changed);
+        // Unchanged lines after
+        assert_eq!(alignments[2].before, Span::new(4, 6));
+        assert_eq!(alignments[2].after, Span::new(3, 5));
+        assert!(!alignments[2].changed);
     }
 }

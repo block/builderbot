@@ -1138,13 +1138,7 @@ mod tests {
 
     #[test]
     fn create_pr_pipeline_fetches_base_and_uses_origin_merge_base_for_context() {
-        let steps = build_create_pr_pipeline_steps(
-            "pull request",
-            "main",
-            "",
-            "feature-branch",
-            "owner/repo",
-        );
+        let steps = build_create_pr_pipeline_steps("pull request", "main", "", "feature-branch");
 
         assert_eq!(steps.len(), 5);
 
@@ -1152,7 +1146,7 @@ mod tests {
         assert_eq!(label, "Fetch latest base");
         assert_eq!(
             command,
-            "if ! git fetch origin main; then git remote set-url origin 'https://github.com/owner/repo.git' && git fetch origin main; fi"
+            "if ! git fetch origin main; then git -c 'url.https://github.com/.insteadOf=git@github.com:' fetch origin main; fi"
         );
         assert!(matches!(on_failure, FailureStrategy::HandoffToAi { .. }));
 
@@ -1174,7 +1168,7 @@ mod tests {
         assert_eq!(label, "Push to remote");
         assert_eq!(
             command,
-            "if ! git push -u origin feature-branch; then git remote set-url origin 'https://github.com/owner/repo.git' && git push -u origin feature-branch; fi"
+            "if ! git push -u origin feature-branch; then git -c 'url.https://github.com/.insteadOf=git@github.com:' push -u origin feature-branch; fi"
         );
 
         let (label, prompt) = ai_prompt_at(&steps, 4);
@@ -1186,12 +1180,12 @@ mod tests {
 
     #[test]
     fn rebase_pipeline_uses_signoff() {
-        let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "owner/repo");
+        let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main");
 
         let (_, command, _) = command_at(&steps, 0);
         assert_eq!(
             command,
-            "if ! git fetch origin main; then git remote set-url origin 'https://github.com/owner/repo.git' && git fetch origin main; fi"
+            "if ! git fetch origin main; then git -c 'url.https://github.com/.insteadOf=git@github.com:' fetch origin main; fi"
         );
 
         let (_, command, _) = command_at(&steps, 1);
@@ -1200,7 +1194,7 @@ mod tests {
 
     #[test]
     fn squash_pipeline_prompt_requires_signoff() {
-        let steps = build_commit_pipeline_steps(&PipelineKind::Squash, "main", "owner/repo");
+        let steps = build_commit_pipeline_steps(&PipelineKind::Squash, "main");
 
         let (_, prompt) = ai_prompt_at(&steps, 3);
         assert!(prompt.contains("Use the user's global git identity"));

@@ -18,6 +18,8 @@ function session(
     id: 'session-1',
     prompt: 'Write a note',
     status,
+    workingDir: '/tmp/test',
+    provider: null,
     agentId: null,
     errorMessage: null,
     completionReason,

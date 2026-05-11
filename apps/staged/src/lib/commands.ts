@@ -588,7 +588,7 @@ export function countAssistantMessagesAfter(
   sessionId: string,
   afterTimestamp: number
 ): Promise<number> {
-  return invoke('count_assistant_messages_after', { sessionId, afterTimestamp });
+  return invokeCommand('count_assistant_messages_after', { sessionId, afterTimestamp });
 }
 
 /** Create a session and immediately start the agent. */

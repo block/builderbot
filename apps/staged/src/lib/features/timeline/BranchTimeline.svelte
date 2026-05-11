@@ -357,17 +357,6 @@
     };
   }
 
-  function baseDisplayName(ref: string): string {
-    return ref.replace(/^refs\/remotes\/origin\//, '').replace(/^origin\//, '');
-  }
-
-  function baseMovedTitleHtml(ref: string, count: number): string {
-    const branchName = baseDisplayName(ref);
-    return `<span class="git-ref-badge">${escapeHtml(branchName)}</span> has ${escapeHtml(
-      plural(count, 'new commit')
-    )}`;
-  }
-
   function gitStateRows(
     state: BranchGitState,
     commitAnchors: Map<string, CommitAnchor>
@@ -395,21 +384,6 @@
         title: 'Could not refresh git state',
         timestamp: topTimestamp,
         order: 0,
-      });
-    }
-
-    if (state.base.commitsSinceFork > 0) {
-      rows.push({
-        key: 'git-base-moved',
-        type: 'git-merge',
-        title: `${baseDisplayName(state.base.ref)} has ${plural(state.base.commitsSinceFork, 'new commit')}`,
-        titleHtml: baseMovedTitleHtml(state.base.ref, state.base.commitsSinceFork),
-        timestamp: topTimestamp,
-        order: 1,
-        onRebase: rebaseBranchDisabledReason ? undefined : onRebaseBranch,
-        rebaseDisabledReason: onRebaseBranch
-          ? (rebaseBranchDisabledReason ?? undefined)
-          : undefined,
       });
     }
 

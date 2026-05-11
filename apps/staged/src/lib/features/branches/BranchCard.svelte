@@ -1329,7 +1329,7 @@
       <BranchCardHeaderInfo
         branchName={branch.branchName}
         {repoLabel}
-        secondaryLabel={formatBaseBranch(branch.baseBranch)}
+        baseBranch={formatBaseBranch(branch.baseBranch)}
       />
       <div class="header-actions">
         <button class="more-button" onclick={() => onDelete?.()} title="Delete branch">
@@ -1368,9 +1368,14 @@
       <BranchCardHeaderInfo
         branchName={branch.branchName}
         {repoLabel}
-        secondaryLabel={isRemote
+        baseBranch={isRemote
           ? (branch.workspaceName ?? formatBaseBranch(branch.baseBranch))
           : formatBaseBranch(branch.baseBranch)}
+        parentAheadCount={refreshingGitState ? 0 : (timeline?.gitState?.base.commitsSinceFork ?? 0)}
+        onRebase={branchCommandDisabledReason
+          ? undefined
+          : () => startBranchCommandPipeline('rebase')}
+        rebaseDisabled={!!branchCommandDisabledReason}
         warning={branchIdentityWarning}
       />
       <div class="header-actions">

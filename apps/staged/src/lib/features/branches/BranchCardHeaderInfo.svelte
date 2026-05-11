@@ -1,16 +1,27 @@
 <script lang="ts">
-  import { AlertTriangle, GitBranch } from 'lucide-svelte';
+  import { AlertTriangle, ChevronRight } from 'lucide-svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import type { ProjectRepo } from '../../types';
 
   interface Props {
     branchName: string;
     repoLabel?: ProjectRepo | null;
-    secondaryLabel?: string | null;
+    baseBranch?: string | null;
+    parentAheadCount?: number;
+    onRebase?: () => void;
+    rebaseDisabled?: boolean;
     warning?: string | null;
   }
 
-  let { branchName, repoLabel = null, secondaryLabel = null, warning = null }: Props = $props();
+  let {
+    branchName,
+    repoLabel = null,
+    baseBranch = null,
+    parentAheadCount = 0,
+    onRebase,
+    rebaseDisabled = false,
+    warning = null,
+  }: Props = $props();
 </script>
 
 <div class="header-left">
@@ -22,25 +33,48 @@
       /></span
     >
     <div class="header-meta">
-      <span class="branch-name">{branchName}</span>
+      <span class="branch-capsule" title={branchName}>{branchName}</span>
+      {#if baseBranch}
+        <ChevronRight size={12} />
+        <span class="branch-capsule" title={baseBranch}>
+          {baseBranch}{#if parentAheadCount > 0}<span class="ahead-count">
+              +{parentAheadCount}</span
+            >{/if}
+        </span>
+        {#if parentAheadCount > 0 && onRebase}
+          <button
+            class="rebase-btn"
+            disabled={rebaseDisabled}
+            title={rebaseDisabled ? 'Rebase unavailable' : 'Rebase onto parent'}
+            onclick={onRebase}>Rebase</button
+          >
+        {/if}
+      {/if}
       {#if warning}
         <span class="branch-warning" title={warning}>
           <AlertTriangle size={12} />
           <span>{warning}</span>
         </span>
       {/if}
-      {#if secondaryLabel}
-        <span class="meta-separator" aria-hidden="true">&middot;</span>
-        <GitBranch size={12} />
-        <span class="base-branch-name" title={secondaryLabel}>{secondaryLabel}</span>
-      {/if}
     </div>
   {:else}
     <span class="repo-name">{branchName}</span>
-    {#if secondaryLabel || warning}
+    {#if baseBranch || warning}
       <div class="header-meta">
-        {#if secondaryLabel}
-          <span class="base-branch-name" title={secondaryLabel}>{secondaryLabel}</span>
+        {#if baseBranch}
+          <span class="branch-capsule" title={baseBranch}>
+            {baseBranch}{#if parentAheadCount > 0}<span class="ahead-count">
+                +{parentAheadCount}</span
+              >{/if}
+          </span>
+          {#if parentAheadCount > 0 && onRebase}
+            <button
+              class="rebase-btn"
+              disabled={rebaseDisabled}
+              title={rebaseDisabled ? 'Rebase unavailable' : 'Rebase onto parent'}
+              onclick={onRebase}>Rebase</button
+            >
+          {/if}
         {/if}
         {#if warning}
           <span class="branch-warning" title={warning}>
@@ -87,13 +121,45 @@
     color: var(--text-faint);
   }
 
-  .branch-name {
-    max-width: 200px;
-    color: var(--text-muted);
-    min-width: 0;
+  .branch-capsule {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-size: var(--size-xs);
+    max-width: 160px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .ahead-count {
+    font-weight: 600;
+    color: var(--ui-accent);
+  }
+
+  .rebase-btn {
+    font-size: var(--size-xs);
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border-primary);
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .rebase-btn:hover:not(:disabled) {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+  }
+
+  .rebase-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .branch-warning {
@@ -110,18 +176,5 @@
   .branch-warning span {
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-
-  .base-branch-name {
-    color: var(--text-faint);
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .meta-separator {
-    color: var(--text-faint);
-    flex-shrink: 0;
   }
 </style>

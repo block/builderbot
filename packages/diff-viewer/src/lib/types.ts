@@ -194,6 +194,4 @@ export interface ReviewCommands {
   markReviewed(reviewId: string, path: string): Promise<void>;
   unmarkReviewed(reviewId: string, path: string): Promise<void>;
 
-  addReferenceFile(reviewId: string, path: string): Promise<void>;
-  removeReferenceFile(reviewId: string, path: string): Promise<void>;
 }

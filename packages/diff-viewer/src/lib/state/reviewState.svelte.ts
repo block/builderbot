@@ -13,17 +13,11 @@
  * This is a factory — each DiffModal creates its own instance.
  */
 
-import type { DiffCommands, ReviewCommands, Comment, Span, Review, FileContent } from '../types';
+import type { ReviewCommands, Comment, Span, Review } from '../types';
 
 // =============================================================================
 // Type
 // =============================================================================
-
-/** A reference file loaded into the sidebar. */
-export interface ReferenceFile {
-  path: string;
-  content: FileContent;
-}
 
 export interface ReviewState {
   /** The review record (null until first persistent action). */
@@ -34,8 +28,6 @@ export interface ReviewState {
   deletedComments: Comment[];
   /** Paths marked as reviewed. */
   reviewedPaths: string[];
-  /** Reference files pinned for viewing. */
-  referenceFiles: ReferenceFile[];
   /** Whether the review is being created/loaded. */
   loading: boolean;
 }
@@ -55,7 +47,7 @@ export interface ReviewState {
  * ID the lookup would return an arbitrary match.
  */
 export function createReviewState(
-  commands: ReviewCommands & Pick<DiffCommands, 'getFileAtRef'>,
+  commands: ReviewCommands,
   branchId: string,
   commitSha: string,
   scope: 'branch' | 'commit',
@@ -66,7 +58,6 @@ export function createReviewState(
     comments: [],
     deletedComments: [],
     reviewedPaths: [],
-    referenceFiles: [],
     loading: false,
   });
 
@@ -87,11 +78,6 @@ export function createReviewState(
       state.review = review;
       state.comments = review.comments;
       state.reviewedPaths = review.reviewed;
-
-      // Load reference files in background
-      if (review.referenceFiles.length > 0) {
-        loadReferenceFilesFromPaths(review.referenceFiles);
-      }
 
       // Load deleted comments in background
       loadDeletedComments(review.id);
@@ -122,10 +108,6 @@ export function createReviewState(
         state.review = review;
         state.comments = review.comments;
         state.reviewedPaths = review.reviewed;
-
-        if (review.referenceFiles.length > 0) {
-          loadReferenceFilesFromPaths(review.referenceFiles);
-        }
 
         // Load deleted comments in background
         loadDeletedComments(review.id);
@@ -267,24 +249,6 @@ export function createReviewState(
   }
 
   /**
-   * Load reference files from persisted paths (fire-and-forget).
-   */
-  async function loadReferenceFilesFromPaths(paths: string[]): Promise<void> {
-    const results = await Promise.allSettled(
-      paths.map(async (path) => {
-        const file = await commands.getFileAtRef(branchId, 'HEAD', path);
-        return { path: file.path, content: file.content } as ReferenceFile;
-      })
-    );
-
-    const loaded: ReferenceFile[] = [];
-    for (const result of results) {
-      if (result.status === 'fulfilled') loaded.push(result.value);
-    }
-    state.referenceFiles = loaded;
-  }
-
-  /**
    * Toggle reviewed status of a file.
    */
   async function toggleReviewed(path: string): Promise<void> {
@@ -300,43 +264,6 @@ export function createReviewState(
    */
   function isReviewed(path: string): boolean {
     return state.reviewedPaths.includes(path);
-  }
-
-  // =========================================================================
-  // Reference file actions
-  // =========================================================================
-
-  /**
-   * Add a reference file. Creates the review if it doesn't exist yet.
-   * Loads file content from the repo at HEAD.
-   */
-  async function addReferenceFile(path: string): Promise<void> {
-    // Don't add duplicates
-    if (state.referenceFiles.some((f) => f.path === path)) return;
-
-    const reviewId = await ensureReviewExists();
-    if (!reviewId) return;
-
-    try {
-      const file = await commands.getFileAtRef(branchId, 'HEAD', path);
-      state.referenceFiles = [...state.referenceFiles, { path: file.path, content: file.content }];
-      await commands.addReferenceFile(reviewId, path);
-    } catch (e) {
-      console.error('Failed to add reference file:', e);
-    }
-  }
-
-  /**
-   * Remove a reference file (optimistic).
-   */
-  async function removeReferenceFile(path: string): Promise<void> {
-    state.referenceFiles = state.referenceFiles.filter((f) => f.path !== path);
-
-    if (state.review) {
-      commands.removeReferenceFile(state.review.id, path).catch((e) => {
-        console.error('Failed to remove reference file from DB:', e);
-      });
-    }
   }
 
   /**
@@ -368,7 +295,5 @@ export function createReviewState(
     unmarkReviewed,
     toggleReviewed,
     isReviewed,
-    addReferenceFile,
-    removeReferenceFile,
   };
 }

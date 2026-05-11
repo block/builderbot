@@ -1,5 +1,5 @@
 // Re-export types from shared package
-export { type ReviewState, type ReferenceFile } from '@builderbot/diff-viewer/state';
+export { type ReviewState } from '@builderbot/diff-viewer/state';
 
 // Re-export with Staged's Tauri commands pre-bound
 import * as commands from '../../api/commands';

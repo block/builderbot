@@ -4,7 +4,7 @@ export {
   type DiffViewerState,
 } from './diffViewerState.svelte';
 
-export { createReviewState, type ReviewState, type ReferenceFile } from './reviewState.svelte';
+export { createReviewState, type ReviewState } from './reviewState.svelte';
 
 export { createScrollController } from './scrollController.svelte';
 

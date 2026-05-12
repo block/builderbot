@@ -1947,9 +1947,11 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let store = get_store(store_mutex)?;
             let github_repo: String = arg(&args, "githubRepo")?;
             let subpath: Option<String> = opt_arg(&args, "subpath")?;
+            let provider: Option<String> = opt_arg(&args, "provider")?;
             let actions = crate::actions::commands::detect_repo_actions_impl(
                 github_repo,
                 subpath,
+                provider,
                 app_handle.clone(),
                 store,
             )

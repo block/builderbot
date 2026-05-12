@@ -37,6 +37,7 @@ struct DetectingActionsEvent {
 pub(crate) async fn detect_actions_for_repo_context(
     github_repo: &str,
     subpath: Option<&str>,
+    provider_id: Option<&str>,
 ) -> Result<Vec<SuggestedAction>, String> {
     // Check whether a local clone already exists on disk.
     let local_clone = crate::paths::repos_dir()
@@ -64,8 +65,11 @@ pub(crate) async fn detect_actions_for_repo_context(
         None => std::env::temp_dir(),
     };
 
-    let provider = AcpAiProvider::new(provider_dir.clone())
-        .map_err(|e| format!("Failed to create AI provider: {e}"))?;
+    let provider = match provider_id {
+        Some(id) => AcpAiProvider::with_agent(id, provider_dir.clone()),
+        None => AcpAiProvider::new(provider_dir.clone()),
+    }
+    .map_err(|e| format!("Failed to create AI provider: {e}"))?;
 
     let detector = ActionDetector::new(Box::new(provider));
 
@@ -107,6 +111,7 @@ fn resolve_branch_repo_context(
 pub(crate) async fn detect_repo_actions_impl(
     github_repo: String,
     subpath: Option<String>,
+    provider: Option<String>,
     app: AppHandle,
     store: Arc<Store>,
 ) -> Result<Vec<SuggestedAction>, String> {
@@ -129,7 +134,12 @@ pub(crate) async fn detect_repo_actions_impl(
         },
     );
 
-    let result = detect_actions_for_repo_context(&github_repo, subpath.as_deref()).await;
+    let result =
+        detect_actions_for_repo_context(&github_repo, subpath.as_deref(), provider.as_deref())
+            .await;
+    if let Err(ref e) = result {
+        log::warn!("Action detection failed for {github_repo}: {e}");
+    }
 
     store
         .mark_action_context_detected(&context.id)
@@ -151,11 +161,12 @@ pub(crate) async fn detect_repo_actions_impl(
 pub async fn detect_repo_actions(
     github_repo: String,
     subpath: Option<String>,
+    provider: Option<String>,
     app: AppHandle,
     store: State<'_, Mutex<Option<Arc<Store>>>>,
 ) -> Result<Vec<SuggestedAction>, String> {
     let store = get_store(&store)?;
-    detect_repo_actions_impl(github_repo, subpath, app, store).await
+    detect_repo_actions_impl(github_repo, subpath, provider, app, store).await
 }
 
 pub(crate) async fn run_branch_action_impl(
@@ -596,18 +607,18 @@ pub(crate) async fn run_prerun_actions_impl(
             },
         );
 
-        let detected = match detect_actions_for_repo_context(&github_repo, subpath.as_deref()).await
-        {
-            Ok(actions) => actions,
-            Err(e) => {
-                log::warn!(
+        let detected =
+            match detect_actions_for_repo_context(&github_repo, subpath.as_deref(), None).await {
+                Ok(actions) => actions,
+                Err(e) => {
+                    log::warn!(
                     "[run_prerun_actions] action detection failed for repo {} (subpath: {:?}): {e}",
                     github_repo,
                     subpath
                 );
-                Vec::new()
-            }
-        };
+                    Vec::new()
+                }
+            };
 
         let existing_actions = store
             .list_repo_actions(&context.id)

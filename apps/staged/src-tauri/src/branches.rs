@@ -2396,6 +2396,7 @@ pub(crate) async fn run_prerun_actions_for_branch(
         let detected = match crate::actions::commands::detect_actions_for_repo_context(
             &github_repo,
             subpath.as_deref(),
+            None,
         )
         .await
         {

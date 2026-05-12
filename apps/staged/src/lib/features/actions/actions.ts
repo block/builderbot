@@ -113,11 +113,13 @@ export interface RunningActionInfo {
 /** Detect available actions for a repo+subpath context. */
 export function detectRepoActions(
   githubRepo: string,
-  subpath?: string
+  subpath?: string,
+  provider?: string
 ): Promise<SuggestedAction[]> {
   return invokeCommand<SuggestedAction[]>('detect_repo_actions', {
     githubRepo,
     subpath: subpath ?? null,
+    provider: provider ?? null,
   });
 }
 

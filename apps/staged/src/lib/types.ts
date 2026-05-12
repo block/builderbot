@@ -206,8 +206,9 @@ export interface BranchGitState {
   };
   worktree: {
     dirty: boolean;
-    staged: number;
-    unstaged: number;
+    modified: number;
+    added: number;
+    deleted: number;
     untracked: number;
     conflicted: number;
   };

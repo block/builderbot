@@ -63,8 +63,9 @@ pub struct BaseGitState {
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeGitState {
     pub dirty: bool,
-    pub staged: u32,
-    pub unstaged: u32,
+    pub modified: u32,
+    pub added: u32,
+    pub deleted: u32,
     pub untracked: u32,
     pub conflicted: u32,
 }
@@ -418,8 +419,9 @@ where
     let Ok(output) = run_git(&["status", "--porcelain=1", "--untracked-files=all"]) else {
         return WorktreeGitState {
             dirty: false,
-            staged: 0,
-            unstaged: 0,
+            modified: 0,
+            added: 0,
+            deleted: 0,
             untracked: 0,
             conflicted: 0,
         };
@@ -802,11 +804,14 @@ fn parse_batch_git_state_output(raw: &str) -> BatchGitStateOutput {
 fn parse_worktree_from_status(status_output: &str) -> WorktreeGitState {
     let mut state = WorktreeGitState {
         dirty: false,
-        staged: 0,
-        unstaged: 0,
+        modified: 0,
+        added: 0,
+        deleted: 0,
         untracked: 0,
         conflicted: 0,
     };
+
+    let mut seen = std::collections::HashSet::new();
 
     for line in status_output.lines() {
         let mut chars = line.chars();
@@ -821,16 +826,30 @@ fn parse_worktree_from_status(status_output: &str) -> WorktreeGitState {
             state.conflicted += 1;
             continue;
         }
-        if x != ' ' {
-            state.staged += 1;
+
+        // Skip the space after XY columns
+        let path: String = chars.skip(1).collect();
+        // For renames/copies the path contains " -> new_path"; use the destination
+        let dedup_path = path.split(" -> ").last().unwrap_or(&path).to_string();
+        if !seen.insert(dedup_path) {
+            continue;
         }
-        if y != ' ' {
-            state.unstaged += 1;
+
+        // Pick the most significant status code (prefer non-space)
+        let code = if x != ' ' { x } else { y };
+        match code {
+            'M' | 'R' => state.modified += 1,
+            'A' | 'C' => state.added += 1,
+            'D' => state.deleted += 1,
+            _ => state.modified += 1, // fallback for unexpected codes
         }
     }
 
-    state.dirty =
-        state.staged > 0 || state.unstaged > 0 || state.untracked > 0 || state.conflicted > 0;
+    state.dirty = state.modified > 0
+        || state.added > 0
+        || state.deleted > 0
+        || state.untracked > 0
+        || state.conflicted > 0;
     state
 }
 
@@ -1156,8 +1175,9 @@ where
                 },
                 worktree: WorktreeGitState {
                     dirty: false,
-                    staged: 0,
-                    unstaged: 0,
+                    modified: 0,
+                    added: 0,
+                    deleted: 0,
                     untracked: 0,
                     conflicted: 0,
                 },

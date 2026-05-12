@@ -51,10 +51,6 @@ struct DbState {
     needs_reset: Mutex<Option<StoreIncompatibility>>,
 }
 
-/// Holds the bearer token for web server authentication so it can be
-/// retrieved by the frontend (Tauri command) and shown to the user.
-struct WebAccessToken(String);
-
 #[derive(Default)]
 struct ShutdownState {
     quit_in_progress: AtomicBool,
@@ -256,12 +252,6 @@ fn stop_actions_for_app_shutdown(app_handle: &tauri::AppHandle) {
 // =============================================================================
 // Store status commands
 // =============================================================================
-
-/// Returns the bearer token used to authenticate web browser clients.
-#[tauri::command]
-fn get_web_access_token(token: tauri::State<'_, WebAccessToken>) -> String {
-    token.0.clone()
-}
 
 /// Returns null if the store is ready, or version info if a reset is needed.
 #[tauri::command]
@@ -1753,16 +1743,14 @@ pub fn run() {
             let (event_tx, _) = tokio::sync::broadcast::channel::<web_server::WebEvent>(256);
             app.manage(event_tx.clone());
 
-            // Start the Axum web server only when opted-in via environment variable.
-            // This avoids exposing an HTTP server on all interfaces for users who
-            // don't need browser-based access.
+            // Web server startup is stubbed out in this build.
+            // TODO(web): restore web server startup from the `mobile-web` branch.
             let web_server_enabled = std::env::var("STAGED_WEB_SERVER")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
 
             if web_server_enabled {
                 let auth_token = web_server::generate_token();
-                app.manage(WebAccessToken(auth_token.clone()));
                 web_server::start(web_server::WebAppState {
                     app_handle: app.handle().clone(),
                     event_tx,
@@ -1771,8 +1759,6 @@ pub fn run() {
                         std::collections::HashSet::new(),
                     )),
                 });
-            } else {
-                app.manage(WebAccessToken(String::new()));
             }
 
             if cfg!(debug_assertions) {
@@ -1803,7 +1789,6 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            get_web_access_token,
             get_store_status,
             confirm_reset_store,
             list_projects,

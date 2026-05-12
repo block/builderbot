@@ -53,35 +53,6 @@ dev repo="":
     {{ if repo != "" { "export STAGED_REPO=" + repo } else { "" } }}
     pnpm exec tauri dev --config "$TAURI_CONFIG"
 
-# Run with the HTTPS web server enabled for phone/browser access.
-# Requires PEM cert/key files and a hostname covered by the certificate.
-dev-web repo="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    [[ -d node_modules ]] || pnpm install
-
-    if [[ -z "${STAGED_WEB_CERT_PATH:-}" || -z "${STAGED_WEB_KEY_PATH:-}" || -z "${STAGED_WEB_HOST:-}" ]]; then
-        printf '%s\n' \
-            'Error: `just dev-web` serves browser access over HTTPS.' \
-            'Provide PEM certificate/key files and a hostname covered by the certificate:' \
-            '' \
-            '  STAGED_WEB_CERT_PATH=/path/to/cert.pem \' \
-            '  STAGED_WEB_KEY_PATH=/path/to/key.pem \' \
-            '  STAGED_WEB_HOST=hostname.example.com \' \
-            '  just dev-web' >&2
-        exit 1
-    fi
-
-    VITE_PORT=$(python3 -c "import hashlib,os; h=int(hashlib.sha256(os.getcwd().encode()).hexdigest(),16); print(10000 + h % 55000)")
-    export VITE_PORT
-    export STAGED_WEB_SERVER=1
-    TAURI_CONFIG="{\"build\":{\"devUrl\":\"https://${STAGED_WEB_HOST}:${VITE_PORT}\",\"beforeDevCommand\":\"exec ./node_modules/.bin/vite --port ${VITE_PORT} --strictPort --host 0.0.0.0\"}}"
-
-    echo "Starting on https://${STAGED_WEB_HOST}:${VITE_PORT} (HTTPS web server on :5175)"
-    {{ if repo != "" { "export STAGED_REPO=" + repo } else { "" } }}
-    pnpm exec tauri dev --config "$TAURI_CONFIG"
-
 # Build the app for production
 build:
     pnpm run tauri:build

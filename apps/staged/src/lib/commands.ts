@@ -42,15 +42,6 @@ export interface WorktreeChangesPreview {
 }
 
 // =============================================================================
-// Web access
-// =============================================================================
-
-/** Returns the bearer token for web server authentication (Tauri-only). */
-export function getWebAccessToken(): Promise<string> {
-  return invokeCommand('get_web_access_token');
-}
-
-// =============================================================================
 // Store status
 // =============================================================================
 

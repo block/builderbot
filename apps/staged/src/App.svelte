@@ -7,7 +7,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { isTauri, listenToEvent, getWindowSync, type UnlistenFn } from './lib/transport';
-  import WebLogin from './lib/features/layout/WebLogin.svelte';
   import * as commands from './lib/api/commands';
   import TopBar from './lib/features/layout/TopBar.svelte';
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
@@ -50,8 +49,6 @@
   const updaterCheckIntervalMs = 15 * 60 * 1000;
 
   let showSessionLab = $state(false);
-  let currentHash = $state(window.location.hash);
-  const showLogin = $derived(!isTauri && currentHash === '#/login');
   let unlistenSettings: UnlistenFn | undefined;
   let unlistenFind: UnlistenFn | undefined;
   let unlistenFindNext: UnlistenFn | undefined;
@@ -205,32 +202,9 @@
     };
   }
 
-  function onHashChange() {
-    currentHash = window.location.hash;
-  }
-
   onMount(async () => {
     darkMode.init();
     document.addEventListener('keydown', handleKonamiKey);
-    window.addEventListener('hashchange', onHashChange);
-
-    // In web mode, verify we have a valid session before loading the app.
-    // This shows the login page immediately rather than after the first
-    // failed API call triggers a 401 redirect.
-    if (!isTauri) {
-      try {
-        const resp = await fetch('/api/invoke/get_store_status', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: '{}',
-        });
-        if (resp.status === 401) {
-          window.location.hash = '#/login';
-        }
-      } catch {
-        // Server unreachable — login page won't help, continue loading
-      }
-    }
 
     // Listen for the app menu Preferences item.
     unlistenSettings = await listenToEvent('menu:settings', () => {
@@ -417,7 +391,6 @@
 
   onDestroy(() => {
     document.removeEventListener('keydown', handleKonamiKey);
-    window.removeEventListener('hashchange', onHashChange);
     unregisterShortcuts?.();
     unlistenSettings?.();
     unlistenFind?.();
@@ -448,9 +421,7 @@
   }
 </script>
 
-{#if showLogin}
-  <WebLogin />
-{:else if preferences.loaded}
+{#if preferences.loaded}
   {#if storeIncompat && storeIncompat.kind === 'needs_reset'}
     <main class="reset-shell">
       <div class="update-state">

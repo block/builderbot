@@ -106,6 +106,10 @@
         matchedPr?.baseRef ?? defaultBranch ?? undefined,
         headRepo ?? undefined
       );
+      if (matchedPr) {
+        const noteTitle = `PR #${matchedPr.number}: ${matchedPr.title}`;
+        await commands.createProjectNote(project.id, noteTitle, matchedPr.body ?? '');
+      }
       onCreated(project);
     } catch (e) {
       if (typeof e === 'string') {

@@ -73,6 +73,8 @@
         prNumber,
         defaultBranch: matchedPr?.baseRef ?? defaultBranch ?? undefined,
         headRepo: headRepo ?? undefined,
+        prTitle: matchedPr?.title,
+        prBody: matchedPr?.body,
       });
       onClose();
     } catch (e) {

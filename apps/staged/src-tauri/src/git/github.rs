@@ -31,6 +31,7 @@ pub struct GitHubAuthStatus {
 pub struct PullRequest {
     pub number: u64,
     pub title: String,
+    pub body: String,
     pub author: String,
     /// Target branch (e.g., "main")
     pub base_ref: String,
@@ -584,7 +585,7 @@ pub fn get_pr_for_repo(github_repo: &str, pr_number: u64) -> Result<PullRequest,
         &pr_number.to_string(),
         "-R",
         github_repo,
-        "--json=number,title,author,baseRefName,headRefName,headRepository,isDraft,updatedAt",
+        "--json=number,title,body,author,baseRefName,headRefName,headRepository,isDraft,updatedAt",
     ])?;
 
     let item: GhPrListItem =
@@ -607,7 +608,7 @@ pub fn get_pr_for_branch_for_repo(
         branch_name,
         "--state=open",
         "--limit=1",
-        "--json=number,title,author,baseRefName,headRefName,headRepository,isDraft,updatedAt",
+        "--json=number,title,body,author,baseRefName,headRefName,headRepository,isDraft,updatedAt",
     ])?;
 
     let items: Vec<GhPrListItem> =
@@ -625,7 +626,7 @@ pub fn list_pull_requests_for_repo(github_repo: &str) -> Result<Vec<PullRequest>
         github_repo,
         "--state=open",
         "--limit=50",
-        "--json=number,title,author,baseRefName,headRefName,headRepository,isDraft,updatedAt",
+        "--json=number,title,body,author,baseRefName,headRefName,headRepository,isDraft,updatedAt",
     ])?;
 
     let items: Vec<GhPrListItem> =
@@ -1141,6 +1142,8 @@ pub fn fetch_for_worktree(
 struct GhPrListItem {
     number: u64,
     title: String,
+    #[serde(default)]
+    body: String,
     author: GhAuthor,
     #[serde(rename = "baseRefName")]
     base_ref_name: String,
@@ -1170,6 +1173,7 @@ impl From<GhPrListItem> for PullRequest {
         PullRequest {
             number: item.number,
             title: item.title,
+            body: item.body,
             author: item.author.login,
             base_ref: item.base_ref_name,
             head_ref: item.head_ref_name,
@@ -1194,7 +1198,7 @@ pub fn list_pull_requests(repo: &Path) -> Result<Vec<PullRequest>, GitError> {
             "list",
             "--state=open",
             "--limit=50",
-            "--json=number,title,author,baseRefName,headRefName,headRepository,isDraft,updatedAt",
+            "--json=number,title,body,author,baseRefName,headRefName,headRepository,isDraft,updatedAt",
         ],
     )?;
 
@@ -1221,7 +1225,7 @@ pub fn search_pull_requests(repo: &Path, query: &str) -> Result<Vec<PullRequest>
             "--state=open",
             "--limit=50",
             &format!("--search={query}"),
-            "--json=number,title,author,baseRefName,headRefName,headRepository,isDraft,updatedAt",
+            "--json=number,title,body,author,baseRefName,headRefName,headRepository,isDraft,updatedAt",
         ],
     )?;
 

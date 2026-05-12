@@ -528,6 +528,10 @@
         selection.defaultBranch ?? undefined,
         selection.headRepo ?? undefined
       );
+      if (selection.prNumber != null && selection.prTitle) {
+        const noteTitle = `PR #${selection.prNumber}: ${selection.prTitle}`;
+        await commands.createProjectNote(projectId, noteTitle, selection.prBody ?? '');
+      }
       const [projectsList, branches, repos] = await Promise.all([
         commands.listProjects(),
         commands.listBranchesForProject(projectId),

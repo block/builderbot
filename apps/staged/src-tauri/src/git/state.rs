@@ -1404,7 +1404,7 @@ pub fn ensure_fast_forward_pullable(state: &BranchGitState) -> Result<(), String
 mod tests {
     use super::*;
 
-    fn assert_worktree(
+fn assert_worktree(
         input: &str,
         dirty: bool,
         modified: u32,
@@ -1562,5 +1562,39 @@ mod tests {
         assert!(!is_conflicted_status(' ', 'D'));
         assert!(!is_conflicted_status('R', ' '));
         assert!(!is_conflicted_status('?', '?'));
+    }
+
+    #[test]
+    fn repo_key_from_local_cache_key_normal_path() {
+        assert_eq!(
+            repo_key_from_local_cache_key("local:/Users/me/project:feature:main"),
+            Some("local:/Users/me/project".to_string()),
+        );
+    }
+
+    #[test]
+    fn repo_key_from_local_cache_key_windows_path() {
+        assert_eq!(
+            repo_key_from_local_cache_key("local:C:\\Users\\me\\project:feature:main"),
+            Some("local:C:\\Users\\me\\project".to_string()),
+        );
+    }
+
+    #[test]
+    fn repo_key_from_local_cache_key_branch_equals_base() {
+        assert_eq!(
+            repo_key_from_local_cache_key("local:/repo:main:main"),
+            Some("local:/repo".to_string()),
+        );
+    }
+
+    #[test]
+    fn repo_key_from_local_cache_key_not_local() {
+        assert_eq!(repo_key_from_local_cache_key("remote:foo:bar:baz"), None);
+    }
+
+    #[test]
+    fn repo_key_from_local_cache_key_too_few_segments() {
+        assert_eq!(repo_key_from_local_cache_key("local:only_one"), None);
     }
 }

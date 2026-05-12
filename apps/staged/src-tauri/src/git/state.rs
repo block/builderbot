@@ -63,8 +63,9 @@ pub struct BaseGitState {
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeGitState {
     pub dirty: bool,
-    pub staged: u32,
-    pub unstaged: u32,
+    pub modified: u32,
+    pub added: u32,
+    pub deleted: u32,
     pub untracked: u32,
     pub conflicted: u32,
 }
@@ -418,8 +419,9 @@ where
     let Ok(output) = run_git(&["status", "--porcelain=1", "--untracked-files=all"]) else {
         return WorktreeGitState {
             dirty: false,
-            staged: 0,
-            unstaged: 0,
+            modified: 0,
+            added: 0,
+            deleted: 0,
             untracked: 0,
             conflicted: 0,
         };
@@ -802,11 +804,14 @@ fn parse_batch_git_state_output(raw: &str) -> BatchGitStateOutput {
 fn parse_worktree_from_status(status_output: &str) -> WorktreeGitState {
     let mut state = WorktreeGitState {
         dirty: false,
-        staged: 0,
-        unstaged: 0,
+        modified: 0,
+        added: 0,
+        deleted: 0,
         untracked: 0,
         conflicted: 0,
     };
+
+    let mut seen = std::collections::HashSet::new();
 
     for line in status_output.lines() {
         let mut chars = line.chars();
@@ -821,16 +826,30 @@ fn parse_worktree_from_status(status_output: &str) -> WorktreeGitState {
             state.conflicted += 1;
             continue;
         }
-        if x != ' ' {
-            state.staged += 1;
+
+        // Skip the space after XY columns
+        let path: String = chars.skip(1).collect();
+        // For renames/copies the path contains " -> new_path"; use the destination
+        let dedup_path = path.split(" -> ").last().unwrap_or(&path).to_string();
+        if !seen.insert(dedup_path) {
+            continue;
         }
-        if y != ' ' {
-            state.unstaged += 1;
+
+        // Pick the most significant status code (prefer non-space)
+        let code = if x != ' ' { x } else { y };
+        match code {
+            'M' | 'R' => state.modified += 1,
+            'A' | 'C' => state.added += 1,
+            'D' => state.deleted += 1,
+            _ => state.modified += 1, // fallback for unexpected codes
         }
     }
 
-    state.dirty =
-        state.staged > 0 || state.unstaged > 0 || state.untracked > 0 || state.conflicted > 0;
+    state.dirty = state.modified > 0
+        || state.added > 0
+        || state.deleted > 0
+        || state.untracked > 0
+        || state.conflicted > 0;
     state
 }
 
@@ -1156,8 +1175,9 @@ where
                 },
                 worktree: WorktreeGitState {
                     dirty: false,
-                    staged: 0,
-                    unstaged: 0,
+                    modified: 0,
+                    added: 0,
+                    deleted: 0,
                     untracked: 0,
                     conflicted: 0,
                 },
@@ -1210,4 +1230,169 @@ pub fn ensure_fast_forward_pullable(state: &BranchGitState) -> Result<(), String
         return Err("Branch is not behind origin, or cannot be fast-forwarded".to_string());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_worktree(
+        input: &str,
+        dirty: bool,
+        modified: u32,
+        added: u32,
+        deleted: u32,
+        untracked: u32,
+        conflicted: u32,
+    ) {
+        let state = parse_worktree_from_status(input);
+        assert_eq!(
+            state,
+            WorktreeGitState {
+                dirty,
+                modified,
+                added,
+                deleted,
+                untracked,
+                conflicted,
+            },
+            "input: {input:?}"
+        );
+    }
+
+    #[test]
+    fn empty_status() {
+        assert_worktree("", false, 0, 0, 0, 0, 0);
+    }
+
+    #[test]
+    fn single_untracked() {
+        assert_worktree("?? untracked.txt", true, 0, 0, 0, 1, 0);
+    }
+
+    #[test]
+    fn multiple_untracked() {
+        assert_worktree("?? ut1.txt\n?? ut2.txt", true, 0, 0, 0, 2, 0);
+    }
+
+    #[test]
+    fn staged_add() {
+        assert_worktree("A  file.txt", true, 0, 1, 0, 0, 0);
+    }
+
+    #[test]
+    fn unstaged_modify() {
+        assert_worktree(" M file.txt", true, 1, 0, 0, 0, 0);
+    }
+
+    #[test]
+    fn staged_modify() {
+        assert_worktree("M  file.txt", true, 1, 0, 0, 0, 0);
+    }
+
+    #[test]
+    fn staged_and_unstaged_modify() {
+        assert_worktree("MM file.txt", true, 1, 0, 0, 0, 0);
+    }
+
+    #[test]
+    fn unstaged_delete() {
+        assert_worktree(" D file.txt", true, 0, 0, 1, 0, 0);
+    }
+
+    #[test]
+    fn staged_delete() {
+        assert_worktree("D  file.txt", true, 0, 0, 1, 0, 0);
+    }
+
+    #[test]
+    fn staged_rename() {
+        assert_worktree("R  file.txt -> renamed.txt", true, 1, 0, 0, 0, 0);
+    }
+
+    #[test]
+    fn staged_modify_then_unstaged_delete() {
+        assert_worktree("MD file.txt", true, 1, 0, 0, 0, 0);
+    }
+
+    #[test]
+    fn staged_add_then_unstaged_delete() {
+        assert_worktree("AD brand_new.txt", true, 0, 1, 0, 0, 0);
+    }
+
+    #[test]
+    fn mixed_changes() {
+        assert_worktree(
+            " M a.txt\nD  b.txt\nA  c.txt\n?? d.txt",
+            true,
+            1,
+            1,
+            1,
+            1,
+            0,
+        );
+    }
+
+    #[test]
+    fn all_staged() {
+        assert_worktree("M  a.txt\nD  b.txt\nA  e.txt", true, 1, 1, 1, 0, 0);
+    }
+
+    #[test]
+    fn conflict_both_modified() {
+        assert_worktree("UU file.txt", true, 0, 0, 0, 0, 1);
+    }
+
+    #[test]
+    fn conflict_add_add() {
+        assert_worktree("AA both.txt", true, 0, 0, 0, 0, 1);
+    }
+
+    #[test]
+    fn conflict_delete_update() {
+        assert_worktree("UD a.txt", true, 0, 0, 0, 0, 1);
+    }
+
+    #[test]
+    fn conflict_plus_untracked_plus_modified() {
+        assert_worktree(
+            "UU file.txt\n?? untracked.txt\n M other.txt",
+            true,
+            1,
+            0,
+            0,
+            1,
+            1,
+        );
+    }
+
+    #[test]
+    fn dedup_same_file_two_lines() {
+        assert_worktree("M  file.txt\n M file.txt", true, 1, 0, 0, 0, 0);
+    }
+
+    #[test]
+    fn rename_destination_collides() {
+        assert_worktree("R  old.txt -> new.txt\n M new.txt", true, 1, 0, 0, 0, 0);
+    }
+
+    #[test]
+    fn is_conflicted_status_pairs() {
+        // All 7 conflict pairs
+        assert!(is_conflicted_status('D', 'D'));
+        assert!(is_conflicted_status('A', 'U'));
+        assert!(is_conflicted_status('U', 'D'));
+        assert!(is_conflicted_status('U', 'A'));
+        assert!(is_conflicted_status('D', 'U'));
+        assert!(is_conflicted_status('A', 'A'));
+        assert!(is_conflicted_status('U', 'U'));
+
+        // Non-conflict pairs
+        assert!(!is_conflicted_status('M', ' '));
+        assert!(!is_conflicted_status(' ', 'M'));
+        assert!(!is_conflicted_status('A', ' '));
+        assert!(!is_conflicted_status(' ', 'D'));
+        assert!(!is_conflicted_status('R', ' '));
+        assert!(!is_conflicted_status('?', '?'));
+    }
 }

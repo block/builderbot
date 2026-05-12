@@ -169,8 +169,8 @@ fn detects_dirty_worktree_counts() {
     let state = state(&clone.path, FetchMode::Never);
 
     assert!(state.worktree.dirty);
-    assert_eq!(state.worktree.staged, 1);
-    assert_eq!(state.worktree.unstaged, 1);
+    assert_eq!(state.worktree.added, 1);
+    assert_eq!(state.worktree.modified, 1);
     assert_eq!(state.worktree.untracked, 1);
 }
 

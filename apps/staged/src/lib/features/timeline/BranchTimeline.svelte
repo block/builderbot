@@ -318,8 +318,9 @@
   function worktreeSummary(state: BranchGitState): string {
     const parts: string[] = [];
     if (state.worktree.conflicted > 0) parts.push(plural(state.worktree.conflicted, 'conflict'));
-    if (state.worktree.staged > 0) parts.push(`${state.worktree.staged} staged`);
-    if (state.worktree.unstaged > 0) parts.push(`${state.worktree.unstaged} unstaged`);
+    if (state.worktree.modified > 0) parts.push(`${state.worktree.modified} modified`);
+    if (state.worktree.added > 0) parts.push(`${state.worktree.added} added`);
+    if (state.worktree.deleted > 0) parts.push(`${state.worktree.deleted} deleted`);
     if (state.worktree.untracked > 0) parts.push(`${state.worktree.untracked} untracked`);
     return parts.join(', ');
   }

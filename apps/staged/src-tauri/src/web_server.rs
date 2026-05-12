@@ -11,6 +11,10 @@
 //! All `/api/*` routes (except `/api/auth`) require authentication via either
 //! an `Authorization: Bearer <token>` header or a valid `staged_session` cookie.
 
+// The full implementation is preserved here but start() is currently stubbed out,
+// so most items appear unused to the compiler.
+#![allow(dead_code, unused_imports)]
+
 use std::collections::HashSet;
 use std::io;
 use std::net::SocketAddr;

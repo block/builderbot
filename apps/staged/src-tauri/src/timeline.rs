@@ -120,6 +120,14 @@ fn map_local_commits(
         .collect()
 }
 
+/// Public wrapper for `build_branch_timeline` for use by the web server.
+pub fn build_branch_timeline_public(
+    store: &Arc<Store>,
+    branch_id: &str,
+) -> Result<BranchTimeline, String> {
+    build_branch_timeline(store, branch_id)
+}
+
 fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTimeline, String> {
     // Get the branch and its workdir for git operations
     let branch = store
@@ -772,7 +780,16 @@ pub async fn delete_commit(
 ) -> Result<(), String> {
     let store = crate::get_store(&store)?;
     let registry = Arc::clone(&registry);
+    delete_commit_impl(registry, store, branch_id, commit_sha, delete_session).await
+}
 
+pub(crate) async fn delete_commit_impl(
+    registry: Arc<session_runner::SessionRegistry>,
+    store: Arc<Store>,
+    branch_id: String,
+    commit_sha: String,
+    delete_session: Option<bool>,
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let branch = store
             .get_branch(&branch_id)

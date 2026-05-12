@@ -7,7 +7,7 @@
  * using a branchId → projectId lookup map.
  */
 
-import type { UnlistenFn } from '@tauri-apps/api/event';
+import type { UnlistenFn } from '../transport';
 import type { Branch } from '../types';
 import {
   type ActionStatusEvent,

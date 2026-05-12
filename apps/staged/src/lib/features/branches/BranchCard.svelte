@@ -22,7 +22,7 @@
     GitPullRequestDraft,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { listenToEvent, type UnlistenFn } from '../../transport';
   import { subscribeDragDrop } from './dragDrop';
   import type {
     Branch,
@@ -207,12 +207,15 @@
     const unlisteners: (() => void)[] = [];
 
     for (const eventName of eventNames) {
-      listen<{ branchId: string; phase: string; detail: string | null }>(eventName, (event) => {
-        if (event.payload.branchId === branch.id) {
-          setupPhase = event.payload.phase;
-          setupDetail = event.payload.detail;
+      listenToEvent<{ branchId: string; phase: string; detail: string | null }>(
+        eventName,
+        (payload) => {
+          if (payload.branchId === branch.id) {
+            setupPhase = payload.phase;
+            setupDetail = payload.detail;
+          }
         }
-      }).then((fn) => {
+      ).then((fn) => {
         if (cancelled) fn();
         else unlisteners.push(fn);
       });
@@ -597,13 +600,8 @@
   $effect(() => {
     const branchId = branch.id;
 
-    listen<SessionStatusPayload>('session-status-changed', (event) => {
-      const {
-        sessionId: eventSessionId,
-        status,
-        branchId: eventBranchId,
-        isAutoReview,
-      } = event.payload;
+    listenToEvent<SessionStatusPayload>('session-status-changed', (payload) => {
+      const { sessionId: eventSessionId, status, branchId: eventBranchId, isAutoReview } = payload;
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
         // If this is the auto review session completing, just clear tracking
         if (eventSessionId === sessionMgr.autoReviewSessionId) {
@@ -679,13 +677,16 @@
   $effect(() => {
     const branchId = branch.id;
 
-    listen<{ branchId: string; gitState: BranchGitState }>('git-state-updated', (event) => {
-      if (event.payload.branchId !== branchId) return;
-      if (timeline) {
-        timeline = { ...timeline, gitState: event.payload.gitState };
+    listenToEvent<{ branchId: string; gitState: BranchGitState }>(
+      'git-state-updated',
+      (payload) => {
+        if (payload.branchId !== branchId) return;
+        if (timeline) {
+          timeline = { ...timeline, gitState: payload.gitState };
+        }
+        refreshingGitState = false;
       }
-      refreshingGitState = false;
-    }).then((unlisten) => {
+    ).then((unlisten) => {
       unlistenGitState = unlisten;
     });
 

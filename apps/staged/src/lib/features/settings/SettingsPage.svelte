@@ -6,11 +6,12 @@
   import DoctorSettingsPanel from './DoctorSettingsPanel.svelte';
   import GeneralSettingsPanel from './GeneralSettingsPanel.svelte';
   import KeyboardSettingsPanel from './KeyboardSettingsPanel.svelte';
+  import { isTauri } from '../../transport';
 
   let appVersion = $state(__APP_VERSION__);
 
   onMount(async () => {
-    if (typeof window === 'undefined' || !('__TAURI__' in window)) return;
+    if (!isTauri) return;
 
     try {
       const { getVersion } = await import('@tauri-apps/api/app');

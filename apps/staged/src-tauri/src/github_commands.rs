@@ -193,14 +193,12 @@ pub async fn list_issues(github_repo: String) -> Result<Vec<git::github::Issue>,
 /// posted), the existing GitHub comment is updated. Otherwise a new comment
 /// is created. The resulting GitHub comment ID is persisted in the local DB
 /// so subsequent edits can update in-place.
-#[tauri::command(rename_all = "camelCase")]
-pub async fn post_comment_to_github(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+pub(crate) async fn post_comment_to_github_impl(
+    store: Arc<Store>,
     branch_id: String,
     pr_number: u64,
     comment: store::Comment,
 ) -> Result<git::GitHubCommentResult, String> {
-    let store = crate::get_store(&store)?;
     let branch = store
         .get_branch(&branch_id)
         .map_err(|e| e.to_string())?
@@ -255,6 +253,17 @@ pub async fn post_comment_to_github(
         .map_err(|e| e.to_string())?;
 
     Ok(result)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn post_comment_to_github(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+    pr_number: u64,
+    comment: store::Comment,
+) -> Result<git::GitHubCommentResult, String> {
+    let store = crate::get_store(&store)?;
+    post_comment_to_github_impl(store, branch_id, pr_number, comment).await
 }
 
 async fn current_branch_head_sha(

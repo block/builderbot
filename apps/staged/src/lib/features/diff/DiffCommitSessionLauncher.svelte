@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { listenToEvent, type UnlistenFn } from '../../transport';
   import { Send } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import { alerts } from '../../shared/alerts.svelte';
@@ -95,8 +95,8 @@
     document.addEventListener('keydown', handleGlobalKeydown);
 
     let unlisten: UnlistenFn | null = null;
-    listen<SessionStatusPayload>('session-status-changed', (event) => {
-      if (event.payload.branchId !== branchId) return;
+    listenToEvent<SessionStatusPayload>('session-status-changed', (payload) => {
+      if (payload.branchId !== branchId) return;
       void refreshQueueState(true);
     }).then((fn) => {
       unlisten = fn;

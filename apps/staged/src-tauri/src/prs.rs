@@ -1,7 +1,6 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tauri::Emitter;
 
 use crate::git;
 use crate::session_runner;
@@ -15,7 +14,7 @@ fn get_store(store: &tauri::State<'_, Mutex<Option<Arc<Store>>>>) -> Result<Arc<
         .ok_or_else(|| "Database not initialized — please reset from the startup prompt".into())
 }
 
-fn resolve_branch_repo_and_subpath(
+pub(crate) fn resolve_branch_repo_and_subpath(
     store: &Arc<Store>,
     project: &store::Project,
     branch: &store::Branch,
@@ -34,16 +33,16 @@ fn resolve_branch_repo_and_subpath(
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-struct PrStatusEvent {
-    branch_id: String,
-    pr_state: String,
-    pr_checks_status: String,
-    pr_review_decision: Option<String>,
-    pr_mergeable: bool,
-    pr_draft: bool,
-    pr_head_sha: Option<String>,
-    pr_fetched_at: i64,
-    failed_checks: Vec<git::FailedCheck>,
+pub(crate) struct PrStatusEvent {
+    pub(crate) branch_id: String,
+    pub(crate) pr_state: String,
+    pub(crate) pr_checks_status: String,
+    pub(crate) pr_review_decision: Option<String>,
+    pub(crate) pr_mergeable: bool,
+    pub(crate) pr_draft: bool,
+    pub(crate) pr_head_sha: Option<String>,
+    pub(crate) pr_fetched_at: i64,
+    pub(crate) failed_checks: Vec<git::FailedCheck>,
 }
 
 // =============================================================================
@@ -346,7 +345,7 @@ async fn start_running_commit_pipeline_for_branch(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn start_or_queue_commit_pipeline_for_branch(
+pub(crate) async fn start_or_queue_commit_pipeline_for_branch(
     store: Arc<Store>,
     registry: Arc<session_runner::SessionRegistry>,
     app_handle: tauri::AppHandle,
@@ -572,16 +571,14 @@ fn build_create_pr_pipeline_steps(
 // =============================================================================
 
 /// Create a pull request for a branch by kicking off an agent session.
-#[tauri::command(rename_all = "camelCase")]
-pub async fn create_pr(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+pub(crate) async fn start_create_pr_pipeline_for_branch(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
     app_handle: tauri::AppHandle,
     branch_id: String,
     provider: Option<String>,
     draft: Option<bool>,
 ) -> Result<String, String> {
-    let store = get_store(&store)?;
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
     let base_branch = base_branch_name(&ctx.branch);
 
@@ -609,6 +606,27 @@ pub async fn create_pr(
         &app_handle,
         &registry,
     )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn create_pr(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    provider: Option<String>,
+    draft: Option<bool>,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
+    start_create_pr_pipeline_for_branch(
+        store,
+        Arc::clone(&registry),
+        app_handle,
+        branch_id,
+        provider,
+        draft,
+    )
+    .await
 }
 
 /// Build the GitHub PR URL for a branch.
@@ -716,22 +734,21 @@ pub async fn refresh_pr_status(
         )
         .map_err(|e| e.to_string())?;
 
-    app_handle
-        .emit(
-            "pr-status-changed",
-            PrStatusEvent {
-                branch_id: branch_id.clone(),
-                pr_state: pr_status.state,
-                pr_checks_status: pr_status.checks_summary.state,
-                pr_review_decision: pr_status.review_decision,
-                pr_mergeable: mergeable,
-                pr_draft: pr_status.is_draft,
-                pr_head_sha: pr_status.head_sha,
-                pr_fetched_at,
-                failed_checks: pr_status.failed_checks,
-            },
-        )
-        .map_err(|e| format!("Failed to emit event: {}", e))?;
+    crate::web_server::emit_to_all(
+        &app_handle,
+        "pr-status-changed",
+        PrStatusEvent {
+            branch_id: branch_id.clone(),
+            pr_state: pr_status.state,
+            pr_checks_status: pr_status.checks_summary.state,
+            pr_review_decision: pr_status.review_decision,
+            pr_mergeable: mergeable,
+            pr_draft: pr_status.is_draft,
+            pr_head_sha: pr_status.head_sha,
+            pr_fetched_at,
+            failed_checks: pr_status.failed_checks,
+        },
+    );
 
     Ok(())
 }
@@ -803,7 +820,8 @@ pub async fn refresh_all_pr_statuses(
 
                 refreshed_count += 1;
 
-                if let Err(e) = app_handle.emit(
+                crate::web_server::emit_to_all(
+                    &app_handle,
                     "pr-status-changed",
                     PrStatusEvent {
                         branch_id: branch.id.clone(),
@@ -816,9 +834,7 @@ pub async fn refresh_all_pr_statuses(
                         pr_fetched_at,
                         failed_checks: pr_status.failed_checks,
                     },
-                ) {
-                    log::warn!("Failed to emit pr-status-changed event: {}", e);
-                }
+                );
             }
             Err(e) => {
                 log::warn!(
@@ -831,9 +847,7 @@ pub async fn refresh_all_pr_statuses(
         }
     }
 
-    app_handle
-        .emit("pr-statuses-refreshed", &project_id)
-        .map_err(|e| format!("Failed to emit event: {}", e))?;
+    crate::web_server::emit_to_all(&app_handle, "pr-statuses-refreshed", &project_id);
 
     Ok(refreshed_count)
 }
@@ -855,9 +869,7 @@ pub fn clear_branch_pr_status(
         .update_branch_pr_status(&branch_id, None, None, None, None, None, None, None, None)
         .map_err(|e| e.to_string())?;
 
-    app_handle
-        .emit("pr-status-cleared", &branch_id)
-        .map_err(|e| format!("Failed to emit event: {}", e))?;
+    crate::web_server::emit_to_all(&app_handle, "pr-status-cleared", &branch_id);
 
     Ok(())
 }
@@ -874,6 +886,13 @@ pub async fn recover_branch_pr(
 ) -> Result<Option<u64>, String> {
     let store = get_store(&store)?;
 
+    recover_branch_pr_impl(store, branch_id).await
+}
+
+pub(crate) async fn recover_branch_pr_impl(
+    store: Arc<Store>,
+    branch_id: String,
+) -> Result<Option<u64>, String> {
     let branch = store
         .get_branch(&branch_id)
         .map_err(|e| e.to_string())?
@@ -936,7 +955,13 @@ pub async fn has_unpushed_commits(
     branch_id: String,
 ) -> Result<bool, String> {
     let store = get_store(&store)?;
+    has_unpushed_commits_impl(store, branch_id).await
+}
 
+pub(crate) async fn has_unpushed_commits_impl(
+    store: Arc<Store>,
+    branch_id: String,
+) -> Result<bool, String> {
     let branch = store
         .get_branch(&branch_id)
         .map_err(|e| e.to_string())?
@@ -989,16 +1014,14 @@ pub async fn has_unpushed_commits(
 }
 
 /// Push a branch to its remote by kicking off an agent session.
-#[tauri::command(rename_all = "camelCase")]
-pub async fn push_branch(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+pub(crate) async fn start_push_branch_pipeline_for_branch(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
     app_handle: tauri::AppHandle,
     branch_id: String,
     provider: Option<String>,
     force: Option<bool>,
 ) -> Result<String, String> {
-    let store = get_store(&store)?;
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
 
     let force = force.unwrap_or(false);
@@ -1055,7 +1078,28 @@ pub async fn push_branch(
     )
 }
 
-/// Rebase a branch via a pipeline.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn push_branch(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    provider: Option<String>,
+    force: Option<bool>,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
+    start_push_branch_pipeline_for_branch(
+        store,
+        Arc::clone(&registry),
+        app_handle,
+        branch_id,
+        provider,
+        force,
+    )
+    .await
+}
+
+/// Rebase a branch onto its base branch via a pipeline.
 ///
 /// When `target` is `None` or `"base"`, rebases onto `origin/{base_branch}`
 /// (the default behaviour used by the base-moved row and the `…` menu).

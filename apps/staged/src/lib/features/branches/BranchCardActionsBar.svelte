@@ -27,7 +27,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import SineWave from '../../shared/SineWave.svelte';
   import ActionOutputModal from '../actions/ActionOutputModal.svelte';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { listenToEvent, type UnlistenFn } from '../../transport';
   import type { Branch, ProjectRepo } from '../../types';
   import * as commands from '../../api/commands';
   import type { ProjectAction } from '../../api/commands';
@@ -208,9 +208,7 @@
   $effect(() => {
     const branchId = branch.id;
 
-    listen<ActionStatusEvent>('action_status', (event) => {
-      const payload = event.payload;
-
+    listenToEvent<ActionStatusEvent>('action_status', (payload) => {
       // Only process events for this branch
       if (payload.branchId !== branchId) {
         return;

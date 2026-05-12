@@ -25,6 +25,7 @@ pub mod store;
 pub(crate) mod terminal_output;
 pub mod timeline;
 pub mod util_commands;
+pub mod web_server;
 
 #[cfg(test)]
 pub mod test_utils;
@@ -214,7 +215,8 @@ fn emit_setup_progress(
     phase: &str,
     detail: Option<String>,
 ) {
-    let _ = handle.emit(
+    web_server::emit_to_all(
+        handle,
         "worktree-setup-progress",
         branches::WorktreeSetupProgress {
             branch_id: branch_id.to_string(),
@@ -470,7 +472,7 @@ fn create_project(
             let project_id = project.id.clone();
             let store_bg = Arc::clone(&store);
             tauri::async_runtime::spawn(async move {
-                let _ = app_handle.emit("project-setup-progress", project_id.clone());
+                web_server::emit_to_all(&app_handle, "project-setup-progress", project_id.clone());
 
                 let store_clone = Arc::clone(&store_bg);
                 let branch_id_clone = branch_id.clone();
@@ -487,7 +489,11 @@ fn create_project(
                 let worktree_path = match worktree_result {
                     Ok(Ok(path)) => {
                         log::info!("[create_project] worktree ready at {path}");
-                        let _ = app_handle.emit("project-setup-progress", project_id.clone());
+                        web_server::emit_to_all(
+                            &app_handle,
+                            "project-setup-progress",
+                            project_id.clone(),
+                        );
                         path
                     }
                     Ok(Err(e)) => {
@@ -518,7 +524,11 @@ fn create_project(
                         {
                             Ok(count) => {
                                 log::info!("[create_project] ran {count} prerun actions");
-                                let _ = app_handle.emit("project-setup-progress", project_id);
+                                web_server::emit_to_all(
+                                    &app_handle,
+                                    "project-setup-progress",
+                                    project_id,
+                                );
                             }
                             Err(e) => {
                                 log::warn!("[create_project] prerun actions failed: {e}");
@@ -634,7 +644,7 @@ async fn add_project_repo(
     tauri::async_runtime::spawn({
         let repo_id = repo.id.clone();
         async move {
-            let _ = app_handle.emit("project-setup-progress", project_id.clone());
+            web_server::emit_to_all(&app_handle, "project-setup-progress", project_id.clone());
 
             let branch = match store.list_branches_for_project(&project_id) {
                 Ok(branches) => branches
@@ -666,7 +676,11 @@ async fn add_project_repo(
                 let worktree_path = match worktree_result {
                     Ok(Ok(path)) => {
                         log::info!("[add_project_repo] worktree ready at {path}");
-                        let _ = app_handle.emit("project-setup-progress", project_id.clone());
+                        web_server::emit_to_all(
+                            &app_handle,
+                            "project-setup-progress",
+                            project_id.clone(),
+                        );
                         path
                     }
                     Ok(Err(e)) => {
@@ -696,8 +710,11 @@ async fn add_project_repo(
                         {
                             Ok(count) => {
                                 log::info!("[add_project_repo] ran {count} prerun actions");
-                                let _ =
-                                    app_handle.emit("project-setup-progress", project_id.clone());
+                                web_server::emit_to_all(
+                                    &app_handle,
+                                    "project-setup-progress",
+                                    project_id.clone(),
+                                );
                             }
                             Err(e) => {
                                 log::warn!("[add_project_repo] prerun actions failed: {e}");
@@ -739,11 +756,11 @@ async fn add_project_repo(
                             "[add_project_repo] remote repo clone failed for branch '{}': {e}",
                             branch.branch_name
                         );
-                        let _ = app_handle.emit("project-setup-progress", project_id);
+                        web_server::emit_to_all(&app_handle, "project-setup-progress", project_id);
                         return;
                     }
                 }
-                let _ = app_handle.emit("project-setup-progress", project_id);
+                web_server::emit_to_all(&app_handle, "project-setup-progress", project_id);
 
                 // If the repo already has commits on this branch, kick off
                 // an automatic code review so the user gets immediate feedback.
@@ -1720,6 +1737,29 @@ pub fn run() {
                 db_path,
                 needs_reset: Mutex::new(reset_info),
             });
+
+            // Create the broadcast channel for web event streaming and manage it
+            // so the web server and event emitters can access it.
+            let (event_tx, _) = tokio::sync::broadcast::channel::<web_server::WebEvent>(256);
+            app.manage(event_tx.clone());
+
+            // Web server startup is stubbed out in this build.
+            // TODO(web): restore web server startup from the `mobile-web` branch.
+            let web_server_enabled = std::env::var("STAGED_WEB_SERVER")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+
+            if web_server_enabled {
+                let auth_token = web_server::generate_token();
+                web_server::start(web_server::WebAppState {
+                    app_handle: app.handle().clone(),
+                    event_tx,
+                    auth_token,
+                    sessions: std::sync::Arc::new(std::sync::Mutex::new(
+                        std::collections::HashSet::new(),
+                    )),
+                });
+            }
 
             if cfg!(debug_assertions) {
                 app.handle().plugin(

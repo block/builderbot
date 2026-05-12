@@ -6,8 +6,7 @@
  * that can be run in branch worktrees with real-time output streaming.
  */
 
-import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { invokeCommand, listenToEvent, type UnlistenFn } from '../../transport';
 
 /** Action types available for project actions. */
 export type ActionType = 'build' | 'test' | 'format' | 'check' | 'prerun' | 'run' | 'cleanUp';
@@ -116,7 +115,10 @@ export function detectRepoActions(
   githubRepo: string,
   subpath?: string
 ): Promise<SuggestedAction[]> {
-  return invoke<SuggestedAction[]>('detect_repo_actions', { githubRepo, subpath: subpath ?? null });
+  return invokeCommand<SuggestedAction[]>('detect_repo_actions', {
+    githubRepo,
+    subpath: subpath ?? null,
+  });
 }
 
 /**
@@ -124,14 +126,14 @@ export function detectRepoActions(
  * Returns an execution ID that can be used to track status and stop the action.
  */
 export function runBranchAction(branchId: string, actionId: string): Promise<string> {
-  return invoke<string>('run_branch_action', { branchId, actionId });
+  return invokeCommand<string>('run_branch_action', { branchId, actionId });
 }
 
 /**
  * Stop a running action by execution ID.
  */
 export function stopBranchAction(executionId: string): Promise<void> {
-  return invoke<void>('stop_branch_action', { executionId });
+  return invokeCommand<void>('stop_branch_action', { executionId });
 }
 
 /**
@@ -174,7 +176,7 @@ export async function stopBranchActionWithState(
  * Returns an array of running action info with execution IDs, action details, and timestamps.
  */
 export function getRunningBranchActions(branchId: string): Promise<RunningActionInfo[]> {
-  return invoke<RunningActionInfo[]>('get_running_branch_actions', { branchId });
+  return invokeCommand<RunningActionInfo[]>('get_running_branch_actions', { branchId });
 }
 
 /**
@@ -182,7 +184,7 @@ export function getRunningBranchActions(branchId: string): Promise<RunningAction
  * Useful for retrieving output history when joining an already-running action.
  */
 export function getActionOutputBuffer(executionId: string): Promise<OutputChunk[] | null> {
-  return invoke<OutputChunk[] | null>('get_action_output_buffer', { executionId });
+  return invokeCommand<OutputChunk[] | null>('get_action_output_buffer', { executionId });
 }
 
 /**
@@ -190,7 +192,7 @@ export function getActionOutputBuffer(executionId: string): Promise<OutputChunk[
  * Returns true if the execution was found and cleared, false otherwise.
  */
 export function clearActionExecution(executionId: string): Promise<boolean> {
-  return invoke<boolean>('clear_action_execution', { executionId });
+  return invokeCommand<boolean>('clear_action_execution', { executionId });
 }
 
 /**
@@ -198,7 +200,7 @@ export function clearActionExecution(executionId: string): Promise<boolean> {
  * Returns an array of execution IDs for the started actions.
  */
 export function runPrerunActions(branchId: string): Promise<string[]> {
-  return invoke<string[]>('run_prerun_actions', { branchId });
+  return invokeCommand<string[]>('run_prerun_actions', { branchId });
 }
 
 /**
@@ -208,9 +210,7 @@ export function runPrerunActions(branchId: string): Promise<string[]> {
 export function listenToActionOutput(
   callback: (event: ActionOutputEvent) => void
 ): Promise<UnlistenFn> {
-  return listen<ActionOutputEvent>('action_output', (event) => {
-    callback(event.payload);
-  });
+  return listenToEvent<ActionOutputEvent>('action_output', callback);
 }
 
 /**
@@ -220,9 +220,7 @@ export function listenToActionOutput(
 export function listenToActionStatus(
   callback: (event: ActionStatusEvent) => void
 ): Promise<UnlistenFn> {
-  return listen<ActionStatusEvent>('action_status', (event) => {
-    callback(event.payload);
-  });
+  return listenToEvent<ActionStatusEvent>('action_status', callback);
 }
 
 /**
@@ -232,18 +230,14 @@ export function listenToActionStatus(
 export function listenToActionAutoCommit(
   callback: (event: ActionAutoCommitEvent) => void
 ): Promise<UnlistenFn> {
-  return listen<ActionAutoCommitEvent>('action_auto_commit', (event) => {
-    callback(event.payload);
-  });
+  return listenToEvent<ActionAutoCommitEvent>('action_auto_commit', callback);
 }
 
 /** Listen for repo action detection start/stop updates. */
 export function listenToRepoActionsDetection(
   callback: (event: RepoActionsDetectionEvent) => void
 ): Promise<UnlistenFn> {
-  return listen<RepoActionsDetectionEvent>('repo-actions-detection', (event) => {
-    callback(event.payload);
-  });
+  return listenToEvent<RepoActionsDetectionEvent>('repo-actions-detection', callback);
 }
 
 /**
@@ -251,14 +245,14 @@ export function listenToRepoActionsDetection(
  * Returns null if the execution is not found or has no phase.
  */
 export function getRunPhase(executionId: string): Promise<RunPhase | null> {
-  return invoke<RunPhase | null>('get_run_phase', { executionId });
+  return invokeCommand<RunPhase | null>('get_run_phase', { executionId });
 }
 
 /**
  * Update the run detection mode for an action.
  */
 export function updateRunDetectionMode(actionId: string, mode: RunDetectionMode): Promise<void> {
-  return invoke('update_run_detection_mode', { actionId, mode });
+  return invokeCommand('update_run_detection_mode', { actionId, mode });
 }
 
 /**
@@ -268,7 +262,5 @@ export function updateRunDetectionMode(actionId: string, mode: RunDetectionMode)
 export function listenToRunPhaseChanged(
   callback: (event: RunPhaseChangedEvent) => void
 ): Promise<UnlistenFn> {
-  return listen<RunPhaseChangedEvent>('action:run-phase-changed', (event) => {
-    callback(event.payload);
-  });
+  return listenToEvent<RunPhaseChangedEvent>('action:run-phase-changed', callback);
 }

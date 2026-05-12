@@ -10,7 +10,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { listenToEvent, type UnlistenFn } from '../../transport';
   import { Plus, X, CheckCircle, AlertCircle, Ban, Eye, Trash2 } from 'lucide-svelte';
   import type { Session, SessionStatus, SessionStatusPayload } from '../../types';
   import { startSession, deleteSession } from '../../api/commands';
@@ -47,20 +47,23 @@
   // =========================================================================
 
   onMount(async () => {
-    unlistenStatus = await listen<SessionStatusPayload>('session-status-changed', (event) => {
-      const { sessionId, status, errorMessage } = event.payload;
-      sessions = sessions.map((s) => {
-        if (s.id === sessionId) {
-          return {
-            ...s,
-            status,
-            errorMessage: errorMessage ?? s.errorMessage,
-            updatedAt: Date.now(),
-          };
-        }
-        return s;
-      });
-    });
+    unlistenStatus = await listenToEvent<SessionStatusPayload>(
+      'session-status-changed',
+      (payload) => {
+        const { sessionId, status, errorMessage } = payload;
+        sessions = sessions.map((s) => {
+          if (s.id === sessionId) {
+            return {
+              ...s,
+              status: status as SessionStatus,
+              errorMessage: errorMessage ?? s.errorMessage,
+              updatedAt: Date.now(),
+            };
+          }
+          return s;
+        });
+      }
+    );
   });
 
   onDestroy(() => {

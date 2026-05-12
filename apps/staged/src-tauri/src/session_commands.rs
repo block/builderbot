@@ -20,7 +20,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
-use tauri::Emitter;
 
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::agent::{self, AcpProviderInfo};
@@ -42,7 +41,7 @@ fn get_store(store: &tauri::State<'_, Mutex<Option<Arc<Store>>>>) -> Result<Arc<
         .ok_or_else(|| "Database not initialized — please reset from the startup prompt".into())
 }
 
-fn resolve_branch_repo_slug(
+pub(crate) fn resolve_branch_repo_slug(
     store: &Arc<Store>,
     project: &store::Project,
     branch: &store::Branch,
@@ -55,7 +54,7 @@ fn resolve_branch_repo_slug(
     project.primary_repo().map(|s| s.to_string())
 }
 
-async fn run_blox_blocking<T, F>(op: F) -> Result<T, String>
+pub(crate) async fn run_blox_blocking<T, F>(op: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, blox::BloxError> + Send + 'static,
@@ -322,7 +321,8 @@ pub async fn resume_session(
         return Err("Session is already running".to_string());
     }
 
-    let _ = app_handle.emit(
+    crate::web_server::emit_to_all(
+        &app_handle,
         "session-status-changed",
         session_runner::SessionStatusEvent {
             session_id: session_id.clone(),
@@ -372,7 +372,7 @@ pub async fn resume_session(
     Ok(())
 }
 
-fn infer_branch_resume_session_type(prompt: &str) -> Option<&'static str> {
+pub(crate) fn infer_branch_resume_session_type(prompt: &str) -> Option<&'static str> {
     // Keep these checks aligned with the action prompts built in `prs.rs`.
     if prompt.contains("Create a draft pull request for the current branch.")
         || prompt.contains("Create a pull request for the current branch.")
@@ -407,7 +407,8 @@ pub fn cancel_session(
                     None,
                     Some(&store::CompletionReason::Interrupted),
                 );
-                let _ = app_handle.emit(
+                crate::web_server::emit_to_all(
+                    &app_handle,
                     "session-status-changed",
                     session_runner::SessionStatusEvent {
                         session_id: session_id.clone(),
@@ -1252,7 +1253,8 @@ pub async fn drain_queued_sessions_for_branch(
         BranchSessionType::Review => "review",
     };
 
-    let _ = app_handle.emit(
+    crate::web_server::emit_to_all(
+        &app_handle,
         "session-status-changed",
         session_runner::SessionStatusEvent {
             session_id: session_id.clone(),
@@ -1510,7 +1512,8 @@ pub async fn trigger_auto_review(
     store.create_review(&review).map_err(|e| e.to_string())?;
 
     // Emit session-status-changed with isAutoReview: true
-    let _ = app_handle.emit(
+    crate::web_server::emit_to_all(
+        &app_handle,
         "session-status-changed",
         session_runner::SessionStatusEvent {
             session_id: session.id.clone(),
@@ -1605,7 +1608,7 @@ fn latest_git_commit_ms(store: &Arc<Store>, branch_id: &str) -> i64 {
     commits.iter().map(|c| c.timestamp).max().unwrap_or(0) * 1000
 }
 
-fn cancel_in_flight_auto_review_for_branch(
+pub(crate) fn cancel_in_flight_auto_review_for_branch(
     store: &Arc<Store>,
     registry: &session_runner::SessionRegistry,
     branch_id: &str,
@@ -1933,7 +1936,7 @@ pub(crate) fn build_project_context(
 ///
 /// Includes: project name, all attached repos (with reasons and per-repo
 /// branch timelines), and existing project notes.
-fn build_project_session_context(
+pub(crate) fn build_project_session_context(
     store: &Arc<Store>,
     project: &store::Project,
     workspace_name: Option<&str>,
@@ -2682,7 +2685,7 @@ fn shell_quote_arg(value: &str) -> String {
 }
 
 /// Assemble the full prompt from action instructions + branch context + user prompt.
-fn build_full_prompt(
+pub(crate) fn build_full_prompt(
     user_prompt: &str,
     project_information: &str,
     branch_context: &str,
@@ -2890,7 +2893,7 @@ fn render_launch_context_entry(
     Some(entry)
 }
 
-fn embed_launch_context(
+pub(crate) fn embed_launch_context(
     prompt: &str,
     launch_context: Option<&BranchSessionLaunchContext>,
 ) -> Result<String, String> {
@@ -2904,7 +2907,7 @@ fn embed_launch_context(
     ))
 }
 
-fn extract_launch_context(
+pub(crate) fn extract_launch_context(
     prompt: &str,
 ) -> Result<(String, Option<BranchSessionLaunchContext>), String> {
     const OPEN: &str = "<launch-context>";

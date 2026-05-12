@@ -7,7 +7,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { PanelLeftClose, PanelLeftOpen, Plus, SlidersHorizontal } from 'lucide-svelte';
-  import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { getWindowSync } from '../../transport';
   import { navigation, openSettings } from './navigation.svelte';
   import {
     hydrateProjectsSidebarState,
@@ -30,7 +30,7 @@
     const isInteractive = target.closest('button, a, input, [role="button"]');
     if (!isInteractive) {
       e.preventDefault();
-      getCurrentWindow().startDragging();
+      getWindowSync().startDragging();
     }
   }
 

@@ -21,7 +21,7 @@
     GitCommitHorizontal,
     PanelRightOpen,
   } from 'lucide-svelte';
-  import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { getWindowSync } from '../../transport';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import { alerts } from '../../shared/alerts.svelte';
@@ -1018,7 +1018,7 @@
     const isInteractive = target.closest('button, a, input, [role="button"]');
     if (!isInteractive) {
       e.preventDefault();
-      getCurrentWindow().startDragging();
+      getWindowSync().startDragging();
     }
   }
 

@@ -5,32 +5,53 @@
  * that works reliably across dev server restarts (unlike localStorage
  * which is origin-scoped and breaks when the dev port changes).
  *
- * The store is saved to `~/.staged/preferences.json`.
+ * In web mode, falls back to localStorage with JSON serialization.
+ *
+ * The store is saved to `~/.staged/preferences.json` in Tauri mode.
  */
 
-import { invoke } from '@tauri-apps/api/core';
-import { load, type Store } from '@tauri-apps/plugin-store';
+import { isTauri, invokeCommand } from '../transport';
 
-// Singleton store instance
-let store: Store | null = null;
+// ---------------------------------------------------------------------------
+// Tauri store backend
+// ---------------------------------------------------------------------------
 
-async function getPreferencesStorePath(): Promise<string> {
-  return invoke<string>('preferences_store_path');
+interface TauriStoreBackend {
+  kind: 'tauri';
+  store: import('@tauri-apps/plugin-store').Store;
 }
+
+// ---------------------------------------------------------------------------
+// localStorage backend (web mode) — stubbed out
+// TODO(web): restore localStorage backend from the `mobile-web` branch
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Singleton
+// ---------------------------------------------------------------------------
+
+type StoreBackend = TauriStoreBackend | null;
+
+let backend: StoreBackend = null;
 
 /**
  * Initialize the persistent store.
  * Must be called once at app startup before using get/set.
  */
 export async function initPersistentStore(): Promise<void> {
-  if (store) return;
+  if (backend) return;
 
-  const storePath = await getPreferencesStorePath();
-  store = await load(storePath, {
-    defaults: {},
-    autoSave: true,
-    overrideDefaults: true,
-  });
+  if (isTauri) {
+    const storePath = await invokeCommand<string>('preferences_store_path');
+    const { load } = await import('@tauri-apps/plugin-store');
+    const store = await load(storePath, {
+      defaults: {},
+      autoSave: true,
+      overrideDefaults: true,
+    });
+    backend = { kind: 'tauri', store };
+  }
+  // TODO(web): restore localStorage backend initialization for web mode
 }
 
 /**
@@ -38,12 +59,12 @@ export async function initPersistentStore(): Promise<void> {
  * Returns undefined if the key doesn't exist.
  */
 export async function getStoreValue<T>(key: string): Promise<T | undefined> {
-  if (!store) {
+  if (!backend) {
     console.warn('[PersistentStore] Store not initialized, call initPersistentStore() first');
     return undefined;
   }
 
-  return store.get<T>(key);
+  return backend.store.get<T>(key);
 }
 
 /**
@@ -51,22 +72,22 @@ export async function getStoreValue<T>(key: string): Promise<T | undefined> {
  * The value is automatically persisted to disk.
  */
 export async function setStoreValue<T>(key: string, value: T): Promise<void> {
-  if (!store) {
+  if (!backend) {
     console.warn('[PersistentStore] Store not initialized, call initPersistentStore() first');
     return;
   }
 
-  await store.set(key, value);
+  await backend.store.set(key, value);
 }
 
 /**
  * Delete a value from the persistent store.
  */
 export async function deleteStoreValue(key: string): Promise<void> {
-  if (!store) {
+  if (!backend) {
     console.warn('[PersistentStore] Store not initialized, call initPersistentStore() first');
     return;
   }
 
-  await store.delete(key);
+  await backend.store.delete(key);
 }

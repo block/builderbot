@@ -93,6 +93,7 @@ fn run_remote_git_bytes(ctx: &BranchDiffContext, args: &[&str]) -> Result<Vec<u8
 /// - Branch scope with no commit_sha: merge-base(base, tip)..tip
 /// - Branch scope with commit_sha: merge-base(base, sha)..sha
 /// - Commit scope: sha~1..sha
+///
 fn build_diff_spec(
     worktree: &Path,
     base_branch: &str,
@@ -496,9 +497,18 @@ pub async fn get_diff_files(
     commit_sha: Option<String>,
     scope: String,
 ) -> Result<DiffFilesResponse, String> {
+    let store = crate::get_store(&store)?;
+    get_diff_files_impl(store, branch_id, commit_sha, scope)
+}
+
+pub(crate) fn get_diff_files_impl(
+    store: Arc<Store>,
+    branch_id: String,
+    commit_sha: Option<String>,
+    scope: String,
+) -> Result<DiffFilesResponse, String> {
     let start = std::time::Instant::now();
     log::info!("get_diff_files: branch_id={branch_id} scope={scope} commit_sha={commit_sha:?}");
-    let store = crate::get_store(&store)?;
     let ctx = resolve_branch_context(&store, &branch_id)?;
     if let Some(worktree_path) = ctx.worktree_path.as_deref() {
         let worktree = Path::new(worktree_path);
@@ -593,9 +603,19 @@ pub async fn get_file_diff(
     scope: String,
     path: String,
 ) -> Result<git::FileDiff, String> {
+    let store = crate::get_store(&store)?;
+    get_file_diff_impl(store, branch_id, commit_sha, scope, path)
+}
+
+pub(crate) fn get_file_diff_impl(
+    store: Arc<Store>,
+    branch_id: String,
+    commit_sha: String,
+    scope: String,
+    path: String,
+) -> Result<git::FileDiff, String> {
     let start = std::time::Instant::now();
     log::info!("get_file_diff: path={path} scope={scope}");
-    let store = crate::get_store(&store)?;
     let ctx = resolve_branch_context(&store, &branch_id)?;
     if let Some(worktree_path) = ctx.worktree_path.as_deref() {
         let worktree = Path::new(worktree_path);
@@ -686,6 +706,15 @@ pub async fn get_file_at_ref(
     path: String,
 ) -> Result<git::File, String> {
     let store = crate::get_store(&store)?;
+    get_file_at_ref_impl(store, branch_id, ref_name, path)
+}
+
+pub(crate) fn get_file_at_ref_impl(
+    store: Arc<Store>,
+    branch_id: String,
+    ref_name: String,
+    path: String,
+) -> Result<git::File, String> {
     let ctx = resolve_branch_context(&store, &branch_id)?;
     if let Some(worktree_path) = ctx.worktree_path.as_deref() {
         let worktree = Path::new(worktree_path);

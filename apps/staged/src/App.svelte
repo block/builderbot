@@ -6,8 +6,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { isTauri, listenToEvent, getWindowSync, type UnlistenFn } from './lib/transport';
   import * as commands from './lib/api/commands';
   import TopBar from './lib/features/layout/TopBar.svelte';
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
@@ -118,7 +117,7 @@
   }
 
   function startUpdaterLoop(): () => void {
-    const isTauriApp = typeof window !== 'undefined' && '__TAURI__' in window;
+    const isTauriApp = isTauri;
     void logUpdater(
       `[updater] gate check: enabled=${updaterEnabled} dev=${import.meta.env.DEV} isTauriApp=${isTauriApp}`
     );
@@ -208,25 +207,25 @@
     document.addEventListener('keydown', handleKonamiKey);
 
     // Listen for the app menu Preferences item.
-    unlistenSettings = await listen('menu:settings', () => {
+    unlistenSettings = await listenToEvent('menu:settings', () => {
       if (!triggerShortcut('app-open-settings')) openSettings();
     });
-    unlistenFind = await listen('menu:find', () => {
+    unlistenFind = await listenToEvent('menu:find', () => {
       if (!triggerShortcut('search-find')) runSearchShortcut('find');
     });
-    unlistenFindNext = await listen('menu:find-next', () => {
+    unlistenFindNext = await listenToEvent('menu:find-next', () => {
       if (!triggerShortcut('search-find-next')) runSearchShortcut('next');
     });
-    unlistenFindPrevious = await listen('menu:find-previous', () => {
+    unlistenFindPrevious = await listenToEvent('menu:find-previous', () => {
       if (!triggerShortcut('search-find-previous')) runSearchShortcut('previous');
     });
-    unlistenZoomIn = await listen('menu:zoom-in', () => {
+    unlistenZoomIn = await listenToEvent('menu:zoom-in', () => {
       if (!triggerShortcut('view-increase-size')) increaseSize();
     });
-    unlistenZoomOut = await listen('menu:zoom-out', () => {
+    unlistenZoomOut = await listenToEvent('menu:zoom-out', () => {
       if (!triggerShortcut('view-decrease-size')) decreaseSize();
     });
-    unlistenZoomReset = await listen('menu:zoom-reset', () => {
+    unlistenZoomReset = await listenToEvent('menu:zoom-reset', () => {
       if (!triggerShortcut('view-reset-size')) resetSize();
     });
 
@@ -386,7 +385,7 @@
     ensureSqAvailabilityLoaded();
 
     // Window was created hidden — show it now that the theme is applied
-    await getCurrentWindow().show();
+    await getWindowSync().show();
     stopUpdaterLoop = startUpdaterLoop();
   });
 
@@ -418,7 +417,7 @@
   }
 
   function handleClose() {
-    getCurrentWindow().close();
+    getWindowSync().close();
   }
 </script>
 

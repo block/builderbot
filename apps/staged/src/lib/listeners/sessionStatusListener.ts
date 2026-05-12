@@ -9,7 +9,7 @@
  * Session lookups are delegated to the unified sessionRegistry for consistency.
  */
 
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { listenToEvent, type UnlistenFn } from '../transport';
 import * as commands from '../api/commands';
 import {
   classifyCompletedPushSession,
@@ -24,7 +24,7 @@ import { sessionRegistry, type SessionType } from '../stores/sessionRegistry.sve
 import type { SessionStatus, SessionStatusPayload } from '../types';
 
 export function listenForSessionStatus(): Promise<UnlistenFn> {
-  return listen<SessionStatusPayload>('session-status-changed', async (event) => {
+  return listenToEvent<SessionStatusPayload>('session-status-changed', async (payload) => {
     const {
       sessionId,
       status,
@@ -32,7 +32,7 @@ export function listenForSessionStatus(): Promise<UnlistenFn> {
       projectId: eventProjectId,
       sessionType,
       isAutoReview,
-    } = event.payload;
+    } = payload;
 
     // Auto review sessions are handled by BranchCard — don't register them
     // here so they don't cause the project list spinner. When the user

@@ -13,7 +13,7 @@ use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 use rmcp::{schemars, tool, tool_handler, tool_router, ServerHandler};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::session_runner::SessionRegistry;
@@ -629,9 +629,11 @@ impl ProjectToolsHandler {
         };
 
         // Notify the UI so the repo appears immediately
-        let _ = self
-            .app_handle
-            .emit("project-setup-progress", self.project_id.clone());
+        crate::web_server::emit_to_all(
+            &self.app_handle,
+            "project-setup-progress",
+            self.project_id.clone(),
+        );
 
         // Find the branch that was just created for this repo
         let branch = match self.store.list_branches_for_project(&self.project_id) {
@@ -672,9 +674,11 @@ impl ProjectToolsHandler {
                 Ok(Ok(path)) => {
                     log::debug!("[project_mcp] add_project_repo: worktree ready at {}", path);
                     // Notify UI that the worktree is ready so branch state updates
-                    let _ = self
-                        .app_handle
-                        .emit("project-setup-progress", self.project_id.clone());
+                    crate::web_server::emit_to_all(
+                        &self.app_handle,
+                        "project-setup-progress",
+                        self.project_id.clone(),
+                    );
                     path
                 }
                 Ok(Err(e)) => {
@@ -722,9 +726,11 @@ impl ProjectToolsHandler {
                                     branch.id
                                 );
                                 // Notify UI that prerun actions finished
-                                let _ = self
-                                    .app_handle
-                                    .emit("project-setup-progress", self.project_id.clone());
+                                crate::web_server::emit_to_all(
+                                    &self.app_handle,
+                                    "project-setup-progress",
+                                    self.project_id.clone(),
+                                );
                             }
                             Err(e) => {
                                 log::warn!(

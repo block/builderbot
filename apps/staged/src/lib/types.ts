@@ -250,6 +250,7 @@ export interface RepoBadge {
 export interface PullRequest {
   number: number;
   title: string;
+  body: string;
   author: string;
   baseRef: string;
   headRef: string;

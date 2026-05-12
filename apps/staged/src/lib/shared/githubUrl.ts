@@ -7,6 +7,10 @@ export interface RepoSelection {
   defaultBranch?: string | null;
   /** For fork PRs, the head (fork) repo slug when it differs from nameWithOwner. */
   headRepo?: string | null;
+  /** PR title, carried through for auto-creating project notes. */
+  prTitle?: string;
+  /** PR body/description, carried through for auto-creating project notes. */
+  prBody?: string;
 }
 
 /**

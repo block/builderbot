@@ -1379,3 +1379,42 @@ pub fn ensure_fast_forward_pullable(state: &BranchGitState) -> Result<(), String
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repo_key_from_local_cache_key_normal_path() {
+        assert_eq!(
+            repo_key_from_local_cache_key("local:/Users/me/project:feature:main"),
+            Some("local:/Users/me/project".to_string()),
+        );
+    }
+
+    #[test]
+    fn repo_key_from_local_cache_key_windows_path() {
+        assert_eq!(
+            repo_key_from_local_cache_key("local:C:\\Users\\me\\project:feature:main"),
+            Some("local:C:\\Users\\me\\project".to_string()),
+        );
+    }
+
+    #[test]
+    fn repo_key_from_local_cache_key_branch_equals_base() {
+        assert_eq!(
+            repo_key_from_local_cache_key("local:/repo:main:main"),
+            Some("local:/repo".to_string()),
+        );
+    }
+
+    #[test]
+    fn repo_key_from_local_cache_key_not_local() {
+        assert_eq!(repo_key_from_local_cache_key("remote:foo:bar:baz"), None);
+    }
+
+    #[test]
+    fn repo_key_from_local_cache_key_too_few_segments() {
+        assert_eq!(repo_key_from_local_cache_key("local:only_one"), None);
+    }
+}

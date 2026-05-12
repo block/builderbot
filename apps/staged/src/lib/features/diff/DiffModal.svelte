@@ -214,6 +214,9 @@
     // Reset review state — the $effect will recreate it once the new commitSha resolves
     reviewHandle = null;
 
+    // Reset so the sidebar-order effect picks the first file after reload
+    initialSelectionApplied = false;
+
     // Switch diff context (reloads file list)
     try {
       await diffViewer.switchContext(newScope, newCommitSha);
@@ -739,6 +742,16 @@
       ? flattenTreeFiles(readonlyTree)
       : [...flattenTreeFiles(needsReviewTree), ...flattenTreeFiles(reviewedTree)]
   );
+
+  // Once files finish loading, override the initial selection with the first
+  // file in sidebar order so the viewer and sidebar stay in sync.
+  let initialSelectionApplied = false;
+  $effect(() => {
+    if (!diffViewer.state.loading && orderedFiles.length > 0 && !initialSelectionApplied) {
+      initialSelectionApplied = true;
+      diffViewer.selectFile(orderedFiles[0].path);
+    }
+  });
 
   // ==========================================================================
   // Sidebar interactions

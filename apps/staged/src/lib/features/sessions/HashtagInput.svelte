@@ -524,7 +524,7 @@
     white-space: pre-wrap;
     word-wrap: break-word;
     overflow-wrap: break-word;
-    overflow-y: auto;
+    overflow-y: hidden;
     outline: none;
     line-height: 1.5;
   }

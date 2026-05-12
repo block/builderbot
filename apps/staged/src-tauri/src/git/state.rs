@@ -420,8 +420,12 @@ where
                 fetched_refspecs: HashSet::new(),
             });
             entry.fetched_at = now;
-            for rs in &needed {
-                entry.fetched_refspecs.insert(rs.to_string());
+            if is_narrow {
+                for rs in &fetch_refspecs {
+                    entry.fetched_refspecs.insert(rs.clone());
+                }
+            } else {
+                entry.fetched_refspecs = needed.iter().map(|s| s.to_string()).collect();
             }
         }
     }

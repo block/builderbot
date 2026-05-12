@@ -179,20 +179,29 @@
   $effect(() => {
     const _items = itemsById;
     if (hasUnresolvedTokens && _items.size > 0 && editorEl) {
-      const shouldRestoreSelectAll = selectionCoversContents(editorEl);
+      const selKind = classifySelection(editorEl);
       const sel = window.getSelection();
-      const hadCaret = sel && sel.isCollapsed && editorEl.contains(sel.anchorNode);
 
       renderContent(value);
 
-      if (shouldRestoreSelectAll) {
+      if (selKind === 'all') {
         const range = document.createRange();
         range.selectNodeContents(editorEl);
         if (sel) {
           sel.removeAllRanges();
           sel.addRange(range);
         }
-      } else if (hadCaret) {
+      } else if (selKind === 'last-line') {
+        // Restore selection from after the last <br> to end of content
+        const start = findLastBrStart(editorEl);
+        if (start && sel) {
+          const range = document.createRange();
+          range.setStart(start.node, start.offset);
+          range.setEnd(editorEl, editorEl.childNodes.length);
+          sel.removeAllRanges();
+          sel.addRange(range);
+        }
+      } else if (selKind === 'caret') {
         // Restore collapsed cursor to end after re-render.
         // DOM is already fresh (renderContent just ran), so use the sync variant.
         focusAtEndSync(editorEl);
@@ -200,22 +209,34 @@
     }
   });
 
-  function selectionCoversContents(root: HTMLElement): boolean {
+  function classifySelection(root: HTMLElement): 'all' | 'last-line' | 'caret' | 'none' {
     const sel = window.getSelection();
-    if (!sel || sel.isCollapsed || !sel.rangeCount || !sel.anchorNode || !sel.focusNode) {
-      return false;
+    if (!sel || !sel.rangeCount || !sel.anchorNode || !root.contains(sel.anchorNode)) {
+      return 'none';
     }
-    if (!root.contains(sel.anchorNode) || !root.contains(sel.focusNode)) {
-      return false;
-    }
+    if (sel.isCollapsed) return 'caret';
+    if (!sel.focusNode || !root.contains(sel.focusNode)) return 'none';
 
-    const selectionRange = sel.getRangeAt(0);
+    const selRange = sel.getRangeAt(0);
     const fullRange = document.createRange();
     fullRange.selectNodeContents(root);
-    return (
-      selectionRange.compareBoundaryPoints(Range.START_TO_START, fullRange) === 0 &&
-      selectionRange.compareBoundaryPoints(Range.END_TO_END, fullRange) === 0
-    );
+
+    const startsAtBeginning = selRange.compareBoundaryPoints(Range.START_TO_START, fullRange) === 0;
+    const endsAtEnd = selRange.compareBoundaryPoints(Range.END_TO_END, fullRange) === 0;
+
+    if (startsAtBeginning && endsAtEnd) return 'all';
+    if (endsAtEnd && !startsAtBeginning) return 'last-line';
+    return 'none';
+  }
+
+  function findLastBrStart(root: HTMLElement): { node: Node; offset: number } | null {
+    let result: { node: Node; offset: number } | null = null;
+    for (let i = 0; i < root.childNodes.length; i++) {
+      if (root.childNodes[i] instanceof HTMLBRElement) {
+        result = { node: root, offset: i + 1 };
+      }
+    }
+    return result;
   }
 
   function createBadgeElement(item: HashtagItem): HTMLSpanElement {

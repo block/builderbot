@@ -2,7 +2,7 @@ use super::cli::{self, GitError};
 use super::refs::{branch_name_without_origin, origin_ref_for_branch};
 use super::status_parse::is_conflicted_status;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -153,6 +153,35 @@ fn fetch_cache() -> &'static Mutex<HashMap<String, FetchCacheEntry>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Repo-level fetch tracking for local projects.
+///
+/// A single `git fetch` updates all remote refs for a repo, so when multiple
+/// branches share the same local `.git` directory we only need to hit the
+/// network once per TTL window. This cache is keyed by repo path and tracks
+/// *which* refspecs were included in the last fetch so we can do a cheap
+/// narrow fetch for any new refspecs that appear.
+#[derive(Debug, Clone)]
+struct RepoFetchEntry {
+    fetched_at: i64,
+    fetched_refspecs: HashSet<String>,
+}
+
+fn repo_fetch_cache() -> &'static Mutex<HashMap<String, RepoFetchEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, RepoFetchEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Extract the repo path portion from a local cache key (`local:{repo_path}:…`).
+fn repo_key_from_local_cache_key(cache_key: &str) -> Option<String> {
+    let rest = cache_key.strip_prefix("local:")?;
+    // The key format is `local:{repo_path}:{branch}:{base}`.
+    // repo_path may contain colons (e.g. Windows paths, though unlikely on
+    // macOS/Linux). We split from the right to peel off base and branch.
+    let (without_base, _base) = rest.rsplit_once(':')?;
+    let (repo_path, _branch) = without_base.rsplit_once(':')?;
+    Some(format!("local:{repo_path}"))
+}
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -179,6 +208,47 @@ fn refspec_for(remote_branch: &str) -> String {
     format!("+refs/heads/{branch}:refs/remotes/origin/{branch}")
 }
 
+/// Determine which refspecs still need fetching given repo-level cache state.
+///
+/// Returns `None` if no fetch is needed at all (repo fresh + all refspecs covered).
+/// Returns `Some(refspecs)` with the list of refspecs to fetch — either all of
+/// them (repo stale) or just the missing ones (repo fresh, new refspecs).
+fn refspecs_to_fetch(
+    repo_key: Option<&str>,
+    needed: &[&str],
+    fetch_mode: FetchMode,
+    now: i64,
+) -> Option<Vec<String>> {
+    match fetch_mode {
+        FetchMode::Never => None,
+        FetchMode::Force => Some(needed.iter().map(|s| s.to_string()).collect()),
+        FetchMode::Ttl => {
+            let repo_entry = repo_key.and_then(|key| {
+                repo_fetch_cache()
+                    .lock()
+                    .ok()
+                    .and_then(|cache| cache.get(key).cloned())
+            });
+            match repo_entry {
+                Some(entry) if now.saturating_sub(entry.fetched_at) <= FETCH_TTL_MS => {
+                    // Repo is fresh — only fetch refspecs not already covered.
+                    let missing: Vec<String> = needed
+                        .iter()
+                        .filter(|rs| !entry.fetched_refspecs.contains(**rs))
+                        .map(|s| s.to_string())
+                        .collect();
+                    if missing.is_empty() {
+                        None
+                    } else {
+                        Some(missing)
+                    }
+                }
+                _ => Some(needed.iter().map(|s| s.to_string()).collect()),
+            }
+        }
+    }
+}
+
 fn refresh_refs_if_needed<F>(
     cache_key: &str,
     run_git: &F,
@@ -195,15 +265,45 @@ where
         .ok()
         .and_then(|cache| cache.get(cache_key).cloned());
 
-    let should_fetch = match (fetch_mode, &previous) {
-        (FetchMode::Never, _) => false,
-        (FetchMode::Force, _) => true,
-        (FetchMode::Ttl, Some(entry)) => now.saturating_sub(entry.fetched_at) > FETCH_TTL_MS,
-        (FetchMode::Ttl, None) => true,
+    let base_refspec = refspec_for(base_branch);
+    let branch_refspec = refspec_for(branch_name);
+
+    // Build the list of needed refspecs (deduplicated).
+    let needed: Vec<&str> = if branch_refspec != base_refspec {
+        vec![base_refspec.as_str(), branch_refspec.as_str()]
+    } else {
+        vec![base_refspec.as_str()]
+    };
+
+    // For local keys, consult the repo-level cache to avoid redundant fetches
+    // when multiple branches share the same repo.
+    let repo_key = repo_key_from_local_cache_key(cache_key);
+    let to_fetch = refspecs_to_fetch(repo_key.as_deref(), &needed, fetch_mode, now);
+
+    // Also check the per-branch cache for the legacy should_fetch decision
+    // (used when there's no repo key, i.e. remote branches).
+    let should_fetch = if repo_key.is_some() {
+        to_fetch.is_some()
+    } else {
+        match (fetch_mode, &previous) {
+            (FetchMode::Never, _) => false,
+            (FetchMode::Force, _) => true,
+            (FetchMode::Ttl, Some(entry)) => now.saturating_sub(entry.fetched_at) > FETCH_TTL_MS,
+            (FetchMode::Ttl, None) => true,
+        }
     };
 
     if !should_fetch {
-        let fetched_at = previous.as_ref().map(|entry| entry.fetched_at);
+        let fetched_at = previous.as_ref().map(|entry| entry.fetched_at).or_else(|| {
+            // For local keys the repo-level cache may have a timestamp even
+            // if the per-branch cache doesn't yet.
+            repo_key.as_deref().and_then(|key| {
+                repo_fetch_cache()
+                    .lock()
+                    .ok()
+                    .and_then(|cache| cache.get(key).map(|e| e.fetched_at))
+            })
+        });
         return RefreshOutcome {
             fetch: FetchGitState {
                 status: if fetched_at.is_some() {
@@ -221,25 +321,36 @@ where
         };
     }
 
-    let base_refspec = refspec_for(base_branch);
-    let branch_refspec = refspec_for(branch_name);
+    // Determine refspecs to actually send over the wire.
+    let fetch_refspecs: Vec<String> = to_fetch.unwrap_or_else(|| {
+        // Fallback for remote keys (no repo-level cache) — fetch all needed.
+        needed.iter().map(|s| s.to_string()).collect()
+    });
+
+    // Is this a narrow supplemental fetch (repo fresh, just filling in gaps)?
+    let is_narrow = repo_key.is_some() && fetch_refspecs.len() < needed.len();
+
     let mut upstream_known_missing = false;
 
-    // Fetch both refspecs in a single network call when they differ.
-    if branch_refspec != base_refspec {
-        match run_git(&[
-            "fetch",
-            "--prune",
-            "origin",
-            base_refspec.as_str(),
-            branch_refspec.as_str(),
-        ]) {
+    if fetch_refspecs.len() > 1 {
+        let refs: Vec<&str> = fetch_refspecs.iter().map(String::as_str).collect();
+        let mut args = vec!["fetch"];
+        if !is_narrow {
+            args.push("--prune");
+        }
+        args.push("origin");
+        args.extend(refs.iter());
+        match run_git(&args) {
             Err(error) if is_missing_remote_ref(&error) => {
                 // The branch refspec is missing on the remote. Re-fetch with
                 // just the base refspec so we still get base branch updates.
-                if let Err(base_err) =
-                    run_git(&["fetch", "--prune", "origin", base_refspec.as_str()])
-                {
+                let mut retry_args = vec!["fetch"];
+                if !is_narrow {
+                    retry_args.push("--prune");
+                }
+                retry_args.push("origin");
+                retry_args.push(base_refspec.as_str());
+                if let Err(base_err) = run_git(&retry_args) {
                     return RefreshOutcome {
                         fetch: FetchGitState {
                             status: FetchStatus::Failed,
@@ -263,17 +374,34 @@ where
             }
             Ok(_) => {}
         }
-    } else if let Err(error) = run_git(&["fetch", "--prune", "origin", base_refspec.as_str()]) {
-        return RefreshOutcome {
-            fetch: FetchGitState {
-                status: FetchStatus::Failed,
-                fetched_at: previous.map(|entry| entry.fetched_at),
-                error: Some(error.trim().to_string()),
-            },
-            upstream_known_missing: false,
-        };
+    } else {
+        let refspec = fetch_refspecs
+            .first()
+            .map(String::as_str)
+            .unwrap_or(base_refspec.as_str());
+        let mut args = vec!["fetch"];
+        if !is_narrow {
+            args.push("--prune");
+        }
+        args.push("origin");
+        args.push(refspec);
+        if let Err(error) = run_git(&args) {
+            if is_missing_remote_ref(&error) {
+                upstream_known_missing = true;
+            } else {
+                return RefreshOutcome {
+                    fetch: FetchGitState {
+                        status: FetchStatus::Failed,
+                        fetched_at: previous.map(|entry| entry.fetched_at),
+                        error: Some(error.trim().to_string()),
+                    },
+                    upstream_known_missing: false,
+                };
+            }
+        }
     }
 
+    // Update per-branch cache.
     if let Ok(mut cache) = fetch_cache().lock() {
         cache.insert(
             cache_key.to_string(),
@@ -282,6 +410,20 @@ where
                 upstream_known_missing,
             },
         );
+    }
+
+    // Update repo-level cache for local keys.
+    if let Some(ref rk) = repo_key {
+        if let Ok(mut cache) = repo_fetch_cache().lock() {
+            let entry = cache.entry(rk.clone()).or_insert_with(|| RepoFetchEntry {
+                fetched_at: now,
+                fetched_refspecs: HashSet::new(),
+            });
+            entry.fetched_at = now;
+            for rs in &needed {
+                entry.fetched_refspecs.insert(rs.to_string());
+            }
+        }
     }
 
     RefreshOutcome {
@@ -519,8 +661,34 @@ pub fn compute_local_branch_git_state(
 
 /// Check whether a fetch is needed for the given cache key and mode.
 /// Used by timeline to decide whether to use the two-stream path.
+///
+/// For local keys this consults the repo-level cache so the decision is
+/// consistent with `refresh_refs_if_needed` — if another branch on the same
+/// repo recently fetched, this returns `false`.
 pub fn needs_fetch(cache_key: &str, fetch_mode: FetchMode) -> bool {
     let now = now_ms();
+
+    // For local keys, check the repo-level cache first.
+    if let Some(repo_key) = repo_key_from_local_cache_key(cache_key) {
+        return match fetch_mode {
+            FetchMode::Never => false,
+            FetchMode::Force => true,
+            FetchMode::Ttl => {
+                let repo_fresh = repo_fetch_cache()
+                    .lock()
+                    .ok()
+                    .and_then(|cache| cache.get(&repo_key).cloned())
+                    .map(|entry| now.saturating_sub(entry.fetched_at) <= FETCH_TTL_MS)
+                    .unwrap_or(false);
+                // Even if the repo is fresh, we might still need a narrow
+                // fetch for uncovered refspecs — but that's fast enough that
+                // we don't need the two-stream split for it.
+                !repo_fresh
+            }
+        };
+    }
+
+    // Remote / non-local keys: fall back to per-branch cache.
     let previous = fetch_cache()
         .lock()
         .ok()

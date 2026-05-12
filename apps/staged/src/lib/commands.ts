@@ -4,7 +4,7 @@
  * One function per command. Each returns a typed promise.
  */
 
-import { invoke } from '@tauri-apps/api/core';
+import { invokeCommand, isTauri } from './transport';
 import type {
   Project,
   ProjectRepo,
@@ -42,17 +42,26 @@ export interface WorktreeChangesPreview {
 }
 
 // =============================================================================
+// Web access
+// =============================================================================
+
+/** Returns the bearer token for web server authentication (Tauri-only). */
+export function getWebAccessToken(): Promise<string> {
+  return invokeCommand('get_web_access_token');
+}
+
+// =============================================================================
 // Store status
 // =============================================================================
 
 /** Returns null if the store is ready, or version info if a reset is needed. */
 export function getStoreStatus(): Promise<StoreIncompatibility | null> {
-  return invoke('get_store_status');
+  return invokeCommand('get_store_status');
 }
 
 /** Delete the old database and create a fresh store. Called after user confirms. */
 export function confirmResetStore(): Promise<void> {
-  return invoke('confirm_reset_store');
+  return invokeCommand('confirm_reset_store');
 }
 
 // =============================================================================
@@ -60,7 +69,7 @@ export function confirmResetStore(): Promise<void> {
 // =============================================================================
 
 export function listProjects(): Promise<Project[]> {
-  return invoke('list_projects');
+  return invokeCommand('list_projects');
 }
 
 export function createProject(
@@ -73,7 +82,7 @@ export function createProject(
   defaultBranch?: string,
   headRepo?: string
 ): Promise<Project> {
-  return invoke('create_project', {
+  return invokeCommand('create_project', {
     name,
     location,
     githubRepo: githubRepo ?? null,
@@ -86,15 +95,15 @@ export function createProject(
 }
 
 export function deleteProject(id: string): Promise<void> {
-  return invoke('delete_project', { id });
+  return invokeCommand('delete_project', { id });
 }
 
 export function listProjectRepos(projectId: string): Promise<ProjectRepo[]> {
-  return invoke('list_project_repos', { projectId });
+  return invokeCommand('list_project_repos', { projectId });
 }
 
 export function listRecentRepos(limit?: number): Promise<RecentRepo[]> {
-  return invoke('list_recent_repos', { limit: limit ?? 10 });
+  return invokeCommand('list_recent_repos', { limit: limit ?? 10 });
 }
 
 export function addProjectRepo(
@@ -107,7 +116,7 @@ export function addProjectRepo(
   defaultBranch?: string,
   headRepo?: string
 ): Promise<ProjectRepo> {
-  return invoke('add_project_repo', {
+  return invokeCommand('add_project_repo', {
     projectId,
     githubRepo,
     branchName: branchName ?? null,
@@ -124,66 +133,66 @@ export function updateProjectRepoBranchName(
   projectRepoId: string,
   branchName: string
 ): Promise<void> {
-  return invoke('update_project_repo_branch_name', { projectId, projectRepoId, branchName });
+  return invokeCommand('update_project_repo_branch_name', { projectId, projectRepoId, branchName });
 }
 
 export function removeProjectRepo(projectId: string, projectRepoId: string): Promise<void> {
-  return invoke('remove_project_repo', { projectId, projectRepoId });
+  return invokeCommand('remove_project_repo', { projectId, projectRepoId });
 }
 
 export function setPrimaryProjectRepo(projectId: string, projectRepoId: string): Promise<void> {
-  return invoke('set_primary_project_repo', { projectId, projectRepoId });
+  return invokeCommand('set_primary_project_repo', { projectId, projectRepoId });
 }
 
 export function clearProjectRepoReason(projectRepoId: string): Promise<void> {
-  return invoke('clear_project_repo_reason', { projectRepoId });
+  return invokeCommand('clear_project_repo_reason', { projectRepoId });
 }
 
 export function getSuggestedRepos(projectId: string, limit?: number): Promise<SuggestedRepo[]> {
-  return invoke('get_suggested_repos', { projectId, limit: limit ?? null });
+  return invokeCommand('get_suggested_repos', { projectId, limit: limit ?? null });
 }
 
 /** List the authenticated user's GitHub organization memberships. */
 export function listGithubOrgs(): Promise<string[]> {
-  return invoke('list_github_orgs');
+  return invokeCommand('list_github_orgs');
 }
 
 /** List GitHub repositories for the authenticated user or a specific owner. */
 export function listGithubRepos(owner?: string): Promise<GitHubRepo[]> {
-  return invoke('list_github_repos', { owner: owner ?? null });
+  return invokeCommand('list_github_repos', { owner: owner ?? null });
 }
 
 /** List repositories the authenticated user has recently pushed to.
  *  Returns repos across all orgs, sorted by most recently pushed. */
 export function listUserRepos(limit?: number): Promise<GitHubRepo[]> {
-  return invoke('list_user_repos', { limit: limit ?? null });
+  return invokeCommand('list_user_repos', { limit: limit ?? null });
 }
 
 /** Fetch a single GitHub repository by owner/repo.
  *  Returns null if the repo doesn't exist or user lacks access. */
 export function getGithubRepo(owner: string, repo: string): Promise<GitHubRepo | null> {
-  return invoke('get_github_repo', { owner, repo });
+  return invokeCommand('get_github_repo', { owner, repo });
 }
 
 /** Search GitHub repositories for the authenticated user or a specific owner. */
 export function searchGithubRepos(query: string, owner?: string): Promise<GitHubRepo[]> {
-  return invoke('search_github_repos', { query, owner: owner ?? null });
+  return invokeCommand('search_github_repos', { query, owner: owner ?? null });
 }
 
 /** Check if a repository is likely a monorepo by counting modules in MODULES.yaml.
  *  Returns the module count (0 if file doesn't exist). */
 export function checkMonorepoModules(githubRepo: string): Promise<number> {
-  return invoke('check_monorepo_modules', { githubRepo });
+  return invokeCommand('check_monorepo_modules', { githubRepo });
 }
 
 /** Validate that a subpath exists as a directory in a GitHub repository. */
 export function validateSubpath(githubRepo: string, subpath: string): Promise<void> {
-  return invoke('validate_subpath', { githubRepo, subpath });
+  return invokeCommand('validate_subpath', { githubRepo, subpath });
 }
 
 /** List directories at a given path in a GitHub repository. */
 export function listRepoDirectories(githubRepo: string, path: string): Promise<string[]> {
-  return invoke('list_repo_directories', { githubRepo, path });
+  return invokeCommand('list_repo_directories', { githubRepo, path });
 }
 
 // =============================================================================
@@ -191,7 +200,7 @@ export function listRepoDirectories(githubRepo: string, path: string): Promise<s
 // =============================================================================
 
 export function listProjectNotes(projectId: string): Promise<import('./types').ProjectNote[]> {
-  return invoke('list_project_notes', { projectId });
+  return invokeCommand('list_project_notes', { projectId });
 }
 
 export function createProjectNote(
@@ -199,11 +208,11 @@ export function createProjectNote(
   title: string,
   content: string
 ): Promise<import('./types').ProjectNote> {
-  return invoke('create_project_note', { projectId, title, content });
+  return invokeCommand('create_project_note', { projectId, title, content });
 }
 
 export function deleteProjectNote(noteId: string): Promise<void> {
-  return invoke('delete_project_note', { noteId });
+  return invokeCommand('delete_project_note', { noteId });
 }
 
 export function startProjectSession(
@@ -212,7 +221,7 @@ export function startProjectSession(
   provider?: string,
   imageIds?: string[]
 ): Promise<import('./types').ProjectSessionResponse> {
-  return invoke('start_project_session', {
+  return invokeCommand('start_project_session', {
     projectId,
     prompt,
     provider: provider ?? null,
@@ -225,12 +234,12 @@ export function startProjectSession(
 // =============================================================================
 
 export function listBranchesForProject(projectId: string): Promise<Branch[]> {
-  return invoke('list_branches_for_project', { projectId });
+  return invokeCommand('list_branches_for_project', { projectId });
 }
 
 /** Get a single branch by ID. */
 export function getBranch(branchId: string): Promise<Branch | null> {
-  return invoke('get_branch', { branchId });
+  return invokeCommand('get_branch', { branchId });
 }
 
 /** Create a local branch record (DB only — no git worktree yet).
@@ -242,19 +251,19 @@ export function createBranch(
   baseBranch?: string,
   projectRepoId?: string
 ): Promise<Branch> {
-  return invoke('create_branch', { projectId, branchName, baseBranch, projectRepoId });
+  return invokeCommand('create_branch', { projectId, branchName, baseBranch, projectRepoId });
 }
 
 /** Create the git worktree for a local branch and record its workdir.
  *  Returns the updated branch with worktreePath populated. */
 export function setupWorktree(branchId: string): Promise<Branch> {
-  return invoke('setup_worktree', { branchId });
+  return invokeCommand('setup_worktree', { branchId });
 }
 
 /** Like setupWorktree, but also runs prerun actions after the worktree is ready.
  *  Used by the retry path so prerun actions aren't skipped on recovery. */
 export function setupWorktreeAndRunPrerun(branchId: string): Promise<Branch> {
-  return invoke('setup_worktree_and_run_prerun', { branchId });
+  return invokeCommand('setup_worktree_and_run_prerun', { branchId });
 }
 
 /** Import a GitHub PR: fetch its head ref, create a local branch + worktree,
@@ -267,7 +276,13 @@ export function setupWorktreeFromPr(
   baseRef: string,
   projectRepoId?: string
 ): Promise<Branch> {
-  return invoke('setup_worktree_from_pr', { projectId, prNumber, headRef, baseRef, projectRepoId });
+  return invokeCommand('setup_worktree_from_pr', {
+    projectId,
+    prNumber,
+    headRef,
+    baseRef,
+    projectRepoId,
+  });
 }
 
 /** Create a remote branch record (does not start the workspace). */
@@ -278,7 +293,7 @@ export function createRemoteBranch(
   baseBranch?: string,
   projectRepoId?: string
 ): Promise<Branch> {
-  return invoke('create_remote_branch', {
+  return invokeCommand('create_remote_branch', {
     projectId,
     branchName,
     baseBranch,
@@ -289,42 +304,42 @@ export function createRemoteBranch(
 
 /** Start the Blox workspace for a remote branch. */
 export function startWorkspace(branchId: string): Promise<void> {
-  return invoke('start_workspace', { branchId });
+  return invokeCommand('start_workspace', { branchId });
 }
 
 /** Resume a suspended Blox workspace. Returns IDs of all affected branches. */
 export function resumeWorkspace(workspaceName: string): Promise<string[]> {
-  return invoke('resume_workspace', { workspaceName });
+  return invokeCommand('resume_workspace', { workspaceName });
 }
 
 export function deleteBranch(branchId: string): Promise<void> {
-  return invoke('delete_branch', { branchId });
+  return invokeCommand('delete_branch', { branchId });
 }
 
 export function renameBranch(branchId: string, branchName: string): Promise<Branch> {
-  return invoke('rename_branch', { branchId, branchName });
+  return invokeCommand('rename_branch', { branchId, branchName });
 }
 
 /** Return the BLOX_ENV environment variable value, or null if unset. */
 export function getBloxEnv(): Promise<string | null> {
-  return invoke('get_blox_env');
+  return invokeCommand('get_blox_env');
 }
 
 /** Get info about a remote branch's Blox workspace. */
 export function getWorkspaceInfo(branchId: string): Promise<WorkspaceInfo> {
-  return invoke('get_workspace_info', { branchId });
+  return invokeCommand('get_workspace_info', { branchId });
 }
 
 /** Poll a remote branch's workspace status and return updated status + workstation ID. */
 export function pollWorkspaceStatus(branchId: string): Promise<PollWorkspaceResult> {
-  return invoke('poll_workspace_status', { branchId });
+  return invokeCommand('poll_workspace_status', { branchId });
 }
 
 /** Poll workspace statuses for multiple branches in a single `sq blox ws list` call. */
 export function pollAllWorkspaceStatuses(
   branchIds: string[]
 ): Promise<Record<string, PollWorkspaceResult>> {
-  return invoke('poll_all_workspace_statuses', { branchIds });
+  return invokeCommand('poll_all_workspace_statuses', { branchIds });
 }
 
 // =============================================================================
@@ -363,9 +378,7 @@ export function getBranchTimeline(
     }
   }
 
-  const request = invoke<BranchTimeline>('get_branch_timeline', {
-    branchId,
-  })
+  const request = invokeCommand<BranchTimeline>('get_branch_timeline', { branchId })
     .then((timeline) => {
       if (inFlightTimelines.get(branchId) === request) {
         timelineCache.set(branchId, { timeline, fetchedAt: Date.now() });
@@ -395,7 +408,7 @@ export function getBranchTimelineWithRevalidation(branchId: string): {
 }
 
 export function refreshBranchGitState(branchId: string): Promise<void> {
-  return invoke('refresh_branch_git_state', { branchId });
+  return invokeCommand('refresh_branch_git_state', { branchId });
 }
 
 export function invalidateProjectBranchTimelines(branchIds: string[]): void {
@@ -407,7 +420,7 @@ export function invalidateProjectBranchTimelines(branchIds: string[]): void {
 }
 
 export function pullBranchFastForward(branchId: string): Promise<void> {
-  return invoke('pull_branch_ff_only', { branchId });
+  return invokeCommand('pull_branch_ff_only', { branchId });
 }
 
 // =============================================================================
@@ -430,7 +443,7 @@ export function listProjectActions(
   projectId: string,
   projectRepoId?: string | null
 ): Promise<ProjectAction[]> {
-  return invoke('list_project_actions', { projectId, projectRepoId: projectRepoId ?? null });
+  return invokeCommand('list_project_actions', { projectId, projectRepoId: projectRepoId ?? null });
 }
 
 export function updateProjectAction(
@@ -441,7 +454,7 @@ export function updateProjectAction(
   sortOrder: number,
   autoCommit: boolean
 ): Promise<void> {
-  return invoke('update_project_action', {
+  return invokeCommand('update_project_action', {
     actionId,
     name,
     command,
@@ -452,7 +465,7 @@ export function updateProjectAction(
 }
 
 export function deleteProjectAction(actionId: string): Promise<void> {
-  return invoke('delete_project_action', { actionId });
+  return invokeCommand('delete_project_action', { actionId });
 }
 
 export interface ActionContext {
@@ -466,11 +479,11 @@ export interface ActionContext {
 }
 
 export function listActionContexts(): Promise<ActionContext[]> {
-  return invoke('list_action_contexts');
+  return invokeCommand('list_action_contexts');
 }
 
 export function listRepoActions(githubRepo: string, subpath?: string): Promise<ProjectAction[]> {
-  return invoke('list_repo_actions', { githubRepo, subpath: subpath ?? null });
+  return invokeCommand('list_repo_actions', { githubRepo, subpath: subpath ?? null });
 }
 
 export function createRepoAction(
@@ -482,7 +495,7 @@ export function createRepoAction(
   sortOrder: number,
   autoCommit: boolean
 ): Promise<ProjectAction> {
-  return invoke('create_repo_action', {
+  return invokeCommand('create_repo_action', {
     githubRepo,
     subpath: subpath ?? null,
     name,
@@ -494,11 +507,11 @@ export function createRepoAction(
 }
 
 export function deleteAllRepoActions(contextId: string): Promise<void> {
-  return invoke('delete_all_repo_actions', { contextId });
+  return invokeCommand('delete_all_repo_actions', { contextId });
 }
 
 export function deleteActionContext(contextId: string): Promise<void> {
-  return invoke('delete_action_context', { contextId });
+  return invokeCommand('delete_action_context', { contextId });
 }
 
 // =============================================================================
@@ -507,12 +520,22 @@ export function deleteActionContext(contextId: string): Promise<void> {
 
 /** Open a URL in the user's default browser. */
 export function openUrl(url: string): Promise<void> {
-  return invoke('open_url', { url });
+  if (!isTauri) {
+    const opened = window.open(url, '_blank');
+    if (!opened) {
+      window.location.assign(url);
+    } else {
+      opened.opener = null;
+    }
+    return Promise.resolve();
+  }
+
+  return invokeCommand('open_url', { url });
 }
 
 /** Read a text file from an absolute path (used for Tauri native drag-and-drop). */
 export function readTextFile(filePath: string): Promise<string> {
-  return invoke('read_text_file', { filePath });
+  return invokeCommand('read_text_file', { filePath });
 }
 
 /** Intercept link clicks so they open in the system browser, not the webview. */
@@ -537,7 +560,7 @@ export interface AcpProviderInfo {
 
 /** Scan the system for installed ACP-compatible agents. */
 export function discoverAcpProviders(): Promise<AcpProviderInfo[]> {
-  return invoke('discover_acp_providers');
+  return invokeCommand('discover_acp_providers');
 }
 
 // =============================================================================
@@ -545,18 +568,18 @@ export function discoverAcpProviders(): Promise<AcpProviderInfo[]> {
 // =============================================================================
 
 export function getSession(sessionId: string): Promise<Session | null> {
-  return invoke('get_session', { sessionId });
+  return invokeCommand('get_session', { sessionId });
 }
 
 export function getSessionMessages(sessionId: string): Promise<SessionMessage[]> {
-  return invoke('get_session_messages', { sessionId });
+  return invokeCommand('get_session_messages', { sessionId });
 }
 
 export function getSessionMessagesSince(
   sessionId: string,
   sinceId: number
 ): Promise<SessionMessage[]> {
-  return invoke('get_session_messages_since', { sessionId, sinceId });
+  return invokeCommand('get_session_messages_since', { sessionId, sinceId });
 }
 
 /** Create a session and immediately start the agent. */
@@ -565,7 +588,7 @@ export function startSession(
   workingDir: string,
   provider?: string
 ): Promise<Session> {
-  return invoke('start_session', { prompt, workingDir, provider: provider ?? null });
+  return invokeCommand('start_session', { prompt, workingDir, provider: provider ?? null });
 }
 
 /** Send a follow-up message to an existing session.
@@ -576,7 +599,7 @@ export function resumeSession(
   imageIds?: string[],
   branchId?: string | null
 ): Promise<void> {
-  return invoke('resume_session', {
+  return invokeCommand('resume_session', {
     sessionId,
     prompt,
     imageIds: imageIds ?? null,
@@ -585,11 +608,11 @@ export function resumeSession(
 }
 
 export function cancelSession(sessionId: string): Promise<void> {
-  return invoke('cancel_session', { sessionId });
+  return invokeCommand('cancel_session', { sessionId });
 }
 
 export function deleteSession(sessionId: string): Promise<void> {
-  return invoke('delete_session', { sessionId });
+  return invokeCommand('delete_session', { sessionId });
 }
 
 /** Start a branch-scoped session (note or commit). */
@@ -601,7 +624,7 @@ export function startBranchSession(
   imageIds?: string[],
   launchContext?: BranchSessionLaunchContext
 ): Promise<BranchSessionResponse> {
-  return invoke('start_branch_session', {
+  return invokeCommand('start_branch_session', {
     branchId,
     prompt,
     sessionType,
@@ -620,7 +643,7 @@ export function queueBranchSession(
   imageIds?: string[],
   launchContext?: BranchSessionLaunchContext
 ): Promise<BranchSessionResponse> {
-  return invoke('queue_branch_session', {
+  return invokeCommand('queue_branch_session', {
     branchId,
     prompt,
     sessionType,
@@ -633,7 +656,7 @@ export function queueBranchSession(
 /** Drain queued sessions for a branch — starts the next queued session if any.
  *  Returns true if a session was started, false if the queue was empty. */
 export function drainQueuedSessions(branchId: string): Promise<boolean> {
-  return invoke('drain_queued_sessions', {
+  return invokeCommand('drain_queued_sessions', {
     branchId,
     provider: null,
   });
@@ -649,12 +672,12 @@ export function createNote(
   title: string,
   content: string
 ): Promise<{ id: string; title: string; content: string; createdAt: number; updatedAt: number }> {
-  return invoke('create_note', { branchId, title, content });
+  return invokeCommand('create_note', { branchId, title, content });
 }
 
 /** Delete a note and optionally its linked session. */
 export function deleteNote(noteId: string, deleteSession = true): Promise<void> {
-  return invoke('delete_note', { noteId, deleteSession });
+  return invokeCommand('delete_note', { noteId, deleteSession });
 }
 
 /** Delete a commit (git reset --hard to parent) and optionally its session.
@@ -664,17 +687,17 @@ export function deleteCommit(
   commitSha: string,
   deleteSession = true
 ): Promise<void> {
-  return invoke('delete_commit', { branchId, commitSha, deleteSession });
+  return invokeCommand('delete_commit', { branchId, commitSha, deleteSession });
 }
 
 /** Delete a pending commit (no SHA) by its DB id, optionally its session. */
 export function deletePendingCommit(commitId: string, deleteSession = true): Promise<void> {
-  return invoke('delete_pending_commit', { commitId, deleteSession });
+  return invokeCommand('delete_pending_commit', { commitId, deleteSession });
 }
 
 /** Preview the exact worktree paths that would be reverted or removed. */
 export function getWorktreeChangesPreview(branchId: string): Promise<WorktreeChangesPreview> {
-  return invoke('get_worktree_changes_preview', { branchId });
+  return invokeCommand('get_worktree_changes_preview', { branchId });
 }
 
 /** Discard all uncommitted worktree changes after backend safety checks. */
@@ -682,12 +705,12 @@ export function discardWorktreeChanges(
   branchId: string,
   expectedPreview?: WorktreeChangesPreview
 ): Promise<void> {
-  return invoke('discard_worktree_changes', { branchId, expectedPreview });
+  return invokeCommand('discard_worktree_changes', { branchId, expectedPreview });
 }
 
 /** Delete a review and all its comments, optionally its linked session. */
 export function deleteReview(reviewId: string, deleteSession = true): Promise<void> {
-  return invoke('delete_review', { reviewId, deleteSession });
+  return invokeCommand('delete_review', { reviewId, deleteSession });
 }
 
 // =============================================================================
@@ -708,7 +731,7 @@ export function getDiffFiles(
   commitSha?: string,
   scope: DiffScope = 'branch'
 ): Promise<DiffFilesResponse> {
-  return invoke('get_diff_files', { branchId, commitSha, scope });
+  return invokeCommand('get_diff_files', { branchId, commitSha, scope });
 }
 
 /** Get the full diff content for a single file. */
@@ -718,12 +741,12 @@ export function getFileDiff(
   scope: DiffScope,
   path: string
 ): Promise<FileDiff> {
-  return invoke('get_file_diff', { branchId, commitSha, scope, path });
+  return invokeCommand('get_file_diff', { branchId, commitSha, scope, path });
 }
 
 /** Get file content at a specific ref (for reference files). */
 export function getFileAtRef(branchId: string, refName: string, path: string): Promise<File> {
-  return invoke('get_file_at_ref', { branchId, refName, path });
+  return invokeCommand('get_file_at_ref', { branchId, refName, path });
 }
 
 // =============================================================================
@@ -739,7 +762,7 @@ export function ensureReview(
   commitSha: string,
   scope: 'branch' | 'commit'
 ): Promise<Review> {
-  return invoke('ensure_review', { branchId, commitSha, scope });
+  return invokeCommand('ensure_review', { branchId, commitSha, scope });
 }
 
 /** Find an existing review by (branch, commit, scope) without creating one. */
@@ -748,22 +771,22 @@ export function findReview(
   commitSha: string,
   scope: 'branch' | 'commit'
 ): Promise<Review | null> {
-  return invoke('find_review', { branchId, commitSha, scope });
+  return invokeCommand('find_review', { branchId, commitSha, scope });
 }
 
 /** Get a review by ID with all child data. */
 export function getReview(reviewId: string): Promise<Review | null> {
-  return invoke('get_review', { reviewId });
+  return invokeCommand('get_review', { reviewId });
 }
 
 /** Mark a file as reviewed. */
 export function markReviewed(reviewId: string, path: string): Promise<void> {
-  return invoke('mark_reviewed', { reviewId, path });
+  return invokeCommand('mark_reviewed', { reviewId, path });
 }
 
 /** Unmark a file as reviewed. */
 export function unmarkReviewed(reviewId: string, path: string): Promise<void> {
-  return invoke('unmark_reviewed', { reviewId, path });
+  return invokeCommand('unmark_reviewed', { reviewId, path });
 }
 
 /** Add a comment to a review. */
@@ -774,42 +797,42 @@ export function addComment(
   spanEnd: number,
   content: string
 ): Promise<Comment> {
-  return invoke('add_comment', { reviewId, path, spanStart, spanEnd, content });
+  return invokeCommand('add_comment', { reviewId, path, spanStart, spanEnd, content });
 }
 
 /** Update a comment's content. */
 export function updateComment(commentId: string, content: string): Promise<void> {
-  return invoke('update_comment', { commentId, content });
+  return invokeCommand('update_comment', { commentId, content });
 }
 
 /** Delete a comment (soft delete). */
 export function deleteComment(commentId: string): Promise<void> {
-  return invoke('delete_comment', { commentId });
+  return invokeCommand('delete_comment', { commentId });
 }
 
 /** Soft-delete all active comments for a review in one atomic operation. */
 export function deleteAllComments(reviewId: string): Promise<void> {
-  return invoke('delete_all_comments', { reviewId });
+  return invokeCommand('delete_all_comments', { reviewId });
 }
 
 /** Restore a soft-deleted comment. */
 export function restoreComment(commentId: string): Promise<void> {
-  return invoke('restore_comment', { commentId });
+  return invokeCommand('restore_comment', { commentId });
 }
 
 /** Get soft-deleted comments for a review. */
 export function getDeletedComments(reviewId: string): Promise<Comment[]> {
-  return invoke('get_deleted_comments', { reviewId });
+  return invokeCommand('get_deleted_comments', { reviewId });
 }
 
 /** Add a reference file to a review. */
 export function addReferenceFile(reviewId: string, path: string): Promise<void> {
-  return invoke('add_reference_file', { reviewId, path });
+  return invokeCommand('add_reference_file', { reviewId, path });
 }
 
 /** Remove a reference file from a review. */
 export function removeReferenceFile(reviewId: string, path: string): Promise<void> {
-  return invoke('remove_reference_file', { reviewId, path });
+  return invokeCommand('remove_reference_file', { reviewId, path });
 }
 
 // =============================================================================
@@ -818,12 +841,12 @@ export function removeReferenceFile(reviewId: string, path: string): Promise<voi
 
 /** Find an auto review created after all commits on a branch. */
 export function findFreshAutoReview(branchId: string): Promise<Review | null> {
-  return invoke('find_fresh_auto_review', { branchId });
+  return invokeCommand('find_fresh_auto_review', { branchId });
 }
 
 /** Mark or unmark a review as auto-generated. */
 export function setReviewAuto(reviewId: string, isAuto: boolean): Promise<void> {
-  return invoke('set_review_auto', { reviewId, isAuto });
+  return invokeCommand('set_review_auto', { reviewId, isAuto });
 }
 
 // =============================================================================
@@ -832,37 +855,37 @@ export function setReviewAuto(reviewId: string, isAuto: boolean): Promise<void> 
 
 /** Check whether the `sq` CLI is available on this system. */
 export function isSqAvailable(): Promise<boolean> {
-  return invoke('is_sq_available');
+  return invokeCommand('is_sq_available');
 }
 
 /** Check whether the user is authenticated with Blox.
  *  Resolves if authenticated, rejects with an error message if not. */
 export function checkBloxAuth(): Promise<void> {
-  return invoke('check_blox_auth');
+  return invokeCommand('check_blox_auth');
 }
 
 export function listGitBranches(githubRepo: string): Promise<BranchRef[]> {
-  return invoke('list_git_branches', { githubRepo });
+  return invokeCommand('list_git_branches', { githubRepo });
 }
 
 export function detectDefaultBranch(githubRepo: string): Promise<string> {
-  return invoke('detect_default_branch_cmd', { githubRepo });
+  return invokeCommand('detect_default_branch_cmd', { githubRepo });
 }
 
 /** Prune stale remote-tracking refs in the background.
  *  With GitHub-repo-based projects, this is a no-op. */
 export function pruneRemoteRefs(githubRepo: string): Promise<void> {
-  return invoke('prune_remote_refs', { githubRepo });
+  return invokeCommand('prune_remote_refs', { githubRepo });
 }
 
 /** Check whether a branch already exists locally for this project. */
 export function checkExistingLocalBranch(projectId: string, branchName: string): Promise<boolean> {
-  return invoke('check_existing_local_branch', { projectId, branchName });
+  return invokeCommand('check_existing_local_branch', { projectId, branchName });
 }
 
 /** Fetch a single PR by number. Throws if not found. */
 export function getPrForRepo(githubRepo: string, prNumber: number): Promise<PullRequest> {
-  return invoke('get_pr_for_repo', { githubRepo, prNumber });
+  return invokeCommand('get_pr_for_repo', { githubRepo, prNumber });
 }
 
 /** Find the open PR (if any) whose head branch matches `branchName`. */
@@ -870,20 +893,20 @@ export function getPrForBranch(
   githubRepo: string,
   branchName: string
 ): Promise<PullRequest | null> {
-  return invoke('get_pr_for_branch', { githubRepo, branchName });
+  return invokeCommand('get_pr_for_branch', { githubRepo, branchName });
 }
 
 export function listPullRequests(githubRepo: string): Promise<PullRequest[]> {
-  return invoke('list_pull_requests', { githubRepo });
+  return invokeCommand('list_pull_requests', { githubRepo });
 }
 
 /** If the repo is a fork, return the parent repo slug (e.g. `"base-owner/repo"`). */
 export function getParentRepo(githubRepo: string): Promise<string | null> {
-  return invoke('get_parent_repo', { githubRepo });
+  return invokeCommand('get_parent_repo', { githubRepo });
 }
 
 export function listIssues(githubRepo: string): Promise<Issue[]> {
-  return invoke('list_issues', { githubRepo });
+  return invokeCommand('list_issues', { githubRepo });
 }
 
 // =============================================================================
@@ -894,35 +917,35 @@ export function listIssues(githubRepo: string): Promise<Issue[]> {
  *  Returns the session ID so the frontend can track progress.
  *  When `draft` is true the PR is created with `--draft`. */
 export function createPr(branchId: string, provider?: string, draft?: boolean): Promise<string> {
-  return invoke('create_pr', { branchId, provider: provider ?? null, draft: draft ?? null });
+  return invokeCommand('create_pr', { branchId, provider: provider ?? null, draft: draft ?? null });
 }
 
 /** Build the GitHub PR URL from the repo's origin remote and a PR number. */
 export function getPrUrl(branchId: string, prNumber: number): Promise<string> {
-  return invoke('get_pr_url', { branchId, prNumber });
+  return invokeCommand('get_pr_url', { branchId, prNumber });
 }
 
 /** Update the PR number stored for a branch. */
 export function updateBranchPr(branchId: string, prNumber: number | null): Promise<void> {
-  return invoke('update_branch_pr', { branchId, prNumber });
+  return invokeCommand('update_branch_pr', { branchId, prNumber });
 }
 
 /** Look up an existing open PR for a branch on GitHub and persist it.
  *  Returns the recovered PR number, or null if no PR exists. */
 export function recoverBranchPr(branchId: string): Promise<number | null> {
-  return invoke('recover_branch_pr', { branchId });
+  return invokeCommand('recover_branch_pr', { branchId });
 }
 
 /** Check whether a branch has local commits not yet pushed to the remote. */
 export function hasUnpushedCommits(branchId: string): Promise<boolean> {
-  return invoke('has_unpushed_commits', { branchId });
+  return invokeCommand('has_unpushed_commits', { branchId });
 }
 
 /** Push a branch to its remote via an agent session.
  *  The agent runs git push and can fix pre-push hook failures.
  *  Returns the session ID so the frontend can track progress. */
 export function pushBranch(branchId: string, provider?: string, force?: boolean): Promise<string> {
-  return invoke('push_branch', {
+  return invokeCommand('push_branch', {
     branchId,
     provider: provider ?? null,
     force: force ?? null,
@@ -935,7 +958,7 @@ export function postCommentToGithub(
   prNumber: number,
   comment: Comment
 ): Promise<GitHubCommentResult> {
-  return invoke('post_comment_to_github', { branchId, prNumber, comment });
+  return invokeCommand('post_comment_to_github', { branchId, prNumber, comment });
 }
 
 export interface GitHubCommentResult {
@@ -953,7 +976,7 @@ export function rebaseBranch(
   provider?: string,
   target?: 'base' | 'origin'
 ): Promise<string> {
-  return invoke('rebase_branch', {
+  return invokeCommand('rebase_branch', {
     branchId,
     provider: provider ?? null,
     target: target ?? null,
@@ -964,7 +987,7 @@ export function rebaseBranch(
  *  Uses git reset --soft then hands off to AI to write the commit message.
  *  Returns the session ID so the frontend can track progress. */
 export function squashCommits(branchId: string, provider?: string): Promise<string> {
-  return invoke('squash_commits', {
+  return invokeCommand('squash_commits', {
     branchId,
     provider: provider ?? null,
   });
@@ -993,12 +1016,12 @@ export interface DoctorReport {
 
 /** Run all system health checks. */
 export function runDoctor(): Promise<DoctorReport> {
-  return invoke('run_doctor');
+  return invokeCommand('run_doctor');
 }
 
 /** Run a fix for a doctor check, identified by check ID and fix type. */
 export function runDoctorFix(checkId: string, fixType: 'command' | 'bridge'): Promise<void> {
-  return invoke('run_doctor_fix', { checkId, fixType });
+  return invokeCommand('run_doctor_fix', { checkId, fixType });
 }
 
 // =============================================================================
@@ -1008,17 +1031,17 @@ export function runDoctorFix(checkId: string, fixType: 'command' | 'bridge'): Pr
 /** Clear stale PR status fields for a branch (e.g. after a push invalidates them).
  *  Emits 'pr-status-cleared' event so the UI drops stale indicators immediately. */
 export function clearBranchPrStatus(branchId: string): Promise<void> {
-  return invoke('clear_branch_pr_status', { branchId });
+  return invokeCommand('clear_branch_pr_status', { branchId });
 }
 
 /** Refresh PR status for a specific branch. Emits 'pr-status-changed' event. */
 export function refreshPrStatus(branchId: string): Promise<void> {
-  return invoke('refresh_pr_status', { branchId });
+  return invokeCommand('refresh_pr_status', { branchId });
 }
 
 /** Refresh PR status for all branches with PRs. */
 export function refreshAllPrStatuses(projectId: string): Promise<void> {
-  return invoke('refresh_all_pr_statuses', { projectId });
+  return invokeCommand('refresh_all_pr_statuses', { projectId });
 }
 
 // =============================================================================
@@ -1032,27 +1055,33 @@ export function createImage(
   filePath: string,
   pending?: boolean
 ): Promise<Image> {
-  return invoke('create_image', { branchId, projectId, filePath, pending });
+  if (!isTauri) {
+    return Promise.reject(
+      new Error('create_image is only available for desktop file paths; use createImageFromData')
+    );
+  }
+
+  return invokeCommand('create_image', { branchId, projectId, filePath, pending });
 }
 
 /** Get the filesystem path for a stored image. */
 export function getImagePath(imageId: string): Promise<string> {
-  return invoke('get_image_path', { imageId });
+  return invokeCommand('get_image_path', { imageId });
 }
 
 /** Delete an image record and its stored file. */
 export function deleteImage(imageId: string): Promise<void> {
-  return invoke('delete_image', { imageId });
+  return invokeCommand('delete_image', { imageId });
 }
 
 /** List all images for a branch. */
 export function listBranchImages(branchId: string): Promise<Image[]> {
-  return invoke('list_branch_images', { branchId });
+  return invokeCommand('list_branch_images', { branchId });
 }
 
 /** Get the base64-encoded data URL for an image. */
 export function getImageData(imageId: string): Promise<string> {
-  return invoke('get_image_data', { imageId });
+  return invokeCommand('get_image_data', { imageId });
 }
 
 /** Create an image from base64-encoded data (browser file input / clipboard paste). */
@@ -1064,7 +1093,7 @@ export function createImageFromData(
   data: string,
   pending?: boolean
 ): Promise<Image> {
-  return invoke('create_image_from_data', {
+  return invokeCommand('create_image_from_data', {
     branchId,
     projectId,
     filename,
@@ -1080,7 +1109,7 @@ export function createImageFromData(
 
 /** Fetch all repo badges from the store. */
 export function getAllRepoBadges(): Promise<import('./types').RepoBadge[]> {
-  return invoke('get_all_repo_badges');
+  return invokeCommand('get_all_repo_badges');
 }
 
 /** Ensure badges exist for the given (githubRepo, subpath) pairs.
@@ -1088,7 +1117,7 @@ export function getAllRepoBadges(): Promise<import('./types').RepoBadge[]> {
 export function ensureRepoBadges(
   repos: [string, string][]
 ): Promise<import('./types').RepoBadge[]> {
-  return invoke('ensure_repo_badges', { repos });
+  return invokeCommand('ensure_repo_badges', { repos });
 }
 
 /** Update the short name and hue of an existing repo badge. */
@@ -1098,9 +1127,9 @@ export function updateRepoBadge(
   shortName: string,
   hue: number
 ): Promise<import('./types').RepoBadge> {
-  return invoke('update_repo_badge', { githubRepo, subpath, shortName, hue });
+  return invokeCommand('update_repo_badge', { githubRepo, subpath, shortName, hue });
 }
 
 export function deleteRepoBadge(githubRepo: string, subpath: string): Promise<void> {
-  return invoke('delete_repo_badge', { githubRepo, subpath });
+  return invokeCommand('delete_repo_badge', { githubRepo, subpath });
 }

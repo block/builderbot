@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use builderbot_actions::{ExecutionEvent, ExecutionListener};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 
 use super::registry::{ActionRegistry, RunPhase};
 
@@ -83,7 +83,8 @@ impl ExecutionListener for TauriExecutionListener {
                 );
 
                 // We emit running status immediately
-                let _ = self.app.emit(
+                crate::web_server::emit_to_all(
+                    &self.app,
                     "action_status",
                     ActionStatusEvent {
                         execution_id: execution_id.clone(),
@@ -109,7 +110,8 @@ impl ExecutionListener for TauriExecutionListener {
                 // receives the original chunk for live display.
                 self.registry.append_output_chunk(&execution_id, &chunk);
 
-                let _ = self.app.emit(
+                crate::web_server::emit_to_all(
+                    &self.app,
                     "action_output",
                     ActionOutputEvent {
                         execution_id,
@@ -137,7 +139,8 @@ impl ExecutionListener for TauriExecutionListener {
                     self.registry.unregister(&execution_id);
                 }
 
-                let _ = self.app.emit(
+                crate::web_server::emit_to_all(
+                    &self.app,
                     "action_status",
                     ActionStatusEvent {
                         execution_id,
@@ -156,7 +159,8 @@ impl ExecutionListener for TauriExecutionListener {
                 execution_id,
                 action_name,
             } => {
-                let _ = self.app.emit(
+                crate::web_server::emit_to_all(
+                    &self.app,
                     "action_auto_commit",
                     serde_json::json!({
                         "executionId": execution_id,
@@ -185,5 +189,5 @@ pub struct RunPhaseChangedEvent {
 
 /// Emit an `action:run-phase-changed` event to the frontend.
 pub fn emit_run_phase_changed(app_handle: &AppHandle, event: RunPhaseChangedEvent) {
-    let _ = app_handle.emit("action:run-phase-changed", event);
+    crate::web_server::emit_to_all(app_handle, "action:run-phase-changed", event);
 }

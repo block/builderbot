@@ -11,7 +11,8 @@
  * multiple branch cards were rendered.
  */
 
-import type { UnlistenFn } from '@tauri-apps/api/event';
+import type { UnlistenFn } from '../../transport';
+import { isTauri } from '../../transport';
 
 export type DragDropSubscription = {
   /** The card's root DOM element, used for hit-testing. */
@@ -98,6 +99,12 @@ function handleEvent(type: string, x: number, y: number, paths?: string[]) {
 
 function ensureGlobalListener(): Promise<void> {
   if (initPromise) return initPromise;
+
+  if (!isTauri) {
+    // Native drag-drop is a Tauri-only feature; no-op in web mode
+    initPromise = Promise.resolve();
+    return initPromise;
+  }
 
   initPromise = import('@tauri-apps/api/webview').then(({ getCurrentWebview }) => {
     return getCurrentWebview()

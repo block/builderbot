@@ -6,7 +6,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { fade } from 'svelte/transition';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { listenToEvent, type UnlistenFn } from '../../transport';
   import {
     Cloud,
     GitPullRequest,
@@ -293,8 +293,7 @@
 
     // Listen for PR status changes to update branch state
     let unlistenPrStatus: UnlistenFn | undefined;
-    listen<PrStatusChangedEvent>('pr-status-changed', (event) => {
-      const payload = event.payload;
+    listenToEvent<PrStatusChangedEvent>('pr-status-changed', (payload) => {
       // Find the project that contains this branch
       for (const [projectId, branches] of projectBranches.entries()) {
         const branchIndex = branches.findIndex((b) => b.id === payload.branchId);

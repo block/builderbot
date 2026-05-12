@@ -16,7 +16,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import { minuteNow, secondNow } from '../../shared/relativeTime.svelte';
-  import { listen } from '@tauri-apps/api/event';
+  import { listenToEvent } from '../../transport';
   import type {
     Branch,
     BranchTimeline as BranchTimelineData,
@@ -158,29 +158,31 @@
   $effect(() => {
     const branchId = branch.id;
 
-    const unlistenStatusPromise = listen<PrStatusChangedEvent>('pr-status-changed', (event) => {
-      const payload = event.payload;
-      if (payload.branchId === branchId) {
-        prStatusState = payload.prState;
-        prStatusChecks = payload.prChecksStatus;
-        prStatusReviewDecision = payload.prReviewDecision;
-        prStatusMergeable = payload.prMergeable;
-        prStatusDraft = payload.prDraft;
-        prHeadSha = payload.prHeadSha;
-        prFetchedAt = payload.prFetchedAt;
-        failedChecks = payload.failedChecks ?? [];
-        prStatusCleared = false;
-        // Update the polling service with the new checks status
-        prPollingService.updateChecksStatus(
-          branchId,
-          branch.projectId,
-          payload.prChecksStatus === 'PENDING'
-        );
+    const unlistenStatusPromise = listenToEvent<PrStatusChangedEvent>(
+      'pr-status-changed',
+      (payload) => {
+        if (payload.branchId === branchId) {
+          prStatusState = payload.prState;
+          prStatusChecks = payload.prChecksStatus;
+          prStatusReviewDecision = payload.prReviewDecision;
+          prStatusMergeable = payload.prMergeable;
+          prStatusDraft = payload.prDraft;
+          prHeadSha = payload.prHeadSha;
+          prFetchedAt = payload.prFetchedAt;
+          failedChecks = payload.failedChecks ?? [];
+          prStatusCleared = false;
+          // Update the polling service with the new checks status
+          prPollingService.updateChecksStatus(
+            branchId,
+            branch.projectId,
+            payload.prChecksStatus === 'PENDING'
+          );
+        }
       }
-    });
+    );
 
-    const unlistenClearedPromise = listen<string>('pr-status-cleared', (event) => {
-      if (event.payload === branchId) {
+    const unlistenClearedPromise = listenToEvent<string>('pr-status-cleared', (clearedBranchId) => {
+      if (clearedBranchId === branchId) {
         prStatusState = null;
         prStatusChecks = null;
         prStatusReviewDecision = null;

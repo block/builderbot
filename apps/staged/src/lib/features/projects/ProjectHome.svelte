@@ -6,8 +6,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { getWindowSync, listenToEvent, type UnlistenFn } from '../../transport';
   import type {
     Project,
     ProjectRepo,
@@ -129,8 +128,7 @@
     // after repo creation, after worktree setup, and after prerun actions.
     // We only refresh display state here — setup itself is owned by the backend.
     let unlistenProjectRepoAdded: UnlistenFn | undefined;
-    listen<string>('project-setup-progress', async (event) => {
-      const projectId = event.payload;
+    listenToEvent<string>('project-setup-progress', async (projectId) => {
       console.log('[ProjectHome] project-setup-progress event for project', projectId);
       try {
         const [projectsList, branches, repos] = await Promise.all([
@@ -160,8 +158,7 @@
 
     // Listen for PR status changes to update branch state
     let unlistenPrStatus: UnlistenFn | undefined;
-    listen<PrStatusChangedEvent>('pr-status-changed', (event) => {
-      const payload = event.payload;
+    listenToEvent<PrStatusChangedEvent>('pr-status-changed', (payload) => {
       // Find the project that contains this branch and update it
       for (const [projectId, branches] of branchesByProject.entries()) {
         const branchIndex = branches.findIndex((b) => b.id === payload.branchId);
@@ -226,7 +223,7 @@
   }
 
   function handleClose() {
-    getCurrentWindow().close();
+    getWindowSync().close();
   }
 
   async function loadData() {

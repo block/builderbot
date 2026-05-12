@@ -188,6 +188,21 @@ pub fn create_image_from_data(
     data: String,
     pending: Option<bool>,
 ) -> Result<crate::store::Image, String> {
+    let store = crate::get_store(&store)?;
+    create_image_from_data_impl(
+        store, branch_id, project_id, filename, mime_type, data, pending,
+    )
+}
+
+pub(crate) fn create_image_from_data_impl(
+    store: Arc<Store>,
+    branch_id: Option<String>,
+    project_id: String,
+    filename: String,
+    mime_type: String,
+    data: String,
+    pending: Option<bool>,
+) -> Result<crate::store::Image, String> {
     use base64::Engine;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&data)
@@ -212,7 +227,6 @@ pub fn create_image_from_data(
         return Err(format!("Unsupported image format: .{ext}"));
     }
 
-    let store = crate::get_store(&store)?;
     const ALLOWED_MIME_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
     let mime = if mime_type.is_empty() {
         mime_type_for_extension(&ext).to_string()

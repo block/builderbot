@@ -7,9 +7,9 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy, untrack } from 'svelte';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import { Bot, Check, X, Circle, Minus } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
+  import { listenToEvent, type UnlistenFn } from '../../transport';
   import type { PipelineExecution, PipelineStepStatus, PipelineStepPayload } from '../../types';
   import { formatPipelineStepDuration } from './pipelineDuration';
 
@@ -62,9 +62,9 @@
   let unlisten: UnlistenFn | null = null;
 
   onMount(async () => {
-    unlisten = await listen<PipelineStepPayload>('pipeline-step-changed', (event) => {
-      if (event.payload.sessionId !== sessionId) return;
-      const { stepIndex, status, output, error, startedAt, completedAt } = event.payload;
+    unlisten = await listenToEvent<PipelineStepPayload>('pipeline-step-changed', (payload) => {
+      if (payload.sessionId !== sessionId) return;
+      const { stepIndex, status, output, error, startedAt, completedAt } = payload;
       if (stepIndex < steps.length) {
         steps[stepIndex] = {
           ...steps[stepIndex],

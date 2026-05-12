@@ -25,6 +25,7 @@ pub mod store;
 pub(crate) mod terminal_output;
 pub mod timeline;
 pub mod util_commands;
+pub mod web_server;
 
 #[cfg(test)]
 pub mod test_utils;
@@ -49,6 +50,10 @@ struct DbState {
     db_path: PathBuf,
     needs_reset: Mutex<Option<StoreIncompatibility>>,
 }
+
+/// Holds the bearer token for web server authentication so it can be
+/// retrieved by the frontend (Tauri command) and shown to the user.
+struct WebAccessToken(String);
 
 #[derive(Default)]
 struct ShutdownState {
@@ -214,7 +219,8 @@ fn emit_setup_progress(
     phase: &str,
     detail: Option<String>,
 ) {
-    let _ = handle.emit(
+    web_server::emit_to_all(
+        handle,
         "worktree-setup-progress",
         branches::WorktreeSetupProgress {
             branch_id: branch_id.to_string(),
@@ -250,6 +256,12 @@ fn stop_actions_for_app_shutdown(app_handle: &tauri::AppHandle) {
 // =============================================================================
 // Store status commands
 // =============================================================================
+
+/// Returns the bearer token used to authenticate web browser clients.
+#[tauri::command]
+fn get_web_access_token(token: tauri::State<'_, WebAccessToken>) -> String {
+    token.0.clone()
+}
 
 /// Returns null if the store is ready, or version info if a reset is needed.
 #[tauri::command]
@@ -470,7 +482,7 @@ fn create_project(
             let project_id = project.id.clone();
             let store_bg = Arc::clone(&store);
             tauri::async_runtime::spawn(async move {
-                let _ = app_handle.emit("project-setup-progress", project_id.clone());
+                web_server::emit_to_all(&app_handle, "project-setup-progress", project_id.clone());
 
                 let store_clone = Arc::clone(&store_bg);
                 let branch_id_clone = branch_id.clone();
@@ -487,7 +499,11 @@ fn create_project(
                 let worktree_path = match worktree_result {
                     Ok(Ok(path)) => {
                         log::info!("[create_project] worktree ready at {path}");
-                        let _ = app_handle.emit("project-setup-progress", project_id.clone());
+                        web_server::emit_to_all(
+                            &app_handle,
+                            "project-setup-progress",
+                            project_id.clone(),
+                        );
                         path
                     }
                     Ok(Err(e)) => {
@@ -518,7 +534,11 @@ fn create_project(
                         {
                             Ok(count) => {
                                 log::info!("[create_project] ran {count} prerun actions");
-                                let _ = app_handle.emit("project-setup-progress", project_id);
+                                web_server::emit_to_all(
+                                    &app_handle,
+                                    "project-setup-progress",
+                                    project_id,
+                                );
                             }
                             Err(e) => {
                                 log::warn!("[create_project] prerun actions failed: {e}");
@@ -634,7 +654,7 @@ async fn add_project_repo(
     tauri::async_runtime::spawn({
         let repo_id = repo.id.clone();
         async move {
-            let _ = app_handle.emit("project-setup-progress", project_id.clone());
+            web_server::emit_to_all(&app_handle, "project-setup-progress", project_id.clone());
 
             let branch = match store.list_branches_for_project(&project_id) {
                 Ok(branches) => branches
@@ -666,7 +686,11 @@ async fn add_project_repo(
                 let worktree_path = match worktree_result {
                     Ok(Ok(path)) => {
                         log::info!("[add_project_repo] worktree ready at {path}");
-                        let _ = app_handle.emit("project-setup-progress", project_id.clone());
+                        web_server::emit_to_all(
+                            &app_handle,
+                            "project-setup-progress",
+                            project_id.clone(),
+                        );
                         path
                     }
                     Ok(Err(e)) => {
@@ -696,8 +720,11 @@ async fn add_project_repo(
                         {
                             Ok(count) => {
                                 log::info!("[add_project_repo] ran {count} prerun actions");
-                                let _ =
-                                    app_handle.emit("project-setup-progress", project_id.clone());
+                                web_server::emit_to_all(
+                                    &app_handle,
+                                    "project-setup-progress",
+                                    project_id.clone(),
+                                );
                             }
                             Err(e) => {
                                 log::warn!("[add_project_repo] prerun actions failed: {e}");
@@ -739,11 +766,11 @@ async fn add_project_repo(
                             "[add_project_repo] remote repo clone failed for branch '{}': {e}",
                             branch.branch_name
                         );
-                        let _ = app_handle.emit("project-setup-progress", project_id);
+                        web_server::emit_to_all(&app_handle, "project-setup-progress", project_id);
                         return;
                     }
                 }
-                let _ = app_handle.emit("project-setup-progress", project_id);
+                web_server::emit_to_all(&app_handle, "project-setup-progress", project_id);
 
                 // If the repo already has commits on this branch, kick off
                 // an automatic code review so the user gets immediate feedback.
@@ -1721,6 +1748,33 @@ pub fn run() {
                 needs_reset: Mutex::new(reset_info),
             });
 
+            // Create the broadcast channel for web event streaming and manage it
+            // so the web server and event emitters can access it.
+            let (event_tx, _) = tokio::sync::broadcast::channel::<web_server::WebEvent>(256);
+            app.manage(event_tx.clone());
+
+            // Start the Axum web server only when opted-in via environment variable.
+            // This avoids exposing an HTTP server on all interfaces for users who
+            // don't need browser-based access.
+            let web_server_enabled = std::env::var("STAGED_WEB_SERVER")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+
+            if web_server_enabled {
+                let auth_token = web_server::generate_token();
+                app.manage(WebAccessToken(auth_token.clone()));
+                web_server::start(web_server::WebAppState {
+                    app_handle: app.handle().clone(),
+                    event_tx,
+                    auth_token,
+                    sessions: std::sync::Arc::new(std::sync::Mutex::new(
+                        std::collections::HashSet::new(),
+                    )),
+                });
+            } else {
+                app.manage(WebAccessToken(String::new()));
+            }
+
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -1749,6 +1803,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            get_web_access_token,
             get_store_status,
             confirm_reset_store,
             list_projects,

@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { listen } from '@tauri-apps/api/event';
+  import { listenToEvent } from '../../transport';
   import { untrack } from 'svelte';
   import {
     ChevronLeft,
@@ -430,10 +430,10 @@
     loadProjectNotes();
 
     let unlistenSession: (() => void) | undefined;
-    listen<{ sessionId: string; status: string; projectId?: string }>(
+    listenToEvent<{ sessionId: string; status: string; projectId?: string }>(
       'session-status-changed',
-      (event) => {
-        const { sessionId, status, projectId } = event.payload;
+      (payload) => {
+        const { sessionId, status, projectId } = payload;
         const isTracked = activeSessionIds.has(sessionId);
         // Also reload if this session belongs to a known project note (handles
         // sessions that were already running when the component mounted).

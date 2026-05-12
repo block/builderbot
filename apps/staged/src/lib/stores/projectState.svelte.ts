@@ -14,7 +14,7 @@
  * Note: Session-to-project lookups are now delegated to the unified sessionRegistry
  */
 
-import { getCurrentWindow } from '@tauri-apps/api/window';
+import { getWindowSync } from '../transport';
 import { getStoreValue, setStoreValue } from '../shared/persistentStore';
 import { sessionRegistry, type SessionType } from './sessionRegistry.svelte';
 
@@ -219,7 +219,7 @@ class ProjectStateStore {
       if (state.unread) ids.push(id);
     }
     setStoreValue(UNREAD_PROJECTS_STORE_KEY, ids);
-    getCurrentWindow()
+    getWindowSync()
       .setBadgeCount(ids.length || undefined)
       .catch(() => {
         // setBadgeCount may be unsupported on some platforms — ignore
@@ -238,7 +238,7 @@ class ProjectStateStore {
         state.unread = true;
       }
       this.version++;
-      getCurrentWindow()
+      getWindowSync()
         .setBadgeCount(ids.length)
         .catch(() => {});
     }
@@ -266,7 +266,7 @@ class ProjectStateStore {
       }
     }
     this.version++;
-    getCurrentWindow()
+    getWindowSync()
       .setBadgeCount(kept.length || undefined)
       .catch(() => {});
   }

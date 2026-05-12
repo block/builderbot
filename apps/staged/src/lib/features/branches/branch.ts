@@ -1,5 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
-import { writeText } from '@tauri-apps/plugin-clipboard-manager';
+import { invokeCommand, isTauri, writeClipboardText } from '../../transport';
 
 /** An application that can open a directory */
 export interface OpenerApp {
@@ -17,7 +16,12 @@ let cachedOpeners: OpenerApp[] | null = null;
  */
 export async function getAvailableOpeners(): Promise<OpenerApp[]> {
   if (cachedOpeners !== null) return cachedOpeners;
-  cachedOpeners = await invoke<OpenerApp[]>('get_available_openers');
+  if (!isTauri) {
+    cachedOpeners = [];
+    return cachedOpeners;
+  }
+
+  cachedOpeners = await invokeCommand<OpenerApp[]>('get_available_openers');
   return cachedOpeners;
 }
 
@@ -25,12 +29,16 @@ export async function getAvailableOpeners(): Promise<OpenerApp[]> {
  * Open a directory in a specific application.
  */
 export async function openInApp(path: string, appId: string): Promise<void> {
-  return invoke<void>('open_in_app', { path, appId });
+  if (!isTauri) {
+    throw new Error('open_in_app is not available in web mode');
+  }
+
+  return invokeCommand<void>('open_in_app', { path, appId });
 }
 
 /**
  * Copy a path to the clipboard.
  */
 export async function copyPathToClipboard(path: string): Promise<void> {
-  await writeText(path);
+  await writeClipboardText(path);
 }

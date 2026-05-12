@@ -6,7 +6,7 @@ use builderbot_actions::{
     RunDetectionMode, StopOptions, SuggestedAction,
 };
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, State};
 use tokio::sync::watch;
 
 use crate::store::Store;
@@ -104,15 +104,12 @@ fn resolve_branch_repo_context(
     Ok((repo.to_string(), project.subpath.clone()))
 }
 
-/// Detect available actions for a specific repo+subpath context using AI.
-#[tauri::command(rename_all = "camelCase")]
-pub async fn detect_repo_actions(
+pub(crate) async fn detect_repo_actions_impl(
     github_repo: String,
     subpath: Option<String>,
     app: AppHandle,
-    store: State<'_, Mutex<Option<Arc<Store>>>>,
+    store: Arc<Store>,
 ) -> Result<Vec<SuggestedAction>, String> {
-    let store = get_store(&store)?;
     let context = store
         .get_or_create_action_context(&github_repo, subpath.as_deref())
         .map_err(|e| format!("Failed to get action context: {e}"))?;
@@ -122,7 +119,8 @@ pub async fn detect_repo_actions(
     store
         .set_action_context_detecting(&context.id, true)
         .map_err(|e| format!("Failed to set detection status: {e}"))?;
-    let _ = app.emit(
+    crate::web_server::emit_to_all(
+        &app,
         "repo-actions-detection",
         DetectingActionsEvent {
             github_repo: github_repo.clone(),
@@ -136,7 +134,8 @@ pub async fn detect_repo_actions(
     store
         .mark_action_context_detected(&context.id)
         .map_err(|e| format!("Failed to update detection status: {e}"))?;
-    let _ = app.emit(
+    crate::web_server::emit_to_all(
+        &app,
         "repo-actions-detection",
         DetectingActionsEvent {
             github_repo,
@@ -147,18 +146,26 @@ pub async fn detect_repo_actions(
     result
 }
 
-/// Run an action for a branch
-#[tauri::command]
-pub async fn run_branch_action(
+/// Detect available actions for a specific repo+subpath context using AI.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn detect_repo_actions(
+    github_repo: String,
+    subpath: Option<String>,
+    app: AppHandle,
+    store: State<'_, Mutex<Option<Arc<Store>>>>,
+) -> Result<Vec<SuggestedAction>, String> {
+    let store = get_store(&store)?;
+    detect_repo_actions_impl(github_repo, subpath, app, store).await
+}
+
+pub(crate) async fn run_branch_action_impl(
     branch_id: String,
     action_id: String,
     app: AppHandle,
-    store: State<'_, Mutex<Option<Arc<Store>>>>,
-    executor: State<'_, Arc<ActionExecutor>>,
-    registry: State<'_, Arc<ActionRegistry>>,
+    store: Arc<Store>,
+    executor: Arc<ActionExecutor>,
+    registry: Arc<ActionRegistry>,
 ) -> Result<String, String> {
-    let store = get_store(&store)?;
-
     // Get the action
     let action = store
         .get_repo_action(&action_id)
@@ -186,7 +193,7 @@ pub async fn run_branch_action(
 
     let is_remote = branch.branch_type == crate::store::BranchType::Remote;
 
-    let reg = registry.inner().clone();
+    let reg = Arc::clone(&registry);
 
     // Create event listener
     let listener = Arc::new(TauriExecutionListener::new(
@@ -411,15 +418,44 @@ pub async fn run_branch_action(
     Ok(execution_id)
 }
 
+/// Run an action for a branch
+#[tauri::command]
+pub async fn run_branch_action(
+    branch_id: String,
+    action_id: String,
+    app: AppHandle,
+    store: State<'_, Mutex<Option<Arc<Store>>>>,
+    executor: State<'_, Arc<ActionExecutor>>,
+    registry: State<'_, Arc<ActionRegistry>>,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
+    run_branch_action_impl(
+        branch_id,
+        action_id,
+        app,
+        store,
+        executor.inner().clone(),
+        registry.inner().clone(),
+    )
+    .await
+}
+
+pub(crate) fn stop_branch_action_impl(
+    execution_id: String,
+    executor: &ActionExecutor,
+) -> Result<(), String> {
+    executor
+        .stop(&execution_id)
+        .map_err(|e| format!("Failed to stop action: {e}"))
+}
+
 /// Stop a running action
 #[tauri::command]
 pub fn stop_branch_action(
     execution_id: String,
     executor: State<'_, Arc<ActionExecutor>>,
 ) -> Result<(), String> {
-    executor
-        .stop(&execution_id)
-        .map_err(|e| format!("Failed to stop action: {e}"))
+    stop_branch_action_impl(execution_id, &executor)
 }
 
 /// Stop all running actions for the given branch IDs (best-effort).
@@ -460,12 +496,10 @@ pub fn stop_all_actions(
     stopped_execution_ids
 }
 
-/// Get all currently running actions for a branch
-#[tauri::command]
-pub fn get_running_branch_actions(
+pub(crate) fn get_running_branch_actions_impl(
     branch_id: String,
-    executor: State<'_, Arc<ActionExecutor>>,
-    registry: State<'_, Arc<ActionRegistry>>,
+    executor: &ActionExecutor,
+    registry: &ActionRegistry,
 ) -> Result<Vec<RunningActionInfo>, String> {
     // Get running actions from registry for this branch
     let running_actions = registry.get_running_for_branch(&branch_id);
@@ -482,13 +516,37 @@ pub fn get_running_branch_actions(
     Ok(active_actions)
 }
 
+/// Get all currently running actions for a branch
+#[tauri::command]
+pub fn get_running_branch_actions(
+    branch_id: String,
+    executor: State<'_, Arc<ActionExecutor>>,
+    registry: State<'_, Arc<ActionRegistry>>,
+) -> Result<Vec<RunningActionInfo>, String> {
+    get_running_branch_actions_impl(branch_id, &executor, &registry)
+}
+
+pub(crate) fn get_action_output_buffer_impl(
+    execution_id: String,
+    executor: &ActionExecutor,
+) -> Result<Option<Vec<builderbot_actions::OutputChunk>>, String> {
+    Ok(executor.get_buffered_output(&execution_id))
+}
+
 /// Get buffered output for an action execution
 #[tauri::command]
 pub fn get_action_output_buffer(
     execution_id: String,
     executor: State<'_, Arc<ActionExecutor>>,
 ) -> Result<Option<Vec<builderbot_actions::OutputChunk>>, String> {
-    Ok(executor.get_buffered_output(&execution_id))
+    get_action_output_buffer_impl(execution_id, &executor)
+}
+
+pub(crate) fn clear_action_execution_impl(
+    execution_id: String,
+    executor: &ActionExecutor,
+) -> Result<bool, String> {
+    Ok(executor.clear_execution(&execution_id))
 }
 
 /// Clear buffered output for a completed execution
@@ -497,20 +555,16 @@ pub fn clear_action_execution(
     execution_id: String,
     executor: State<'_, Arc<ActionExecutor>>,
 ) -> Result<bool, String> {
-    Ok(executor.clear_execution(&execution_id))
+    clear_action_execution_impl(execution_id, &executor)
 }
 
-/// Run all prerun actions for a branch after creation
-#[tauri::command]
-pub async fn run_prerun_actions(
+pub(crate) async fn run_prerun_actions_impl(
     branch_id: String,
     app: AppHandle,
-    store: State<'_, Mutex<Option<Arc<Store>>>>,
-    executor: State<'_, Arc<ActionExecutor>>,
-    registry: State<'_, Arc<ActionRegistry>>,
+    store: Arc<Store>,
+    executor: Arc<ActionExecutor>,
+    registry: Arc<ActionRegistry>,
 ) -> Result<Vec<String>, String> {
-    let store = get_store(&store)?;
-
     // Get the branch and project (for repo context + subpath)
     let branch = store
         .get_branch(&branch_id)
@@ -532,7 +586,8 @@ pub async fn run_prerun_actions(
         store
             .set_action_context_detecting(&context.id, true)
             .map_err(|e| format!("Failed to set detection status: {e}"))?;
-        let _ = app.emit(
+        crate::web_server::emit_to_all(
+            &app,
             "repo-actions-detection",
             DetectingActionsEvent {
                 github_repo: github_repo.clone(),
@@ -588,7 +643,8 @@ pub async fn run_prerun_actions(
         store
             .mark_action_context_detected(&context.id)
             .map_err(|e| format!("Failed to update detection status: {e}"))?;
-        let _ = app.emit(
+        crate::web_server::emit_to_all(
+            &app,
             "repo-actions-detection",
             DetectingActionsEvent {
                 github_repo: github_repo.clone(),
@@ -632,7 +688,7 @@ pub async fn run_prerun_actions(
             action.id.clone(),
             action.name.clone(),
             action.action_type.as_str().to_string(),
-            registry.inner().clone(),
+            Arc::clone(&registry),
         ));
 
         let metadata = ActionMetadata {
@@ -652,9 +708,36 @@ pub async fn run_prerun_actions(
     Ok(execution_ids)
 }
 
+/// Run all prerun actions for a branch after creation
+#[tauri::command]
+pub async fn run_prerun_actions(
+    branch_id: String,
+    app: AppHandle,
+    store: State<'_, Mutex<Option<Arc<Store>>>>,
+    executor: State<'_, Arc<ActionExecutor>>,
+    registry: State<'_, Arc<ActionRegistry>>,
+) -> Result<Vec<String>, String> {
+    let store = get_store(&store)?;
+    run_prerun_actions_impl(
+        branch_id,
+        app,
+        store,
+        executor.inner().clone(),
+        registry.inner().clone(),
+    )
+    .await
+}
+
 // =============================================================================
 // Run detection commands
 // =============================================================================
+
+pub(crate) fn get_run_phase_impl(
+    registry: &ActionRegistry,
+    execution_id: String,
+) -> Result<Option<RunPhase>, String> {
+    Ok(registry.get_run_phase(&execution_id))
+}
 
 /// Get the current run phase for an execution.
 #[tauri::command]
@@ -662,7 +745,23 @@ pub async fn get_run_phase(
     registry: State<'_, Arc<ActionRegistry>>,
     execution_id: String,
 ) -> Result<Option<RunPhase>, String> {
-    Ok(registry.get_run_phase(&execution_id))
+    get_run_phase_impl(&registry, execution_id)
+}
+
+pub(crate) fn update_run_detection_mode_impl(
+    store: Arc<Store>,
+    action_id: String,
+    mode: RunDetectionMode,
+) -> Result<(), String> {
+    let mut action = store
+        .get_repo_action(&action_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Action not found".to_string())?;
+    action.run_detection_mode = Some(mode);
+    store
+        .update_repo_action(&action)
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Update the run detection mode for a repo action.
@@ -673,13 +772,5 @@ pub async fn update_run_detection_mode(
     mode: RunDetectionMode,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
-    let mut action = store
-        .get_repo_action(&action_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "Action not found".to_string())?;
-    action.run_detection_mode = Some(mode);
-    store
-        .update_repo_action(&action)
-        .map_err(|e| e.to_string())?;
-    Ok(())
+    update_run_detection_mode_impl(store, action_id, mode)
 }

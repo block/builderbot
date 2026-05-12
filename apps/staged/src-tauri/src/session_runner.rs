@@ -41,7 +41,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::AppHandle;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::sync::CancellationToken;
 
@@ -1509,9 +1509,7 @@ fn emit_pipeline_step(
         started_at: step.started_at,
         completed_at: step.completed_at,
     };
-    if let Err(e) = app_handle.emit("pipeline-step-changed", &event) {
-        log::warn!("Failed to emit pipeline-step-changed: {e}");
-    }
+    crate::web_server::emit_to_all(app_handle, "pipeline-step-changed", &event);
 }
 
 // =============================================================================
@@ -2282,9 +2280,7 @@ fn emit_status(
         session_type: None,
         is_auto_review: false,
     };
-    if let Err(e) = app_handle.emit("session-status-changed", &event) {
-        log::warn!("Failed to emit session-status-changed: {e}");
-    }
+    crate::web_server::emit_to_all(app_handle, "session-status-changed", &event);
 }
 
 /// Emit a `session-status-changed` event with `"running"` status and branch/project
@@ -2308,9 +2304,7 @@ pub fn emit_session_running(
         session_type: Some(session_type.to_string()),
         is_auto_review: false,
     };
-    if let Err(e) = app_handle.emit("session-status-changed", &event) {
-        log::warn!("Failed to emit session-status-changed (running): {e}");
-    }
+    crate::web_server::emit_to_all(app_handle, "session-status-changed", &event);
 }
 
 #[cfg(test)]

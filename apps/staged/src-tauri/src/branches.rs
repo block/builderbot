@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 use crate::actions::events::TauriExecutionListener;
 use crate::actions::{ActionExecutor, ActionMetadata, ActionRegistry, ActionType};
@@ -21,17 +21,17 @@ pub(crate) struct WorktreeSetupProgress {
 }
 
 /// Default idle timeout (in minutes) for Staged workstations.
-const WORKSPACE_IDLE_TIMEOUT_MINUTES: u32 = 10080;
+pub(crate) const WORKSPACE_IDLE_TIMEOUT_MINUTES: u32 = 10080;
 
 // In-memory cache: workspace name → numeric workstation ID.
 // Populated by `poll_workspace_status` and `start_workspace` when `blox ws info`
 // returns an ID; read by `to_branch_with_workdir` when serializing for the frontend.
-fn workstation_id_cache() -> &'static Mutex<HashMap<String, u64>> {
+pub(crate) fn workstation_id_cache() -> &'static Mutex<HashMap<String, u64>> {
     static CACHE: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn cached_workstation_id(workspace_name: &str) -> Option<u64> {
+pub(crate) fn cached_workstation_id(workspace_name: &str) -> Option<u64> {
     workstation_id_cache()
         .lock()
         .ok()
@@ -62,7 +62,15 @@ fn get_store(store: &tauri::State<'_, Mutex<Option<Arc<Store>>>>) -> Result<Arc<
         .ok_or_else(|| "Database not initialized — please reset from the startup prompt".into())
 }
 
-fn to_branch_with_workdir(
+/// Public wrapper for `to_branch_with_workdir` for use by the web server.
+pub fn to_branch_with_workdir_public(
+    branch: store::Branch,
+    workdir_path: Option<String>,
+) -> BranchWithWorkdir {
+    to_branch_with_workdir(branch, workdir_path)
+}
+
+pub(crate) fn to_branch_with_workdir(
     branch: store::Branch,
     workdir_path: Option<String>,
 ) -> BranchWithWorkdir {
@@ -250,7 +258,7 @@ pub(crate) fn run_workspace_git_bytes(
     blox::ws_exec_bytes(workspace_name, &borrowed)
 }
 
-async fn run_blox_blocking<T, F>(op: F) -> Result<T, blox::BloxError>
+pub(crate) async fn run_blox_blocking<T, F>(op: F) -> Result<T, blox::BloxError>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, blox::BloxError> + Send + 'static,
@@ -260,7 +268,10 @@ where
         .map_err(|e| blox::BloxError::CommandFailed(format!("blox task failed: {e}")))?
 }
 
-async fn ws_exec_async(workspace_name: &str, args: &[&str]) -> Result<String, blox::BloxError> {
+pub(crate) async fn ws_exec_async(
+    workspace_name: &str,
+    args: &[&str],
+) -> Result<String, blox::BloxError> {
     let ws_name = workspace_name.to_string();
     let owned_args = args
         .iter()
@@ -273,7 +284,7 @@ async fn ws_exec_async(workspace_name: &str, args: &[&str]) -> Result<String, bl
     .await
 }
 
-async fn run_workspace_git_async(
+pub(crate) async fn run_workspace_git_async(
     workspace_name: &str,
     repo_subpath: Option<&str>,
     git_args: &[&str],
@@ -356,7 +367,7 @@ pub(crate) fn resolve_branch_workspace_subpath(
     Ok(Some(workspace_path))
 }
 
-fn normalize_branch_ref(branch: &str) -> String {
+pub(crate) fn normalize_branch_ref(branch: &str) -> String {
     branch.strip_prefix("origin/").unwrap_or(branch).to_string()
 }
 
@@ -366,7 +377,7 @@ fn normalize_branch_ref(branch: &str) -> String {
 /// This is used both by `start_workspace` (secondary repo in a shared
 /// workspace) and by `add_project_repo` (adding a repo to a remote project
 /// whose workspace is already running).
-async fn clone_repo_into_workspace(
+pub(crate) async fn clone_repo_into_workspace(
     ws_name: &str,
     repo_subpath: &str,
     repo_slug: &str,
@@ -661,7 +672,7 @@ fn create_worktree_with_fallback(
     }
 }
 
-fn is_blox_onboarding_precondition_error(err: &blox::BloxError) -> bool {
+pub(crate) fn is_blox_onboarding_precondition_error(err: &blox::BloxError) -> bool {
     match err {
         blox::BloxError::CommandFailed(stderr) => {
             let lower = stderr.to_ascii_lowercase();
@@ -905,7 +916,7 @@ pub fn create_branch(
 /// and links the workdir in the database.
 ///
 /// Returns the worktree path as a string.
-fn create_and_link_worktree(
+pub(crate) fn create_and_link_worktree(
     store: &Arc<Store>,
     branch: &store::Branch,
     repo_path: &std::path::Path,
@@ -1578,7 +1589,7 @@ pub async fn get_workspace_info(
 /// During initial startup, Blox may briefly report "stopped" before the
 /// workspace transitions to "running". If the DB still says Starting,
 /// treat a Blox "stopped" as still Starting so we keep polling.
-fn map_blox_status_to_workspace_status(
+pub(crate) fn map_blox_status_to_workspace_status(
     blox_status: Option<&str>,
     db_status: Option<&store::WorkspaceStatus>,
 ) -> store::WorkspaceStatus {
@@ -1797,7 +1808,7 @@ pub async fn poll_workspace_status(
 ///   2 = COMMAND_TYPE_EXECUTE_PROCESS
 ///   3 = COMMAND_TYPE_PROJECT_BOOTSTRAP
 ///   4 = COMMAND_TYPE_PROVISION_WORKSPACE
-fn bootstrap_command_type_name(command_type: u32) -> &'static str {
+pub(crate) fn bootstrap_command_type_name(command_type: u32) -> &'static str {
     match command_type {
         1 => "checkout",
         2 => "execute_process",
@@ -1809,7 +1820,7 @@ fn bootstrap_command_type_name(command_type: u32) -> &'static str {
 
 /// Derive workspace setup progress from bootstrap commands and emit events
 /// for all branches sharing the workspace.
-fn emit_workspace_setup_progress(
+pub(crate) fn emit_workspace_setup_progress(
     app_handle: &AppHandle,
     branch_ids: &[String],
     commands: &[blox::WorkspaceCommand],
@@ -1842,7 +1853,8 @@ fn emit_workspace_setup_progress(
     let detail = Some(format!("Step {} of {}", completed + 1, total));
 
     for bid in branch_ids {
-        let _ = app_handle.emit(
+        crate::web_server::emit_to_all(
+            app_handle,
             "workspace-setup-progress",
             WorktreeSetupProgress {
                 branch_id: bid.clone(),
@@ -2247,7 +2259,8 @@ pub(crate) fn setup_worktree_sync(
 ) -> Result<String, String> {
     let emit_progress = |phase: &str, detail: Option<String>| {
         if let Some(handle) = app_handle {
-            let _ = handle.emit(
+            crate::web_server::emit_to_all(
+                handle,
                 "worktree-setup-progress",
                 WorktreeSetupProgress {
                     branch_id: branch_id.to_string(),
@@ -2289,7 +2302,8 @@ pub(crate) fn setup_worktree_sync(
                 if now.duration_since(last_emit) >= std::time::Duration::from_millis(250) {
                     last_emit = now;
                     let detail = format!("{phase_name} \u{2014} {pct}%");
-                    let _ = handle.emit(
+                    crate::web_server::emit_to_all(
+                        &handle,
                         "worktree-setup-progress",
                         WorktreeSetupProgress {
                             branch_id: bid.clone(),
@@ -2368,7 +2382,8 @@ pub(crate) async fn run_prerun_actions_for_branch(
             .set_action_context_detecting(&context.id, true)
             .map_err(|e| format!("Failed to set detection status: {e}"))?;
 
-        let _ = app_handle.emit(
+        crate::web_server::emit_to_all(
+            app_handle,
             "repo-actions-detection",
             serde_json::json!({
                 "githubRepo": github_repo,
@@ -2431,7 +2446,8 @@ pub(crate) async fn run_prerun_actions_for_branch(
             .mark_action_context_detected(&context.id)
             .map_err(|e| format!("Failed to update detection status: {e}"))?;
 
-        let _ = app_handle.emit(
+        crate::web_server::emit_to_all(
+            app_handle,
             "repo-actions-detection",
             serde_json::json!({
                 "githubRepo": github_repo,

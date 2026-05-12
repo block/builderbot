@@ -6,8 +6,8 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+  import { isTauri, listenToEvent, getWindowSync, type UnlistenFn } from './lib/transport';
+  import WebLogin from './lib/features/layout/WebLogin.svelte';
   import * as commands from './lib/api/commands';
   import TopBar from './lib/features/layout/TopBar.svelte';
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
@@ -50,6 +50,8 @@
   const updaterCheckIntervalMs = 15 * 60 * 1000;
 
   let showSessionLab = $state(false);
+  let currentHash = $state(window.location.hash);
+  const showLogin = $derived(!isTauri && currentHash === '#/login');
   let unlistenSettings: UnlistenFn | undefined;
   let unlistenFind: UnlistenFn | undefined;
   let unlistenFindNext: UnlistenFn | undefined;
@@ -118,7 +120,7 @@
   }
 
   function startUpdaterLoop(): () => void {
-    const isTauriApp = typeof window !== 'undefined' && '__TAURI__' in window;
+    const isTauriApp = isTauri;
     void logUpdater(
       `[updater] gate check: enabled=${updaterEnabled} dev=${import.meta.env.DEV} isTauriApp=${isTauriApp}`
     );
@@ -203,30 +205,53 @@
     };
   }
 
+  function onHashChange() {
+    currentHash = window.location.hash;
+  }
+
   onMount(async () => {
     darkMode.init();
     document.addEventListener('keydown', handleKonamiKey);
+    window.addEventListener('hashchange', onHashChange);
+
+    // In web mode, verify we have a valid session before loading the app.
+    // This shows the login page immediately rather than after the first
+    // failed API call triggers a 401 redirect.
+    if (!isTauri) {
+      try {
+        const resp = await fetch('/api/invoke/get_store_status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        if (resp.status === 401) {
+          window.location.hash = '#/login';
+        }
+      } catch {
+        // Server unreachable — login page won't help, continue loading
+      }
+    }
 
     // Listen for the app menu Preferences item.
-    unlistenSettings = await listen('menu:settings', () => {
+    unlistenSettings = await listenToEvent('menu:settings', () => {
       if (!triggerShortcut('app-open-settings')) openSettings();
     });
-    unlistenFind = await listen('menu:find', () => {
+    unlistenFind = await listenToEvent('menu:find', () => {
       if (!triggerShortcut('search-find')) runSearchShortcut('find');
     });
-    unlistenFindNext = await listen('menu:find-next', () => {
+    unlistenFindNext = await listenToEvent('menu:find-next', () => {
       if (!triggerShortcut('search-find-next')) runSearchShortcut('next');
     });
-    unlistenFindPrevious = await listen('menu:find-previous', () => {
+    unlistenFindPrevious = await listenToEvent('menu:find-previous', () => {
       if (!triggerShortcut('search-find-previous')) runSearchShortcut('previous');
     });
-    unlistenZoomIn = await listen('menu:zoom-in', () => {
+    unlistenZoomIn = await listenToEvent('menu:zoom-in', () => {
       if (!triggerShortcut('view-increase-size')) increaseSize();
     });
-    unlistenZoomOut = await listen('menu:zoom-out', () => {
+    unlistenZoomOut = await listenToEvent('menu:zoom-out', () => {
       if (!triggerShortcut('view-decrease-size')) decreaseSize();
     });
-    unlistenZoomReset = await listen('menu:zoom-reset', () => {
+    unlistenZoomReset = await listenToEvent('menu:zoom-reset', () => {
       if (!triggerShortcut('view-reset-size')) resetSize();
     });
 
@@ -386,12 +411,13 @@
     ensureSqAvailabilityLoaded();
 
     // Window was created hidden — show it now that the theme is applied
-    await getCurrentWindow().show();
+    await getWindowSync().show();
     stopUpdaterLoop = startUpdaterLoop();
   });
 
   onDestroy(() => {
     document.removeEventListener('keydown', handleKonamiKey);
+    window.removeEventListener('hashchange', onHashChange);
     unregisterShortcuts?.();
     unlistenSettings?.();
     unlistenFind?.();
@@ -418,11 +444,13 @@
   }
 
   function handleClose() {
-    getCurrentWindow().close();
+    getWindowSync().close();
   }
 </script>
 
-{#if preferences.loaded}
+{#if showLogin}
+  <WebLogin />
+{:else if preferences.loaded}
   {#if storeIncompat && storeIncompat.kind === 'needs_reset'}
     <main class="reset-shell">
       <div class="update-state">

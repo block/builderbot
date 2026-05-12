@@ -54,8 +54,6 @@ struct StartRepoSessionParams {
     /// - `"commit"`: Use this to request code changes. Agent makes code changes and
     ///   creates a signed-off commit with a conventional commit message.
     pub expected_outcome: RepoSessionOutcome,
-    /// Optional ACP provider ID (e.g. "claude", "goose").
-    pub provider: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -311,6 +309,9 @@ struct ProjectToolsHandler {
     app_handle: AppHandle,
     action_executor: Option<Arc<ActionExecutor>>,
     action_registry: Option<Arc<ActionRegistry>>,
+    /// ACP provider ID inherited from the parent project session.
+    /// All repo sessions spawned by this handler use this provider.
+    provider: Option<String>,
     /// Cancellation token for the parent project session.
     /// Signalled when the user cancels the project session.
     cancel_token: CancellationToken,
@@ -325,6 +326,7 @@ impl ProjectToolsHandler {
         app_handle: AppHandle,
         action_executor: Option<Arc<ActionExecutor>>,
         action_registry: Option<Arc<ActionRegistry>>,
+        provider: Option<String>,
         cancel_token: CancellationToken,
     ) -> Self {
         Self {
@@ -335,6 +337,7 @@ impl ProjectToolsHandler {
             app_handle,
             action_executor,
             action_registry,
+            provider,
             cancel_token,
         }
     }
@@ -354,7 +357,7 @@ impl ProjectToolsHandler {
             p.repo,
             p.subpath,
             p.expected_outcome,
-            p.provider,
+            self.provider,
             p.instructions,
         );
         let target = match self.resolve_repo_target(&p.repo, p.subpath.as_deref()) {
@@ -363,7 +366,7 @@ impl ProjectToolsHandler {
         };
 
         let mut session = crate::store::Session::new_queued(&p.instructions);
-        if let Some(ref provider) = p.provider {
+        if let Some(ref provider) = self.provider {
             session = session.with_provider(provider);
         }
         if let Err(e) = self.store.create_session(&session) {
@@ -402,7 +405,7 @@ impl ProjectToolsHandler {
             Arc::clone(&self.registry),
             self.app_handle.clone(),
             target.branch.id.clone(),
-            p.provider.clone(),
+            self.provider.clone(),
         )
         .await
         {
@@ -785,6 +788,7 @@ pub async fn start_project_mcp_server(
     app_handle: AppHandle,
     action_executor: Option<Arc<ActionExecutor>>,
     action_registry: Option<Arc<ActionRegistry>>,
+    provider: Option<String>,
     cancel_token: CancellationToken,
 ) -> Result<(u16, JoinHandle<()>), String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -802,6 +806,7 @@ pub async fn start_project_mcp_server(
         app_handle,
         action_executor,
         action_registry,
+        provider,
         cancel_token,
     );
     log::debug!(

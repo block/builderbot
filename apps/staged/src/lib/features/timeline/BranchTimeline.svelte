@@ -379,16 +379,6 @@
           ? 'Session in progress'
           : undefined;
 
-    if (state.fetch.status === 'failed') {
-      rows.push({
-        key: 'git-fetch-failed',
-        type: 'git-warning',
-        title: 'Could not refresh git state',
-        timestamp: topTimestamp,
-        order: 0,
-      });
-    }
-
     switch (state.upstream.relation) {
       case 'missing':
         break;

@@ -1,5 +1,7 @@
 <script lang="ts">
+  import { fade, slide } from 'svelte/transition';
   import { AlertTriangle, ChevronRight } from 'lucide-svelte';
+  import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import type { ProjectRepo } from '../../types';
 
@@ -11,6 +13,8 @@
     onRebase?: () => void;
     rebaseDisabled?: boolean;
     warning?: string | null;
+    refreshingGitState?: boolean;
+    fetchError?: string | null;
   }
 
   let {
@@ -21,13 +25,18 @@
     onRebase,
     rebaseDisabled = false,
     warning = null,
+    refreshingGitState = false,
+    fetchError = null,
   }: Props = $props();
 </script>
 
 {#snippet parentPill()}
   {#if baseBranch}
     <span class="branch-capsule" title={baseBranch}>
-      {baseBranch}{#if parentAheadCount > 0}<span class="ahead-count">
+      {baseBranch}{#if parentAheadCount > 0}<span
+          class="ahead-count"
+          transition:fade={{ duration: 150 }}
+        >
           +{parentAheadCount}</span
         >{/if}
     </span>
@@ -36,9 +45,20 @@
         class="rebase-btn"
         disabled={rebaseDisabled}
         title={rebaseDisabled ? 'Rebase unavailable' : 'Rebase onto parent'}
-        onclick={onRebase}>Rebase</button
+        onclick={onRebase}
+        transition:slide={{ axis: 'x', duration: 150 }}>Rebase</button
       >
     {/if}
+  {/if}
+{/snippet}
+
+{#snippet refreshStatus()}
+  {#if refreshingGitState}
+    <Spinner size={10} />
+  {:else if fetchError}
+    <span class="fetch-error" title={fetchError} transition:slide={{ axis: 'x', duration: 150 }}>
+      <AlertTriangle size={12} />
+    </span>
   {/if}
 {/snippet}
 
@@ -62,10 +82,11 @@
           <span>{warning}</span>
         </span>
       {/if}
+      {@render refreshStatus()}
     </div>
   {:else}
     <span class="repo-name">{branchName}</span>
-    {#if baseBranch || warning}
+    {#if baseBranch || warning || refreshingGitState || fetchError}
       <div class="header-meta">
         {@render parentPill()}
         {#if warning}
@@ -74,6 +95,7 @@
             <span>{warning}</span>
           </span>
         {/if}
+        {@render refreshStatus()}
       </div>
     {/if}
   {/if}
@@ -177,5 +199,11 @@
   .branch-warning span {
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .fetch-error {
+    display: inline-flex;
+    align-items: center;
+    color: var(--ui-warning, var(--status-modified));
   }
 </style>

@@ -307,6 +307,7 @@ pub struct CommitInfo {
     pub short_sha: String,
     pub subject: String,
     pub author: String,
+    pub author_email: String,
     pub timestamp: i64,
     /// Position in git's topological order (0 = oldest on the branch).
     /// Used as a tiebreaker when multiple commits share the same second-level timestamp.
@@ -326,8 +327,8 @@ pub fn get_commits_since_base(worktree: &Path, base: &str) -> Result<Vec<CommitI
     // was originally created or last rebased onto.
     let merge_base = super::refs::merge_base(worktree, base, "HEAD")?;
 
-    // Format: sha|short_sha|subject|author|timestamp
-    let format = "--format=%H|%h|%s|%an|%ct";
+    // Format: sha|short_sha|subject|author|author_email|timestamp
+    let format = "--format=%H|%h|%s|%an|%ae|%ct";
     let range = format!("{merge_base}..HEAD");
 
     let output = cli::run(worktree, &["log", format, &range])?;
@@ -337,14 +338,15 @@ pub fn get_commits_since_base(worktree: &Path, base: &str) -> Result<Vec<CommitI
         if line.is_empty() {
             continue;
         }
-        let parts: Vec<&str> = line.splitn(5, '|').collect();
-        if parts.len() >= 5 {
+        let parts: Vec<&str> = line.splitn(6, '|').collect();
+        if parts.len() >= 6 {
             commits.push(CommitInfo {
                 sha: parts[0].to_string(),
                 short_sha: parts[1].to_string(),
                 subject: parts[2].to_string(),
                 author: parts[3].to_string(),
-                timestamp: parts[4].parse().unwrap_or(0),
+                author_email: parts[4].to_string(),
+                timestamp: parts[5].parse().unwrap_or(0),
                 order: 0, // placeholder, assigned below
             });
         }

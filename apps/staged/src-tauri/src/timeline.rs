@@ -22,50 +22,118 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 
-/// TTL for cached git user name lookups (5 minutes).
-const GIT_USER_NAME_TTL_MS: u128 = 300_000;
+/// TTL for cached git user identity lookups (5 minutes).
+const GIT_USER_IDENTITY_TTL_MS: u128 = 300_000;
 
 #[derive(Debug, Clone)]
-struct GitUserNameCacheEntry {
+struct GitUserIdentity {
     name: Option<String>,
+    email: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GitUserIdentityCacheEntry {
+    identity: GitUserIdentity,
     fetched_at: u128,
 }
 
-fn git_user_name_cache() -> &'static Mutex<HashMap<String, GitUserNameCacheEntry>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, GitUserNameCacheEntry>>> = OnceLock::new();
+fn git_user_identity_cache() -> &'static Mutex<HashMap<String, GitUserIdentityCacheEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, GitUserIdentityCacheEntry>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn cached_git_user_name<F>(cache_key: &str, fetch: F) -> Option<String>
+fn cached_git_user_identity<F>(cache_key: &str, fetch: F) -> GitUserIdentity
 where
-    F: FnOnce() -> Option<String>,
+    F: FnOnce() -> GitUserIdentity,
 {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
 
-    if let Ok(cache) = git_user_name_cache().lock() {
+    if let Ok(cache) = git_user_identity_cache().lock() {
         if let Some(entry) = cache.get(cache_key) {
-            if now.saturating_sub(entry.fetched_at) < GIT_USER_NAME_TTL_MS {
-                return entry.name.clone();
+            if now.saturating_sub(entry.fetched_at) < GIT_USER_IDENTITY_TTL_MS {
+                return entry.identity.clone();
             }
         }
     }
 
-    let name = fetch();
+    let identity = fetch();
 
-    if let Ok(mut cache) = git_user_name_cache().lock() {
+    if let Ok(mut cache) = git_user_identity_cache().lock() {
         cache.insert(
             cache_key.to_string(),
-            GitUserNameCacheEntry {
-                name: name.clone(),
+            GitUserIdentityCacheEntry {
+                identity: identity.clone(),
                 fetched_at: now,
             },
         );
     }
 
-    name
+    identity
+}
+
+/// Extract the GitHub username from a noreply email address.
+/// Matches both `<username>@users.noreply.github.com` and
+/// `<id>+<username>@users.noreply.github.com`.
+fn github_noreply_username(email: &str) -> Option<&str> {
+    let local = email.strip_suffix("@users.noreply.github.com")?;
+    // `<id>+<username>` form
+    if let Some((_id, username)) = local.split_once('+') {
+        Some(username)
+    } else {
+        Some(local)
+    }
+}
+
+/// Check whether a commit was authored by the configured git user.
+///
+/// Matches on name OR email (case-insensitive). Also handles GitHub
+/// noreply emails by comparing the embedded username against the local
+/// user name.
+fn is_commit_by_user(commit_author: &str, commit_email: &str, identity: &GitUserIdentity) -> bool {
+    let has_identity = identity.name.is_some() || identity.email.is_some();
+    if !has_identity {
+        // When we don't know who the user is, we can't claim ownership.
+        return false;
+    }
+
+    // Case-insensitive name match
+    if let Some(ref name) = identity.name {
+        if !commit_author.is_empty() && commit_author.eq_ignore_ascii_case(name) {
+            return true;
+        }
+    }
+
+    // Case-insensitive email match
+    if let Some(ref email) = identity.email {
+        if !commit_email.is_empty() && commit_email.eq_ignore_ascii_case(email) {
+            return true;
+        }
+    }
+
+    // GitHub noreply heuristic: if the commit email is a noreply, compare
+    // the embedded username against the configured user name.
+    if let Some(gh_username) = github_noreply_username(commit_email) {
+        if let Some(ref name) = identity.name {
+            if gh_username.eq_ignore_ascii_case(name) {
+                return true;
+            }
+        }
+    }
+
+    // Reverse: if the local email is a noreply, compare its username
+    // against the commit author name.
+    if let Some(ref email) = identity.email {
+        if let Some(gh_username) = github_noreply_username(email) {
+            if !commit_author.is_empty() && commit_author.eq_ignore_ascii_case(gh_username) {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 /// Payload for the `git-state-updated` event emitted by `refresh_branch_git_state`.
@@ -76,7 +144,7 @@ struct GitStateUpdatedPayload {
     git_state: git::BranchGitState,
 }
 
-/// Parse `%H|%h|%s|%an|%ct` formatted commit lines into timeline items,
+/// Parse `%H|%h|%s|%an|%ae|%ct` formatted commit lines into timeline items,
 /// looking up DB metadata for session linkage.
 fn parse_commit_lines(
     store: &Arc<Store>,
@@ -85,8 +153,8 @@ fn parse_commit_lines(
 ) -> Vec<CommitTimelineItem> {
     let mut commits = Vec::new();
     for line in lines {
-        let parts: Vec<&str> = line.splitn(5, '|').collect();
-        if parts.len() >= 5 {
+        let parts: Vec<&str> = line.splitn(6, '|').collect();
+        if parts.len() >= 6 {
             let sha = parts[0].to_string();
             let our_commit = store.get_commit_by_sha(branch_id, &sha).unwrap_or(None);
             let resolved = store
@@ -97,11 +165,13 @@ fn parse_commit_lines(
                 short_sha: parts[1].to_string(),
                 subject: parts[2].to_string(),
                 author: parts[3].to_string(),
-                timestamp: parts[4].parse().unwrap_or(0),
+                author_email: parts[4].to_string(),
+                timestamp: parts[5].parse().unwrap_or(0),
                 order: 0,
                 session_id: resolved.session_id,
                 session_status: resolved.status,
                 completion_reason: resolved.completion_reason,
+                is_own_commit: false, // set later by build_branch_timeline
             });
         }
     }
@@ -128,7 +198,7 @@ fn fetch_remote_commits(
     } else {
         format!("{base_ref}..HEAD")
     };
-    let format_arg = "--format=%H|%h|%s|%an|%ct";
+    let format_arg = "--format=%H|%h|%s|%an|%ae|%ct";
     let output = branches::run_workspace_git(ws_name, repo_subpath, &["log", format_arg, &range])
         .map_err(|e| format!("Failed to load commits from workspace: {e}"))?;
     let lines: Vec<String> = output
@@ -157,11 +227,13 @@ fn map_local_commits(
                 short_sha: gc.short_sha.clone(),
                 subject: gc.subject.clone(),
                 author: gc.author.clone(),
+                author_email: gc.author_email.clone(),
                 timestamp: gc.timestamp,
                 order: gc.order,
                 session_id: resolved.session_id,
                 session_status: resolved.status,
                 completion_reason: resolved.completion_reason,
+                is_own_commit: false, // set later by build_branch_timeline
             }
         })
         .collect()
@@ -187,7 +259,10 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         .map_err(|e| e.to_string())?;
 
     let mut git_state = None;
-    let mut git_user_name: Option<String> = None;
+    let mut identity = GitUserIdentity {
+        name: None,
+        email: None,
+    };
 
     // Get commits from git (the source of truth for commit data)
     let mut commits = Vec::new();
@@ -215,13 +290,20 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         {
             let ws = ws_name.clone();
             let sub = repo_subpath.clone();
-            git_user_name = cached_git_user_name(
+            identity = cached_git_user_identity(
                 &format!("remote:{ws}:{}", sub.as_deref().unwrap_or("")),
                 || {
-                    branches::run_workspace_git(&ws, sub.as_deref(), &["config", "user.name"])
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
+                    let name =
+                        branches::run_workspace_git(&ws, sub.as_deref(), &["config", "user.name"])
+                            .ok()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty());
+                    let email =
+                        branches::run_workspace_git(&ws, sub.as_deref(), &["config", "user.email"])
+                            .ok()
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty());
+                    GitUserIdentity { name, email }
                 },
             );
         }
@@ -246,11 +328,16 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             ));
             {
                 let path_str = wd.path.clone();
-                git_user_name = cached_git_user_name(&format!("local:{path_str}"), || {
-                    git::cli_run(worktree_path, &["config", "user.name"])
+                identity = cached_git_user_identity(&format!("local:{path_str}"), || {
+                    let name = git::cli_run(worktree_path, &["config", "user.name"])
                         .ok()
                         .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
+                        .filter(|s| !s.is_empty());
+                    let email = git::cli_run(worktree_path, &["config", "user.email"])
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty());
+                    GitUserIdentity { name, email }
                 });
             }
             let git_commits =
@@ -258,6 +345,14 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                     format!("Failed to get commits since base for branch {branch_id}: {e:?}")
                 })?;
             commits = map_local_commits(store, branch_id, &git_commits);
+        }
+    }
+
+    // Mark commits authored by the current user
+    for commit in &mut commits {
+        if !commit.sha.is_empty() {
+            commit.is_own_commit =
+                is_commit_by_user(&commit.author, &commit.author_email, &identity);
         }
     }
 
@@ -285,11 +380,13 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                     })
                     .unwrap_or_else(|| "Pending commit".to_string()),
                 author: String::new(),
+                author_email: String::new(),
                 timestamp: dc.created_at / 1000,
                 order: 0,
                 session_id: resolved.session_id,
                 session_status: resolved.status,
                 completion_reason: resolved.completion_reason,
+                is_own_commit: true, // pending commits are always the current user's
             });
         }
     }
@@ -378,7 +475,6 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         reviews,
         images,
         git_state,
-        git_user_name,
     })
 }
 

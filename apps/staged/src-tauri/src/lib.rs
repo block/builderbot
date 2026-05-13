@@ -124,6 +124,7 @@ pub struct CommitTimelineItem {
     pub short_sha: String,
     pub subject: String,
     pub author: String,
+    pub author_email: String,
     pub timestamp: i64,
     /// Position in git's topological order (0 = oldest on the branch).
     /// Used as a tiebreaker when multiple commits share the same second-level timestamp.
@@ -131,6 +132,8 @@ pub struct CommitTimelineItem {
     pub session_id: Option<String>,
     pub session_status: Option<String>,
     pub completion_reason: Option<String>,
+    /// Whether this commit was authored by the current git user.
+    pub is_own_commit: bool,
 }
 
 /// Note with session status resolved.
@@ -192,8 +195,6 @@ pub struct BranchTimeline {
     pub reviews: Vec<ReviewTimelineItem>,
     pub images: Vec<ImageTimelineItem>,
     pub git_state: Option<git::BranchGitState>,
-    /// The configured `user.name` from git config in the repo, if available.
-    pub git_user_name: Option<String>,
 }
 
 // =============================================================================

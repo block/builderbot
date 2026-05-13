@@ -885,7 +885,7 @@ const BATCH_FAST_SCRIPT: &str = concat!(
     "  range=\"$2..HEAD\"\n",
     "fi\n",
     "echo COMMITS_START\n",
-    "git log --format='%H|%h|%s|%an|%ct' \"$range\" 2>/dev/null || true\n",
+    "git log --format='%H|%h|%s|%an|%ae|%ct' \"$range\" 2>/dev/null || true\n",
     "echo COMMITS_END\n",
     "exit 0\n",
 );

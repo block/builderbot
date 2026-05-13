@@ -65,6 +65,8 @@ describe('timelineToHashtagItems', () => {
           shortSha: 'abcdef1',
           subject: 'Add branch picker filtering',
           author: 'Test User',
+          authorEmail: 'test@example.com',
+          isOwnCommit: true,
           timestamp: 1,
           order: 0,
           sessionId: null,

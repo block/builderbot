@@ -123,6 +123,7 @@ export interface CommitTimelineItem {
   shortSha: string;
   subject: string;
   author: string;
+  authorEmail: string;
   /** Unix timestamp in seconds */
   timestamp: number;
   /** Position in git's topological order (0 = oldest). Tiebreaker for same-second timestamps. */
@@ -130,6 +131,8 @@ export interface CommitTimelineItem {
   sessionId: string | null;
   sessionStatus: string | null;
   completionReason: string | null;
+  /** Whether this commit was authored by the current git user. */
+  isOwnCommit: boolean;
 }
 
 export interface NoteTimelineItem {
@@ -179,7 +182,6 @@ export interface BranchTimeline {
   reviews: ReviewTimelineItem[];
   images: ImageTimelineItem[];
   gitState?: BranchGitState | null;
-  gitUserName?: string | null;
 }
 
 export type UpstreamRelation = 'missing' | 'inSync' | 'localAhead' | 'originAhead' | 'diverged';

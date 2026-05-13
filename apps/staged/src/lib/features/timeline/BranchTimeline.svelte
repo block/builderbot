@@ -500,7 +500,6 @@
   // Merge commits, notes, and reviews into a single sorted list
   let items = $derived.by(() => {
     const nowMs = minuteNow.now();
-    const gitUserName = timeline.gitUserName ?? null;
     const all: DisplayItem[] = [];
     const commitAnchors = new Map<string, CommitAnchor>();
     const deletingCommitIds = new Set(
@@ -543,11 +542,7 @@
         secondaryMeta = formatRelativeTimeSeconds(commit.timestamp, nowMs);
       }
 
-      const showAuthor =
-        type === 'commit' &&
-        !isDeleting &&
-        !!commit.author &&
-        (!gitUserName || commit.author !== gitUserName);
+      const showAuthor = type === 'commit' && !isDeleting && !!commit.author && !commit.isOwnCommit;
 
       all.push({
         key: commit.sha || `pending-${commit.sessionId || commit.timestamp}`,

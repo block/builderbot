@@ -192,6 +192,8 @@ pub struct BranchTimeline {
     pub reviews: Vec<ReviewTimelineItem>,
     pub images: Vec<ImageTimelineItem>,
     pub git_state: Option<git::BranchGitState>,
+    /// The configured `user.name` from git config in the repo, if available.
+    pub git_user_name: Option<String>,
 }
 
 // =============================================================================

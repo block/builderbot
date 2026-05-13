@@ -65,6 +65,8 @@
     titleHtml?: string;
     meta?: string;
     secondaryMeta?: string;
+    /** Tertiary metadata shown after the secondary meta (e.g. commit author). */
+    tertiaryMeta?: string;
     badges?: TimelineBadge[];
     deleting?: boolean;
     isLast?: boolean;
@@ -107,6 +109,7 @@
     titleHtml,
     meta,
     secondaryMeta,
+    tertiaryMeta,
     badges,
     deleting = false,
     isLast = false,
@@ -329,13 +332,16 @@
           >{title}</span
         >
       {/if}
-      {#if meta || secondaryMeta || (badges && badges.length > 0)}
+      {#if meta || secondaryMeta || tertiaryMeta || (badges && badges.length > 0)}
         <div class="timeline-meta">
           {#if meta}
             <span class="meta-item">{meta}</span>
           {/if}
           {#if secondaryMeta}
             <span class="meta-item meta-sha" class:failed-meta={isFailed}>{secondaryMeta}</span>
+          {/if}
+          {#if tertiaryMeta}
+            <span class="meta-item">{tertiaryMeta}</span>
           {/if}
           {#if badges}
             {#each badges as badge}
@@ -684,7 +690,7 @@
 
   .timeline-meta {
     display: flex;
-    align-items: center;
+    align-items: baseline;
     gap: 8px;
     margin-top: 3px;
   }

@@ -193,6 +193,7 @@ pub fn spawn_autodetect_poller(
     action_name: String,
     command: String,
     working_dir: PathBuf,
+    provider_id: Option<String>,
     mut cancel_rx: watch::Receiver<bool>,
 ) {
     tokio::spawn(async move {
@@ -274,7 +275,11 @@ If still building, set regex and has_endpoint_capture to null/false."#,
             );
 
             let ai_response = {
-                let provider = match AcpAiProvider::new(working_dir.clone()) {
+                let provider_result = match provider_id.as_deref() {
+                    Some(id) => AcpAiProvider::with_agent(id, working_dir.clone()),
+                    None => AcpAiProvider::new(working_dir.clone()),
+                };
+                let provider = match provider_result {
                     Ok(p) => p,
                     Err(e) => {
                         log::warn!(

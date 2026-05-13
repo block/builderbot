@@ -127,8 +127,12 @@ export function detectRepoActions(
  * Run an action for a branch.
  * Returns an execution ID that can be used to track status and stop the action.
  */
-export function runBranchAction(branchId: string, actionId: string): Promise<string> {
-  return invokeCommand<string>('run_branch_action', { branchId, actionId });
+export function runBranchAction(
+  branchId: string,
+  actionId: string,
+  provider?: string
+): Promise<string> {
+  return invokeCommand<string>('run_branch_action', { branchId, actionId, provider });
 }
 
 /**
@@ -201,8 +205,8 @@ export function clearActionExecution(executionId: string): Promise<boolean> {
  * Run all prerun actions for a branch after creation.
  * Returns an array of execution IDs for the started actions.
  */
-export function runPrerunActions(branchId: string): Promise<string[]> {
-  return invokeCommand<string[]>('run_prerun_actions', { branchId });
+export function runPrerunActions(branchId: string, provider?: string): Promise<string[]> {
+  return invokeCommand<string[]>('run_prerun_actions', { branchId, provider });
 }
 
 /**

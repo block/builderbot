@@ -172,6 +172,7 @@ pub async fn detect_repo_actions(
 pub(crate) async fn run_branch_action_impl(
     branch_id: String,
     action_id: String,
+    provider_id: Option<String>,
     app: AppHandle,
     store: Arc<Store>,
     executor: Arc<ActionExecutor>,
@@ -420,6 +421,7 @@ pub(crate) async fn run_branch_action_impl(
                     action.name.clone(),
                     command_for_detection,
                     std::path::PathBuf::from(&working_dir_for_detection),
+                    provider_id,
                     cancel_rx,
                 );
             }
@@ -434,6 +436,7 @@ pub(crate) async fn run_branch_action_impl(
 pub async fn run_branch_action(
     branch_id: String,
     action_id: String,
+    provider: Option<String>,
     app: AppHandle,
     store: State<'_, Mutex<Option<Arc<Store>>>>,
     executor: State<'_, Arc<ActionExecutor>>,
@@ -443,6 +446,7 @@ pub async fn run_branch_action(
     run_branch_action_impl(
         branch_id,
         action_id,
+        provider,
         app,
         store,
         executor.inner().clone(),
@@ -571,6 +575,7 @@ pub fn clear_action_execution(
 
 pub(crate) async fn run_prerun_actions_impl(
     branch_id: String,
+    provider_id: Option<String>,
     app: AppHandle,
     store: Arc<Store>,
     executor: Arc<ActionExecutor>,
@@ -607,18 +612,23 @@ pub(crate) async fn run_prerun_actions_impl(
             },
         );
 
-        let detected =
-            match detect_actions_for_repo_context(&github_repo, subpath.as_deref(), None).await {
-                Ok(actions) => actions,
-                Err(e) => {
-                    log::warn!(
+        let detected = match detect_actions_for_repo_context(
+            &github_repo,
+            subpath.as_deref(),
+            provider_id.as_deref(),
+        )
+        .await
+        {
+            Ok(actions) => actions,
+            Err(e) => {
+                log::warn!(
                     "[run_prerun_actions] action detection failed for repo {} (subpath: {:?}): {e}",
                     github_repo,
                     subpath
                 );
-                    Vec::new()
-                }
-            };
+                Vec::new()
+            }
+        };
 
         let existing_actions = store
             .list_repo_actions(&context.id)
@@ -723,6 +733,7 @@ pub(crate) async fn run_prerun_actions_impl(
 #[tauri::command]
 pub async fn run_prerun_actions(
     branch_id: String,
+    provider: Option<String>,
     app: AppHandle,
     store: State<'_, Mutex<Option<Arc<Store>>>>,
     executor: State<'_, Arc<ActionExecutor>>,
@@ -731,6 +742,7 @@ pub async fn run_prerun_actions(
     let store = get_store(&store)?;
     run_prerun_actions_impl(
         branch_id,
+        provider,
         app,
         store,
         executor.inner().clone(),

@@ -6,7 +6,6 @@
  * - Event listening (Tauri events vs WebSocket)
  * - Window management (Tauri window vs no-op)
  * - Clipboard (Tauri plugin vs navigator.clipboard)
- *
  */
 
 // ---------------------------------------------------------------------------
@@ -102,6 +101,11 @@ export async function invokeCommand<T>(
     body: JSON.stringify(args ?? {}),
   });
 
+  if (response.status === 401) {
+    redirectToLogin();
+    throw new Error('Authentication required');
+  }
+
   if (!response.ok) {
     const text = await response.text();
     let message = text;
@@ -117,6 +121,35 @@ export async function invokeCommand<T>(
   }
 
   return (await response.json()) as T;
+}
+
+// ---------------------------------------------------------------------------
+// Web authentication
+// ---------------------------------------------------------------------------
+
+let loginRedirectPending = false;
+
+function redirectToLogin(): void {
+  if (loginRedirectPending) return;
+  loginRedirectPending = true;
+  // Use a small delay to batch multiple 401s that fire simultaneously
+  setTimeout(() => {
+    window.location.hash = '#/login';
+    loginRedirectPending = false;
+  }, 50);
+}
+
+/**
+ * Submit a bearer token to the web server's auth endpoint.
+ * On success the server sets a session cookie and subsequent requests are authenticated.
+ */
+export async function submitWebToken(token: string): Promise<boolean> {
+  const response = await fetch('/api/auth', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+  return response.ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -147,10 +180,10 @@ export interface ListenOptions {
  * API; in web mode it connects to the shared WebSocket event stream.
  *
  * Returns a synchronous unlisten function. Registration happens asynchronously
- * in the background; if the unlisten is called before registration finishes,
- * the eventual listener is torn down on arrival. This makes the helper safe to
- * use directly in `onMount` cleanup blocks without an intermediate
- * `Promise<UnlistenFn>` reference that could race the unmount.
+ * in the background for Tauri; if the unlisten is called before registration
+ * finishes, the eventual listener is torn down on arrival. This makes the
+ * helper safe to use directly in `onMount` cleanup blocks without an
+ * intermediate `Promise<UnlistenFn>` reference that could race the unmount.
  *
  * Because registration is asynchronous, an event emitted between the call and
  * the listener going live is lost. `opts.onEstablished` is the hook for
@@ -463,6 +496,7 @@ interface WindowHandle {
 const noopWindow: WindowHandle = {
   show: async () => {},
   close: async () => {
+    // In browser mode, just close the tab/window
     window.close();
   },
   startDragging: async () => {},
@@ -476,7 +510,7 @@ const noopWindow: WindowHandle = {
 
 /**
  * Get a handle to the current window. In Tauri mode this returns the real
- * Tauri window; in web mode it returns a no-op implementation.
+ * Tauri window; in web mode it returns a no-op (or limited) implementation.
  */
 export async function getWindow(): Promise<WindowHandle> {
   if (isTauri) {
@@ -494,6 +528,7 @@ export async function getWindow(): Promise<WindowHandle> {
 export function getWindowSync(): WindowHandle {
   if (!isTauri) return noopWindow;
 
+  // Return a proxy that lazily imports the Tauri window API
   return {
     show: async () => {
       const { getCurrentWindow } = await import('@tauri-apps/api/window');
@@ -565,5 +600,6 @@ export async function onDragDropEvent(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     return getCurrentWebview().onDragDropEvent(callback as any);
   }
+  // No-op in web mode — native file drag is a Tauri-only feature
   return () => {};
 }

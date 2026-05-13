@@ -10,9 +10,12 @@
   import DoctorSettingsPanel from './DoctorSettingsPanel.svelte';
   import GeneralSettingsPanel from './GeneralSettingsPanel.svelte';
   import KeyboardSettingsPanel from './KeyboardSettingsPanel.svelte';
-  import { isTauri } from '../../transport';
+  import { isTauri, writeClipboardText } from '../../transport';
+  import * as commands from '../../commands';
 
   let appVersion = $state(__APP_VERSION__);
+  let webToken = $state<string | null>(null);
+  let tokenCopied = $state(false);
 
   onMount(async () => {
     if (!isTauri) return;
@@ -23,7 +26,20 @@
     } catch (error) {
       console.warn('[Settings] Could not load runtime app version', error);
     }
+
+    try {
+      webToken = await commands.getWebAccessToken();
+    } catch {
+      // web server may not be running
+    }
   });
+
+  async function copyToken() {
+    if (!webToken) return;
+    await writeClipboardText(webToken);
+    tokenCopied = true;
+    setTimeout(() => (tokenCopied = false), 2000);
+  }
 </script>
 
 <TopBarPortal title="Settings" subtitle={`v${appVersion}`} />
@@ -85,6 +101,18 @@
           </div>
         </button>
       </div>
+
+      {#if webToken}
+        <div class="web-token-section">
+          <span class="web-token-label">Web Access Token</span>
+          <div class="web-token-row">
+            <code class="web-token-value">{webToken.slice(0, 8)}...</code>
+            <button class="web-token-copy" onclick={copyToken}>
+              {tokenCopied ? 'Copied!' : 'Copy'}
+            </button>
+          </div>
+        </div>
+      {/if}
     </aside>
 
     <section class="settings-content">
@@ -268,5 +296,55 @@
     .nav-meta {
       display: none;
     }
+
+    .web-token-section {
+      display: none;
+    }
+  }
+
+  .web-token-section {
+    margin-top: auto;
+    padding: 12px;
+    border-top: 1px solid var(--border-subtle);
+  }
+
+  .web-token-label {
+    font-size: var(--size-xs);
+    color: var(--text-muted);
+    display: block;
+    margin-bottom: 6px;
+  }
+
+  .web-token-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .web-token-value {
+    font-size: var(--size-xs);
+    color: var(--text-faint);
+    background: var(--bg-deepest);
+    padding: 2px 6px;
+    border-radius: 3px;
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .web-token-copy {
+    background: none;
+    border: 1px solid var(--border-muted);
+    border-radius: 4px;
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+    padding: 2px 8px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .web-token-copy:hover {
+    color: var(--text-primary);
+    border-color: var(--border-emphasis);
   }
 </style>

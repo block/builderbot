@@ -690,7 +690,7 @@
 
   .timeline-meta {
     display: flex;
-    align-items: center;
+    align-items: baseline;
     gap: 8px;
     margin-top: 3px;
   }

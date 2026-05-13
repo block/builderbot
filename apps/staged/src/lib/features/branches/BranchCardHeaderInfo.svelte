@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fade, slide } from 'svelte/transition';
   import { AlertTriangle, ChevronRight } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
@@ -32,7 +33,10 @@
 {#snippet parentPill()}
   {#if baseBranch}
     <span class="branch-capsule" title={baseBranch}>
-      {baseBranch}{#if parentAheadCount > 0}<span class="ahead-count">
+      {baseBranch}{#if parentAheadCount > 0}<span
+          class="ahead-count"
+          transition:fade={{ duration: 150 }}
+        >
           +{parentAheadCount}</span
         >{/if}
     </span>
@@ -41,7 +45,8 @@
         class="rebase-btn"
         disabled={rebaseDisabled}
         title={rebaseDisabled ? 'Rebase unavailable' : 'Rebase onto parent'}
-        onclick={onRebase}>Rebase</button
+        onclick={onRebase}
+        transition:slide={{ axis: 'x', duration: 150 }}>Rebase</button
       >
     {/if}
   {/if}
@@ -70,7 +75,11 @@
       {#if refreshingGitState}
         <Spinner size={10} />
       {:else if fetchError}
-        <span class="fetch-error" title={fetchError}>
+        <span
+          class="fetch-error"
+          title={fetchError}
+          transition:slide={{ axis: 'x', duration: 150 }}
+        >
           <AlertTriangle size={12} />
         </span>
       {/if}
@@ -89,7 +98,11 @@
         {#if refreshingGitState}
           <Spinner size={10} />
         {:else if fetchError}
-          <span class="fetch-error" title={fetchError}>
+          <span
+            class="fetch-error"
+            title={fetchError}
+            transition:slide={{ axis: 'x', duration: 150 }}
+          >
             <AlertTriangle size={12} />
           </span>
         {/if}

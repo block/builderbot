@@ -578,6 +578,7 @@
       class="prompt-input-wrapper"
       class:drag-over={dragOver}
       class:expanded={promptExpanded}
+      class:has-content={promptText.trim() || imageIds.length > 0}
       bind:this={promptWrapperEl}
       onfocusin={handlePromptFocusIn}
       onfocusout={handlePromptFocusOut}
@@ -1080,6 +1081,20 @@
     align-items: center;
     gap: 4px;
     flex-shrink: 0;
+  }
+
+  .prompt-input-wrapper.has-content .prompt-input-row {
+    flex-wrap: wrap;
+  }
+
+  .prompt-input-wrapper.has-content .prompt-input-row :global(.hashtag-input-wrapper) {
+    flex: 1 1 calc(100% - 48px);
+  }
+
+  .prompt-input-wrapper.has-content .prompt-actions {
+    width: 100%;
+    justify-content: flex-end;
+    gap: 4px;
   }
 
   .send-button {

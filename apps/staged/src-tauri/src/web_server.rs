@@ -11,10 +11,6 @@
 //! All `/api/*` routes (except `/api/auth`) require authentication via either
 //! an `Authorization: Bearer <token>` header or a valid `staged_session` cookie.
 
-// The full implementation is preserved here but start() is currently stubbed out,
-// so most items appear unused to the compiler.
-#![allow(dead_code, unused_imports)]
-
 use std::collections::HashSet;
 use std::io;
 use std::net::SocketAddr;
@@ -208,14 +204,68 @@ impl Listener for TlsListener {
 
 /// Start the Axum web server in a background tokio task.
 ///
-/// Stubbed — logs a warning and returns. The full implementation (TLS listener,
-/// Axum router with static file serving) is intentionally disabled in this build.
-/// All route handlers, auth middleware, and the `dispatch()` match block are kept
-/// compiling so they stay in sync with the rest of the codebase.
-///
-/// TODO(web): restore full web server startup from the `mobile-web` branch.
-pub fn start(_state: WebAppState) {
-    log::warn!("Web server requested but this build has the web server stubbed out");
+/// This should be called from the Tauri `setup` hook after all managed state
+/// has been registered.
+pub fn start(state: WebAppState) {
+    let token = state.auth_token.clone();
+    tauri::async_runtime::spawn(async move {
+        let dist_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            // In dev, the exe is in src-tauri/target/debug; dist is at ../../dist relative to src-tauri
+            .map(|p| {
+                // Try multiple candidate paths for the built frontend
+                let candidates = vec![
+                    p.join("../dist"),          // production bundle
+                    p.join("../../../../dist"), // dev (target/debug -> src-tauri -> apps/staged -> dist)
+                    PathBuf::from("../dist"),   // relative to cwd
+                ];
+                candidates
+                    .into_iter()
+                    .find(|c| c.exists())
+                    .unwrap_or_else(|| PathBuf::from("../dist"))
+            })
+            .unwrap_or_else(|| PathBuf::from("../dist"));
+
+        // Protected API routes require auth (Bearer token or session cookie)
+        let api_routes = Router::new()
+            .route("/api/invoke/{command}", post(invoke_command))
+            .route("/api/events", get(ws_events))
+            .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
+
+        // Auth endpoint is public (it's where you submit the token)
+        let auth_route = Router::new().route("/api/auth", post(authenticate));
+
+        let app = api_routes
+            .merge(auth_route)
+            .fallback_service(ServeDir::new(&dist_dir).append_index_html_on_directories(true))
+            .layer(CorsLayer::permissive())
+            .with_state(state);
+
+        let addr = "0.0.0.0:5175";
+        let tls_acceptor = match load_tls_acceptor() {
+            Ok(acceptor) => acceptor,
+            Err(e) => {
+                log::error!("[web_server] {e}");
+                return;
+            }
+        };
+        log::info!(
+            "[web_server] starting HTTPS on {addr}, serving static files from {}",
+            dist_dir.display()
+        );
+        log::info!("[web_server] web access token: {token}");
+        let listener = match tokio::net::TcpListener::bind(addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                log::error!("[web_server] failed to bind {addr}: {e}");
+                return;
+            }
+        };
+        if let Err(e) = axum::serve(TlsListener::new(listener, tls_acceptor), app).await {
+            log::error!("[web_server] server error: {e}");
+        }
+    });
 }
 
 // =============================================================================

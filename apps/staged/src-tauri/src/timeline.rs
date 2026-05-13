@@ -16,10 +16,57 @@ use crate::{
     ReviewTimelineItem,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
+
+/// TTL for cached git user name lookups (5 minutes).
+const GIT_USER_NAME_TTL_MS: u128 = 300_000;
+
+#[derive(Debug, Clone)]
+struct GitUserNameCacheEntry {
+    name: Option<String>,
+    fetched_at: u128,
+}
+
+fn git_user_name_cache() -> &'static Mutex<HashMap<String, GitUserNameCacheEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, GitUserNameCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_git_user_name<F>(cache_key: &str, fetch: F) -> Option<String>
+where
+    F: FnOnce() -> Option<String>,
+{
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    if let Ok(cache) = git_user_name_cache().lock() {
+        if let Some(entry) = cache.get(cache_key) {
+            if now.saturating_sub(entry.fetched_at) < GIT_USER_NAME_TTL_MS {
+                return entry.name.clone();
+            }
+        }
+    }
+
+    let name = fetch();
+
+    if let Ok(mut cache) = git_user_name_cache().lock() {
+        cache.insert(
+            cache_key.to_string(),
+            GitUserNameCacheEntry {
+                name: name.clone(),
+                fetched_at: now,
+            },
+        );
+    }
+
+    name
+}
 
 /// Payload for the `git-state-updated` event emitted by `refresh_branch_git_state`.
 #[derive(Debug, Clone, Serialize)]
@@ -165,11 +212,19 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             &branch.base_branch,
             git::FetchMode::Never,
         ));
-        git_user_name =
-            branches::run_workspace_git(ws_name, repo_subpath.as_deref(), &["config", "user.name"])
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
+        {
+            let ws = ws_name.clone();
+            let sub = repo_subpath.clone();
+            git_user_name = cached_git_user_name(
+                &format!("remote:{ws}:{}", sub.as_deref().unwrap_or("")),
+                || {
+                    branches::run_workspace_git(&ws, sub.as_deref(), &["config", "user.name"])
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                },
+            );
+        }
         commits = fetch_remote_commits(
             ws_name,
             repo_subpath.as_deref(),
@@ -189,10 +244,15 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 &branch.base_branch,
                 git::FetchMode::Never,
             ));
-            git_user_name = git::cli_run(worktree_path, &["config", "user.name"])
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty());
+            {
+                let path_str = wd.path.clone();
+                git_user_name = cached_git_user_name(&format!("local:{path_str}"), || {
+                    git::cli_run(worktree_path, &["config", "user.name"])
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                });
+            }
             let git_commits =
                 git::get_commits_since_base(worktree_path, &base_ref).map_err(|e| {
                     format!("Failed to get commits since base for branch {branch_id}: {e:?}")

@@ -745,9 +745,16 @@
 
   // Once files finish loading, override the initial selection with the first
   // file in sidebar order so the viewer and sidebar stay in sync.
+  // For non-readonly reviews, also wait for reviewedPaths to load so the
+  // needs-review / reviewed split is accurate before picking the first file.
   let initialSelectionApplied = false;
   $effect(() => {
-    if (!diffViewer.state.loading && orderedFiles.length > 0 && !initialSelectionApplied) {
+    if (
+      !diffViewer.state.loading &&
+      orderedFiles.length > 0 &&
+      !initialSelectionApplied &&
+      (readonly || !reviewHandle || !reviewHandle.state.loading)
+    ) {
       initialSelectionApplied = true;
       diffViewer.selectFile(orderedFiles[0].path);
     }

@@ -22,6 +22,7 @@
     GitPullRequestDraft,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
+  import { isSessionActive } from '../../shared/sessionStatus';
   import { listenToEvent, type UnlistenFn } from '../../transport';
   import { subscribeDragDrop } from './dragDrop';
   import type {
@@ -282,11 +283,9 @@
   /** True when the branch has at least one queued or running session. */
   function hasActiveSessions(tl: NonNullable<typeof timeline>): boolean {
     return (
-      tl.commits.some((c) => c.sessionStatus === 'queued' || c.sessionStatus === 'running') ||
-      tl.notes.some((n) => n.sessionStatus === 'queued' || n.sessionStatus === 'running') ||
-      tl.reviews.some(
-        (r) => !r.isAuto && (r.sessionStatus === 'queued' || r.sessionStatus === 'running')
-      )
+      tl.commits.some((c) => isSessionActive(c.sessionStatus)) ||
+      tl.notes.some((n) => isSessionActive(n.sessionStatus)) ||
+      tl.reviews.some((r) => !r.isAuto && isSessionActive(r.sessionStatus))
     );
   }
   let commandPipelinePending = $state(false);

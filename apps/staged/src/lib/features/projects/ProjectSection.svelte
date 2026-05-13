@@ -40,6 +40,7 @@
   import { projectStateStore } from '../../stores/projectState.svelte';
   import BranchCard from '../branches/BranchCard.svelte';
   import Spinner from '../../shared/Spinner.svelte';
+  import { isSessionActive } from '../../shared/sessionStatus';
   import AddRepoModal from './AddRepoModal.svelte';
   import SuggestedRepos from './SuggestedRepos.svelte';
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
@@ -184,7 +185,7 @@
   let runningNoteSessionIds = $derived.by(() => {
     const ids = new Set<string>();
     for (const note of projectNotes) {
-      if (!note.title.trim() && !note.content.trim() && note.sessionId) {
+      if (isSessionActive(note.sessionStatus) && note.sessionId) {
         ids.add(note.sessionId);
       }
     }
@@ -440,36 +441,21 @@
       'session-status-changed',
       (payload) => {
         const { sessionId, status, projectId } = payload;
-        const isTracked = activeSessionIds.has(sessionId);
-        // Also reload if this session belongs to a known project note (handles
-        // sessions that were already running when the component mounted).
-        const isKnownNoteSession = projectNotes.some((n) => n.sessionId === sessionId);
+        if (projectId !== project.id) return;
 
-        // Handle resumed sessions: when a project note session is resumed,
-        // the backend emits a "running" event with the projectId. Re-add it
-        // to active tracking so the row spinner and sidebar spinner appear.
-        if (
-          status === 'running' &&
-          !isTracked &&
-          isKnownNoteSession &&
-          (projectId === project.id || !projectId)
-        ) {
+        if (status === 'running') {
+          // Bridge: track until next loadProjectNotes() picks it up via sessionStatus
           activeSessionIds = new Set([...activeSessionIds, sessionId]);
-          sessionRegistry.register(sessionId, project.id, 'note');
-          projectStateStore.addRunningSession(project.id, sessionId);
         }
 
-        if (isTracked || isKnownNoteSession) {
-          if (status === 'completed' || status === 'error' || status === 'cancelled') {
-            if (isTracked) {
-              const next = new Set(activeSessionIds);
-              next.delete(sessionId);
-              activeSessionIds = next;
-            }
-            // Refresh notes after session completes
-            loadProjectNotes();
-          }
+        if (status === 'completed' || status === 'error' || status === 'cancelled') {
+          const next = new Set(activeSessionIds);
+          next.delete(sessionId);
+          activeSessionIds = next;
         }
+
+        // Always refresh — backend now provides authoritative status
+        loadProjectNotes();
       }
     ).then((unlisten) => {
       unlistenSession = unlisten;
@@ -647,7 +633,7 @@
       </div>
       <div class="notes-timeline">
         {#each timelineNotes as note, index (note.id)}
-          {@const isRunning = !note.title.trim() && !note.content.trim()}
+          {@const isRunning = isSessionActive(note.sessionStatus)}
           {@const isFailed = !isRunning && !!note.sessionId && !note.content.trim()}
           {@const noteType = isRunning ? 'generating-note' : isFailed ? 'failed-note' : 'note'}
           {@const liveHint =

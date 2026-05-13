@@ -11,6 +11,7 @@
 
 import type { Branch, BranchTimeline as BranchTimelineData, BranchSessionType } from '../../types';
 import * as commands from '../../api/commands';
+import { isSessionActive } from '../../shared/sessionStatus';
 import { getPreferredAgent } from '../settings/preferences.svelte';
 import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
 import { alerts } from '../../shared/alerts.svelte';
@@ -66,9 +67,9 @@ export default class BranchCardSessionManager {
     const tl = this.getTimeline();
     if (!tl) return false;
     return (
-      tl.commits.some((c) => c.sessionStatus === 'running') ||
-      tl.notes.some((n) => n.sessionStatus === 'running') ||
-      tl.reviews.some((r) => r.sessionStatus === 'running' && !r.isAuto)
+      tl.commits.some((c) => isSessionActive(c.sessionStatus)) ||
+      tl.notes.some((n) => isSessionActive(n.sessionStatus)) ||
+      tl.reviews.some((r) => isSessionActive(r.sessionStatus) && !r.isAuto)
     );
   });
 

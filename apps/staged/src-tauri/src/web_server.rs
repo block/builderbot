@@ -2106,7 +2106,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
             let notes = store
-                .list_project_notes(&project_id)
+                .list_project_notes_with_status(&project_id)
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(notes).unwrap())
         }

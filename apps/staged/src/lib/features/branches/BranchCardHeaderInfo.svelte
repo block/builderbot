@@ -1,5 +1,6 @@
 <script lang="ts">
   import { AlertTriangle, ChevronRight } from 'lucide-svelte';
+  import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import type { ProjectRepo } from '../../types';
 
@@ -11,6 +12,8 @@
     onRebase?: () => void;
     rebaseDisabled?: boolean;
     warning?: string | null;
+    refreshingGitState?: boolean;
+    fetchError?: string | null;
   }
 
   let {
@@ -21,6 +24,8 @@
     onRebase,
     rebaseDisabled = false,
     warning = null,
+    refreshingGitState = false,
+    fetchError = null,
   }: Props = $props();
 </script>
 
@@ -62,16 +67,30 @@
           <span>{warning}</span>
         </span>
       {/if}
+      {#if refreshingGitState}
+        <Spinner size={10} />
+      {:else if fetchError}
+        <span class="fetch-error" title={fetchError}>
+          <AlertTriangle size={12} />
+        </span>
+      {/if}
     </div>
   {:else}
     <span class="repo-name">{branchName}</span>
-    {#if baseBranch || warning}
+    {#if baseBranch || warning || refreshingGitState || fetchError}
       <div class="header-meta">
         {@render parentPill()}
         {#if warning}
           <span class="branch-warning" title={warning}>
             <AlertTriangle size={12} />
             <span>{warning}</span>
+          </span>
+        {/if}
+        {#if refreshingGitState}
+          <Spinner size={10} />
+        {:else if fetchError}
+          <span class="fetch-error" title={fetchError}>
+            <AlertTriangle size={12} />
           </span>
         {/if}
       </div>
@@ -177,5 +196,11 @@
   .branch-warning span {
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .fetch-error {
+    display: inline-flex;
+    align-items: center;
+    color: var(--ui-warning, var(--status-modified));
   }
 </style>

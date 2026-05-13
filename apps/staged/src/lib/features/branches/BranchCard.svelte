@@ -1333,9 +1333,7 @@
     </div>
   {:else}
     <div class="card-header">
-      {#if refreshingGitState}
-        <Spinner size={14} />
-      {:else if isRemote}
+      {#if isRemote}
         <Cloud size={14} class="header-icon {cloudStatusClass(remoteWorkspaceStatus)}" />
       {:else if prStatus === 'merged'}
         <GitPullRequest size={14} class="header-icon pr-status-merged" />
@@ -1362,6 +1360,8 @@
           : () => startBranchCommandPipeline('rebase')}
         rebaseDisabled={!!branchCommandDisabledReason}
         warning={branchIdentityWarning}
+        {refreshingGitState}
+        fetchError={timeline?.gitState?.fetch.error ?? null}
       />
       <div class="header-actions">
         {#if isRemote && remoteWorkspaceStatus !== 'running' && remoteWorkspaceStatus !== 'starting'}

@@ -52,6 +52,16 @@
   {/if}
 {/snippet}
 
+{#snippet refreshStatus()}
+  {#if refreshingGitState}
+    <Spinner size={10} />
+  {:else if fetchError}
+    <span class="fetch-error" title={fetchError} transition:slide={{ axis: 'x', duration: 150 }}>
+      <AlertTriangle size={12} />
+    </span>
+  {/if}
+{/snippet}
+
 <div class="header-left">
   {#if repoLabel}
     <span class="repo-name"
@@ -72,17 +82,7 @@
           <span>{warning}</span>
         </span>
       {/if}
-      {#if refreshingGitState}
-        <Spinner size={10} />
-      {:else if fetchError}
-        <span
-          class="fetch-error"
-          title={fetchError}
-          transition:slide={{ axis: 'x', duration: 150 }}
-        >
-          <AlertTriangle size={12} />
-        </span>
-      {/if}
+      {@render refreshStatus()}
     </div>
   {:else}
     <span class="repo-name">{branchName}</span>
@@ -95,17 +95,7 @@
             <span>{warning}</span>
           </span>
         {/if}
-        {#if refreshingGitState}
-          <Spinner size={10} />
-        {:else if fetchError}
-          <span
-            class="fetch-error"
-            title={fetchError}
-            transition:slide={{ axis: 'x', duration: 150 }}
-          >
-            <AlertTriangle size={12} />
-          </span>
-        {/if}
+        {@render refreshStatus()}
       </div>
     {/if}
   {/if}

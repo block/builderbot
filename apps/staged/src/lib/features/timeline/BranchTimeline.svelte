@@ -224,6 +224,7 @@
     titleHtml?: string;
     meta?: string;
     secondaryMeta?: string;
+    tertiaryMeta?: string;
     deleting?: boolean;
     timestamp: number;
     /** Position in git's topological order (0 = oldest). Tiebreaker for same-second timestamps. */
@@ -499,6 +500,7 @@
   // Merge commits, notes, and reviews into a single sorted list
   let items = $derived.by(() => {
     const nowMs = minuteNow.now();
+    const gitUserName = timeline.gitUserName ?? null;
     const all: DisplayItem[] = [];
     const commitAnchors = new Map<string, CommitAnchor>();
     const deletingCommitIds = new Set(
@@ -541,12 +543,19 @@
         secondaryMeta = formatRelativeTimeSeconds(commit.timestamp, nowMs);
       }
 
+      const showAuthor =
+        type === 'commit' &&
+        !isDeleting &&
+        !!commit.author &&
+        (!gitUserName || commit.author !== gitUserName);
+
       all.push({
         key: commit.sha || `pending-${commit.sessionId || commit.timestamp}`,
         type,
         title: stripXmlTags(commit.subject),
         meta: isDeleting ? 'Deleting...' : secondaryMeta,
         secondaryMeta: isDeleting || isRunning ? undefined : commit.shortSha || undefined,
+        tertiaryMeta: showAuthor ? commit.author : undefined,
         deleting: isDeleting,
         timestamp: commit.timestamp,
         order: commit.order,
@@ -869,6 +878,7 @@
           titleHtml={item.titleHtml}
           meta={item.meta}
           secondaryMeta={item.secondaryMeta}
+          tertiaryMeta={item.tertiaryMeta}
           badges={item.badges}
           onPullClick={item.onPull}
           pullDisabledReason={item.pullDisabledReason}
@@ -954,6 +964,7 @@
           titleHtml={item.titleHtml}
           meta={item.meta}
           secondaryMeta={item.secondaryMeta}
+          tertiaryMeta={item.tertiaryMeta}
           badges={item.badges}
           onPullClick={item.onPull}
           pullDisabledReason={item.pullDisabledReason}

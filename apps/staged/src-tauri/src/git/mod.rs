@@ -12,6 +12,7 @@ mod status_parse;
 mod types;
 mod worktree;
 
+pub(crate) use cli::run as cli_run;
 pub use cli::GitError;
 pub use commit::commit;
 pub use diff::{get_file_diff, get_unified_diff, list_diff_files};

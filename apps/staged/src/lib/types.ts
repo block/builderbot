@@ -179,6 +179,7 @@ export interface BranchTimeline {
   reviews: ReviewTimelineItem[];
   images: ImageTimelineItem[];
   gitState?: BranchGitState | null;
+  gitUserName?: string | null;
 }
 
 export type UpstreamRelation = 'missing' | 'inSync' | 'localAhead' | 'originAhead' | 'diverged';

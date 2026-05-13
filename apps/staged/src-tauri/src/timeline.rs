@@ -140,6 +140,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         .map_err(|e| e.to_string())?;
 
     let mut git_state = None;
+    let mut git_user_name: Option<String> = None;
 
     // Get commits from git (the source of truth for commit data)
     let mut commits = Vec::new();
@@ -164,6 +165,11 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             &branch.base_branch,
             git::FetchMode::Never,
         ));
+        git_user_name =
+            branches::run_workspace_git(ws_name, repo_subpath.as_deref(), &["config", "user.name"])
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
         commits = fetch_remote_commits(
             ws_name,
             repo_subpath.as_deref(),
@@ -183,6 +189,10 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 &branch.base_branch,
                 git::FetchMode::Never,
             ));
+            git_user_name = git::cli_run(worktree_path, &["config", "user.name"])
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
             let git_commits =
                 git::get_commits_since_base(worktree_path, &base_ref).map_err(|e| {
                     format!("Failed to get commits since base for branch {branch_id}: {e:?}")
@@ -308,6 +318,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         reviews,
         images,
         git_state,
+        git_user_name,
     })
 }
 

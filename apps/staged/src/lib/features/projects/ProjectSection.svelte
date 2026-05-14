@@ -207,9 +207,17 @@
   // Hashtag reference items
   let hashtagItems = $state<HashtagItem[]>([]);
   $effect(() => {
-    buildProjectHashtagItems(project.id, branches, reposById).then((items) => {
-      hashtagItems = items;
-    });
+    let stale = false;
+    buildProjectHashtagItems(project.id, branches, reposById)
+      .then((items) => {
+        if (!stale) hashtagItems = items;
+      })
+      .catch((err) => {
+        console.error('[ProjectSection] Failed to build hashtag items:', err);
+      });
+    return () => {
+      stale = true;
+    };
   });
 
   // Image attachment state

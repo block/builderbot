@@ -2113,9 +2113,16 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "delete_project_note" => {
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;
+            let note = store
+                .get_project_note(&note_id)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("Project note not found: {note_id}"))?;
             store
                 .delete_project_note(&note_id)
                 .map_err(|e| e.to_string())?;
+            if let Some(sid) = note.session_id {
+                let _ = store.delete_session(&sid);
+            }
             Ok(Value::Null)
         }
 

@@ -83,12 +83,24 @@ pub fn list_project_notes(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+/// Delete a project note and its linked session (if any).
+#[tauri::command(rename_all = "camelCase")]
 pub fn delete_project_note(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     note_id: String,
 ) -> Result<(), String> {
-    crate::get_store(&store)?
+    let store = crate::get_store(&store)?;
+    let note = store
+        .get_project_note(&note_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project note not found: {note_id}"))?;
+
+    store
         .delete_project_note(&note_id)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    if let Some(sid) = note.session_id {
+        let _ = store.delete_session(&sid);
+    }
+    Ok(())
 }

@@ -41,6 +41,7 @@
   import BranchCard from '../branches/BranchCard.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import { isSessionActive } from '../../shared/sessionStatus';
+  import { deleteSessionLinkedItem } from '../../shared/deleteSessionLinkedItem';
   import AddRepoModal from './AddRepoModal.svelte';
   import SuggestedRepos from './SuggestedRepos.svelte';
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
@@ -404,9 +405,11 @@
   }
 
   async function handleDeleteNote(noteId: string) {
+    const note = projectNotes.find((n) => n.id === noteId);
+    const sessionId = note?.sessionId ?? undefined;
     deletingNoteIds = new Set([...deletingNoteIds, noteId]);
     try {
-      await commands.deleteProjectNote(noteId);
+      await deleteSessionLinkedItem(() => commands.deleteProjectNote(noteId), sessionId);
       projectNotes = projectNotes.filter((n) => n.id !== noteId);
     } catch (e) {
       console.error('[ProjectSection] Failed to delete project note:', e);
@@ -420,9 +423,9 @@
   /** All notes: completed (oldest first) followed by generating – matches branch timeline order. */
   let timelineNotes = $derived(
     [...projectNotes].sort((a, b) => {
-      const aIsGenerating = !a.title.trim() && !a.content.trim();
-      const bIsGenerating = !b.title.trim() && !b.content.trim();
-      if (aIsGenerating !== bIsGenerating) return aIsGenerating ? 1 : -1;
+      const aIsActive = isSessionActive(a.sessionStatus);
+      const bIsActive = isSessionActive(b.sessionStatus);
+      if (aIsActive !== bIsActive) return aIsActive ? 1 : -1;
       return (a.completedAt ?? a.createdAt) - (b.completedAt ?? b.createdAt);
     })
   );

@@ -104,6 +104,10 @@ pub struct BranchWithWorkdir {
     pub worktree_path: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Number of finalized commits (with a git SHA) on this branch.
+    /// Only populated by `list_branches_for_project`; `None` elsewhere.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commit_count: Option<u64>,
 }
 
 /// Result of polling a remote workspace's status.

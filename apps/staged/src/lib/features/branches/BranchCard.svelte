@@ -20,6 +20,7 @@
     GitPullRequest,
     GitPullRequestClosed,
     GitPullRequestDraft,
+    Sprout,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import { listenToEvent, type UnlistenFn } from '../../transport';
@@ -1345,8 +1346,10 @@
         <GitPullRequestClosed size={14} class="header-icon" />
       {:else if prStatus === 'conflict'}
         <GitPullRequestClosed size={14} class="header-icon pr-status-conflict" />
-      {:else}
+      {:else if hasCodeChanges}
         <GitPullRequestDraft size={14} class="header-icon pr-status-draft" />
+      {:else}
+        <Sprout size={14} class="header-icon pr-status-clean" />
       {/if}
       <BranchCardHeaderInfo
         branchName={branch.branchName}
@@ -1800,6 +1803,10 @@
 
   .card-header :global(svg.pr-status-draft) {
     stroke: var(--text-muted);
+  }
+
+  .card-header :global(svg.pr-status-clean) {
+    stroke: var(--text-faint);
   }
 
   .card-header :global(svg.cloud-running) {

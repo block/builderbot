@@ -10,12 +10,14 @@
     GitPullRequestClosed,
     GitPullRequestDraft,
     GitBranch,
+    Sprout,
   } from 'lucide-svelte';
   import type { Project, ProjectRepo, Branch, WorkspaceStatus } from '../../types';
   import { goHome, navigation, selectProject } from '../layout/navigation.svelte';
   import {
     projectDisplayName,
     aggregateProjectPrStatus,
+    projectHasCodeChanges,
     projectSubtitle,
     projectActivity,
   } from '../../shared/utils';
@@ -316,8 +318,10 @@
                     <GitPullRequestClosed size={14} />
                   {:else if prStatus === 'conflict'}
                     <GitPullRequestClosed size={14} class="pr-status-conflict" />
-                  {:else}
+                  {:else if projectHasCodeChanges(projectBranches.get(project.id) || [])}
                     <GitPullRequestDraft size={14} class="pr-status-draft" />
+                  {:else}
+                    <Sprout size={14} class="pr-status-clean" />
                   {/if}
                   <div class="row-text">
                     <span class="project-name">{projectDisplayName(project)}</span>
@@ -599,6 +603,10 @@
   }
 
   .row-main :global(svg.pr-status-draft) {
+    stroke: var(--text-faint);
+  }
+
+  .row-main :global(svg.pr-status-clean) {
     stroke: var(--text-faint);
   }
 

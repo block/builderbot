@@ -481,16 +481,12 @@
                 <Icon size={14} />
               {/if}
             </span>
-            <span class="hashtag-item-title">{item.title}</span>
-            {#if item.repoSlug || item.branchName}
-              <span class="hashtag-item-context">
-                {#if item.repoSlug}{item.repoSlug}{/if}
-                {#if item.repoSlug && item.branchName}
-                  &middot;
-                {/if}
-                {#if item.branchName}{item.branchName}{/if}
-              </span>
-            {/if}
+            <span class="hashtag-item-text">
+              <span class="hashtag-item-title">{item.title}</span>
+              {#if item.subtitle}
+                <span class="hashtag-item-subtitle">{item.subtitle}</span>
+              {/if}
+            </span>
           </div>
         {/each}
       </div>
@@ -549,7 +545,7 @@
 
   /* Dropdown — fixed-positioned near the caret via inline style */
   .hashtag-dropdown {
-    width: 340px;
+    width: 420px;
     max-width: calc(100vw - 32px);
     background: var(--bg-chrome);
     border: 1px solid var(--border-muted);
@@ -563,7 +559,7 @@
 
   .hashtag-dropdown-item {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 8px;
     padding: 6px 10px;
     border-radius: 6px;
@@ -608,8 +604,15 @@
     color: var(--image-color);
   }
 
-  .hashtag-item-title {
+  .hashtag-item-text {
     flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    min-width: 0;
+  }
+
+  .hashtag-item-title {
     font-size: var(--size-sm);
     color: var(--text-primary);
     overflow: hidden;
@@ -617,11 +620,9 @@
     white-space: nowrap;
   }
 
-  .hashtag-item-context {
+  .hashtag-item-subtitle {
     font-size: var(--size-xs);
     color: var(--text-faint);
-    flex-shrink: 0;
-    max-width: 140px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

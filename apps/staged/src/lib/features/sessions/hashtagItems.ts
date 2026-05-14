@@ -107,6 +107,7 @@ export function timelineToHashtagItems(
       title: note.title,
       color: '--note-color',
       bgColor: '--note-bg',
+      subtitle: repoSlug,
       branchName,
       repoSlug,
     });
@@ -120,6 +121,7 @@ export function timelineToHashtagItems(
       title: commit.subject,
       color: '--commit-color',
       bgColor: '--commit-bg',
+      subtitle: repoSlug,
       branchName,
       repoSlug,
     });
@@ -135,6 +137,7 @@ export function timelineToHashtagItems(
       title,
       color: '--review-color',
       bgColor: '--review-bg',
+      subtitle: repoSlug,
       branchName,
       repoSlug,
     });
@@ -148,6 +151,7 @@ export function timelineToHashtagItems(
       title: image.filename,
       color: '--image-color',
       bgColor: '--image-bg',
+      subtitle: repoSlug,
       branchName,
       repoSlug,
     });
@@ -165,6 +169,7 @@ export function projectNotesToHashtagItems(notes: ProjectNote[]): HashtagItem[] 
       title: n.title,
       color: '--note-color',
       bgColor: '--note-bg',
+      subtitle: 'Project note',
     }));
 }
 

@@ -12,6 +12,7 @@ use crate::detector::AiProvider;
 /// AI provider that uses ACP agents (like Goose or Claude Code)
 pub struct AcpAiProvider {
     working_dir: PathBuf,
+    provider_id: Option<String>,
 }
 
 impl AcpAiProvider {
@@ -32,7 +33,10 @@ impl AcpAiProvider {
                 acp_client::known_agent_commands().join(", ")
             )
         })?;
-        Ok(Self { working_dir })
+        Ok(Self {
+            working_dir,
+            provider_id: None,
+        })
     }
 
     /// Create a provider with a specific agent ID
@@ -46,15 +50,21 @@ impl AcpAiProvider {
         acp_client::find_acp_agent_by_id(provider_id).ok_or_else(|| {
             anyhow::anyhow!("ACP agent '{}' not found or not installed", provider_id)
         })?;
-        Ok(Self { working_dir })
+        Ok(Self {
+            working_dir,
+            provider_id: Some(provider_id.to_string()),
+        })
     }
 }
 
 #[async_trait]
 impl AiProvider for AcpAiProvider {
     async fn prompt(&self, prompt: String) -> Result<String> {
-        let agent =
-            acp_client::find_acp_agent().ok_or_else(|| anyhow::anyhow!("No ACP agent found"))?;
+        let agent = match &self.provider_id {
+            Some(id) => acp_client::find_acp_agent_by_id(id),
+            None => acp_client::find_acp_agent(),
+        }
+        .ok_or_else(|| anyhow::anyhow!("No ACP agent found"))?;
 
         acp_client::run_acp_prompt(&agent, &self.working_dir, &prompt).await
     }

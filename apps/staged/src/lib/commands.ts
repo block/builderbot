@@ -253,8 +253,8 @@ export function setupWorktree(branchId: string): Promise<Branch> {
 
 /** Like setupWorktree, but also runs prerun actions after the worktree is ready.
  *  Used by the retry path so prerun actions aren't skipped on recovery. */
-export function setupWorktreeAndRunPrerun(branchId: string): Promise<Branch> {
-  return invokeCommand('setup_worktree_and_run_prerun', { branchId });
+export function setupWorktreeAndRunPrerun(branchId: string, provider?: string): Promise<Branch> {
+  return invokeCommand('setup_worktree_and_run_prerun', { branchId, provider });
 }
 
 /** Import a GitHub PR: fetch its head ref, create a local branch + worktree,

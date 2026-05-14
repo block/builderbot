@@ -1150,6 +1150,7 @@ pub async fn setup_worktree_and_run_prerun(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     app_handle: AppHandle,
     branch_id: String,
+    provider: Option<String>,
 ) -> Result<BranchWithWorkdir, String> {
     // Delegate to the existing setup_worktree command for worktree creation.
     let result = setup_worktree(store.clone(), branch_id.clone()).await?;
@@ -1167,6 +1168,7 @@ pub async fn setup_worktree_and_run_prerun(
                 &branch_id,
                 &executor,
                 &act_registry,
+                provider.as_deref(),
             )
             .await
             {
@@ -2347,6 +2349,7 @@ pub(crate) async fn run_prerun_actions_for_branch(
     branch_id: &str,
     executor: &Arc<ActionExecutor>,
     act_registry: &Arc<ActionRegistry>,
+    provider_id: Option<&str>,
 ) -> Result<usize, String> {
     let branch = store
         .get_branch(branch_id)
@@ -2396,6 +2399,7 @@ pub(crate) async fn run_prerun_actions_for_branch(
         let detected = match crate::actions::commands::detect_actions_for_repo_context(
             &github_repo,
             subpath.as_deref(),
+            provider_id,
         )
         .await
         {

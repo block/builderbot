@@ -1399,6 +1399,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "setup_worktree_and_run_prerun" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
+            let provider: Option<String> = opt_arg(&args, "provider")?;
 
             // Reuse setup_worktree logic inline
             let branch = store
@@ -1452,6 +1453,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                         &branch_id,
                         action_executor,
                         action_registry,
+                        provider.as_deref(),
                     )
                     .await
                     {
@@ -1947,9 +1949,11 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let store = get_store(store_mutex)?;
             let github_repo: String = arg(&args, "githubRepo")?;
             let subpath: Option<String> = opt_arg(&args, "subpath")?;
+            let provider: Option<String> = opt_arg(&args, "provider")?;
             let actions = crate::actions::commands::detect_repo_actions_impl(
                 github_repo,
                 subpath,
+                provider,
                 app_handle.clone(),
                 store,
             )
@@ -1960,9 +1964,11 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
             let action_id: String = arg(&args, "actionId")?;
+            let provider: Option<String> = opt_arg(&args, "provider")?;
             let execution_id = crate::actions::commands::run_branch_action_impl(
                 branch_id,
                 action_id,
+                provider,
                 app_handle.clone(),
                 store,
                 Arc::clone(action_executor),
@@ -2004,8 +2010,10 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "run_prerun_actions" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
+            let provider: Option<String> = opt_arg(&args, "provider")?;
             let execution_ids = crate::actions::commands::run_prerun_actions_impl(
                 branch_id,
+                provider,
                 app_handle.clone(),
                 store,
                 Arc::clone(action_executor),

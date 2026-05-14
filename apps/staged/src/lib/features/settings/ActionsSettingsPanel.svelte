@@ -29,6 +29,9 @@
   } from '../actions/actions';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { matchesRepoSearch } from './repoContextSearch';
+  import { alerts } from '../../shared/alerts.svelte';
+  import { getPreferredAgent } from './preferences.svelte';
+  import { agentState } from '../agents/agent.svelte';
 
   type RepoAttachment = {
     projectId: string;
@@ -294,7 +297,8 @@
 
     detecting = true;
     try {
-      const suggested = await detectRepoActions(githubRepo, subpath);
+      const provider = getPreferredAgent(agentState.providers) ?? undefined;
+      const suggested = await detectRepoActions(githubRepo, subpath, provider);
 
       // After the await the user may have navigated away from this context.
       // Only mutate local `actions` state when we're still viewing the same
@@ -327,6 +331,7 @@
       await loadContexts();
     } catch (e) {
       console.error('Failed to detect actions:', e);
+      alerts.error(String(e), 'Failed to detect actions');
     } finally {
       detecting = false;
     }

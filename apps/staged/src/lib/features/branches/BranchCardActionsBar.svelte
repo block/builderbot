@@ -53,6 +53,8 @@
   } from './branchCardHelpers';
   import { alerts } from '../../shared/alerts.svelte';
   import { bloxEnv } from '../../stores/bloxEnv.svelte';
+  import { getPreferredAgent } from '../settings/preferences.svelte';
+  import { agentState } from '../agents/agent.svelte';
   import MoreMenu from '../../shared/menu/MoreMenu.svelte';
   import type { MenuItem } from '../../shared/menu/types';
 
@@ -435,7 +437,8 @@
     }
 
     try {
-      await runBranchAction(branch.id, action.id);
+      const provider = getPreferredAgent(agentState.providers) ?? undefined;
+      await runBranchAction(branch.id, action.id, provider);
     } catch (e) {
       console.error('Failed to run action:', e);
       notifyError(`Failed to run action "${action.name}"`, e);
@@ -888,7 +891,8 @@
       }
 
       try {
-        const newExecutionId = await runBranchAction(branch.id, action.id);
+        const provider = getPreferredAgent(agentState.providers) ?? undefined;
+        const newExecutionId = await runBranchAction(branch.id, action.id, provider);
         // Keep the modal open and switch to the new execution
         actionOutputModal = {
           executionId: newExecutionId,

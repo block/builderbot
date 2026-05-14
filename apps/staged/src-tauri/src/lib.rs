@@ -522,6 +522,7 @@ fn create_project(
                             &branch_id,
                             &executor,
                             &act_registry,
+                            None,
                         )
                         .await
                         {
@@ -708,6 +709,7 @@ async fn add_project_repo(
                             &branch.id,
                             &executor,
                             &act_registry,
+                            None,
                         )
                         .await
                         {

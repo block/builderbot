@@ -1,6 +1,8 @@
 import type { Branch, WorkspaceStatus } from '../../types';
 import * as commands from '../../api/commands';
 import { alerts } from '../../shared/alerts.svelte';
+import { getPreferredAgent } from '../settings/preferences.svelte';
+import { agentState } from '../agents/agent.svelte';
 
 type BranchMap = Map<string, Branch[]>;
 
@@ -501,7 +503,10 @@ class WorkspaceLifecycleController {
 
     try {
       const updated = opts?.runPrerun
-        ? await commands.setupWorktreeAndRunPrerun(branchId)
+        ? await commands.setupWorktreeAndRunPrerun(
+            branchId,
+            getPreferredAgent(agentState.providers) ?? undefined
+          )
         : await commands.setupWorktree(branchId);
       const hooks = this.hooks;
       if (hooks) {

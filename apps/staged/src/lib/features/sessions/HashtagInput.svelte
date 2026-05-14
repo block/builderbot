@@ -24,6 +24,7 @@
   import { FileText, GitCommitVertical, FileSearch, Image as ImageLucide } from 'lucide-svelte';
   import { HASHTAG_TOKEN_RE, hashtagTypeIconSvg, escapeHtml } from './hashtagItems';
   import { focusAtEndSync } from '../../shared/focusAtEnd';
+  import RepoLabel from '../../shared/RepoLabel.svelte';
 
   type DropdownIconComponent = typeof FileText;
 
@@ -483,7 +484,11 @@
             </span>
             <span class="hashtag-item-text">
               <span class="hashtag-item-title">{item.title}</span>
-              {#if item.subtitle}
+              {#if item.repoSlug}
+                <span class="hashtag-item-subtitle"
+                  ><RepoLabel githubRepo={item.repoSlug} subpath={item.repoSubpath} /></span
+                >
+              {:else if item.subtitle}
                 <span class="hashtag-item-subtitle">{item.subtitle}</span>
               {/if}
             </span>

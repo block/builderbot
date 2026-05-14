@@ -206,7 +206,9 @@
 
   // Hashtag reference items
   let hashtagItems = $state<HashtagItem[]>([]);
+  let hashtagVersion = $state(0);
   $effect(() => {
+    const _v = hashtagVersion; // reactive dependency for manual invalidation
     let stale = false;
     buildProjectHashtagItems(project.id, branches, reposById)
       .then((items) => {
@@ -447,6 +449,12 @@
   onMount(() => {
     loadProjectNotes();
 
+    // Refresh hashtag items when branch timelines are invalidated (e.g. branch session completion)
+    const onTimelineInvalidated = () => {
+      hashtagVersion++;
+    };
+    window.addEventListener('timeline-invalidated', onTimelineInvalidated);
+
     let unlistenSession: (() => void) | undefined;
     listenToEvent<{ sessionId: string; status: string; projectId?: string }>(
       'session-status-changed',
@@ -474,6 +482,12 @@
             // Note was filtered out (e.g. deleted) — remove from local list
             projectNotes = projectNotes.filter((n) => n.sessionId !== sessionId);
           }
+
+          // Invalidate timeline caches so hashtag items pick up new commits/notes
+          for (const b of branches) {
+            commands.invalidateBranchTimeline(b.id);
+          }
+          hashtagVersion++;
         }
       }
     ).then((unlisten) => {
@@ -482,6 +496,7 @@
 
     return () => {
       unlistenSession?.();
+      window.removeEventListener('timeline-invalidated', onTimelineInvalidated);
     };
   });
 </script>

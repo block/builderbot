@@ -450,23 +450,31 @@
     let unlistenSession: (() => void) | undefined;
     listenToEvent<{ sessionId: string; status: string; projectId?: string }>(
       'session-status-changed',
-      (payload) => {
+      async (payload) => {
         const { sessionId, status, projectId } = payload;
         if (projectId !== project.id) return;
 
         if (status === 'running') {
-          // Bridge: track until next loadProjectNotes() picks it up via sessionStatus
+          // Bridge: track until the stub (already loaded by startProjectSession) is
+          // updated with an authoritative sessionStatus on the terminal event.
           activeSessionIds = new Set([...activeSessionIds, sessionId]);
+          return;
         }
 
         if (status === 'completed' || status === 'error' || status === 'cancelled') {
           const next = new Set(activeSessionIds);
           next.delete(sessionId);
           activeSessionIds = next;
-        }
 
-        // Always refresh — backend now provides authoritative status
-        loadProjectNotes();
+          // Surgically update just the affected note instead of reloading all
+          const updatedNote = await commands.getProjectNoteBySession(sessionId);
+          if (updatedNote) {
+            projectNotes = projectNotes.map((n) => (n.id === updatedNote.id ? updatedNote : n));
+          } else {
+            // Note was filtered out (e.g. deleted) — remove from local list
+            projectNotes = projectNotes.filter((n) => n.sessionId !== sessionId);
+          }
+        }
       }
     ).then((unlisten) => {
       unlistenSession = unlisten;

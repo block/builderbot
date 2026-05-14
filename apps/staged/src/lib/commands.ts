@@ -202,6 +202,12 @@ export function createProjectNote(
   return invokeCommand('create_project_note', { projectId, title, content });
 }
 
+export function getProjectNoteBySession(
+  sessionId: string
+): Promise<import('./types').ProjectNote | null> {
+  return invokeCommand('get_project_note_by_session', { sessionId });
+}
+
 export function deleteProjectNote(noteId: string): Promise<void> {
   return invokeCommand('delete_project_note', { noteId });
 }

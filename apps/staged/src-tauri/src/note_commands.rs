@@ -83,6 +83,17 @@ pub fn list_project_notes(
         .map_err(|e| e.to_string())
 }
 
+/// Get a single project note by its linked session ID, with resolved session status.
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_project_note_by_session(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    session_id: String,
+) -> Result<Option<crate::store::ProjectNote>, String> {
+    crate::get_store(&store)?
+        .get_project_note_by_session_with_status(&session_id)
+        .map_err(|e| e.to_string())
+}
+
 /// Delete a project note and its linked session (if any).
 #[tauri::command(rename_all = "camelCase")]
 pub fn delete_project_note(

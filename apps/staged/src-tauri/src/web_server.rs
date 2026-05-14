@@ -2110,6 +2110,14 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(notes).unwrap())
         }
+        "get_project_note_by_session" => {
+            let store = get_store(store_mutex)?;
+            let session_id: String = arg(&args, "sessionId")?;
+            let note = store
+                .get_project_note_by_session_with_status(&session_id)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(note).unwrap())
+        }
         "delete_project_note" => {
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;

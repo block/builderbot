@@ -142,6 +142,21 @@ impl Store {
         })
     }
 
+    /// Find a project note by session ID with session status resolved.
+    pub fn get_project_note_by_session_with_status(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<ProjectNote>, StoreError> {
+        let mut note = match self.get_project_note_by_session(session_id)? {
+            Some(n) => n,
+            None => return Ok(None),
+        };
+        let resolved = self.resolve_session_status(note.session_id.as_deref());
+        note.session_status = resolved.status;
+        note.completion_reason = resolved.completion_reason;
+        Ok(Some(note))
+    }
+
     /// Return project notes with session status resolved from the sessions table.
     pub fn list_project_notes_with_status(
         &self,

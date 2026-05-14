@@ -274,7 +274,7 @@
           </button>
         </div>
       {:else}
-        <RepoSearchInput onSelect={handleRepoSelected} {disabled} {excludeRepos} />
+        <RepoSearchInput onSelect={handleRepoSelected} {disabled} {excludeRepos} {autofocus} />
       {/if}
 
       {#if !selectedRepo && filteredRecentRepos.length > 0}

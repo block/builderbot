@@ -611,8 +611,8 @@ Begin the note with a markdown H1 heading as the title.\n\n"
     }
     store.create_session(&session).map_err(|e| e.to_string())?;
 
-    // Always create a project note stub with empty title and content so that the
-    // frontend can detect it as "generating" via the !title && !content check.
+    // Create a project note stub linked to the session. The frontend uses the
+    // backend-resolved sessionStatus to determine whether the note is generating.
     let note = store::ProjectNote::new(&project_id, "", "").with_session(&session.id);
     store
         .create_project_note(&note)

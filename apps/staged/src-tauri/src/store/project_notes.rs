@@ -112,10 +112,17 @@ impl Store {
         Ok(())
     }
 
-    pub fn delete_project_note(&self, id: &str) -> Result<(), StoreError> {
+    /// Delete a project note and return its session_id (if any) atomically.
+    pub fn delete_project_note(&self, id: &str) -> Result<Option<String>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM project_notes WHERE id = ?1", params![id])?;
-        Ok(())
+        let session_id: Option<Option<String>> = conn
+            .query_row(
+                "DELETE FROM project_notes WHERE id = ?1 RETURNING session_id",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(session_id.flatten())
     }
 
     fn row_to_project_note(row: &rusqlite::Row) -> rusqlite::Result<ProjectNote> {
@@ -130,6 +137,37 @@ impl Store {
             completed_at: row.get(7)?,
             suggested_next_commit_step: row.get(8)?,
             suggested_next_note_step: row.get(9)?,
+            session_status: None,
+            completion_reason: None,
         })
+    }
+
+    /// Find a project note by session ID with session status resolved.
+    pub fn get_project_note_by_session_with_status(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<ProjectNote>, StoreError> {
+        let mut note = match self.get_project_note_by_session(session_id)? {
+            Some(n) => n,
+            None => return Ok(None),
+        };
+        let resolved = self.resolve_session_status(note.session_id.as_deref());
+        note.session_status = resolved.status;
+        note.completion_reason = resolved.completion_reason;
+        Ok(Some(note))
+    }
+
+    /// Return project notes with session status resolved from the sessions table.
+    pub fn list_project_notes_with_status(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<ProjectNote>, StoreError> {
+        let mut notes = self.list_project_notes(project_id)?;
+        for note in &mut notes {
+            let resolved = self.resolve_session_status(note.session_id.as_deref());
+            note.session_status = resolved.status;
+            note.completion_reason = resolved.completion_reason;
+        }
+        Ok(notes)
     }
 }

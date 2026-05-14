@@ -290,6 +290,8 @@ export interface ProjectNote {
   completedAt: number | null;
   suggestedNextCommitStep: string | null;
   suggestedNextNoteStep: string | null;
+  sessionStatus: string | null;
+  completionReason: string | null;
 }
 
 export interface ProjectSessionResponse {

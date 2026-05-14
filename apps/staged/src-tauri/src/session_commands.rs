@@ -160,6 +160,8 @@ pub async fn start_session(
             action_registry: None,
             remote_working_dir: None,
             image_ids: vec![],
+            branch_id: None,
+            project_id: None,
         },
         store,
         app_handle,
@@ -321,6 +323,9 @@ pub async fn resume_session(
         return Err("Session is already running".to_string());
     }
 
+    let config_branch_id = event_branch_id.clone();
+    let config_project_id = event_project_id.clone().or(mcp_project_id.clone());
+
     crate::web_server::emit_to_all(
         &app_handle,
         "session-status-changed",
@@ -363,6 +368,8 @@ pub async fn resume_session(
             },
             remote_working_dir,
             image_ids: image_ids.unwrap_or_default(),
+            branch_id: config_branch_id,
+            project_id: config_project_id,
         },
         store,
         app_handle,
@@ -407,6 +414,8 @@ pub fn cancel_session(
                     None,
                     Some(&store::CompletionReason::Interrupted),
                 );
+                let branch_id = store.get_branch_id_for_session(&session_id).ok().flatten();
+                let project_id = store.get_project_id_for_session(&session_id).ok().flatten();
                 crate::web_server::emit_to_all(
                     &app_handle,
                     "session-status-changed",
@@ -415,8 +424,8 @@ pub fn cancel_session(
                         status: "cancelled".to_string(),
                         error_message: None,
                         completion_reason: Some("interrupted".to_string()),
-                        branch_id: None,
-                        project_id: None,
+                        branch_id,
+                        project_id,
                         session_type: None,
                         is_auto_review: false,
                     },
@@ -602,8 +611,8 @@ Begin the note with a markdown H1 heading as the title.\n\n"
     }
     store.create_session(&session).map_err(|e| e.to_string())?;
 
-    // Always create a project note stub with empty title and content so that the
-    // frontend can detect it as "generating" via the !title && !content check.
+    // Create a project note stub linked to the session. The frontend uses the
+    // backend-resolved sessionStatus to determine whether the note is generating.
     let note = store::ProjectNote::new(&project_id, "", "").with_session(&session.id);
     store
         .create_project_note(&note)
@@ -625,6 +634,8 @@ Begin the note with a markdown H1 heading as the title.\n\n"
             action_registry: Some(Arc::clone(&action_registry)),
             remote_working_dir: None,
             image_ids: image_ids.unwrap_or_default(),
+            branch_id: None,
+            project_id: Some(project_id),
         },
         store,
         app_handle,
@@ -876,6 +887,8 @@ pub async fn start_branch_session(
             action_registry: None,
             remote_working_dir,
             image_ids: image_ids.unwrap_or_default(),
+            branch_id: Some(branch_id),
+            project_id: Some(branch.project_id.clone()),
         },
         store,
         app_handle,
@@ -1283,6 +1296,8 @@ pub async fn drain_queued_sessions_for_branch(
             action_registry: None,
             remote_working_dir,
             image_ids,
+            branch_id: Some(branch_id),
+            project_id: Some(branch.project_id.clone()),
         },
         store,
         app_handle,
@@ -1567,6 +1582,8 @@ pub async fn trigger_auto_review(
             action_registry: None,
             remote_working_dir,
             image_ids: vec![],
+            branch_id: Some(branch_id.clone()),
+            project_id: Some(branch.project_id.clone()),
         },
         store,
         app_handle,

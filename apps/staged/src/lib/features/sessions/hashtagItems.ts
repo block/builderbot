@@ -66,12 +66,19 @@ export async function buildProjectHashtagItems(
   const items: HashtagItem[] = [];
   const readyBranches = branches.filter((branch) => branchTimelineReadyKey(branch) !== null);
 
-  const [timelines, projectNotes] = await Promise.all([
-    Promise.all(
+  const [timelineResults, projectNotes] = await Promise.all([
+    Promise.allSettled(
       readyBranches.map((b) => getBranchTimeline(b.id).then((t) => ({ branch: b, timeline: t })))
     ),
     listProjectNotes(projectId),
   ]);
+
+  const timelines = timelineResults
+    .filter(
+      (r): r is PromiseFulfilledResult<{ branch: Branch; timeline: BranchTimeline }> =>
+        r.status === 'fulfilled'
+    )
+    .map((r) => r.value);
 
   for (const { branch, timeline } of timelines) {
     const repo = branch.projectRepoId && reposById ? reposById.get(branch.projectRepoId) : null;

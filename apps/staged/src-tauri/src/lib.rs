@@ -1859,6 +1859,7 @@ pub fn run() {
             note_commands::delete_note,
             note_commands::create_project_note,
             note_commands::list_project_notes,
+            note_commands::get_project_note_by_session,
             note_commands::delete_project_note,
             // Images
             image_commands::create_image,

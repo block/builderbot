@@ -758,6 +758,13 @@ pub struct ProjectNote {
     pub suggested_next_commit_step: Option<String>,
     /// AI-suggested prompt for a follow-up note session.
     pub suggested_next_note_step: Option<String>,
+    /// Resolved session status (e.g. "running", "completed", "cancelled").
+    /// Populated at query time via `resolve_session_status()`.
+    #[serde(skip_deserializing)]
+    pub session_status: Option<String>,
+    /// Why the session reached its terminal state.
+    #[serde(skip_deserializing)]
+    pub completion_reason: Option<String>,
 }
 
 impl ProjectNote {
@@ -775,6 +782,8 @@ impl ProjectNote {
             completed_at: if has_content { Some(now) } else { None },
             suggested_next_commit_step: None,
             suggested_next_note_step: None,
+            session_status: None,
+            completion_reason: None,
         }
     }
 

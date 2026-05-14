@@ -40,6 +40,8 @@
   import { projectStateStore } from '../../stores/projectState.svelte';
   import BranchCard from '../branches/BranchCard.svelte';
   import Spinner from '../../shared/Spinner.svelte';
+  import { isSessionActive } from '../../shared/sessionStatus';
+  import { deleteSessionLinkedItem } from '../../shared/deleteSessionLinkedItem';
   import AddRepoModal from './AddRepoModal.svelte';
   import SuggestedRepos from './SuggestedRepos.svelte';
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
@@ -184,7 +186,7 @@
   let runningNoteSessionIds = $derived.by(() => {
     const ids = new Set<string>();
     for (const note of projectNotes) {
-      if (!note.title.trim() && !note.content.trim() && note.sessionId) {
+      if (isSessionActive(note.sessionStatus) && note.sessionId) {
         ids.add(note.sessionId);
       }
     }
@@ -204,10 +206,20 @@
 
   // Hashtag reference items
   let hashtagItems = $state<HashtagItem[]>([]);
+  let hashtagVersion = $state(0);
   $effect(() => {
-    buildProjectHashtagItems(project.id, branches, reposById).then((items) => {
-      hashtagItems = items;
-    });
+    const _v = hashtagVersion; // reactive dependency for manual invalidation
+    let stale = false;
+    buildProjectHashtagItems(project.id, branches, reposById)
+      .then((items) => {
+        if (!stale) hashtagItems = items;
+      })
+      .catch((err) => {
+        console.error('[ProjectSection] Failed to build hashtag items:', err);
+      });
+    return () => {
+      stale = true;
+    };
   });
 
   // Image attachment state
@@ -403,9 +415,11 @@
   }
 
   async function handleDeleteNote(noteId: string) {
+    const note = projectNotes.find((n) => n.id === noteId);
+    const sessionId = note?.sessionId ?? undefined;
     deletingNoteIds = new Set([...deletingNoteIds, noteId]);
     try {
-      await commands.deleteProjectNote(noteId);
+      await deleteSessionLinkedItem(() => commands.deleteProjectNote(noteId), sessionId);
       projectNotes = projectNotes.filter((n) => n.id !== noteId);
     } catch (e) {
       console.error('[ProjectSection] Failed to delete project note:', e);
@@ -419,9 +433,9 @@
   /** All notes: completed (oldest first) followed by generating – matches branch timeline order. */
   let timelineNotes = $derived(
     [...projectNotes].sort((a, b) => {
-      const aIsGenerating = !a.title.trim() && !a.content.trim();
-      const bIsGenerating = !b.title.trim() && !b.content.trim();
-      if (aIsGenerating !== bIsGenerating) return aIsGenerating ? 1 : -1;
+      const aIsActive = isSessionActive(a.sessionStatus);
+      const bIsActive = isSessionActive(b.sessionStatus);
+      if (aIsActive !== bIsActive) return aIsActive ? 1 : -1;
       return (a.completedAt ?? a.createdAt) - (b.completedAt ?? b.createdAt);
     })
   );
@@ -435,40 +449,45 @@
   onMount(() => {
     loadProjectNotes();
 
+    // Refresh hashtag items when branch timelines are invalidated (e.g. branch session completion)
+    const onTimelineInvalidated = () => {
+      hashtagVersion++;
+    };
+    window.addEventListener('timeline-invalidated', onTimelineInvalidated);
+
     let unlistenSession: (() => void) | undefined;
     listenToEvent<{ sessionId: string; status: string; projectId?: string }>(
       'session-status-changed',
-      (payload) => {
+      async (payload) => {
         const { sessionId, status, projectId } = payload;
-        const isTracked = activeSessionIds.has(sessionId);
-        // Also reload if this session belongs to a known project note (handles
-        // sessions that were already running when the component mounted).
-        const isKnownNoteSession = projectNotes.some((n) => n.sessionId === sessionId);
+        if (projectId !== project.id) return;
 
-        // Handle resumed sessions: when a project note session is resumed,
-        // the backend emits a "running" event with the projectId. Re-add it
-        // to active tracking so the row spinner and sidebar spinner appear.
-        if (
-          status === 'running' &&
-          !isTracked &&
-          isKnownNoteSession &&
-          (projectId === project.id || !projectId)
-        ) {
+        if (status === 'running') {
+          // Bridge: track until the stub (already loaded by startProjectSession) is
+          // updated with an authoritative sessionStatus on the terminal event.
           activeSessionIds = new Set([...activeSessionIds, sessionId]);
-          sessionRegistry.register(sessionId, project.id, 'note');
-          projectStateStore.addRunningSession(project.id, sessionId);
+          return;
         }
 
-        if (isTracked || isKnownNoteSession) {
-          if (status === 'completed' || status === 'error' || status === 'cancelled') {
-            if (isTracked) {
-              const next = new Set(activeSessionIds);
-              next.delete(sessionId);
-              activeSessionIds = next;
-            }
-            // Refresh notes after session completes
-            loadProjectNotes();
+        if (status === 'completed' || status === 'error' || status === 'cancelled') {
+          const next = new Set(activeSessionIds);
+          next.delete(sessionId);
+          activeSessionIds = next;
+
+          // Surgically update just the affected note instead of reloading all
+          const updatedNote = await commands.getProjectNoteBySession(sessionId);
+          if (updatedNote) {
+            projectNotes = projectNotes.map((n) => (n.id === updatedNote.id ? updatedNote : n));
+          } else {
+            // Note was filtered out (e.g. deleted) — remove from local list
+            projectNotes = projectNotes.filter((n) => n.sessionId !== sessionId);
           }
+
+          // Invalidate timeline caches so hashtag items pick up new commits/notes
+          for (const b of branches) {
+            commands.invalidateBranchTimeline(b.id);
+          }
+          hashtagVersion++;
         }
       }
     ).then((unlisten) => {
@@ -477,6 +496,7 @@
 
     return () => {
       unlistenSession?.();
+      window.removeEventListener('timeline-invalidated', onTimelineInvalidated);
     };
   });
 </script>
@@ -648,7 +668,7 @@
       </div>
       <div class="notes-timeline">
         {#each timelineNotes as note, index (note.id)}
-          {@const isRunning = !note.title.trim() && !note.content.trim()}
+          {@const isRunning = isSessionActive(note.sessionStatus)}
           {@const isFailed = !isRunning && !!note.sessionId && !note.content.trim()}
           {@const noteType = isRunning ? 'generating-note' : isFailed ? 'failed-note' : 'note'}
           {@const liveHint =

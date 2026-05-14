@@ -23,6 +23,8 @@
     Sprout,
   } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
+  import { isSessionActive } from '../../shared/sessionStatus';
+  import { deleteSessionLinkedItem } from '../../shared/deleteSessionLinkedItem';
   import { listenToEvent, type UnlistenFn } from '../../transport';
   import { subscribeDragDrop } from './dragDrop';
   import type {
@@ -60,7 +62,6 @@
   import { alerts } from '../../shared/alerts.svelte';
   import { aggregateProjectPrStatus } from '../../shared/utils';
   import { timelineToHashtagItems, projectNotesToHashtagItems } from '../sessions/hashtagItems';
-  import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import type { WorktreeChangesPreview } from '../../commands';
@@ -283,11 +284,9 @@
   /** True when the branch has at least one queued or running session. */
   function hasActiveSessions(tl: NonNullable<typeof timeline>): boolean {
     return (
-      tl.commits.some((c) => c.sessionStatus === 'queued' || c.sessionStatus === 'running') ||
-      tl.notes.some((n) => n.sessionStatus === 'queued' || n.sessionStatus === 'running') ||
-      tl.reviews.some(
-        (r) => !r.isAuto && (r.sessionStatus === 'queued' || r.sessionStatus === 'running')
-      )
+      tl.commits.some((c) => isSessionActive(c.sessionStatus)) ||
+      tl.notes.some((n) => isSessionActive(n.sessionStatus)) ||
+      tl.reviews.some((r) => !r.isAuto && isSessionActive(r.sessionStatus))
     );
   }
   let commandPipelinePending = $state(false);
@@ -1034,19 +1033,8 @@
     const doDelete = async () => {
       confirmDelete = null;
       try {
-        if (sessionId) {
-          try {
-            await commands.cancelSession(sessionId);
-          } catch {
-            // Session may already be finished
-          }
-        }
-        await commands.deleteNote(noteId, !!sessionId);
-        if (sessionId) {
-          sessionRegistry.cleanupSession(sessionId);
-        }
+        await deleteSessionLinkedItem(() => commands.deleteNote(noteId, !!sessionId), sessionId);
         loadTimeline();
-        // Drain the next queued session now that this one has been removed.
         commands
           .drainQueuedSessions(branch.id)
           .catch((e) => console.error('Failed to drain queued sessions:', e));
@@ -1072,19 +1060,11 @@
     const doDelete = async () => {
       confirmDelete = null;
       try {
-        if (sessionId) {
-          try {
-            await commands.cancelSession(sessionId);
-          } catch {
-            // Session may already be finished
-          }
-        }
-        await commands.deleteReview(reviewId, !!sessionId);
-        if (sessionId) {
-          sessionRegistry.cleanupSession(sessionId);
-        }
+        await deleteSessionLinkedItem(
+          () => commands.deleteReview(reviewId, !!sessionId),
+          sessionId
+        );
         loadTimeline();
-        // Drain the next queued session now that this one has been removed.
         commands
           .drainQueuedSessions(branch.id)
           .catch((e) => console.error('Failed to drain queued sessions:', e));
@@ -1145,19 +1125,11 @@
   async function handleDeletePendingCommit(commitId: string, sessionId?: string) {
     deletingCommitKeys = new Set([...deletingCommitKeys, commitId]);
     try {
-      if (sessionId) {
-        try {
-          await commands.cancelSession(sessionId);
-        } catch {
-          // Session may already be finished, that's fine
-        }
-      }
-      await commands.deletePendingCommit(commitId, !!sessionId);
-      if (sessionId) {
-        sessionRegistry.cleanupSession(sessionId);
-      }
+      await deleteSessionLinkedItem(
+        () => commands.deletePendingCommit(commitId, !!sessionId),
+        sessionId
+      );
       await loadTimeline();
-      // Drain the next queued session now that this one has been removed.
       commands
         .drainQueuedSessions(branch.id)
         .catch((e) => console.error('Failed to drain queued sessions:', e));

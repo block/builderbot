@@ -332,6 +332,44 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// Resolve the project that owns a session.
+    ///
+    /// Checks project_notes first (project-note sessions), then falls back to
+    /// resolving via the branch (branch-level sessions have their branch linked
+    /// to a project). Used by the recovery path (`recover_orphaned_sessions`)
+    /// which has no caller context to pipe through.
+    pub fn get_project_id_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let direct: Option<String> = conn
+            .query_row(
+                "SELECT project_id FROM project_notes WHERE session_id = ?1 LIMIT 1",
+                params![session_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if direct.is_some() {
+            return Ok(direct);
+        }
+        conn.query_row(
+            "SELECT b.project_id FROM branches b
+             INNER JOIN (
+                 SELECT branch_id FROM commits WHERE session_id = ?1
+                 UNION ALL
+                 SELECT branch_id FROM notes WHERE session_id = ?1
+                 UNION ALL
+                 SELECT branch_id FROM reviews WHERE session_id = ?1
+             ) a ON a.branch_id = b.id
+             LIMIT 1",
+            params![session_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn delete_session(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;

@@ -2106,16 +2106,27 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
             let notes = store
-                .list_project_notes(&project_id)
+                .list_project_notes_with_status(&project_id)
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(notes).unwrap())
+        }
+        "get_project_note_by_session" => {
+            let store = get_store(store_mutex)?;
+            let session_id: String = arg(&args, "sessionId")?;
+            let note = store
+                .get_project_note_by_session_with_status(&session_id)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(note).unwrap())
         }
         "delete_project_note" => {
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;
-            store
+            let session_id = store
                 .delete_project_note(&note_id)
                 .map_err(|e| e.to_string())?;
+            if let Some(sid) = session_id {
+                let _ = store.delete_session(&sid);
+            }
             Ok(Value::Null)
         }
 
@@ -2471,6 +2482,8 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     action_registry: None,
                     remote_working_dir: None,
                     image_ids: vec![],
+                    branch_id: None,
+                    project_id: None,
                 },
                 store,
                 app_handle.clone(),
@@ -2600,6 +2613,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 return Err("Session is already running".to_string());
             }
 
+            let config_branch_id = event_branch_id.clone();
+            let config_project_id = event_project_id.clone().or(mcp_project_id.clone());
+
             emit_to_all(
                 app_handle,
                 "session-status-changed",
@@ -2638,6 +2654,8 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     },
                     remote_working_dir,
                     image_ids: image_ids.unwrap_or_default(),
+                    branch_id: config_branch_id,
+                    project_id: config_project_id,
                 },
                 store,
                 app_handle.clone(),
@@ -2855,6 +2873,8 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     action_registry: None,
                     remote_working_dir,
                     image_ids: image_ids.unwrap_or_default(),
+                    branch_id: Some(branch_id),
+                    project_id: Some(branch.project_id.clone()),
                 },
                 store,
                 app_handle.clone(),
@@ -2978,6 +2998,8 @@ Begin the note with a markdown H1 heading as the title.\n\n"
                     action_registry: Some(Arc::clone(action_registry)),
                     remote_working_dir: None,
                     image_ids: image_ids.unwrap_or_default(),
+                    branch_id: None,
+                    project_id: Some(project_id),
                 },
                 store,
                 app_handle.clone(),

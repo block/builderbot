@@ -136,7 +136,6 @@ impl Store {
     }
 
     /// Return project notes with session status resolved from the sessions table.
-    /// Filters out empty stubs whose session was cancelled (nothing to show).
     pub fn list_project_notes_with_status(
         &self,
         project_id: &str,
@@ -147,15 +146,6 @@ impl Store {
             note.session_status = resolved.status;
             note.completion_reason = resolved.completion_reason;
         }
-        // Remove empty stubs from cancelled/errored sessions — no content to display.
-        notes.retain(|n| {
-            let is_empty = n.title.trim().is_empty() && n.content.trim().is_empty();
-            let is_terminal = matches!(
-                n.session_status.as_deref(),
-                Some("cancelled") | Some("error")
-            );
-            !(is_empty && is_terminal)
-        });
         Ok(notes)
     }
 }

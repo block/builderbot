@@ -2478,6 +2478,8 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     action_registry: None,
                     remote_working_dir: None,
                     image_ids: vec![],
+                    branch_id: None,
+                    project_id: None,
                 },
                 store,
                 app_handle.clone(),
@@ -2607,6 +2609,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 return Err("Session is already running".to_string());
             }
 
+            let config_branch_id = event_branch_id.clone();
+            let config_project_id = event_project_id.clone().or(mcp_project_id.clone());
+
             emit_to_all(
                 app_handle,
                 "session-status-changed",
@@ -2645,6 +2650,8 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     },
                     remote_working_dir,
                     image_ids: image_ids.unwrap_or_default(),
+                    branch_id: config_branch_id,
+                    project_id: config_project_id,
                 },
                 store,
                 app_handle.clone(),
@@ -2862,6 +2869,8 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     action_registry: None,
                     remote_working_dir,
                     image_ids: image_ids.unwrap_or_default(),
+                    branch_id: Some(branch_id),
+                    project_id: Some(branch.project_id.clone()),
                 },
                 store,
                 app_handle.clone(),
@@ -2985,6 +2994,8 @@ Begin the note with a markdown H1 heading as the title.\n\n"
                     action_registry: Some(Arc::clone(action_registry)),
                     remote_working_dir: None,
                     image_ids: image_ids.unwrap_or_default(),
+                    branch_id: None,
+                    project_id: Some(project_id),
                 },
                 store,
                 app_handle.clone(),

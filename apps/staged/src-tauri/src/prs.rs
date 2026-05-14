@@ -153,11 +153,14 @@ fn start_pipeline_for_branch(
     // Emit "running" event *before* returning so the global session listener
     // registers this session atomically — avoiding the race where the session
     // completes before the frontend `.then()` callback fires.
+    let branch_id = ctx.branch.id.clone();
+    let project_id = ctx.branch.project_id.clone();
+
     session_runner::emit_session_running(
         app_handle,
         &session.id,
-        &ctx.branch.id,
-        &ctx.branch.project_id,
+        &branch_id,
+        &project_id,
         session_type,
     );
 
@@ -172,6 +175,8 @@ fn start_pipeline_for_branch(
             provider,
             workspace_name: ctx.workspace_name,
             remote_working_dir: ctx.remote_working_dir,
+            branch_id: Some(branch_id),
+            project_id: Some(project_id),
         },
         store,
         app_handle.clone(),
@@ -313,14 +318,17 @@ async fn start_running_commit_pipeline_for_branch(
     session.pipeline = Some(pipeline.clone());
     store.create_session(&session).map_err(|e| e.to_string())?;
 
-    let commit = store::Commit::new_pending(&ctx.branch.id).with_session(&session.id);
+    let branch_id = ctx.branch.id.clone();
+    let project_id = ctx.branch.project_id.clone();
+
+    let commit = store::Commit::new_pending(&branch_id).with_session(&session.id);
     store.create_commit(&commit).map_err(|e| e.to_string())?;
 
     session_runner::emit_session_running(
         app_handle,
         &session.id,
-        &ctx.branch.id,
-        &ctx.branch.project_id,
+        &branch_id,
+        &project_id,
         "commit",
     );
 
@@ -335,6 +343,8 @@ async fn start_running_commit_pipeline_for_branch(
             provider,
             workspace_name: ctx.workspace_name,
             remote_working_dir: ctx.remote_working_dir,
+            branch_id: Some(branch_id),
+            project_id: Some(project_id),
         },
         store,
         app_handle.clone(),
@@ -440,11 +450,14 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
         .update_session_pipeline(&session.id, &pipeline)
         .map_err(|e| e.to_string())?;
 
+    let branch_id = ctx.branch.id.clone();
+    let project_id = ctx.branch.project_id.clone();
+
     session_runner::emit_session_running(
         &app_handle,
         &session.id,
-        &ctx.branch.id,
-        &ctx.branch.project_id,
+        &branch_id,
+        &project_id,
         "commit",
     );
 
@@ -459,6 +472,8 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
             provider: effective_provider,
             workspace_name: ctx.workspace_name,
             remote_working_dir: ctx.remote_working_dir,
+            branch_id: Some(branch_id),
+            project_id: Some(project_id),
         },
         store,
         app_handle,

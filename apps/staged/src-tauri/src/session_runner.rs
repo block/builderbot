@@ -226,6 +226,12 @@ pub struct SessionConfig {
     /// Image IDs to include in the prompt. The runner reads the image files,
     /// base64-encodes them, and passes them as content blocks to the driver.
     pub image_ids: Vec<String>,
+    /// Branch that owns this session (branch-level sessions only).
+    /// Threaded through so terminal events carry the same context as start events.
+    pub branch_id: Option<String>,
+    /// Project that owns this session. Set for both project-note sessions
+    /// (directly) and branch-level sessions (via the branch's project).
+    pub project_id: Option<String>,
 }
 
 /// Start a session: persist the user message, spawn the agent, stream to DB.
@@ -476,13 +482,12 @@ pub fn start_session(
             new_status,
             error_msg,
             Some(&completion_reason),
+            config.branch_id.clone(),
+            config.project_id.clone(),
         );
 
         if transitioned {
-            let branch_id = store_for_status
-                .get_branch_id_for_session(&session_id_for_status)
-                .ok()
-                .flatten();
+            let branch_id = config.branch_id.clone();
             let auto_review_branch_id = committed_branch_id.clone();
 
             if let Some(branch_id) = branch_id {
@@ -587,6 +592,11 @@ pub struct PipelineConfig {
     pub workspace_name: Option<String>,
     /// Remote working directory for remote branches.
     pub remote_working_dir: Option<PathBuf>,
+    /// Branch that owns this pipeline session. Copied to `SessionConfig` on
+    /// AI handoff and used by `emit_status` for terminal events.
+    pub branch_id: Option<String>,
+    /// Project that owns this pipeline session.
+    pub project_id: Option<String>,
 }
 
 /// Result of running a pipeline — tells the caller what happened.
@@ -653,10 +663,6 @@ pub fn start_pipeline_session(
         match outcome {
             PipelineOutcome::CompletedWithoutAi => {
                 // Pipeline completed successfully — transition session to completed.
-                let branch_id = store_for_status
-                    .get_branch_id_for_session(&session_id)
-                    .ok()
-                    .flatten();
                 resolve_pipeline_artifacts_without_ai(&config, &store_for_status, true);
                 let status_enum = SessionStatus::Completed;
                 let reason = CompletionReason::TurnComplete;
@@ -664,13 +670,21 @@ pub fn start_pipeline_session(
                 let transitioned = store_for_status
                     .transition_from_running(&session_id, status_enum, None, Some(&reason))
                     .unwrap_or(false);
-                emit_status(&app_handle, &session_id, "completed", None, Some(&reason));
+                emit_status(
+                    &app_handle,
+                    &session_id,
+                    "completed",
+                    None,
+                    Some(&reason),
+                    config.branch_id.clone(),
+                    config.project_id.clone(),
+                );
                 if transitioned {
                     drain_queued_after_pipeline_terminal(
                         Arc::clone(&store_for_status),
                         Arc::clone(&registry),
                         app_handle.clone(),
-                        branch_id,
+                        config.branch_id.clone(),
                     );
                 }
             }
@@ -712,6 +726,8 @@ pub fn start_pipeline_session(
                     action_registry: None,
                     remote_working_dir: config.remote_working_dir.clone(),
                     image_ids: vec![],
+                    branch_id: config.branch_id.clone(),
+                    project_id: config.project_id.clone(),
                 };
                 if let Err(e) = start_session(
                     ai_config,
@@ -743,10 +759,6 @@ pub fn start_pipeline_session(
                             }
                         }
                     }
-                    let branch_id = store_for_status
-                        .get_branch_id_for_session(&session_id)
-                        .ok()
-                        .flatten();
                     resolve_pipeline_artifacts_without_ai(&config, &store_for_status, false);
                     let transitioned = finish_failed_pipeline_handoff_start(
                         &store_for_status,
@@ -760,13 +772,15 @@ pub fn start_pipeline_session(
                         "error",
                         Some(e),
                         Some(&CompletionReason::Crashed),
+                        config.branch_id.clone(),
+                        config.project_id.clone(),
                     );
                     if transitioned {
                         drain_queued_after_pipeline_terminal(
                             Arc::clone(&store_for_status),
                             Arc::clone(&registry),
                             app_handle.clone(),
-                            branch_id,
+                            config.branch_id.clone(),
                         );
                     }
                 }
@@ -774,10 +788,6 @@ pub fn start_pipeline_session(
             PipelineOutcome::Aborted { .. } => {
                 // Pipeline aborted (e.g. non-fast-forward). Mark as completed so
                 // the frontend can inspect the pipeline steps for the failure.
-                let branch_id = store_for_status
-                    .get_branch_id_for_session(&session_id)
-                    .ok()
-                    .flatten();
                 resolve_pipeline_artifacts_without_ai(&config, &store_for_status, false);
                 let reason = CompletionReason::TurnComplete;
                 registry.deregister(&session_id);
@@ -789,21 +799,25 @@ pub fn start_pipeline_session(
                         Some(&reason),
                     )
                     .unwrap_or(false);
-                emit_status(&app_handle, &session_id, "completed", None, Some(&reason));
+                emit_status(
+                    &app_handle,
+                    &session_id,
+                    "completed",
+                    None,
+                    Some(&reason),
+                    config.branch_id.clone(),
+                    config.project_id.clone(),
+                );
                 if transitioned {
                     drain_queued_after_pipeline_terminal(
                         Arc::clone(&store_for_status),
                         Arc::clone(&registry),
                         app_handle.clone(),
-                        branch_id,
+                        config.branch_id.clone(),
                     );
                 }
             }
             PipelineOutcome::Cancelled => {
-                let branch_id = store_for_status
-                    .get_branch_id_for_session(&session_id)
-                    .ok()
-                    .flatten();
                 resolve_pipeline_artifacts_without_ai(&config, &store_for_status, false);
                 let reason = CompletionReason::Interrupted;
                 registry.deregister(&session_id);
@@ -815,13 +829,21 @@ pub fn start_pipeline_session(
                         Some(&reason),
                     )
                     .unwrap_or(false);
-                emit_status(&app_handle, &session_id, "cancelled", None, Some(&reason));
+                emit_status(
+                    &app_handle,
+                    &session_id,
+                    "cancelled",
+                    None,
+                    Some(&reason),
+                    config.branch_id.clone(),
+                    config.project_id.clone(),
+                );
                 if transitioned {
                     drain_queued_after_pipeline_terminal(
                         Arc::clone(&store_for_status),
                         Arc::clone(&registry),
                         app_handle.clone(),
-                        branch_id,
+                        config.branch_id.clone(),
                     );
                 }
             }
@@ -1557,15 +1579,19 @@ pub fn recover_dead_sessions(
                     Some(&CompletionReason::AppQuit),
                 )
                 .unwrap_or(false);
+            let recovered_branch_id = store.get_branch_id_for_session(&session.id).ok().flatten();
+            let recovered_project_id = store.get_project_id_for_session(&session.id).ok().flatten();
             emit_status(
                 &app_handle,
                 &session.id,
                 "error",
                 None,
                 Some(&CompletionReason::AppQuit),
+                recovered_branch_id.clone(),
+                recovered_project_id,
             );
             if transitioned {
-                let branch_id = store.get_branch_id_for_session(&session.id).ok().flatten();
+                let branch_id = recovered_branch_id;
                 if let Some(branch_id) = branch_id {
                     let store_for_follow_up = Arc::clone(&store);
                     let registry_for_follow_up = Arc::clone(&registry);
@@ -2270,14 +2296,16 @@ fn emit_status(
     status: &str,
     error: Option<String>,
     completion_reason: Option<&CompletionReason>,
+    branch_id: Option<String>,
+    project_id: Option<String>,
 ) {
     let event = SessionStatusEvent {
         session_id: session_id.to_string(),
         status: status.to_string(),
         error_message: error,
         completion_reason: completion_reason.map(|r| r.as_str().to_string()),
-        branch_id: None,
-        project_id: None,
+        branch_id,
+        project_id,
         session_type: None,
         is_auto_review: false,
     };
@@ -2421,6 +2449,8 @@ mod tests {
             provider: None,
             workspace_name: None,
             remote_working_dir: None,
+            branch_id: None,
+            project_id: None,
         }
     }
 

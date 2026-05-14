@@ -20,9 +20,10 @@
     onSelect: (selection: RepoSelection) => void;
     disabled?: boolean;
     excludeRepos?: Set<string>;
+    autofocus?: boolean;
   }
 
-  let { onSelect, disabled = false, excludeRepos = new Set() }: Props = $props();
+  let { onSelect, disabled = false, excludeRepos = new Set(), autofocus = false }: Props = $props();
 
   let recentRepos = $state<RecentRepo[]>([]);
   let repos = $state<GitHubRepo[]>([]);
@@ -105,6 +106,9 @@
   });
 
   onMount(async () => {
+    if (autofocus) {
+      inputEl?.focus();
+    }
     try {
       recentRepos = await commands.listRecentRepos(10);
       repos = await commands.listUserRepos(30);

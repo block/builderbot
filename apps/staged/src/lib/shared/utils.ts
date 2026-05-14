@@ -90,6 +90,14 @@ export function aggregateProjectPrStatus(
 }
 
 /**
+ * Whether any branch in the project has at least one finalized commit.
+ * Relies on `commitCount` populated by `list_branches_for_project`.
+ */
+export function projectHasCodeChanges(branches: Branch[]): boolean {
+  return branches.some((b) => (b.commitCount ?? 0) > 0);
+}
+
+/**
  * Human-readable label for a session type.
  * Returns the singular noun form (e.g. "commit", "note").
  */

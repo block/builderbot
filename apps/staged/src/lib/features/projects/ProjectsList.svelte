@@ -13,6 +13,7 @@
     GitPullRequestClosed,
     GitPullRequestDraft,
     Plus,
+    Sprout,
   } from 'lucide-svelte';
   import type {
     Project,
@@ -25,6 +26,7 @@
   import {
     projectDisplayName,
     aggregateProjectPrStatus,
+    projectHasCodeChanges,
     projectSubtitle,
   } from '../../shared/utils';
   import { projectStateStore } from '../../stores/projectState.svelte';
@@ -712,8 +714,10 @@
                     <GitPullRequestClosed size={16} />
                   {:else if prStatus === 'conflict'}
                     <GitPullRequestClosed size={16} class="pr-status-conflict" />
-                  {:else}
+                  {:else if projectHasCodeChanges(projectBranches.get(project.id) || [])}
                     <GitPullRequestDraft size={16} class="pr-status-draft" />
+                  {:else}
+                    <Sprout size={16} class="pr-status-clean" />
                   {/if}
                   <span>{projectDisplayName(project)}</span>
                 </div>
@@ -1063,6 +1067,10 @@
 
   .card-header :global(svg.pr-status-draft) {
     stroke: var(--text-muted);
+  }
+
+  .card-header :global(svg.pr-status-clean) {
+    stroke: var(--text-faint);
   }
 
   .card-header :global(svg.cloud-running) {

@@ -102,6 +102,7 @@ pub(crate) fn to_branch_with_workdir(
         worktree_path: workdir_path,
         created_at: branch.created_at,
         updated_at: branch.updated_at,
+        commit_count: None,
     }
 }
 
@@ -849,13 +850,19 @@ pub fn list_branches_for_project(
     // than eagerly here. Eager per-workspace `ws_info` calls were serial and
     // each took ~1s, causing multi-second UI freezes on project load.
 
+    let commit_counts = store
+        .count_finalized_commits_by_branch_for_project(&project_id)
+        .map_err(|e| e.to_string())?;
+
     let mut result = Vec::with_capacity(branches.len());
     for branch in branches {
         let workdir = store
             .get_workdir_for_branch(&branch.id)
             .map_err(|e| e.to_string())?;
 
-        let bw = to_branch_with_workdir(branch, workdir.map(|w| w.path));
+        let count = commit_counts.get(&branch.id).copied().unwrap_or(0);
+        let mut bw = to_branch_with_workdir(branch, workdir.map(|w| w.path));
+        bw.commit_count = Some(count);
         result.push(bw);
     }
     Ok(result)

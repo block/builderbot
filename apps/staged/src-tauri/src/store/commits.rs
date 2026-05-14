@@ -52,6 +52,31 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// Return a map of branch_id → number of finalized commits (sha IS NOT NULL)
+    /// for every branch belonging to the given project.
+    pub fn count_finalized_commits_by_branch_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<std::collections::HashMap<String, u64>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT c.branch_id, COUNT(*)
+             FROM commits c
+             JOIN branches b ON b.id = c.branch_id
+             WHERE b.project_id = ?1 AND c.sha IS NOT NULL
+             GROUP BY c.branch_id",
+        )?;
+        let rows = stmt.query_map(params![project_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+        })?;
+        let mut map = std::collections::HashMap::new();
+        for row in rows {
+            let (branch_id, count) = row?;
+            map.insert(branch_id, count);
+        }
+        Ok(map)
+    }
+
     pub fn list_commits_for_branch(&self, branch_id: &str) -> Result<Vec<Commit>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(

@@ -79,6 +79,8 @@ export interface Branch {
   prUpdatedAt: number | null;
   prFetchedAt: number | null;
   prHeadSha: string | null;
+  /** Number of finalized commits on this branch (populated by list_branches_for_project). */
+  commitCount?: number;
 }
 
 // PR status types

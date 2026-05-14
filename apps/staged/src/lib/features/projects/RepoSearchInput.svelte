@@ -14,6 +14,9 @@
   import type { GitHubRepo, RecentRepo } from '../../types';
   import { parseGitHubUrl, type RepoSelection } from '../../shared/githubUrl';
   import { viewport } from '../../shared/viewport.svelte';
+  import { repoBadgeStore } from '../../stores/repoBadges.svelte';
+  import { darkMode } from '../../stores/isDark.svelte';
+  import * as badge from '../../shared/badgeColors';
 
   export type { RepoSelection };
 
@@ -105,6 +108,20 @@
     const base = recentRepos.filter((r) => !excludeRepos.has(r.githubRepo));
     return q ? base.filter((r) => r.githubRepo.toLowerCase().includes(q)) : base;
   });
+
+  const dark = $derived(darkMode.value);
+
+  $effect(() => {
+    if (recentRepos.length > 0) {
+      repoBadgeStore.ensureForRepos(
+        recentRepos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
+      );
+    }
+  });
+
+  function recentHue(r: RecentRepo): number {
+    return repoBadgeStore.lookup(r.githubRepo, r.subpath)?.hue ?? 210;
+  }
 
   onMount(async () => {
     if (autofocus) {
@@ -273,9 +290,17 @@
     <div class="repo-dropdown" style={dropdownStyle}>
       {#if filteredRecentRepos.length > 0}
         {#each filteredRecentRepos as recent, i}
+          {@const hue = recentHue(recent)}
           <button
             class="repo-item recent"
             tabindex="-1"
+            style="--recent-bg: {badge.badgeBg(hue, dark)}; --recent-bg-hover: {badge.badgeBgHover(
+              hue,
+              dark
+            )}; --recent-fg: {badge.badgeFg(hue, dark)}; --recent-border: {badge.badgeBorder(
+              hue,
+              dark
+            )};"
             onclick={() =>
               handleSelect({
                 nameWithOwner: recent.githubRepo,
@@ -474,8 +499,23 @@
     display: flex;
   }
 
+  .repo-item.recent {
+    background: var(--recent-bg);
+    border-left: 2px solid var(--recent-border);
+    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+  }
+
+  .repo-item.recent:hover,
+  .repo-item.recent:focus {
+    background: var(--recent-bg-hover);
+  }
+
+  .repo-item.recent .repo-name {
+    color: var(--recent-fg);
+  }
+
   .recent-icon {
-    color: var(--ui-accent);
+    color: var(--recent-fg);
   }
 
   .repo-info {

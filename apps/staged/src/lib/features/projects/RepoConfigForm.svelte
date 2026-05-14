@@ -12,10 +12,13 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { slide, fade } from 'svelte/transition';
-  import { GitBranch, X, Clock, Command } from 'lucide-svelte';
+  import { GitBranch, X, Plus, Command } from 'lucide-svelte';
   import type { RecentRepo, PullRequest } from '../../types';
   import * as commands from '../../api/commands';
   import RepoLabel from '../../shared/RepoLabel.svelte';
+  import { repoBadgeStore } from '../../stores/repoBadges.svelte';
+  import { darkMode } from '../../stores/isDark.svelte';
+  import * as badge from '../../shared/badgeColors';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoSearchInput from './RepoSearchInput.svelte';
   import SubpathInput from './SubpathInput.svelte';
@@ -175,6 +178,20 @@
     excludeRepos ? recentRepos.filter((r) => !excludeRepos.has(r.githubRepo)) : recentRepos
   );
 
+  const dark = $derived(darkMode.value);
+
+  $effect(() => {
+    if (recentRepos.length > 0) {
+      repoBadgeStore.ensureForRepos(
+        recentRepos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
+      );
+    }
+  });
+
+  function repoHue(r: RecentRepo): number {
+    return repoBadgeStore.lookup(r.githubRepo, r.subpath)?.hue ?? 210;
+  }
+
   function handleRepoSelected(selection: RepoSelection) {
     if (branchPickerTimer) clearTimeout(branchPickerTimer);
     showBranchPicker = false;
@@ -281,20 +298,31 @@
       {#if !selectedRepo && filteredRecentRepos.length > 0}
         <div class="recent-repos" out:slide={{ duration: SLIDE_DURATION }}>
           {#each filteredRecentRepos.slice(0, 5) as recent, i}
+            {@const hue = repoHue(recent)}
             <button
-              class="recent-repo-item"
+              class="recent-chip"
+              style="--chip-bg: {badge.badgeBg(hue, dark)}; --chip-bg-hover: {badge.badgeBgHover(
+                hue,
+                dark
+              )}; --chip-border: {badge.badgeBorder(
+                hue,
+                dark
+              )}; --chip-border-hover: {badge.badgeBorderHover(
+                hue,
+                dark
+              )}; --chip-fg: {badge.badgeFg(hue, dark)};"
               onclick={() =>
                 handleRepoSelected({
                   nameWithOwner: recent.githubRepo,
                   subpath: recent.subpath ?? undefined,
                 })}
             >
-              <Clock size={12} class="recent-repo-icon" />
-              <span class="recent-repo-label">
+              <Plus size={13} />
+              <span class="chip-name">
                 <RepoLabel githubRepo={recent.githubRepo} subpath={recent.subpath} />
               </span>
               {#if viewport.showShortcutHints}
-                <span class="recent-repo-shortcut">
+                <span class="recent-chip-shortcut">
                   <Command size={9} />
                   {i + 1}
                 </span>
@@ -519,52 +547,62 @@
 
   .recent-repos {
     display: flex;
-    flex-direction: column;
-    gap: 2px;
-    margin-top: 2px;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 4px;
   }
 
-  .recent-repo-item {
-    display: flex;
+  .recent-chip {
+    display: inline-flex;
     align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 5px 8px;
-    background: none;
-    border: none;
-    border-radius: 6px;
-    text-align: left;
+    gap: 4px;
+    padding: 3px 10px;
+    border: 1px solid var(--chip-border);
+    border-radius: 5px;
+    background: var(--chip-bg);
+    color: var(--chip-fg);
+    font-size: 12.5px;
+    font-weight: 600;
+    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+    line-height: 1.4;
     cursor: pointer;
-    transition: background-color 0.15s ease;
-    font-family: inherit;
+    transition:
+      background 0.15s,
+      border-color 0.15s;
   }
 
-  .recent-repo-item:hover {
-    background-color: var(--bg-hover);
+  .recent-chip:hover {
+    background: var(--chip-bg-hover);
+    border-color: var(--chip-border-hover);
   }
 
-  .recent-repo-item :global(.recent-repo-icon) {
-    color: var(--text-faint);
-    flex-shrink: 0;
-  }
-
-  .recent-repo-label {
-    flex: 1;
-    min-width: 0;
-    font-size: var(--size-xs);
+  .chip-name {
+    display: inline-flex;
+    max-width: 250px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .recent-repo-shortcut {
+  .chip-name :global(.repo-label-prefix) {
+    color: inherit;
+    opacity: 0.6;
+  }
+
+  .chip-name :global(.repo-label-emphasis) {
+    color: inherit;
+  }
+
+  .recent-chip-shortcut {
     display: inline-flex;
     align-items: center;
     gap: 2px;
+    margin-left: 2px;
     padding: 1px 4px;
-    background: var(--bg-hover);
+    background: rgba(0, 0, 0, 0.1);
     border-radius: 3px;
-    color: var(--text-faint);
+    color: inherit;
+    opacity: 0.5;
     font-size: 10px;
     flex-shrink: 0;
     line-height: 1;

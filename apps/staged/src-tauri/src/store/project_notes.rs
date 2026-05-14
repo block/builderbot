@@ -112,10 +112,17 @@ impl Store {
         Ok(())
     }
 
-    pub fn delete_project_note(&self, id: &str) -> Result<(), StoreError> {
+    /// Delete a project note and return its session_id (if any) atomically.
+    pub fn delete_project_note(&self, id: &str) -> Result<Option<String>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM project_notes WHERE id = ?1", params![id])?;
-        Ok(())
+        let session_id: Option<Option<String>> = conn
+            .query_row(
+                "DELETE FROM project_notes WHERE id = ?1 RETURNING session_id",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(session_id.flatten())
     }
 
     fn row_to_project_note(row: &rusqlite::Row) -> rusqlite::Result<ProjectNote> {

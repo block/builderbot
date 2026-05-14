@@ -90,16 +90,11 @@ pub fn delete_project_note(
     note_id: String,
 ) -> Result<(), String> {
     let store = crate::get_store(&store)?;
-    let note = store
-        .get_project_note(&note_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project note not found: {note_id}"))?;
-
-    store
+    let session_id = store
         .delete_project_note(&note_id)
         .map_err(|e| e.to_string())?;
 
-    if let Some(sid) = note.session_id {
+    if let Some(sid) = session_id {
         let _ = store.delete_session(&sid);
     }
     Ok(())

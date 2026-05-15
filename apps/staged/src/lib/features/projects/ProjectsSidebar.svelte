@@ -391,7 +391,7 @@
           <button
             class="new-project-button list-new-project-button"
             onclick={openNewProject}
-            title={viewport.hasKeyboard ? 'New project (⌘N)' : 'New project'}
+            title={viewport.showShortcutHints ? 'New project (⌘N)' : 'New project'}
           >
             <span class="plus-icon"><Plus size={12} /></span>
             New project

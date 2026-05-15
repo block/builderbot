@@ -664,7 +664,7 @@
                 disabled={status.kind === 'deleting'}
                 title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
               >
-                {#if viewport.hasKeyboard && isCommandKeyHeld && index < 9}
+                {#if viewport.showShortcutHints && isCommandKeyHeld && index < 9}
                   <div class="keyboard-shortcut-overlay">
                     <span class="command-icon">⌘</span>
                     <span class="number">{index + 1}</span>

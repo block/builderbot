@@ -69,7 +69,7 @@
       disabled={navigation.activeView === 'settings'}
       title={navigation.activeView === 'settings'
         ? 'Unavailable while viewing settings'
-        : viewport.hasKeyboard
+        : viewport.showShortcutHints
           ? 'New project (⌘N)'
           : 'New project'}
     >
@@ -79,7 +79,7 @@
     <button
       class="icon-btn"
       onclick={() => openSettings()}
-      title={viewport.hasKeyboard ? 'Settings (⌘,)' : 'Settings'}
+      title={viewport.showShortcutHints ? 'Settings (⌘,)' : 'Settings'}
     >
       <SlidersHorizontal size={14} />
     </button>

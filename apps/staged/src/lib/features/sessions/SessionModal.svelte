@@ -980,7 +980,7 @@
         <button
           class="close-btn"
           onclick={requestClose}
-          title={viewport.hasKeyboard ? 'Close (Esc)' : 'Close'}
+          title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
         >
           <X size={16} />
         </button>

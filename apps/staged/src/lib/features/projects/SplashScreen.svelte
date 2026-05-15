@@ -112,7 +112,7 @@
   {#if !showForm}
     <div class="splash-actions">
       <button class="splash-pill" onclick={openForm}> Create your first project </button>
-      {#if viewport.hasKeyboard}
+      {#if viewport.showShortcutHints}
         <span class="splash-hint">or press <kbd>⌘ N</kbd> anytime</span>
       {/if}
     </div>

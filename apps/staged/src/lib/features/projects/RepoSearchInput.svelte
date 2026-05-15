@@ -290,7 +290,7 @@
                 <RepoLabel githubRepo={recent.githubRepo} subpath={recent.subpath} />
               </span>
             </div>
-            {#if viewport.hasKeyboard && i < 9}
+            {#if viewport.showShortcutHints && i < 9}
               <span class="keyboard-shortcut">
                 <Command size={10} />
                 {i + 1}

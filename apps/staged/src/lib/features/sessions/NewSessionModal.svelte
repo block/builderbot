@@ -431,7 +431,7 @@
       <button
         class="close-btn"
         onclick={handleClose}
-        title={viewport.hasKeyboard ? 'Close (Esc)' : 'Close'}
+        title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
       >
         <X size={18} />
       </button>
@@ -460,7 +460,7 @@
           disabled={starting}
           items={hashtagItems}
         />
-        {#if viewport.hasKeyboard}
+        {#if viewport.showShortcutHints}
           <span class="hint">{willQueue ? '⌘ Enter to queue' : '⌘ Enter to start'}</span>
         {/if}
       </div>

@@ -2,7 +2,8 @@ const MOBILE_BREAKPOINT_PX = 768;
 
 export const viewport = $state({
   isMobile: false,
-  hasKeyboard: true,
+  // Visual shortcut affordances only; not a hardware keyboard capability check.
+  showShortcutHints: true,
 });
 
 let mediaQuery: MediaQueryList | null = null;
@@ -12,7 +13,7 @@ let subscriberCount = 0;
 
 function syncViewport() {
   viewport.isMobile = mediaQuery?.matches ?? false;
-  viewport.hasKeyboard = !(
+  viewport.showShortcutHints = !(
     (coarsePointerQuery?.matches ?? false) ||
     (noHoverQuery?.matches ?? false)
   );

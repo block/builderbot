@@ -293,7 +293,7 @@
               <span class="recent-repo-label">
                 <RepoLabel githubRepo={recent.githubRepo} subpath={recent.subpath} />
               </span>
-              {#if viewport.hasKeyboard}
+              {#if viewport.showShortcutHints}
                 <span class="recent-repo-shortcut">
                   <Command size={9} />
                   {i + 1}

@@ -224,7 +224,7 @@
       {:else}
         <Send size={14} />
         {willQueue ? 'Queue commit' : 'Start commit'}
-        {#if viewport.hasKeyboard}
+        {#if viewport.showShortcutHints}
           <span class="shortcut-badge">⌘↵</span>
         {/if}
       {/if}

@@ -76,7 +76,7 @@
       class="search-btn"
       onclick={onPrevious}
       disabled={matchCount === 0}
-      title={viewport.hasKeyboard ? 'Previous match (Shift+Enter)' : 'Previous match'}
+      title={viewport.showShortcutHints ? 'Previous match (Shift+Enter)' : 'Previous match'}
     >
       <ChevronUp size={14} />
     </button>
@@ -84,14 +84,14 @@
       class="search-btn"
       onclick={onNext}
       disabled={matchCount === 0}
-      title={viewport.hasKeyboard ? 'Next match (Enter)' : 'Next match'}
+      title={viewport.showShortcutHints ? 'Next match (Enter)' : 'Next match'}
     >
       <ChevronDown size={14} />
     </button>
     <button
       class="search-btn close-search"
       onclick={onClose}
-      title={viewport.hasKeyboard ? 'Close search (Esc)' : 'Close search'}
+      title={viewport.showShortcutHints ? 'Close search (Esc)' : 'Close search'}
     >
       <X size={14} />
     </button>

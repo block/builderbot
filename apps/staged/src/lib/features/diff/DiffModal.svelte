@@ -1226,7 +1226,7 @@
         <button
           class="icon-btn"
           onclick={onClose}
-          title={viewport.hasKeyboard ? 'Back (Esc)' : 'Back'}
+          title={viewport.showShortcutHints ? 'Back (Esc)' : 'Back'}
         >
           <ArrowLeft size={14} />
         </button>

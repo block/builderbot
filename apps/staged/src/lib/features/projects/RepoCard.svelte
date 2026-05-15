@@ -6,7 +6,7 @@
   and a dirty-state indicator.
 -->
 <script lang="ts">
-  import { Download, AlertTriangle } from 'lucide-svelte';
+  import { Download, AlertTriangle, Plus } from 'lucide-svelte';
   import type { RepoHomeItem } from '../../types';
   import { formatRelativeTimeSeconds } from '../../shared/relativeTime.svelte';
   import { darkMode } from '../../stores/isDark.svelte';
@@ -28,6 +28,26 @@
   let { repo, onclick, onclone }: Props = $props();
 
   let cloning = $state(false);
+  let showDirtyPopover = $state(false);
+
+  function handleDirtyClick(e: MouseEvent) {
+    e.stopPropagation();
+    showDirtyPopover = !showDirtyPopover;
+  }
+
+  function closeDirtyPopover() {
+    showDirtyPopover = false;
+  }
+
+  function handleAddProjectFromChanges(e: MouseEvent) {
+    e.stopPropagation();
+    showDirtyPopover = false;
+    window.dispatchEvent(
+      new CustomEvent('staged:new-project', {
+        detail: { githubRepo: repo.githubRepo, subpath: repo.subpath },
+      })
+    );
+  }
 
   let subtitle = $derived.by(() => {
     const base = repo.githubRepo;
@@ -62,9 +82,26 @@
   title={subtitle}
 >
   {#if repo.isDirty}
-    <span class="dirty-indicator" title="Uncommitted changes on main branch">
+    <button
+      class="dirty-indicator"
+      title="Uncommitted changes on main branch"
+      onclick={handleDirtyClick}
+    >
       <AlertTriangle size={12} />
-    </span>
+    </button>
+    {#if showDirtyPopover}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div class="dirty-popover-backdrop" onclick={closeDirtyPopover} onkeydown={() => {}}></div>
+      <div class="dirty-popover" onclick={(e) => e.stopPropagation()}>
+        <p class="dirty-popover-message">
+          Staged maintains the main branch. Uncommitted changes may be lost.
+        </p>
+        <button class="dirty-popover-action" onclick={handleAddProjectFromChanges}>
+          <Plus size={12} />
+          Add project from changes
+        </button>
+      </div>
+    {/if}
   {/if}
 
   {#if repo.pinned}
@@ -145,6 +182,67 @@
     color: var(--ui-warning, #e5a100);
     display: flex;
     align-items: center;
+    background: none;
+    border: none;
+    padding: 2px;
+    border-radius: 4px;
+    cursor: pointer;
+    z-index: 2;
+    transition: background 0.12s ease;
+  }
+
+  .dirty-indicator:hover {
+    background: var(--bg-hover);
+  }
+
+  .dirty-popover-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 99;
+  }
+
+  .dirty-popover {
+    position: absolute;
+    top: 24px;
+    right: 4px;
+    z-index: 100;
+    width: 220px;
+    padding: 10px 12px;
+    background: var(--bg-chrome);
+    border: 1px solid var(--border-muted);
+    border-radius: 8px;
+    box-shadow: var(--shadow-elevated);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .dirty-popover-message {
+    margin: 0;
+    font-size: var(--size-xs);
+    color: var(--text-secondary);
+    line-height: 1.4;
+  }
+
+  .dirty-popover-action {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: var(--size-xs);
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.12s ease;
+    white-space: nowrap;
+  }
+
+  .dirty-popover-action:hover {
+    background: var(--bg-hover);
+    border-color: var(--border-muted);
   }
 
   .card-title {

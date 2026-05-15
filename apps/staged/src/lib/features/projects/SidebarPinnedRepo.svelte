@@ -56,6 +56,22 @@
   let cloning = $state(false);
   let dragging = $state(false);
   let dragOver = $state(false);
+  let showDirtyPopover = $state(false);
+
+  function handleDirtyClick(e: MouseEvent) {
+    e.stopPropagation();
+    showDirtyPopover = !showDirtyPopover;
+  }
+
+  function closeDirtyPopover() {
+    showDirtyPopover = false;
+  }
+
+  function handleAddProjectFromChanges(e: MouseEvent) {
+    e.stopPropagation();
+    showDirtyPopover = false;
+    openNewProjectForRepo();
+  }
 
   let stripColor = $derived(badgeFg(repo.hue, darkMode.value));
   let bgTint = $derived(
@@ -239,9 +255,30 @@
         <span class="subpath-badge">{subpathLabel}</span>
       {/if}
       {#if repo.isDirty && repo.hasLocalClone}
-        <span class="dirty-indicator" title="Main branch has uncommitted changes">
+        <button
+          class="dirty-indicator"
+          title="Main branch has uncommitted changes"
+          onclick={handleDirtyClick}
+        >
           <AlertCircle size={12} />
-        </span>
+        </button>
+        {#if showDirtyPopover}
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="dirty-popover-backdrop"
+            onclick={closeDirtyPopover}
+            onkeydown={() => {}}
+          ></div>
+          <div class="dirty-popover" onclick={(e) => e.stopPropagation()}>
+            <p class="dirty-popover-message">
+              Staged maintains the main branch. Uncommitted changes may be lost.
+            </p>
+            <button class="dirty-popover-action" onclick={handleAddProjectFromChanges}>
+              <Plus size={12} />
+              Add project from changes
+            </button>
+          </div>
+        {/if}
       {/if}
     </button>
 
@@ -303,6 +340,7 @@
 
 <style>
   .pinned-repo-card {
+    position: relative;
     display: flex;
     align-items: stretch;
     border-radius: 6px;
@@ -386,6 +424,67 @@
     align-items: center;
     color: var(--ui-warning, oklch(0.75 0.15 85));
     flex-shrink: 0;
+    background: none;
+    border: none;
+    padding: 2px;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.12s ease;
+  }
+
+  .dirty-indicator:hover {
+    background: var(--bg-hover);
+  }
+
+  .dirty-popover-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 99;
+  }
+
+  .dirty-popover {
+    position: absolute;
+    top: 100%;
+    left: 8px;
+    z-index: 100;
+    width: 220px;
+    padding: 10px 12px;
+    margin-top: 4px;
+    background: var(--bg-chrome);
+    border: 1px solid var(--border-muted);
+    border-radius: 8px;
+    box-shadow: var(--shadow-elevated);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .dirty-popover-message {
+    margin: 0;
+    font-size: var(--size-xs);
+    color: var(--text-secondary);
+    line-height: 1.4;
+  }
+
+  .dirty-popover-action {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 8px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: var(--size-xs);
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.12s ease;
+    white-space: nowrap;
+  }
+
+  .dirty-popover-action:hover {
+    background: var(--bg-hover);
+    border-color: var(--border-muted);
   }
 
   .card-actions {

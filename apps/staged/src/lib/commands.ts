@@ -1142,3 +1142,36 @@ export function updateRepoBadge(
 export function deleteRepoBadge(githubRepo: string, subpath: string): Promise<void> {
   return invokeCommand('delete_repo_badge', { githubRepo, subpath });
 }
+
+// =============================================================================
+// Pinned Repos
+// =============================================================================
+
+/** Pin a repo badge so it appears prominently in the home screen and sidebar. */
+export function pinRepo(githubRepo: string, subpath: string): Promise<void> {
+  return invokeCommand('pin_repo', { githubRepo, subpath });
+}
+
+/** Unpin a repo badge. */
+export function unpinRepo(githubRepo: string, subpath: string): Promise<void> {
+  return invokeCommand('unpin_repo', { githubRepo, subpath });
+}
+
+/** Bulk-update pin sort order from an ordered list of [githubRepo, subpath] keys. */
+export function reorderPinnedRepos(orderedKeys: [string, string][]): Promise<void> {
+  return invokeCommand('reorder_pinned_repos', { orderedKeys });
+}
+
+/** List all repo badges ordered: pinned first by sort order, then unpinned by project count. */
+export function listReposForHome(): Promise<import('./types').RepoBadge[]> {
+  return invokeCommand('list_repos_for_home');
+}
+
+/** Store the detected default branch for a repo badge. */
+export function setRepoDefaultBranch(
+  githubRepo: string,
+  subpath: string,
+  defaultBranch: string
+): Promise<void> {
+  return invokeCommand('set_repo_default_branch', { githubRepo, subpath, defaultBranch });
+}

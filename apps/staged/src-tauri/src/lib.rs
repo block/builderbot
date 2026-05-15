@@ -1061,6 +1061,59 @@ fn update_repo_badge(
         })
 }
 
+#[tauri::command(rename_all = "camelCase")]
+fn pin_repo(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    github_repo: String,
+    subpath: String,
+) -> Result<(), String> {
+    get_store(&store)?
+        .pin_repo(&github_repo, &subpath)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn unpin_repo(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    github_repo: String,
+    subpath: String,
+) -> Result<(), String> {
+    get_store(&store)?
+        .unpin_repo(&github_repo, &subpath)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn reorder_pinned_repos(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    ordered_keys: Vec<(String, String)>,
+) -> Result<(), String> {
+    get_store(&store)?
+        .reorder_pinned_repos(&ordered_keys)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn list_repos_for_home(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+) -> Result<Vec<store::RepoBadge>, String> {
+    get_store(&store)?
+        .list_repos_for_home()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn set_repo_default_branch(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    github_repo: String,
+    subpath: String,
+    default_branch: String,
+) -> Result<(), String> {
+    get_store(&store)?
+        .set_default_branch(&github_repo, &subpath, &default_branch)
+        .map_err(|e| e.to_string())
+}
+
 /// Build the prompt for AI short name generation.
 fn build_badge_prompt(
     existing_badges: &[store::RepoBadge],
@@ -1222,6 +1275,9 @@ async fn ensure_repo_badges(
             short_name: short_name.clone(),
             hue,
             created_at: store::now_timestamp(),
+            pinned: false,
+            pin_sort_order: None,
+            default_branch: None,
         };
         match store.create_repo_badge(&badge) {
             Ok(()) => {
@@ -1816,6 +1872,12 @@ pub fn run() {
             ensure_repo_badges,
             update_repo_badge,
             delete_repo_badge,
+            // Pinned repos
+            pin_repo,
+            unpin_repo,
+            reorder_pinned_repos,
+            list_repos_for_home,
+            set_repo_default_branch,
             // GitHub
             github_commands::list_github_orgs,
             github_commands::list_github_repos,

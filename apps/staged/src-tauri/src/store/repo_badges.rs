@@ -5,24 +5,32 @@ use rusqlite::params;
 use super::models::RepoBadge;
 use super::{Store, StoreError};
 
+/// All columns selected in badge queries, in a fixed order.
+const BADGE_COLUMNS: &str =
+    "github_repo, subpath, short_name, hue, created_at, pinned, pin_sort_order, default_branch";
+
+fn row_to_badge(row: &rusqlite::Row) -> rusqlite::Result<RepoBadge> {
+    let pinned_int: i32 = row.get(5)?;
+    Ok(RepoBadge {
+        github_repo: row.get(0)?,
+        subpath: row.get(1)?,
+        short_name: row.get(2)?,
+        hue: row.get(3)?,
+        created_at: row.get(4)?,
+        pinned: pinned_int != 0,
+        pin_sort_order: row.get(6)?,
+        default_branch: row.get(7)?,
+    })
+}
+
 impl Store {
     /// Fetch all repo badges.
     pub fn list_repo_badges(&self) -> Result<Vec<RepoBadge>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT github_repo, subpath, short_name, hue, created_at
-             FROM repo_badges
-             ORDER BY created_at ASC",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(RepoBadge {
-                github_repo: row.get(0)?,
-                subpath: row.get(1)?,
-                short_name: row.get(2)?,
-                hue: row.get(3)?,
-                created_at: row.get(4)?,
-            })
-        })?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {BADGE_COLUMNS} FROM repo_badges ORDER BY created_at ASC"
+        ))?;
+        let rows = stmt.query_map([], row_to_badge)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -35,19 +43,12 @@ impl Store {
         use rusqlite::OptionalExtension;
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT github_repo, subpath, short_name, hue, created_at
-             FROM repo_badges
-             WHERE github_repo = ?1 AND subpath = ?2",
+            &format!(
+                "SELECT {BADGE_COLUMNS} FROM repo_badges
+                 WHERE github_repo = ?1 AND subpath = ?2"
+            ),
             params![github_repo, subpath],
-            |row| {
-                Ok(RepoBadge {
-                    github_repo: row.get(0)?,
-                    subpath: row.get(1)?,
-                    short_name: row.get(2)?,
-                    hue: row.get(3)?,
-                    created_at: row.get(4)?,
-                })
-            },
+            row_to_badge,
         )
         .optional()
         .map_err(Into::into)
@@ -57,14 +58,17 @@ impl Store {
     pub fn create_repo_badge(&self, badge: &RepoBadge) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO repo_badges (github_repo, subpath, short_name, hue, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO repo_badges (github_repo, subpath, short_name, hue, created_at, pinned, pin_sort_order, default_branch)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 badge.github_repo,
                 badge.subpath,
                 badge.short_name,
                 badge.hue,
                 badge.created_at,
+                badge.pinned as i32,
+                badge.pin_sort_order,
+                badge.default_branch,
             ],
         )?;
         Ok(())
@@ -101,19 +105,9 @@ impl Store {
         use rusqlite::OptionalExtension;
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT github_repo, subpath, short_name, hue, created_at
-             FROM repo_badges
-             WHERE short_name = ?1",
+            &format!("SELECT {BADGE_COLUMNS} FROM repo_badges WHERE short_name = ?1"),
             params![short_name],
-            |row| {
-                Ok(RepoBadge {
-                    github_repo: row.get(0)?,
-                    subpath: row.get(1)?,
-                    short_name: row.get(2)?,
-                    hue: row.get(3)?,
-                    created_at: row.get(4)?,
-                })
-            },
+            row_to_badge,
         )
         .optional()
         .map_err(Into::into)
@@ -135,6 +129,103 @@ impl Store {
         let mut stmt = conn.prepare("SELECT hue FROM repo_badges ORDER BY hue ASC")?;
         let rows = stmt.query_map([], |row| row.get(0))?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    // =========================================================================
+    // Pinning operations
+    // =========================================================================
+
+    /// Pin a repo badge — sets `pinned=1` and assigns the next `pin_sort_order`.
+    pub fn pin_repo(&self, github_repo: &str, subpath: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let max_order: Option<i32> = conn.query_row(
+            "SELECT MAX(pin_sort_order) FROM repo_badges WHERE pinned = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        let next_order = max_order.map_or(0, |m| m + 1);
+        let rows = conn.execute(
+            "UPDATE repo_badges SET pinned = 1, pin_sort_order = ?1
+             WHERE github_repo = ?2 AND subpath = ?3",
+            params![next_order, github_repo, subpath],
+        )?;
+        if rows == 0 {
+            return Err(StoreError(format!(
+                "No badge found for {github_repo} subpath={subpath}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Unpin a repo badge — sets `pinned=0` and clears `pin_sort_order`.
+    pub fn unpin_repo(&self, github_repo: &str, subpath: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE repo_badges SET pinned = 0, pin_sort_order = NULL
+             WHERE github_repo = ?1 AND subpath = ?2",
+            params![github_repo, subpath],
+        )?;
+        if rows == 0 {
+            return Err(StoreError(format!(
+                "No badge found for {github_repo} subpath={subpath}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Bulk-update `pin_sort_order` from the given ordered list of (github_repo, subpath) keys.
+    pub fn reorder_pinned_repos(
+        &self,
+        ordered_keys: &[(String, String)],
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        for (i, (github_repo, subpath)) in ordered_keys.iter().enumerate() {
+            conn.execute(
+                "UPDATE repo_badges SET pin_sort_order = ?1
+                 WHERE github_repo = ?2 AND subpath = ?3 AND pinned = 1",
+                params![i as i32, github_repo, subpath],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// List all repo badges ordered: pinned first by `pin_sort_order`, then unpinned
+    /// sorted by project count descending (number of projects using that repo+subpath).
+    pub fn list_repos_for_home(&self) -> Result<Vec<RepoBadge>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {BADGE_COLUMNS}
+             FROM repo_badges rb
+             LEFT JOIN (
+                 SELECT github_repo, subpath, COUNT(*) AS project_count
+                 FROM project_repos
+                 GROUP BY github_repo, subpath
+             ) pc ON rb.github_repo = pc.github_repo AND rb.subpath = pc.subpath
+             ORDER BY rb.pinned DESC, rb.pin_sort_order ASC, COALESCE(pc.project_count, 0) DESC"
+        ))?;
+        let rows = stmt.query_map([], row_to_badge)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Store the detected default branch for a repo badge.
+    pub fn set_default_branch(
+        &self,
+        github_repo: &str,
+        subpath: &str,
+        default_branch: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE repo_badges SET default_branch = ?1
+             WHERE github_repo = ?2 AND subpath = ?3",
+            params![default_branch, github_repo, subpath],
+        )?;
+        if rows == 0 {
+            return Err(StoreError(format!(
+                "No badge found for {github_repo} subpath={subpath}"
+            )));
+        }
+        Ok(())
     }
 }
 

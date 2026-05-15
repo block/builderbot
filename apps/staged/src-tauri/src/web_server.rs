@@ -786,6 +786,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                         short_name,
                         hue,
                         created_at: crate::store::now_timestamp(),
+                        pinned: false,
+                        pin_sort_order: None,
+                        default_branch: None,
                     };
                     let _ = store.create_repo_badge(&badge);
                     if let Some(b) = store
@@ -819,6 +822,51 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let subpath: String = arg(&args, "subpath")?;
             store
                 .delete_repo_badge(&github_repo, &subpath)
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+
+        // =====================================================================
+        // Pinned repos
+        // =====================================================================
+        "pin_repo" => {
+            let store = get_store(store_mutex)?;
+            let github_repo: String = arg(&args, "githubRepo")?;
+            let subpath: String = arg(&args, "subpath")?;
+            store
+                .pin_repo(&github_repo, &subpath)
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "unpin_repo" => {
+            let store = get_store(store_mutex)?;
+            let github_repo: String = arg(&args, "githubRepo")?;
+            let subpath: String = arg(&args, "subpath")?;
+            store
+                .unpin_repo(&github_repo, &subpath)
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "reorder_pinned_repos" => {
+            let store = get_store(store_mutex)?;
+            let ordered_keys: Vec<(String, String)> = arg(&args, "orderedKeys")?;
+            store
+                .reorder_pinned_repos(&ordered_keys)
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "list_repos_for_home" => {
+            let store = get_store(store_mutex)?;
+            let badges = store.list_repos_for_home().map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(badges).unwrap())
+        }
+        "set_repo_default_branch" => {
+            let store = get_store(store_mutex)?;
+            let github_repo: String = arg(&args, "githubRepo")?;
+            let subpath: String = arg(&args, "subpath")?;
+            let default_branch: String = arg(&args, "defaultBranch")?;
+            store
+                .set_default_branch(&github_repo, &subpath, &default_branch)
                 .map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }

@@ -247,6 +247,9 @@ export interface RepoBadge {
   shortName: string;
   hue: number;
   createdAt: number;
+  pinned: boolean;
+  pinSortOrder: number | null;
+  defaultBranch: string | null;
 }
 
 // =============================================================================

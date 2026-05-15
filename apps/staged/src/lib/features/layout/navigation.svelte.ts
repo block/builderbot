@@ -33,6 +33,7 @@ export const navigation = $state({
   activeView: 'workspace' as 'workspace' | 'settings',
   selectedProjectId: null as string | null,
   selectedRepo: null as SelectedRepo | null,
+  showReposList: false,
   settingsSection: 'general' as SettingsSection,
 });
 
@@ -78,11 +79,20 @@ export async function initNavigation(): Promise<void> {
   }
 }
 
+/** Navigate to the repos list view. */
+export function showAllRepos(): void {
+  showWorkspaceView();
+  navigation.selectedProjectId = null;
+  navigation.selectedRepo = null;
+  navigation.showReposList = true;
+}
+
 /** Navigate to the repo detail view. */
 export function selectRepo(githubRepo: string, subpath: string): void {
   showWorkspaceView();
   navigation.selectedProjectId = null;
   navigation.selectedRepo = { githubRepo, subpath };
+  navigation.showReposList = false;
 }
 
 /** Navigate to a specific project's detail view. */
@@ -90,6 +100,7 @@ export function selectProject(projectId: string): void {
   showWorkspaceView();
   navigation.selectedProjectId = projectId;
   navigation.selectedRepo = null;
+  navigation.showReposList = false;
   persistLastProject(projectId);
   // Mark the project as read when navigating to it, but only if it's not already read
   if (projectStateStore.isUnread(projectId)) {
@@ -103,6 +114,7 @@ export function selectProjectAndBranch(projectId: string, branchId: string): voi
   const alreadyOnProject = navigation.selectedProjectId === projectId;
   navigation.selectedProjectId = projectId;
   navigation.selectedRepo = null;
+  navigation.showReposList = false;
   persistLastProject(projectId);
   // Mark the project as read when navigating to it, but only if it's not already read
   if (projectStateStore.isUnread(projectId)) {
@@ -152,6 +164,7 @@ export function goHome(): void {
   requestProjectsListRestore(navigation.selectedProjectId);
   navigation.selectedProjectId = null;
   navigation.selectedRepo = null;
+  navigation.showReposList = false;
   persistLastProject(null);
 }
 

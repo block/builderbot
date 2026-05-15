@@ -34,7 +34,7 @@
   } from '../../shared/utils';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
-  import { selectProject, selectRepo } from '../layout/navigation.svelte';
+  import { selectProject, selectRepo, showAllRepos } from '../layout/navigation.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import ProjectsSidebar from './ProjectsSidebar.svelte';
   import ProjectContextMenu from './ProjectContextMenu.svelte';
@@ -660,14 +660,7 @@
           <div class="repos-section">
             <div class="repos-header">
               <h2 class="repos-title">Repos</h2>
-              <button
-                class="view-all-btn"
-                onclick={() => {
-                  /* TODO: navigate to repos list view */
-                }}
-              >
-                View all
-              </button>
+              <button class="view-all-btn" onclick={showAllRepos}> View all </button>
             </div>
             <div class="repos-scroll-row">
               {#each homeRepos as repo (repo.githubRepo + ':' + repo.subpath)}

@@ -14,7 +14,7 @@
     FolderGit2,
   } from 'lucide-svelte';
   import type { Project, ProjectRepo, Branch, WorkspaceStatus, RepoHomeItem } from '../../types';
-  import { goHome, navigation, selectProject } from '../layout/navigation.svelte';
+  import { goHome, navigation, selectProject, showAllRepos } from '../layout/navigation.svelte';
   import {
     projectDisplayName,
     aggregateProjectPrStatus,
@@ -344,7 +344,12 @@
       {:else}
         <div class="projects-list">
           {#if pinnedRepos.length > 0}
-            <button class="project-row all-repos-row" onclick={goHome} title="View all repos">
+            <button
+              class="project-row all-repos-row"
+              class:active={navigation.showReposList}
+              onclick={showAllRepos}
+              title="View all repos"
+            >
               <div class="row-main">
                 <FolderGit2 size={14} />
                 <span class="project-name">All Repos</span>
@@ -370,7 +375,9 @@
           {#if showAllProjectsRow}
             <button
               class="project-row all-projects-row"
-              class:active={navigation.selectedProjectId === null}
+              class:active={navigation.selectedProjectId === null &&
+                !navigation.showReposList &&
+                !navigation.selectedRepo}
               onclick={openAllProjects}
               title="Show all projects"
             >

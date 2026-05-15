@@ -313,10 +313,10 @@ async fn handle_ws(mut socket: WebSocket, state: WebAppState) {
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(Message::Ping(data)))
-                        if socket.send(Message::Pong(data)).await.is_err() =>
-                    {
-                        break;
+                    Some(Ok(Message::Ping(data))) => {
+                        if socket.send(Message::Pong(data)).await.is_err() {
+                            break;
+                        }
                     }
                     _ => {}
                 }

@@ -291,6 +291,10 @@ async fn ws_events(ws: WebSocketUpgrade, State(state): State<WebAppState>) -> Re
     ws.on_upgrade(move |socket| handle_ws(socket, state))
 }
 
+// clippy's suggested fix (collapsing the inner `if` into a match guard) doesn't
+// compile because `data: Bytes` can't be moved out of the pattern binding into
+// the guard expression.
+#[allow(clippy::collapsible_match)]
 async fn handle_ws(mut socket: WebSocket, state: WebAppState) {
     let mut rx = state.event_tx.subscribe();
     loop {

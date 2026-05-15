@@ -464,8 +464,10 @@ export interface HashtagItem {
   title: string;
   color: string;
   bgColor: string;
+  subtitle?: string;
   branchName?: string;
   repoSlug?: string;
+  repoSubpath?: string | null;
 }
 
 // =============================================================================

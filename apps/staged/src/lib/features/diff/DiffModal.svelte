@@ -1206,6 +1206,8 @@
           scope={reviewableScope()}
           reviewId={activeReviewId}
           visibleCommentCount={currentComments.length}
+          {githubRepo}
+          {subpath}
           {isRemote}
           onStarted={onClose}
         />

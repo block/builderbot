@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Branch, BranchTimeline, ProjectNote } from '../../types';
 import { getBranchTimeline, listProjectNotes } from '../../commands';
-import { buildProjectHashtagItems, timelineToHashtagItems } from './hashtagItems';
+import {
+  buildProjectHashtagItems,
+  projectNotesToHashtagItems,
+  timelineToHashtagItems,
+} from './hashtagItems';
 
 vi.mock('../../commands', () => ({
   getBranchTimeline: vi.fn(),
@@ -47,6 +51,24 @@ function emptyTimeline(overrides: Partial<BranchTimeline> = {}): BranchTimeline 
   };
 }
 
+function projectNote(overrides: Partial<ProjectNote> = {}): ProjectNote {
+  return {
+    id: 'project-note-1',
+    projectId: 'project-1',
+    sessionId: null,
+    title: 'Project note',
+    content: '',
+    createdAt: 0,
+    updatedAt: 0,
+    completedAt: 0,
+    suggestedNextCommitStep: null,
+    suggestedNextNoteStep: null,
+    sessionStatus: null,
+    completionReason: null,
+    ...overrides,
+  };
+}
+
 const projectNotes: ProjectNote[] = [];
 
 beforeEach(() => {
@@ -83,6 +105,146 @@ describe('timelineToHashtagItems', () => {
         title: 'Add branch picker filtering',
       })
     );
+  });
+
+  it('sorts timeline references newest first across types', () => {
+    const timeline: BranchTimeline = emptyTimeline({
+      notes: [
+        {
+          id: 'old-note',
+          title: 'Old note',
+          content: '',
+          sessionId: null,
+          sessionStatus: null,
+          completionReason: null,
+          createdAt: 1000,
+          updatedAt: 1000,
+          completedAt: 1000,
+          suggestedNextCommitStep: null,
+          suggestedNextNoteStep: null,
+        },
+        {
+          id: 'new-note',
+          title: 'New note',
+          content: '',
+          sessionId: null,
+          sessionStatus: null,
+          completionReason: null,
+          createdAt: 5000,
+          updatedAt: 5000,
+          completedAt: 5000,
+          suggestedNextCommitStep: null,
+          suggestedNextNoteStep: null,
+        },
+      ],
+      commits: [
+        {
+          id: 'old-commit-id',
+          sha: 'oldcommit',
+          shortSha: 'oldcomm',
+          subject: 'Old commit',
+          author: 'Test User',
+          authorEmail: 'test@example.com',
+          isOwnCommit: true,
+          timestamp: 2000,
+          order: 0,
+          sessionId: null,
+          sessionStatus: null,
+          completionReason: null,
+        },
+        {
+          id: 'new-commit-id',
+          sha: 'newcommit',
+          shortSha: 'newcomm',
+          subject: 'New commit',
+          author: 'Test User',
+          authorEmail: 'test@example.com',
+          isOwnCommit: true,
+          timestamp: 6000,
+          order: 1,
+          sessionId: null,
+          sessionStatus: null,
+          completionReason: null,
+        },
+      ],
+      reviews: [
+        {
+          id: 'old-review',
+          commitSha: 'oldcommit',
+          scope: 'commit',
+          sessionId: null,
+          sessionStatus: null,
+          sessionProvider: null,
+          completionReason: null,
+          title: 'Old review',
+          commentCount: 0,
+          isAuto: false,
+          createdAt: 3000,
+          updatedAt: 3000,
+          completedAt: 3000,
+        },
+        {
+          id: 'new-review',
+          commitSha: 'newcommit',
+          scope: 'commit',
+          sessionId: null,
+          sessionStatus: null,
+          sessionProvider: null,
+          completionReason: null,
+          title: 'New review',
+          commentCount: 0,
+          isAuto: false,
+          createdAt: 7000,
+          updatedAt: 7000,
+          completedAt: 7000,
+        },
+      ],
+      images: [
+        {
+          id: 'old-image',
+          filename: 'old.png',
+          mimeType: 'image/png',
+          sizeBytes: 1,
+          sessionId: null,
+          sessionStatus: null,
+          completionReason: null,
+          createdAt: 4000,
+        },
+        {
+          id: 'new-image',
+          filename: 'new.png',
+          mimeType: 'image/png',
+          sizeBytes: 1,
+          sessionId: null,
+          sessionStatus: null,
+          completionReason: null,
+          createdAt: 8000,
+        },
+      ],
+    });
+
+    expect(timelineToHashtagItems(timeline).map((item) => `${item.type}:${item.id}`)).toEqual([
+      'image:new-image',
+      'review:new-review',
+      'commit:newcommit',
+      'note:new-note',
+      'image:old-image',
+      'review:old-review',
+      'commit:oldcommit',
+      'note:old-note',
+    ]);
+  });
+});
+
+describe('projectNotesToHashtagItems', () => {
+  it('sorts project notes newest first without a generic subtitle', () => {
+    const items = projectNotesToHashtagItems([
+      projectNote({ id: 'old-project-note', title: 'Old project note', completedAt: 1000 }),
+      projectNote({ id: 'new-project-note', title: 'New project note', completedAt: 2000 }),
+    ]);
+
+    expect(items.map((item) => item.id)).toEqual(['new-project-note', 'old-project-note']);
+    expect(items[0]).not.toHaveProperty('subtitle');
   });
 });
 

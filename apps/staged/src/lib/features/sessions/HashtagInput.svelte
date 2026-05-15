@@ -24,6 +24,7 @@
   import { FileText, GitCommitVertical, FileSearch, Image as ImageLucide } from 'lucide-svelte';
   import { HASHTAG_TOKEN_RE, hashtagTypeIconSvg, escapeHtml } from './hashtagItems';
   import { focusAtEndSync } from '../../shared/focusAtEnd';
+  import RepoLabel from '../../shared/RepoLabel.svelte';
 
   type DropdownIconComponent = typeof FileText;
 
@@ -72,7 +73,14 @@
   let dropdownStyle = $state('');
   let pendingInsert: { textNode: Text; hashPos: number; cursorPos: number } | null = null;
 
-  const MAX_RESULTS = 10;
+  type HashtagSection = {
+    key: string;
+    label?: string;
+    repoSlug?: string;
+    repoSubpath?: string | null;
+    items: HashtagItem[];
+    startIndex: number;
+  };
 
   // Sync editorEl to the textareaEl binding
   $effect(() => {
@@ -97,13 +105,63 @@
     return keys;
   });
 
-  let filteredItems = $derived.by(() => {
+  let filteredSections = $derived.by((): HashtagSection[] => {
     if (!showDropdown) return [];
     const filter = filterText.toLowerCase();
-    return items
-      .filter((item) => !selectedTokenKeys.has(`${item.type}:${item.id}`))
-      .filter((item) => item.title.toLowerCase().includes(filter))
-      .slice(0, MAX_RESULTS);
+    const sectionsByKey = new Map<string, Omit<HashtagSection, 'startIndex'>>();
+
+    for (const item of items) {
+      if (selectedTokenKeys.has(`${item.type}:${item.id}`)) continue;
+      if (!item.title.toLowerCase().includes(filter)) continue;
+
+      const sectionKey = hashtagSectionKey(item);
+      const section = sectionsByKey.get(sectionKey);
+      if (section) {
+        section.items.push(item);
+      } else {
+        sectionsByKey.set(sectionKey, {
+          key: sectionKey,
+          ...hashtagSectionLabel(item),
+          items: [item],
+        });
+      }
+    }
+
+    const sections: HashtagSection[] = [];
+    let startIndex = 0;
+    for (const section of sectionsByKey.values()) {
+      sections.push({
+        ...section,
+        startIndex,
+      });
+      startIndex += section.items.length;
+    }
+    return sections;
+  });
+
+  let filteredItems = $derived.by(() => filteredSections.flatMap((section) => section.items));
+
+  function hashtagSectionKey(item: HashtagItem): string {
+    if (item.type === 'project-note') return 'project-notes';
+    if (item.repoSlug) return `repo:${item.repoSlug}\u0000${item.repoSubpath ?? ''}`;
+    return 'branch-references';
+  }
+
+  function hashtagSectionLabel(
+    item: HashtagItem
+  ): Pick<HashtagSection, 'label' | 'repoSlug' | 'repoSubpath'> {
+    if (item.type === 'project-note') return { label: 'Project notes' };
+    if (item.repoSlug) return { repoSlug: item.repoSlug, repoSubpath: item.repoSubpath };
+    return { label: 'Branch references' };
+  }
+
+  $effect(() => {
+    const itemCount = filteredItems.length;
+    if (itemCount === 0) {
+      if (selectedIndex !== 0) selectedIndex = 0;
+      return;
+    }
+    if (selectedIndex >= itemCount) selectedIndex = itemCount - 1;
   });
 
   let lastExtractedValue = '';
@@ -464,33 +522,40 @@
         style={dropdownStyle}
         bind:this={dropdownEl}
       >
-        {#each filteredItems as item, i}
-          {@const Icon = dropdownIconMap[item.type]}
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div
-            class="hashtag-dropdown-item"
-            class:selected={i === selectedIndex}
-            onmousedown={(e) => {
-              e.preventDefault();
-              selectItem(item);
-            }}
-            onmouseenter={() => (selectedIndex = i)}
-          >
-            <span class="hashtag-item-icon {item.type}-icon">
-              {#if Icon}
-                <Icon size={14} />
+        {#each filteredSections as section (section.key)}
+          <div class="hashtag-dropdown-section">
+            <div class="hashtag-section-header">
+              {#if section.repoSlug}
+                <span class="hashtag-section-repo"
+                  ><RepoLabel githubRepo={section.repoSlug} subpath={section.repoSubpath} /></span
+                >
+              {:else}
+                <span class="hashtag-section-label">{section.label}</span>
               {/if}
-            </span>
-            <span class="hashtag-item-title">{item.title}</span>
-            {#if item.repoSlug || item.branchName}
-              <span class="hashtag-item-context">
-                {#if item.repoSlug}{item.repoSlug}{/if}
-                {#if item.repoSlug && item.branchName}
-                  &middot;
-                {/if}
-                {#if item.branchName}{item.branchName}{/if}
-              </span>
-            {/if}
+            </div>
+            {#each section.items as item, i}
+              {@const Icon = dropdownIconMap[item.type]}
+              {@const itemIndex = section.startIndex + i}
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div
+                class="hashtag-dropdown-item"
+                class:selected={itemIndex === selectedIndex}
+                onmousedown={(e) => {
+                  e.preventDefault();
+                  selectItem(item);
+                }}
+                onmouseenter={() => (selectedIndex = itemIndex)}
+              >
+                <span class="hashtag-item-icon {item.type}-icon">
+                  {#if Icon}
+                    <Icon size={14} />
+                  {/if}
+                </span>
+                <span class="hashtag-item-text">
+                  <span class="hashtag-item-title">{item.title}</span>
+                </span>
+              </div>
+            {/each}
           </div>
         {/each}
       </div>
@@ -549,7 +614,7 @@
 
   /* Dropdown — fixed-positioned near the caret via inline style */
   .hashtag-dropdown {
-    width: 340px;
+    width: 420px;
     max-width: calc(100vw - 32px);
     background: var(--bg-chrome);
     border: 1px solid var(--border-muted);
@@ -559,6 +624,33 @@
     z-index: 9999;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
     padding: 4px;
+  }
+
+  .hashtag-dropdown-section + .hashtag-dropdown-section {
+    margin-top: 4px;
+  }
+
+  .hashtag-section-header {
+    display: flex;
+    min-width: 0;
+    padding: 6px 10px 3px;
+    font-size: var(--size-xs);
+    font-weight: 600;
+    color: var(--text-muted);
+  }
+
+  .hashtag-section-label,
+  .hashtag-section-repo {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .hashtag-section-repo :global(.repo-label) {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .hashtag-dropdown-item {
@@ -608,20 +700,16 @@
     color: var(--image-color);
   }
 
-  .hashtag-item-title {
+  .hashtag-item-text {
     flex: 1;
-    font-size: var(--size-sm);
-    color: var(--text-primary);
+    display: flex;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    min-width: 0;
   }
 
-  .hashtag-item-context {
-    font-size: var(--size-xs);
-    color: var(--text-faint);
-    flex-shrink: 0;
-    max-width: 140px;
+  .hashtag-item-title {
+    font-size: var(--size-sm);
+    color: var(--text-primary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

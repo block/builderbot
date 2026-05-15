@@ -868,7 +868,70 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "list_repos_for_home" => {
             let store = get_store(store_mutex)?;
             let badges = store.list_repos_for_home().map_err(|e| e.to_string())?;
-            Ok(serde_json::to_value(badges).unwrap())
+            let items: Vec<crate::RepoHomeItem> = badges
+                .into_iter()
+                .map(|badge| {
+                    let clone_path = crate::paths::clone_path_for(&badge.github_repo);
+                    let has_local_clone = clone_path
+                        .as_ref()
+                        .map(|p| p.join(".git").exists())
+                        .unwrap_or(false);
+
+                    let (latest_commit, is_dirty) = if has_local_clone {
+                        if let Some(ref cp) = clone_path {
+                            let default_branch = badge.default_branch.as_deref().unwrap_or("main");
+                            let origin_ref = format!("origin/{default_branch}");
+                            let latest = crate::git::cli_run(
+                                cp,
+                                &["log", "-1", "--format=%H|%h|%s|%an|%ae|%ct", &origin_ref],
+                            )
+                            .ok()
+                            .and_then(|output| {
+                                let line = output.trim();
+                                if line.is_empty() {
+                                    return None;
+                                }
+                                let parts: Vec<&str> = line.splitn(6, '|').collect();
+                                if parts.len() >= 6 {
+                                    Some(crate::CommitTimelineItem {
+                                        id: None,
+                                        sha: parts[0].to_string(),
+                                        short_sha: parts[1].to_string(),
+                                        subject: parts[2].to_string(),
+                                        author: parts[3].to_string(),
+                                        author_email: parts[4].to_string(),
+                                        timestamp: parts[5].parse().unwrap_or(0),
+                                        order: 0,
+                                        session_id: None,
+                                        session_status: None,
+                                        completion_reason: None,
+                                        is_own_commit: false,
+                                    })
+                                } else {
+                                    None
+                                }
+                            });
+                            let dirty = crate::git::cli_run(cp, &["status", "--porcelain"])
+                                .ok()
+                                .map(|output| !output.trim().is_empty())
+                                .unwrap_or(false);
+                            (latest, dirty)
+                        } else {
+                            (None, false)
+                        }
+                    } else {
+                        (None, false)
+                    };
+
+                    crate::RepoHomeItem {
+                        badge,
+                        has_local_clone,
+                        latest_commit,
+                        is_dirty,
+                    }
+                })
+                .collect();
+            Ok(serde_json::to_value(items).unwrap())
         }
         "set_repo_default_branch" => {
             let store = get_store(store_mutex)?;
@@ -886,6 +949,95 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let subpath: String = arg(&args, "subpath")?;
             let branch = crate::detect_and_store_default_branch(&store, &github_repo, &subpath)?;
             Ok(serde_json::to_value(branch).unwrap())
+        }
+        "get_repo_default_branch_timeline" => {
+            let store = get_store(store_mutex)?;
+            let github_repo: String = arg(&args, "githubRepo")?;
+            let subpath: String = arg(&args, "subpath")?;
+            let limit: Option<usize> = opt_arg(&args, "limit")?;
+            let result = tokio::task::spawn_blocking(move || {
+                let default_branch =
+                    crate::detect_and_store_default_branch(&store, &github_repo, &subpath)?;
+                let clone_path = crate::paths::clone_path_for(&github_repo)
+                    .ok_or_else(|| "Cannot determine clone path".to_string())?;
+                if !clone_path.join(".git").exists() {
+                    return Err(format!(
+                        "No local clone found for {github_repo}. Clone the repo first."
+                    ));
+                }
+                let max_count = limit.unwrap_or(50);
+                let origin_ref = format!("origin/{default_branch}");
+                let limit_arg = format!("-{max_count}");
+                let format_arg = "--format=%H|%h|%s|%an|%ae|%ct";
+                let output =
+                    crate::git::cli_run(&clone_path, &["log", &limit_arg, format_arg, &origin_ref])
+                        .map_err(|e| format!("Failed to get commits: {e}"))?;
+                let commits: Vec<crate::CommitTimelineItem> = output
+                    .lines()
+                    .filter(|l| !l.is_empty())
+                    .enumerate()
+                    .filter_map(|(i, line)| {
+                        let parts: Vec<&str> = line.splitn(6, '|').collect();
+                        if parts.len() >= 6 {
+                            Some(crate::CommitTimelineItem {
+                                id: None,
+                                sha: parts[0].to_string(),
+                                short_sha: parts[1].to_string(),
+                                subject: parts[2].to_string(),
+                                author: parts[3].to_string(),
+                                author_email: parts[4].to_string(),
+                                timestamp: parts[5].parse().unwrap_or(0),
+                                order: (max_count - 1 - i) as i64,
+                                session_id: None,
+                                session_status: None,
+                                completion_reason: None,
+                                is_own_commit: false,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                Ok(crate::RepoDefaultBranchTimeline {
+                    commits,
+                    default_branch,
+                })
+            })
+            .await
+            .map_err(|e| format!("task failed: {e}"))??;
+            Ok(serde_json::to_value(result).unwrap())
+        }
+        "clone_repo_locally" => {
+            let store = get_store(store_mutex)?;
+            let github_repo: String = arg(&args, "githubRepo")?;
+            let github_repo_clone = github_repo.clone();
+            let clone_path = tokio::task::spawn_blocking(move || {
+                crate::git::ensure_local_clone(&github_repo_clone).map_err(|e| e.to_string())
+            })
+            .await
+            .map_err(|e| format!("Clone task failed: {e}"))??;
+            // Detect default branch
+            let store_clone = std::sync::Arc::clone(&store);
+            let github_repo_ref = github_repo.clone();
+            let default_branch = tokio::task::spawn_blocking(move || {
+                let branch = crate::git::detect_default_branch_from_remote(&clone_path)
+                    .unwrap_or_else(|_| "main".to_string());
+                let badges = store_clone.list_repo_badges().unwrap_or_default();
+                for badge in &badges {
+                    if badge.github_repo == github_repo_ref && badge.default_branch.is_none() {
+                        let _ = store_clone.set_default_branch(
+                            &github_repo_ref,
+                            &badge.subpath,
+                            &branch,
+                        );
+                    }
+                }
+                branch
+            })
+            .await
+            .map_err(|e| format!("Default branch detection failed: {e}"))?;
+            emit_to_all(&state.app_handle, "repo-cloned", &github_repo);
+            Ok(serde_json::to_value(default_branch).unwrap())
         }
 
         // =====================================================================

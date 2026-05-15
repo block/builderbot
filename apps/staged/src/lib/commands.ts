@@ -1163,7 +1163,7 @@ export function reorderPinnedRepos(orderedKeys: [string, string][]): Promise<voi
 }
 
 /** List all repo badges ordered: pinned first by sort order, then unpinned by project count. */
-export function listReposForHome(): Promise<import('./types').RepoBadge[]> {
+export function listReposForHome(): Promise<import('./types').RepoHomeItem[]> {
   return invokeCommand('list_repos_for_home');
 }
 
@@ -1174,4 +1174,18 @@ export function setRepoDefaultBranch(
   defaultBranch: string
 ): Promise<void> {
   return invokeCommand('set_repo_default_branch', { githubRepo, subpath, defaultBranch });
+}
+
+/** Get the commit timeline for a repo's default branch from its local clone. */
+export function getRepoDefaultBranchTimeline(
+  githubRepo: string,
+  subpath: string,
+  limit?: number
+): Promise<import('./types').RepoDefaultBranchTimeline> {
+  return invokeCommand('get_repo_default_branch_timeline', { githubRepo, subpath, limit });
+}
+
+/** Clone a repo locally that has only been used remotely, then detect its default branch. */
+export function cloneRepoLocally(githubRepo: string): Promise<string> {
+  return invokeCommand('clone_repo_locally', { githubRepo });
 }

@@ -1,5 +1,11 @@
 import * as commands from '../../api/commands';
 import type { BranchTimeline, PipelineExecution, SessionMessage } from '../../types';
+import {
+  displayRootKey,
+  normalizeDisplayRoots,
+  resolveDisplayRoots,
+  type DisplayRootInput,
+} from '../sessions/pathDisplayRoots';
 import { formatToolDisplay, stripXmlTags } from '../sessions/sessionModalHelpers';
 
 const HINT_POLL_INTERVAL_MS = 750;
@@ -9,6 +15,8 @@ const MAX_HINT_MESSAGES = 40;
 type HintTracker = {
   lastMessageId: number | null;
   messages: SessionMessage[];
+  rootKey: string;
+  displayRoots: string[];
 };
 
 export type PendingHintItemType = 'pending-commit' | 'generating-note' | 'generating-review';
@@ -39,8 +47,8 @@ function withTrailingEllipsis(text: string): string {
   return `${text}…`;
 }
 
-function formatToolCallHint(content: string, repoDir?: string | null): string | undefined {
-  const { verb, detail } = formatToolDisplay(content, repoDir, true);
+function formatToolCallHint(content: string, displayRoots?: DisplayRootInput): string | undefined {
+  const { verb, detail } = formatToolDisplay(content, displayRoots, true);
   const text = detail ? `${verb} ${detail}` : verb;
   return normalizeHintText(withTrailingEllipsis(text));
 }
@@ -74,14 +82,17 @@ function formatAssistantHint(content: string): string | undefined {
   return undefined;
 }
 
-function deriveHint(messages: SessionMessage[], repoDir?: string | null): string | undefined {
+function deriveHint(
+  messages: SessionMessage[],
+  displayRoots?: DisplayRootInput
+): string | undefined {
   let latestToolHint: { id: number; text: string } | null = null;
   let latestAssistantHint: { id: number; text: string } | null = null;
 
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
     if (!latestToolHint && message.role === 'tool_call') {
-      const hint = formatToolCallHint(message.content, repoDir);
+      const hint = formatToolCallHint(message.content, displayRoots);
       if (hint) {
         latestToolHint = { id: message.id, text: hint };
       }
@@ -171,7 +182,7 @@ export function collectRunningSessionIds(
 
 export function createLiveSessionHints(
   onHintsChange: (hints: Record<string, string>) => void,
-  getRepoDir?: () => string | null | undefined
+  getDisplayRootCandidates?: () => DisplayRootInput
 ) {
   const hintTrackers = new Map<string, HintTracker>();
   let hints: Record<string, string> = {};
@@ -206,6 +217,18 @@ export function createLiveSessionHints(
         return;
       }
 
+      const rootCandidates: DisplayRootInput = [getDisplayRootCandidates?.(), session.workingDir];
+      const nextRootKey = displayRootKey(rootCandidates);
+      if (tracker.rootKey !== nextRootKey) {
+        tracker.rootKey = nextRootKey;
+        tracker.displayRoots = normalizeDisplayRoots(rootCandidates);
+        if (nextRootKey) {
+          const resolvedRoots = await resolveDisplayRoots(rootCandidates);
+          if (destroyed || !hintTrackers.has(sessionId) || tracker.rootKey !== nextRootKey) return;
+          tracker.displayRoots = resolvedRoots;
+        }
+      }
+
       const updatedMessages =
         tracker.lastMessageId === null
           ? await commands.getSessionMessages(sessionId)
@@ -224,7 +247,7 @@ export function createLiveSessionHints(
       }
 
       const nextHint =
-        deriveHint(tracker.messages, getRepoDir?.()) ??
+        deriveHint(tracker.messages, tracker.displayRoots) ??
         (tracker.messages.length === 0 ? derivePipelineHint(session.pipeline) : undefined);
       if (nextHint) {
         setHint(sessionId, nextHint);
@@ -277,6 +300,8 @@ export function createLiveSessionHints(
           hintTrackers.set(sessionId, {
             lastMessageId: null,
             messages: [],
+            rootKey: '',
+            displayRoots: [],
           });
         }
       }

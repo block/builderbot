@@ -2,6 +2,7 @@
 
 use crate::blox;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::path::Path;
 
 /// An application that can open directories.
@@ -88,12 +89,74 @@ pub fn read_text_file(file_path: String) -> Result<String, String> {
     std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))
 }
 
+/// Resolve equivalent path roots for display-only relative path formatting.
+#[tauri::command]
+pub fn resolve_path_aliases(paths: Vec<String>) -> Vec<String> {
+    resolve_path_aliases_impl(paths)
+}
+
+pub(crate) fn resolve_path_aliases_impl(paths: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut aliases = Vec::new();
+
+    for path in paths {
+        if seen.insert(path.clone()) {
+            aliases.push(path.clone());
+        }
+
+        if let Ok(canonical) = std::fs::canonicalize(&path) {
+            let canonical = canonical.to_string_lossy().to_string();
+            if seen.insert(canonical.clone()) {
+                aliases.push(canonical);
+            }
+        }
+    }
+
+    aliases
+}
+
 /// Return the absolute path for the shared preferences store file.
 #[tauri::command]
 pub fn preferences_store_path() -> Result<String, String> {
     crate::preferences_store_path_buf()
         .map(|p| p.to_string_lossy().to_string())
         .ok_or_else(|| "Cannot determine preferences store path".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_path_aliases_impl;
+
+    #[cfg(unix)]
+    #[test]
+    fn resolves_symlink_aliases_and_deduplicates_paths() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let link = temp.path().join("link");
+        symlink(&real, &link).unwrap();
+
+        let link = link.to_string_lossy().to_string();
+        let canonical_real = std::fs::canonicalize(&real)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        let aliases = resolve_path_aliases_impl(vec![link.clone(), link.clone()]);
+
+        assert_eq!(aliases, vec![link, canonical_real]);
+    }
+
+    #[test]
+    fn keeps_missing_paths_as_original_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("missing");
+
+        let aliases = resolve_path_aliases_impl(vec![missing.to_string_lossy().to_string()]);
+
+        assert_eq!(aliases, vec![missing.to_string_lossy().to_string()]);
+    }
 }
 
 /// Check whether the user is authenticated with Blox.

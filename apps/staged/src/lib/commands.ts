@@ -535,6 +535,11 @@ export function readTextFile(filePath: string): Promise<string> {
   return invokeCommand('read_text_file', { filePath });
 }
 
+/** Resolve equivalent display roots for paths that may involve symlinks. */
+export function resolvePathAliases(paths: string[]): Promise<string[]> {
+  return invokeCommand('resolve_path_aliases', { paths });
+}
+
 /** Intercept link clicks so they open in the system browser, not the webview. */
 export function handleExternalLinkClick(e: MouseEvent): void {
   const anchor = (e.target as HTMLElement).closest('a');

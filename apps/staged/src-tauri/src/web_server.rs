@@ -3444,6 +3444,13 @@ Begin the note with a markdown H1 heading as the title.\n\n"
                 std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {e}"))?;
             Ok(serde_json::to_value(content).unwrap())
         }
+        "resolve_path_aliases" => {
+            let paths: Vec<String> = arg(&args, "paths")?;
+            Ok(
+                serde_json::to_value(crate::util_commands::resolve_path_aliases_impl(paths))
+                    .unwrap(),
+            )
+        }
         "preferences_store_path" => {
             let path = crate::preferences_store_path_buf()
                 .map(|p| p.to_string_lossy().to_string())

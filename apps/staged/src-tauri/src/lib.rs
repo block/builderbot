@@ -1901,6 +1901,7 @@ pub fn run() {
             util_commands::open_url,
             util_commands::is_sq_available,
             util_commands::read_text_file,
+            util_commands::resolve_path_aliases,
             util_commands::preferences_store_path,
             util_commands::check_blox_auth,
             util_commands::get_available_openers,

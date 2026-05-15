@@ -72,7 +72,6 @@
     insertFilePathsAtCursor,
   } from '../branches/branchCardHelpers';
   import {
-    formatToolDisplay,
     groupByVerb,
     verbGroupSummary,
     hasXmlBlocks,
@@ -80,6 +79,12 @@
     stripXmlTags,
     type VerbGroup,
   } from './sessionModalHelpers';
+  import {
+    displayRootKey,
+    normalizeDisplayRoots,
+    resolveDisplayRoots,
+    type DisplayRootInput,
+  } from './pathDisplayRoots';
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import PipelineSteps from './PipelineSteps.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
@@ -91,8 +96,8 @@
   interface Props {
     sessionId: string;
     onClose: () => void;
-    /** Repo base directory — tool call paths within it are shown as relative. */
-    repoDir?: string | null;
+    /** Display roots — tool call paths within them are shown as relative. */
+    repoDir?: DisplayRootInput;
     /** Branch ID — when provided, enables image attachment on replies. */
     branchId?: string | null;
     /** Project ID — when provided, enables image attachment on replies. */
@@ -125,11 +130,35 @@
   let copiedId = $state<number | string | null>(null);
   let expandedTools = $state<Set<number>>(new Set());
   let expandedVerbGroups = $state<Set<string>>(new Set());
+  let displayRoots = $state<string[]>([]);
+  let currentDisplayRootKey = '';
 
   let isLive = $derived(session?.status === 'running');
   let hasQueuedMessages = $derived(messageQueue.length > 0);
 
   const SLIDE_DURATION = 150;
+
+  $effect(() => {
+    const rootCandidates: DisplayRootInput = [repoDir, session?.workingDir];
+    const nextKey = displayRootKey(rootCandidates);
+    if (nextKey === currentDisplayRootKey) return;
+
+    currentDisplayRootKey = nextKey;
+    displayRoots = normalizeDisplayRoots(rootCandidates);
+
+    let stale = false;
+    if (nextKey) {
+      resolveDisplayRoots(rootCandidates).then((resolvedRoots) => {
+        if (!stale && currentDisplayRootKey === nextKey) {
+          displayRoots = resolvedRoots;
+        }
+      });
+    }
+
+    return () => {
+      stale = true;
+    };
+  });
 
   /** Whether the initial load has rendered — transitions are suppressed until then. */
   let animateNewMessages = false;
@@ -903,8 +932,8 @@
     for (const group of grouped) {
       if (group.type === 'tools') {
         cache.push({
-          past: groupByVerb(group.pairs, repoDir, true),
-          present: groupByVerb(group.pairs, repoDir, false),
+          past: groupByVerb(group.pairs, displayRoots, true),
+          present: groupByVerb(group.pairs, displayRoots, false),
         });
       } else {
         // Placeholder — tool-group index won't line up otherwise.

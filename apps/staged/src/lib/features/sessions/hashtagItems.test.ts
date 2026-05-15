@@ -63,6 +63,8 @@ function projectNote(overrides: Partial<ProjectNote> = {}): ProjectNote {
     completedAt: 0,
     suggestedNextCommitStep: null,
     suggestedNextNoteStep: null,
+    sessionStatus: null,
+    completionReason: null,
     ...overrides,
   };
 }

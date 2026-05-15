@@ -1404,6 +1404,23 @@ pub fn ensure_fast_forward_pullable(state: &BranchGitState) -> Result<(), String
     Ok(())
 }
 
+/// Update the repo-level fetch cache for a given repo path.
+///
+/// Called by the background sync service after a successful `git fetch` so
+/// that the existing `FetchMode::Ttl` checks see the repo as fresh and
+/// avoid redundant fetches when the user navigates to a project.
+pub fn update_repo_fetch_cache(repo_path: &Path) {
+    let now = now_ms();
+    let repo_key = format!("local:{}", repo_path.display());
+    if let Ok(mut cache) = repo_fetch_cache().lock() {
+        let entry = cache.entry(repo_key).or_insert_with(|| RepoFetchEntry {
+            fetched_at: now,
+            fetched_refspecs: HashSet::new(),
+        });
+        entry.fetched_at = now;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

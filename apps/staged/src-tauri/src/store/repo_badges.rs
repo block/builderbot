@@ -207,6 +207,32 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// List all distinct `github_repo` values from `repo_badges` together with
+    /// their tier classification for background sync scheduling.
+    ///
+    /// Returns `(github_repo, default_branch, is_pinned, has_projects)` tuples.
+    pub fn list_repos_for_sync(
+        &self,
+    ) -> Result<Vec<(String, Option<String>, bool, bool)>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT rb.github_repo, rb.default_branch, rb.pinned,
+                    EXISTS(SELECT 1 FROM project_repos pr WHERE pr.github_repo = rb.github_repo) AS has_projects
+             FROM repo_badges rb
+             GROUP BY rb.github_repo",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let pinned_int: i32 = row.get(2)?;
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                pinned_int != 0,
+                row.get::<_, bool>(3)?,
+            ))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Store the detected default branch for a repo badge.
     pub fn set_default_branch(
         &self,

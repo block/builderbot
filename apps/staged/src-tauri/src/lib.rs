@@ -5,6 +5,7 @@
 
 pub mod actions;
 pub mod agent;
+pub mod background_sync;
 pub mod blox;
 pub mod branches;
 pub mod diff_cache;
@@ -2062,6 +2063,8 @@ pub fn run() {
                         Ok(n) => log::info!("Cleaned up {n} pending image(s) from previous run"),
                         Err(e) => log::warn!("Failed to clean up pending images: {e}"),
                     }
+                    // Start the tiered background sync service for all cloned repos.
+                    background_sync::spawn(Arc::clone(&store_arc), app.handle().clone());
                     (Mutex::new(Some(store_arc)), None)
                 }
                 store::DbCompatibility::NeedsReset { db_app_version } => {

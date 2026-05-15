@@ -547,7 +547,8 @@
 
   .recent-repos {
     display: flex;
-    flex-wrap: wrap;
+    flex-direction: column;
+    align-items: flex-start;
     gap: 6px;
     margin-top: 4px;
   }
@@ -565,6 +566,7 @@
     font-weight: 600;
     font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
     line-height: 1.4;
+    max-width: 100%;
     cursor: pointer;
     transition:
       background 0.15s,

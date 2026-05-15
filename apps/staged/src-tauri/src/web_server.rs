@@ -836,6 +836,16 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             store
                 .pin_repo(&github_repo, &subpath)
                 .map_err(|e| e.to_string())?;
+            // Backfill default_branch if not yet detected
+            if let Ok(Some(badge)) = store.get_repo_badge(&github_repo, &subpath) {
+                if badge.default_branch.is_none() {
+                    if let Err(e) =
+                        crate::detect_and_store_default_branch(&store, &github_repo, &subpath)
+                    {
+                        log::warn!("[pin_repo] failed to backfill default_branch: {e}");
+                    }
+                }
+            }
             Ok(Value::Null)
         }
         "unpin_repo" => {
@@ -869,6 +879,13 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .set_default_branch(&github_repo, &subpath, &default_branch)
                 .map_err(|e| e.to_string())?;
             Ok(Value::Null)
+        }
+        "detect_default_branch" => {
+            let store = get_store(store_mutex)?;
+            let github_repo: String = arg(&args, "githubRepo")?;
+            let subpath: String = arg(&args, "subpath")?;
+            let branch = crate::detect_and_store_default_branch(&store, &github_repo, &subpath)?;
+            Ok(serde_json::to_value(branch).unwrap())
         }
 
         // =====================================================================

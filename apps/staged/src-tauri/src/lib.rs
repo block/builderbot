@@ -1067,9 +1067,21 @@ fn pin_repo(
     github_repo: String,
     subpath: String,
 ) -> Result<(), String> {
-    get_store(&store)?
+    let store = get_store(&store)?;
+    store
         .pin_repo(&github_repo, &subpath)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // Backfill default_branch if not yet detected
+    if let Ok(Some(badge)) = store.get_repo_badge(&github_repo, &subpath) {
+        if badge.default_branch.is_none() {
+            if let Err(e) = detect_and_store_default_branch(&store, &github_repo, &subpath) {
+                log::warn!("[pin_repo] failed to backfill default_branch: {e}");
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1112,6 +1124,56 @@ fn set_repo_default_branch(
     get_store(&store)?
         .set_default_branch(&github_repo, &subpath, &default_branch)
         .map_err(|e| e.to_string())
+}
+
+/// Detect the default branch for a repo, cache it in repo_badges, and return it.
+///
+/// Fallback chain:
+/// 1. Stored value in `repo_badges.default_branch`
+/// 2. `git remote show origin | grep "HEAD branch"` on the local clone
+/// 3. Local ref check for `origin/main` then `origin/master`
+/// 4. `"main"` as the ultimate fallback
+pub(crate) fn detect_and_store_default_branch(
+    store: &Arc<Store>,
+    github_repo: &str,
+    subpath: &str,
+) -> Result<String, String> {
+    // 1. Check stored value first
+    if let Ok(Some(badge)) = store.get_repo_badge(github_repo, subpath) {
+        if let Some(ref branch) = badge.default_branch {
+            return Ok(branch.clone());
+        }
+    }
+
+    // 2. Try detecting from the local clone
+    let branch = if let Some(clone_path) = crate::paths::clone_path_for(github_repo) {
+        if clone_path.exists() {
+            git::detect_default_branch_from_remote(&clone_path)
+                .unwrap_or_else(|_| "main".to_string())
+        } else {
+            // No local clone — fall back to GitHub API
+            git::detect_default_branch_for_repo(github_repo).unwrap_or_else(|_| "main".to_string())
+        }
+    } else {
+        git::detect_default_branch_for_repo(github_repo).unwrap_or_else(|_| "main".to_string())
+    };
+
+    // 3. Cache the result in repo_badges (best-effort — badge may not exist yet)
+    if let Err(e) = store.set_default_branch(github_repo, subpath, &branch) {
+        log::warn!("[detect_default_branch] failed to cache default_branch for {github_repo}: {e}");
+    }
+
+    Ok(branch)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn detect_default_branch(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    github_repo: String,
+    subpath: String,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
+    detect_and_store_default_branch(&store, &github_repo, &subpath)
 }
 
 /// Build the prompt for AI short name generation.
@@ -1878,6 +1940,7 @@ pub fn run() {
             reorder_pinned_repos,
             list_repos_for_home,
             set_repo_default_branch,
+            detect_default_branch,
             // GitHub
             github_commands::list_github_orgs,
             github_commands::list_github_repos,

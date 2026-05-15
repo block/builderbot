@@ -207,6 +207,45 @@ pub fn detect_default_branch(repo: &Path) -> Result<String, GitError> {
     Ok("origin/main".to_string())
 }
 
+/// Detect the default branch by querying `git remote show origin`.
+///
+/// Parses the `HEAD branch:` line from the output. Returns the bare branch
+/// name (e.g. `"main"`, not `"origin/main"`).
+///
+/// Falls back to checking whether `origin/main` or `origin/master` exist
+/// locally if the remote query fails (e.g. no network).
+pub fn detect_default_branch_from_remote(repo: &Path) -> Result<String, GitError> {
+    // Try `git remote show origin` first — authoritative when it works.
+    match cli::run(repo, &["remote", "show", "origin"]) {
+        Ok(output) => {
+            for line in output.lines() {
+                let trimmed = line.trim();
+                if let Some(rest) = trimmed.strip_prefix("HEAD branch:") {
+                    let branch = rest.trim();
+                    if !branch.is_empty() && branch != "(unknown)" {
+                        return Ok(branch.to_string());
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            log::warn!("[detect_default_branch_from_remote] git remote show origin failed: {e}");
+        }
+    }
+
+    // Fallback: check local refs for origin/main or origin/master.
+    let refs = list_refs(repo).unwrap_or_default();
+    if refs.iter().any(|r| r == "origin/main") {
+        return Ok("main".to_string());
+    }
+    if refs.iter().any(|r| r == "origin/master") {
+        return Ok("master".to_string());
+    }
+
+    // Ultimate fallback
+    Ok("main".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{branch_name_without_origin, origin_ref_for_branch};

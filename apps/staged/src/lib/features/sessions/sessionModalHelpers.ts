@@ -41,20 +41,18 @@ export function parseToolCall(content: string): ParsedToolCall | null {
  * Replace absolute paths that fall within any display root with relative paths.
  * If roots are empty/null, returns the text unchanged.
  *
- * When exact root prefixes aren't found in the text, ancestor directories
- * are tried (up to 3 levels). This handles the common case where the session's
- * working directory includes a repo subpath (e.g. `worktree_root/apps/staged`)
- * but tool call paths reference the worktree root directly.
+ * Ancestor directories are also tried (up to 3 levels). This handles the
+ * common case where the session's working directory includes a repo subpath
+ * (e.g. `worktree_root/apps/staged`) but tool call paths reference the
+ * worktree root directly.
  */
 export function makePathsRelative(text: string, rootsInput: DisplayRootInput): string {
   const roots = normalizeDisplayRoots(rootsInput);
   if (roots.length === 0) return text;
 
   const direct = replaceRootPrefixes(text, roots);
-  if (direct.matched) return direct.text;
-
-  const fallback = replaceRootPrefixes(text, ancestorRoots(roots));
-  if (fallback.matched) return fallback.text;
+  const fallback = replaceRootPrefixes(direct.text, ancestorRoots(roots));
+  if (direct.matched || fallback.matched) return fallback.text;
 
   return text;
 }

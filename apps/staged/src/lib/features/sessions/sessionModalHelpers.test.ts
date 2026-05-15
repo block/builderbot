@@ -24,6 +24,15 @@ describe('makePathsRelative', () => {
     expect(makePathsRelative('/work/repo/src/lib.rs', '/work/repo/apps/staged')).toBe('src/lib.rs');
   });
 
+  it('applies the ancestor fallback after direct matches', () => {
+    expect(
+      makePathsRelative(
+        'cat /work/repo/apps/staged/src/App.svelte /work/repo/src-tauri/src/lib.rs',
+        '/work/repo/apps/staged'
+      )
+    ).toBe('cat src/App.svelte src-tauri/src/lib.rs');
+  });
+
   it('formats shell command strings with resolved alias roots', () => {
     const call = JSON.stringify({
       name: 'Bash',

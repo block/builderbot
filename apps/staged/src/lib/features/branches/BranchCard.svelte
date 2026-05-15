@@ -717,6 +717,19 @@
     return () => window.removeEventListener('timeline-invalidated', handler);
   });
 
+  // Re-fetch project note hashtag items when a project note is deleted
+  $effect(() => {
+    const projectId = branch.projectId;
+    if (!projectId) return;
+    const handler = () => {
+      commands.listProjectNotes(projectId).then((notes) => {
+        projectNoteHashtagItems = projectNotesToHashtagItems(notes);
+      });
+    };
+    window.addEventListener('project-notes-invalidated', handler);
+    return () => window.removeEventListener('project-notes-invalidated', handler);
+  });
+
   async function loadTimeline({
     timelineKey = branchTimelineReadyKey(branch),
     force = false,

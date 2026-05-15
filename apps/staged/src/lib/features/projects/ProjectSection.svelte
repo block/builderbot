@@ -424,6 +424,8 @@
     try {
       await deleteSessionLinkedItem(() => commands.deleteProjectNote(noteId), sessionId);
       projectNotes = projectNotes.filter((n) => n.id !== noteId);
+      hashtagVersion++;
+      window.dispatchEvent(new CustomEvent('project-notes-invalidated'));
     } catch (e) {
       console.error('[ProjectSection] Failed to delete project note:', e);
     } finally {

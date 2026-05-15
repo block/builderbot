@@ -763,7 +763,7 @@ fn clone_lock_for_repo(github_repo: &str) -> Arc<Mutex<()>> {
 /// Fetch the latest from origin and reset the main checkout's working tree to
 /// the remote default branch tip.
 ///
-/// This ensures the files on disk in the bare/main clone reflect the latest
+/// This ensures the files on disk in the main clone reflect the latest
 /// upstream state — critical for action detection which reads files from the
 /// working tree. Worktrees are separate directories and are **not** affected
 /// by this reset.

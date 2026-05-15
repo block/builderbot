@@ -335,13 +335,15 @@
       {#if meta || secondaryMeta || tertiaryMeta || (badges && badges.length > 0)}
         <div class="timeline-meta">
           {#if meta}
-            <span class="meta-item">{meta}</span>
+            <span class="meta-item" title={meta}>{meta}</span>
           {/if}
           {#if secondaryMeta}
-            <span class="meta-item meta-sha" class:failed-meta={isFailed}>{secondaryMeta}</span>
+            <span class="meta-item meta-sha" class:failed-meta={isFailed} title={secondaryMeta}
+              >{secondaryMeta}</span
+            >
           {/if}
           {#if tertiaryMeta}
-            <span class="meta-item">{tertiaryMeta}</span>
+            <span class="meta-item" title={tertiaryMeta}>{tertiaryMeta}</span>
           {/if}
           {#if badges}
             {#each badges as badge}
@@ -693,9 +695,15 @@
     align-items: baseline;
     gap: 8px;
     margin-top: 3px;
+    min-width: 0;
+    max-width: 100%;
   }
 
   .meta-item {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: var(--size-xs);
     color: var(--text-faint);
   }
@@ -707,6 +715,7 @@
   .meta-badge {
     display: inline-flex;
     align-items: center;
+    flex: 0 0 auto;
     gap: 3px;
     padding: 2px 7px;
     border-radius: 8px;

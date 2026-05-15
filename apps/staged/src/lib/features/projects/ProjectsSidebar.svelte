@@ -11,8 +11,9 @@
     GitPullRequestDraft,
     GitBranch,
     Sprout,
+    FolderGit2,
   } from 'lucide-svelte';
-  import type { Project, ProjectRepo, Branch, WorkspaceStatus } from '../../types';
+  import type { Project, ProjectRepo, Branch, WorkspaceStatus, RepoHomeItem } from '../../types';
   import { goHome, navigation, selectProject } from '../layout/navigation.svelte';
   import {
     projectDisplayName,
@@ -38,6 +39,8 @@
   } from './projectsSidebarState.svelte';
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
   import ProjectContextMenu from './ProjectContextMenu.svelte';
+  import SidebarPinnedRepo from './SidebarPinnedRepo.svelte';
+  import * as commands from '../../api/commands';
 
   const devBranch = import.meta.env.VITE_DEV_BRANCH as string | undefined;
 
@@ -69,6 +72,69 @@
 
   let projectMenu = $state<{ project: Project; x: number; y: number } | null>(null);
   let lastNavigationKey = `${navigation.activeView}:${navigation.selectedProjectId ?? ''}`;
+
+  // ── Pinned repos ──
+  let pinnedRepos = $state<RepoHomeItem[]>([]);
+  let dragSourceIndex = $state<number | null>(null);
+
+  async function loadPinnedRepos() {
+    try {
+      const all = await commands.listReposForHome();
+      pinnedRepos = all.filter((r) => r.pinned);
+    } catch (e) {
+      console.error('[ProjectsSidebar] Failed to load pinned repos:', e);
+    }
+  }
+
+  function handleDragStart(index: number) {
+    return (e: DragEvent) => {
+      dragSourceIndex = index;
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+      }
+    };
+  }
+
+  function handleDragOver(index: number) {
+    return (e: DragEvent) => {
+      e.preventDefault();
+      if (e.dataTransfer) {
+        e.dataTransfer.dropEffect = 'move';
+      }
+    };
+  }
+
+  function handleDrop(index: number) {
+    return async (_e: DragEvent) => {
+      if (dragSourceIndex === null || dragSourceIndex === index) {
+        dragSourceIndex = null;
+        return;
+      }
+
+      // Reorder the array
+      const items = [...pinnedRepos];
+      const [moved] = items.splice(dragSourceIndex, 1);
+      items.splice(index, 0, moved);
+      pinnedRepos = items;
+      dragSourceIndex = null;
+
+      // Persist the new order
+      const orderedKeys: [string, string][] = items.map((r) => [r.githubRepo, r.subpath]);
+      try {
+        await commands.reorderPinnedRepos(orderedKeys);
+      } catch (e) {
+        console.error('[ProjectsSidebar] Failed to reorder pinned repos:', e);
+        // Reload to get the correct order
+        await loadPinnedRepos();
+      }
+    };
+  }
+
+  function handleDragEnd() {
+    return () => {
+      dragSourceIndex = null;
+    };
+  }
 
   function openProject(projectId: string) {
     closeProjectMenu();
@@ -153,6 +219,7 @@
   onMount(() => {
     const stopWatchingViewport = watchViewport();
     void hydrateProjectsSidebarState();
+    void loadPinnedRepos();
     return () => {
       stopWatchingViewport();
     };
@@ -260,6 +327,30 @@
         <div class="state error">{error}</div>
       {:else}
         <div class="projects-list">
+          {#if pinnedRepos.length > 0}
+            <button class="project-row all-repos-row" onclick={goHome} title="View all repos">
+              <div class="row-main">
+                <FolderGit2 size={14} />
+                <span class="project-name">All Repos</span>
+              </div>
+            </button>
+
+            <div class="pinned-repos-list" role="list" aria-label="Pinned repos">
+              {#each pinnedRepos as repo, index (repo.githubRepo + '\t' + repo.subpath)}
+                <SidebarPinnedRepo
+                  {repo}
+                  onReorderStart={handleDragStart(index)}
+                  onReorderOver={handleDragOver(index)}
+                  onReorderDrop={handleDrop(index)}
+                  onReorderEnd={handleDragEnd()}
+                  onPinnedReposChanged={loadPinnedRepos}
+                />
+              {/each}
+            </div>
+
+            <div class="section-divider"></div>
+          {/if}
+
           {#if showAllProjectsRow}
             <button
               class="project-row all-projects-row"
@@ -702,6 +793,22 @@
     font-size: calc(var(--size-xs) - 1px);
     color: var(--text-faint);
     font-weight: 600;
+  }
+
+  .all-repos-row :global(svg) {
+    stroke: var(--text-secondary);
+  }
+
+  .pinned-repos-list {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .section-divider {
+    height: 1px;
+    background: color-mix(in srgb, var(--border-subtle) 40%, transparent);
+    margin: 4px 4px;
   }
 
   .state {

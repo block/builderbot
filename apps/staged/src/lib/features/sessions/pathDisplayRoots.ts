@@ -3,8 +3,15 @@ import { resolvePathAliases } from '../../api/commands';
 export type DisplayRootInput = string | null | undefined | readonly DisplayRootInput[];
 export type PathAliasResolver = (paths: string[]) => Promise<string[]>;
 
-const pathAliasCache = new Map<string, Promise<string[]>>();
-const rootSetCache = new Map<string, Promise<string[]>>();
+const FALLBACK_ALIAS_RETRY_MS = 5_000;
+
+type AliasCacheEntry = {
+  promise: Promise<string[]>;
+  expiresAt?: number;
+};
+
+const pathAliasCache = new Map<string, AliasCacheEntry>();
+const rootSetCache = new Map<string, AliasCacheEntry>();
 
 function visitDisplayRoots(input: DisplayRootInput, roots: string[]) {
   if (typeof input === 'string' || input == null) {
@@ -52,15 +59,47 @@ export function displayRootKey(input: DisplayRootInput): string {
   return [...normalizeDisplayRoots(input)].sort().join('\n');
 }
 
+function cachedAliases(cache: Map<string, AliasCacheEntry>, key: string): Promise<string[]> | null {
+  const cached = cache.get(key);
+  if (!cached) return null;
+  if (cached.expiresAt !== undefined && cached.expiresAt <= Date.now()) {
+    cache.delete(key);
+    return null;
+  }
+  return cached.promise;
+}
+
+function isFallbackOnlyAlias(root: string, aliases: string[]): boolean {
+  return aliases.length === 1 && aliases[0] === root;
+}
+
+function expireFallbackAlias(
+  cache: Map<string, AliasCacheEntry>,
+  key: string,
+  entry: AliasCacheEntry,
+  shouldRetry: boolean
+) {
+  if (!shouldRetry) return;
+  if (cache.get(key) !== entry) return;
+  entry.expiresAt = Date.now() + FALLBACK_ALIAS_RETRY_MS;
+}
+
 function aliasesForRoot(root: string, resolver: PathAliasResolver): Promise<string[]> {
-  const cached = pathAliasCache.get(root);
+  const cached = cachedAliases(pathAliasCache, root);
   if (cached) return cached;
 
-  const promise = resolver([root])
+  let entry: AliasCacheEntry;
+  const promise = Promise.resolve()
+    .then(() => resolver([root]))
     .then((aliases) => normalizeDisplayRoots([root, aliases]))
-    .catch(() => [root]);
+    .catch(() => [root])
+    .then((aliases) => {
+      expireFallbackAlias(pathAliasCache, root, entry, isFallbackOnlyAlias(root, aliases));
+      return aliases;
+    });
 
-  pathAliasCache.set(root, promise);
+  entry = { promise };
+  pathAliasCache.set(root, entry);
   return promise;
 }
 
@@ -72,13 +111,23 @@ export function resolveDisplayRoots(
   const key = displayRootKey(roots);
   if (!key) return Promise.resolve([]);
 
-  const cached = rootSetCache.get(key);
+  const cached = cachedAliases(rootSetCache, key);
   if (cached) return cached;
 
-  const promise = Promise.all(roots.map((root) => aliasesForRoot(root, resolver))).then((groups) =>
-    normalizeDisplayRoots(groups)
+  let entry: AliasCacheEntry;
+  const promise = Promise.all(roots.map((root) => aliasesForRoot(root, resolver))).then(
+    (groups) => {
+      expireFallbackAlias(
+        rootSetCache,
+        key,
+        entry,
+        groups.some((aliases, index) => isFallbackOnlyAlias(roots[index], aliases))
+      );
+      return normalizeDisplayRoots(groups);
+    }
   );
-  rootSetCache.set(key, promise);
+  entry = { promise };
+  rootSetCache.set(key, entry);
   return promise;
 }
 

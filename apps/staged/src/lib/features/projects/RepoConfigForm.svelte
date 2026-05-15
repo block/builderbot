@@ -310,7 +310,10 @@
               )}; --chip-border-hover: {badge.badgeBorderHover(
                 hue,
                 dark
-              )}; --chip-fg: {badge.badgeFg(hue, dark)};"
+              )}; --chip-fg: {badge.badgeFg(hue, dark)}; --chip-shortcut-bg: {badge.badgeShortcutBg(
+                hue,
+                dark
+              )};"
               onclick={() =>
                 handleRepoSelected({
                   nameWithOwner: recent.githubRepo,
@@ -601,7 +604,7 @@
     gap: 2px;
     margin-left: 2px;
     padding: 1px 4px;
-    background: rgba(0, 0, 0, 0.1);
+    background: var(--chip-shortcut-bg);
     border-radius: 3px;
     color: inherit;
     opacity: 0.5;

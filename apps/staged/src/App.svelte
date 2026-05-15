@@ -11,6 +11,7 @@
   import TopBar from './lib/features/layout/TopBar.svelte';
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
   import ProjectsList from './lib/features/projects/ProjectsList.svelte';
+  import RepoDetailView from './lib/features/projects/RepoDetailView.svelte';
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
   import SettingsPage from './lib/features/settings/SettingsPage.svelte';
   import ToastHost from './lib/shared/ToastHost.svelte';
@@ -498,6 +499,11 @@
           </div>
         {:else if navigation.activeView === 'settings'}
           <SettingsPage />
+        {:else if navigation.selectedRepo}
+          <RepoDetailView
+            githubRepo={navigation.selectedRepo.githubRepo}
+            subpath={navigation.selectedRepo.subpath}
+          />
         {:else if navigation.selectedProjectId}
           <ProjectHome selectedProjectId={navigation.selectedProjectId} />
         {:else}

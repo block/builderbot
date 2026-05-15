@@ -29,6 +29,7 @@
     type OpenerApp,
   } from '../branches/branch';
   import * as commands from '../../api/commands';
+  import { selectRepo } from '../layout/navigation.svelte';
   import { alerts } from '../../shared/alerts.svelte';
   import Spinner from '../../shared/Spinner.svelte';
 
@@ -66,6 +67,7 @@
   let borderColor = $derived(badgeBorder(repo.hue, darkMode.value));
 
   let subpathLabel = $derived(repo.subpath ? repo.subpath : null);
+  let subtitle = $derived(repo.subpath ? `${repo.githubRepo}/${repo.subpath}` : repo.githubRepo);
 
   onMount(() => {
     if (repo.hasLocalClone) {
@@ -224,7 +226,14 @@
   <div class="card-stripe"></div>
 
   <div class="card-content">
-    <div class="card-name-row">
+    <button
+      class="card-name-row"
+      onclick={(e) => {
+        e.stopPropagation();
+        selectRepo(repo.githubRepo, repo.subpath);
+      }}
+      title={subtitle}
+    >
       <span class="repo-name">{repo.shortName}</span>
       {#if subpathLabel}
         <span class="subpath-badge">{subpathLabel}</span>
@@ -234,7 +243,7 @@
           <AlertCircle size={12} />
         </span>
       {/if}
-    </div>
+    </button>
 
     <div class="card-actions">
       <button
@@ -344,6 +353,12 @@
     gap: 4px;
     min-width: 0;
     flex: 1;
+    border: none;
+    background: transparent;
+    padding: 0;
+    cursor: pointer;
+    color: inherit;
+    text-align: left;
   }
 
   .repo-name {

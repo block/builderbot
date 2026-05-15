@@ -1,3 +1,5 @@
+import { normalizeDisplayRoots, type DisplayRootInput } from './pathDisplayRoots';
+
 export interface ParsedToolCall {
   name: string;
   args: Record<string, unknown>;
@@ -36,29 +38,74 @@ export function parseToolCall(content: string): ParsedToolCall | null {
 }
 
 /**
- * Replace absolute paths that fall within `repoDir` with relative paths.
- * If repoDir is empty/null, returns the text unchanged.
+ * Replace absolute paths that fall within any display root with relative paths.
+ * If roots are empty/null, returns the text unchanged.
  *
- * When the exact `repoDir` prefix isn't found in the text, ancestor directories
- * are tried (up to 3 levels). This handles the common case where the session's
- * working directory includes a repo subpath (e.g. `worktree_root/apps/staged`)
- * but tool call paths reference the worktree root directly.
+ * Ancestor directories are also tried (up to 3 levels). This handles the
+ * common case where the session's working directory includes a repo subpath
+ * (e.g. `worktree_root/apps/staged`) but tool call paths reference the
+ * worktree root directly.
  */
-export function makePathsRelative(text: string, repoDir: string | null | undefined): string {
-  if (!repoDir) return text;
+export function makePathsRelative(text: string, rootsInput: DisplayRootInput): string {
+  const roots = normalizeDisplayRoots(rootsInput);
+  if (roots.length === 0) return text;
 
-  let dir = repoDir;
-  for (let i = 0; i < 4; i++) {
-    const prefix = dir.endsWith('/') ? dir : dir + '/';
-    if (text.includes(prefix)) {
-      return text.replaceAll(prefix, '');
-    }
-    const parentEnd = dir.lastIndexOf('/');
-    if (parentEnd <= 0) break;
-    dir = dir.slice(0, parentEnd);
-  }
+  const direct = replaceRootPrefixes(text, roots);
+  const fallback = replaceRootPrefixes(direct.text, ancestorRoots(roots));
+  if (direct.matched || fallback.matched) return fallback.text;
 
   return text;
+}
+
+function pathSeparatorFor(root: string): '/' | '\\' {
+  return root.includes('\\') && !root.includes('/') ? '\\' : '/';
+}
+
+function rootPrefix(root: string): string {
+  if (root.endsWith('/') || root.endsWith('\\')) return root;
+  return `${root}${pathSeparatorFor(root)}`;
+}
+
+function parentRoot(root: string): string | null {
+  const trimmed = root.replace(/[/\\]+$/, '');
+  const parentEnd = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+  if (parentEnd <= 0) return null;
+
+  const parent = trimmed.slice(0, parentEnd);
+  if (/^[A-Za-z]:$/.test(parent)) return null;
+  return parent;
+}
+
+function ancestorRoots(roots: string[]): string[] {
+  const ancestors: string[] = [];
+  const seen = new Set<string>();
+  for (const root of roots) {
+    let dir = root;
+    for (let i = 0; i < 3; i++) {
+      const parent = parentRoot(dir);
+      if (!parent) break;
+      if (!seen.has(parent)) {
+        ancestors.push(parent);
+        seen.add(parent);
+      }
+      dir = parent;
+    }
+  }
+  return ancestors;
+}
+
+function replaceRootPrefixes(text: string, roots: string[]): { text: string; matched: boolean } {
+  const prefixes = [...new Set(roots.map(rootPrefix))].sort((a, b) => b.length - a.length);
+  let result = text;
+  let matched = false;
+
+  for (const prefix of prefixes) {
+    if (!result.includes(prefix)) continue;
+    matched = true;
+    result = result.split(prefix).join('');
+  }
+
+  return { text: result, matched };
 }
 
 const TOOL_VERBS: Record<string, [past: string, present: string]> = {
@@ -222,7 +269,7 @@ const VERB_NOUNS: Record<string, string> = {
 
 export function groupByVerb(
   pairs: { call: { id: number; content: string }; result: { content: string } | null }[],
-  repoDir?: string | null,
+  repoDir?: DisplayRootInput,
   forcePastTense?: boolean
 ): VerbGroup[] {
   const groups: VerbGroup[] = [];
@@ -247,7 +294,7 @@ export function verbGroupSummary(group: VerbGroup): string {
 
 export function formatToolDisplay(
   content: string,
-  repoDir?: string | null,
+  repoDir?: DisplayRootInput,
   pending?: boolean
 ): ToolDisplay {
   const tenseIdx = pending ? 1 : 0;

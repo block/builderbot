@@ -322,6 +322,7 @@ export interface Session {
   id: string;
   prompt: string;
   status: SessionStatus;
+  workingDir: string;
   provider: string | null;
   agentId: string | null;
   errorMessage: string | null;

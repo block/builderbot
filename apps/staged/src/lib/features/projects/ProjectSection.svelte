@@ -109,6 +109,9 @@
   }: Props = $props();
 
   let sortedBranches = $derived([...branches].sort((a, b) => b.createdAt - a.createdAt));
+  let projectDisplayRootCandidates = $derived(
+    branches.map((branch) => branch.worktreePath).filter((path): path is string => !!path)
+  );
   let addRepoDisabled = $derived(deleting || !canAddRepo);
   let addRepoTitle = $derived(
     deleting
@@ -179,7 +182,7 @@
     (nextHints) => {
       liveSessionHints = nextHints;
     },
-    () => branches.find((b) => b.worktreePath)?.worktreePath ?? null
+    () => projectDisplayRootCandidates
   );
 
   /** Collect session IDs from running project notes + activeSessionIds. */
@@ -748,7 +751,7 @@
   )}
   <SessionModal
     sessionId={openSessionId}
-    repoDir={branches.find((b) => b.worktreePath)?.worktreePath ?? null}
+    repoDir={projectDisplayRootCandidates}
     projectId={project.id}
     noteInfo={noteForSession
       ? { id: noteForSession.id, title: noteForSession.title, content: noteForSession.content }

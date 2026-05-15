@@ -105,7 +105,7 @@ describe('timelineToHashtagItems', () => {
     );
   });
 
-  it('sorts by section and newest first within each section', () => {
+  it('sorts timeline references newest first across types', () => {
     const timeline: BranchTimeline = emptyTimeline({
       notes: [
         {
@@ -128,9 +128,9 @@ describe('timelineToHashtagItems', () => {
           sessionId: null,
           sessionStatus: null,
           completionReason: null,
-          createdAt: 2000,
-          updatedAt: 2000,
-          completedAt: 2000,
+          createdAt: 5000,
+          updatedAt: 5000,
+          completedAt: 5000,
           suggestedNextCommitStep: null,
           suggestedNextNoteStep: null,
         },
@@ -144,7 +144,7 @@ describe('timelineToHashtagItems', () => {
           author: 'Test User',
           authorEmail: 'test@example.com',
           isOwnCommit: true,
-          timestamp: 1,
+          timestamp: 2000,
           order: 0,
           sessionId: null,
           sessionStatus: null,
@@ -158,7 +158,7 @@ describe('timelineToHashtagItems', () => {
           author: 'Test User',
           authorEmail: 'test@example.com',
           isOwnCommit: true,
-          timestamp: 2,
+          timestamp: 6000,
           order: 1,
           sessionId: null,
           sessionStatus: null,
@@ -177,9 +177,9 @@ describe('timelineToHashtagItems', () => {
           title: 'Old review',
           commentCount: 0,
           isAuto: false,
-          createdAt: 1000,
-          updatedAt: 1000,
-          completedAt: 1000,
+          createdAt: 3000,
+          updatedAt: 3000,
+          completedAt: 3000,
         },
         {
           id: 'new-review',
@@ -192,9 +192,9 @@ describe('timelineToHashtagItems', () => {
           title: 'New review',
           commentCount: 0,
           isAuto: false,
-          createdAt: 2000,
-          updatedAt: 2000,
-          completedAt: 2000,
+          createdAt: 7000,
+          updatedAt: 7000,
+          completedAt: 7000,
         },
       ],
       images: [
@@ -206,7 +206,7 @@ describe('timelineToHashtagItems', () => {
           sessionId: null,
           sessionStatus: null,
           completionReason: null,
-          createdAt: 1000,
+          createdAt: 4000,
         },
         {
           id: 'new-image',
@@ -216,20 +216,20 @@ describe('timelineToHashtagItems', () => {
           sessionId: null,
           sessionStatus: null,
           completionReason: null,
-          createdAt: 2000,
+          createdAt: 8000,
         },
       ],
     });
 
     expect(timelineToHashtagItems(timeline).map((item) => `${item.type}:${item.id}`)).toEqual([
-      'note:new-note',
-      'note:old-note',
-      'commit:newcommit',
-      'commit:oldcommit',
-      'review:new-review',
-      'review:old-review',
       'image:new-image',
+      'review:new-review',
+      'commit:newcommit',
+      'note:new-note',
       'image:old-image',
+      'review:old-review',
+      'commit:oldcommit',
+      'note:old-note',
     ]);
   });
 });

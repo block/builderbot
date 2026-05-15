@@ -19,6 +19,8 @@
     scope: 'branch' | 'commit';
     reviewId?: string;
     visibleCommentCount: number;
+    githubRepo?: string;
+    subpath?: string | null;
     isRemote: boolean;
     onStarted: () => void;
   }
@@ -30,6 +32,8 @@
     scope,
     reviewId,
     visibleCommentCount,
+    githubRepo,
+    subpath,
     isRemote,
     onStarted,
   }: Props = $props();
@@ -45,7 +49,10 @@
   let hashtagItems = $state<HashtagItem[]>([]);
   $effect(() => {
     let stale = false;
-    buildBranchHashtagItems(branchId, projectId ?? null).then((items) => {
+    buildBranchHashtagItems(branchId, projectId ?? null, {
+      repoSlug: githubRepo,
+      repoSubpath: subpath,
+    }).then((items) => {
       if (!stale) hashtagItems = items;
     });
     return () => {

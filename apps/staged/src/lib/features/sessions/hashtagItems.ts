@@ -40,6 +40,12 @@ type SortableHashtagItem = HashtagItem & {
   sortOrder: number;
 };
 
+type BranchHashtagContext = {
+  branchName?: string;
+  repoSlug?: string;
+  repoSubpath?: string | null;
+};
+
 const hashtagTypeOrder: Record<HashtagItem['type'], number> = {
   'project-note': 0,
   note: 1,
@@ -53,8 +59,8 @@ function sortAndStripHashtagItems(items: SortableHashtagItem[]): HashtagItem[] {
 }
 
 function compareHashtagItems(a: SortableHashtagItem, b: SortableHashtagItem): number {
-  const typeDiff = hashtagTypeOrder[a.type] - hashtagTypeOrder[b.type];
-  if (typeDiff !== 0) return typeDiff;
+  const sectionDiff = hashtagSectionOrder(a) - hashtagSectionOrder(b);
+  if (sectionDiff !== 0) return sectionDiff;
 
   const timestampDiff = b.sortTimestamp - a.sortTimestamp;
   if (timestampDiff !== 0) return timestampDiff;
@@ -62,7 +68,14 @@ function compareHashtagItems(a: SortableHashtagItem, b: SortableHashtagItem): nu
   const orderDiff = b.sortOrder - a.sortOrder;
   if (orderDiff !== 0) return orderDiff;
 
+  const typeDiff = hashtagTypeOrder[a.type] - hashtagTypeOrder[b.type];
+  if (typeDiff !== 0) return typeDiff;
+
   return a.title.localeCompare(b.title);
+}
+
+function hashtagSectionOrder(item: HashtagItem): number {
+  return item.type === 'project-note' ? 0 : 1;
 }
 
 function stripSortMetadata(item: SortableHashtagItem): HashtagItem {
@@ -87,7 +100,8 @@ function stripSortMetadata(item: SortableHashtagItem): HashtagItem {
  */
 export async function buildBranchHashtagItems(
   branchId: string,
-  projectId: string | null
+  projectId: string | null,
+  context: BranchHashtagContext = {}
 ): Promise<HashtagItem[]> {
   const [timeline, projectNotes] = await Promise.all([
     getBranchTimeline(branchId),
@@ -95,7 +109,12 @@ export async function buildBranchHashtagItems(
   ]);
 
   return sortAndStripHashtagItems([
-    ...timelineToSortableHashtagItems(timeline),
+    ...timelineToSortableHashtagItems(
+      timeline,
+      context.branchName,
+      context.repoSlug,
+      context.repoSubpath
+    ),
     ...projectNotesToSortableHashtagItems(projectNotes),
   ]);
 }

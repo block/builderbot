@@ -1636,6 +1636,7 @@
     repoDir={branch.worktreePath}
     branchId={branch.id}
     projectId={branch.projectId}
+    {repoLabel}
     noteInfo={findNoteForSession(sessionMgr.openSessionId)}
     onOpenNote={(noteId, title, content) => {
       const sid = sessionMgr.openSessionId;

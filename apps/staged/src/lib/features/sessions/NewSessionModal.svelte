@@ -236,7 +236,11 @@
   let hashtagItems = $state<HashtagItem[]>([]);
   $effect(() => {
     let stale = false;
-    buildBranchHashtagItems(branch.id, branch.projectId).then((items) => {
+    buildBranchHashtagItems(branch.id, branch.projectId, {
+      branchName: branch.branchName,
+      repoSlug: repoLabel?.headRepo ?? repoLabel?.githubRepo,
+      repoSubpath: repoLabel?.subpath,
+    }).then((items) => {
       if (!stale) hashtagItems = items;
     });
     return () => {

@@ -46,7 +46,7 @@
   import { marked } from 'marked';
   import { sanitize } from '../../shared/sanitize';
   import { isResumableReason } from '../../types';
-  import type { Session, SessionMessage, HashtagItem } from '../../types';
+  import type { Session, SessionMessage, HashtagItem, ProjectRepo } from '../../types';
   import {
     cancelSession,
     createImage,
@@ -97,12 +97,23 @@
     branchId?: string | null;
     /** Project ID — when provided, enables image attachment on replies. */
     projectId?: string | null;
+    /** Repo label for grouping branch-scoped hashtag suggestions. */
+    repoLabel?: Pick<ProjectRepo, 'githubRepo' | 'subpath' | 'headRepo'> | null;
     /** When set, shows a button to open the associated note. */
     noteInfo?: { id: string; title: string; content: string } | null;
     onOpenNote?: (noteId: string, title: string, content: string) => void;
   }
 
-  let { sessionId, onClose, repoDir, branchId, projectId, noteInfo, onOpenNote }: Props = $props();
+  let {
+    sessionId,
+    onClose,
+    repoDir,
+    branchId,
+    projectId,
+    repoLabel = null,
+    noteInfo,
+    onOpenNote,
+  }: Props = $props();
 
   // =========================================================================
   // State
@@ -139,7 +150,10 @@
   $effect(() => {
     if (branchId) {
       let stale = false;
-      buildBranchHashtagItems(branchId, projectId ?? null).then((items) => {
+      buildBranchHashtagItems(branchId, projectId ?? null, {
+        repoSlug: repoLabel?.headRepo ?? repoLabel?.githubRepo,
+        repoSubpath: repoLabel?.subpath,
+      }).then((items) => {
         if (!stale) hashtagItems = items;
       });
       return () => {

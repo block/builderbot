@@ -74,25 +74,12 @@
   let pendingInsert: { textNode: Text; hashPos: number; cursorPos: number } | null = null;
 
   type HashtagSection = {
-    label: string;
+    key: string;
+    label?: string;
+    repoSlug?: string;
+    repoSubpath?: string | null;
     items: HashtagItem[];
     startIndex: number;
-  };
-
-  const HASHTAG_SECTION_ORDER: HashtagItem['type'][] = [
-    'project-note',
-    'note',
-    'commit',
-    'review',
-    'image',
-  ];
-
-  const HASHTAG_SECTION_LABELS: Record<HashtagItem['type'], string> = {
-    'project-note': 'Project notes',
-    note: 'Branch notes',
-    commit: 'Commits',
-    review: 'Reviews',
-    image: 'Images',
   };
 
   // Sync editorEl to the textareaEl binding
@@ -121,37 +108,52 @@
   let filteredSections = $derived.by((): HashtagSection[] => {
     if (!showDropdown) return [];
     const filter = filterText.toLowerCase();
-    const sectionsByType = new Map<HashtagItem['type'], HashtagItem[]>();
+    const sectionsByKey = new Map<string, Omit<HashtagSection, 'startIndex'>>();
 
     for (const item of items) {
       if (selectedTokenKeys.has(`${item.type}:${item.id}`)) continue;
       if (!item.title.toLowerCase().includes(filter)) continue;
 
-      const sectionItems = sectionsByType.get(item.type);
-      if (sectionItems) {
-        sectionItems.push(item);
+      const sectionKey = hashtagSectionKey(item);
+      const section = sectionsByKey.get(sectionKey);
+      if (section) {
+        section.items.push(item);
       } else {
-        sectionsByType.set(item.type, [item]);
+        sectionsByKey.set(sectionKey, {
+          key: sectionKey,
+          ...hashtagSectionLabel(item),
+          items: [item],
+        });
       }
     }
 
     const sections: HashtagSection[] = [];
     let startIndex = 0;
-    for (const type of HASHTAG_SECTION_ORDER) {
-      const sectionItems = sectionsByType.get(type);
-      if (!sectionItems?.length) continue;
-
+    for (const section of sectionsByKey.values()) {
       sections.push({
-        label: HASHTAG_SECTION_LABELS[type],
-        items: sectionItems,
+        ...section,
         startIndex,
       });
-      startIndex += sectionItems.length;
+      startIndex += section.items.length;
     }
     return sections;
   });
 
   let filteredItems = $derived.by(() => filteredSections.flatMap((section) => section.items));
+
+  function hashtagSectionKey(item: HashtagItem): string {
+    if (item.type === 'project-note') return 'project-notes';
+    if (item.repoSlug) return `repo:${item.repoSlug}\u0000${item.repoSubpath ?? ''}`;
+    return 'branch-references';
+  }
+
+  function hashtagSectionLabel(
+    item: HashtagItem
+  ): Pick<HashtagSection, 'label' | 'repoSlug' | 'repoSubpath'> {
+    if (item.type === 'project-note') return { label: 'Project notes' };
+    if (item.repoSlug) return { repoSlug: item.repoSlug, repoSubpath: item.repoSubpath };
+    return { label: 'Branch references' };
+  }
 
   $effect(() => {
     const itemCount = filteredItems.length;
@@ -520,9 +522,17 @@
         style={dropdownStyle}
         bind:this={dropdownEl}
       >
-        {#each filteredSections as section}
+        {#each filteredSections as section (section.key)}
           <div class="hashtag-dropdown-section">
-            <div class="hashtag-section-header">{section.label}</div>
+            <div class="hashtag-section-header">
+              {#if section.repoSlug}
+                <span class="hashtag-section-repo"
+                  ><RepoLabel githubRepo={section.repoSlug} subpath={section.repoSubpath} /></span
+                >
+              {:else}
+                <span class="hashtag-section-label">{section.label}</span>
+              {/if}
+            </div>
             {#each section.items as item, i}
               {@const Icon = dropdownIconMap[item.type]}
               {@const itemIndex = section.startIndex + i}
@@ -543,25 +553,6 @@
                 </span>
                 <span class="hashtag-item-text">
                   <span class="hashtag-item-title">{item.title}</span>
-                  {#if item.repoSlug || item.branchName || item.subtitle}
-                    <span class="hashtag-item-subtitle">
-                      {#if item.repoSlug}
-                        <span class="hashtag-subtitle-repo"
-                          ><RepoLabel githubRepo={item.repoSlug} subpath={item.repoSubpath} /></span
-                        >
-                      {/if}
-                      {#if item.repoSlug && item.branchName}
-                        <span class="hashtag-subtitle-separator">-</span>
-                      {/if}
-                      {#if item.branchName}
-                        <span class="hashtag-subtitle-branch" title={item.branchName}
-                          >{item.branchName}</span
-                        >
-                      {:else if !item.repoSlug && item.subtitle}
-                        <span class="hashtag-subtitle-text">{item.subtitle}</span>
-                      {/if}
-                    </span>
-                  {/if}
                 </span>
               </div>
             {/each}
@@ -640,16 +631,31 @@
   }
 
   .hashtag-section-header {
+    display: flex;
+    min-width: 0;
     padding: 6px 10px 3px;
     font-size: var(--size-xs);
     font-weight: 600;
     color: var(--text-muted);
-    text-transform: uppercase;
+  }
+
+  .hashtag-section-label,
+  .hashtag-section-repo {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .hashtag-section-repo :global(.repo-label) {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .hashtag-dropdown-item {
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     gap: 8px;
     padding: 6px 10px;
     border-radius: 6px;
@@ -697,7 +703,6 @@
   .hashtag-item-text {
     flex: 1;
     display: flex;
-    flex-direction: column;
     overflow: hidden;
     min-width: 0;
   }
@@ -708,39 +713,6 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  .hashtag-item-subtitle {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    min-width: 0;
-    font-size: var(--size-xs);
-    color: var(--text-faint);
-    white-space: nowrap;
-  }
-
-  .hashtag-subtitle-repo,
-  .hashtag-subtitle-branch,
-  .hashtag-subtitle-text {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .hashtag-subtitle-repo {
-    min-width: 0;
-  }
-
-  .hashtag-subtitle-branch,
-  .hashtag-subtitle-text {
-    min-width: 0;
-    color: var(--text-faint);
-  }
-
-  .hashtag-subtitle-separator {
-    flex: 0 0 auto;
-    color: var(--text-faint);
   }
 
   .hashtag-dropdown-empty {

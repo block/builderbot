@@ -73,7 +73,27 @@
   let dropdownStyle = $state('');
   let pendingInsert: { textNode: Text; hashPos: number; cursorPos: number } | null = null;
 
-  const MAX_RESULTS = 10;
+  type HashtagSection = {
+    label: string;
+    items: HashtagItem[];
+    startIndex: number;
+  };
+
+  const HASHTAG_SECTION_ORDER: HashtagItem['type'][] = [
+    'project-note',
+    'note',
+    'commit',
+    'review',
+    'image',
+  ];
+
+  const HASHTAG_SECTION_LABELS: Record<HashtagItem['type'], string> = {
+    'project-note': 'Project notes',
+    note: 'Branch notes',
+    commit: 'Commits',
+    review: 'Reviews',
+    image: 'Images',
+  };
 
   // Sync editorEl to the textareaEl binding
   $effect(() => {
@@ -98,13 +118,48 @@
     return keys;
   });
 
-  let filteredItems = $derived.by(() => {
+  let filteredSections = $derived.by((): HashtagSection[] => {
     if (!showDropdown) return [];
     const filter = filterText.toLowerCase();
-    return items
-      .filter((item) => !selectedTokenKeys.has(`${item.type}:${item.id}`))
-      .filter((item) => item.title.toLowerCase().includes(filter))
-      .slice(0, MAX_RESULTS);
+    const sectionsByType = new Map<HashtagItem['type'], HashtagItem[]>();
+
+    for (const item of items) {
+      if (selectedTokenKeys.has(`${item.type}:${item.id}`)) continue;
+      if (!item.title.toLowerCase().includes(filter)) continue;
+
+      const sectionItems = sectionsByType.get(item.type);
+      if (sectionItems) {
+        sectionItems.push(item);
+      } else {
+        sectionsByType.set(item.type, [item]);
+      }
+    }
+
+    const sections: HashtagSection[] = [];
+    let startIndex = 0;
+    for (const type of HASHTAG_SECTION_ORDER) {
+      const sectionItems = sectionsByType.get(type);
+      if (!sectionItems?.length) continue;
+
+      sections.push({
+        label: HASHTAG_SECTION_LABELS[type],
+        items: sectionItems,
+        startIndex,
+      });
+      startIndex += sectionItems.length;
+    }
+    return sections;
+  });
+
+  let filteredItems = $derived.by(() => filteredSections.flatMap((section) => section.items));
+
+  $effect(() => {
+    const itemCount = filteredItems.length;
+    if (itemCount === 0) {
+      if (selectedIndex !== 0) selectedIndex = 0;
+      return;
+    }
+    if (selectedIndex >= itemCount) selectedIndex = itemCount - 1;
   });
 
   let lastExtractedValue = '';
@@ -465,33 +520,51 @@
         style={dropdownStyle}
         bind:this={dropdownEl}
       >
-        {#each filteredItems as item, i}
-          {@const Icon = dropdownIconMap[item.type]}
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div
-            class="hashtag-dropdown-item"
-            class:selected={i === selectedIndex}
-            onmousedown={(e) => {
-              e.preventDefault();
-              selectItem(item);
-            }}
-            onmouseenter={() => (selectedIndex = i)}
-          >
-            <span class="hashtag-item-icon {item.type}-icon">
-              {#if Icon}
-                <Icon size={14} />
-              {/if}
-            </span>
-            <span class="hashtag-item-text">
-              <span class="hashtag-item-title">{item.title}</span>
-              {#if item.repoSlug}
-                <span class="hashtag-item-subtitle"
-                  ><RepoLabel githubRepo={item.repoSlug} subpath={item.repoSubpath} /></span
-                >
-              {:else if item.subtitle}
-                <span class="hashtag-item-subtitle">{item.subtitle}</span>
-              {/if}
-            </span>
+        {#each filteredSections as section}
+          <div class="hashtag-dropdown-section">
+            <div class="hashtag-section-header">{section.label}</div>
+            {#each section.items as item, i}
+              {@const Icon = dropdownIconMap[item.type]}
+              {@const itemIndex = section.startIndex + i}
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div
+                class="hashtag-dropdown-item"
+                class:selected={itemIndex === selectedIndex}
+                onmousedown={(e) => {
+                  e.preventDefault();
+                  selectItem(item);
+                }}
+                onmouseenter={() => (selectedIndex = itemIndex)}
+              >
+                <span class="hashtag-item-icon {item.type}-icon">
+                  {#if Icon}
+                    <Icon size={14} />
+                  {/if}
+                </span>
+                <span class="hashtag-item-text">
+                  <span class="hashtag-item-title">{item.title}</span>
+                  {#if item.repoSlug || item.branchName || item.subtitle}
+                    <span class="hashtag-item-subtitle">
+                      {#if item.repoSlug}
+                        <span class="hashtag-subtitle-repo"
+                          ><RepoLabel githubRepo={item.repoSlug} subpath={item.repoSubpath} /></span
+                        >
+                      {/if}
+                      {#if item.repoSlug && item.branchName}
+                        <span class="hashtag-subtitle-separator">-</span>
+                      {/if}
+                      {#if item.branchName}
+                        <span class="hashtag-subtitle-branch" title={item.branchName}
+                          >{item.branchName}</span
+                        >
+                      {:else if !item.repoSlug && item.subtitle}
+                        <span class="hashtag-subtitle-text">{item.subtitle}</span>
+                      {/if}
+                    </span>
+                  {/if}
+                </span>
+              </div>
+            {/each}
           </div>
         {/each}
       </div>
@@ -562,6 +635,18 @@
     padding: 4px;
   }
 
+  .hashtag-dropdown-section + .hashtag-dropdown-section {
+    margin-top: 4px;
+  }
+
+  .hashtag-section-header {
+    padding: 6px 10px 3px;
+    font-size: var(--size-xs);
+    font-weight: 600;
+    color: var(--text-muted);
+    text-transform: uppercase;
+  }
+
   .hashtag-dropdown-item {
     display: flex;
     align-items: flex-start;
@@ -626,11 +711,36 @@
   }
 
   .hashtag-item-subtitle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
     font-size: var(--size-xs);
     color: var(--text-faint);
+    white-space: nowrap;
+  }
+
+  .hashtag-subtitle-repo,
+  .hashtag-subtitle-branch,
+  .hashtag-subtitle-text {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .hashtag-subtitle-repo {
+    min-width: 0;
+  }
+
+  .hashtag-subtitle-branch,
+  .hashtag-subtitle-text {
+    min-width: 0;
+    color: var(--text-faint);
+  }
+
+  .hashtag-subtitle-separator {
+    flex: 0 0 auto;
+    color: var(--text-faint);
   }
 
   .hashtag-dropdown-empty {

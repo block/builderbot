@@ -22,8 +22,10 @@
     PrStatusChangedEvent,
     SessionStatusPayload,
     WorkspaceStatus,
+    RepoHomeItem,
   } from '../../types';
   import * as commands from '../../api/commands';
+  import RepoCard from './RepoCard.svelte';
   import {
     projectDisplayName,
     aggregateProjectPrStatus,
@@ -75,6 +77,9 @@
   let restoreInProgress = false;
   let restoreToken = 0;
   const projectCardElements = new Map<string, HTMLElement>();
+
+  let homeRepos = $state<RepoHomeItem[]>([]);
+  let homeReposLoading = $state(false);
 
   let repoCountsByProject = $derived(
     new Map(
@@ -352,6 +357,7 @@
     error = null;
     try {
       await repoBadgeStore.loadAll();
+      void loadHomeRepos();
       const loadedProjects = await commands.listProjects();
       projects = loadedProjects;
       setProjects(loadedProjects);
@@ -376,6 +382,32 @@
       error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
+    }
+  }
+
+  async function loadHomeRepos() {
+    homeReposLoading = true;
+    try {
+      homeRepos = await commands.listReposForHome();
+    } catch (e) {
+      console.error('[ProjectsList] Failed to load home repos:', e);
+    } finally {
+      homeReposLoading = false;
+    }
+  }
+
+  async function handleCloneRepo(repo: RepoHomeItem) {
+    try {
+      await commands.cloneRepoLocally(repo.githubRepo);
+      await loadHomeRepos();
+    } catch (e) {
+      console.error('[ProjectsList] Failed to clone repo:', e);
+      const message = e instanceof Error ? e.message : String(e);
+      alerts.show({
+        tone: 'error',
+        title: 'Failed to clone repo',
+        message,
+      });
     }
   }
 
@@ -613,6 +645,33 @@
           onFormOpenChange={(open) => (showNewProjectModal = open)}
         />
       {:else}
+        {#if homeRepos.length > 0}
+          <div class="repos-section">
+            <div class="repos-header">
+              <h2 class="repos-title">Repos</h2>
+              <button
+                class="view-all-btn"
+                onclick={() => {
+                  /* TODO: navigate to repos list view */
+                }}
+              >
+                View all
+              </button>
+            </div>
+            <div class="repos-scroll-row">
+              {#each homeRepos as repo (repo.githubRepo + ':' + repo.subpath)}
+                <RepoCard
+                  {repo}
+                  onclick={() => {
+                    /* TODO: navigate to repo detail view */
+                  }}
+                  onclone={() => handleCloneRepo(repo)}
+                />
+              {/each}
+            </div>
+          </div>
+        {/if}
+
         <div class="title-row">
           <h1>Projects</h1>
           <button class="new-project-btn" onclick={() => (showNewProjectModal = true)}>
@@ -1000,6 +1059,63 @@
 
   .filter-chip.repo-filter :global(.repo-label-emphasis) {
     color: inherit;
+  }
+
+  .repos-section {
+    margin-bottom: 24px;
+  }
+
+  .repos-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+
+  .repos-title {
+    margin: 0;
+    font-size: var(--size-lg);
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+
+  .view-all-btn {
+    padding: 4px 10px;
+    border: none;
+    border-radius: 6px;
+    background: none;
+    color: var(--text-muted);
+    font-size: var(--size-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .view-all-btn:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+  }
+
+  .repos-scroll-row {
+    display: flex;
+    gap: 10px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-muted) transparent;
+  }
+
+  .repos-scroll-row::-webkit-scrollbar {
+    height: 4px;
+  }
+
+  .repos-scroll-row::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .repos-scroll-row::-webkit-scrollbar-thumb {
+    background: var(--border-muted);
+    border-radius: 2px;
   }
 
   .projects-grid {

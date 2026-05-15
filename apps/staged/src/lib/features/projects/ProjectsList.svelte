@@ -20,6 +20,7 @@
     ProjectRepo,
     Branch,
     PrStatusChangedEvent,
+    SessionStatusPayload,
     WorkspaceStatus,
   } from '../../types';
   import * as commands from '../../api/commands';
@@ -320,12 +321,31 @@
       unlistenPrStatus = unlisten;
     });
 
+    // Refresh a project's branches when a commit session completes so the
+    // sprout/draft-PR icon flips as soon as the first commit lands.
+    let unlistenSessionStatus: UnlistenFn | undefined;
+    listenToEvent<SessionStatusPayload>('session-status-changed', async (payload) => {
+      if (payload.status !== 'completed') return;
+      if (payload.sessionType !== 'commit') return;
+      const projectId = payload.projectId;
+      if (!projectId || !projectBranches.has(projectId)) return;
+      try {
+        const branches = await commands.listBranchesForProject(projectId);
+        projectBranches = new Map(projectBranches).set(projectId, branches);
+      } catch (e) {
+        console.error(`Failed to refresh branches for project ${projectId} after commit:`, e);
+      }
+    }).then((unlisten) => {
+      unlistenSessionStatus = unlisten;
+    });
+
     return () => {
       projectRunActionsStore.stopListening();
       window.removeEventListener('staged:new-project', onNewProject);
       window.removeEventListener('staged:project-delete-start', onProjectDeleteStart);
       window.removeEventListener('staged:project-delete-end', onProjectDeleteEnd);
       unlistenPrStatus?.();
+      unlistenSessionStatus?.();
     };
   });
 

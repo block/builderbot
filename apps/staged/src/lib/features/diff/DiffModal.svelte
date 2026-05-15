@@ -65,6 +65,7 @@
     type FileEntry,
     type TreeNode,
   } from './diffModalHelpers';
+  import { viewport } from '../../shared/viewport.svelte';
 
   // ==========================================================================
   // Props
@@ -1222,7 +1223,11 @@
     <div class="title-bar" onpointerdown={startDrag}>
       <div class="traffic-light-spacer"></div>
       <div class="left-actions">
-        <button class="icon-btn" onclick={onClose} title="Back (Esc)">
+        <button
+          class="icon-btn"
+          onclick={onClose}
+          title={viewport.hasKeyboard ? 'Back (Esc)' : 'Back'}
+        >
           <ArrowLeft size={14} />
         </button>
       </div>

@@ -7,6 +7,7 @@
 <script lang="ts">
   import { ChevronUp, ChevronDown, X } from 'lucide-svelte';
   import { tick } from 'svelte';
+  import { viewport } from './viewport.svelte';
 
   interface Props {
     visible: boolean;
@@ -75,7 +76,7 @@
       class="search-btn"
       onclick={onPrevious}
       disabled={matchCount === 0}
-      title="Previous match (Shift+Enter)"
+      title={viewport.hasKeyboard ? 'Previous match (Shift+Enter)' : 'Previous match'}
     >
       <ChevronUp size={14} />
     </button>
@@ -83,11 +84,15 @@
       class="search-btn"
       onclick={onNext}
       disabled={matchCount === 0}
-      title="Next match (Enter)"
+      title={viewport.hasKeyboard ? 'Next match (Enter)' : 'Next match'}
     >
       <ChevronDown size={14} />
     </button>
-    <button class="search-btn close-search" onclick={onClose} title="Close search (Esc)">
+    <button
+      class="search-btn close-search"
+      onclick={onClose}
+      title={viewport.hasKeyboard ? 'Close search (Esc)' : 'Close search'}
+    >
       <X size={14} />
     </button>
   </div>

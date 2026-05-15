@@ -8,6 +8,7 @@
   import { X, Trash2 } from 'lucide-svelte';
   import { getImageData } from '../../api/commands';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
+  import { viewport } from '../../shared/viewport.svelte';
 
   interface Props {
     imageId: string;
@@ -64,7 +65,11 @@
             <Trash2 size={16} />
           </button>
         {/if}
-        <button class="close-btn" onclick={onClose} title="Close (Esc)">
+        <button
+          class="close-btn"
+          onclick={onClose}
+          title={viewport.hasKeyboard ? 'Close (Esc)' : 'Close'}
+        >
           <X size={18} />
         </button>
       </div>

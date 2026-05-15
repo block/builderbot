@@ -13,6 +13,7 @@
   import * as commands from '../../api/commands';
   import type { GitHubRepo, RecentRepo } from '../../types';
   import { parseGitHubUrl, type RepoSelection } from '../../shared/githubUrl';
+  import { viewport } from '../../shared/viewport.svelte';
 
   export type { RepoSelection };
 
@@ -289,7 +290,7 @@
                 <RepoLabel githubRepo={recent.githubRepo} subpath={recent.subpath} />
               </span>
             </div>
-            {#if i < 9}
+            {#if viewport.hasKeyboard && i < 9}
               <span class="keyboard-shortcut">
                 <Command size={10} />
                 {i + 1}

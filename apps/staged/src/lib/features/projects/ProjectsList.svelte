@@ -53,6 +53,7 @@
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { badgeBg, badgeFg, badgeBgHover } from '../../shared/badgeColors';
   import { canDeleteProjectWithoutConfirmation } from './projectDeleteSafety';
+  import { viewport } from '../../shared/viewport.svelte';
 
   type FilterKind = 'unread' | 'running' | { repo: string; subpath: string };
 
@@ -663,7 +664,7 @@
                 disabled={status.kind === 'deleting'}
                 title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
               >
-                {#if isCommandKeyHeld && index < 9}
+                {#if viewport.hasKeyboard && isCommandKeyHeld && index < 9}
                   <div class="keyboard-shortcut-overlay">
                     <span class="command-icon">⌘</span>
                     <span class="number">{index + 1}</span>

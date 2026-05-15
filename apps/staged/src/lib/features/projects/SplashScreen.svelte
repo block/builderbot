@@ -12,6 +12,7 @@
   import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
   import NewProjectForm from './NewProjectForm.svelte';
+  import { viewport } from '../../shared/viewport.svelte';
 
   interface Props {
     onCreated: (project: Project) => void;
@@ -111,7 +112,9 @@
   {#if !showForm}
     <div class="splash-actions">
       <button class="splash-pill" onclick={openForm}> Create your first project </button>
-      <span class="splash-hint">or press <kbd>⌘ N</kbd> anytime</span>
+      {#if viewport.hasKeyboard}
+        <span class="splash-hint">or press <kbd>⌘ N</kbd> anytime</span>
+      {/if}
     </div>
     <div class="splash-tree">
       <GitTreeAnimation />

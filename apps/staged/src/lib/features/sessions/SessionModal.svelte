@@ -84,6 +84,7 @@
   import PipelineSteps from './PipelineSteps.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
+  import { viewport } from '../../shared/viewport.svelte';
 
   // Configure marked
   marked.setOptions({ breaks: true, gfm: true });
@@ -976,7 +977,11 @@
             View note
           </button>
         {/if}
-        <button class="close-btn" onclick={requestClose} title="Close (Esc)">
+        <button
+          class="close-btn"
+          onclick={requestClose}
+          title={viewport.hasKeyboard ? 'Close (Esc)' : 'Close'}
+        >
           <X size={16} />
         </button>
       </div>

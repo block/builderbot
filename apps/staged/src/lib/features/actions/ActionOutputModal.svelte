@@ -44,6 +44,7 @@
     listenToActionStatus,
   } from './actions';
   import { createIncrementalProcessor, type TerminalLine } from './processOutput';
+  import { viewport } from '../../shared/viewport.svelte';
 
   interface Props {
     executionId: string;
@@ -477,7 +478,11 @@
             <span>Remove</span>
           </button>
         {/if}
-        <button class="close-btn" onclick={onClose} title="Close (Esc)">
+        <button
+          class="close-btn"
+          onclick={onClose}
+          title={viewport.hasKeyboard ? 'Close (Esc)' : 'Close'}
+        >
           <X size={16} />
         </button>
       </div>

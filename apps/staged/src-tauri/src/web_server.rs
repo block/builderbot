@@ -311,14 +311,13 @@ async fn handle_ws(mut socket: WebSocket, state: WebAppState) {
             }
             // Handle incoming messages (ping/pong, close)
             msg = socket.recv() => {
-                match msg {
+                let pong_data = match msg {
                     Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(Message::Ping(data))) => {
-                        if socket.send(Message::Pong(data)).await.is_err() {
-                            break;
-                        }
-                    }
-                    _ => {}
+                    Some(Ok(Message::Ping(data))) => data,
+                    _ => continue,
+                };
+                if socket.send(Message::Pong(pong_data)).await.is_err() {
+                    break;
                 }
             }
         }

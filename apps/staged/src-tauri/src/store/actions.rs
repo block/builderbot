@@ -18,14 +18,16 @@ impl Store {
         let context = ActionContext::new(github_repo.to_string(), subpath.map(str::to_string));
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO action_contexts (id, github_repo, subpath, has_detected_actions, detecting_actions, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO action_contexts (id, github_repo, subpath, has_detected_actions, detecting_actions, last_run_worktree_path, copy_build_dirs_enabled, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 context.id,
                 context.github_repo,
                 context.subpath,
                 context.has_detected_actions as i32,
                 context.detecting_actions as i32,
+                context.last_run_worktree_path,
+                context.copy_build_dirs_enabled as i32,
                 context.created_at,
                 context.updated_at,
             ],
@@ -36,7 +38,7 @@ impl Store {
     pub fn list_action_contexts(&self) -> Result<Vec<ActionContext>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, github_repo, subpath, has_detected_actions, detecting_actions, created_at, updated_at
+            "SELECT id, github_repo, subpath, has_detected_actions, detecting_actions, last_run_worktree_path, copy_build_dirs_enabled, created_at, updated_at
              FROM action_contexts
              ORDER BY created_at ASC",
         )?;
@@ -47,7 +49,7 @@ impl Store {
     pub fn get_action_context(&self, id: &str) -> Result<Option<ActionContext>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, github_repo, subpath, has_detected_actions, detecting_actions, created_at, updated_at
+            "SELECT id, github_repo, subpath, has_detected_actions, detecting_actions, last_run_worktree_path, copy_build_dirs_enabled, created_at, updated_at
              FROM action_contexts WHERE id = ?1",
             params![id],
             Self::row_to_action_context,
@@ -73,7 +75,7 @@ impl Store {
     ) -> Result<Option<ActionContext>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, github_repo, subpath, has_detected_actions, detecting_actions, created_at, updated_at
+            "SELECT id, github_repo, subpath, has_detected_actions, detecting_actions, last_run_worktree_path, copy_build_dirs_enabled, created_at, updated_at
              FROM action_contexts
              WHERE github_repo = ?1 AND subpath IS ?2",
             params![github_repo, subpath],
@@ -94,6 +96,36 @@ impl Store {
              SET detecting_actions = ?1, updated_at = ?2
              WHERE id = ?3",
             params![detecting as i32, now_timestamp(), context_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_last_run_worktree_path(
+        &self,
+        context_id: &str,
+        worktree_path: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE action_contexts
+             SET last_run_worktree_path = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![worktree_path, now_timestamp(), context_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_copy_build_dirs_enabled(
+        &self,
+        context_id: &str,
+        enabled: bool,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE action_contexts
+             SET copy_build_dirs_enabled = ?1, updated_at = ?2
+             WHERE id = ?3",
+            params![enabled as i32, now_timestamp(), context_id],
         )?;
         Ok(())
     }
@@ -221,14 +253,17 @@ impl Store {
     fn row_to_action_context(row: &rusqlite::Row) -> rusqlite::Result<ActionContext> {
         let has_detected_actions: i32 = row.get(3)?;
         let detecting_actions: i32 = row.get(4)?;
+        let copy_build_dirs_enabled: i32 = row.get(6)?;
         Ok(ActionContext {
             id: row.get(0)?,
             github_repo: row.get(1)?,
             subpath: row.get(2)?,
             has_detected_actions: has_detected_actions != 0,
             detecting_actions: detecting_actions != 0,
-            created_at: row.get(5)?,
-            updated_at: row.get(6)?,
+            last_run_worktree_path: row.get(5)?,
+            copy_build_dirs_enabled: copy_build_dirs_enabled != 0,
+            created_at: row.get(7)?,
+            updated_at: row.get(8)?,
         })
     }
 

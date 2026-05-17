@@ -1095,8 +1095,66 @@ pub(crate) fn create_and_link_worktree(
         }
     }
 
+    // Best-effort: copy build directories from the last-run worktree for
+    // this repo context. Uses APFS cloning on macOS for near-instant,
+    // zero-cost copies.
+    copy_build_dirs_for_branch(store, branch, &worktree_str);
+
     // _guard dropped here, releasing the per-branch lock.
     Ok(worktree_str)
+}
+
+/// Best-effort copy of build directories from the last-run worktree for
+/// this branch's repo context. Failures are logged and swallowed.
+fn copy_build_dirs_for_branch(
+    store: &Arc<Store>,
+    branch: &store::Branch,
+    dest_worktree_path: &str,
+) {
+    // Resolve the repo+subpath for this branch so we can look up the
+    // action context (which stores last_run_worktree_path).
+    let (github_repo, subpath) = match resolve_repo_context_for_branch(store, branch) {
+        Some(ctx) => ctx,
+        None => return,
+    };
+
+    let context =
+        match store.get_action_context_by_repo_and_subpath(&github_repo, subpath.as_deref()) {
+            Ok(Some(ctx)) => ctx,
+            _ => return,
+        };
+
+    if !context.copy_build_dirs_enabled {
+        return;
+    }
+
+    let source_path = match &context.last_run_worktree_path {
+        Some(p) if Path::new(p).is_dir() => p.clone(),
+        _ => return,
+    };
+
+    log::info!(
+        "Copying build dirs from '{}' to '{}'",
+        source_path,
+        dest_worktree_path
+    );
+    crate::build_dir_copy::copy_build_dirs(Path::new(&source_path), Path::new(dest_worktree_path));
+}
+
+/// Resolve (github_repo, subpath) for a branch from its project_repo or
+/// project. Returns `None` on any lookup failure.
+fn resolve_repo_context_for_branch(
+    store: &Arc<Store>,
+    branch: &store::Branch,
+) -> Option<(String, Option<String>)> {
+    if let Some(ref repo_id) = branch.project_repo_id {
+        if let Ok(Some(pr)) = store.get_project_repo(repo_id) {
+            return Some((pr.github_repo, pr.subpath));
+        }
+    }
+    let project = store.get_project(&branch.project_id).ok()??;
+    let repo = project.primary_repo()?.to_string();
+    Some((repo, project.subpath.clone()))
 }
 
 /// Create the git worktree for a local branch and record its workdir.
@@ -1248,6 +1306,23 @@ pub async fn setup_worktree_from_pr(
         .to_str()
         .ok_or("Invalid worktree path")?
         .to_string();
+
+    // Best-effort: copy build dirs from last-run worktree for this repo.
+    if let Ok(Some(ctx)) = store.get_action_context_by_repo_and_subpath(
+        &target_repo.github_repo,
+        target_repo.subpath.as_deref(),
+    ) {
+        if ctx.copy_build_dirs_enabled {
+            if let Some(source) = &ctx.last_run_worktree_path {
+                if Path::new(source).is_dir() {
+                    crate::build_dir_copy::copy_build_dirs(
+                        Path::new(source),
+                        Path::new(&worktree_str),
+                    );
+                }
+            }
+        }
+    }
 
     // Create branch record with PR number
     let branch = store::Branch::new(&project_id, &branch_name, &base_branch)

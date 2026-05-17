@@ -7,6 +7,7 @@ pub mod actions;
 pub mod agent;
 pub mod blox;
 pub mod branches;
+pub mod build_dir_copy;
 pub mod diff_cache;
 pub mod diff_commands;
 pub mod doctor;
@@ -1497,6 +1498,18 @@ fn delete_action_context(
     Ok(())
 }
 
+#[tauri::command(rename_all = "camelCase")]
+fn set_copy_build_dirs_enabled(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    context_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+    store
+        .set_copy_build_dirs_enabled(&context_id, enabled)
+        .map_err(|e| e.to_string())
+}
+
 // =============================================================================
 // Tauri App Setup
 // =============================================================================
@@ -1850,6 +1863,7 @@ pub fn run() {
             create_repo_action,
             delete_all_repo_actions,
             delete_action_context,
+            set_copy_build_dirs_enabled,
             // Timeline
             timeline::get_branch_timeline,
             timeline::refresh_branch_git_state,

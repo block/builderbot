@@ -905,6 +905,12 @@ pub struct ActionContext {
     pub subpath: Option<String>,
     pub has_detected_actions: bool,
     pub detecting_actions: bool,
+    /// Path to the most recently run worktree for this repo+subpath context.
+    /// Used to copy build directories (via APFS cloning) into new worktrees.
+    pub last_run_worktree_path: Option<String>,
+    /// Whether to copy build directories from the last-run worktree into new
+    /// worktrees for this repo context. Defaults to off (experimental).
+    pub copy_build_dirs_enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -918,6 +924,8 @@ impl ActionContext {
             subpath,
             has_detected_actions: false,
             detecting_actions: false,
+            last_run_worktree_path: None,
+            copy_build_dirs_enabled: false,
             created_at: now,
             updated_at: now,
         }

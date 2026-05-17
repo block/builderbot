@@ -332,12 +332,19 @@ pub(crate) async fn run_branch_action_impl(
             .map_err(|e| format!("Failed to get workdir: {e}"))?
             .ok_or_else(|| "No worktree found for branch".to_string())?;
 
+        let worktree_root = workdir.path.clone();
         let working_dir = if let Some(subpath) = &subpath {
             let path = std::path::PathBuf::from(&workdir.path).join(subpath);
             path.to_string_lossy().to_string()
         } else {
             workdir.path
         };
+
+        // Track this worktree as the last-run for this repo context so
+        // future worktrees can clone its build directories.
+        if let Err(e) = store.set_last_run_worktree_path(&context.id, &worktree_root) {
+            log::warn!("Failed to update last_run_worktree_path: {e}");
+        }
 
         let wd = working_dir.clone();
         let eid = executor
@@ -692,12 +699,18 @@ pub(crate) async fn run_prerun_actions_impl(
         .map_err(|e| format!("Failed to get workdir: {e}"))?
         .ok_or_else(|| "No worktree found for branch".to_string())?;
 
+    let worktree_root = workdir.path.clone();
     let working_dir = if let Some(subpath) = &subpath {
         let path = std::path::PathBuf::from(&workdir.path).join(subpath);
         path.to_string_lossy().to_string()
     } else {
         workdir.path
     };
+
+    // Track this worktree as the last-run for build dir copying.
+    if let Err(e) = store.set_last_run_worktree_path(&context.id, &worktree_root) {
+        log::warn!("Failed to update last_run_worktree_path: {e}");
+    }
 
     // Execute each prerun action sequentially, waiting for each to complete
     // before starting the next one

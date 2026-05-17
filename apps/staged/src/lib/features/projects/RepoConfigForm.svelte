@@ -22,6 +22,7 @@
   import type { SubpathInputApi } from './SubpathInput.svelte';
   import BranchPicker, { type BranchSelection } from './BranchPicker.svelte';
   import type { RepoSelection } from '../../shared/githubUrl';
+  import { viewport } from '../../shared/viewport.svelte';
 
   interface Props {
     // Bindable state
@@ -292,10 +293,12 @@
               <span class="recent-repo-label">
                 <RepoLabel githubRepo={recent.githubRepo} subpath={recent.subpath} />
               </span>
-              <span class="recent-repo-shortcut">
-                <Command size={9} />
-                {i + 1}
-              </span>
+              {#if viewport.showShortcutHints}
+                <span class="recent-repo-shortcut">
+                  <Command size={9} />
+                  {i + 1}
+                </span>
+              {/if}
             </button>
           {/each}
         </div>

@@ -11,6 +11,7 @@
   import { buildBranchHashtagItems } from '../sessions/hashtagItems';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
+  import { viewport } from '../../shared/viewport.svelte';
 
   interface Props {
     branchId: string;
@@ -230,7 +231,9 @@
       {:else}
         <Send size={14} />
         {willQueue ? 'Queue commit' : 'Start commit'}
-        <span class="shortcut-badge">⌘↵</span>
+        {#if viewport.showShortcutHints}
+          <span class="shortcut-badge">⌘↵</span>
+        {/if}
       {/if}
     </button>
   </div>

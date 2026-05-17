@@ -32,6 +32,7 @@
     insertFilePathsAtCursor,
   } from '../branches/branchCardHelpers';
   import { createImage } from '../../commands';
+  import { viewport } from '../../shared/viewport.svelte';
 
   interface Props {
     branch: Branch;
@@ -431,7 +432,11 @@
           </div>
         {/if}
       </div>
-      <button class="close-btn" onclick={handleClose} title="Close (Esc)">
+      <button
+        class="close-btn"
+        onclick={handleClose}
+        title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
+      >
         <X size={18} />
       </button>
     </header>
@@ -459,7 +464,9 @@
           disabled={starting}
           items={hashtagItems}
         />
-        <span class="hint">{willQueue ? '⌘ Enter to queue' : '⌘ Enter to start'}</span>
+        {#if viewport.showShortcutHints}
+          <span class="hint">{willQueue ? '⌘ Enter to queue' : '⌘ Enter to start'}</span>
+        {/if}
       </div>
 
       <ImageAttachment

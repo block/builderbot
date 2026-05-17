@@ -14,6 +14,7 @@
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
+  import { viewport } from '../../shared/viewport.svelte';
 
   marked.setOptions({ breaks: true, gfm: true });
 
@@ -205,7 +206,11 @@
             View chat
           </button>
         {/if}
-        <button class="close-btn" onclick={onClose} title="Close (Esc)">
+        <button
+          class="close-btn"
+          onclick={onClose}
+          title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
+        >
           <X size={16} />
         </button>
       </div>

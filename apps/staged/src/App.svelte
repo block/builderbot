@@ -74,6 +74,24 @@
     prPollingService.setSelectedProject(navigation.selectedProjectId);
   });
 
+  // Refresh git state (TTL-gated) for the selected project's branches when the
+  // window regains focus, so the user sees a fresh-enough view on return.
+  $effect(() => {
+    if (!isTauri) return;
+    const handler = async () => {
+      const projectId = navigation.selectedProjectId;
+      if (!projectId) return;
+      try {
+        const branches = await commands.listBranchesForProject(projectId);
+        await Promise.allSettled(branches.map((b) => commands.refreshBranchGitState(b.id)));
+      } catch {
+        // best-effort refresh; ignore failures
+      }
+    };
+    window.addEventListener('focus', handler);
+    return () => window.removeEventListener('focus', handler);
+  });
+
   // Konami code: ↑↑↓↓←→←→BA
   const konamiSequence = [
     'ArrowUp',

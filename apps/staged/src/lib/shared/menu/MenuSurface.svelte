@@ -4,8 +4,6 @@
   import { selectMenuAction } from './actions';
   import type { MenuActionItem, MenuItem, MenuSubmenuItem } from './types';
 
-  type SubmenuPlacement = 'right' | 'left';
-
   interface Props {
     items: MenuItem[];
     left: number;
@@ -30,7 +28,7 @@
 
   let menuEl = $state<HTMLDivElement | null>(null);
   let openSubmenuPath = $state<string | null>(null);
-  let submenuPlacements = $state<Record<string, SubmenuPlacement>>({});
+  let submenuPositions = $state<Record<string, { left: number; top: number }>>({});
   let closeSubmenuTimer: ReturnType<typeof setTimeout> | null = null;
 
   const submenuContainers = new Map<string, HTMLElement>();
@@ -68,6 +66,21 @@
 
   async function openSubmenu(path: string) {
     clearSubmenuTimer();
+
+    // Pre-compute an initial position from the trigger's rect so the submenu
+    // appears in the right place on first paint, before measurement refines it.
+    const container = submenuContainers.get(path);
+    if (container && !submenuPositions[path]) {
+      const containerRect = container.getBoundingClientRect();
+      submenuPositions = {
+        ...submenuPositions,
+        [path]: {
+          left: containerRect.right + submenuGap,
+          top: containerRect.top,
+        },
+      };
+    }
+
     openSubmenuPath = path;
     await updateSubmenuPlacement(path);
   }
@@ -110,9 +123,17 @@
     const wouldOverflowRight =
       containerRect.right + submenuGap + submenuRect.width > window.innerWidth - viewportPadding;
 
-    submenuPlacements = {
-      ...submenuPlacements,
-      [path]: wouldOverflowRight ? 'left' : 'right',
+    const left = wouldOverflowRight
+      ? Math.max(viewportPadding, containerRect.left - submenuGap - submenuRect.width)
+      : containerRect.right + submenuGap;
+
+    const preferredTop = containerRect.top;
+    const maxTop = window.innerHeight - submenuRect.height - viewportPadding;
+    const top = Math.max(viewportPadding, Math.min(preferredTop, maxTop));
+
+    submenuPositions = {
+      ...submenuPositions,
+      [path]: { left, top },
     };
   }
 
@@ -324,9 +345,11 @@
         {#if isSubmenuOpen(path)}
           <div
             class="submenu"
-            class:open-left={submenuPlacements[path] === 'left'}
             role="menu"
             aria-label={item.label}
+            style:left={`${submenuPositions[path]?.left ?? 0}px`}
+            style:top={`${submenuPositions[path]?.top ?? 0}px`}
+            style:visibility={submenuPositions[path] ? 'visible' : 'hidden'}
             use:trackSubmenu={path}
           >
             {@render renderMenuItems(item.children, path)}
@@ -455,18 +478,10 @@
   }
 
   .submenu {
-    position: absolute;
-    top: 0;
-    left: calc(100% + 2px);
     z-index: 1;
     min-width: 160px;
     max-width: min(320px, calc(100vw - 16px));
     max-height: min(400px, calc(100vh - 16px));
     overflow-y: auto;
-  }
-
-  .submenu.open-left {
-    right: calc(100% + 2px);
-    left: auto;
   }
 </style>

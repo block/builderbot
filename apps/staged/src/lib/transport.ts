@@ -68,7 +68,9 @@ export function listenToEvent<T>(event: string, callback: (payload: T) => void):
     const u = await listen<T>(event, (e) => callback(e.payload));
     if (cancelled) u();
     else unlisten = u;
-  })();
+  })().catch((e) => {
+    console.error(`[transport] Failed to register listener for event "${event}":`, e);
+  });
 
   return () => {
     cancelled = true;

@@ -63,7 +63,8 @@
     showDirtyPopover = !showDirtyPopover;
   }
 
-  function closeDirtyPopover() {
+  function closeDirtyPopover(e?: MouseEvent) {
+    e?.stopPropagation();
     showDirtyPopover = false;
   }
 
@@ -222,6 +223,23 @@
     dragOver = false;
     onReorderEnd?.(e);
   }
+
+  function openRepoDetail() {
+    selectRepo(repo.githubRepo, repo.subpath);
+  }
+
+  function handleNameRowClick(e: MouseEvent) {
+    e.stopPropagation();
+    openRepoDetail();
+  }
+
+  function handleNameRowKeydown(e: KeyboardEvent) {
+    if (e.target !== e.currentTarget) return;
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    e.stopPropagation();
+    openRepoDetail();
+  }
 </script>
 
 <div
@@ -242,12 +260,12 @@
   <div class="card-stripe"></div>
 
   <div class="card-content">
-    <button
+    <div
       class="card-name-row"
-      onclick={(e) => {
-        e.stopPropagation();
-        selectRepo(repo.githubRepo, repo.subpath);
-      }}
+      role="button"
+      tabindex="0"
+      onclick={handleNameRowClick}
+      onkeydown={handleNameRowKeydown}
       title={subtitle}
     >
       <span class="repo-name">{repo.shortName}</span>
@@ -263,13 +281,20 @@
           <AlertCircle size={12} />
         </button>
         {#if showDirtyPopover}
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div
+          <button
+            type="button"
             class="dirty-popover-backdrop"
+            aria-label="Close dirty changes popover"
             onclick={closeDirtyPopover}
-            onkeydown={() => {}}
-          ></div>
-          <div class="dirty-popover" onclick={(e) => e.stopPropagation()}>
+          ></button>
+          <div
+            class="dirty-popover"
+            role="dialog"
+            aria-label="Dirty changes"
+            tabindex="-1"
+            onclick={(e) => e.stopPropagation()}
+            onkeydown={(e) => e.stopPropagation()}
+          >
             <p class="dirty-popover-message">
               Staged maintains the main branch. Uncommitted changes may be lost.
             </p>
@@ -280,7 +305,7 @@
           </div>
         {/if}
       {/if}
-    </button>
+    </div>
 
     <div class="card-actions">
       <button
@@ -399,6 +424,12 @@
     text-align: left;
   }
 
+  .card-name-row:focus-visible {
+    outline: 2px solid var(--ui-accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
   .repo-name {
     font-size: var(--size-sm);
     font-weight: 600;
@@ -440,6 +471,10 @@
     position: fixed;
     inset: 0;
     z-index: 99;
+    border: none;
+    background: transparent;
+    padding: 0;
+    cursor: default;
   }
 
   .dirty-popover {

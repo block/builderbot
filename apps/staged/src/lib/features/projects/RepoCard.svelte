@@ -35,7 +35,8 @@
     showDirtyPopover = !showDirtyPopover;
   }
 
-  function closeDirtyPopover() {
+  function closeDirtyPopover(e?: MouseEvent) {
+    e?.stopPropagation();
     showDirtyPopover = false;
   }
 
@@ -73,12 +74,22 @@
       cloning = false;
     }
   }
+
+  function handleCardKeydown(e: KeyboardEvent) {
+    if (e.target !== e.currentTarget) return;
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    onclick();
+  }
 </script>
 
-<button
+<div
   class="repo-card"
+  role="button"
+  tabindex="0"
   style="--accent: {accentColor}; --card-bg: {bgColor}; --card-bg-hover: {bgHoverColor}; --card-border: {borderColor}; --card-border-hover: {borderHoverColor};"
   {onclick}
+  onkeydown={handleCardKeydown}
   title={subtitle}
 >
   {#if repo.isDirty}
@@ -90,9 +101,20 @@
       <AlertTriangle size={12} />
     </button>
     {#if showDirtyPopover}
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="dirty-popover-backdrop" onclick={closeDirtyPopover} onkeydown={() => {}}></div>
-      <div class="dirty-popover" onclick={(e) => e.stopPropagation()}>
+      <button
+        type="button"
+        class="dirty-popover-backdrop"
+        aria-label="Close dirty changes popover"
+        onclick={closeDirtyPopover}
+      ></button>
+      <div
+        class="dirty-popover"
+        role="dialog"
+        aria-label="Dirty changes"
+        tabindex="-1"
+        onclick={(e) => e.stopPropagation()}
+        onkeydown={(e) => e.stopPropagation()}
+      >
         <p class="dirty-popover-message">
           Staged maintains the main branch. Uncommitted changes may be lost.
         </p>
@@ -137,7 +159,7 @@
       </span>
     {/if}
   </div>
-</button>
+</div>
 
 <style>
   .repo-card {
@@ -162,6 +184,11 @@
   .repo-card:hover {
     background: var(--card-bg-hover);
     border-color: var(--card-border-hover);
+  }
+
+  .repo-card:focus-visible {
+    outline: 2px solid var(--ui-accent);
+    outline-offset: 2px;
   }
 
   .pin-indicator {
@@ -199,6 +226,10 @@
     position: fixed;
     inset: 0;
     z-index: 99;
+    border: none;
+    background: transparent;
+    padding: 0;
+    cursor: default;
   }
 
   .dirty-popover {

@@ -123,15 +123,17 @@
   onMount(() => {
     void loadRepo();
 
-    let unlistenSync: (() => void) | undefined;
-    listenToEvent<{ githubRepo: string; isDirty: boolean }>('repo-sync-update', (payload) => {
-      if (payload.githubRepo === githubRepo && repo) {
-        repo = { ...repo, isDirty: payload.isDirty };
+    const unlistenSync = listenToEvent<{ githubRepo: string; isDirty: boolean }>(
+      'repo-sync-update',
+      (payload) => {
+        if (payload.githubRepo === githubRepo && repo) {
+          repo = { ...repo, isDirty: payload.isDirty };
+        }
       }
-    }).then((fn) => (unlistenSync = fn));
+    );
 
     return () => {
-      unlistenSync?.();
+      unlistenSync();
     };
   });
 </script>

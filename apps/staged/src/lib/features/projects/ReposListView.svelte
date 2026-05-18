@@ -21,7 +21,7 @@
   } from '../../shared/badgeColors';
   import { formatRelativeTimeSeconds } from '../../shared/relativeTime.svelte';
   import { alerts } from '../../shared/alerts.svelte';
-  import { listenToEvent, type UnlistenFn } from '../../transport';
+  import { listenToEvent } from '../../transport';
   import Spinner from '../../shared/Spinner.svelte';
   import ProjectsSidebar from './ProjectsSidebar.svelte';
   import PinRepoModal from './PinRepoModal.svelte';
@@ -53,20 +53,20 @@
     loadRepos();
 
     // Listen for repo sync updates to refresh dirty state
-    let unlistenRepoSync: UnlistenFn | undefined;
-    listenToEvent<{ githubRepo: string; isDirty: boolean }>('repo-sync-update', (payload) => {
-      const idx = repos.findIndex((r) => r.githubRepo === payload.githubRepo);
-      if (idx !== -1) {
-        const updated = [...repos];
-        updated[idx] = { ...updated[idx], isDirty: payload.isDirty };
-        repos = updated;
+    const unlistenRepoSync = listenToEvent<{ githubRepo: string; isDirty: boolean }>(
+      'repo-sync-update',
+      (payload) => {
+        const idx = repos.findIndex((r) => r.githubRepo === payload.githubRepo);
+        if (idx !== -1) {
+          const updated = [...repos];
+          updated[idx] = { ...updated[idx], isDirty: payload.isDirty };
+          repos = updated;
+        }
       }
-    }).then((unlisten) => {
-      unlistenRepoSync = unlisten;
-    });
+    );
 
     return () => {
-      unlistenRepoSync?.();
+      unlistenRepoSync();
     };
   });
 
@@ -137,6 +137,17 @@
     if (repo.subpath) return `${base}/${repo.subpath}`;
     return base;
   }
+
+  function openRepo(repo: RepoHomeItem) {
+    selectRepo(repo.githubRepo, repo.subpath);
+  }
+
+  function handleRepoCardKeydown(e: KeyboardEvent, repo: RepoHomeItem) {
+    if (e.target !== e.currentTarget) return;
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    openRepo(repo);
+  }
 </script>
 
 <div class="repos-list-page">
@@ -184,10 +195,13 @@
             {@const borderHover = badgeBorderHover(repo.hue, darkMode.value)}
             {@const key = repoKey(repo)}
             <div class="repo-card-wrapper">
-              <button
+              <div
                 class="repo-card"
+                role="button"
+                tabindex="0"
                 style="--accent: {accent}; --card-bg: {bg}; --card-bg-hover: {bgHover}; --card-border: {border}; --card-border-hover: {borderHover};"
-                onclick={() => selectRepo(repo.githubRepo, repo.subpath)}
+                onclick={() => openRepo(repo)}
+                onkeydown={(e) => handleRepoCardKeydown(e, repo)}
                 title={subtitle(repo)}
               >
                 <button
@@ -234,7 +248,7 @@
                     </span>
                   {/if}
                 </div>
-              </button>
+              </div>
               {#if repo.pinned}
                 <div class="card-label">Pinned</div>
               {/if}
@@ -417,6 +431,11 @@
   .repo-card:hover {
     background: var(--card-bg-hover);
     border-color: var(--card-border-hover);
+  }
+
+  .repo-card:focus-visible {
+    outline: 2px solid var(--ui-accent);
+    outline-offset: 2px;
   }
 
   .pin-toggle {

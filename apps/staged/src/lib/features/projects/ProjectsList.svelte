@@ -343,14 +343,17 @@
     );
 
     // Listen for repo sync updates to refresh dirty state in real-time
-    const unlistenRepoSync = listenToEvent<{ githubRepo: string; isDirty: boolean }>('repo-sync-update', (payload) => {
-      const idx = homeRepos.findIndex((r) => r.githubRepo === payload.githubRepo);
-      if (idx !== -1) {
-        const updated = [...homeRepos];
-        updated[idx] = { ...updated[idx], isDirty: payload.isDirty };
-        homeRepos = updated;
+    const unlistenRepoSync = listenToEvent<{ githubRepo: string; isDirty: boolean }>(
+      'repo-sync-update',
+      (payload) => {
+        const idx = homeRepos.findIndex((r) => r.githubRepo === payload.githubRepo);
+        if (idx !== -1) {
+          const updated = [...homeRepos];
+          updated[idx] = { ...updated[idx], isDirty: payload.isDirty };
+          homeRepos = updated;
+        }
       }
-    });
+    );
 
     return () => {
       projectRunActionsStore.stopListening();

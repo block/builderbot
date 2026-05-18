@@ -179,6 +179,14 @@ fn test_store_repairs_github_comment_tracking_user_version() {
         );
         INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
         CREATE TABLE sessions (id TEXT PRIMARY KEY);
+        CREATE TABLE repo_badges (
+            github_repo TEXT NOT NULL,
+            subpath     TEXT NOT NULL DEFAULT '',
+            short_name  TEXT NOT NULL,
+            hue         REAL NOT NULL,
+            created_at  INTEGER NOT NULL,
+            PRIMARY KEY (github_repo, subpath)
+        );
         CREATE TABLE comments (
             id                    TEXT PRIMARY KEY,
             github_comment_id     INTEGER,
@@ -218,6 +226,14 @@ fn test_store_repairs_pipeline_user_version() {
         CREATE TABLE sessions (
             id       TEXT PRIMARY KEY,
             pipeline TEXT
+        );
+        CREATE TABLE repo_badges (
+            github_repo TEXT NOT NULL,
+            subpath     TEXT NOT NULL DEFAULT '',
+            short_name  TEXT NOT NULL,
+            hue         REAL NOT NULL,
+            created_at  INTEGER NOT NULL,
+            PRIMARY KEY (github_repo, subpath)
         );
         CREATE TABLE comments (id TEXT PRIMARY KEY);
         ",

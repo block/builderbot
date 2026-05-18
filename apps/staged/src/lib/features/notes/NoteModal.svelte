@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { X, Copy, Check } from 'lucide-svelte';
+  import { X, Copy, Check, MessageCircle } from 'lucide-svelte';
   import { marked } from 'marked';
   import { sanitize } from '../../shared/sanitize';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
@@ -48,6 +48,9 @@
   const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
   let assistantMessagesAfterNote = $state(0);
   let chatButtonLabel = $derived(formatChatButtonLabel(assistantMessagesAfterNote));
+  let showFloatingChatInfo = $derived(
+    Boolean(sessionId && onOpenSession && assistantMessagesAfterNote > 0)
+  );
 
   // Search state
   let searchVisible = $state(false);
@@ -233,15 +236,6 @@
             <Copy size={16} />
           {/if}
         </button>
-        {#if sessionId && onOpenSession}
-          <button
-            class="header-btn"
-            onclick={() => onOpenSession?.(sessionId!)}
-            title="Open chat session"
-          >
-            {chatButtonLabel}
-          </button>
-        {/if}
         <button
           class="close-btn"
           onclick={onClose}
@@ -251,14 +245,31 @@
         </button>
       </div>
     </header>
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="modal-content" bind:this={contentEl} onclick={handleExternalLinkClick}>
-      {#if content.trim()}
-        <div class="markdown-content">
-          {@html renderMarkdown(content)}
-        </div>
-      {:else}
-        <p class="empty-note">This note has no content.</p>
+    <div class="modal-body">
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div
+        class:has-floating-chat-info={showFloatingChatInfo}
+        class="modal-content"
+        bind:this={contentEl}
+        onclick={handleExternalLinkClick}
+      >
+        {#if content.trim()}
+          <div class="markdown-content">
+            {@html renderMarkdown(content)}
+          </div>
+        {:else}
+          <p class="empty-note">This note has no content.</p>
+        {/if}
+      </div>
+      {#if showFloatingChatInfo}
+        <button
+          class="floating-chat-info"
+          onclick={() => onOpenSession?.(sessionId!)}
+          title="Open chat session"
+        >
+          <MessageCircle size={16} aria-hidden="true" />
+          <span>{chatButtonLabel}</span>
+        </button>
       {/if}
     </div>
     {#if nextSteps && onStartSession && (nextSteps.noteStep || nextSteps.commitStep)}
@@ -397,11 +408,59 @@
     color: var(--status-added);
   }
 
+  .modal-body {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+  }
+
   .modal-content {
     flex: 1;
     overflow-y: auto;
     padding: 24px;
     min-height: 0;
+  }
+
+  .modal-content.has-floating-chat-info {
+    padding-bottom: 96px;
+  }
+
+  .floating-chat-info {
+    position: absolute;
+    left: 24px;
+    right: 24px;
+    bottom: 16px;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-height: 44px;
+    padding: 10px 14px;
+    background: var(--bg-chrome);
+    border: 1px solid var(--border-muted);
+    border-radius: 8px;
+    box-shadow: var(--shadow-elevated);
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: var(--size-sm);
+    font-weight: 500;
+    transition:
+      background-color 0.1s,
+      border-color 0.1s,
+      color 0.1s;
+  }
+
+  .floating-chat-info:hover {
+    background: var(--bg-hover);
+    border-color: var(--text-muted);
+  }
+
+  .floating-chat-info span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .modal-content::-webkit-scrollbar {
@@ -630,6 +689,16 @@
 
     .modal-content {
       padding: 16px;
+    }
+
+    .modal-content.has-floating-chat-info {
+      padding-bottom: 88px;
+    }
+
+    .floating-chat-info {
+      left: 16px;
+      right: 16px;
+      bottom: 12px;
     }
 
     .next-steps {

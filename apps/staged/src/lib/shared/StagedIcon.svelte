@@ -1,7 +1,7 @@
 <!--
   StagedIcon.svelte - The Staged app icon
 
-  Renders the generated public app icon asset.
+  Renders the app-only greyscale icon asset.
 
   Props:
     size - icon dimensions in px (default 32)
@@ -12,9 +12,7 @@
 
 <img
   class="staged-icon"
-  src="/icons/staged-512.png"
-  srcset="/icons/staged-192.png 192w, /icons/staged-512.png 512w"
-  sizes={`${size}px`}
+  src="/icons/staged-greyscale.svg"
   width={size}
   height={size}
   style={`--staged-icon-size: ${size}px`}
@@ -29,5 +27,6 @@
     width: var(--staged-icon-size);
     height: var(--staged-icon-size);
     object-fit: contain;
+    filter: invert(var(--theme-is-dark, 0));
   }
 </style>

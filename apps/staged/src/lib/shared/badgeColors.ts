@@ -24,3 +24,7 @@ export function badgeBorder(hue: number, dark: boolean): string {
 export function badgeBorderHover(hue: number, dark: boolean): string {
   return dark ? `oklch(0.50 0.08 ${hue})` : `oklch(0.72 0.09 ${hue})`;
 }
+
+export function badgeShortcutBg(hue: number, dark: boolean): string {
+  return dark ? `oklch(0.40 0.06 ${hue})` : `oklch(0.86 0.06 ${hue})`;
+}

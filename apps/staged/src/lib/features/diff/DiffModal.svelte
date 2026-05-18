@@ -744,10 +744,10 @@
       : [...flattenTreeFiles(needsReviewTree), ...flattenTreeFiles(reviewedTree)]
   );
 
-  // Once files finish loading, override the initial selection with the first
-  // file in sidebar order so the viewer and sidebar stay in sync.
-  // For non-readonly reviews, also wait for reviewedPaths to load so the
-  // needs-review / reviewed split is accurate before picking the first file.
+  // Once files finish loading, override the initial selection with the file
+  // containing the first comment (if any), falling back to the first sidebar
+  // file otherwise. For non-readonly reviews, also wait for review state to
+  // load so the comment list and needs-review / reviewed split are accurate.
   let initialSelectionApplied = false;
   $effect(() => {
     if (
@@ -757,7 +757,15 @@
       (readonly || !reviewHandle || !reviewHandle.state.loading)
     ) {
       initialSelectionApplied = true;
-      diffViewer.selectFile(orderedFiles[0].path);
+      const firstComment = currentComments[0];
+      if (firstComment) {
+        selectedCommentId = firstComment.id;
+        commentJumpToken += 1;
+        jumpToComment = { id: firstComment.id, token: commentJumpToken };
+        diffViewer.selectFile(resolveCommentPath(firstComment.path));
+      } else {
+        diffViewer.selectFile(orderedFiles[0].path);
+      }
     }
   });
 

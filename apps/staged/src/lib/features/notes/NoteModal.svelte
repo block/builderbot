@@ -436,20 +436,23 @@
 
   .floating-chat-info {
     position: absolute;
-    left: 24px;
-    right: 24px;
+    left: 50%;
     bottom: 16px;
+    transform: translateX(-50%);
     z-index: 2;
     display: flex;
     align-items: center;
     justify-content: center;
     gap: 8px;
+    box-sizing: border-box;
+    width: max-content;
+    max-width: calc(100% - 48px);
     min-height: 44px;
     padding: 10px 14px;
     background: var(--bg-chrome);
     border: 1px solid var(--border-muted);
     border-radius: 8px;
-    box-shadow: var(--shadow-elevated);
+    box-shadow: 0 4px 14px color-mix(in srgb, var(--shadow-overlay) 40%, transparent);
     color: var(--text-primary);
     cursor: pointer;
     font-size: var(--size-sm);
@@ -466,6 +469,7 @@
   }
 
   .floating-chat-info span {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -704,9 +708,8 @@
     }
 
     .floating-chat-info {
-      left: 16px;
-      right: 16px;
       bottom: 12px;
+      max-width: calc(100% - 32px);
     }
 
     .next-steps {

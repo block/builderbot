@@ -1,14 +1,25 @@
-<svg width="512" height="512" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- Padding: 35px on each side, so inner icon is 442x442 centered -->
-  <g transform="translate(35, 35)">
-    <g clip-path="url(#clip0_4_8)">
-      <rect width="442" height="442" rx="143" fill="black"/>
-      <path d="M144.621 257C177.415 257 204.001 283.585 204.001 316.38C204.001 349.174 177.415 375.759 144.621 375.759C122.332 375.759 102.911 363.478 92.7566 345.313C86.3324 333.822 75.7553 323.505 62.5901 323.505H-198.5C-202.09 323.505 -205 320.595 -205 317.005C-205 313.415 -202.09 310.505 -198.5 310.505H61.9577C75.3329 310.505 86.0125 299.871 92.3884 288.114C102.437 269.583 122.06 257 144.621 257Z" fill="white"/>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="1024" height="1024" fill="black"/>
+
+  <!-- Each colored shape is a single path that smoothly bulges the line
+       into its disc, like the original pre-redesign icon.
+       Local frame: line along x-axis (half-width 12), disc radius 40,
+       connection at +/-30 deg from disc top with cubic-bezier tangent blends. -->
+
+  <g transform="scale(2.316742081448)">
+    <!-- Green: line through middle disc -->
+    <g transform="translate(221 221) rotate(-45)">
+      <path d="M -341.13 -12 H -50 C -30 -12 -37.32 -24.64 -20 -34.64 A 40 40 0 0 1 20 -34.64 C 37.32 -24.64 30 -12 50 -12 H 341.13 A 12 12 0 0 1 341.13 12 H 50 C 30 12 37.32 24.64 20 34.64 A 40 40 0 0 1 -20 34.64 C -37.32 24.64 -30 12 -50 12 H -341.13 A 12 12 0 0 1 -341.13 -12 Z" fill="#00e676"/>
     </g>
-    <defs>
-      <clipPath id="clip0_4_8">
-        <rect width="442" height="442" rx="143" fill="white"/>
-      </clipPath>
-    </defs>
+
+    <!-- Orange: line ending in upper disc -->
+    <g transform="translate(221 111) rotate(-45)">
+      <path d="M -383.25 -12 H -50 C -30 -12 -37.32 -24.64 -20 -34.64 A 40 40 0 1 1 -20 34.64 C -37.32 24.64 -30 12 -50 12 H -383.25 A 12 12 0 0 1 -383.25 -12 Z" fill="#ff9100"/>
+    </g>
+
+    <!-- Purple: line starting from lower disc -->
+    <g transform="translate(221 331) rotate(-45)">
+      <path d="M 383.25 -12 H 50 C 30 -12 37.32 -24.64 20 -34.64 A 40 40 0 1 0 20 34.64 C 37.32 24.64 30 12 50 12 H 383.25 A 12 12 0 0 0 383.25 -12 Z" fill="#ea80fc"/>
+    </g>
   </g>
 </svg>

@@ -61,8 +61,8 @@
 
   let unlisten: UnlistenFn | null = null;
 
-  onMount(async () => {
-    unlisten = await listenToEvent<PipelineStepPayload>('pipeline-step-changed', (payload) => {
+  onMount(() => {
+    unlisten = listenToEvent<PipelineStepPayload>('pipeline-step-changed', (payload) => {
       if (payload.sessionId !== sessionId) return;
       const { stepIndex, status, output, error, startedAt, completedAt } = payload;
       if (stepIndex < steps.length) {

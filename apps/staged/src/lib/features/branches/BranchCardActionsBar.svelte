@@ -197,8 +197,6 @@
   // More menu state
   let openerApps = $state<OpenerApp[]>([]);
 
-  let unlistenActionStatus: UnlistenFn | null = null;
-  let unlistenRunPhaseChanged: UnlistenFn | null = null;
   let unlistenRepoActionsDetection: UnlistenFn | null = null;
 
   function handleActionsChanged(event: CustomEvent) {
@@ -210,7 +208,7 @@
   $effect(() => {
     const branchId = branch.id;
 
-    listenToEvent<ActionStatusEvent>('action_status', (payload) => {
+    const unlistenActionStatus = listenToEvent<ActionStatusEvent>('action_status', (payload) => {
       // Only process events for this branch
       if (payload.branchId !== branchId) {
         return;
@@ -281,22 +279,18 @@
           }, displayTime);
         }
       }
-    }).then((unlisten) => {
-      unlistenActionStatus = unlisten;
     });
 
-    listenToRunPhaseChanged((event) => {
+    const unlistenRunPhaseChanged = listenToRunPhaseChanged((event) => {
       if (event.branchId === branchId) {
         runPhases.set(event.executionId, event.phase);
         runPhases = new Map(runPhases);
       }
-    }).then((unlisten) => {
-      unlistenRunPhaseChanged = unlisten;
     });
 
     return () => {
-      unlistenActionStatus?.();
-      unlistenRunPhaseChanged?.();
+      unlistenActionStatus();
+      unlistenRunPhaseChanged();
     };
   });
 
@@ -306,12 +300,10 @@
     getAvailableOpeners().then((apps) => (openerApps = apps));
     window.addEventListener('project-actions-changed', handleActionsChanged as EventListener);
 
-    listenToRepoActionsDetection((event) => {
+    unlistenRepoActionsDetection = listenToRepoActionsDetection((event) => {
       if (!event.detecting) {
         loadActions();
       }
-    }).then((unlisten) => {
-      unlistenRepoActionsDetection = unlisten;
     });
 
     window.addEventListener('keydown', handleAltDown);
@@ -319,8 +311,6 @@
   });
 
   onDestroy(() => {
-    unlistenActionStatus?.();
-    unlistenRunPhaseChanged?.();
     unlistenRepoActionsDetection?.();
     window.removeEventListener('project-actions-changed', handleActionsChanged as EventListener);
     window.removeEventListener('keydown', handleAltDown);

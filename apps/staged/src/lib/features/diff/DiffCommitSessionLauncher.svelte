@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { listenToEvent, type UnlistenFn } from '../../transport';
+  import { listenToEvent } from '../../transport';
   import { Send } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import { alerts } from '../../shared/alerts.svelte';
@@ -102,17 +102,14 @@
 
     document.addEventListener('keydown', handleGlobalKeydown);
 
-    let unlisten: UnlistenFn | null = null;
-    listenToEvent<SessionStatusPayload>('session-status-changed', (payload) => {
+    const unlisten = listenToEvent<SessionStatusPayload>('session-status-changed', (payload) => {
       if (payload.branchId !== branchId) return;
       void refreshQueueState(true);
-    }).then((fn) => {
-      unlisten = fn;
     });
 
     return () => {
       document.removeEventListener('keydown', handleGlobalKeydown);
-      unlisten?.();
+      unlisten();
     };
   });
 

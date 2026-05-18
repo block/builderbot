@@ -47,19 +47,35 @@ export type UnlistenFn = () => void;
 /**
  * Listen to a backend event. In Tauri mode this delegates to the Tauri event
  * API; in web mode it is stubbed out.
+ *
+ * Returns a synchronous unlisten function. Registration happens asynchronously
+ * in the background; if the unlisten is called before registration finishes,
+ * the eventual listener is torn down on arrival. This makes the helper safe to
+ * use directly in `onMount` cleanup blocks without an intermediate
+ * `Promise<UnlistenFn>` reference that could race the unmount.
  */
-export async function listenToEvent<T>(
-  event: string,
-  callback: (payload: T) => void
-): Promise<UnlistenFn> {
-  if (isTauri) {
-    const { listen } = await import('@tauri-apps/api/event');
-    return listen<T>(event, (e) => callback(e.payload));
-  }
+export function listenToEvent<T>(event: string, callback: (payload: T) => void): UnlistenFn {
+  let cancelled = false;
+  let unlisten: UnlistenFn | undefined;
 
-  // TODO(web): restore WebSocket event transport from the `mobile-web` branch
-  console.warn(`[transport] Web mode event listening stubbed out (event: ${event})`);
-  return () => {};
+  void (async () => {
+    if (!isTauri) {
+      // TODO(web): restore WebSocket event transport from the `mobile-web` branch
+      console.warn(`[transport] Web mode event listening stubbed out (event: ${event})`);
+      return;
+    }
+    const { listen } = await import('@tauri-apps/api/event');
+    const u = await listen<T>(event, (e) => callback(e.payload));
+    if (cancelled) u();
+    else unlisten = u;
+  })().catch((e) => {
+    console.error(`[transport] Failed to register listener for event "${event}":`, e);
+  });
+
+  return () => {
+    cancelled = true;
+    unlisten?.();
+  };
 }
 
 // ---------------------------------------------------------------------------

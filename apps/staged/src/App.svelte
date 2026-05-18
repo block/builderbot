@@ -207,31 +207,31 @@
     document.addEventListener('keydown', handleKonamiKey);
 
     // Listen for the app menu Preferences item.
-    unlistenSettings = await listenToEvent('menu:settings', () => {
+    unlistenSettings = listenToEvent('menu:settings', () => {
       if (!triggerShortcut('app-open-settings')) openSettings();
     });
-    unlistenFind = await listenToEvent('menu:find', () => {
+    unlistenFind = listenToEvent('menu:find', () => {
       if (!triggerShortcut('search-find')) runSearchShortcut('find');
     });
-    unlistenFindNext = await listenToEvent('menu:find-next', () => {
+    unlistenFindNext = listenToEvent('menu:find-next', () => {
       if (!triggerShortcut('search-find-next')) runSearchShortcut('next');
     });
-    unlistenFindPrevious = await listenToEvent('menu:find-previous', () => {
+    unlistenFindPrevious = listenToEvent('menu:find-previous', () => {
       if (!triggerShortcut('search-find-previous')) runSearchShortcut('previous');
     });
-    unlistenZoomIn = await listenToEvent('menu:zoom-in', () => {
+    unlistenZoomIn = listenToEvent('menu:zoom-in', () => {
       if (!triggerShortcut('view-increase-size')) increaseSize();
     });
-    unlistenZoomOut = await listenToEvent('menu:zoom-out', () => {
+    unlistenZoomOut = listenToEvent('menu:zoom-out', () => {
       if (!triggerShortcut('view-decrease-size')) decreaseSize();
     });
-    unlistenZoomReset = await listenToEvent('menu:zoom-reset', () => {
+    unlistenZoomReset = listenToEvent('menu:zoom-reset', () => {
       if (!triggerShortcut('view-reset-size')) resetSize();
     });
 
     // Global session-status listener — must live at App level so it works
     // regardless of which view the user is on. See sessionStatusListener.ts.
-    unlistenSessionStatus = await listenForSessionStatus();
+    unlistenSessionStatus = listenForSessionStatus();
 
     try {
       await initPreferences();

@@ -23,7 +23,7 @@ import { pushStateStore } from '../stores/pushState.svelte';
 import { sessionRegistry, type SessionType } from '../stores/sessionRegistry.svelte';
 import type { SessionStatus, SessionStatusPayload } from '../types';
 
-export function listenForSessionStatus(): Promise<UnlistenFn> {
+export function listenForSessionStatus(): UnlistenFn {
   return listenToEvent<SessionStatusPayload>('session-status-changed', async (payload) => {
     const {
       sessionId,

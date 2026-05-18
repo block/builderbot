@@ -205,7 +205,7 @@
 
     (async () => {
       await loadBufferedOutput();
-      await setupListeners();
+      setupListeners();
       tick().then(() => scrollToBottom());
     })();
   });
@@ -230,40 +230,36 @@
     }
   }
 
-  async function setupListeners() {
-    try {
-      // Listen for output events — batched via requestAnimationFrame
-      unlistenOutput = await listenToActionOutput((event: ActionOutputEvent) => {
-        if (event.executionId === executionId) {
-          pendingChunks.push({
-            chunk: event.chunk,
-            stream: event.stream,
-            timestamp: Date.now(),
-          });
-          if (flushRaf === null) {
-            flushRaf = requestAnimationFrame(flushPendingChunks);
-          }
+  function setupListeners() {
+    // Listen for output events — batched via requestAnimationFrame
+    unlistenOutput = listenToActionOutput((event: ActionOutputEvent) => {
+      if (event.executionId === executionId) {
+        pendingChunks.push({
+          chunk: event.chunk,
+          stream: event.stream,
+          timestamp: Date.now(),
+        });
+        if (flushRaf === null) {
+          flushRaf = requestAnimationFrame(flushPendingChunks);
         }
-      });
+      }
+    });
 
-      // Listen for status changes
-      unlistenStatus = await listenToActionStatus((event: ActionStatusEvent) => {
-        if (event.executionId === executionId) {
-          status = event.status;
-          if (event.exitCode !== undefined) {
-            exitCode = event.exitCode;
-          }
-          // Clean up stopping state when action reaches terminal state
-          if (status !== 'running') {
-            const updated = new Set(stoppingExecutions);
-            updated.delete(executionId);
-            stoppingExecutions = updated;
-          }
+    // Listen for status changes
+    unlistenStatus = listenToActionStatus((event: ActionStatusEvent) => {
+      if (event.executionId === executionId) {
+        status = event.status;
+        if (event.exitCode !== undefined) {
+          exitCode = event.exitCode;
         }
-      });
-    } catch (e: any) {
-      console.error('Failed to setup event listeners:', e);
-    }
+        // Clean up stopping state when action reaches terminal state
+        if (status !== 'running') {
+          const updated = new Set(stoppingExecutions);
+          updated.delete(executionId);
+          stoppingExecutions = updated;
+        }
+      }
+    });
   }
 
   function cleanup() {

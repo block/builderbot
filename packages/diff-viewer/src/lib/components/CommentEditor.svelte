@@ -58,10 +58,15 @@
 
   // Track current input value - initialized by effect when existingComment changes
   let currentValue = $state('');
+  let textareaEl: HTMLTextAreaElement | null = null;
 
-  // Update value when existingComment changes (for editing mode)
+  // Update value when existingComment changes (for editing mode). Reset scroll
+  // on identity change so a previously-scrolled textarea doesn't leak its
+  // offset into the next comment being viewed.
   $effect(() => {
+    existingComment?.id;
     currentValue = existingComment?.content ?? '';
+    if (textareaEl) textareaEl.scrollTop = 0;
   });
 
   function handleInput(e: Event) {
@@ -107,6 +112,7 @@
   style="top: {top}px; left: {left}px; width: {width}px;"
 >
   <textarea
+    bind:this={textareaEl}
     class="comment-textarea"
     {placeholder}
     value={currentValue}

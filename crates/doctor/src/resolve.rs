@@ -15,36 +15,37 @@ pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
         match Command::new(shell).args(["-l", "-c", &lookup_cmd]).output() {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                if output.status.success() {
-                    match candidate_from_shell_output(stdout.as_ref()) {
-                        Some(path) if is_executable_file(&path) => {
-                            lines.push(format!(
-                                "    {shell} -l -c '{lookup_cmd}' => {} (resolved)",
-                                path.display()
-                            ));
-                            return ResolvedBinary {
-                                path: Some(path),
-                                search_output: lines.join("\n"),
-                            };
-                        }
-                        Some(path) => {
-                            lines.push(format!(
-                                "    {shell} -l -c '{lookup_cmd}' => {} (ignored: not an executable file)",
-                                path.display()
-                            ));
-                        }
-                        None if stdout.trim().is_empty() => {
-                            lines.push(format!("    {shell} -l -c '{lookup_cmd}' => not found"));
-                        }
-                        None => {
-                            lines.push(format!(
-                                "    {shell} -l -c '{lookup_cmd}' => {} (ignored: not an absolute path)",
-                                summarize_output(stdout.as_ref())
-                            ));
-                        }
-                    }
-                } else {
+                if !output.status.success() {
                     lines.push(format!("    {shell} -l -c '{lookup_cmd}' => not found"));
+                    continue;
+                }
+
+                match candidate_from_shell_output(stdout.as_ref()) {
+                    Some(path) if is_executable_file(&path) => {
+                        lines.push(format!(
+                            "    {shell} -l -c '{lookup_cmd}' => {} (resolved)",
+                            path.display()
+                        ));
+                        return ResolvedBinary {
+                            path: Some(path),
+                            search_output: lines.join("\n"),
+                        };
+                    }
+                    Some(path) => {
+                        lines.push(format!(
+                            "    {shell} -l -c '{lookup_cmd}' => {} (ignored: not an executable file)",
+                            path.display()
+                        ));
+                    }
+                    None if stdout.trim().is_empty() => {
+                        lines.push(format!("    {shell} -l -c '{lookup_cmd}' => not found"));
+                    }
+                    None => {
+                        lines.push(format!(
+                            "    {shell} -l -c '{lookup_cmd}' => {} (ignored: not an absolute path)",
+                            summarize_output(stdout.as_ref())
+                        ));
+                    }
                 }
             }
             Err(e) => {
@@ -79,9 +80,9 @@ pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
     }
 }
 
-fn shell_lookup_commands(cmd: &str) -> Vec<(&'static str, String)> {
+fn shell_lookup_commands(cmd: &str) -> [(&'static str, String); 2] {
     let quoted = shell_quote(cmd);
-    vec![
+    [
         ("/bin/zsh", format!("whence -p -- {quoted}")),
         ("/bin/bash", format!("type -P -- {quoted}")),
     ]
@@ -131,7 +132,8 @@ fn summarize_output(output: &str) -> String {
     if trimmed.len() <= MAX_LEN {
         return trimmed.replace('\n', "\\n");
     }
-    format!("{}...", trimmed[..MAX_LEN].replace('\n', "\\n"))
+    let summary: String = trimmed.chars().take(MAX_LEN).collect();
+    format!("{}...", summary.replace('\n', "\\n"))
 }
 
 /// Format the raw output of a command invocation for debug diagnostics.

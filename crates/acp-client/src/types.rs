@@ -196,17 +196,20 @@ fn find_via_login_shell(cmd: &str) -> Option<PathBuf> {
     ];
 
     for (shell, lookup_cmd) in lookups {
-        if let Ok(output) = std::process::Command::new(shell)
+        let Ok(output) = std::process::Command::new(shell)
             .args(["-l", "-c", &lookup_cmd])
             .output()
-        {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Some(path) = candidate_from_shell_output(stdout.as_ref()) {
-                    if is_executable_file(&path) {
-                        return Some(path);
-                    }
-                }
+        else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(path) = candidate_from_shell_output(stdout.as_ref()) {
+            if is_executable_file(&path) {
+                return Some(path);
             }
         }
     }

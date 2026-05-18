@@ -1619,6 +1619,9 @@
       : sessionMgr.newSessionMode === 'commit'
         ? commitPrefill
         : ''}
+  {@const hasRef =
+    (sessionMgr.newSessionMode === 'commit' && !!suggestedPrefill.commitRef) ||
+    (sessionMgr.newSessionMode === 'note' && !!suggestedPrefill.noteRef)}
   <NewSessionModal
     {branch}
     mode={sessionMgr.newSessionMode}
@@ -1626,6 +1629,7 @@
     initialPrompt={usePrefill ? prefillText : sessionMgr.draftPrompt}
     initialImageIds={sessionMgr.draftImageIds}
     prefilled={usePrefill}
+    prefillSelection={usePrefill && hasRef ? 'last-line' : 'all'}
     {commitPrefill}
     {notePrefill}
     remote={isRemote}

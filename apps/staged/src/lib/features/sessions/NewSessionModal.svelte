@@ -215,9 +215,10 @@
       newMode === 'commit' ? commitPrefill : newMode === 'note' ? notePrefill : '';
     if (modePrefill && !userDraft) {
       prompt = modePrefill;
+      const modeSelection = modePrefill.includes('\n') ? 'last-line' : prefillSelection;
       tick().then(() => {
         if (textareaEl && textareaEl.textContent) {
-          selectPromptContent(textareaEl, prefillSelection);
+          selectPromptContent(textareaEl, modeSelection);
           textareaEl.focus();
         }
       });

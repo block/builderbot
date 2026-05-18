@@ -86,6 +86,27 @@ impl Store {
         suggested_next_note_step: Option<&str>,
     ) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        // The session runner re-runs note extraction at the end of every turn for sessions
+        // with a linked note, even if the assistant didn't rewrite the note. Without this
+        // short-circuit, `updated_at` would advance on every turn, defeating any freshness
+        // comparison that relies on it.
+        let existing: Option<(String, String, Option<String>, Option<String>)> = conn
+            .query_row(
+                "SELECT title, content, suggested_next_commit_step, suggested_next_note_step
+                 FROM notes WHERE id = ?1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        if let Some((cur_title, cur_content, cur_sncs, cur_snns)) = existing {
+            if cur_title == title
+                && cur_content == content
+                && cur_sncs.as_deref() == suggested_next_commit_step
+                && cur_snns.as_deref() == suggested_next_note_step
+            {
+                return Ok(());
+            }
+        }
         let now = now_timestamp();
         conn.execute(
             "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3, completed_at = COALESCE(completed_at, ?4), suggested_next_commit_step = ?5, suggested_next_note_step = ?6 WHERE id = ?7",

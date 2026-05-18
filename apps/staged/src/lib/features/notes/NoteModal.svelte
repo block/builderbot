@@ -48,9 +48,8 @@
   const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
   let assistantMessagesAfterNote = $state(0);
   let chatButtonLabel = $derived(formatChatButtonLabel(assistantMessagesAfterNote));
-  let showFloatingChatInfo = $derived(
-    Boolean(sessionId && onOpenSession && assistantMessagesAfterNote > 0)
-  );
+  let canOpenSession = $derived(Boolean(sessionId && onOpenSession));
+  let showFloatingChatInfo = $derived(canOpenSession && assistantMessagesAfterNote > 0);
 
   // Search state
   let searchVisible = $state(false);
@@ -236,6 +235,15 @@
             <Copy size={16} />
           {/if}
         </button>
+        {#if canOpenSession}
+          <button
+            class="header-btn"
+            onclick={() => onOpenSession?.(sessionId!)}
+            title="Open chat session"
+          >
+            View chat
+          </button>
+        {/if}
         <button
           class="close-btn"
           onclick={onClose}

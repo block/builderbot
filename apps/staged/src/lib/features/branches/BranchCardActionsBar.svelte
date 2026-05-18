@@ -506,15 +506,48 @@
   }
 
   function buildActionMenuItems(): MenuItem[] {
-    return actionMenuTypes.flatMap((type) => {
-      const typeActions = type === 'run' ? remainingRunActions : groupedActions[type];
-      return typeActions.map((action) => ({
-        type: 'action' as const,
-        label: action.name,
-        icon: getActionIcon(type),
-        onSelect: () => handleRunAction(action),
-      }));
+    const toActionItem = (type: ActionType, action: ProjectAction): MenuItem => ({
+      type: 'action',
+      label: action.name,
+      icon: getActionIcon(type),
+      onSelect: () => handleRunAction(action),
     });
+
+    const formatItems = groupedActions.format.map((a) => toActionItem('format', a));
+    const checkItems = groupedActions.check.map((a) => toActionItem('check', a));
+    const combineFormatCheck = formatItems.length + checkItems.length > 2;
+
+    const groups: MenuItem[][] = [];
+    for (const type of actionMenuTypes) {
+      if (combineFormatCheck && type === 'check') continue;
+      if (combineFormatCheck && type === 'format') {
+        const children: MenuItem[] = [
+          ...formatItems,
+          ...(formatItems.length && checkItems.length ? [{ type: 'separator' as const }] : []),
+          ...checkItems,
+        ];
+        groups.push([
+          {
+            type: 'submenu',
+            label: 'Format & Check',
+            icon: Wand2,
+            children,
+          },
+        ]);
+        continue;
+      }
+
+      const typeActions = type === 'run' ? remainingRunActions : groupedActions[type];
+      if (!typeActions || typeActions.length === 0) continue;
+      groups.push(typeActions.map((action) => toActionItem(type, action)));
+    }
+
+    const items: MenuItem[] = [];
+    for (const group of groups) {
+      if (items.length > 0) items.push({ type: 'separator' });
+      items.push(...group);
+    }
+    return items;
   }
 
   const terminalAppIds = new Set([

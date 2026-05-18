@@ -1911,6 +1911,7 @@ pub fn run() {
             session_commands::get_session,
             session_commands::get_session_messages,
             session_commands::get_session_messages_since,
+            session_commands::count_assistant_messages_after,
             session_commands::start_session,
             session_commands::resume_session,
             session_commands::cancel_session,

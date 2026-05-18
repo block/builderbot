@@ -87,6 +87,22 @@ impl Store {
         Ok(())
     }
 
+    /// Count assistant messages created after a given timestamp.
+    pub fn count_assistant_messages_after(
+        &self,
+        session_id: &str,
+        after_timestamp: i64,
+    ) -> Result<i64, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM session_messages
+             WHERE session_id = ?1 AND role = 'assistant' AND created_at > ?2",
+            params![session_id, after_timestamp],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
     /// Get messages with id >= since_id (inclusive — re-fetches the last known
     /// message so the caller picks up streaming content updates).
     pub fn get_session_messages_since(

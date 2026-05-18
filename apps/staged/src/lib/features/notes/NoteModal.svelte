@@ -6,11 +6,12 @@
 -->
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { X, Copy, Check } from 'lucide-svelte';
+  import { X, Copy, Check, MessageCircle } from 'lucide-svelte';
   import { marked } from 'marked';
   import { sanitize } from '../../shared/sanitize';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
-  import { handleExternalLinkClick } from '../../api/commands';
+  import { countAssistantMessagesAfter, handleExternalLinkClick } from '../../api/commands';
+  import { formatChatButtonLabel } from '../sessions/noteFreshness';
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
@@ -24,6 +25,7 @@
     onClose: () => void;
     /** When set, shows a button to open the associated chat session. */
     sessionId?: string | null;
+    noteUpdatedAt?: number | null;
     onOpenSession?: (sessionId: string) => void;
     /** Suggested next steps to show as action buttons at the bottom. */
     nextSteps?: { commitStep: string | null; noteStep: string | null } | null;
@@ -31,11 +33,23 @@
     onStartSession?: (mode: 'commit' | 'note', prefill: string) => void;
   }
 
-  let { title, content, onClose, sessionId, onOpenSession, nextSteps, onStartSession }: Props =
-    $props();
+  let {
+    title,
+    content,
+    onClose,
+    sessionId,
+    noteUpdatedAt,
+    onOpenSession,
+    nextSteps,
+    onStartSession,
+  }: Props = $props();
 
   let copied = $state(false);
   const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
+  let assistantMessagesAfterNote = $state(0);
+  let chatButtonLabel = $derived(formatChatButtonLabel(assistantMessagesAfterNote));
+  let canOpenSession = $derived(Boolean(sessionId && onOpenSession));
+  let showFloatingChatInfo = $derived(canOpenSession && assistantMessagesAfterNote > 0);
 
   // Search state
   let searchVisible = $state(false);
@@ -56,6 +70,30 @@
 
   onDestroy(() => {
     unregisterSearchTarget?.();
+  });
+
+  $effect(() => {
+    const sid = sessionId;
+    const updatedAt = noteUpdatedAt;
+    if (!sid || typeof updatedAt !== 'number') {
+      assistantMessagesAfterNote = 0;
+      return;
+    }
+
+    let stale = false;
+    countAssistantMessagesAfter(sid, updatedAt)
+      .then((count) => {
+        if (!stale) {
+          assistantMessagesAfterNote = count;
+        }
+      })
+      .catch(() => {
+        if (!stale) assistantMessagesAfterNote = 0;
+      });
+
+    return () => {
+      stale = true;
+    };
   });
 
   function renderMarkdown(text: string): string {
@@ -197,7 +235,7 @@
             <Copy size={16} />
           {/if}
         </button>
-        {#if sessionId && onOpenSession}
+        {#if canOpenSession}
           <button
             class="header-btn"
             onclick={() => onOpenSession?.(sessionId!)}
@@ -215,14 +253,31 @@
         </button>
       </div>
     </header>
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="modal-content" bind:this={contentEl} onclick={handleExternalLinkClick}>
-      {#if content.trim()}
-        <div class="markdown-content">
-          {@html renderMarkdown(content)}
-        </div>
-      {:else}
-        <p class="empty-note">This note has no content.</p>
+    <div class="modal-body">
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div
+        class:has-floating-chat-info={showFloatingChatInfo}
+        class="modal-content"
+        bind:this={contentEl}
+        onclick={handleExternalLinkClick}
+      >
+        {#if content.trim()}
+          <div class="markdown-content">
+            {@html renderMarkdown(content)}
+          </div>
+        {:else}
+          <p class="empty-note">This note has no content.</p>
+        {/if}
+      </div>
+      {#if showFloatingChatInfo}
+        <button
+          class="floating-chat-info"
+          onclick={() => onOpenSession?.(sessionId!)}
+          title="Open chat session"
+        >
+          <MessageCircle size={16} aria-hidden="true" />
+          <span>{chatButtonLabel}</span>
+        </button>
       {/if}
     </div>
     {#if nextSteps && onStartSession && (nextSteps.noteStep || nextSteps.commitStep)}
@@ -361,11 +416,63 @@
     color: var(--status-added);
   }
 
+  .modal-body {
+    position: relative;
+    flex: 1;
+    min-height: 0;
+    display: flex;
+  }
+
   .modal-content {
     flex: 1;
     overflow-y: auto;
     padding: 24px;
     min-height: 0;
+  }
+
+  .modal-content.has-floating-chat-info {
+    padding-bottom: 96px;
+  }
+
+  .floating-chat-info {
+    position: absolute;
+    left: 50%;
+    bottom: 16px;
+    transform: translateX(-50%);
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    box-sizing: border-box;
+    width: max-content;
+    max-width: calc(100% - 48px);
+    min-height: 44px;
+    padding: 10px 14px;
+    background: var(--bg-chrome);
+    border: 1px solid var(--border-muted);
+    border-radius: 8px;
+    box-shadow: 0 4px 14px color-mix(in srgb, var(--shadow-overlay) 40%, transparent);
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: var(--size-sm);
+    font-weight: 500;
+    transition:
+      background-color 0.1s,
+      border-color 0.1s,
+      color 0.1s;
+  }
+
+  .floating-chat-info:hover {
+    background: var(--bg-hover);
+    border-color: var(--text-muted);
+  }
+
+  .floating-chat-info span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .modal-content::-webkit-scrollbar {
@@ -594,6 +701,15 @@
 
     .modal-content {
       padding: 16px;
+    }
+
+    .modal-content.has-floating-chat-info {
+      padding-bottom: 88px;
+    }
+
+    .floating-chat-info {
+      bottom: 12px;
+      max-width: calc(100% - 32px);
     }
 
     .next-steps {

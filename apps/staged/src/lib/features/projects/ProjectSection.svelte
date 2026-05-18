@@ -63,6 +63,7 @@
   import { focusAtEnd } from '../../shared/focusAtEnd';
   import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
   import { createLiveSessionHints } from '../timeline/liveSessionHints';
+  import type { LinkedNoteContext } from '../sessions/noteFreshness';
 
   interface Props {
     project: Project;
@@ -445,9 +446,25 @@
     })
   );
 
-  let openNote = $state<{ title: string; content: string; sessionId?: string } | null>(null);
+  let openNote = $state<{
+    title: string;
+    content: string;
+    sessionId?: string;
+    noteUpdatedAt?: number;
+  } | null>(null);
   let openSessionId = $state<string | null>(null);
   let projectContextMenuRef: TimelineContextMenu | undefined = $state();
+
+  function linkedNoteContext(note: ProjectNote | undefined): LinkedNoteContext | null {
+    if (!note) return null;
+    return {
+      id: note.id,
+      title: note.title,
+      content: note.content,
+      updatedAt: note.updatedAt,
+      hasParsedNote: !!note.content.trim(),
+    };
+  }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────
 
@@ -698,6 +715,7 @@
                     title: note.title,
                     content: note.content,
                     sessionId: note.sessionId ?? undefined,
+                    noteUpdatedAt: note.updatedAt,
                   };
                 }}
             onSessionClick={(sid) => {
@@ -737,6 +755,7 @@
     title={openNote.title}
     content={openNote.content}
     sessionId={openNote.sessionId}
+    noteUpdatedAt={openNote.noteUpdatedAt}
     onClose={() => (openNote = null)}
     onOpenSession={(sid) => {
       openNote = null;
@@ -746,20 +765,23 @@
 {/if}
 
 {#if openSessionId}
-  {@const noteForSession = projectNotes.find(
-    (n) => n.sessionId === openSessionId && n.content?.trim()
+  {@const noteForSession = linkedNoteContext(
+    projectNotes.find((n) => n.sessionId === openSessionId)
   )}
   <SessionModal
     sessionId={openSessionId}
     repoDir={projectDisplayRootCandidates}
     projectId={project.id}
-    noteInfo={noteForSession
-      ? { id: noteForSession.id, title: noteForSession.title, content: noteForSession.content }
-      : null}
-    onOpenNote={(_noteId, title, content) => {
+    noteInfo={noteForSession}
+    onOpenNote={(note) => {
       const sid = openSessionId;
       openSessionId = null;
-      openNote = { title, content, sessionId: sid ?? undefined };
+      openNote = {
+        title: note.title,
+        content: note.content,
+        sessionId: sid ?? undefined,
+        noteUpdatedAt: note.updatedAt,
+      };
     }}
     onClose={() => {
       openSessionId = null;

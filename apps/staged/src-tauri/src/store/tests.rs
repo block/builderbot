@@ -104,6 +104,57 @@ fn test_project_note_completion_is_write_once() {
 }
 
 #[test]
+fn test_update_project_note_title_and_content_is_noop_when_unchanged() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+
+    let note = ProjectNote::new(&project.id, "", "");
+    store.create_project_note(&note).unwrap();
+
+    store
+        .update_project_note_title_and_content(
+            &note.id,
+            "Title",
+            "Body",
+            Some("commit-step"),
+            Some("note-step"),
+        )
+        .unwrap();
+    let after_first = store.get_project_note(&note.id).unwrap().unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+
+    // Same title/content/steps — must not bump updated_at.
+    store
+        .update_project_note_title_and_content(
+            &note.id,
+            "Title",
+            "Body",
+            Some("commit-step"),
+            Some("note-step"),
+        )
+        .unwrap();
+    let after_second = store.get_project_note(&note.id).unwrap().unwrap();
+    assert_eq!(after_second.updated_at, after_first.updated_at);
+    assert_eq!(after_second.completed_at, after_first.completed_at);
+
+    // A real change still advances updated_at.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    store
+        .update_project_note_title_and_content(
+            &note.id,
+            "Title",
+            "New body",
+            Some("commit-step"),
+            Some("note-step"),
+        )
+        .unwrap();
+    let after_third = store.get_project_note(&note.id).unwrap().unwrap();
+    assert!(after_third.updated_at > after_first.updated_at);
+}
+
+#[test]
 fn test_list_project_notes_orders_by_completion_time() {
     let store = Store::in_memory().unwrap();
     let project = Project::new("test-owner/test-repo");
@@ -623,6 +674,41 @@ fn test_session_messages() {
     assert_eq!(since[1].id, id2);
 }
 
+#[test]
+fn test_count_assistant_messages_after() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    // Add messages with different roles — timestamps are auto-set via now_timestamp()
+    // so we use a timestamp of 0 to count all assistant messages.
+    store
+        .add_session_message(&session.id, MessageRole::User, "hello")
+        .unwrap();
+    store
+        .add_session_message(&session.id, MessageRole::Assistant, "hi there")
+        .unwrap();
+    store
+        .add_session_message(&session.id, MessageRole::User, "more")
+        .unwrap();
+    store
+        .add_session_message(&session.id, MessageRole::Assistant, "reply")
+        .unwrap();
+
+    // All assistant messages are after timestamp 0
+    let count = store
+        .count_assistant_messages_after(&session.id, 0)
+        .unwrap();
+    assert_eq!(count, 2);
+
+    // No assistant messages after a far-future timestamp
+    let count = store
+        .count_assistant_messages_after(&session.id, i64::MAX)
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
 // =============================================================================
 // Workdirs
 // =============================================================================
@@ -1120,6 +1206,59 @@ fn test_list_notes_for_branch_orders_by_completion_time() {
     let notes = store.list_notes_for_branch(&branch.id).unwrap();
     let ordered_ids: Vec<_> = notes.iter().map(|note| note.id.as_str()).collect();
     assert_eq!(ordered_ids, vec![older.id.as_str(), newer.id.as_str()]);
+}
+
+#[test]
+fn test_update_note_title_and_content_is_noop_when_unchanged() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let note = Note::new(&branch.id, "", "").with_session("session-1");
+    store.create_note(&note).unwrap();
+
+    store
+        .update_note_title_and_content(
+            &note.id,
+            "Title",
+            "Body",
+            Some("commit-step"),
+            Some("note-step"),
+        )
+        .unwrap();
+    let after_first = store.get_note(&note.id).unwrap().unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+
+    // Same title/content/steps — must not bump updated_at.
+    store
+        .update_note_title_and_content(
+            &note.id,
+            "Title",
+            "Body",
+            Some("commit-step"),
+            Some("note-step"),
+        )
+        .unwrap();
+    let after_second = store.get_note(&note.id).unwrap().unwrap();
+    assert_eq!(after_second.updated_at, after_first.updated_at);
+    assert_eq!(after_second.completed_at, after_first.completed_at);
+
+    // A real change still advances updated_at.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    store
+        .update_note_title_and_content(
+            &note.id,
+            "Title",
+            "New body",
+            Some("commit-step"),
+            Some("note-step"),
+        )
+        .unwrap();
+    let after_third = store.get_note(&note.id).unwrap().unwrap();
+    assert!(after_third.updated_at > after_first.updated_at);
 }
 
 // =============================================================================

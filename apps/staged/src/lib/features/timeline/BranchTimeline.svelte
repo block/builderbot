@@ -17,6 +17,7 @@
     BranchTimeline as BranchTimelineData,
     HashtagItem,
   } from '../../types';
+  import type { NoteClickInfo } from '../sessions/noteFreshness';
   import TimelineRow from './TimelineRow.svelte';
   import type { TimelineItemType, TimelineBadge } from './TimelineRow.svelte';
   import TimelineContextMenu from './TimelineContextMenu.svelte';
@@ -58,7 +59,7 @@
     onSessionClick?: (sessionId: string) => void;
     onResumeClick?: (sessionId: string) => void;
     onCommitClick?: (sha: string) => void;
-    onNoteClick?: (noteId: string, title: string, content: string, sessionId?: string) => void;
+    onNoteClick?: (note: NoteClickInfo) => void;
     onReviewClick?: (reviewId: string) => void;
     onImageClick?: (imageId: string) => void;
     onDeleteCommit?: (sha: string, sessionId?: string, opts?: { altKey: boolean }) => void;
@@ -235,6 +236,7 @@
     noteId?: string;
     noteTitle?: string;
     noteContent?: string;
+    noteUpdatedAt?: number;
     reviewId?: string;
     imageId?: string;
     imageFilename?: string;
@@ -602,6 +604,7 @@
         noteId: note.id,
         noteTitle: stripXmlTags(note.title),
         noteContent: note.content,
+        noteUpdatedAt: note.updatedAt,
         deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
         completionReason: note.completionReason,
         hashtagRef: type === 'note' ? `#note:${note.id}` : undefined,
@@ -774,7 +777,13 @@
     if (item.type === 'commit' && item.commitSha && onCommitClick) {
       onCommitClick(item.commitSha);
     } else if (item.type === 'note' && item.noteId && onNoteClick) {
-      onNoteClick(item.noteId, item.noteTitle ?? '', item.noteContent ?? '', item.sessionId);
+      onNoteClick({
+        noteId: item.noteId,
+        title: item.noteTitle ?? '',
+        content: item.noteContent ?? '',
+        sessionId: item.sessionId,
+        updatedAt: item.noteUpdatedAt,
+      });
     } else if (item.type === 'review' && item.reviewId && onReviewClick) {
       onReviewClick(item.reviewId);
     } else if (item.type === 'image' && item.imageId && onImageClick) {

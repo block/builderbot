@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -118,18 +118,16 @@ where
 /// Find a CLI binary by command name.
 ///
 /// Searches in order:
-/// 1. Login shell `which` (picks up user's PATH from shell rc files)
+/// 1. Login shell path lookup (picks up user's PATH from shell rc files)
 /// 2. Common install locations
 pub fn find_command(cmd: &str) -> Option<PathBuf> {
     if let Some(path) = find_via_login_shell(cmd) {
-        if path.exists() {
-            return Some(path);
-        }
+        return Some(path);
     }
 
     for dir in COMMON_PATHS {
         let path = PathBuf::from(dir).join(cmd);
-        if path.exists() {
+        if is_executable_file(&path) {
             return Some(path);
         }
     }
@@ -138,16 +136,19 @@ pub fn find_command(cmd: &str) -> Option<PathBuf> {
 }
 
 fn find_via_login_shell(cmd: &str) -> Option<PathBuf> {
-    let which_cmd = format!("which {cmd}");
+    let quoted = shell_quote(cmd);
+    let lookups = [
+        ("/bin/zsh", format!("whence -p -- {quoted}")),
+        ("/bin/bash", format!("type -P -- {quoted}")),
+    ];
 
-    for shell in ["/bin/zsh", "/bin/bash"] {
-        if let Ok(output) = Command::new(shell).args(["-l", "-c", &which_cmd]).output() {
+    for (shell, lookup_cmd) in lookups {
+        if let Ok(output) = Command::new(shell).args(["-l", "-c", &lookup_cmd]).output() {
             if output.status.success() {
                 let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Some(path_str) = stdout.lines().rfind(|line| !line.is_empty()) {
-                    let path_str = path_str.trim();
-                    if !path_str.is_empty() && path_str.starts_with('/') {
-                        return Some(PathBuf::from(path_str));
+                if let Some(path) = candidate_from_shell_output(stdout.as_ref()) {
+                    if is_executable_file(&path) {
+                        return Some(path);
                     }
                 }
             }
@@ -155,6 +156,44 @@ fn find_via_login_shell(cmd: &str) -> Option<PathBuf> {
     }
 
     None
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn candidate_from_shell_output(output: &str) -> Option<PathBuf> {
+    let mut lines = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let candidate = lines.next()?;
+    if lines.next().is_some() {
+        return None;
+    }
+
+    let path = PathBuf::from(candidate);
+    path.is_absolute().then_some(path)
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 /// Locate the `sq` binary.

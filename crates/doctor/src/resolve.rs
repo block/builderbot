@@ -1,34 +1,54 @@
 //! Binary resolution and command output formatting helpers.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::types::ResolvedBinary;
 
-/// Resolve a binary by trying login shell `which` then common install paths.
+/// Resolve a binary by trying login shell path lookup then common install paths.
 pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
     let mut lines = vec![format!("resolve '{cmd}':")];
 
-    // Strategy 1: Login shell `which` (primary)
-    lines.push("  strategy 1 — login shell `which`:".to_string());
-    for shell in &["/bin/zsh", "/bin/bash"] {
-        let which_cmd = format!("which {cmd}");
-        match Command::new(shell).args(["-l", "-c", &which_cmd]).output() {
+    // Strategy 1: Login shell path lookup (primary)
+    lines.push("  strategy 1 — login shell path lookup:".to_string());
+    for (shell, lookup_cmd) in shell_lookup_commands(cmd) {
+        match Command::new(shell).args(["-l", "-c", &lookup_cmd]).output() {
             Ok(output) => {
-                let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if output.status.success() && !result.is_empty() {
-                    lines.push(format!(
-                        "    {shell} -l -c 'which {cmd}' => {result} (resolved)"
-                    ));
-                    return ResolvedBinary {
-                        path: Some(PathBuf::from(&result)),
-                        search_output: lines.join("\n"),
-                    };
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if output.status.success() {
+                    match candidate_from_shell_output(stdout.as_ref()) {
+                        Some(path) if is_executable_file(&path) => {
+                            lines.push(format!(
+                                "    {shell} -l -c '{lookup_cmd}' => {} (resolved)",
+                                path.display()
+                            ));
+                            return ResolvedBinary {
+                                path: Some(path),
+                                search_output: lines.join("\n"),
+                            };
+                        }
+                        Some(path) => {
+                            lines.push(format!(
+                                "    {shell} -l -c '{lookup_cmd}' => {} (ignored: not an executable file)",
+                                path.display()
+                            ));
+                        }
+                        None if stdout.trim().is_empty() => {
+                            lines.push(format!("    {shell} -l -c '{lookup_cmd}' => not found"));
+                        }
+                        None => {
+                            lines.push(format!(
+                                "    {shell} -l -c '{lookup_cmd}' => {} (ignored: not an absolute path)",
+                                summarize_output(stdout.as_ref())
+                            ));
+                        }
+                    }
+                } else {
+                    lines.push(format!("    {shell} -l -c '{lookup_cmd}' => not found"));
                 }
-                lines.push(format!("    {shell} -l -c 'which {cmd}' => not found"));
             }
             Err(e) => {
-                lines.push(format!("    {shell} -l -c 'which {cmd}' => error: {e}"));
+                lines.push(format!("    {shell} -l -c '{lookup_cmd}' => error: {e}"));
             }
         }
     }
@@ -42,7 +62,7 @@ pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
         "/home/linuxbrew/.linuxbrew/bin",
     ] {
         let path = PathBuf::from(dir).join(cmd);
-        if path.exists() {
+        if is_executable_file(&path) {
             lines.push(format!("    {} => found (resolved)", path.display()));
             return ResolvedBinary {
                 path: Some(path),
@@ -59,6 +79,61 @@ pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
     }
 }
 
+fn shell_lookup_commands(cmd: &str) -> Vec<(&'static str, String)> {
+    let quoted = shell_quote(cmd);
+    vec![
+        ("/bin/zsh", format!("whence -p -- {quoted}")),
+        ("/bin/bash", format!("type -P -- {quoted}")),
+    ]
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn candidate_from_shell_output(output: &str) -> Option<PathBuf> {
+    let mut lines = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let candidate = lines.next()?;
+    if lines.next().is_some() {
+        return None;
+    }
+
+    let path = PathBuf::from(candidate);
+    path.is_absolute().then_some(path)
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn summarize_output(output: &str) -> String {
+    let trimmed = output.trim();
+    const MAX_LEN: usize = 120;
+    if trimmed.len() <= MAX_LEN {
+        return trimmed.replace('\n', "\\n");
+    }
+    format!("{}...", trimmed[..MAX_LEN].replace('\n', "\\n"))
+}
+
 /// Format the raw output of a command invocation for debug diagnostics.
 pub fn format_command_output(cmd_desc: &str, output: &std::process::Output) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -71,4 +146,64 @@ pub fn format_command_output(cmd_desc: &str, output: &std::process::Output) -> S
         raw.push_str(&format!("\nstderr:\n{}", stderr.trim()));
     }
     raw
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{candidate_from_shell_output, is_executable_file, shell_quote};
+    use std::fs::{self, File};
+    use std::path::PathBuf;
+
+    #[test]
+    fn candidate_accepts_single_absolute_path() {
+        assert_eq!(
+            candidate_from_shell_output("/opt/homebrew/bin/git\n"),
+            Some(PathBuf::from("/opt/homebrew/bin/git"))
+        );
+    }
+
+    #[test]
+    fn candidate_rejects_function_body_output() {
+        let output = "git () {\n\tcommand git \"$@\"\n}\n";
+        assert_eq!(candidate_from_shell_output(output), None);
+    }
+
+    #[test]
+    fn candidate_rejects_relative_or_command_name_output() {
+        assert_eq!(candidate_from_shell_output("git\n"), None);
+    }
+
+    #[test]
+    fn shell_quote_handles_single_quotes() {
+        assert_eq!(shell_quote("git'bad"), "'git'\\''bad'");
+    }
+
+    #[test]
+    fn executable_file_validation_checks_file_and_mode() {
+        let dir = std::env::temp_dir().join(format!("doctor-resolve-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let executable = dir.join("tool");
+        File::create(&executable).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(!is_executable_file(&executable));
+
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(is_executable_file(&executable));
+        }
+
+        #[cfg(not(unix))]
+        {
+            assert!(is_executable_file(&executable));
+        }
+
+        assert!(!is_executable_file(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

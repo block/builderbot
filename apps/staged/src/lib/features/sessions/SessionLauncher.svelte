@@ -46,24 +46,21 @@
   // Lifecycle — listen for status events
   // =========================================================================
 
-  onMount(async () => {
-    unlistenStatus = await listenToEvent<SessionStatusPayload>(
-      'session-status-changed',
-      (payload) => {
-        const { sessionId, status, errorMessage } = payload;
-        sessions = sessions.map((s) => {
-          if (s.id === sessionId) {
-            return {
-              ...s,
-              status: status as SessionStatus,
-              errorMessage: errorMessage ?? s.errorMessage,
-              updatedAt: Date.now(),
-            };
-          }
-          return s;
-        });
-      }
-    );
+  onMount(() => {
+    unlistenStatus = listenToEvent<SessionStatusPayload>('session-status-changed', (payload) => {
+      const { sessionId, status, errorMessage } = payload;
+      sessions = sessions.map((s) => {
+        if (s.id === sessionId) {
+          return {
+            ...s,
+            status: status as SessionStatus,
+            errorMessage: errorMessage ?? s.errorMessage,
+            updatedAt: Date.now(),
+          };
+        }
+        return s;
+      });
+    });
   });
 
   onDestroy(() => {

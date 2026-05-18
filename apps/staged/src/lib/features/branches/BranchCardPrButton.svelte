@@ -153,35 +153,32 @@
   let showForcePushDialog = $state(false);
 
   // =========================================================================
-  // Event listeners for PR status (fix race condition by awaiting promises)
+  // Event listeners for PR status
   // =========================================================================
   $effect(() => {
     const branchId = branch.id;
 
-    const unlistenStatusPromise = listenToEvent<PrStatusChangedEvent>(
-      'pr-status-changed',
-      (payload) => {
-        if (payload.branchId === branchId) {
-          prStatusState = payload.prState;
-          prStatusChecks = payload.prChecksStatus;
-          prStatusReviewDecision = payload.prReviewDecision;
-          prStatusMergeable = payload.prMergeable;
-          prStatusDraft = payload.prDraft;
-          prHeadSha = payload.prHeadSha;
-          prFetchedAt = payload.prFetchedAt;
-          failedChecks = payload.failedChecks ?? [];
-          prStatusCleared = false;
-          // Update the polling service with the new checks status
-          prPollingService.updateChecksStatus(
-            branchId,
-            branch.projectId,
-            payload.prChecksStatus === 'PENDING'
-          );
-        }
+    const unlistenStatus = listenToEvent<PrStatusChangedEvent>('pr-status-changed', (payload) => {
+      if (payload.branchId === branchId) {
+        prStatusState = payload.prState;
+        prStatusChecks = payload.prChecksStatus;
+        prStatusReviewDecision = payload.prReviewDecision;
+        prStatusMergeable = payload.prMergeable;
+        prStatusDraft = payload.prDraft;
+        prHeadSha = payload.prHeadSha;
+        prFetchedAt = payload.prFetchedAt;
+        failedChecks = payload.failedChecks ?? [];
+        prStatusCleared = false;
+        // Update the polling service with the new checks status
+        prPollingService.updateChecksStatus(
+          branchId,
+          branch.projectId,
+          payload.prChecksStatus === 'PENDING'
+        );
       }
-    );
+    });
 
-    const unlistenClearedPromise = listenToEvent<string>('pr-status-cleared', (clearedBranchId) => {
+    const unlistenCleared = listenToEvent<string>('pr-status-cleared', (clearedBranchId) => {
       if (clearedBranchId === branchId) {
         prStatusState = null;
         prStatusChecks = null;
@@ -197,8 +194,8 @@
     });
 
     return () => {
-      unlistenStatusPromise.then((fn) => fn());
-      unlistenClearedPromise.then((fn) => fn());
+      unlistenStatus();
+      unlistenCleared();
     };
   });
 

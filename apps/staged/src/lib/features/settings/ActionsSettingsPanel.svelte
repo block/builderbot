@@ -76,7 +76,7 @@
   let unlistenDetection: (() => void) | undefined;
 
   onMount(async () => {
-    listenToRepoActionsDetection((event) => {
+    unlistenDetection = listenToRepoActionsDetection((event) => {
       const ctx = selectedContext;
       if (!ctx) return;
       if (event.githubRepo !== ctx.githubRepo || event.subpath !== (ctx.subpath ?? null)) return;
@@ -84,8 +84,6 @@
       if (!event.detecting) {
         loadActions();
       }
-    }).then((unlisten) => {
-      unlistenDetection = unlisten;
     });
 
     await repoBadgeStore.loadAll();

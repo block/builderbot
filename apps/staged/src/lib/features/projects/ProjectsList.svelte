@@ -6,7 +6,7 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { fade } from 'svelte/transition';
-  import { listenToEvent, type UnlistenFn } from '../../transport';
+  import { listenToEvent } from '../../transport';
   import {
     Cloud,
     GitPullRequest,
@@ -295,8 +295,7 @@
     window.addEventListener('staged:project-delete-end', onProjectDeleteEnd);
 
     // Listen for PR status changes to update branch state
-    let unlistenPrStatus: UnlistenFn | undefined;
-    listenToEvent<PrStatusChangedEvent>('pr-status-changed', (payload) => {
+    const unlistenPrStatus = listenToEvent<PrStatusChangedEvent>('pr-status-changed', (payload) => {
       // Find the project that contains this branch
       for (const [projectId, branches] of projectBranches.entries()) {
         const branchIndex = branches.findIndex((b) => b.id === payload.branchId);
@@ -317,35 +316,33 @@
           break;
         }
       }
-    }).then((unlisten) => {
-      unlistenPrStatus = unlisten;
     });
 
     // Refresh a project's branches when a commit session completes so the
     // sprout/draft-PR icon flips as soon as the first commit lands.
-    let unlistenSessionStatus: UnlistenFn | undefined;
-    listenToEvent<SessionStatusPayload>('session-status-changed', async (payload) => {
-      if (payload.status !== 'completed') return;
-      if (payload.sessionType !== 'commit') return;
-      const projectId = payload.projectId;
-      if (!projectId || !projectBranches.has(projectId)) return;
-      try {
-        const branches = await commands.listBranchesForProject(projectId);
-        projectBranches = new Map(projectBranches).set(projectId, branches);
-      } catch (e) {
-        console.error(`Failed to refresh branches for project ${projectId} after commit:`, e);
+    const unlistenSessionStatus = listenToEvent<SessionStatusPayload>(
+      'session-status-changed',
+      async (payload) => {
+        if (payload.status !== 'completed') return;
+        if (payload.sessionType !== 'commit') return;
+        const projectId = payload.projectId;
+        if (!projectId || !projectBranches.has(projectId)) return;
+        try {
+          const branches = await commands.listBranchesForProject(projectId);
+          projectBranches = new Map(projectBranches).set(projectId, branches);
+        } catch (e) {
+          console.error(`Failed to refresh branches for project ${projectId} after commit:`, e);
+        }
       }
-    }).then((unlisten) => {
-      unlistenSessionStatus = unlisten;
-    });
+    );
 
     return () => {
       projectRunActionsStore.stopListening();
       window.removeEventListener('staged:new-project', onNewProject);
       window.removeEventListener('staged:project-delete-start', onProjectDeleteStart);
       window.removeEventListener('staged:project-delete-end', onProjectDeleteEnd);
-      unlistenPrStatus?.();
-      unlistenSessionStatus?.();
+      unlistenPrStatus();
+      unlistenSessionStatus();
     };
   });
 

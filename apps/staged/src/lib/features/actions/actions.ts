@@ -213,9 +213,7 @@ export function runPrerunActions(branchId: string, provider?: string): Promise<s
  * Listen for real-time action output events.
  * Returns an unlisten function to stop listening.
  */
-export function listenToActionOutput(
-  callback: (event: ActionOutputEvent) => void
-): Promise<UnlistenFn> {
+export function listenToActionOutput(callback: (event: ActionOutputEvent) => void): UnlistenFn {
   return listenToEvent<ActionOutputEvent>('action_output', callback);
 }
 
@@ -223,9 +221,7 @@ export function listenToActionOutput(
  * Listen for action status change events.
  * Returns an unlisten function to stop listening.
  */
-export function listenToActionStatus(
-  callback: (event: ActionStatusEvent) => void
-): Promise<UnlistenFn> {
+export function listenToActionStatus(callback: (event: ActionStatusEvent) => void): UnlistenFn {
   return listenToEvent<ActionStatusEvent>('action_status', callback);
 }
 
@@ -235,14 +231,14 @@ export function listenToActionStatus(
  */
 export function listenToActionAutoCommit(
   callback: (event: ActionAutoCommitEvent) => void
-): Promise<UnlistenFn> {
+): UnlistenFn {
   return listenToEvent<ActionAutoCommitEvent>('action_auto_commit', callback);
 }
 
 /** Listen for repo action detection start/stop updates. */
 export function listenToRepoActionsDetection(
   callback: (event: RepoActionsDetectionEvent) => void
-): Promise<UnlistenFn> {
+): UnlistenFn {
   return listenToEvent<RepoActionsDetectionEvent>('repo-actions-detection', callback);
 }
 
@@ -267,6 +263,6 @@ export function updateRunDetectionMode(actionId: string, mode: RunDetectionMode)
  */
 export function listenToRunPhaseChanged(
   callback: (event: RunPhaseChangedEvent) => void
-): Promise<UnlistenFn> {
+): UnlistenFn {
   return listenToEvent<RunPhaseChangedEvent>('action:run-phase-changed', callback);
 }

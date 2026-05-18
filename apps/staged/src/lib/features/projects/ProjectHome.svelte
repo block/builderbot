@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getWindowSync, listenToEvent, type UnlistenFn } from '../../transport';
+  import { getWindowSync, listenToEvent } from '../../transport';
   import type {
     Project,
     ProjectRepo,
@@ -105,8 +105,7 @@
     const onNewProject = () => handleNewProject();
     window.addEventListener('staged:new-project', onNewProject);
 
-    let unlistenDetection: (() => void) | undefined;
-    listenToRepoActionsDetection((event) => {
+    const unlistenDetection = listenToRepoActionsDetection((event) => {
       const matchingProjectIds = projects
         .filter((p) => p.githubRepo === event.githubRepo && p.subpath === event.subpath)
         .map((p) => p.id);
@@ -121,45 +120,42 @@
         }
       }
       detectingProjectIds = next;
-    }).then((unlisten) => {
-      unlistenDetection = unlisten;
     });
 
     // Listen for backend-driven setup progress events. The backend emits this
     // after repo creation, after worktree setup, and after prerun actions.
     // We only refresh display state here — setup itself is owned by the backend.
-    let unlistenProjectRepoAdded: UnlistenFn | undefined;
-    listenToEvent<string>('project-setup-progress', async (projectId) => {
-      console.log('[ProjectHome] project-setup-progress event for project', projectId);
-      try {
-        const [projectsList, branches, repos] = await Promise.all([
-          commands.listProjects(),
-          commands.listBranchesForProject(projectId),
-          commands.listProjectRepos(projectId),
-        ]);
-        setProjects(projectsList);
-        projects = projectsList;
-        const mergedBranches = mergeBranchesPreservingWorktree(
-          branchesByProject.get(projectId) || [],
-          branches
-        );
-        branchesByProject = new Map(branchesByProject).set(projectId, mergedBranches);
-        commands.invalidateProjectBranchTimelines(mergedBranches.map((b) => b.id));
-        workspaceLifecycle.enqueueInitialSetup(projectId, mergedBranches);
-        replaceProjectRepos(projectId, repos);
-        void repoBadgeStore.ensureForRepos(
-          repos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
-        );
-      } catch (e) {
-        console.error('[ProjectHome] Failed to refresh project after setup progress:', e);
+    const unlistenProjectRepoAdded = listenToEvent<string>(
+      'project-setup-progress',
+      async (projectId) => {
+        console.log('[ProjectHome] project-setup-progress event for project', projectId);
+        try {
+          const [projectsList, branches, repos] = await Promise.all([
+            commands.listProjects(),
+            commands.listBranchesForProject(projectId),
+            commands.listProjectRepos(projectId),
+          ]);
+          setProjects(projectsList);
+          projects = projectsList;
+          const mergedBranches = mergeBranchesPreservingWorktree(
+            branchesByProject.get(projectId) || [],
+            branches
+          );
+          branchesByProject = new Map(branchesByProject).set(projectId, mergedBranches);
+          commands.invalidateProjectBranchTimelines(mergedBranches.map((b) => b.id));
+          workspaceLifecycle.enqueueInitialSetup(projectId, mergedBranches);
+          replaceProjectRepos(projectId, repos);
+          void repoBadgeStore.ensureForRepos(
+            repos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
+          );
+        } catch (e) {
+          console.error('[ProjectHome] Failed to refresh project after setup progress:', e);
+        }
       }
-    }).then((unlisten) => {
-      unlistenProjectRepoAdded = unlisten;
-    });
+    );
 
     // Listen for PR status changes to update branch state
-    let unlistenPrStatus: UnlistenFn | undefined;
-    listenToEvent<PrStatusChangedEvent>('pr-status-changed', (payload) => {
+    const unlistenPrStatus = listenToEvent<PrStatusChangedEvent>('pr-status-changed', (payload) => {
       // Find the project that contains this branch and update it
       for (const [projectId, branches] of branchesByProject.entries()) {
         const branchIndex = branches.findIndex((b) => b.id === payload.branchId);
@@ -180,34 +176,32 @@
           break;
         }
       }
-    }).then((unlisten) => {
-      unlistenPrStatus = unlisten;
     });
 
     // Refresh a project's branches when a commit session completes so the
     // sprout/draft-PR icon flips as soon as the first commit lands.
-    let unlistenSessionStatus: UnlistenFn | undefined;
-    listenToEvent<SessionStatusPayload>('session-status-changed', async (payload) => {
-      if (payload.status !== 'completed') return;
-      if (payload.sessionType !== 'commit') return;
-      const projectId = payload.projectId;
-      if (!projectId || !branchesByProject.has(projectId)) return;
-      try {
-        const branches = await commands.listBranchesForProject(projectId);
-        branchesByProject = new Map(branchesByProject).set(projectId, branches);
-      } catch (e) {
-        console.error(`Failed to refresh branches for project ${projectId} after commit:`, e);
+    const unlistenSessionStatus = listenToEvent<SessionStatusPayload>(
+      'session-status-changed',
+      async (payload) => {
+        if (payload.status !== 'completed') return;
+        if (payload.sessionType !== 'commit') return;
+        const projectId = payload.projectId;
+        if (!projectId || !branchesByProject.has(projectId)) return;
+        try {
+          const branches = await commands.listBranchesForProject(projectId);
+          branchesByProject = new Map(branchesByProject).set(projectId, branches);
+        } catch (e) {
+          console.error(`Failed to refresh branches for project ${projectId} after commit:`, e);
+        }
       }
-    }).then((unlisten) => {
-      unlistenSessionStatus = unlisten;
-    });
+    );
 
     return () => {
       window.removeEventListener('staged:new-project', onNewProject);
-      unlistenDetection?.();
-      unlistenProjectRepoAdded?.();
-      unlistenPrStatus?.();
-      unlistenSessionStatus?.();
+      unlistenDetection();
+      unlistenProjectRepoAdded();
+      unlistenPrStatus();
+      unlistenSessionStatus();
       workspaceLifecycle.stop();
       projectRunActionsStore.stopListening();
     };

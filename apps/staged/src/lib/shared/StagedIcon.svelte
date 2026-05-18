@@ -1,7 +1,7 @@
 <!--
   StagedIcon.svelte - The Staged app icon
 
-  Renders the app-only greyscale icon asset.
+  Renders the app-only theme-specific icon assets.
 
   Props:
     size - icon dimensions in px (default 32)
@@ -10,23 +10,47 @@
   let { size = 32 }: { size?: number } = $props();
 </script>
 
-<img
-  class="staged-icon"
-  src="/icons/staged-greyscale.svg"
-  width={size}
-  height={size}
-  style={`--staged-icon-size: ${size}px`}
-  alt=""
-  aria-hidden="true"
-  decoding="async"
-/>
+<span class="staged-icon" style={`--staged-icon-size: ${size}px`} aria-hidden="true">
+  <img
+    class="icon-layer light"
+    src="/icons/staged-monochrome.png"
+    width={size}
+    height={size}
+    alt=""
+    decoding="async"
+  />
+  <img
+    class="icon-layer dark"
+    src="/icons/staged-clear.png"
+    width={size}
+    height={size}
+    alt=""
+    decoding="async"
+  />
+</span>
 
 <style>
   .staged-icon {
-    display: block;
+    display: inline-grid;
     width: var(--staged-icon-size);
     height: var(--staged-icon-size);
+    line-height: 0;
+  }
+
+  .icon-layer {
+    grid-area: 1 / 1;
+    display: block;
+    width: 100%;
+    height: 100%;
     object-fit: contain;
-    filter: invert(var(--theme-is-dark, 0));
+    pointer-events: none;
+  }
+
+  .light {
+    opacity: calc(1 - var(--theme-is-dark, 0));
+  }
+
+  .dark {
+    opacity: var(--theme-is-dark, 0);
   }
 </style>

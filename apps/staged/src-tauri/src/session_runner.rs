@@ -37,7 +37,7 @@ use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -45,7 +45,7 @@ use tauri::AppHandle;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::sync::CancellationToken;
 
-use acp_client::{McpServer, McpServerHttp};
+use acp_client::{McpServer, McpServerHttp, ShellEnvCache};
 
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::agent::{AcpDriver, AgentDriver, MessageWriter};
@@ -1282,18 +1282,51 @@ async fn run_pipeline(
     PipelineOutcome::CompletedWithoutAi
 }
 
+/// Shared cache of interactive-login-shell env snapshots, keyed by working
+/// directory. Spawning `$SHELL -ils` to capture `.zshrc`-driven PATH (e.g.
+/// Hermit) on every pipeline step costs ~50–500 ms; this amortises it to
+/// once per project per TTL window.
+pub fn shell_env_cache() -> &'static Arc<ShellEnvCache> {
+    static CACHE: OnceLock<Arc<ShellEnvCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Arc::new(ShellEnvCache::new()))
+}
+
 async fn run_pipeline_command(
     command: &str,
     working_dir: &PathBuf,
     cancel_token: &CancellationToken,
 ) -> io::Result<PipelineCommandResult> {
+    // Apply the cached interactive-login-shell env so Hermit-managed
+    // binaries are on PATH (matters for git hooks invoked by pipeline
+    // steps). On capture failure fall back to `sh -lc`, which at least
+    // sources `/etc/profile`/`~/.profile`.
+    let snapshot = match shell_env_cache().get(working_dir).await {
+        Ok(env) => Some(env),
+        Err(e) => {
+            log::warn!(
+                "Failed to capture shell env for {}: {e}; falling back to sh -lc",
+                working_dir.display()
+            );
+            None
+        }
+    };
+
     let mut cmd = tokio::process::Command::new("sh");
-    cmd.args(["-lc", command])
+    let sh_args: &[&str] = if snapshot.is_some() {
+        &["-c", command]
+    } else {
+        &["-lc", command]
+    };
+    cmd.args(sh_args)
         .current_dir(working_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+
+    if let Some(snapshot) = &snapshot {
+        snapshot.apply_to(&mut cmd);
+    }
 
     #[cfg(unix)]
     cmd.process_group(0);

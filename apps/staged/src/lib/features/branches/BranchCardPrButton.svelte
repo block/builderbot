@@ -33,6 +33,7 @@
     type CompletedPushOutcome,
   } from './branchCardHelpers';
   import { buildPrButtonTitle } from './prButtonTooltip';
+  import { shouldShowPushChanges } from './prButtonGitState';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { prStateStore, type PrState } from '../../stores/prState.svelte';
@@ -106,17 +107,17 @@
   let prStatusDraft = $state<boolean | null>(null);
   let failedChecks = $state<PrFailedCheck[]>([]);
 
-  // Derive hasUnpushed by comparing the latest timeline commit SHA with the PR head SHA.
-  // This replaces the old approach of shelling out to `git rev-list`.
-  let hasUnpushed = $derived.by(() => {
-    if (!branch.prNumber || !timeline) return false;
-    // Don't show push changes on merged PRs
-    if (branch.prState === 'MERGED') return false;
-    // Find the first commit with a real (non-empty) SHA — pending commits have sha: ""
-    const latestCommit = timeline.commits.find((c) => c.sha && c.sha.length > 0);
-    if (!latestCommit || !prHeadSha) return false;
-    return latestCommit.sha !== prHeadSha;
-  });
+  // Derive hasUnpushed from the git-state upstream relation when available,
+  // falling back to a HEAD/PR SHA comparison only when upstream is missing
+  // (e.g. fork PRs without an `origin/<branch>` ref).
+  let hasUnpushed = $derived(
+    shouldShowPushChanges({
+      prNumber: branch.prNumber,
+      prState: branch.prState,
+      prHeadSha,
+      gitState: timeline?.gitState ?? null,
+    })
+  );
 
   // Sync local PR status state when branch prop changes
   let syncedBranchId = $state<string | null>(null);
@@ -536,13 +537,12 @@
             console.warn('[Staged] Failed to clear PR status after push:', e);
           }
           pushStateStore.setPushDone(branch.id);
-          // Optimistically update prHeadSha to the latest timeline commit
-          // so hasUnpushed becomes false immediately, before the next PR
-          // status refresh picks up the new head SHA from GitHub.
-          const latestCommit = timeline?.commits.find((c) => c.sha && c.sha.length > 0);
-          if (latestCommit) {
-            prHeadSha = latestCommit.sha;
-          }
+          // Refresh local git state so `upstream.relation` settles back to
+          // `inSync` (driving hasUnpushed to false) without optimistically
+          // mutating prHeadSha here.
+          commands.refreshBranchGitState(branch.id).catch((e) => {
+            console.warn('[Staged] Failed to refresh git state after push:', e);
+          });
           // Immediately refresh PR status so checks update right away
           prPollingService.refreshNow(branch.projectId);
           setTimeout(() => {

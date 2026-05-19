@@ -18,7 +18,6 @@
 //!    without session management
 
 mod driver;
-mod shell_env;
 mod simple;
 mod types;
 
@@ -30,7 +29,6 @@ pub use agent_client_protocol::{
 pub use driver::{
     strip_code_fences, AcpDriver, AgentDriver, BasicMessageWriter, MessageWriter, Store,
 };
-pub use shell_env::{ShellEnv, ShellEnvCache, DEFAULT_TTL as SHELL_ENV_DEFAULT_TTL};
 pub use simple::run_acp_prompt;
 pub use types::{
     discover_providers, find_acp_agent, find_acp_agent_by_id, find_command, known_agent_commands,

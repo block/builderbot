@@ -178,7 +178,7 @@ async fn capture_shell_env(working_dir: &Path) -> io::Result<Vec<(String, String
         .map(|d| d.as_nanos())
         .unwrap_or_default();
     let pid = std::process::id();
-    let dump_path = std::env::temp_dir().join(format!("acp-shell-env-{pid}-{nanos}"));
+    let dump_path = std::env::temp_dir().join(format!("staged-shell-env-{pid}-{nanos}"));
     let dump_path_str = dump_path.to_string_lossy().into_owned();
 
     // Dump the environment NUL-delimited to a tempfile so values with

@@ -45,11 +45,12 @@ use tauri::AppHandle;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::sync::CancellationToken;
 
-use acp_client::{McpServer, McpServerHttp, ShellEnvCache};
+use acp_client::{McpServer, McpServerHttp};
 
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::agent::{AcpDriver, AgentDriver, MessageWriter};
 use crate::git::Span;
+use crate::shell_env::ShellEnvCache;
 use crate::store::{
     Comment, CommentAuthor, CommentType, CompletionReason, FailureStrategy, MessageRole,
     PipelineExecution, PipelineKind, PipelineStep, SessionStatus, StepStatus, StepType, Store,

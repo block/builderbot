@@ -38,20 +38,36 @@ export function createDiffViewerState(branchId: string, scope: DiffScope, commit
   let selectionGeneration = 0;
   let contextGeneration = 0;
 
+  console.info(
+    `[diff] open: branchId=${branchId} scope=${scope} commitSha=${commitSha ?? '(unresolved)'}`
+  );
+
   async function loadFiles(generation: number): Promise<void> {
     state.loading = true;
     state.error = null;
 
+    const t0 = performance.now();
+    console.info(
+      `[diff] loadFiles start: branchId=${state.branchId} scope=${state.scope} commitSha=${state.commitSha ?? '(unresolved)'}`
+    );
     try {
       const response = await commands.getDiffFiles(
         state.branchId,
         state.commitSha ?? undefined,
         state.scope
       );
-      if (generation !== contextGeneration) return;
+      if (generation !== contextGeneration) {
+        console.info(
+          `[diff] loadFiles stale (took ${Math.round(performance.now() - t0)}ms) — ignoring`
+        );
+        return;
+      }
 
       state.commitSha = response.commitSha;
       state.files = response.files;
+      console.info(
+        `[diff] loadFiles done in ${Math.round(performance.now() - t0)}ms: files=${response.files.length} commitSha=${response.commitSha}`
+      );
 
       if (state.files.length > 0) {
         await selectFile(sharedFileSummaryPath(state.files[0]));
@@ -60,6 +76,9 @@ export function createDiffViewerState(branchId: string, scope: DiffScope, commit
       if (generation !== contextGeneration) return;
       state.error = e instanceof Error ? e.message : String(e);
       state.files = [];
+      console.warn(
+        `[diff] loadFiles failed in ${Math.round(performance.now() - t0)}ms: ${state.error}`
+      );
     } finally {
       if (generation === contextGeneration) {
         state.loading = false;
@@ -81,18 +100,29 @@ export function createDiffViewerState(branchId: string, scope: DiffScope, commit
     if (!state.commitSha) return null;
 
     const cached = state.diffCache.get(path);
-    if (cached) return cached;
+    if (cached) {
+      console.info(`[diff] loadFileDiff cache hit: path=${path}`);
+      return cached;
+    }
 
     state.loadingFile = path;
 
+    const t0 = performance.now();
+    console.info(`[diff] loadFileDiff start: path=${path} scope=${state.scope}`);
     try {
       const diff = await commands.getFileDiff(state.branchId, state.commitSha, state.scope, path);
       const newCache = new Map(state.diffCache);
       newCache.set(path, diff);
       state.diffCache = newCache;
+      console.info(
+        `[diff] loadFileDiff done in ${Math.round(performance.now() - t0)}ms: path=${path}`
+      );
       return diff;
     } catch (e) {
-      console.error(`Failed to load diff for ${path}:`, e);
+      console.error(
+        `[diff] loadFileDiff failed in ${Math.round(performance.now() - t0)}ms: path=${path}:`,
+        e
+      );
       return null;
     } finally {
       state.loadingFile = null;
@@ -109,6 +139,7 @@ export function createDiffViewerState(branchId: string, scope: DiffScope, commit
     newCommitSha?: string
   ): Promise<void> {
     const generation = ++contextGeneration;
+    console.info(`[diff] switchContext: scope=${newScope} commitSha=${newCommitSha ?? '(none)'}`);
     state.scope = newScope;
     state.commitSha = newCommitSha ?? null;
     state.diffCache = new Map();

@@ -144,4 +144,38 @@ describe('shouldShowPushChanges', () => {
       })
     ).toBe(false);
   });
+
+  it('returns false when a different branch is checked out (localAhead would otherwise apply)', () => {
+    // User has switched to `main`; `upstream.relation` reflects main vs
+    // origin/main, not the PR's branch, so the helper must bail out.
+    expect(
+      shouldShowPushChanges({
+        prNumber: 42,
+        prState: 'OPEN',
+        prHeadSha: 'prsha',
+        gitState: makeGitState('localAhead', {
+          expectedBranchMatches: false,
+          currentBranch: 'main',
+        }),
+      })
+    ).toBe(false);
+  });
+
+  it('returns false when a different branch is checked out and upstream is missing', () => {
+    // Without the expected-branch guard, the SHA fallback would compare
+    // the wrong-branch HEAD against the PR head SHA and almost certainly
+    // surface a spurious "needs push".
+    expect(
+      shouldShowPushChanges({
+        prNumber: 42,
+        prState: 'OPEN',
+        prHeadSha: 'prsha',
+        gitState: makeGitState('missing', {
+          expectedBranchMatches: false,
+          currentBranch: 'main',
+          headSha: 'mainsha0000000000000000000000000000000c',
+        }),
+      })
+    ).toBe(false);
+  });
 });

@@ -12,6 +12,10 @@ export function shouldShowPushChanges(input: ShouldShowPushChangesInput): boolea
   if (!prNumber) return false;
   if (prState === 'MERGED') return false;
   if (!gitState) return false;
+  // When a different branch is checked out, neither `upstream.relation`
+  // (computed against HEAD's upstream) nor `headSha` reflect this PR's
+  // branch, so the comparison would be meaningless.
+  if (!gitState.expectedBranchMatches) return false;
 
   switch (gitState.upstream.relation) {
     case 'localAhead':
@@ -25,6 +29,11 @@ export function shouldShowPushChanges(input: ShouldShowPushChangesInput): boolea
       // HEAD with the PR head SHA reported by GitHub.
       if (!gitState.headSha || !prHeadSha) return false;
       return gitState.headSha !== prHeadSha;
+    }
+    default: {
+      const _exhaustive: never = gitState.upstream.relation;
+      void _exhaustive;
+      return false;
     }
   }
 }

@@ -395,7 +395,7 @@ fn compute_upstream_relation(
     )
     .map_err(|e| format!("rev-list: {e}"))?;
 
-    let mut parts = counts.trim().split_whitespace();
+    let mut parts = counts.split_whitespace();
     let ahead: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let behind: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
 

@@ -2389,6 +2389,14 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn pipeline_command_cancellation_stops_current_step() {
+        // Pre-warm the global cache so the elapsed-time assertion measures pure
+        // cancellation latency rather than first-time shell-env capture (which
+        // can take seconds under parallel-test load).
+        let _ = shell_env_cache()
+            .get(&std::env::temp_dir())
+            .await
+            .expect("warm cache");
+
         let cancel_token = CancellationToken::new();
         let cancel_after_start = cancel_token.clone();
         tokio::spawn(async move {
@@ -2405,6 +2413,161 @@ mod tests {
             Ok(PipelineCommandResult::Cancelled { .. })
         ));
         assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    // ---------------------------------------------------------------------
+    // Integration: `run_pipeline_command_with_cache` snapshot/fallback paths
+    //
+    // These tests inject a hermetic `ShellEnvCache` via the test seam so
+    // pipeline behaviour can be exercised without depending on the
+    // developer's `$SHELL` or `.zshrc`.
+    // ---------------------------------------------------------------------
+
+    /// Write `content` to a 0755 tempfile suitable for use as `$SHELL`.
+    #[cfg(unix)]
+    fn write_fake_shell(content: &str) -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+        let mut file = tempfile::Builder::new()
+            .prefix("staged-fake-shell-")
+            .suffix(".sh")
+            .tempfile()
+            .expect("create fake shell tempfile");
+        file.write_all(content.as_bytes()).expect("write script");
+        file.flush().expect("flush script");
+        let mut perms = std::fs::metadata(file.path()).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(file.path(), perms).expect("chmod 755");
+        file
+    }
+
+    /// G20: When the cache produces a snapshot, its env vars reach the child
+    /// process spawned for the pipeline step.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn snapshot_path_cached_env_reaches_child() {
+        let shell = write_fake_shell(
+            "#!/bin/sh\nPATH=/usr/bin:/bin\nPIPELINE_TEST_TOKEN=snapshot-marker-abc\nexport PATH PIPELINE_TEST_TOKEN\nexec /bin/sh -s\n",
+        );
+        let cache = ShellEnvCache::with_shell_and_ttl(
+            shell.path().to_path_buf(),
+            Duration::from_secs(3600),
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let cancel = CancellationToken::new();
+        let result = run_pipeline_command_with_cache(
+            &cache,
+            "echo $PIPELINE_TEST_TOKEN",
+            &dir.path().to_path_buf(),
+            &cancel,
+        )
+        .await
+        .expect("run_pipeline_command_with_cache should succeed");
+
+        let output = match result {
+            PipelineCommandResult::Completed(o) => o,
+            PipelineCommandResult::Cancelled { .. } => panic!("unexpected cancellation"),
+        };
+        assert!(output.status.success(), "command should succeed");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("snapshot-marker-abc"),
+            "child must see PIPELINE_TEST_TOKEN from the snapshot; stdout={stdout:?}"
+        );
+    }
+
+    /// G21: When the cache returns `Err`, `run_pipeline_command_with_cache`
+    /// falls back to `sh -lc` and the command still runs.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fallback_path_when_cache_returns_err() {
+        let shell = write_fake_shell("#!/bin/sh\nexit 1\n");
+        let cache = ShellEnvCache::with_shell_and_ttl(
+            shell.path().to_path_buf(),
+            Duration::from_secs(3600),
+        );
+        let dir = std::env::temp_dir();
+
+        let cancel = CancellationToken::new();
+        let result = run_pipeline_command_with_cache(&cache, "echo fallback-ok", &dir, &cancel)
+            .await
+            .expect("fallback path should still spawn and run");
+
+        let output = match result {
+            PipelineCommandResult::Completed(o) => o,
+            PipelineCommandResult::Cancelled { .. } => panic!("unexpected cancellation"),
+        };
+        assert!(output.status.success(), "fallback sh -lc should succeed");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("fallback-ok"),
+            "fallback should still produce the echo output; stdout={stdout:?}"
+        );
+    }
+
+    /// G22: Cancellation still terminates the child even after a snapshot is
+    /// applied — guards against a future refactor that loses `kill_on_drop`
+    /// or the cancellation `select!` arm.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancellation_under_snapshot_branch() {
+        let shell =
+            write_fake_shell("#!/bin/sh\nPATH=/usr/bin:/bin\nexport PATH\nexec /bin/sh -s\n");
+        let cache = ShellEnvCache::with_shell_and_ttl(
+            shell.path().to_path_buf(),
+            Duration::from_secs(3600),
+        );
+        let dir = std::env::temp_dir();
+
+        let cancel_token = CancellationToken::new();
+        let cancel_after_start = cancel_token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            cancel_after_start.cancel();
+        });
+
+        let started = std::time::Instant::now();
+        let result =
+            run_pipeline_command_with_cache(&cache, "sleep 5 & wait", &dir, &cancel_token).await;
+        assert!(matches!(
+            result,
+            Ok(PipelineCommandResult::Cancelled { .. })
+        ));
+        assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    /// G23: `current_dir` survives `apply_to` — `pwd` reports the directory
+    /// passed to `run_pipeline_command_with_cache`, not the test's cwd.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn current_dir_survives_apply_to() {
+        let shell =
+            write_fake_shell("#!/bin/sh\nPATH=/usr/bin:/bin\nexport PATH\nexec /bin/sh -s\n");
+        let cache = ShellEnvCache::with_shell_and_ttl(
+            shell.path().to_path_buf(),
+            Duration::from_secs(3600),
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+        let resolved = std::fs::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_owned());
+
+        let cancel = CancellationToken::new();
+        let result = run_pipeline_command_with_cache(&cache, "pwd", &resolved, &cancel)
+            .await
+            .expect("pwd should succeed");
+        let output = match result {
+            PipelineCommandResult::Completed(o) => o,
+            PipelineCommandResult::Cancelled { .. } => panic!("unexpected cancellation"),
+        };
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let reported = stdout.trim();
+        let reported_path = std::fs::canonicalize(PathBuf::from(reported))
+            .unwrap_or_else(|_| PathBuf::from(reported));
+        assert_eq!(
+            reported_path, resolved,
+            "child should run in the requested working_dir; pwd reported {reported:?}"
+        );
     }
 
     #[test]

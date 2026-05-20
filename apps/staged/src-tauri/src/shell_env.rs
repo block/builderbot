@@ -414,6 +414,54 @@ fn single_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    // ---------------------------------------------------------------------
+    // Test helpers
+    // ---------------------------------------------------------------------
+
+    /// Write `content` to a 0755 tempfile suitable for use as `$SHELL`.
+    ///
+    /// Hold the returned handle for the test's lifetime — dropping it removes
+    /// the file. Unix-only because we set the executable mode.
+    #[cfg(unix)]
+    fn write_fake_shell(content: &str) -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+        let mut file = tempfile::Builder::new()
+            .prefix("staged-fake-shell-")
+            .suffix(".sh")
+            .tempfile()
+            .expect("create fake shell tempfile");
+        file.write_all(content.as_bytes()).expect("write script");
+        file.flush().expect("flush script");
+        let mut perms = std::fs::metadata(file.path()).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(file.path(), perms).expect("chmod 755");
+        file
+    }
+
+    /// Snapshot the set of `staged-shell-env-*` files currently in temp_dir().
+    /// Used by tempfile-cleanup tests to assert no orphan was created across a
+    /// single capture (set difference, so parallel captures don't interfere).
+    fn snapshot_orphan_paths() -> HashSet<PathBuf> {
+        std::fs::read_dir(std::env::temp_dir())
+            .map(|rd| {
+                rd.flatten()
+                    .filter(|e| {
+                        e.file_name()
+                            .to_string_lossy()
+                            .starts_with("staged-shell-env-")
+                    })
+                    .map(|e| e.path())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    // ---------------------------------------------------------------------
+    // Existing tests (preserved)
+    // ---------------------------------------------------------------------
 
     #[tokio::test]
     async fn captures_path_for_a_real_dir() {
@@ -545,5 +593,431 @@ mod tests {
             .await
             .expect("second caller must not spin");
         assert!(second.is_ok());
+    }
+
+    // ---------------------------------------------------------------------
+    // Wave 1: Pure unit tests (no fake-shell, no concurrency)
+    // ---------------------------------------------------------------------
+
+    /// A1: A `Ready` entry whose `captured_at` is older than `ttl` triggers a
+    /// fresh capture instead of being returned. Exercises the stale-`Ready`
+    /// branch the in-TTL test cannot reach.
+    #[tokio::test]
+    async fn ttl_expiry_triggers_recapture() {
+        let cache = ShellEnvCache::with_ttl(Duration::from_millis(50));
+        let dir = std::env::temp_dir();
+        let first = cache.get(&dir).await.expect("first capture");
+        tokio::time::sleep(Duration::from_millis(75)).await;
+        let second = cache.get(&dir).await.expect("recapture after TTL");
+        assert_ne!(
+            first.captured_at(),
+            second.captured_at(),
+            "TTL expiry must force a fresh capture"
+        );
+        assert!(second.captured_at() > first.captured_at());
+    }
+
+    /// A2: `invalidate_all` empties the internal map and forces both dirs to
+    /// recapture on the next `get`.
+    #[tokio::test]
+    async fn invalidate_all_clears_every_entry() {
+        let cache = ShellEnvCache::new();
+        let dir_a = std::env::temp_dir();
+        let dir_b = tempfile::tempdir().expect("tempdir b");
+
+        let a_first = cache.get(&dir_a).await.expect("capture a");
+        let b_first = cache.get(dir_b.path()).await.expect("capture b");
+
+        cache.invalidate_all();
+        assert!(
+            cache.inner.lock().unwrap().is_empty(),
+            "invalidate_all should empty the map"
+        );
+
+        let a_second = cache.get(&dir_a).await.expect("recapture a");
+        let b_second = cache.get(dir_b.path()).await.expect("recapture b");
+        assert_ne!(a_first.captured_at(), a_second.captured_at());
+        assert_ne!(b_first.captured_at(), b_second.captured_at());
+    }
+
+    /// A3: Two distinct working dirs are cached independently — each second
+    /// `get` hits its own `Ready` entry without recapture.
+    #[tokio::test]
+    async fn different_dirs_cached_independently() {
+        let cache = ShellEnvCache::new();
+        let dir_a = std::env::temp_dir();
+        let dir_b = tempfile::tempdir().expect("tempdir b");
+
+        let a_first = cache.get(&dir_a).await.expect("capture a");
+        let b_first = cache.get(dir_b.path()).await.expect("capture b");
+        // Per-dir cache hits.
+        let a_second = cache.get(&dir_a).await.expect("a hit");
+        let b_second = cache.get(dir_b.path()).await.expect("b hit");
+        assert_eq!(a_first.captured_at(), a_second.captured_at());
+        assert_eq!(b_first.captured_at(), b_second.captured_at());
+        // Distinct captures across dirs.
+        assert_ne!(a_first.captured_at(), b_first.captured_at());
+    }
+
+    /// A4: `invalidate(A)` must not disturb dir B's cached snapshot.
+    #[tokio::test]
+    async fn invalidate_only_affects_target_dir() {
+        let cache = ShellEnvCache::new();
+        let dir_a = std::env::temp_dir();
+        let dir_b = tempfile::tempdir().expect("tempdir b");
+        let a_first = cache.get(&dir_a).await.expect("capture a");
+        let b_first = cache.get(dir_b.path()).await.expect("capture b");
+
+        cache.invalidate(&dir_a);
+
+        let a_second = cache.get(&dir_a).await.expect("recapture a");
+        let b_second = cache
+            .get(dir_b.path())
+            .await
+            .expect("b should still be cached");
+
+        assert_ne!(
+            a_first.captured_at(),
+            a_second.captured_at(),
+            "A should have been recaptured"
+        );
+        assert_eq!(
+            b_first.captured_at(),
+            b_second.captured_at(),
+            "B's snapshot must be unaffected by invalidating A"
+        );
+    }
+
+    /// D13: `apply_to` must call `env_clear` — i.e. any env vars set on the
+    /// `Command` *before* `apply_to` must NOT leak into the child.
+    #[tokio::test]
+    async fn apply_to_clears_existing_env() {
+        let cache = ShellEnvCache::new();
+        let env = cache
+            .get(&std::env::temp_dir())
+            .await
+            .expect("snapshot should succeed");
+        let mut cmd = Command::new("/usr/bin/env");
+        cmd.env("PIPELINE_TEST_SHOULD_NOT_LEAK", "1");
+        env.apply_to(&mut cmd);
+        let output = cmd.output().await.expect("env should run");
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.contains("PIPELINE_TEST_SHOULD_NOT_LEAK"),
+            "apply_to must clear pre-existing env vars (env_clear): stdout = {stdout}"
+        );
+    }
+
+    /// D14: Env vars set *after* `apply_to` win — locks in the docstring
+    /// contract so per-call `extra_env` overrides keep working.
+    #[tokio::test]
+    async fn apply_to_then_env_lets_caller_override() {
+        let cache = ShellEnvCache::new();
+        let env = cache
+            .get(&std::env::temp_dir())
+            .await
+            .expect("snapshot should succeed");
+        let mut cmd = Command::new("/usr/bin/env");
+        env.apply_to(&mut cmd);
+        cmd.env("PATH", "/sentinel");
+        let output = cmd.output().await.expect("env should run");
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("PATH=/sentinel"),
+            "post-apply_to env override must win: stdout = {stdout}"
+        );
+    }
+
+    /// F17: Empty input → empty single-quote pair.
+    #[test]
+    fn single_quote_empty_input() {
+        assert_eq!(single_quote(""), "''");
+    }
+
+    /// F18: Backslashes pass through unchanged — sh single-quotes don't
+    /// interpret backslashes. Locks in current behavior against a future
+    /// "harden the escape" PR that might over-escape.
+    #[test]
+    fn single_quote_backslash_unchanged() {
+        assert_eq!(single_quote(r"a\b"), r"'a\b'");
+    }
+
+    /// F19: Pure quote becomes the three-character close/escape/open dance.
+    #[test]
+    fn single_quote_pure_quote() {
+        assert_eq!(single_quote("'"), "''\\'''");
+    }
+
+    // ---------------------------------------------------------------------
+    // Wave 2: Single-capture mechanics (no concurrency, no fake shell)
+    // ---------------------------------------------------------------------
+
+    /// C11: The `current_dir` is honoured by the spawned shell — `PWD` in the
+    /// captured env matches the directory we asked to capture in.
+    #[tokio::test]
+    async fn working_dir_argument_is_honoured() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Resolve symlinks so the `PWD` the shell reports lines up with what
+        // we expect (macOS's TMPDIR is under a symlink-laden path).
+        let resolved = std::fs::canonicalize(dir.path()).unwrap_or_else(|_| dir.path().to_owned());
+        let cache = ShellEnvCache::new();
+        let env = cache.get(&resolved).await.expect("capture should succeed");
+        let pwd = env
+            .vars()
+            .iter()
+            .find(|(k, _)| k == "PWD")
+            .map(|(_, v)| v.clone())
+            .expect("captured env should include PWD");
+        let pwd_path =
+            std::fs::canonicalize(PathBuf::from(&pwd)).unwrap_or_else(|_| PathBuf::from(&pwd));
+        assert_eq!(
+            pwd_path, resolved,
+            "PWD should match the working_dir argument"
+        );
+    }
+
+    /// C12: `HOME` and `USER` from the parent process are passed through into
+    /// the captured snapshot — guards against `env_clear` accidentally
+    /// dropping the whitelist.
+    #[tokio::test]
+    async fn home_and_user_passed_through() {
+        let cache = ShellEnvCache::new();
+        let env = cache
+            .get(&std::env::temp_dir())
+            .await
+            .expect("snapshot should succeed");
+        let find = |k| {
+            env.vars()
+                .iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.clone())
+        };
+
+        if let Ok(parent_home) = std::env::var("HOME") {
+            if !parent_home.is_empty() {
+                let captured = find("HOME").unwrap_or_default();
+                assert_eq!(
+                    captured, parent_home,
+                    "HOME must round-trip into the snapshot"
+                );
+            }
+        }
+        if let Ok(parent_user) = std::env::var("USER") {
+            if !parent_user.is_empty() {
+                let captured = find("USER").unwrap_or_default();
+                assert_eq!(
+                    captured, parent_user,
+                    "USER must round-trip into the snapshot"
+                );
+            }
+        }
+    }
+
+    /// E15: A successful capture promotes the entry to `Ready` and leaves it
+    /// in the map (not removed, not still `InFlight`). Locks in the
+    /// `promoted = true` semantics.
+    #[tokio::test]
+    async fn promoted_guard_keeps_ready_entry() {
+        let cache = ShellEnvCache::new();
+        let dir = std::env::temp_dir();
+        let _ = cache.get(&dir).await.expect("capture");
+        let map = cache.inner.lock().unwrap();
+        match map.get(&dir) {
+            Some(CachedEntry::Ready(_)) => {}
+            other => panic!(
+                "expected Ready after successful capture, got {:?}",
+                other.is_some()
+            ),
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Wave 3: Concurrency + failure modes (needs fake-shell seam)
+    // ---------------------------------------------------------------------
+
+    /// B5: Concurrent first-callers coalesce through the watch channel — only
+    /// one shell is spawned per (dir, miss) and every caller sees the same
+    /// `captured_at`.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_first_callers_share_one_capture() {
+        let cache = Arc::new(ShellEnvCache::new());
+        let dir = std::env::temp_dir();
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let cache = cache.clone();
+            let dir = dir.clone();
+            handles.push(tokio::spawn(async move { cache.get(&dir).await }));
+        }
+        let mut captured_ats = Vec::new();
+        for h in handles {
+            let env = h.await.expect("task").expect("capture");
+            captured_ats.push(env.captured_at());
+        }
+        let first = captured_ats[0];
+        assert!(
+            captured_ats.iter().all(|c| *c == first),
+            "all coalesced callers should observe the same captured_at: {:?}",
+            captured_ats
+        );
+    }
+
+    /// B6: When the active Capturer is aborted, a parallel Waiter must wake
+    /// (either becoming the next Capturer and succeeding, or seeing a
+    /// recapture-then-Ok) within a bounded timeout — no spin-loop.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn waiter_wakes_when_capturer_cancels() {
+        let cache = Arc::new(ShellEnvCache::new());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_path = dir.path().to_path_buf();
+
+        // First task becomes the Capturer; it inserts InFlight before its
+        // first internal `.await` inside `capture_shell_env`.
+        let capturer = tokio::spawn({
+            let cache = cache.clone();
+            let dir = dir_path.clone();
+            async move { cache.get(&dir).await }
+        });
+        // Give the capturer a chance to insert InFlight.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Second task should arrive as a Waiter on the same InFlight rx.
+        let waiter = tokio::spawn({
+            let cache = cache.clone();
+            let dir = dir_path.clone();
+            async move { tokio::time::timeout(Duration::from_secs(30), cache.get(&dir)).await }
+        });
+        tokio::task::yield_now().await;
+
+        capturer.abort();
+        let _ = capturer.await;
+
+        // Waiter must complete within a bounded time (not spin), and ultimately
+        // succeed because the cancellation evicts InFlight so it can recapture.
+        let waiter_result = waiter.await.expect("waiter task");
+        let inner = waiter_result.expect("waiter must not spin past timeout");
+        assert!(
+            inner.is_ok(),
+            "waiter should ultimately succeed after capturer cancellation: {inner:?}"
+        );
+    }
+
+    /// B7: A failing capture propagates `Err` to all concurrent waiters AND is
+    /// not negative-cached — a subsequent `get` must launch a fresh capture.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn capture_err_propagates_and_is_not_cached() {
+        let shell = write_fake_shell("#!/bin/sh\nexit 1\n");
+        let cache = Arc::new(ShellEnvCache::with_shell_and_ttl(
+            shell.path().to_path_buf(),
+            Duration::from_secs(3600),
+        ));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_path = dir.path().to_path_buf();
+
+        let h1 = tokio::spawn({
+            let cache = cache.clone();
+            let dir = dir_path.clone();
+            async move { cache.get(&dir).await }
+        });
+        let h2 = tokio::spawn({
+            let cache = cache.clone();
+            let dir = dir_path.clone();
+            async move { cache.get(&dir).await }
+        });
+        let (r1, r2) = (h1.await.expect("h1"), h2.await.expect("h2"));
+        assert!(r1.is_err(), "concurrent caller 1 should see Err: {r1:?}");
+        assert!(r2.is_err(), "concurrent caller 2 should see Err: {r2:?}");
+
+        // No negative caching — failures must not persist.
+        {
+            let map = cache.inner.lock().unwrap();
+            assert!(
+                map.get(&dir_path).is_none(),
+                "failed capture must not leave an entry in the cache"
+            );
+        }
+
+        // A third caller spawns a fresh capture (which also fails).
+        let r3 = cache.get(&dir_path).await;
+        assert!(r3.is_err(), "third caller should still see Err: {r3:?}");
+    }
+
+    /// C8: Tempfile is cleaned up after both successful and failing captures.
+    /// Uses set-difference vs. a pre-snapshot so parallel tests don't perturb.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tempfile_cleaned_up_on_success() {
+        let shell =
+            write_fake_shell("#!/bin/sh\nPATH=/usr/bin:/bin\nexport PATH\nexec /bin/sh -s\n");
+        let cache = ShellEnvCache::with_shell_and_ttl(
+            shell.path().to_path_buf(),
+            Duration::from_secs(3600),
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let pre = snapshot_orphan_paths();
+        let env = cache.get(dir.path()).await.expect("capture");
+        assert!(
+            env.vars().iter().any(|(k, _)| k == "PATH"),
+            "fake shell should set PATH"
+        );
+        let post = snapshot_orphan_paths();
+        let new_files: Vec<&PathBuf> = post.difference(&pre).collect();
+        assert!(
+            new_files.is_empty(),
+            "successful capture must not leak tempfiles: {new_files:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tempfile_cleaned_up_on_failure() {
+        let shell = write_fake_shell("#!/bin/sh\nexit 1\n");
+        let cache = ShellEnvCache::with_shell_and_ttl(
+            shell.path().to_path_buf(),
+            Duration::from_secs(3600),
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let pre = snapshot_orphan_paths();
+        let result = cache.get(dir.path()).await;
+        assert!(result.is_err(), "failing fake shell should produce Err");
+        let post = snapshot_orphan_paths();
+        let new_files: Vec<&PathBuf> = post.difference(&pre).collect();
+        assert!(
+            new_files.is_empty(),
+            "failed capture must not leak tempfiles: {new_files:?}"
+        );
+    }
+
+    /// C9: Values containing newlines round-trip through the NUL-delimited
+    /// `env -0` dump — locks in the choice to use NUL framing instead of
+    /// line-based parsing.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn values_with_newlines_round_trip() {
+        let shell = write_fake_shell(
+            "#!/bin/sh\nPATH=/usr/bin:/bin\nWEIRD='line1\nline2'\nexport PATH WEIRD\nexec /bin/sh -s\n",
+        );
+        let cache = ShellEnvCache::with_shell_and_ttl(
+            shell.path().to_path_buf(),
+            Duration::from_secs(3600),
+        );
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let env = cache.get(dir.path()).await.expect("capture");
+        let weird = env
+            .vars()
+            .iter()
+            .find(|(k, _)| k == "WEIRD")
+            .map(|(_, v)| v.clone())
+            .expect("WEIRD must round-trip into the snapshot");
+        assert_eq!(weird, "line1\nline2", "newlines must round-trip verbatim");
     }
 }

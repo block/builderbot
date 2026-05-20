@@ -69,6 +69,30 @@ pub struct ShellEnvCache {
     ttl: Duration,
 }
 
+/// Removes an `InFlight` entry from the cache if its capture future is
+/// dropped (cancellation or panic) before publishing a `Ready` result.
+///
+/// Without this, a cancelled capture would leave a stale `InFlight(rx)` in
+/// the map whose `tx` is gone; subsequent callers would clone the receiver,
+/// wake immediately on `Err`, and spin the outer retry loop forever.
+struct InFlightGuard<'a> {
+    cache: &'a ShellEnvCache,
+    key: &'a Path,
+    promoted: bool,
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        if self.promoted {
+            return;
+        }
+        let mut map = self.cache.inner.lock().unwrap();
+        if matches!(map.get(self.key), Some(CachedEntry::InFlight(_))) {
+            map.remove(self.key);
+        }
+    }
+}
+
 impl ShellEnvCache {
     /// Construct a cache with the default 1h TTL.
     pub fn new() -> Self {
@@ -122,6 +146,15 @@ impl ShellEnvCache {
                     // Fall through to retry.
                 }
                 Action::Capture(tx) => {
+                    // Declared after `tx` (a match binding) so it drops first
+                    // on cancellation/panic: evict the InFlight entry before
+                    // `tx` drops and signals waiters Err. Waiters then retry,
+                    // find no entry, and become the next Capturer.
+                    let mut guard = InFlightGuard {
+                        cache: self,
+                        key: &key,
+                        promoted: false,
+                    };
                     let outcome = capture_shell_env(&key).await;
                     match outcome {
                         Ok(vars) => {
@@ -133,17 +166,12 @@ impl ShellEnvCache {
                                 .lock()
                                 .unwrap()
                                 .insert(key.clone(), CachedEntry::Ready(env.clone()));
+                            guard.promoted = true;
                             let _ = tx.send(Some(Ok(env.clone())));
                             return Ok(env);
                         }
                         Err(err) => {
                             let msg = err.to_string();
-                            {
-                                let mut map = self.inner.lock().unwrap();
-                                if matches!(map.get(&key), Some(CachedEntry::InFlight(_))) {
-                                    map.remove(&key);
-                                }
-                            }
                             let _ = tx.send(Some(Err(msg)));
                             return Err(err);
                         }
@@ -311,5 +339,40 @@ mod tests {
     fn single_quote_escapes_quotes() {
         assert_eq!(single_quote("plain"), "'plain'");
         assert_eq!(single_quote("with 'quote'"), "'with '\\''quote'\\'''");
+    }
+
+    #[tokio::test]
+    async fn cancelled_capture_evicts_stale_inflight() {
+        let cache = Arc::new(ShellEnvCache::new());
+        let dir = std::env::temp_dir();
+
+        // Drive a Capturer just long enough to insert InFlight, then abort it.
+        // On a current_thread runtime, yield_now hands control to the spawned
+        // task; it inserts InFlight before its first internal `.await`, then
+        // parks somewhere inside `capture_shell_env`.
+        let first = tokio::spawn({
+            let cache = cache.clone();
+            let dir = dir.clone();
+            async move { cache.get(&dir).await }
+        });
+        tokio::task::yield_now().await;
+        first.abort();
+        let _ = first.await;
+
+        // The guard's Drop must have evicted the InFlight entry — otherwise
+        // subsequent callers would clone a dead receiver and spin.
+        {
+            let map = cache.inner.lock().unwrap();
+            assert!(
+                !matches!(map.get(&dir), Some(CachedEntry::InFlight(_))),
+                "InFlight entry leaked after capture future was cancelled"
+            );
+        }
+
+        // And a subsequent caller must complete (not spin) within a sane bound.
+        let second = tokio::time::timeout(Duration::from_secs(30), cache.get(&dir))
+            .await
+            .expect("second caller must not spin");
+        assert!(second.is_ok());
     }
 }

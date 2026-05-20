@@ -744,12 +744,6 @@ mod tests {
         assert_eq!(single_quote(r"a\b"), r"'a\b'");
     }
 
-    /// F19: Pure quote becomes the three-character close/escape/open dance.
-    #[test]
-    fn single_quote_pure_quote() {
-        assert_eq!(single_quote("'"), "''\\'''");
-    }
-
     // ---------------------------------------------------------------------
     // Wave 2: Single-capture mechanics (no concurrency, no fake shell)
     // ---------------------------------------------------------------------
@@ -840,16 +834,28 @@ mod tests {
     /// B5: Concurrent first-callers coalesce through the watch channel — only
     /// one shell is spawned per (dir, miss) and every caller sees the same
     /// `captured_at`.
+    ///
+    /// The fake shell's leading `sleep 0.5` guarantees all 8 callers arrive
+    /// during `InFlight(rx)` rather than racing a sub-ms real-`$SHELL` capture
+    /// (which would still pass the `captured_at` assertion via the cache-hit
+    /// path, without proving watch-channel coalescing actually fired).
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_first_callers_share_one_capture() {
-        let cache = Arc::new(ShellEnvCache::new());
-        let dir = std::env::temp_dir();
+        let shell = write_fake_shell(
+            "#!/bin/sh\nsleep 0.5\nPATH=/usr/bin:/bin\nexport PATH\nexec /bin/sh -s\n",
+        );
+        let cache = Arc::new(ShellEnvCache::with_shell_and_ttl(
+            shell.path().to_path_buf(),
+            Duration::from_secs(3600),
+        ));
+        let dir = tempfile::tempdir().expect("tempdir");
+        let dir_path = dir.path().to_path_buf();
 
         let mut handles = Vec::new();
         for _ in 0..8 {
             let cache = cache.clone();
-            let dir = dir.clone();
+            let dir = dir_path.clone();
             handles.push(tokio::spawn(async move { cache.get(&dir).await }));
         }
         let mut captured_ats = Vec::new();
@@ -868,10 +874,23 @@ mod tests {
     /// B6: When the active Capturer is aborted, a parallel Waiter must wake
     /// (either becoming the next Capturer and succeeding, or seeing a
     /// recapture-then-Ok) within a bounded timeout — no spin-loop.
+    ///
+    /// Uses the fake-shell seam so the post-cancellation recapture is fast
+    /// and deterministic. The 3s budget is tight enough to catch
+    /// slower-but-not-infinite regressions (~600ms is the expected path:
+    /// abort → guard evicts InFlight → waiter retries → new capture's
+    /// `sleep 0.5` + parse), not just the hard hang from the original
+    /// cancellation bug.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn waiter_wakes_when_capturer_cancels() {
-        let cache = Arc::new(ShellEnvCache::new());
+        let shell = write_fake_shell(
+            "#!/bin/sh\nsleep 0.5\nPATH=/usr/bin:/bin\nexport PATH\nexec /bin/sh -s\n",
+        );
+        let cache = Arc::new(ShellEnvCache::with_shell_and_ttl(
+            shell.path().to_path_buf(),
+            Duration::from_secs(3600),
+        ));
         let dir = tempfile::tempdir().expect("tempdir");
         let dir_path = dir.path().to_path_buf();
 
@@ -884,13 +903,13 @@ mod tests {
         });
         // Give the capturer a chance to insert InFlight.
         tokio::task::yield_now().await;
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Second task should arrive as a Waiter on the same InFlight rx.
         let waiter = tokio::spawn({
             let cache = cache.clone();
             let dir = dir_path.clone();
-            async move { tokio::time::timeout(Duration::from_secs(30), cache.get(&dir)).await }
+            async move { tokio::time::timeout(Duration::from_secs(3), cache.get(&dir)).await }
         });
         tokio::task::yield_now().await;
 

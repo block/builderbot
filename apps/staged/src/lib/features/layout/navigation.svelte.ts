@@ -15,6 +15,7 @@ import * as commands from '../../api/commands';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { projectsList } from '../projects/projectsSidebarState.svelte';
 import { requestProjectsListRestore } from '../projects/projectsListViewState.svelte';
+import { reposUiEnabled } from '../../featureFlags';
 
 const LAST_PROJECT_STORE_KEY = 'last-viewed-project';
 
@@ -71,6 +72,7 @@ export async function initNavigation(): Promise<void> {
 
 /** Navigate to the repos list view. */
 export function showAllRepos(): void {
+  if (!reposUiEnabled) return;
   showWorkspaceView();
   navigation.selectedProjectId = null;
   navigation.showReposList = true;

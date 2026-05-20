@@ -44,6 +44,7 @@
   import { darkMode } from './lib/stores/isDark.svelte';
   import * as prPollingService from './lib/services/prPollingService';
   import { projectsList } from './lib/features/projects/projectsSidebarState.svelte';
+  import { reposUiEnabled } from './lib/featureFlags';
   import type { StoreIncompatibility } from './lib/types';
 
   const updaterEnabled = import.meta.env.VITE_UPDATER_ENABLED === 'true';
@@ -499,7 +500,7 @@
           </div>
         {:else if navigation.activeView === 'settings'}
           <SettingsPage />
-        {:else if navigation.showReposList}
+        {:else if reposUiEnabled && navigation.showReposList}
           <ReposListView />
         {:else if navigation.selectedProjectId}
           <ProjectHome selectedProjectId={navigation.selectedProjectId} />

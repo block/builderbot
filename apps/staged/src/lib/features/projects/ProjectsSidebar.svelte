@@ -41,6 +41,7 @@
   import ProjectContextMenu from './ProjectContextMenu.svelte';
   import SidebarPinnedRepo from './SidebarPinnedRepo.svelte';
   import * as commands from '../../api/commands';
+  import { reposUiEnabled } from '../../featureFlags';
 
   const devBranch = import.meta.env.VITE_DEV_BRANCH as string | undefined;
 
@@ -219,16 +220,20 @@
   onMount(() => {
     const stopWatchingViewport = watchViewport();
     void hydrateProjectsSidebarState();
-    void loadPinnedRepos();
 
     const onPinnedChanged = () => {
       void loadPinnedRepos();
     };
-    window.addEventListener('staged:pinned-repos-changed', onPinnedChanged);
+    if (reposUiEnabled) {
+      void loadPinnedRepos();
+      window.addEventListener('staged:pinned-repos-changed', onPinnedChanged);
+    }
 
     return () => {
       stopWatchingViewport();
-      window.removeEventListener('staged:pinned-repos-changed', onPinnedChanged);
+      if (reposUiEnabled) {
+        window.removeEventListener('staged:pinned-repos-changed', onPinnedChanged);
+      }
     };
   });
 
@@ -334,7 +339,7 @@
         <div class="state error">{error}</div>
       {:else}
         <div class="projects-list">
-          {#if pinnedRepos.length > 0}
+          {#if reposUiEnabled && pinnedRepos.length > 0}
             <button
               class="project-row all-repos-row"
               class:active={navigation.showReposList}

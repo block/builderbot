@@ -57,6 +57,7 @@
   import { badgeBg, badgeFg, badgeBgHover } from '../../shared/badgeColors';
   import { canDeleteProjectWithoutConfirmation } from './projectDeleteSafety';
   import { viewport } from '../../shared/viewport.svelte';
+  import { reposUiEnabled } from '../../featureFlags';
 
   type FilterKind = 'unread' | 'running' | { repo: string; subpath: string };
 
@@ -357,7 +358,7 @@
     error = null;
     try {
       await repoBadgeStore.loadAll();
-      void loadHomeRepos();
+      if (reposUiEnabled) void loadHomeRepos();
       const loadedProjects = await commands.listProjects();
       projects = loadedProjects;
       setProjects(loadedProjects);
@@ -645,7 +646,7 @@
           onFormOpenChange={(open) => (showNewProjectModal = open)}
         />
       {:else}
-        {#if homeRepos.length > 0}
+        {#if reposUiEnabled && homeRepos.length > 0}
           <div class="repos-section">
             <div class="repos-header">
               <h2 class="repos-title">Repos</h2>

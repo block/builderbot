@@ -1,14 +1,13 @@
 <!--
   RepoCard.svelte — A card for a single repo on the home screen repos row.
 
-  Shows repo short name (colored by badge hue), owner/repo subtitle,
-  latest commit info or a download button for unclonable repos,
-  and a dirty-state indicator.
+  Shows repo short name (colored by badge hue), owner/repo subtitle, a
+  pin/unpin toggle, and either a download button (when the repo has no
+  local clone) or nothing.
 -->
 <script lang="ts">
-  import { Download, AlertTriangle, Plus } from 'lucide-svelte';
+  import { Download, Pin, PinOff } from 'lucide-svelte';
   import type { RepoHomeItem } from '../../types';
-  import { formatRelativeTimeSeconds } from '../../shared/relativeTime.svelte';
   import { darkMode } from '../../stores/isDark.svelte';
   import {
     badgeFg,
@@ -18,37 +17,19 @@
     badgeBorderHover,
   } from '../../shared/badgeColors';
   import Spinner from '../../shared/Spinner.svelte';
+  import * as commands from '../../api/commands';
+  import { alerts } from '../../shared/alerts.svelte';
 
   interface Props {
     repo: RepoHomeItem;
-    onclick: () => void;
     onclone: () => void;
+    onPinChange?: () => void;
   }
 
-  let { repo, onclick, onclone }: Props = $props();
+  let { repo, onclone, onPinChange }: Props = $props();
 
   let cloning = $state(false);
-  let showDirtyPopover = $state(false);
-
-  function handleDirtyClick(e: MouseEvent) {
-    e.stopPropagation();
-    showDirtyPopover = !showDirtyPopover;
-  }
-
-  function closeDirtyPopover(e?: MouseEvent) {
-    e?.stopPropagation();
-    showDirtyPopover = false;
-  }
-
-  function handleAddProjectFromChanges(e: MouseEvent) {
-    e.stopPropagation();
-    showDirtyPopover = false;
-    window.dispatchEvent(
-      new CustomEvent('staged:new-project', {
-        detail: { githubRepo: repo.githubRepo, subpath: repo.subpath },
-      })
-    );
-  }
+  let togglingPin = $state(false);
 
   let subtitle = $derived.by(() => {
     const base = repo.githubRepo;
@@ -69,73 +50,62 @@
     try {
       onclone();
     } finally {
-      // The parent will refresh the repo list after cloning completes,
-      // but reset local state in case the card stays mounted.
       cloning = false;
     }
   }
 
-  function handleCardKeydown(e: KeyboardEvent) {
-    if (e.target !== e.currentTarget) return;
-    if (e.key !== 'Enter' && e.key !== ' ') return;
-    e.preventDefault();
-    onclick();
+  async function handleTogglePin(e: MouseEvent) {
+    e.stopPropagation();
+    if (togglingPin) return;
+    togglingPin = true;
+    try {
+      if (repo.pinned) {
+        await commands.unpinRepo(repo.githubRepo, repo.subpath);
+      } else {
+        await commands.pinRepo(repo.githubRepo, repo.subpath);
+      }
+      onPinChange?.();
+      window.dispatchEvent(new CustomEvent('staged:pinned-repos-changed'));
+    } catch (err) {
+      console.error('[RepoCard] Failed to toggle pin:', err);
+      alerts.show({
+        tone: 'error',
+        title: 'Failed to update pin',
+        message: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      togglingPin = false;
+    }
   }
 </script>
 
 <div
   class="repo-card"
-  role="button"
-  tabindex="0"
   style="--accent: {accentColor}; --card-bg: {bgColor}; --card-bg-hover: {bgHoverColor}; --card-border: {borderColor}; --card-border-hover: {borderHoverColor};"
-  {onclick}
-  onkeydown={handleCardKeydown}
   title={subtitle}
 >
-  {#if repo.isDirty}
-    <button
-      class="dirty-indicator"
-      title="Uncommitted changes on main branch"
-      onclick={handleDirtyClick}
-    >
-      <AlertTriangle size={12} />
-    </button>
-    {#if showDirtyPopover}
-      <button
-        type="button"
-        class="dirty-popover-backdrop"
-        aria-label="Close dirty changes popover"
-        onclick={closeDirtyPopover}
-      ></button>
-      <div
-        class="dirty-popover"
-        role="dialog"
-        aria-label="Dirty changes"
-        tabindex="-1"
-        onclick={(e) => e.stopPropagation()}
-        onkeydown={(e) => e.stopPropagation()}
-      >
-        <p class="dirty-popover-message">
-          Staged maintains the main branch. Uncommitted changes may be lost.
-        </p>
-        <button class="dirty-popover-action" onclick={handleAddProjectFromChanges}>
-          <Plus size={12} />
-          Add project from changes
-        </button>
-      </div>
+  <button
+    class="pin-toggle"
+    class:pinned={repo.pinned}
+    title={repo.pinned ? 'Unpin repo' : 'Pin repo'}
+    onclick={handleTogglePin}
+    disabled={togglingPin}
+  >
+    {#if togglingPin}
+      <Spinner size={14} />
+    {:else if repo.pinned}
+      <Pin size={14} />
+    {:else}
+      <PinOff size={14} />
     {/if}
-  {/if}
-
-  {#if repo.pinned}
-    <span class="pin-indicator" title="Pinned"></span>
-  {/if}
+  </button>
 
   <span class="card-title">{repo.shortName}</span>
 
   <span class="card-subtitle">{subtitle}</span>
 
-  <div class="card-footer">
-    {#if !repo.hasLocalClone}
+  {#if !repo.hasLocalClone}
+    <div class="card-footer">
       <button
         class="download-btn"
         title="Clone repo locally"
@@ -148,17 +118,8 @@
           <Download size={14} />
         {/if}
       </button>
-    {:else if repo.latestCommit}
-      <span class="commit-info">
-        <span class="commit-subject" title={repo.latestCommit.subject}>
-          {repo.latestCommit.subject}
-        </span>
-        <span class="commit-time">
-          {formatRelativeTimeSeconds(repo.latestCommit.timestamp)}
-        </span>
-      </span>
-    {/if}
-  </div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -176,104 +137,46 @@
     background: var(--card-bg);
     color: inherit;
     text-align: left;
-    cursor: pointer;
     transition: all 0.15s ease;
     box-sizing: border-box;
   }
 
-  .repo-card:hover {
-    background: var(--card-bg-hover);
-    border-color: var(--card-border-hover);
-  }
-
-  .repo-card:focus-visible {
-    outline: 2px solid var(--ui-accent);
-    outline-offset: 2px;
-  }
-
-  .pin-indicator {
+  .pin-toggle {
     position: absolute;
-    top: 8px;
-    right: 8px;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--accent);
-    opacity: 0.6;
-  }
-
-  .dirty-indicator {
-    position: absolute;
-    top: 7px;
-    right: 7px;
-    color: var(--ui-warning, #e5a100);
+    top: 6px;
+    right: 6px;
     display: flex;
     align-items: center;
-    background: none;
-    border: none;
-    padding: 2px;
-    border-radius: 4px;
-    cursor: pointer;
-    z-index: 2;
-    transition: background 0.12s ease;
-  }
-
-  .dirty-indicator:hover {
-    background: var(--bg-hover);
-  }
-
-  .dirty-popover-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 99;
-    border: none;
-    background: transparent;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
     padding: 0;
-    cursor: default;
-  }
-
-  .dirty-popover {
-    position: absolute;
-    top: 24px;
-    right: 4px;
-    z-index: 100;
-    width: 220px;
-    padding: 10px 12px;
-    background: var(--bg-chrome);
-    border: 1px solid var(--border-muted);
-    border-radius: 8px;
-    box-shadow: var(--shadow-elevated);
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .dirty-popover-message {
-    margin: 0;
-    font-size: var(--size-xs);
-    color: var(--text-secondary);
-    line-height: 1.4;
-  }
-
-  .dirty-popover-action {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 5px 8px;
-    border: 1px solid var(--border-subtle);
+    border: none;
     border-radius: 6px;
     background: transparent;
-    color: var(--text-primary);
-    font-size: var(--size-xs);
-    font-weight: 500;
+    color: var(--text-faint);
     cursor: pointer;
-    transition: all 0.12s ease;
-    white-space: nowrap;
+    transition: all 0.15s ease;
+    z-index: 2;
   }
 
-  .dirty-popover-action:hover {
+  .pin-toggle:hover:not(:disabled) {
     background: var(--bg-hover);
-    border-color: var(--border-muted);
+    color: var(--text-primary);
+  }
+
+  .pin-toggle.pinned {
+    color: var(--accent);
+  }
+
+  .pin-toggle.pinned:hover:not(:disabled) {
+    color: var(--accent);
+    background: var(--bg-hover);
+  }
+
+  .pin-toggle:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
 
   .card-title {
@@ -283,7 +186,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    padding-right: 16px;
+    padding-right: 28px;
   }
 
   .card-subtitle {
@@ -301,27 +204,6 @@
     display: flex;
     align-items: center;
     min-height: 20px;
-  }
-
-  .commit-info {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    overflow: hidden;
-    width: 100%;
-  }
-
-  .commit-subject {
-    font-size: var(--size-xs);
-    color: var(--text-secondary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .commit-time {
-    font-size: 10px;
-    color: var(--text-faint);
   }
 
   .download-btn {

@@ -193,16 +193,17 @@ impl Store {
     /// sorted by project count descending (number of projects using that repo+subpath).
     pub fn list_repos_for_home(&self) -> Result<Vec<RepoBadge>, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(&format!(
-            "SELECT {BADGE_COLUMNS}
+        let mut stmt = conn.prepare(
+            "SELECT rb.github_repo, rb.subpath, rb.short_name, rb.hue, rb.created_at,
+                    rb.pinned, rb.pin_sort_order, rb.default_branch
              FROM repo_badges rb
              LEFT JOIN (
                  SELECT github_repo, subpath, COUNT(*) AS project_count
                  FROM project_repos
                  GROUP BY github_repo, subpath
              ) pc ON rb.github_repo = pc.github_repo AND rb.subpath = pc.subpath
-             ORDER BY rb.pinned DESC, rb.pin_sort_order ASC, COALESCE(pc.project_count, 0) DESC"
-        ))?;
+             ORDER BY rb.pinned DESC, rb.pin_sort_order ASC, COALESCE(pc.project_count, 0) DESC",
+        )?;
         let rows = stmt.query_map([], row_to_badge)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -216,7 +217,9 @@ impl Store {
     ) -> Result<Vec<(String, Option<String>, bool, bool)>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT rb.github_repo, rb.default_branch, rb.pinned,
+            "SELECT rb.github_repo,
+                    MAX(rb.default_branch) AS default_branch,
+                    MAX(rb.pinned) AS pinned,
                     EXISTS(SELECT 1 FROM project_repos pr WHERE pr.github_repo = rb.github_repo) AS has_projects
              FROM repo_badges rb
              GROUP BY rb.github_repo",

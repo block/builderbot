@@ -252,14 +252,10 @@ export interface RepoBadge {
   defaultBranch: string | null;
 }
 
-/** A repo badge enriched with git state for the home screen. */
+/** A repo badge enriched with clone-state for the home screen. */
 export interface RepoHomeItem extends RepoBadge {
   /** Whether this repo has a local clone on disk. */
   hasLocalClone: boolean;
-  /** Latest commit on the default branch (if local clone exists). */
-  latestCommit: CommitTimelineItem | null;
-  /** Whether the default branch worktree has uncommitted changes. */
-  isDirty: boolean;
 }
 
 /** Timeline of commits on a repo's default branch. */

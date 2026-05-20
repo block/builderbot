@@ -202,7 +202,7 @@ pub struct BranchTimeline {
     pub git_state: Option<git::BranchGitState>,
 }
 
-/// A repo badge enriched with git state for the home screen.
+/// A repo badge enriched with clone-state for the home screen.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoHomeItem {
@@ -210,11 +210,6 @@ pub struct RepoHomeItem {
     pub badge: store::RepoBadge,
     /// Whether this repo has a local clone on disk.
     pub has_local_clone: bool,
-    /// Latest commit on the default branch (if local clone exists).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub latest_commit: Option<CommitTimelineItem>,
-    /// Whether the default branch worktree has uncommitted changes.
-    pub is_dirty: bool,
 }
 
 /// Timeline of commits on a repo's default branch.
@@ -1139,68 +1134,12 @@ async fn list_repos_for_home(
         let items: Vec<RepoHomeItem> = badges
             .into_iter()
             .map(|badge| {
-                let clone_path = crate::paths::clone_path_for(&badge.github_repo);
-                let has_local_clone = clone_path
-                    .as_ref()
+                let has_local_clone = crate::paths::clone_path_for(&badge.github_repo)
                     .map(|p| p.join(".git").exists())
                     .unwrap_or(false);
-
-                let (latest_commit, is_dirty) = if has_local_clone {
-                    if let Some(ref cp) = clone_path {
-                        let default_branch = badge.default_branch.as_deref().unwrap_or("main");
-                        let origin_ref = format!("origin/{default_branch}");
-
-                        // Get latest commit on the default branch
-                        let latest = git::cli_run(
-                            cp,
-                            &["log", "-1", "--format=%H|%h|%s|%an|%ae|%ct", &origin_ref],
-                        )
-                        .ok()
-                        .and_then(|output| {
-                            let line = output.trim();
-                            if line.is_empty() {
-                                return None;
-                            }
-                            let parts: Vec<&str> = line.splitn(6, '|').collect();
-                            if parts.len() >= 6 {
-                                Some(CommitTimelineItem {
-                                    id: None,
-                                    sha: parts[0].to_string(),
-                                    short_sha: parts[1].to_string(),
-                                    subject: parts[2].to_string(),
-                                    author: parts[3].to_string(),
-                                    author_email: parts[4].to_string(),
-                                    timestamp: parts[5].parse().unwrap_or(0),
-                                    order: 0,
-                                    session_id: None,
-                                    session_status: None,
-                                    completion_reason: None,
-                                    is_own_commit: false,
-                                })
-                            } else {
-                                None
-                            }
-                        });
-
-                        // Check dirty status
-                        let dirty = git::cli_run(cp, &["status", "--porcelain"])
-                            .ok()
-                            .map(|output| !output.trim().is_empty())
-                            .unwrap_or(false);
-
-                        (latest, dirty)
-                    } else {
-                        (None, false)
-                    }
-                } else {
-                    (None, false)
-                };
-
                 RepoHomeItem {
                     badge,
                     has_local_clone,
-                    latest_commit,
-                    is_dirty,
                 }
             })
             .collect();

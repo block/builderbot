@@ -11,7 +11,6 @@
   import TopBar from './lib/features/layout/TopBar.svelte';
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
   import ProjectsList from './lib/features/projects/ProjectsList.svelte';
-  import RepoDetailView from './lib/features/projects/RepoDetailView.svelte';
   import ReposListView from './lib/features/projects/ReposListView.svelte';
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
   import SettingsPage from './lib/features/settings/SettingsPage.svelte';
@@ -500,11 +499,6 @@
           </div>
         {:else if navigation.activeView === 'settings'}
           <SettingsPage />
-        {:else if navigation.selectedRepo}
-          <RepoDetailView
-            githubRepo={navigation.selectedRepo.githubRepo}
-            subpath={navigation.selectedRepo.subpath}
-          />
         {:else if navigation.showReposList}
           <ReposListView />
         {:else if navigation.selectedProjectId}

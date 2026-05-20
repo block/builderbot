@@ -41,7 +41,6 @@
   import ProjectContextMenu from './ProjectContextMenu.svelte';
   import SidebarPinnedRepo from './SidebarPinnedRepo.svelte';
   import * as commands from '../../api/commands';
-  import { listenToEvent } from '../../transport';
 
   const devBranch = import.meta.env.VITE_DEV_BRANCH as string | undefined;
 
@@ -222,22 +221,14 @@
     void hydrateProjectsSidebarState();
     void loadPinnedRepos();
 
-    // Listen for repo sync updates to refresh dirty state in real-time
-    const unlistenRepoSync = listenToEvent<{ githubRepo: string; isDirty: boolean }>(
-      'repo-sync-update',
-      (payload) => {
-        const idx = pinnedRepos.findIndex((r) => r.githubRepo === payload.githubRepo);
-        if (idx !== -1) {
-          const updated = [...pinnedRepos];
-          updated[idx] = { ...updated[idx], isDirty: payload.isDirty };
-          pinnedRepos = updated;
-        }
-      }
-    );
+    const onPinnedChanged = () => {
+      void loadPinnedRepos();
+    };
+    window.addEventListener('staged:pinned-repos-changed', onPinnedChanged);
 
     return () => {
       stopWatchingViewport();
-      unlistenRepoSync();
+      window.removeEventListener('staged:pinned-repos-changed', onPinnedChanged);
     };
   });
 

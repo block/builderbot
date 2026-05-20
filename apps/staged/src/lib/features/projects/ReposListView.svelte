@@ -10,7 +10,7 @@
   import { ArrowLeft, Plus, Pin, PinOff, Search, Download } from 'lucide-svelte';
   import type { RepoHomeItem } from '../../types';
   import * as commands from '../../api/commands';
-  import { goHome, selectRepo } from '../layout/navigation.svelte';
+  import { goHome } from '../layout/navigation.svelte';
   import { darkMode } from '../../stores/isDark.svelte';
   import {
     badgeFg,
@@ -19,9 +19,7 @@
     badgeBorder,
     badgeBorderHover,
   } from '../../shared/badgeColors';
-  import { formatRelativeTimeSeconds } from '../../shared/relativeTime.svelte';
   import { alerts } from '../../shared/alerts.svelte';
-  import { listenToEvent } from '../../transport';
   import Spinner from '../../shared/Spinner.svelte';
   import ProjectsSidebar from './ProjectsSidebar.svelte';
   import PinRepoModal from './PinRepoModal.svelte';
@@ -51,23 +49,6 @@
 
   onMount(() => {
     loadRepos();
-
-    // Listen for repo sync updates to refresh dirty state
-    const unlistenRepoSync = listenToEvent<{ githubRepo: string; isDirty: boolean }>(
-      'repo-sync-update',
-      (payload) => {
-        const idx = repos.findIndex((r) => r.githubRepo === payload.githubRepo);
-        if (idx !== -1) {
-          const updated = [...repos];
-          updated[idx] = { ...updated[idx], isDirty: payload.isDirty };
-          repos = updated;
-        }
-      }
-    );
-
-    return () => {
-      unlistenRepoSync();
-    };
   });
 
   async function loadRepos() {
@@ -96,6 +77,7 @@
         await commands.pinRepo(repo.githubRepo, repo.subpath);
       }
       await loadRepos();
+      window.dispatchEvent(new CustomEvent('staged:pinned-repos-changed'));
     } catch (e) {
       console.error('[ReposListView] Failed to toggle pin:', e);
       const message = e instanceof Error ? e.message : String(e);
@@ -136,17 +118,6 @@
     const base = repo.githubRepo;
     if (repo.subpath) return `${base}/${repo.subpath}`;
     return base;
-  }
-
-  function openRepo(repo: RepoHomeItem) {
-    selectRepo(repo.githubRepo, repo.subpath);
-  }
-
-  function handleRepoCardKeydown(e: KeyboardEvent, repo: RepoHomeItem) {
-    if (e.target !== e.currentTarget) return;
-    if (e.key !== 'Enter' && e.key !== ' ') return;
-    e.preventDefault();
-    openRepo(repo);
   }
 </script>
 
@@ -197,11 +168,7 @@
             <div class="repo-card-wrapper">
               <div
                 class="repo-card"
-                role="button"
-                tabindex="0"
                 style="--accent: {accent}; --card-bg: {bg}; --card-bg-hover: {bgHover}; --card-border: {border}; --card-border-hover: {borderHover};"
-                onclick={() => openRepo(repo)}
-                onkeydown={(e) => handleRepoCardKeydown(e, repo)}
                 title={subtitle(repo)}
               >
                 <button
@@ -223,8 +190,8 @@
                 <span class="card-title">{repo.shortName}</span>
                 <span class="card-subtitle">{subtitle(repo)}</span>
 
-                <div class="card-footer">
-                  {#if !repo.hasLocalClone}
+                {#if !repo.hasLocalClone}
+                  <div class="card-footer">
                     <button
                       class="download-btn"
                       title="Clone repo locally"
@@ -237,17 +204,8 @@
                         <Download size={14} />
                       {/if}
                     </button>
-                  {:else if repo.latestCommit}
-                    <span class="commit-info">
-                      <span class="commit-subject" title={repo.latestCommit.subject}>
-                        {repo.latestCommit.subject}
-                      </span>
-                      <span class="commit-time">
-                        {formatRelativeTimeSeconds(repo.latestCommit.timestamp)}
-                      </span>
-                    </span>
-                  {/if}
-                </div>
+                  </div>
+                {/if}
               </div>
               {#if repo.pinned}
                 <div class="card-label">Pinned</div>
@@ -423,19 +381,8 @@
     border-radius: 10px;
     background: var(--card-bg);
     color: inherit;
-    cursor: pointer;
     transition: all 0.15s ease;
     box-sizing: border-box;
-  }
-
-  .repo-card:hover {
-    background: var(--card-bg-hover);
-    border-color: var(--card-border-hover);
-  }
-
-  .repo-card:focus-visible {
-    outline: 2px solid var(--ui-accent);
-    outline-offset: 2px;
   }
 
   .pin-toggle {
@@ -501,27 +448,6 @@
     display: flex;
     align-items: center;
     min-height: 20px;
-  }
-
-  .commit-info {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    overflow: hidden;
-    width: 100%;
-  }
-
-  .commit-subject {
-    font-size: var(--size-xs);
-    color: var(--text-secondary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .commit-time {
-    font-size: 10px;
-    color: var(--text-faint);
   }
 
   .download-btn {

@@ -34,7 +34,7 @@
   } from '../../shared/utils';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
-  import { selectProject, selectRepo, showAllRepos } from '../layout/navigation.svelte';
+  import { selectProject, showAllRepos } from '../layout/navigation.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import ProjectsSidebar from './ProjectsSidebar.svelte';
   import ProjectContextMenu from './ProjectContextMenu.svelte';
@@ -342,19 +342,6 @@
       }
     );
 
-    // Listen for repo sync updates to refresh dirty state in real-time
-    const unlistenRepoSync = listenToEvent<{ githubRepo: string; isDirty: boolean }>(
-      'repo-sync-update',
-      (payload) => {
-        const idx = homeRepos.findIndex((r) => r.githubRepo === payload.githubRepo);
-        if (idx !== -1) {
-          const updated = [...homeRepos];
-          updated[idx] = { ...updated[idx], isDirty: payload.isDirty };
-          homeRepos = updated;
-        }
-      }
-    );
-
     return () => {
       projectRunActionsStore.stopListening();
       window.removeEventListener('staged:new-project', onNewProject);
@@ -362,7 +349,6 @@
       window.removeEventListener('staged:project-delete-end', onProjectDeleteEnd);
       unlistenPrStatus();
       unlistenSessionStatus();
-      unlistenRepoSync();
     };
   });
 
@@ -669,8 +655,8 @@
               {#each homeRepos as repo (repo.githubRepo + ':' + repo.subpath)}
                 <RepoCard
                   {repo}
-                  onclick={() => selectRepo(repo.githubRepo, repo.subpath)}
                   onclone={() => handleCloneRepo(repo)}
+                  onPinChange={loadHomeRepos}
                 />
               {/each}
             </div>

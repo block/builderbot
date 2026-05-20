@@ -2,12 +2,11 @@
   ReposListView.svelte - Full grid view of all repos with search and pin management.
 
   Shows pinned repos first (by sort order), then unpinned (by project count).
-  Each card has a pin/unpin toggle. Includes a search input for filtering
-  and an "Add repo" button to search GitHub and pin new repos.
+  Each card has a pin/unpin toggle. Includes a search input for filtering.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { ArrowLeft, Plus, Pin, PinOff, Search, Download } from 'lucide-svelte';
+  import { ArrowLeft, Pin, PinOff, Search, Download } from 'lucide-svelte';
   import type { RepoHomeItem } from '../../types';
   import * as commands from '../../api/commands';
   import { goHome } from '../layout/navigation.svelte';
@@ -22,12 +21,10 @@
   import { alerts } from '../../shared/alerts.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import ProjectsSidebar from './ProjectsSidebar.svelte';
-  import PinRepoModal from './PinRepoModal.svelte';
 
   let repos = $state<RepoHomeItem[]>([]);
   let loading = $state(true);
   let searchQuery = $state('');
-  let showPinRepoModal = $state(false);
   let togglingPin = $state<Set<string>>(new Set());
   let cloningRepos = $state<Set<string>>(new Set());
   let searchInputEl = $state<HTMLInputElement | null>(null);
@@ -109,11 +106,6 @@
     }
   }
 
-  function handleRepoPinned() {
-    showPinRepoModal = false;
-    void loadRepos();
-  }
-
   function subtitle(repo: RepoHomeItem): string {
     const base = repo.githubRepo;
     if (repo.subpath) return `${base}/${repo.subpath}`;
@@ -131,10 +123,6 @@
           <ArrowLeft size={16} />
         </button>
         <h1>Repos</h1>
-        <button class="add-repo-btn" onclick={() => (showPinRepoModal = true)}>
-          <Plus size={14} />
-          Add repo
-        </button>
       </div>
 
       <div class="search-row">
@@ -155,7 +143,7 @@
       {:else if filteredRepos.length === 0 && searchQuery.trim()}
         <div class="state">No repos matching "{searchQuery}"</div>
       {:else if filteredRepos.length === 0}
-        <div class="state">No repos yet. Add a repo to get started.</div>
+        <div class="state">No repos yet.</div>
       {:else}
         <div class="repos-grid">
           {#each filteredRepos as repo (repoKey(repo))}
@@ -217,10 +205,6 @@
     </div>
   </div>
 </div>
-
-{#if showPinRepoModal}
-  <PinRepoModal onPinned={handleRepoPinned} onClose={() => (showPinRepoModal = false)} />
-{/if}
 
 <style>
   .repos-list-page {
@@ -285,26 +269,6 @@
   .back-btn:hover {
     color: var(--text-primary);
     background: var(--bg-hover);
-  }
-
-  .add-repo-btn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 14px;
-    border: none;
-    border-radius: 8px;
-    background-color: var(--bg-elevated);
-    color: var(--text-primary);
-    font-size: var(--size-sm);
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .add-repo-btn:hover {
-    color: var(--text-primary);
-    background-color: var(--bg-hover);
   }
 
   .search-row {

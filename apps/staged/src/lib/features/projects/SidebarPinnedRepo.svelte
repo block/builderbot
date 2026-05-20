@@ -43,6 +43,7 @@
 
   let contextMenu = $state<ReturnType<typeof ContextMenu> | undefined>();
   let openerApps = $state<OpenerApp[]>([]);
+  let clonePath = $state<string | null>(null);
   let cloning = $state(false);
   let dragging = $state(false);
   let dragOver = $state(false);
@@ -62,6 +63,10 @@
   onMount(() => {
     if (repo.hasLocalClone) {
       getAvailableOpeners().then((apps) => (openerApps = apps));
+      commands
+        .getRepoClonePath(repo.githubRepo)
+        .then((path) => (clonePath = path))
+        .catch((e) => console.error('[SidebarPinnedRepo] Failed to resolve clone path:', e));
     }
   });
 
@@ -108,7 +113,9 @@
 
     const items: MenuItem[] = [];
 
-    if (repo.hasLocalClone) {
+    if (repo.hasLocalClone && clonePath) {
+      const path = clonePath;
+
       // Open-in submenu
       if (openerApps.length > 0) {
         items.push({
@@ -120,10 +127,8 @@
             label: app.name,
             iconSrc: app.icon ?? undefined,
             onSelect: async () => {
-              // Derive path from githubRepo — best effort until backend provides it
               try {
-                // Use the repo's githubRepo slug to compute expected path
-                await openInApp(`~/.staged/clones/${repo.githubRepo}`, app.id);
+                await openInApp(path, app.id);
               } catch (e) {
                 alerts.show({
                   tone: 'error',
@@ -142,7 +147,7 @@
         type: 'action',
         label: 'Copy Path',
         icon: Copy,
-        onSelect: () => copyPathToClipboard(`~/.staged/clones/${repo.githubRepo}`),
+        onSelect: () => copyPathToClipboard(path),
       });
 
       items.push({ type: 'separator' });

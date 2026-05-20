@@ -1353,6 +1353,18 @@ async fn clone_repo_locally(
     Ok(default_branch)
 }
 
+/// Return the canonical absolute path where a repo's local clone lives.
+///
+/// This is the same path used by `ensure_local_clone` and background sync,
+/// regardless of whether the clone currently exists on disk. The frontend
+/// uses this for "Open in…" and "Copy Path" actions on pinned repo cards.
+#[tauri::command(rename_all = "camelCase")]
+fn get_repo_clone_path(github_repo: String) -> Result<String, String> {
+    let path = crate::paths::clone_path_for(&github_repo)
+        .ok_or_else(|| "Cannot determine clone path (no home directory)".to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// Build the prompt for AI short name generation.
 fn build_badge_prompt(
     existing_badges: &[store::RepoBadge],
@@ -2122,6 +2134,7 @@ pub fn run() {
             detect_default_branch,
             get_repo_default_branch_timeline,
             clone_repo_locally,
+            get_repo_clone_path,
             // GitHub
             github_commands::list_github_orgs,
             github_commands::list_github_repos,

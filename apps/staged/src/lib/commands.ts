@@ -1189,3 +1189,8 @@ export function getRepoDefaultBranchTimeline(
 export function cloneRepoLocally(githubRepo: string): Promise<string> {
   return invokeCommand('clone_repo_locally', { githubRepo });
 }
+
+/** Resolve the absolute filesystem path where a repo's local clone lives. */
+export function getRepoClonePath(githubRepo: string): Promise<string> {
+  return invokeCommand('get_repo_clone_path', { githubRepo });
+}

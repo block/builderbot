@@ -988,6 +988,12 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             emit_to_all(&state.app_handle, "repo-cloned", &github_repo);
             Ok(serde_json::to_value(default_branch).unwrap())
         }
+        "get_repo_clone_path" => {
+            let github_repo: String = arg(&args, "githubRepo")?;
+            let path = crate::paths::clone_path_for(&github_repo)
+                .ok_or_else(|| "Cannot determine clone path (no home directory)".to_string())?;
+            Ok(serde_json::to_value(path.to_string_lossy().into_owned()).unwrap())
+        }
 
         // =====================================================================
         // GitHub commands

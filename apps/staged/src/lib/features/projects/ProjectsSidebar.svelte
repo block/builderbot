@@ -366,9 +366,7 @@
           {#if showAllProjectsRow}
             <button
               class="project-row all-projects-row"
-              class:active={navigation.selectedProjectId === null &&
-                !navigation.showReposList &&
-                !navigation.selectedRepo}
+              class:active={navigation.selectedProjectId === null && !navigation.showReposList}
               onclick={openAllProjects}
               title="Show all projects"
             >

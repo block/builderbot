@@ -55,6 +55,15 @@ impl ShellEnv {
             cmd.env(k, v);
         }
     }
+
+    /// Std-process variant of [`apply_to`] for synchronous callers (notably
+    /// `git/cli.rs::run`).
+    pub fn apply_to_std(&self, cmd: &mut std::process::Command) {
+        cmd.env_clear();
+        for (k, v) in self.vars.iter() {
+            cmd.env(k, v);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -67,6 +76,7 @@ enum CachedEntry {
 pub struct ShellEnvCache {
     inner: Mutex<HashMap<PathBuf, CachedEntry>>,
     ttl: Duration,
+    shell: PathBuf,
 }
 
 /// Removes an `InFlight` entry from the cache if its capture future is
@@ -100,9 +110,20 @@ impl ShellEnvCache {
     }
 
     pub fn with_ttl(ttl: Duration) -> Self {
+        Self::with_shell_and_ttl(resolve_shell(), ttl)
+    }
+
+    /// Construct a cache that spawns `shell` instead of `$SHELL`. Tests use this
+    /// to point at a hermetic script; production code should use [`new`] or
+    /// [`with_ttl`].
+    ///
+    /// [`new`]: ShellEnvCache::new
+    /// [`with_ttl`]: ShellEnvCache::with_ttl
+    pub fn with_shell_and_ttl(shell: PathBuf, ttl: Duration) -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
             ttl,
+            shell,
         }
     }
 
@@ -155,7 +176,7 @@ impl ShellEnvCache {
                         key: &key,
                         promoted: false,
                     };
-                    let outcome = capture_shell_env(&key).await;
+                    let outcome = capture_shell_env(&key, &self.shell).await;
                     match outcome {
                         Ok(vars) => {
                             let env = ShellEnv {
@@ -181,6 +202,41 @@ impl ShellEnvCache {
         }
     }
 
+    /// Synchronous variant of [`get`] for sync callers like `git/cli.rs::run`.
+    ///
+    /// Returns a `Ready` snapshot if one is present and fresh; otherwise
+    /// spawns a *blocking* `$SHELL -ils` capture and stores the result.
+    ///
+    /// Does **not** coordinate with `InFlight` async captures — if a sync
+    /// caller races an async caller for the same dir, both will capture
+    /// independently and the second writer wins. Semantically safe (both
+    /// captures produce equivalent env); only cost is duplicate shell-init
+    /// work in that narrow first-call window.
+    ///
+    /// [`get`]: ShellEnvCache::get
+    pub fn get_blocking(&self, working_dir: &Path) -> io::Result<ShellEnv> {
+        let key = working_dir.to_path_buf();
+        {
+            let map = self.inner.lock().unwrap();
+            if let Some(CachedEntry::Ready(env)) = map.get(&key) {
+                if env.captured_at.elapsed() < self.ttl {
+                    return Ok(env.clone());
+                }
+            }
+        }
+
+        let vars = capture_shell_env_blocking(&key, &self.shell)?;
+        let env = ShellEnv {
+            vars: Arc::new(vars),
+            captured_at: Instant::now(),
+        };
+        self.inner
+            .lock()
+            .unwrap()
+            .insert(key, CachedEntry::Ready(env.clone()));
+        Ok(env)
+    }
+
     /// Drop the cached snapshot for `working_dir` (next `get` will recapture).
     pub fn invalidate(&self, working_dir: &Path) {
         self.inner.lock().unwrap().remove(working_dir);
@@ -198,31 +254,62 @@ impl Default for ShellEnvCache {
     }
 }
 
-async fn capture_shell_env(working_dir: &Path) -> io::Result<Vec<(String, String)>> {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+/// Resolve the shell binary the cache should spawn. Reads `$SHELL`, falling
+/// back to `/bin/bash` — matching the canonical interactive-login-shell
+/// wrapper used elsewhere in the codebase.
+fn resolve_shell() -> PathBuf {
+    std::env::var_os("SHELL")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/bin/bash"))
+}
 
+/// Allocate a unique tempfile path for the env dump.
+fn dump_path() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or_default();
     let pid = std::process::id();
-    let dump_path = std::env::temp_dir().join(format!("staged-shell-env-{pid}-{nanos}"));
-    let dump_path_str = dump_path.to_string_lossy().into_owned();
+    std::env::temp_dir().join(format!("staged-shell-env-{pid}-{nanos}"))
+}
 
-    // Dump the environment NUL-delimited to a tempfile so values with
-    // newlines round-trip and shell-init banners on stdout are ignored
-    // entirely.
-    let script = format!(
+/// Build the shell script that dumps the interactive-login env NUL-delimited
+/// to `dump_path` and exits. The tempfile path is single-quoted so values
+/// with newlines round-trip and shell-init banners on stdout are ignored.
+fn dump_script(dump_path: &Path) -> String {
+    let dump_path_str = dump_path.to_string_lossy();
+    format!(
         "env -0 > {} 2>/dev/null\nexit\n",
         single_quote(&dump_path_str)
-    );
+    )
+}
 
-    let mut cmd = Command::new(&shell);
+fn parse_env_dump(bytes: &[u8]) -> Vec<(String, String)> {
+    let mut vars = Vec::new();
+    for chunk in bytes.split(|&b| b == 0) {
+        if chunk.is_empty() {
+            continue;
+        }
+        let Ok(s) = std::str::from_utf8(chunk) else {
+            continue;
+        };
+        if let Some(eq_pos) = s.find('=') {
+            vars.push((s[..eq_pos].to_string(), s[eq_pos + 1..].to_string()));
+        }
+    }
+    vars
+}
+
+async fn capture_shell_env(working_dir: &Path, shell: &Path) -> io::Result<Vec<(String, String)>> {
+    let dump_path = dump_path();
+    let script = dump_script(&dump_path);
+
+    let mut cmd = Command::new(shell);
     cmd.current_dir(working_dir)
         .env_clear()
         .env("HOME", std::env::var("HOME").unwrap_or_default())
         .env("USER", std::env::var("USER").unwrap_or_default())
-        .env("SHELL", &shell)
+        .env("SHELL", shell)
         .arg("-i")
         .arg("-l")
         .arg("-s")
@@ -259,19 +346,64 @@ async fn capture_shell_env(working_dir: &Path) -> io::Result<Vec<(String, String
     };
     let _ = tokio::fs::remove_file(&dump_path).await;
 
-    let mut vars = Vec::new();
-    for chunk in bytes.split(|&b| b == 0) {
-        if chunk.is_empty() {
-            continue;
-        }
-        let Ok(s) = std::str::from_utf8(chunk) else {
-            continue;
-        };
-        if let Some(eq_pos) = s.find('=') {
-            vars.push((s[..eq_pos].to_string(), s[eq_pos + 1..].to_string()));
-        }
+    Ok(parse_env_dump(&bytes))
+}
+
+/// Synchronous counterpart to [`capture_shell_env`].
+///
+/// Blocks the current thread on the shell's startup. Suitable for sync
+/// callers (`git/cli.rs::run`); async callers should use [`capture_shell_env`].
+fn capture_shell_env_blocking(
+    working_dir: &Path,
+    shell: &Path,
+) -> io::Result<Vec<(String, String)>> {
+    use std::io::Write as _;
+
+    let dump_path = dump_path();
+    let script = dump_script(&dump_path);
+
+    let mut cmd = std::process::Command::new(shell);
+    cmd.current_dir(working_dir)
+        .env_clear()
+        .env("HOME", std::env::var("HOME").unwrap_or_default())
+        .env("USER", std::env::var("USER").unwrap_or_default())
+        .env("SHELL", shell)
+        .arg("-i")
+        .arg("-l")
+        .arg("-s")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    let mut child = cmd.spawn()?;
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("Failed to open shell stdin for env capture"))?;
+        stdin.write_all(script.as_bytes())?;
+        stdin.flush()?;
+        // Drop stdin → shell sees EOF after `exit` and terminates cleanly.
     }
-    Ok(vars)
+
+    let status = child.wait()?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&dump_path);
+        return Err(io::Error::other(format!(
+            "Shell env capture exited with status {status}"
+        )));
+    }
+
+    let bytes = match std::fs::read(&dump_path) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = std::fs::remove_file(&dump_path);
+            return Err(e);
+        }
+    };
+    let _ = std::fs::remove_file(&dump_path);
+
+    Ok(parse_env_dump(&bytes))
 }
 
 fn single_quote(value: &str) -> String {
@@ -339,6 +471,45 @@ mod tests {
     fn single_quote_escapes_quotes() {
         assert_eq!(single_quote("plain"), "'plain'");
         assert_eq!(single_quote("with 'quote'"), "'with '\\''quote'\\'''");
+    }
+
+    #[test]
+    fn get_blocking_captures_and_caches() {
+        let cache = ShellEnvCache::new();
+        let dir = std::env::temp_dir();
+
+        let first = cache
+            .get_blocking(&dir)
+            .expect("blocking snapshot should succeed");
+        assert!(
+            first.vars().iter().any(|(k, _)| k == "PATH"),
+            "captured env should contain PATH"
+        );
+
+        let second = cache
+            .get_blocking(&dir)
+            .expect("second blocking snapshot should hit cache");
+        assert_eq!(
+            first.captured_at(),
+            second.captured_at(),
+            "second blocking call should return cached snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_blocking_sees_snapshots_from_async_get() {
+        let cache = Arc::new(ShellEnvCache::new());
+        let dir = std::env::temp_dir();
+
+        let async_env = cache.get(&dir).await.expect("async capture should succeed");
+        let sync_env = cache
+            .get_blocking(&dir)
+            .expect("blocking call should hit cache populated by async path");
+        assert_eq!(
+            async_env.captured_at(),
+            sync_env.captured_at(),
+            "sync caller should observe the async-populated snapshot"
+        );
     }
 
     #[tokio::test]

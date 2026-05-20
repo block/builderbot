@@ -1297,11 +1297,22 @@ async fn run_pipeline_command(
     working_dir: &PathBuf,
     cancel_token: &CancellationToken,
 ) -> io::Result<PipelineCommandResult> {
+    run_pipeline_command_with_cache(shell_env_cache(), command, working_dir, cancel_token).await
+}
+
+/// Same as [`run_pipeline_command`] but lets the caller pass an explicit cache.
+/// Used by tests to pre-seed snapshots or point at a hermetic fake `$SHELL`.
+async fn run_pipeline_command_with_cache(
+    cache: &ShellEnvCache,
+    command: &str,
+    working_dir: &PathBuf,
+    cancel_token: &CancellationToken,
+) -> io::Result<PipelineCommandResult> {
     // Apply the cached interactive-login-shell env so Hermit-managed
     // binaries are on PATH (matters for git hooks invoked by pipeline
     // steps). On capture failure fall back to `sh -lc`, which at least
     // sources `/etc/profile`/`~/.profile`.
-    let snapshot = match shell_env_cache().get(working_dir).await {
+    let snapshot = match cache.get(working_dir).await {
         Ok(env) => Some(env),
         Err(e) => {
             log::warn!(

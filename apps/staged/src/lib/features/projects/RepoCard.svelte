@@ -22,7 +22,7 @@
 
   interface Props {
     repo: RepoHomeItem;
-    onclone: () => void;
+    onclone: () => void | Promise<void>;
     onPinChange?: () => void;
   }
 
@@ -48,7 +48,7 @@
     if (cloning) return;
     cloning = true;
     try {
-      onclone();
+      await onclone();
     } finally {
       cloning = false;
     }

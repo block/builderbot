@@ -423,22 +423,26 @@ mod tests {
     /// Write `content` to a 0755 tempfile suitable for use as `$SHELL`.
     ///
     /// Hold the returned handle for the test's lifetime — dropping it removes
-    /// the file. Unix-only because we set the executable mode.
+    /// the file. Returns a `TempPath` (not `NamedTempFile`) so the writable fd
+    /// is closed before the script gets exec'd: Linux's exec path refuses to
+    /// load a binary whose inode has `i_writecount > 0` and returns ETXTBSY.
+    /// macOS has no equivalent check, which is why the prior `NamedTempFile`
+    /// shape passed locally on Darwin but failed on Linux CI. Unix-only
+    /// because we set the executable mode.
     #[cfg(unix)]
-    fn write_fake_shell(content: &str) -> tempfile::NamedTempFile {
-        use std::io::Write as _;
+    fn write_fake_shell(content: &str) -> tempfile::TempPath {
         use std::os::unix::fs::PermissionsExt;
-        let mut file = tempfile::Builder::new()
+        let temp_path = tempfile::Builder::new()
             .prefix("staged-fake-shell-")
             .suffix(".sh")
             .tempfile()
-            .expect("create fake shell tempfile");
-        file.write_all(content.as_bytes()).expect("write script");
-        file.flush().expect("flush script");
-        let mut perms = std::fs::metadata(file.path()).unwrap().permissions();
+            .expect("create fake shell tempfile")
+            .into_temp_path();
+        std::fs::write(&temp_path, content).expect("write script");
+        let mut perms = std::fs::metadata(&temp_path).unwrap().permissions();
         perms.set_mode(0o755);
-        std::fs::set_permissions(file.path(), perms).expect("chmod 755");
-        file
+        std::fs::set_permissions(&temp_path, perms).expect("chmod 755");
+        temp_path
     }
 
     /// Snapshot the set of `staged-shell-env-*` files currently in temp_dir().
@@ -846,7 +850,7 @@ mod tests {
             "#!/bin/sh\nsleep 0.5\nPATH=/usr/bin:/bin\nexport PATH\nexec /bin/sh -s\n",
         );
         let cache = Arc::new(ShellEnvCache::with_shell_and_ttl(
-            shell.path().to_path_buf(),
+            shell.to_path_buf(),
             Duration::from_secs(3600),
         ));
         let dir = tempfile::tempdir().expect("tempdir");
@@ -888,7 +892,7 @@ mod tests {
             "#!/bin/sh\nsleep 0.5\nPATH=/usr/bin:/bin\nexport PATH\nexec /bin/sh -s\n",
         );
         let cache = Arc::new(ShellEnvCache::with_shell_and_ttl(
-            shell.path().to_path_buf(),
+            shell.to_path_buf(),
             Duration::from_secs(3600),
         ));
         let dir = tempfile::tempdir().expect("tempdir");
@@ -933,7 +937,7 @@ mod tests {
     async fn capture_err_propagates_and_is_not_cached() {
         let shell = write_fake_shell("#!/bin/sh\nexit 1\n");
         let cache = Arc::new(ShellEnvCache::with_shell_and_ttl(
-            shell.path().to_path_buf(),
+            shell.to_path_buf(),
             Duration::from_secs(3600),
         ));
         let dir = tempfile::tempdir().expect("tempdir");
@@ -974,10 +978,8 @@ mod tests {
     async fn tempfile_cleaned_up_on_success() {
         let shell =
             write_fake_shell("#!/bin/sh\nPATH=/usr/bin:/bin\nexport PATH\nexec /bin/sh -s\n");
-        let cache = ShellEnvCache::with_shell_and_ttl(
-            shell.path().to_path_buf(),
-            Duration::from_secs(3600),
-        );
+        let cache =
+            ShellEnvCache::with_shell_and_ttl(shell.to_path_buf(), Duration::from_secs(3600));
         let dir = tempfile::tempdir().expect("tempdir");
 
         let pre = snapshot_orphan_paths();
@@ -998,10 +1000,8 @@ mod tests {
     #[tokio::test]
     async fn tempfile_cleaned_up_on_failure() {
         let shell = write_fake_shell("#!/bin/sh\nexit 1\n");
-        let cache = ShellEnvCache::with_shell_and_ttl(
-            shell.path().to_path_buf(),
-            Duration::from_secs(3600),
-        );
+        let cache =
+            ShellEnvCache::with_shell_and_ttl(shell.to_path_buf(), Duration::from_secs(3600));
         let dir = tempfile::tempdir().expect("tempdir");
 
         let pre = snapshot_orphan_paths();
@@ -1024,10 +1024,8 @@ mod tests {
         let shell = write_fake_shell(
             "#!/bin/sh\nPATH=/usr/bin:/bin\nWEIRD='line1\nline2'\nexport PATH WEIRD\nexec /bin/sh -s\n",
         );
-        let cache = ShellEnvCache::with_shell_and_ttl(
-            shell.path().to_path_buf(),
-            Duration::from_secs(3600),
-        );
+        let cache =
+            ShellEnvCache::with_shell_and_ttl(shell.to_path_buf(), Duration::from_secs(3600));
         let dir = tempfile::tempdir().expect("tempdir");
 
         let env = cache.get(dir.path()).await.expect("capture");

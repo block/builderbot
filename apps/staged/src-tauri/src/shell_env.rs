@@ -77,6 +77,7 @@ pub struct ShellEnvCache {
     inner: Mutex<HashMap<PathBuf, CachedEntry>>,
     ttl: Duration,
     shell: PathBuf,
+    temp_root: PathBuf,
 }
 
 /// Removes an `InFlight` entry from the cache if its capture future is
@@ -120,10 +121,21 @@ impl ShellEnvCache {
     /// [`new`]: ShellEnvCache::new
     /// [`with_ttl`]: ShellEnvCache::with_ttl
     pub fn with_shell_and_ttl(shell: PathBuf, ttl: Duration) -> Self {
+        Self::with_shell_ttl_and_temp_root(shell, ttl, std::env::temp_dir())
+    }
+
+    /// Same as [`with_shell_and_ttl`] but also redirects the env-dump tempfile
+    /// into `temp_root`. Tests pointing at their own per-test tempdir get
+    /// deterministic leak checks that don't race other parallel captures
+    /// sharing `std::env::temp_dir()`.
+    ///
+    /// [`with_shell_and_ttl`]: ShellEnvCache::with_shell_and_ttl
+    pub fn with_shell_ttl_and_temp_root(shell: PathBuf, ttl: Duration, temp_root: PathBuf) -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
             ttl,
             shell,
+            temp_root,
         }
     }
 
@@ -176,7 +188,7 @@ impl ShellEnvCache {
                         key: &key,
                         promoted: false,
                     };
-                    let outcome = capture_shell_env(&key, &self.shell).await;
+                    let outcome = capture_shell_env(&key, &self.shell, &self.temp_root).await;
                     match outcome {
                         Ok(vars) => {
                             let env = ShellEnv {
@@ -225,7 +237,7 @@ impl ShellEnvCache {
             }
         }
 
-        let vars = capture_shell_env_blocking(&key, &self.shell)?;
+        let vars = capture_shell_env_blocking(&key, &self.shell, &self.temp_root)?;
         let env = ShellEnv {
             vars: Arc::new(vars),
             captured_at: Instant::now(),
@@ -263,14 +275,14 @@ fn resolve_shell() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/bin/bash"))
 }
 
-/// Allocate a unique tempfile path for the env dump.
-fn dump_path() -> PathBuf {
+/// Allocate a unique tempfile path for the env dump inside `temp_root`.
+fn dump_path(temp_root: &Path) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or_default();
     let pid = std::process::id();
-    std::env::temp_dir().join(format!("staged-shell-env-{pid}-{nanos}"))
+    temp_root.join(format!("staged-shell-env-{pid}-{nanos}"))
 }
 
 /// Build the shell script that dumps the interactive-login env NUL-delimited
@@ -300,8 +312,12 @@ fn parse_env_dump(bytes: &[u8]) -> Vec<(String, String)> {
     vars
 }
 
-async fn capture_shell_env(working_dir: &Path, shell: &Path) -> io::Result<Vec<(String, String)>> {
-    let dump_path = dump_path();
+async fn capture_shell_env(
+    working_dir: &Path,
+    shell: &Path,
+    temp_root: &Path,
+) -> io::Result<Vec<(String, String)>> {
+    let dump_path = dump_path(temp_root);
     let script = dump_script(&dump_path);
 
     let mut cmd = Command::new(shell);
@@ -356,10 +372,11 @@ async fn capture_shell_env(working_dir: &Path, shell: &Path) -> io::Result<Vec<(
 fn capture_shell_env_blocking(
     working_dir: &Path,
     shell: &Path,
+    temp_root: &Path,
 ) -> io::Result<Vec<(String, String)>> {
     use std::io::Write as _;
 
-    let dump_path = dump_path();
+    let dump_path = dump_path(temp_root);
     let script = dump_script(&dump_path);
 
     let mut cmd = std::process::Command::new(shell);
@@ -414,7 +431,6 @@ fn single_quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
 
     // ---------------------------------------------------------------------
     // Test helpers
@@ -445,11 +461,13 @@ mod tests {
         temp_path
     }
 
-    /// Snapshot the set of `staged-shell-env-*` files currently in temp_dir().
-    /// Used by tempfile-cleanup tests to assert no orphan was created across a
-    /// single capture (set difference, so parallel captures don't interfere).
-    fn snapshot_orphan_paths() -> HashSet<PathBuf> {
-        std::fs::read_dir(std::env::temp_dir())
+    /// Collect any `staged-shell-env-*` files left in `temp_root`. Tempfile
+    /// cleanup tests point the cache at a per-test tempdir and assert this is
+    /// empty after a capture — no need to set-difference against the shared
+    /// `std::env::temp_dir()`, where parallel tests' in-flight captures would
+    /// race the assertion.
+    fn orphan_paths_in(temp_root: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(temp_root)
             .map(|rd| {
                 rd.flatten()
                     .filter(|e| {
@@ -972,27 +990,31 @@ mod tests {
     }
 
     /// C8: Tempfile is cleaned up after both successful and failing captures.
-    /// Uses set-difference vs. a pre-snapshot so parallel tests don't perturb.
+    /// Points the cache at a per-test tempdir so the leak check sees only this
+    /// test's captures — parallel tests dumping into `std::env::temp_dir()`
+    /// can't perturb the assertion.
     #[cfg(unix)]
     #[tokio::test]
     async fn tempfile_cleaned_up_on_success() {
         let shell =
             write_fake_shell("#!/bin/sh\nPATH=/usr/bin:/bin\nexport PATH\nexec /bin/sh -s\n");
-        let cache =
-            ShellEnvCache::with_shell_and_ttl(shell.to_path_buf(), Duration::from_secs(3600));
+        let temp_root = tempfile::tempdir().expect("temp_root");
+        let cache = ShellEnvCache::with_shell_ttl_and_temp_root(
+            shell.to_path_buf(),
+            Duration::from_secs(3600),
+            temp_root.path().to_path_buf(),
+        );
         let dir = tempfile::tempdir().expect("tempdir");
 
-        let pre = snapshot_orphan_paths();
         let env = cache.get(dir.path()).await.expect("capture");
         assert!(
             env.vars().iter().any(|(k, _)| k == "PATH"),
             "fake shell should set PATH"
         );
-        let post = snapshot_orphan_paths();
-        let new_files: Vec<&PathBuf> = post.difference(&pre).collect();
+        let leftover = orphan_paths_in(temp_root.path());
         assert!(
-            new_files.is_empty(),
-            "successful capture must not leak tempfiles: {new_files:?}"
+            leftover.is_empty(),
+            "successful capture must not leak tempfiles: {leftover:?}"
         );
     }
 
@@ -1000,18 +1022,20 @@ mod tests {
     #[tokio::test]
     async fn tempfile_cleaned_up_on_failure() {
         let shell = write_fake_shell("#!/bin/sh\nexit 1\n");
-        let cache =
-            ShellEnvCache::with_shell_and_ttl(shell.to_path_buf(), Duration::from_secs(3600));
+        let temp_root = tempfile::tempdir().expect("temp_root");
+        let cache = ShellEnvCache::with_shell_ttl_and_temp_root(
+            shell.to_path_buf(),
+            Duration::from_secs(3600),
+            temp_root.path().to_path_buf(),
+        );
         let dir = tempfile::tempdir().expect("tempdir");
 
-        let pre = snapshot_orphan_paths();
         let result = cache.get(dir.path()).await;
         assert!(result.is_err(), "failing fake shell should produce Err");
-        let post = snapshot_orphan_paths();
-        let new_files: Vec<&PathBuf> = post.difference(&pre).collect();
+        let leftover = orphan_paths_in(temp_root.path());
         assert!(
-            new_files.is_empty(),
-            "failed capture must not leak tempfiles: {new_files:?}"
+            leftover.is_empty(),
+            "failed capture must not leak tempfiles: {leftover:?}"
         );
     }
 

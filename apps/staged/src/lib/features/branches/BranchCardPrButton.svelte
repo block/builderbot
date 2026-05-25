@@ -539,8 +539,10 @@
           pushStateStore.setPushDone(branch.id);
           // Refresh local git state so `upstream.relation` settles back to
           // `inSync` (driving hasUnpushed to false) without optimistically
-          // mutating prHeadSha here.
-          commands.refreshBranchGitState(branch.id).catch((e) => {
+          // mutating prHeadSha here. Force-bypass the TTL: a recent
+          // window-focus or timeline-mount refresh can otherwise short-circuit
+          // the `git fetch` and leave `refs/remotes/origin/<branch>` stale.
+          commands.refreshBranchGitState(branch.id, { force: true }).catch((e) => {
             console.warn('[Staged] Failed to refresh git state after push:', e);
           });
           // Immediately refresh PR status so checks update right away

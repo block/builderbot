@@ -404,8 +404,14 @@ export function getBranchTimelineWithRevalidation(branchId: string): {
   };
 }
 
-export function refreshBranchGitState(branchId: string): Promise<void> {
-  return invokeCommand('refresh_branch_git_state', { branchId });
+export function refreshBranchGitState(
+  branchId: string,
+  options: { force?: boolean } = {}
+): Promise<void> {
+  return invokeCommand('refresh_branch_git_state', {
+    branchId,
+    force: options.force ?? false,
+  });
 }
 
 export function invalidateProjectBranchTimelines(branchIds: string[]): void {

@@ -520,16 +520,24 @@ pub async fn get_branch_timeline(
         .map_err(|e| format!("Timeline task failed: {e}"))?
 }
 
-/// Run a TTL-gated `git fetch` + git state recomputation for a branch,
-/// then emit a `git-state-updated` event so the frontend can merge the
-/// fresh state into the existing timeline.
+/// Run a `git fetch` + git state recomputation for a branch, then emit
+/// a `git-state-updated` event so the frontend can merge the fresh state
+/// into the existing timeline. Defaults to TTL-gated fetching; pass
+/// `force = true` to bypass the TTL (e.g. right after a successful push,
+/// where the caller knows the remote has moved).
 #[tauri::command(rename_all = "camelCase")]
 pub async fn refresh_branch_git_state(
     app: tauri::AppHandle,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     branch_id: String,
+    force: Option<bool>,
 ) -> Result<(), String> {
     let store = crate::get_store(&store)?;
+    let fetch_mode = if force.unwrap_or(false) {
+        git::FetchMode::Force
+    } else {
+        git::FetchMode::Ttl
+    };
 
     tauri::async_runtime::spawn_blocking(move || {
         let branch = store
@@ -559,7 +567,7 @@ pub async fn refresh_branch_git_state(
                 &resolved_path,
                 &branch.branch_name,
                 &branch.base_branch,
-                git::FetchMode::Ttl,
+                fetch_mode,
             ))
         } else if let Some(ref wd) = workdir {
             let worktree_path = Path::new(&wd.path);
@@ -568,7 +576,7 @@ pub async fn refresh_branch_git_state(
                     worktree_path,
                     &branch.branch_name,
                     &branch.base_branch,
-                    git::FetchMode::Ttl,
+                    fetch_mode,
                 ))
             } else {
                 None

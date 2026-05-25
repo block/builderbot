@@ -64,6 +64,7 @@
   import { timelineToHashtagItems, projectNotesToHashtagItems } from '../sessions/hashtagItems';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
+  import { pushStateStore } from '../../stores/pushState.svelte';
   import type { WorktreeChangesPreview } from '../../commands';
   import type { LinkedNoteContext, NoteClickInfo } from '../sessions/noteFreshness';
 
@@ -608,14 +609,8 @@
             return;
           }
 
-          // Clear push/force-push session tracking on terminal status only
-          // (guarded by the outer completed/error/cancelled check above)
-          if (eventSessionId === pushSessionId) {
-            pushSessionId = null;
-          }
-          if (eventSessionId === forcePushSessionId) {
-            forcePushSessionId = null;
-          }
+          // Push/force-push session tracking lives in pushStateStore and is
+          // cleared centrally by sessionStatusListener.handlePushCompletion.
 
           // Skip normal completion handling for any auto review session
           if (isAutoReview) {
@@ -905,23 +900,33 @@
     }
   }
 
-  let pushSessionId = $state<string | null>(null);
-  let pushingOrigin = $derived(!!pushSessionId);
+  // Push state is sourced from the global pushStateStore so it survives the
+  // BranchCard remount that happens when the user switches projects and back.
+  // The store is shared with BranchCardPrButton (single entry per branch.id),
+  // updated by the global sessionStatusListener on completion, and covered by
+  // a 5s polling fallback in BranchCardPrButton.
+  let storePushState = $derived(pushStateStore.getPushState(branch.id));
+  let pushingOrigin = $derived(storePushState?.state === 'pushing');
+  let pushSessionId = $derived(storePushState?.sessionId ?? null);
+  let forcePushingOrigin = $derived(pushingOrigin);
+  let forcePushSessionId = $derived(pushSessionId);
 
   async function handlePushOrigin() {
-    if (pushSessionId || commandPipelinePending || branchSessionBusy) return;
+    if (pushingOrigin || commandPipelinePending || branchSessionBusy) return;
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
     const provider = getPreferredAgent(agents) ?? undefined;
+    pushStateStore.setPushing(branch.id, '__pending__');
     try {
-      pushSessionId = await commands.pushBranch(branch.id, provider, false);
+      const sessionId = await commands.pushBranch(branch.id, provider, false);
+      pushStateStore.setPushing(branch.id, sessionId);
     } catch (e) {
-      pushSessionId = null;
+      pushStateStore.setPushError(branch.id, e instanceof Error ? e.message : String(e));
       notifyError('Push failed', e);
     }
   }
 
   function openPushSession() {
-    if (pushSessionId) {
+    if (pushSessionId && pushSessionId !== '__pending__') {
       sessionMgr.openSessionId = pushSessionId;
     }
   }
@@ -932,11 +937,8 @@
     showForcePushDialog = true;
   }
 
-  let forcePushSessionId = $state<string | null>(null);
-  let forcePushingOrigin = $derived(!!forcePushSessionId);
-
   async function confirmForcePush() {
-    if (forcePushSessionId || commandPipelinePending || branchSessionBusy) {
+    if (forcePushingOrigin || commandPipelinePending || branchSessionBusy) {
       // Another operation is in progress — keep the dialog open so the user
       // understands why the action didn't proceed.
       return;
@@ -944,16 +946,18 @@
     showForcePushDialog = false;
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
     const provider = getPreferredAgent(agents) ?? undefined;
+    pushStateStore.setPushing(branch.id, '__pending__');
     try {
-      forcePushSessionId = await commands.pushBranch(branch.id, provider, true);
+      const sessionId = await commands.pushBranch(branch.id, provider, true);
+      pushStateStore.setPushing(branch.id, sessionId);
     } catch (e) {
-      forcePushSessionId = null;
+      pushStateStore.setPushError(branch.id, e instanceof Error ? e.message : String(e));
       notifyError('Force push failed', e);
     }
   }
 
   function openForcePushSession() {
-    if (forcePushSessionId) {
+    if (forcePushSessionId && forcePushSessionId !== '__pending__') {
       sessionMgr.openSessionId = forcePushSessionId;
     }
   }
@@ -1449,11 +1453,15 @@
             : undefined}
           onPullOrigin={handlePullOrigin}
           onPushOrigin={handlePushOrigin}
-          onOpenPushSession={pushSessionId ? openPushSession : undefined}
+          onOpenPushSession={pushSessionId && pushSessionId !== '__pending__'
+            ? openPushSession
+            : undefined}
           onRebaseBranch={() => startBranchCommandPipeline('rebase')}
           onRebaseBranchOntoOrigin={() => startBranchCommandPipeline('rebase', 'origin')}
           onForcePush={handleForcePush}
-          onOpenForcePushSession={forcePushSessionId ? openForcePushSession : undefined}
+          onOpenForcePushSession={forcePushSessionId && forcePushSessionId !== '__pending__'
+            ? openForcePushSession
+            : undefined}
           {forcePushingOrigin}
           rebaseBranchDisabledReason={branchCommandDisabledReason}
           onViewWorktreeDiff={isLocal ? () => (showWorktreeDiff = true) : undefined}

@@ -137,8 +137,10 @@ async fn sync_loop(store: Arc<Store>, app_handle: tauri::AppHandle) {
             let clone_path = match crate::paths::clone_path_for(github_repo) {
                 Some(p) if p.join(".git").exists() => p,
                 _ => {
-                    // No local clone — skip and schedule far in the future.
-                    state.next_fetch_at = now + COLD_INTERVAL_MS;
+                    // No local clone yet — recheck on the tier's normal cadence
+                    // so a pinned or project-backed repo picks up a fresh clone
+                    // promptly instead of waiting the cold-tier 4 hours.
+                    state.next_fetch_at = now + tier.interval_ms();
                     continue;
                 }
             };

@@ -1324,24 +1324,32 @@ async fn clone_repo_locally(
         let github_repo_ref = github_repo.clone();
         let clone_path_ref = clone_path.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            let branch = git::detect_default_branch_from_remote(&clone_path_ref)
-                .unwrap_or_else(|_| "main".to_string());
-            // Store for all subpath variants of this repo that exist as badges
-            let badges = store_ref.list_repo_badges().unwrap_or_default();
-            for badge in &badges {
-                if badge.github_repo == github_repo_ref && badge.default_branch.is_none() {
-                    if let Err(e) =
-                        store_ref.set_default_branch(&github_repo_ref, &badge.subpath, &branch)
-                    {
-                        log::warn!(
-                            "[clone_repo_locally] failed to set default_branch for {} ({}): {e}",
-                            github_repo_ref,
-                            badge.subpath
-                        );
+            // `git remote show origin` on a fresh local clone is the canonical
+            // source of truth for the default branch, so a successful detection
+            // here should overwrite any pre-clone guess (which may be the
+            // `"main"` fallback from `detect_and_store_default_branch`).
+            match git::detect_default_branch_from_remote(&clone_path_ref) {
+                Ok(branch) => {
+                    let badges = store_ref.list_repo_badges().unwrap_or_default();
+                    for badge in &badges {
+                        if badge.github_repo == github_repo_ref {
+                            if let Err(e) = store_ref.set_default_branch(
+                                &github_repo_ref,
+                                &badge.subpath,
+                                &branch,
+                            ) {
+                                log::warn!(
+                                    "[clone_repo_locally] failed to set default_branch for {} ({}): {e}",
+                                    github_repo_ref,
+                                    badge.subpath
+                                );
+                            }
+                        }
                     }
+                    branch
                 }
+                Err(_) => "main".to_string(),
             }
-            branch
         })
         .await
         .map_err(|e| format!("Default branch detection failed: {e}"))?

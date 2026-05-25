@@ -218,9 +218,7 @@ impl Store {
     /// their tier classification for background sync scheduling.
     ///
     /// Returns `(github_repo, default_branch, is_pinned, has_projects)` tuples.
-    pub fn list_repos_for_sync(
-        &self,
-    ) -> Result<Vec<(String, Option<String>, bool, bool)>, StoreError> {
+    pub fn list_repos_for_sync(&self) -> Result<Vec<RepoSyncRow>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT rb.github_repo,

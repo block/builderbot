@@ -9,6 +9,10 @@ use super::{Store, StoreError};
 const BADGE_COLUMNS: &str =
     "github_repo, subpath, short_name, hue, created_at, pinned, pin_sort_order, default_branch";
 
+/// Row returned by [`Store::list_repos_for_sync`]:
+/// `(github_repo, default_branch, is_pinned, has_projects)`.
+pub type RepoSyncRow = (String, Option<String>, bool, bool);
+
 fn row_to_badge(row: &rusqlite::Row) -> rusqlite::Result<RepoBadge> {
     let pinned_int: i32 = row.get(5)?;
     Ok(RepoBadge {

@@ -178,14 +178,16 @@ impl Store {
         &self,
         ordered_keys: &[(String, String)],
     ) -> Result<(), StoreError> {
-        let conn = self.conn.lock().unwrap();
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
         for (i, (github_repo, subpath)) in ordered_keys.iter().enumerate() {
-            conn.execute(
+            tx.execute(
                 "UPDATE repo_badges SET pin_sort_order = ?1
                  WHERE github_repo = ?2 AND subpath = ?3 AND pinned = 1",
                 params![i as i32, github_repo, subpath],
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
 

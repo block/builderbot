@@ -42,7 +42,7 @@ pub use state::{
     compute_fast_git_state_batched, compute_fast_local_git_state, compute_local_branch_git_state,
     ensure_fast_forward_pullable, fast_forward_to_ref, local_git_state_cache_key, needs_fetch,
     update_repo_fetch_cache, BaseGitState, BranchGitState, FastGitState, FetchGitState, FetchMode,
-    FetchStatus, UpstreamGitState, UpstreamRelation, WorktreeGitState,
+    FetchStatus, UpstreamGitState, UpstreamRelation, WorktreeGitState, WorktreeStatusScope,
 };
 pub use types::*;
 pub use worktree::{

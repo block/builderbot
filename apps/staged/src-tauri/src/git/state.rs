@@ -16,6 +16,36 @@ pub enum FetchMode {
     Never,
 }
 
+/// Controls whether `git status` enumerates untracked files.
+///
+/// `Full` (`--untracked-files=all`) walks the entire working tree and on big
+/// monorepos like cash-server can take >15s. `Indexed` (`--untracked-files=no`)
+/// only consults the index for tracked-file modifications and returns in
+/// hundreds of ms. The foreground timeline path uses `Indexed` for first paint;
+/// the background `refresh_branch_git_state` (and destructive ops that need an
+/// accurate dirty/untracked count) uses `Full`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeStatusScope {
+    Indexed,
+    Full,
+}
+
+impl WorktreeStatusScope {
+    fn git_flag(self) -> &'static str {
+        match self {
+            WorktreeStatusScope::Indexed => "--untracked-files=no",
+            WorktreeStatusScope::Full => "--untracked-files=all",
+        }
+    }
+
+    fn script_arg(self) -> &'static str {
+        match self {
+            WorktreeStatusScope::Indexed => "uno",
+            WorktreeStatusScope::Full => "uall",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchGitState {
@@ -558,11 +588,11 @@ where
     }
 }
 
-fn compute_worktree_state<F>(run_git: &F) -> WorktreeGitState
+fn compute_worktree_state<F>(run_git: &F, scope: WorktreeStatusScope) -> WorktreeGitState
 where
     F: Fn(&[&str]) -> Result<String, String>,
 {
-    let Ok(output) = run_git(&["status", "--porcelain=1", "--untracked-files=all"]) else {
+    let Ok(output) = run_git(&["status", "--porcelain=1", scope.git_flag()]) else {
         return WorktreeGitState {
             dirty: false,
             modified: 0,
@@ -582,31 +612,59 @@ pub fn compute_branch_git_state<F>(
     branch_name: &str,
     base_branch: &str,
     fetch_mode: FetchMode,
+    worktree_scope: WorktreeStatusScope,
 ) -> BranchGitState
 where
     F: Fn(&[&str]) -> Result<String, String> + Sync,
 {
+    let phase1_start = std::time::Instant::now();
+
     // Phase 1: Fetch runs in parallel with local-only commands (HEAD, branch
     // name, worktree status) since those read local state unaffected by fetch.
-    let (refresh, head_sha, branch, worktree) = std::thread::scope(|s| {
+    let (refresh, head_sha, branch, worktree, phase1_timings) = std::thread::scope(|s| {
         let fetch_handle = s.spawn(|| {
-            refresh_refs_if_needed(cache_key, &run_git, branch_name, base_branch, fetch_mode)
+            let t = std::time::Instant::now();
+            let r =
+                refresh_refs_if_needed(cache_key, &run_git, branch_name, base_branch, fetch_mode);
+            (r, t.elapsed().as_millis())
         });
         let head_handle = s.spawn(|| {
-            run_git(&["rev-parse", "HEAD"])
+            let t = std::time::Instant::now();
+            let r = run_git(&["rev-parse", "HEAD"])
                 .ok()
-                .and_then(trim_non_empty)
+                .and_then(trim_non_empty);
+            (r, t.elapsed().as_millis())
         });
-        let branch_handle = s.spawn(|| current_branch(&run_git));
-        let worktree_handle = s.spawn(|| compute_worktree_state(&run_git));
+        let branch_handle = s.spawn(|| {
+            let t = std::time::Instant::now();
+            let r = current_branch(&run_git);
+            (r, t.elapsed().as_millis())
+        });
+        let worktree_handle = s.spawn(|| {
+            let t = std::time::Instant::now();
+            let r = compute_worktree_state(&run_git, worktree_scope);
+            (r, t.elapsed().as_millis())
+        });
+
+        let (refresh, t_fetch) = fetch_handle.join().expect("fetch thread panicked");
+        let (head, t_head) = head_handle.join().expect("head thread panicked");
+        let (br, t_branch) = branch_handle.join().expect("branch thread panicked");
+        let (wt, t_worktree) = worktree_handle.join().expect("worktree thread panicked");
 
         (
-            fetch_handle.join().expect("fetch thread panicked"),
-            head_handle.join().expect("head thread panicked"),
-            branch_handle.join().expect("branch thread panicked"),
-            worktree_handle.join().expect("worktree thread panicked"),
+            refresh,
+            head,
+            br,
+            wt,
+            (t_fetch, t_head, t_branch, t_worktree),
         )
     });
+    let (t_fetch, t_head, t_branch, t_worktree) = phase1_timings;
+    log::info!(
+        "[compute_branch_git_state] {cache_key} phase1 took {}ms (fetch={t_fetch}ms[{:?}], head={t_head}ms, branch={t_branch}ms, worktree-status={t_worktree}ms)",
+        phase1_start.elapsed().as_millis(),
+        fetch_mode,
+    );
 
     let detached_head = head_sha.is_some() && branch.is_none();
     let expected_branch = branch_name_without_origin(branch_name);
@@ -617,25 +675,37 @@ where
     let upstream_ref = origin_ref_for_branch(branch_name);
     let base_ref = origin_ref_for_branch(base_branch);
 
+    let phase2_start = std::time::Instant::now();
+
     // Phase 2: Upstream and base state computations are independent of each
     // other but both need fetch to have completed (for up-to-date remote refs)
     // and head_sha.
-    let (upstream, base) = std::thread::scope(|s| {
+    let (upstream, base, phase2_timings) = std::thread::scope(|s| {
         let upstream_handle = s.spawn(|| {
-            compute_upstream_state(
+            let t = std::time::Instant::now();
+            let r = compute_upstream_state(
                 &run_git,
                 upstream_ref,
                 head_sha.as_deref(),
                 refresh.upstream_known_missing,
-            )
+            );
+            (r, t.elapsed().as_millis())
         });
-        let base_handle = s.spawn(|| compute_base_state(&run_git, base_ref, head_sha.as_deref()));
+        let base_handle = s.spawn(|| {
+            let t = std::time::Instant::now();
+            let r = compute_base_state(&run_git, base_ref, head_sha.as_deref());
+            (r, t.elapsed().as_millis())
+        });
 
-        (
-            upstream_handle.join().expect("upstream thread panicked"),
-            base_handle.join().expect("base thread panicked"),
-        )
+        let (u, t_up) = upstream_handle.join().expect("upstream thread panicked");
+        let (b, t_base) = base_handle.join().expect("base thread panicked");
+        (u, b, (t_up, t_base))
     });
+    let (t_up, t_base) = phase2_timings;
+    log::info!(
+        "[compute_branch_git_state] {cache_key} phase2 took {}ms (upstream={t_up}ms, base={t_base}ms)",
+        phase2_start.elapsed().as_millis()
+    );
 
     BranchGitState {
         upstream,
@@ -654,6 +724,7 @@ pub fn compute_local_branch_git_state(
     branch_name: &str,
     base_branch: &str,
     fetch_mode: FetchMode,
+    worktree_scope: WorktreeStatusScope,
 ) -> BranchGitState {
     let cache_key = format!("local:{}:{}:{}", repo.display(), branch_name, base_branch);
     compute_branch_git_state(
@@ -662,6 +733,7 @@ pub fn compute_local_branch_git_state(
         branch_name,
         base_branch,
         fetch_mode,
+        worktree_scope,
     )
 }
 
@@ -710,7 +782,11 @@ pub fn needs_fetch(cache_key: &str, fetch_mode: FetchMode) -> bool {
 
 /// Compute fast (local-only) git state for a local branch.
 /// Returns HEAD, branch name, and worktree status without any fetch.
-pub fn compute_fast_local_git_state(repo: &Path, branch_name: &str) -> FastGitState {
+pub fn compute_fast_local_git_state(
+    repo: &Path,
+    branch_name: &str,
+    worktree_scope: WorktreeStatusScope,
+) -> FastGitState {
     let run_git = |args: &[&str]| -> Result<String, String> {
         cli::run(repo, args).map_err(|e| e.to_string())
     };
@@ -721,7 +797,7 @@ pub fn compute_fast_local_git_state(repo: &Path, branch_name: &str) -> FastGitSt
                 .and_then(trim_non_empty)
         });
         let b = s.spawn(|| current_branch(&run_git));
-        let w = s.spawn(|| compute_worktree_state(&run_git));
+        let w = s.spawn(|| compute_worktree_state(&run_git, worktree_scope));
         (
             h.join().expect("head thread panicked"),
             b.join().expect("branch thread panicked"),
@@ -811,6 +887,7 @@ pub fn local_git_state_cache_key(repo: &Path, branch_name: &str, base_branch: &s
 ///   $4 = upstream_ref (empty to skip upstream resolution)
 ///   $5 = base_ref
 ///   $6 = "skip_fetch" to skip the fetch phase (cache fresh)
+///   $7 = "uno" (no untracked enumeration) or "uall" (full enumeration)
 const BATCH_GIT_STATE_SCRIPT: &str = concat!(
     "cd \"$1\" || exit 1\n",
     // --- Fetch phase (conditional) ---
@@ -841,8 +918,9 @@ const BATCH_GIT_STATE_SCRIPT: &str = concat!(
     "head_sha=$(git rev-parse HEAD 2>/dev/null || true)\n",
     "printf 'HEAD=%s\\n' \"$head_sha\"\n",
     "printf 'BRANCH=%s\\n' \"$(git branch --show-current 2>/dev/null || true)\"\n",
+    "if [ \"$7\" = 'uno' ]; then ut_flag='--untracked-files=no'; else ut_flag='--untracked-files=all'; fi\n",
     "echo STATUS_START\n",
-    "git status --porcelain=1 --untracked-files=all 2>/dev/null || true\n",
+    "git status --porcelain=1 \"$ut_flag\" 2>/dev/null || true\n",
     "echo STATUS_END\n",
     "[ -n \"$upstream_missing\" ] && echo 'UPSTREAM_MISSING=true'\n",
     "[ -n \"$fetch_err\" ] && printf 'FETCH_ERR=%s\\n' \"$fetch_err\"\n",
@@ -1041,13 +1119,15 @@ fn parse_worktree_from_status(status_output: &str) -> WorktreeGitState {
 /// Arguments:
 ///   $1 = repo_path
 ///   $2 = base_ref (e.g., "origin/main") — used for merge-base + git log
+///   $3 = "uno" (no untracked enumeration) or "uall" (full enumeration)
 const BATCH_FAST_SCRIPT: &str = concat!(
     "cd \"$1\" || exit 1\n",
     "head_sha=$(git rev-parse HEAD 2>/dev/null || true)\n",
     "printf 'HEAD=%s\\n' \"$head_sha\"\n",
     "printf 'BRANCH=%s\\n' \"$(git branch --show-current 2>/dev/null || true)\"\n",
+    "if [ \"$3\" = 'uno' ]; then ut_flag='--untracked-files=no'; else ut_flag='--untracked-files=all'; fi\n",
     "echo STATUS_START\n",
-    "git status --porcelain=1 --untracked-files=all 2>/dev/null || true\n",
+    "git status --porcelain=1 \"$ut_flag\" 2>/dev/null || true\n",
     "echo STATUS_END\n",
     // Commits using locally-cached refs
     "mb=$(git merge-base \"$2\" HEAD 2>/dev/null || true)\n",
@@ -1154,12 +1234,16 @@ pub fn compute_fast_git_state_batched<F>(
     run_script: &F,
     repo_path: &str,
     base_branch: &str,
+    worktree_scope: WorktreeStatusScope,
 ) -> Result<BatchFastOutput, String>
 where
     F: Fn(&str, &[&str]) -> Result<String, String>,
 {
     let base_ref = origin_ref_for_branch(base_branch);
-    let raw = run_script(BATCH_FAST_SCRIPT, &[repo_path, &base_ref])?;
+    let raw = run_script(
+        BATCH_FAST_SCRIPT,
+        &[repo_path, &base_ref, worktree_scope.script_arg()],
+    )?;
     Ok(parse_batch_fast_output(&raw))
 }
 
@@ -1177,6 +1261,7 @@ pub fn compute_branch_git_state_batched<F>(
     branch_name: &str,
     base_branch: &str,
     fetch_mode: FetchMode,
+    worktree_scope: WorktreeStatusScope,
 ) -> BranchGitState
 where
     F: Fn(&str, &[&str]) -> Result<String, String>,
@@ -1229,6 +1314,7 @@ where
             up_ref_arg,
             &base_ref,
             skip_fetch_arg,
+            worktree_scope.script_arg(),
         ],
     );
 

@@ -247,6 +247,21 @@ export interface RepoBadge {
   shortName: string;
   hue: number;
   createdAt: number;
+  pinned: boolean;
+  pinSortOrder: number | null;
+  defaultBranch: string | null;
+}
+
+/** A repo badge enriched with clone-state for the home screen. */
+export interface RepoHomeItem extends RepoBadge {
+  /** Whether this repo has a local clone on disk. */
+  hasLocalClone: boolean;
+}
+
+/** Timeline of commits on a repo's default branch. */
+export interface RepoDefaultBranchTimeline {
+  commits: CommitTimelineItem[];
+  defaultBranch: string;
 }
 
 // =============================================================================

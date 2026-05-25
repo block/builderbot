@@ -5,6 +5,7 @@
 
 pub mod actions;
 pub mod agent;
+pub mod background_sync;
 pub mod blox;
 pub mod branches;
 pub mod diff_cache;
@@ -199,6 +200,24 @@ pub struct BranchTimeline {
     pub reviews: Vec<ReviewTimelineItem>,
     pub images: Vec<ImageTimelineItem>,
     pub git_state: Option<git::BranchGitState>,
+}
+
+/// A repo badge enriched with clone-state for the home screen.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoHomeItem {
+    #[serde(flatten)]
+    pub badge: store::RepoBadge,
+    /// Whether this repo has a local clone on disk.
+    pub has_local_clone: bool,
+}
+
+/// Timeline of commits on a repo's default branch.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoDefaultBranchTimeline {
+    pub commits: Vec<CommitTimelineItem>,
+    pub default_branch: String,
 }
 
 // =============================================================================
@@ -1061,6 +1080,299 @@ fn update_repo_badge(
         })
 }
 
+#[tauri::command(rename_all = "camelCase")]
+fn pin_repo(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    github_repo: String,
+    subpath: String,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+    store
+        .pin_repo(&github_repo, &subpath)
+        .map_err(|e| e.to_string())?;
+
+    // Backfill default_branch if not yet detected
+    if let Ok(Some(badge)) = store.get_repo_badge(&github_repo, &subpath) {
+        if badge.default_branch.is_none() {
+            if let Err(e) = detect_and_store_default_branch(&store, &github_repo, &subpath) {
+                log::warn!("[pin_repo] failed to backfill default_branch: {e}");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn unpin_repo(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    github_repo: String,
+    subpath: String,
+) -> Result<(), String> {
+    get_store(&store)?
+        .unpin_repo(&github_repo, &subpath)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn reorder_pinned_repos(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    ordered_keys: Vec<(String, String)>,
+) -> Result<(), String> {
+    get_store(&store)?
+        .reorder_pinned_repos(&ordered_keys)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn list_repos_for_home(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+) -> Result<Vec<RepoHomeItem>, String> {
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let badges = store.list_repos_for_home().map_err(|e| e.to_string())?;
+        let items: Vec<RepoHomeItem> = badges
+            .into_iter()
+            .map(|badge| {
+                let has_local_clone = crate::paths::clone_path_for(&badge.github_repo)
+                    .map(|p| p.join(".git").exists())
+                    .unwrap_or(false);
+                RepoHomeItem {
+                    badge,
+                    has_local_clone,
+                }
+            })
+            .collect();
+        Ok(items)
+    })
+    .await
+    .map_err(|e| format!("list_repos_for_home task failed: {e}"))?
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn set_repo_default_branch(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    github_repo: String,
+    subpath: String,
+    default_branch: String,
+) -> Result<(), String> {
+    get_store(&store)?
+        .set_default_branch(&github_repo, &subpath, &default_branch)
+        .map_err(|e| e.to_string())
+}
+
+/// Detect the default branch for a repo, cache it in repo_badges, and return it.
+///
+/// Fallback chain:
+/// 1. Stored value in `repo_badges.default_branch`
+/// 2. `git remote show origin | grep "HEAD branch"` on the local clone
+/// 3. Local ref check for `origin/main` then `origin/master`
+/// 4. `"main"` as the ultimate fallback
+pub(crate) fn detect_and_store_default_branch(
+    store: &Arc<Store>,
+    github_repo: &str,
+    subpath: &str,
+) -> Result<String, String> {
+    // 1. Check stored value first
+    if let Ok(Some(badge)) = store.get_repo_badge(github_repo, subpath) {
+        if let Some(ref branch) = badge.default_branch {
+            return Ok(branch.clone());
+        }
+    }
+
+    // 2. Try detecting from the local clone
+    let branch = if let Some(clone_path) = crate::paths::clone_path_for(github_repo) {
+        if clone_path.exists() {
+            git::detect_default_branch_from_remote(&clone_path)
+                .unwrap_or_else(|_| "main".to_string())
+        } else {
+            // No local clone — fall back to GitHub API
+            git::detect_default_branch_for_repo(github_repo).unwrap_or_else(|_| "main".to_string())
+        }
+    } else {
+        git::detect_default_branch_for_repo(github_repo).unwrap_or_else(|_| "main".to_string())
+    };
+
+    // 3. Cache the result in repo_badges (best-effort — badge may not exist yet)
+    if let Err(e) = store.set_default_branch(github_repo, subpath, &branch) {
+        log::warn!("[detect_default_branch] failed to cache default_branch for {github_repo}: {e}");
+    }
+
+    Ok(branch)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn detect_default_branch(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    github_repo: String,
+    subpath: String,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
+    detect_and_store_default_branch(&store, &github_repo, &subpath)
+}
+
+/// Get the commit timeline for a repo's default branch from its local clone.
+#[tauri::command(rename_all = "camelCase")]
+async fn get_repo_default_branch_timeline(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    github_repo: String,
+    subpath: String,
+    limit: Option<usize>,
+) -> Result<RepoDefaultBranchTimeline, String> {
+    let store = get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let default_branch = detect_and_store_default_branch(&store, &github_repo, &subpath)?;
+        let clone_path = crate::paths::clone_path_for(&github_repo)
+            .ok_or_else(|| "Cannot determine clone path".to_string())?;
+        if !clone_path.join(".git").exists() {
+            return Err(format!(
+                "No local clone found for {github_repo}. Clone the repo first."
+            ));
+        }
+
+        let max_count = limit.unwrap_or(50);
+        let origin_ref = format!("origin/{default_branch}");
+        let limit_arg = format!("-{max_count}");
+        let format_arg = "--format=%H|%h|%s|%an|%ae|%ct";
+
+        let output = git::cli_run(&clone_path, &["log", &limit_arg, format_arg, &origin_ref])
+            .map_err(|e| format!("Failed to get commits for {github_repo}: {e}"))?;
+
+        let mut commits: Vec<CommitTimelineItem> = output
+            .lines()
+            .filter(|l| !l.is_empty())
+            .enumerate()
+            .filter_map(|(i, line)| {
+                let parts: Vec<&str> = line.splitn(6, '|').collect();
+                if parts.len() >= 6 {
+                    Some(CommitTimelineItem {
+                        id: None,
+                        sha: parts[0].to_string(),
+                        short_sha: parts[1].to_string(),
+                        subject: parts[2].to_string(),
+                        author: parts[3].to_string(),
+                        author_email: parts[4].to_string(),
+                        timestamp: parts[5].parse().unwrap_or(0),
+                        order: (max_count - 1 - i) as i64,
+                        session_id: None,
+                        session_status: None,
+                        completion_reason: None,
+                        is_own_commit: false,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Mark commits by current user
+        let identity_name = git::cli_run(&clone_path, &["config", "user.name"])
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let identity_email = git::cli_run(&clone_path, &["config", "user.email"])
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        if identity_name.is_some() || identity_email.is_some() {
+            for commit in &mut commits {
+                // Simple name/email match
+                if let Some(ref name) = identity_name {
+                    if commit.author.eq_ignore_ascii_case(name) {
+                        commit.is_own_commit = true;
+                        continue;
+                    }
+                }
+                if let Some(ref email) = identity_email {
+                    if commit.author_email.eq_ignore_ascii_case(email) {
+                        commit.is_own_commit = true;
+                    }
+                }
+            }
+        }
+
+        Ok(RepoDefaultBranchTimeline {
+            commits,
+            default_branch,
+        })
+    })
+    .await
+    .map_err(|e| format!("get_repo_default_branch_timeline task failed: {e}"))?
+}
+
+/// Clone a repo locally that has only been used remotely, then detect its default branch.
+#[tauri::command(rename_all = "camelCase")]
+async fn clone_repo_locally(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
+    github_repo: String,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
+    let github_repo_clone = github_repo.clone();
+    let store_clone = Arc::clone(&store);
+
+    let clone_path = tauri::async_runtime::spawn_blocking(move || {
+        git::ensure_local_clone(&github_repo_clone).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("Clone task failed: {e}"))??;
+
+    // Detect and cache the default branch
+    let default_branch = {
+        let store_ref = Arc::clone(&store_clone);
+        let github_repo_ref = github_repo.clone();
+        let clone_path_ref = clone_path.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            // `git remote show origin` on a fresh local clone is the canonical
+            // source of truth for the default branch, so a successful detection
+            // here should overwrite any pre-clone guess (which may be the
+            // `"main"` fallback from `detect_and_store_default_branch`).
+            match git::detect_default_branch_from_remote(&clone_path_ref) {
+                Ok(branch) => {
+                    let badges = store_ref.list_repo_badges().unwrap_or_default();
+                    for badge in &badges {
+                        if badge.github_repo == github_repo_ref {
+                            if let Err(e) = store_ref.set_default_branch(
+                                &github_repo_ref,
+                                &badge.subpath,
+                                &branch,
+                            ) {
+                                log::warn!(
+                                    "[clone_repo_locally] failed to set default_branch for {} ({}): {e}",
+                                    github_repo_ref,
+                                    badge.subpath
+                                );
+                            }
+                        }
+                    }
+                    branch
+                }
+                Err(_) => "main".to_string(),
+            }
+        })
+        .await
+        .map_err(|e| format!("Default branch detection failed: {e}"))?
+    };
+
+    // Emit event so frontend can refresh
+    web_server::emit_to_all(&app_handle, "repo-cloned", github_repo);
+
+    Ok(default_branch)
+}
+
+/// Return the canonical absolute path where a repo's local clone lives.
+///
+/// This is the same path used by `ensure_local_clone` and background sync,
+/// regardless of whether the clone currently exists on disk. The frontend
+/// uses this for "Open in…" and "Copy Path" actions on pinned repo cards.
+#[tauri::command(rename_all = "camelCase")]
+fn get_repo_clone_path(github_repo: String) -> Result<String, String> {
+    let path = crate::paths::clone_path_for(&github_repo)
+        .ok_or_else(|| "Cannot determine clone path (no home directory)".to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// Build the prompt for AI short name generation.
 fn build_badge_prompt(
     existing_badges: &[store::RepoBadge],
@@ -1222,6 +1534,9 @@ async fn ensure_repo_badges(
             short_name: short_name.clone(),
             hue,
             created_at: store::now_timestamp(),
+            pinned: false,
+            pin_sort_order: None,
+            default_branch: None,
         };
         match store.create_repo_badge(&badge) {
             Ok(()) => {
@@ -1707,6 +2022,8 @@ pub fn run() {
                         Ok(n) => log::info!("Cleaned up {n} pending image(s) from previous run"),
                         Err(e) => log::warn!("Failed to clean up pending images: {e}"),
                     }
+                    // Start the tiered background sync service for all cloned repos.
+                    background_sync::spawn(Arc::clone(&store_arc), app.handle().clone());
                     (Mutex::new(Some(store_arc)), None)
                 }
                 store::DbCompatibility::NeedsReset { db_app_version } => {
@@ -1816,6 +2133,16 @@ pub fn run() {
             ensure_repo_badges,
             update_repo_badge,
             delete_repo_badge,
+            // Pinned repos
+            pin_repo,
+            unpin_repo,
+            reorder_pinned_repos,
+            list_repos_for_home,
+            set_repo_default_branch,
+            detect_default_branch,
+            get_repo_default_branch_timeline,
+            clone_repo_locally,
+            get_repo_clone_path,
             // GitHub
             github_commands::list_github_orgs,
             github_commands::list_github_repos,

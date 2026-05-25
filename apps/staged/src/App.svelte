@@ -11,6 +11,7 @@
   import TopBar from './lib/features/layout/TopBar.svelte';
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
   import ProjectsList from './lib/features/projects/ProjectsList.svelte';
+  import ReposListView from './lib/features/projects/ReposListView.svelte';
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
   import SettingsPage from './lib/features/settings/SettingsPage.svelte';
   import ToastHost from './lib/shared/ToastHost.svelte';
@@ -43,6 +44,7 @@
   import { darkMode } from './lib/stores/isDark.svelte';
   import * as prPollingService from './lib/services/prPollingService';
   import { projectsList } from './lib/features/projects/projectsSidebarState.svelte';
+  import { reposUiEnabled } from './lib/featureFlags';
   import type { StoreIncompatibility } from './lib/types';
 
   const updaterEnabled = import.meta.env.VITE_UPDATER_ENABLED === 'true';
@@ -498,6 +500,8 @@
           </div>
         {:else if navigation.activeView === 'settings'}
           <SettingsPage />
+        {:else if reposUiEnabled && navigation.showReposList}
+          <ReposListView />
         {:else if navigation.selectedProjectId}
           <ProjectHome selectedProjectId={navigation.selectedProjectId} />
         {:else}

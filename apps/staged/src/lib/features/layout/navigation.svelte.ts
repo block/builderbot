@@ -15,6 +15,7 @@ import * as commands from '../../api/commands';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { projectsList } from '../projects/projectsSidebarState.svelte';
 import { requestProjectsListRestore } from '../projects/projectsListViewState.svelte';
+import { reposUiEnabled } from '../../featureFlags';
 
 const LAST_PROJECT_STORE_KEY = 'last-viewed-project';
 
@@ -23,6 +24,7 @@ export type SettingsSection = 'general' | 'repo' | 'keyboard' | 'doctor';
 export const navigation = $state({
   activeView: 'workspace' as 'workspace' | 'settings',
   selectedProjectId: null as string | null,
+  showReposList: false,
   settingsSection: 'general' as SettingsSection,
 });
 
@@ -68,10 +70,19 @@ export async function initNavigation(): Promise<void> {
   }
 }
 
+/** Navigate to the repos list view. */
+export function showAllRepos(): void {
+  if (!reposUiEnabled) return;
+  showWorkspaceView();
+  navigation.selectedProjectId = null;
+  navigation.showReposList = true;
+}
+
 /** Navigate to a specific project's detail view. */
 export function selectProject(projectId: string): void {
   showWorkspaceView();
   navigation.selectedProjectId = projectId;
+  navigation.showReposList = false;
   persistLastProject(projectId);
   // Mark the project as read when navigating to it, but only if it's not already read
   if (projectStateStore.isUnread(projectId)) {
@@ -84,6 +95,7 @@ export function selectProjectAndBranch(projectId: string, branchId: string): voi
   showWorkspaceView();
   const alreadyOnProject = navigation.selectedProjectId === projectId;
   navigation.selectedProjectId = projectId;
+  navigation.showReposList = false;
   persistLastProject(projectId);
   // Mark the project as read when navigating to it, but only if it's not already read
   if (projectStateStore.isUnread(projectId)) {
@@ -132,6 +144,7 @@ export function goHome(): void {
   showWorkspaceView();
   requestProjectsListRestore(navigation.selectedProjectId);
   navigation.selectedProjectId = null;
+  navigation.showReposList = false;
   persistLastProject(null);
 }
 

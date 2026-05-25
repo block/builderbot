@@ -1379,4 +1379,7 @@ pub struct RepoBadge {
     pub short_name: String,
     pub hue: f64,
     pub created_at: i64,
+    pub pinned: bool,
+    pub pin_sort_order: Option<i32>,
+    pub default_branch: Option<String>,
 }

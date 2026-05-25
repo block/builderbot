@@ -755,7 +755,7 @@
             excludeRepos={new Set(
               [...reposById.values()]
                 .filter((r) => r.projectId === project.id)
-                .map((r) => r.githubRepo)
+                .map((r) => `${r.githubRepo}\x00${r.subpath ?? ''}`)
             )}
             onRepoSelected={(selection) => handleRepoSelected(project.id, selection)}
             onRetryWorktree={(branchId) => setupBranchWorktree(branchId, project.id)}

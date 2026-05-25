@@ -66,6 +66,12 @@
       const normalizedBranch = branchName.trim() || undefined;
       const prNumber = matchedPr?.number ?? undefined;
 
+      if (excludeRepos?.has(`${selectedRepo}\x00${normalizedSubpath ?? ''}`)) {
+        error = 'This repo + subpath is already in the project';
+        saving = false;
+        return;
+      }
+
       onAdded({
         nameWithOwner: selectedRepo,
         branchName: normalizedBranch,

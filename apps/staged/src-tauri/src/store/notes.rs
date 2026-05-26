@@ -8,6 +8,26 @@ use super::{now_timestamp, Store, StoreError};
 impl Store {
     pub fn create_note(&self, note: &Note) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        Self::insert_note(&conn, note)
+    }
+
+    /// Like [`Store::create_note`], but if the requested title collides with
+    /// an existing note on the same branch, append ` (2)`, ` (3)`, … to make
+    /// it unique (filesystem "Untitled (2).txt" convention). Lookup and
+    /// insert run under one connection lock so concurrent saves can't pick
+    /// the same suffix.
+    ///
+    /// Empty titles are left untouched — those are session stubs that get
+    /// their title filled in later by the runner.
+    pub fn create_note_with_unique_title(&self, note: &mut Note) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        if !note.title.is_empty() {
+            note.title = Self::resolve_unique_note_title(&conn, &note.branch_id, &note.title)?;
+        }
+        Self::insert_note(&conn, note)
+    }
+
+    fn insert_note(conn: &rusqlite::Connection, note: &Note) -> Result<(), StoreError> {
         conn.execute(
             "INSERT INTO notes (id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
@@ -25,6 +45,35 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    fn resolve_unique_note_title(
+        conn: &rusqlite::Connection,
+        branch_id: &str,
+        base: &str,
+    ) -> Result<String, StoreError> {
+        let mut stmt = conn.prepare("SELECT title FROM notes WHERE branch_id = ?1")?;
+        let titles: Vec<String> = stmt
+            .query_map(params![branch_id], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+
+        if !titles.iter().any(|t| t == base) {
+            return Ok(base.to_string());
+        }
+
+        let prefix = format!("{base} (");
+        let max_n = titles
+            .iter()
+            .filter_map(|t| {
+                let rest = t.strip_prefix(&prefix)?;
+                let num = rest.strip_suffix(')')?;
+                let n = num.parse::<u32>().ok()?;
+                (n >= 2).then_some(n)
+            })
+            .max()
+            .unwrap_or(1);
+
+        Ok(format!("{base} ({})", max_n + 1))
     }
 
     pub fn get_note(&self, id: &str) -> Result<Option<Note>, StoreError> {

@@ -2233,8 +2233,10 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let branch_id: String = arg(&args, "branchId")?;
             let title: String = arg(&args, "title")?;
             let content: String = arg(&args, "content")?;
-            let note = crate::store::models::Note::new(&branch_id, &title, &content);
-            store.create_note(&note).map_err(|e| e.to_string())?;
+            let mut note = crate::store::models::Note::new(&branch_id, &title, &content);
+            store
+                .create_note_with_unique_title(&mut note)
+                .map_err(|e| e.to_string())?;
             let item = crate::NoteTimelineItem {
                 id: note.id,
                 title: note.title,

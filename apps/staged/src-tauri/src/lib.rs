@@ -1990,16 +1990,13 @@ pub fn run() {
 
             let db_path = data_dir.join("data.db");
 
-            crate::migrations::run_pending(&[
-                crate::migrations::Migration {
-                    id: "legacy-worktrees-layout",
-                    run: crate::paths::migrate_legacy_worktrees_layout,
-                },
-                crate::migrations::Migration {
-                    id: "fsmonitor-v1",
-                    run: crate::git::config_apply::migrate_existing_clones,
-                },
-            ]);
+            // `legacy-worktrees-layout` must run synchronously before
+            // `Store::new` — it's a filesystem rename that `Store` and
+            // various `paths::*` lookups assume has already happened.
+            crate::migrations::run_pending(&[crate::migrations::Migration {
+                id: "legacy-worktrees-layout",
+                run: crate::paths::migrate_legacy_worktrees_layout,
+            }]);
 
             // Check compatibility *before* creating the store.
             let compat = store::check_db_compatibility(&db_path)
@@ -2027,6 +2024,19 @@ pub fn run() {
                     }
                     // Start the tiered background sync service for all cloned repos.
                     background_sync::spawn(Arc::clone(&store_arc), app.handle().clone());
+                    // `fsmonitor-v1` only flips `.git/config` flags on stale
+                    // clones the user may not visit this session — per-project
+                    // `ensure_local_clone` already re-applies the same config
+                    // idempotently, so we can move the sweep off the startup
+                    // critical path. A bare `std::thread` keeps it off the
+                    // tokio worker pool (the sweep is fully sync) and dodges
+                    // any uncertainty about runtime readiness during setup.
+                    std::thread::spawn(|| {
+                        crate::migrations::run_pending(&[crate::migrations::Migration {
+                            id: "fsmonitor-v1",
+                            run: crate::git::config_apply::migrate_existing_clones,
+                        }]);
+                    });
                     (Mutex::new(Some(store_arc)), None)
                 }
                 store::DbCompatibility::NeedsReset { db_app_version } => {

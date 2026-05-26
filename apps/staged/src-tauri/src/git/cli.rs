@@ -28,6 +28,17 @@ pub fn run(repo: &Path, args: &[&str]) -> Result<String, GitError> {
     run_with_env(repo, args, EnvSource::Captured)
 }
 
+/// Run a git command with the lite env (parent env minus `GIT_*`).
+///
+/// No shell-env warm-up, no captured-env retry. The right primitive for git
+/// invocations that are demonstrably env-independent — e.g. `git config
+/// --local --get|set`, which only touches `.git/config` and never fires
+/// smudge filters, credential helpers, or anything else the captured env
+/// exists to satisfy.
+pub fn run_lite(repo: &Path, args: &[&str]) -> Result<String, GitError> {
+    run_with_env(repo, args, EnvSource::Lite)
+}
+
 /// Fast-path variant of [`run`] for foreground first-paint reads.
 ///
 /// Tries the lite env first (parent env minus `GIT_*`), which avoids blocking

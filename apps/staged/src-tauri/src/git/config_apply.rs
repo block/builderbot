@@ -64,13 +64,17 @@ pub fn apply_to_clone(clone_path: &Path) {
 }
 
 fn set_if_unset_local(clone_path: &Path, key: &str, value: &str) {
-    match super::cli::run(clone_path, &["config", "--local", "--get", key]) {
+    // `git config --local --get|set` only touches `.git/config` — no smudge
+    // filters, no credential helpers, nothing the captured shell env exists
+    // for. Use `run_lite` so the migration sweep across N stale clones doesn't
+    // pay N × `$SHELL -ils` capture cost on cold cache.
+    match super::cli::run_lite(clone_path, &["config", "--local", "--get", key]) {
         Ok(_) => {
             // User (or a previous run) already set this key. Leave it alone.
         }
         Err(GitError::CommandFailed(_)) => {
             // `git config --get` exits non-zero when the key is unset.
-            if let Err(e) = super::cli::run(clone_path, &["config", "--local", key, value]) {
+            if let Err(e) = super::cli::run_lite(clone_path, &["config", "--local", key, value]) {
                 log::warn!(
                     "[config_apply] failed to set {key}={value} in {}: {e}",
                     clone_path.display()
@@ -253,6 +257,42 @@ mod tests {
         let v2 = super::super::cli::run(
             repo.path(),
             &["config", "--local", "--get", "core.untrackedcache"],
+        )
+        .expect("after no-op set, key still readable");
+        assert_eq!(
+            v2.trim(),
+            "false",
+            "set_if_unset must not clobber explicit value"
+        );
+    }
+
+    /// Same idempotency property, but driving verification through the new
+    /// `cli::run_lite` entry point that `set_if_unset_local` now uses. Smoke
+    /// test that the lite-env code path compiles and behaves identically on
+    /// the env-independent `config --local` reads.
+    #[test]
+    fn set_if_unset_local_is_idempotent_via_run_lite() {
+        let repo = crate::test_utils::TempGitRepo::new();
+        repo.write_file("a.txt", "hello\n");
+        repo.commit("init");
+
+        set_if_unset_local(repo.path(), "core.fsmonitor", "true");
+        let v1 = super::super::cli::run_lite(
+            repo.path(),
+            &["config", "--local", "--get", "core.fsmonitor"],
+        )
+        .expect("first set should leave key readable");
+        assert_eq!(v1.trim(), "true");
+
+        super::super::cli::run_lite(
+            repo.path(),
+            &["config", "--local", "core.fsmonitor", "false"],
+        )
+        .expect("override should succeed");
+        set_if_unset_local(repo.path(), "core.fsmonitor", "true");
+        let v2 = super::super::cli::run_lite(
+            repo.path(),
+            &["config", "--local", "--get", "core.fsmonitor"],
         )
         .expect("after no-op set, key still readable");
         assert_eq!(

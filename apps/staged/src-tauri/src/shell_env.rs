@@ -363,13 +363,7 @@ impl ShellEnvCache {
                         promise: promise.clone(),
                         promoted: false,
                     };
-                    let capture_start = Instant::now();
                     let outcome = capture_shell_env_blocking(&key, &self.shell, &self.temp_root);
-                    log::info!(
-                        "[shell_env_cache] cache miss for {} — blocking $SHELL -ils capture took {}ms",
-                        key.display(),
-                        capture_start.elapsed().as_millis()
-                    );
                     match outcome {
                         Ok(vars) => {
                             let env = ShellEnv {

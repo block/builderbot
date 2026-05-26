@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::Emitter;
 
 /// TTL for cached git user identity lookups (5 minutes).
@@ -248,8 +248,6 @@ pub fn build_branch_timeline_public(
 }
 
 fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTimeline, String> {
-    let total_start = Instant::now();
-
     // Get the branch and its workdir for git operations
     let branch = store
         .get_branch(branch_id)
@@ -268,9 +266,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
 
     // Get commits from git (the source of truth for commit data)
     let mut commits = Vec::new();
-    let kind: &str;
     if let Some(ref ws_name) = branch.workspace_name {
-        kind = "remote";
         let repo_subpath = branches::resolve_branch_workspace_subpath(store, &branch)?;
         let cache_key = remote_git_state_cache_key(
             ws_name,
@@ -281,7 +277,6 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         let resolved_path = resolve_repo_path(ws_name, repo_subpath.as_deref())?;
         let base_ref = git::origin_ref_for_branch(&branch.base_branch);
 
-        let git_state_start = Instant::now();
         // Foreground: skip untracked enumeration so first paint isn't blocked
         // by a recursive working-tree walk on huge monorepos. The background
         // refresh re-runs with `Full` and emits the corrected counts via
@@ -297,12 +292,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             git::FetchMode::Never,
             git::WorktreeStatusScope::Indexed,
         ));
-        log::info!(
-            "[build_branch_timeline] {branch_id} remote git_state took {}ms",
-            git_state_start.elapsed().as_millis()
-        );
 
-        let identity_start = Instant::now();
         {
             let ws = ws_name.clone();
             let sub = repo_subpath.clone();
@@ -323,12 +313,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 },
             );
         }
-        log::info!(
-            "[build_branch_timeline] {branch_id} remote identity took {}ms",
-            identity_start.elapsed().as_millis()
-        );
 
-        let commits_start = Instant::now();
         commits = fetch_remote_commits(
             ws_name,
             repo_subpath.as_deref(),
@@ -336,19 +321,12 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             branch_id,
             &base_ref,
         )?;
-        log::info!(
-            "[build_branch_timeline] {branch_id} remote commits ({n}) took {}ms",
-            commits_start.elapsed().as_millis(),
-            n = commits.len()
-        );
     } else if let Some(ref wd) = workdir {
-        kind = "local";
         // Local branch: fetch commits from the local worktree
         let worktree_path = Path::new(&wd.path);
         if worktree_path.exists() {
             let base_ref = git::origin_ref_for_branch(&branch.base_branch);
 
-            let git_state_start = Instant::now();
             // Foreground: `Indexed` skips the untracked-file walk and lite-env
             // skips the per-project `$SHELL -ils` capture. A captured-env
             // warm-up still fires in the background so the next non-foreground
@@ -361,13 +339,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 git::WorktreeStatusScope::Indexed,
                 git::EnvSource::Lite,
             ));
-            log::info!(
-                "[build_branch_timeline] {branch_id} local git_state took {}ms (worktree={})",
-                git_state_start.elapsed().as_millis(),
-                worktree_path.display()
-            );
 
-            let identity_start = Instant::now();
             {
                 let path_str = wd.path.clone();
                 // `git config user.{name,email}` reads `.git/config` + `~/.gitconfig`
@@ -386,30 +358,13 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                     GitUserIdentity { name, email }
                 });
             }
-            log::info!(
-                "[build_branch_timeline] {branch_id} local identity took {}ms",
-                identity_start.elapsed().as_millis()
-            );
 
-            let commits_start = Instant::now();
             let git_commits =
                 git::get_commits_since_base(worktree_path, &base_ref).map_err(|e| {
                     format!("Failed to get commits since base for branch {branch_id}: {e:?}")
                 })?;
             commits = map_local_commits(store, branch_id, &git_commits);
-            log::info!(
-                "[build_branch_timeline] {branch_id} local commits ({n}) took {}ms",
-                commits_start.elapsed().as_millis(),
-                n = commits.len()
-            );
-        } else {
-            log::info!(
-                "[build_branch_timeline] {branch_id} local worktree missing on disk: {}",
-                worktree_path.display()
-            );
         }
-    } else {
-        kind = "no-workdir";
     }
 
     // Mark commits authored by the current user
@@ -421,7 +376,6 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
     }
 
     // Also include pending commits (sha = None, i.e. session in progress)
-    let db_start = Instant::now();
     let db_commits = store
         .list_commits_for_branch(branch_id)
         .map_err(|e| e.to_string())?;
@@ -534,20 +488,6 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         })
         .collect();
 
-    log::info!(
-        "[build_branch_timeline] {branch_id} db lookups (commits={nc}, notes={nn}, reviews={nr}, images={ni}) took {}ms",
-        db_start.elapsed().as_millis(),
-        nc = commits.len(),
-        nn = notes.len(),
-        nr = reviews.len(),
-        ni = images.len(),
-    );
-
-    log::info!(
-        "[build_branch_timeline] {branch_id} TOTAL {}ms (kind={kind})",
-        total_start.elapsed().as_millis()
-    );
-
     Ok(BranchTimeline {
         commits,
         notes,
@@ -619,7 +559,6 @@ pub async fn refresh_branch_git_state(
     };
 
     tauri::async_runtime::spawn_blocking(move || {
-        let total_start = Instant::now();
         let branch = store
             .get_branch(&branch_id)
             .map_err(|e| e.to_string())?
@@ -677,10 +616,6 @@ pub async fn refresh_branch_git_state(
                 },
             );
         }
-        log::info!(
-            "[refresh_branch_git_state] {branch_id} TOTAL {}ms",
-            total_start.elapsed().as_millis()
-        );
         Ok(())
     })
     .await

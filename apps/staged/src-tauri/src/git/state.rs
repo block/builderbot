@@ -622,54 +622,27 @@ pub fn compute_branch_git_state<F>(
 where
     F: Fn(&[&str]) -> Result<String, String> + Sync,
 {
-    let phase1_start = std::time::Instant::now();
-
     // Phase 1: Fetch runs in parallel with local-only commands (HEAD, branch
     // name, worktree status) since those read local state unaffected by fetch.
-    let (refresh, head_sha, branch, worktree, phase1_timings) = std::thread::scope(|s| {
+    let (refresh, head_sha, branch, worktree) = std::thread::scope(|s| {
         let fetch_handle = s.spawn(|| {
-            let t = std::time::Instant::now();
-            let r =
-                refresh_refs_if_needed(cache_key, &run_git, branch_name, base_branch, fetch_mode);
-            (r, t.elapsed().as_millis())
+            refresh_refs_if_needed(cache_key, &run_git, branch_name, base_branch, fetch_mode)
         });
         let head_handle = s.spawn(|| {
-            let t = std::time::Instant::now();
-            let r = run_git(&["rev-parse", "HEAD"])
+            run_git(&["rev-parse", "HEAD"])
                 .ok()
-                .and_then(trim_non_empty);
-            (r, t.elapsed().as_millis())
+                .and_then(trim_non_empty)
         });
-        let branch_handle = s.spawn(|| {
-            let t = std::time::Instant::now();
-            let r = current_branch(&run_git);
-            (r, t.elapsed().as_millis())
-        });
-        let worktree_handle = s.spawn(|| {
-            let t = std::time::Instant::now();
-            let r = compute_worktree_state(&run_git, worktree_scope);
-            (r, t.elapsed().as_millis())
-        });
-
-        let (refresh, t_fetch) = fetch_handle.join().expect("fetch thread panicked");
-        let (head, t_head) = head_handle.join().expect("head thread panicked");
-        let (br, t_branch) = branch_handle.join().expect("branch thread panicked");
-        let (wt, t_worktree) = worktree_handle.join().expect("worktree thread panicked");
+        let branch_handle = s.spawn(|| current_branch(&run_git));
+        let worktree_handle = s.spawn(|| compute_worktree_state(&run_git, worktree_scope));
 
         (
-            refresh,
-            head,
-            br,
-            wt,
-            (t_fetch, t_head, t_branch, t_worktree),
+            fetch_handle.join().expect("fetch thread panicked"),
+            head_handle.join().expect("head thread panicked"),
+            branch_handle.join().expect("branch thread panicked"),
+            worktree_handle.join().expect("worktree thread panicked"),
         )
     });
-    let (t_fetch, t_head, t_branch, t_worktree) = phase1_timings;
-    log::info!(
-        "[compute_branch_git_state] {cache_key} phase1 took {}ms (fetch={t_fetch}ms[{:?}], head={t_head}ms, branch={t_branch}ms, worktree-status={t_worktree}ms)",
-        phase1_start.elapsed().as_millis(),
-        fetch_mode,
-    );
 
     let detached_head = head_sha.is_some() && branch.is_none();
     let expected_branch = branch_name_without_origin(branch_name);
@@ -680,37 +653,25 @@ where
     let upstream_ref = origin_ref_for_branch(branch_name);
     let base_ref = origin_ref_for_branch(base_branch);
 
-    let phase2_start = std::time::Instant::now();
-
     // Phase 2: Upstream and base state computations are independent of each
     // other but both need fetch to have completed (for up-to-date remote refs)
     // and head_sha.
-    let (upstream, base, phase2_timings) = std::thread::scope(|s| {
+    let (upstream, base) = std::thread::scope(|s| {
         let upstream_handle = s.spawn(|| {
-            let t = std::time::Instant::now();
-            let r = compute_upstream_state(
+            compute_upstream_state(
                 &run_git,
                 upstream_ref,
                 head_sha.as_deref(),
                 refresh.upstream_known_missing,
-            );
-            (r, t.elapsed().as_millis())
+            )
         });
-        let base_handle = s.spawn(|| {
-            let t = std::time::Instant::now();
-            let r = compute_base_state(&run_git, base_ref, head_sha.as_deref());
-            (r, t.elapsed().as_millis())
-        });
+        let base_handle = s.spawn(|| compute_base_state(&run_git, base_ref, head_sha.as_deref()));
 
-        let (u, t_up) = upstream_handle.join().expect("upstream thread panicked");
-        let (b, t_base) = base_handle.join().expect("base thread panicked");
-        (u, b, (t_up, t_base))
+        (
+            upstream_handle.join().expect("upstream thread panicked"),
+            base_handle.join().expect("base thread panicked"),
+        )
     });
-    let (t_up, t_base) = phase2_timings;
-    log::info!(
-        "[compute_branch_git_state] {cache_key} phase2 took {}ms (upstream={t_up}ms, base={t_base}ms)",
-        phase2_start.elapsed().as_millis()
-    );
 
     BranchGitState {
         upstream,

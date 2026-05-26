@@ -5,7 +5,7 @@ edition = "2021"
 description = "Full-featured client for ACP (Agent Client Protocol) agents like Goose and Claude Code"
 
 [dependencies]
-agent-client-protocol = { version = "0.10", features = ["unstable"] }
+agent-client-protocol = { version = "0.12", features = ["unstable"] }
 tokio = { version = "1", features = ["process", "io-util", "time", "sync", "rt", "macros"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 serde = { version = "1", features = ["derive"] }

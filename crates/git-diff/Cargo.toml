@@ -7,7 +7,7 @@ description = "Git diff computation: file listing, content diffing, and alignmen
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0"
-git2 = { version = "0.20", features = ["vendored-openssl", "vendored-libgit2"] }
+git2 = { version = "0.21", features = ["vendored-openssl", "vendored-libgit2"] }
 base64 = "0.22"
 log = "0.4"
 

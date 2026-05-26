@@ -74,6 +74,12 @@ pub struct UpstreamGitState {
     pub ahead: u32,
     pub behind: u32,
     pub merge_base_sha: Option<String>,
+    /// Number of commits `origin/{base_branch}` is ahead of `origin/{branch_name}`.
+    ///
+    /// Non-zero means the remote branch tip is stale relative to base. The
+    /// timeline UI uses this to disable "Rebase onto Origin" when rebasing
+    /// onto a behind-base remote tip would produce an unmergeable result.
+    pub behind_base: u32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -157,6 +163,7 @@ impl FastGitState {
                 ahead: 0,
                 behind: 0,
                 merge_base_sha: None,
+                behind_base: 0,
             },
             base: BaseGitState {
                 r#ref: base_ref,
@@ -521,6 +528,7 @@ where
 fn compute_upstream_state<F>(
     run_git: &F,
     upstream_ref: String,
+    base_ref: &str,
     head_sha: Option<&str>,
     upstream_known_missing: bool,
 ) -> UpstreamGitState
@@ -543,6 +551,7 @@ where
             ahead: 0,
             behind: 0,
             merge_base_sha: None,
+            behind_base: 0,
         };
     }
 
@@ -562,6 +571,15 @@ where
     };
     let merge_base_sha = merge_base(run_git, "HEAD", &upstream_ref);
 
+    // How many commits `origin/{base}` is ahead of `origin/{branch}`. When the
+    // upstream ref *is* the base ref this is always 0, which is the correct
+    // signal for "branch tracking its own base" workflows.
+    let behind_base = if upstream_ref == base_ref {
+        0
+    } else {
+        rev_count(run_git, &format!("{upstream_ref}..{base_ref}"))
+    };
+
     UpstreamGitState {
         r#ref: upstream_ref,
         exists,
@@ -570,6 +588,7 @@ where
         ahead,
         behind,
         merge_base_sha,
+        behind_base,
     }
 }
 
@@ -652,6 +671,7 @@ where
         .unwrap_or(false);
     let upstream_ref = origin_ref_for_branch(branch_name);
     let base_ref = origin_ref_for_branch(base_branch);
+    let base_ref_for_upstream = base_ref.clone();
 
     // Phase 2: Upstream and base state computations are independent of each
     // other but both need fetch to have completed (for up-to-date remote refs)
@@ -661,6 +681,7 @@ where
             compute_upstream_state(
                 &run_git,
                 upstream_ref,
+                &base_ref_for_upstream,
                 head_sha.as_deref(),
                 refresh.upstream_known_missing,
             )
@@ -803,12 +824,14 @@ pub fn complete_local_git_state(
         refresh_refs_if_needed(&cache_key, &run_git, branch_name, base_branch, fetch_mode);
     let upstream_ref = origin_ref_for_branch(branch_name);
     let base_ref = origin_ref_for_branch(base_branch);
+    let base_ref_for_upstream = base_ref.clone();
 
     let (upstream, base) = std::thread::scope(|s| {
         let u = s.spawn(|| {
             compute_upstream_state(
                 &run_git,
                 upstream_ref,
+                &base_ref_for_upstream,
                 fast.head_sha.as_deref(),
                 refresh.upstream_known_missing,
             )
@@ -904,6 +927,11 @@ const BATCH_GIT_STATE_SCRIPT: &str = concat!(
     "if [ -n \"$up_sha\" ] && [ -n \"$head_sha\" ]; then\n",
     "  printf 'UP_COUNTS=%s\\n' \"$(git rev-list --left-right --count \"$head_sha\"...\"$4\" 2>/dev/null || echo '0 0')\"\n",
     "  printf 'UP_MB=%s\\n' \"$(git merge-base \"$head_sha\" \"$4\" 2>/dev/null || true)\"\n",
+    "  if [ \"$4\" != \"$5\" ]; then\n",
+    "    printf 'UP_BEHIND_BASE=%s\\n' \"$(git rev-list --count \"$4\"..\"$5\" 2>/dev/null || echo 0)\"\n",
+    "  else\n",
+    "    printf 'UP_BEHIND_BASE=0\\n'\n",
+    "  fi\n",
     "fi\n",
     // --- Base state ---
     "base_sha=$(git rev-parse --verify \"$5\" 2>/dev/null || true)\n",
@@ -929,6 +957,7 @@ struct BatchGitStateOutput {
     up_ahead: u32,
     up_behind: u32,
     up_merge_base: Option<String>,
+    up_behind_base: u32,
     base_sha: Option<String>,
     base_behind: u32,
 }
@@ -944,6 +973,7 @@ fn parse_batch_git_state_output(raw: &str) -> BatchGitStateOutput {
     let mut up_ahead = 0u32;
     let mut up_behind = 0u32;
     let mut up_merge_base = None;
+    let mut up_behind_base = 0u32;
     let mut base_sha = None;
     let mut base_behind = 0u32;
 
@@ -994,6 +1024,8 @@ fn parse_batch_git_state_output(raw: &str) -> BatchGitStateOutput {
             if !v.is_empty() {
                 up_merge_base = Some(v.to_string());
             }
+        } else if let Some(val) = line.strip_prefix("UP_BEHIND_BASE=") {
+            up_behind_base = parse_u32(Some(val.trim()));
         } else if let Some(val) = line.strip_prefix("BASE_SHA=") {
             let v = val.trim();
             if !v.is_empty() {
@@ -1016,6 +1048,7 @@ fn parse_batch_git_state_output(raw: &str) -> BatchGitStateOutput {
         up_ahead,
         up_behind,
         up_merge_base,
+        up_behind_base,
         base_sha,
         base_behind,
     }
@@ -1364,6 +1397,7 @@ where
                 ahead: parsed.up_ahead,
                 behind: parsed.up_behind,
                 merge_base_sha: parsed.up_merge_base,
+                behind_base: parsed.up_behind_base,
             };
 
             let base = BaseGitState {
@@ -1395,6 +1429,7 @@ where
                     ahead: 0,
                     behind: 0,
                     merge_base_sha: None,
+                    behind_base: 0,
                 },
                 base: BaseGitState {
                     r#ref: base_ref,

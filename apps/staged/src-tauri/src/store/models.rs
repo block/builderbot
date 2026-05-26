@@ -1267,6 +1267,14 @@ pub struct PipelineStepStatus {
 pub struct PipelineExecution {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kind: Option<PipelineKind>,
+    /// Remote ref the rebase variant should target (without the `origin/` prefix).
+    ///
+    /// `None` means the pipeline targets the branch's configured base (today's
+    /// default). `Some("feature-x")` records that a "Rebase onto Origin" was
+    /// requested so the queued path can re-derive the same steps on dequeue
+    /// rather than silently downgrading to a base rebase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rebase_target: Option<String>,
     pub steps: Vec<PipelineStepStatus>,
     pub current_step: usize,
     /// Set when pipeline completes without needing AI.
@@ -1302,6 +1310,7 @@ impl PipelineExecution {
 
         Self {
             kind: None,
+            rebase_target: None,
             steps: step_statuses,
             current_step: 0,
             completed_without_ai: false,
@@ -1310,6 +1319,11 @@ impl PipelineExecution {
 
     pub fn with_kind(mut self, kind: PipelineKind) -> Self {
         self.kind = Some(kind);
+        self
+    }
+
+    pub fn with_rebase_target(mut self, target: String) -> Self {
+        self.rebase_target = Some(target);
         self
     }
 }
@@ -1347,6 +1361,28 @@ mod pipeline_tests {
                 .unwrap();
 
         assert_eq!(execution.kind, None);
+    }
+
+    #[test]
+    fn pipeline_rebase_target_is_optional_for_legacy_pipeline_json() {
+        let execution: PipelineExecution = serde_json::from_str(
+            r#"{"kind":"rebase","steps":[],"currentStep":0,"completedWithoutAi":false}"#,
+        )
+        .unwrap();
+
+        assert_eq!(execution.rebase_target, None);
+    }
+
+    #[test]
+    fn pipeline_rebase_target_round_trips() {
+        let execution: PipelineExecution = serde_json::from_str(
+            r#"{"kind":"rebase","rebaseTarget":"feature-x","steps":[],"currentStep":0,"completedWithoutAi":false}"#,
+        )
+        .unwrap();
+
+        assert_eq!(execution.rebase_target.as_deref(), Some("feature-x"));
+        let json = serde_json::to_string(&execution).unwrap();
+        assert!(json.contains("\"rebaseTarget\":\"feature-x\""));
     }
 }
 

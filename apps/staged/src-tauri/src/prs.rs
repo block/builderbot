@@ -225,28 +225,53 @@ fn git_push_with_fallback(args: &str) -> String {
     format!("if ! git push {args}; then git -c '{HTTPS_FALLBACK_CONFIG}' push {args}; fi")
 }
 
-fn build_commit_pipeline_steps(kind: &PipelineKind, base_branch: &str) -> Vec<PipelineStep> {
+/// Build the steps for a rebase or squash pipeline.
+///
+/// `base_branch` is the branch's configured upstream base (e.g. `main`). For
+/// squash this is also the bound the reset must not cross. For rebase it is
+/// purely informational in the AI handoff prompts so the agent can sanity-check
+/// the requested target.
+///
+/// `rebase_target` is the remote ref the rebase will actually run against. It
+/// equals `base_branch` for the default "rebase onto base" action and equals
+/// the branch's own name for "rebase onto origin" (used when local has
+/// diverged from `origin/{branch}`). Only the rebase variant consults this
+/// value; squash always operates against the base branch.
+fn build_commit_pipeline_steps(
+    kind: &PipelineKind,
+    base_branch: &str,
+    rebase_target: &str,
+) -> Vec<PipelineStep> {
     match kind {
-        PipelineKind::Rebase => vec![
-            PipelineStep::Command {
-                label: "Fetch latest base".to_string(),
-                command: git_fetch_with_fallback(base_branch),
-                on_failure: FailureStrategy::HandoffToAi {
-                    prompt_template: format!(
-                        "The fetch failed. Diagnose and fix the issue, then rebase this branch onto `origin/{base_branch}` with DCO signoffs. Resolve conflicts if present and continue the rebase. Do not push the branch.\n\n{{step_outputs}}"
-                    ),
+        PipelineKind::Rebase => {
+            let target_note = if base_branch == rebase_target {
+                String::new()
+            } else {
+                format!(
+                    " The branch's configured base is `origin/{base_branch}`; the requested target `origin/{rebase_target}` is different. If `origin/{rebase_target}` is itself behind `origin/{base_branch}` by a non-trivial amount, surface that to the user before continuing — the rebase target may be wrong."
+                )
+            };
+            vec![
+                PipelineStep::Command {
+                    label: "Fetch latest base".to_string(),
+                    command: git_fetch_with_fallback(rebase_target),
+                    on_failure: FailureStrategy::HandoffToAi {
+                        prompt_template: format!(
+                            "The fetch failed. Diagnose and fix the issue, then rebase this branch onto `origin/{rebase_target}` with DCO signoffs. Resolve conflicts if present and continue the rebase. Do not push the branch.{target_note}\n\n{{step_outputs}}"
+                        ),
+                    },
                 },
-            },
-            PipelineStep::Command {
-                label: "Rebase onto base".to_string(),
-                command: format!("git rebase --signoff origin/{base_branch}"),
-                on_failure: FailureStrategy::HandoffToAi {
-                    prompt_template: format!(
-                        "The rebase failed. Inspect the output, recover from the actual failure, resolve conflicts if present, then continue the rebase onto `origin/{base_branch}` with DCO signoffs. Do not push the branch.\n\n{{step_outputs}}"
-                    ),
+                PipelineStep::Command {
+                    label: "Rebase onto base".to_string(),
+                    command: format!("git rebase --signoff origin/{rebase_target}"),
+                    on_failure: FailureStrategy::HandoffToAi {
+                        prompt_template: format!(
+                            "The rebase failed. Inspect the output, recover from the actual failure, resolve conflicts if present, then continue the rebase onto `origin/{rebase_target}` with DCO signoffs. Do not push the branch.{target_note}\n\n{{step_outputs}}"
+                        ),
+                    },
                 },
-            },
-        ],
+            ]
+        }
         PipelineKind::Squash => vec![
             // Fetch first so origin/{base} is up-to-date before computing the
             // merge-base for the destructive soft reset. Without this, a stale
@@ -299,17 +324,22 @@ Here is the context from the prior steps:
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_running_commit_pipeline_for_branch(
     ctx: BranchPipelineContext,
     kind: PipelineKind,
     steps: Vec<PipelineStep>,
+    rebase_target: Option<String>,
     provider: Option<String>,
     store: Arc<Store>,
     app_handle: &tauri::AppHandle,
     registry: &Arc<session_runner::SessionRegistry>,
 ) -> Result<String, String> {
     let prompt = commit_pipeline_prompt(&kind);
-    let pipeline = PipelineExecution::from_steps(&steps).with_kind(kind);
+    let mut pipeline = PipelineExecution::from_steps(&steps).with_kind(kind);
+    if let Some(target) = rebase_target {
+        pipeline = pipeline.with_rebase_target(target);
+    }
 
     let mut session = store::Session::new_running(prompt, &ctx.working_dir);
     if let Some(ref p) = provider {
@@ -379,9 +409,13 @@ pub(crate) async fn start_or_queue_commit_pipeline_for_branch(
             .get_branch(&branch_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+        let base_branch = base_branch_name(&branch);
         let rebase_ref = rebase_ref_for_target(&branch, target.as_deref());
-        let steps = build_commit_pipeline_steps(&kind, &rebase_ref);
-        let pipeline = PipelineExecution::from_steps(&steps).with_kind(kind);
+        let steps = build_commit_pipeline_steps(&kind, base_branch, &rebase_ref);
+        let mut pipeline = PipelineExecution::from_steps(&steps).with_kind(kind);
+        if matches!(target.as_deref(), Some("origin")) {
+            pipeline = pipeline.with_rebase_target(rebase_ref.clone());
+        }
         let mut session = store::Session::new_queued(prompt);
         if let Some(ref p) = provider {
             session = session.with_provider(p);
@@ -396,13 +430,17 @@ pub(crate) async fn start_or_queue_commit_pipeline_for_branch(
     }
 
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
+    let base_branch = base_branch_name(&ctx.branch).to_string();
     let rebase_ref = rebase_ref_for_target(&ctx.branch, target.as_deref());
-    let steps = build_commit_pipeline_steps(&kind, &rebase_ref);
+    let steps = build_commit_pipeline_steps(&kind, &base_branch, &rebase_ref);
+    let persisted_rebase_target =
+        matches!(target.as_deref(), Some("origin")).then(|| rebase_ref.clone());
 
     start_running_commit_pipeline_for_branch(
         ctx,
         kind,
         steps,
+        persisted_rebase_target,
         provider,
         store,
         &app_handle,
@@ -424,12 +462,22 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
         .as_ref()
         .and_then(|pipeline| pipeline.kind.clone())
         .ok_or_else(|| format!("Queued session {} has no pipeline kind", session.id))?;
+    let queued_rebase_target = session
+        .pipeline
+        .as_ref()
+        .and_then(|pipeline| pipeline.rebase_target.clone());
 
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
-    let base_branch = base_branch_name(&ctx.branch);
-    let steps = build_commit_pipeline_steps(&kind, base_branch);
+    let base_branch = base_branch_name(&ctx.branch).to_string();
+    let rebase_ref = queued_rebase_target
+        .clone()
+        .unwrap_or_else(|| base_branch.clone());
+    let steps = build_commit_pipeline_steps(&kind, &base_branch, &rebase_ref);
     let prompt = commit_pipeline_prompt(&kind);
-    let pipeline = PipelineExecution::from_steps(&steps).with_kind(kind);
+    let mut pipeline = PipelineExecution::from_steps(&steps).with_kind(kind);
+    if let Some(target) = queued_rebase_target {
+        pipeline = pipeline.with_rebase_target(target);
+    }
     let effective_provider = session.provider.clone().or(provider);
 
     let transitioned = store
@@ -1239,7 +1287,7 @@ mod tests {
 
     #[test]
     fn rebase_pipeline_uses_signoff() {
-        let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main");
+        let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "main");
 
         let (_, command, _) = command_at(&steps, 0);
         assert_eq!(
@@ -1252,8 +1300,65 @@ mod tests {
     }
 
     #[test]
+    fn rebase_pipeline_targets_origin_branch_when_target_differs() {
+        let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "feature-branch");
+
+        let (_, command, _) = command_at(&steps, 0);
+        assert_eq!(
+            command,
+            "if ! git fetch origin feature-branch; then git -c 'url.https://github.com/.insteadOf=git@github.com:' fetch origin feature-branch; fi"
+        );
+
+        let (_, command, _) = command_at(&steps, 1);
+        assert_eq!(command, "git rebase --signoff origin/feature-branch");
+    }
+
+    #[test]
+    fn rebase_pipeline_prompt_mentions_base_when_target_differs() {
+        let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "feature-branch");
+
+        let fetch_failure = match &steps[0] {
+            PipelineStep::Command {
+                on_failure: FailureStrategy::HandoffToAi { prompt_template },
+                ..
+            } => prompt_template.clone(),
+            _ => panic!("expected fetch step to have HandoffToAi failure"),
+        };
+        assert!(fetch_failure.contains("origin/feature-branch"));
+        assert!(fetch_failure.contains("origin/main"));
+        assert!(fetch_failure.contains("the rebase target may be wrong"));
+
+        let rebase_failure = match &steps[1] {
+            PipelineStep::Command {
+                on_failure: FailureStrategy::HandoffToAi { prompt_template },
+                ..
+            } => prompt_template.clone(),
+            _ => panic!("expected rebase step to have HandoffToAi failure"),
+        };
+        assert!(rebase_failure.contains("origin/feature-branch"));
+        assert!(rebase_failure.contains("origin/main"));
+        assert!(rebase_failure.contains("the rebase target may be wrong"));
+    }
+
+    #[test]
+    fn rebase_pipeline_prompt_omits_target_note_when_target_matches_base() {
+        let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "main");
+
+        for step in &steps {
+            if let PipelineStep::Command {
+                on_failure: FailureStrategy::HandoffToAi { prompt_template },
+                ..
+            } = step
+            {
+                assert!(!prompt_template.contains("the rebase target may be wrong"));
+                assert!(!prompt_template.contains("is different"));
+            }
+        }
+    }
+
+    #[test]
     fn squash_pipeline_prompt_requires_signoff() {
-        let steps = build_commit_pipeline_steps(&PipelineKind::Squash, "main");
+        let steps = build_commit_pipeline_steps(&PipelineKind::Squash, "main", "main");
 
         let (_, prompt) = ai_prompt_at(&steps, 3);
         assert!(prompt.contains("Use the user's global git identity"));

@@ -259,3 +259,29 @@ fn detects_base_branch_moved() {
 
     assert_eq!(state.base.commits_since_fork, 1);
 }
+
+#[test]
+fn upstream_behind_base_zero_when_origin_branch_is_caught_up() {
+    let (_origin, clone) = remote_backed_feature();
+    let state = state(&clone.path, FetchMode::Force);
+
+    // Branch and its origin tip are both forked from main, so origin/main is
+    // not ahead of origin/feature.
+    assert_eq!(state.upstream.behind_base, 0);
+}
+
+#[test]
+fn upstream_behind_base_counts_origin_base_commits_missing_from_origin_branch() {
+    let (origin, clone) = remote_backed_feature();
+    // Land two commits on origin/main *after* origin/feature was pushed, so
+    // origin/feature is now two commits behind origin/main.
+    origin.run_git(&["checkout", "main"]);
+    origin.write_file("base1.txt", "one\n");
+    origin.commit("base 1");
+    origin.write_file("base2.txt", "two\n");
+    origin.commit("base 2");
+
+    let state = state(&clone.path, FetchMode::Force);
+
+    assert_eq!(state.upstream.behind_base, 2);
+}

@@ -203,6 +203,8 @@ export interface BranchGitState {
     ahead: number;
     behind: number;
     mergeBaseSha: string | null;
+    /** Number of commits `origin/{base}` is ahead of `origin/{branch}`. */
+    behindBase: number;
   };
   base: {
     ref: string;

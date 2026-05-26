@@ -1261,6 +1261,95 @@ fn test_update_note_title_and_content_is_noop_when_unchanged() {
     assert!(after_third.updated_at > after_first.updated_at);
 }
 
+#[test]
+fn test_create_note_with_unique_title_appends_increment_on_collision() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let mut first = Note::new(&branch.id, "Build log", "first");
+    store.create_note_with_unique_title(&mut first).unwrap();
+    assert_eq!(first.title, "Build log");
+
+    let mut second = Note::new(&branch.id, "Build log", "second");
+    store.create_note_with_unique_title(&mut second).unwrap();
+    assert_eq!(second.title, "Build log (2)");
+
+    let mut third = Note::new(&branch.id, "Build log", "third");
+    store.create_note_with_unique_title(&mut third).unwrap();
+    assert_eq!(third.title, "Build log (3)");
+
+    // Each insert actually landed, with the disambiguated titles persisted.
+    let titles: Vec<_> = store
+        .list_notes_for_branch(&branch.id)
+        .unwrap()
+        .into_iter()
+        .map(|n| n.title)
+        .collect();
+    assert!(titles.contains(&"Build log".to_string()));
+    assert!(titles.contains(&"Build log (2)".to_string()));
+    assert!(titles.contains(&"Build log (3)".to_string()));
+}
+
+#[test]
+fn test_create_note_with_unique_title_picks_max_plus_one_with_gaps() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    // Seed a non-contiguous set: "Build log" and "Build log (5)" exist, but
+    // (2)–(4) do not. macOS-Finder convention says the next pick is (6).
+    let mut base = Note::new(&branch.id, "Build log", "");
+    store.create_note_with_unique_title(&mut base).unwrap();
+    let manual = Note::new(&branch.id, "Build log (5)", "");
+    store.create_note(&manual).unwrap();
+
+    let mut next = Note::new(&branch.id, "Build log", "");
+    store.create_note_with_unique_title(&mut next).unwrap();
+    assert_eq!(next.title, "Build log (6)");
+}
+
+#[test]
+fn test_create_note_with_unique_title_is_scoped_to_branch() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch_a = Branch::new(&project.id, "feature-a", "main");
+    let branch_b = Branch::new(&project.id, "feature-b", "main");
+    store.create_branch(&branch_a).unwrap();
+    store.create_branch(&branch_b).unwrap();
+
+    let mut on_a = Note::new(&branch_a.id, "Build log", "");
+    store.create_note_with_unique_title(&mut on_a).unwrap();
+
+    // Same title on a different branch must not trigger a suffix.
+    let mut on_b = Note::new(&branch_b.id, "Build log", "");
+    store.create_note_with_unique_title(&mut on_b).unwrap();
+    assert_eq!(on_b.title, "Build log");
+}
+
+#[test]
+fn test_create_note_with_unique_title_skips_empty_titles() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    // Empty-titled session stubs must stay empty — the runner fills them in
+    // later via update_note_title_and_content.
+    let mut first = Note::new(&branch.id, "", "").with_session("session-1");
+    store.create_note_with_unique_title(&mut first).unwrap();
+    let mut second = Note::new(&branch.id, "", "").with_session("session-2");
+    store.create_note_with_unique_title(&mut second).unwrap();
+    assert_eq!(first.title, "");
+    assert_eq!(second.title, "");
+}
+
 // =============================================================================
 // Repo Actions
 // =============================================================================

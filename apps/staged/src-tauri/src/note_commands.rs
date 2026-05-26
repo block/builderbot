@@ -13,8 +13,10 @@ pub fn create_note(
     content: String,
 ) -> Result<NoteTimelineItem, String> {
     let store = crate::get_store(&store)?;
-    let note = crate::store::models::Note::new(&branch_id, &title, &content);
-    store.create_note(&note).map_err(|e| e.to_string())?;
+    let mut note = crate::store::models::Note::new(&branch_id, &title, &content);
+    store
+        .create_note_with_unique_title(&mut note)
+        .map_err(|e| e.to_string())?;
     Ok(NoteTimelineItem {
         id: note.id,
         title: note.title,

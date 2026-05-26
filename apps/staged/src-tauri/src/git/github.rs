@@ -841,6 +841,7 @@ pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitEr
     let https_url = format!("https://github.com/{github_repo}.git");
 
     if clone_path.join(".git").exists() {
+        super::config_apply::apply_to_clone(&clone_path);
         return Ok(clone_path);
     }
 
@@ -902,6 +903,8 @@ pub fn ensure_local_clone(github_repo: &str) -> Result<std::path::PathBuf, GitEr
             &["clone", &https_url, &clone_str],
         )?;
     }
+
+    super::config_apply::apply_to_clone(&clone_path);
 
     Ok(clone_path)
 }
@@ -995,6 +998,7 @@ where
     let https_url = format!("https://github.com/{github_repo}.git");
 
     if clone_path.join(".git").exists() {
+        super::config_apply::apply_to_clone(&clone_path);
         return Ok(clone_path);
     }
 
@@ -1059,6 +1063,8 @@ where
             &mut on_stderr_line,
         )?;
     }
+
+    super::config_apply::apply_to_clone(&clone_path);
 
     Ok(clone_path)
 }

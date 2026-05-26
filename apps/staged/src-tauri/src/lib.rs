@@ -14,6 +14,7 @@ pub mod doctor;
 pub mod git;
 pub mod github_commands;
 pub mod image_commands;
+pub mod migrations;
 pub mod note_commands;
 pub mod paths;
 pub mod project_commands;
@@ -1989,15 +1990,16 @@ pub fn run() {
 
             let db_path = data_dir.join("data.db");
 
-            // Move local worktrees from the legacy top-level `worktrees/`
-            // folder into the workspace-scoped `workspaces/local/` folder.
-            if let Some(old_worktrees) = crate::paths::legacy_worktrees_dir() {
-                if let Some(new_worktrees) = crate::paths::worktrees_dir() {
-                    if old_worktrees.exists() && old_worktrees != new_worktrees {
-                        crate::paths::migrate_legacy_worktrees_layout();
-                    }
-                }
-            }
+            crate::migrations::run_pending(&[
+                crate::migrations::Migration {
+                    id: "legacy-worktrees-layout",
+                    run: crate::paths::migrate_legacy_worktrees_layout,
+                },
+                crate::migrations::Migration {
+                    id: "fsmonitor-v1",
+                    run: crate::git::config_apply::migrate_existing_clones,
+                },
+            ]);
 
             // Check compatibility *before* creating the store.
             let compat = store::check_db_compatibility(&db_path)

@@ -54,15 +54,15 @@ pub fn db_path() -> Option<PathBuf> {
 ///
 /// Moves entries from `~/.staged/worktrees/` to `~/.staged/workspaces/local/`.
 /// Safe to call repeatedly.
-pub fn migrate_legacy_worktrees_layout() {
+pub fn migrate_legacy_worktrees_layout() -> Result<(), String> {
     let Some(old_dir) = legacy_worktrees_dir() else {
-        return;
+        return Ok(());
     };
     let Some(new_dir) = worktrees_dir() else {
-        return;
+        return Ok(());
     };
     if old_dir == new_dir || !old_dir.exists() {
-        return;
+        return Ok(());
     }
 
     log::info!(
@@ -90,6 +90,7 @@ pub fn migrate_legacy_worktrees_layout() {
             );
         }
     }
+    Ok(())
 }
 
 /// Move all entries from `src` into `dst`, creating `dst` if needed.

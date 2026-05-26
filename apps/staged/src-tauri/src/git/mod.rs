@@ -1,5 +1,6 @@
 mod cli;
 mod commit;
+pub mod config_apply;
 mod diff;
 mod env;
 mod files;

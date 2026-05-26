@@ -1,3 +1,4 @@
+use super::cli::EnvSource;
 use super::state::{
     compute_local_branch_git_state, BranchGitState, FetchMode, UpstreamRelation,
     WorktreeStatusScope,
@@ -88,7 +89,7 @@ fn state(repo: &Path, fetch_mode: FetchMode) -> BranchGitState {
         "main",
         fetch_mode,
         WorktreeStatusScope::Full,
-        false,
+        EnvSource::Captured,
     )
 }
 
@@ -215,7 +216,7 @@ fn detects_conflicted_worktree() {
         "main",
         FetchMode::Never,
         WorktreeStatusScope::Full,
-        false,
+        EnvSource::Captured,
     );
 
     assert!(state.worktree.dirty);

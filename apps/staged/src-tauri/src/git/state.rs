@@ -1,4 +1,4 @@
-use super::cli::{self, GitError};
+use super::cli::{self, EnvSource, GitError};
 use super::refs::{branch_name_without_origin, origin_ref_for_branch};
 use super::status_parse::is_conflicted_status;
 use serde::Serialize;
@@ -730,17 +730,14 @@ pub fn compute_local_branch_git_state(
     base_branch: &str,
     fetch_mode: FetchMode,
     worktree_scope: WorktreeStatusScope,
-    use_lite_env: bool,
+    env_source: EnvSource,
 ) -> BranchGitState {
     let cache_key = format!("local:{}:{}:{}", repo.display(), branch_name, base_branch);
     compute_branch_git_state(
         &cache_key,
-        |args| {
-            if use_lite_env {
-                cli::run_smart(repo, args).map_err(|e| e.to_string())
-            } else {
-                cli::run(repo, args).map_err(|e| e.to_string())
-            }
+        |args| match env_source {
+            EnvSource::Lite => cli::run_smart(repo, args).map_err(|e| e.to_string()),
+            EnvSource::Captured => cli::run(repo, args).map_err(|e| e.to_string()),
         },
         branch_name,
         base_branch,

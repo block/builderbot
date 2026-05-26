@@ -359,7 +359,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 &branch.base_branch,
                 git::FetchMode::Never,
                 git::WorktreeStatusScope::Indexed,
-                true,
+                git::EnvSource::Lite,
             ));
             log::info!(
                 "[build_branch_timeline] {branch_id} local git_state took {}ms (worktree={})",
@@ -659,7 +659,7 @@ pub async fn refresh_branch_git_state(
                     &branch.base_branch,
                     fetch_mode,
                     git::WorktreeStatusScope::Full,
-                    false,
+                    git::EnvSource::Captured,
                 ))
             } else {
                 None
@@ -741,7 +741,7 @@ pub async fn pull_branch_ff_only(
             &branch.base_branch,
             git::FetchMode::Force,
             git::WorktreeStatusScope::Full,
-            false,
+            git::EnvSource::Captured,
         );
         git::ensure_fast_forward_pullable(&state)?;
         git::fast_forward_to_ref(worktree, &state.upstream.r#ref).map_err(|e| e.to_string())?;
@@ -927,7 +927,7 @@ pub async fn discard_worktree_changes(
             &branch.base_branch,
             git::FetchMode::Never,
             git::WorktreeStatusScope::Full,
-            false,
+            git::EnvSource::Captured,
         );
         ensure_worktree_discardable(&state)?;
         let changes = git::list_worktree_change_paths(worktree).map_err(|e| e.to_string())?;

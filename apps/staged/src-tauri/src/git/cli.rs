@@ -66,14 +66,21 @@ pub fn run_smart(repo: &Path, args: &[&str]) -> Result<String, GitError> {
 }
 
 /// Which environment to pass to the spawned git process.
+///
+/// Also surfaces at the `state::compute_local_branch_git_state` boundary as a
+/// self-documenting selector between the foreground-optimized cli entry point
+/// (`run_smart`, which tries `Lite` and falls back to `Captured` on env-
+/// sensitive failure) and the captured-only entry point (`run`).
 #[derive(Debug, Clone, Copy)]
-enum EnvSource {
+pub enum EnvSource {
     /// Parent env with `GIT_*` variables stripped. Skips the per-project
-    /// shell-env capture; correct for repos that don't need Hermit-managed git
-    /// or LFS smudge filters.
+    /// shell-env capture; correct for foreground reads that don't depend on
+    /// Hermit-managed git, LFS smudge filters, or credential helpers.
     Lite,
     /// Project's cached interactive-login-shell snapshot — sees Hermit, LFS,
     /// credential helpers, etc. Blocks on the capture if it isn't ready.
+    /// Required for mutating ops (push, pull, discard) and for repos whose
+    /// foreground reads have shown env-sensitivity.
     Captured,
 }
 

@@ -15,7 +15,7 @@ mod worktree;
 
 pub(crate) use cli::run as cli_run;
 pub(crate) use cli::run_smart as cli_run_smart;
-pub use cli::GitError;
+pub use cli::{EnvSource, GitError};
 pub use commit::commit;
 pub use diff::{get_file_diff, get_unified_diff, list_diff_files};
 pub(crate) use env::strip_git_env;

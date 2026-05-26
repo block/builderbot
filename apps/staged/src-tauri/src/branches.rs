@@ -406,6 +406,11 @@ pub(crate) async fn clone_repo_into_workspace(
         }
     }
 
+    // Apply staged-managed git config. Idempotent — also serves as the
+    // lazy migration for pre-existing remote clones (no registry on blox
+    // workstations, so we redo the cheap config check on every visit).
+    crate::git::config_apply::apply_to_blox_clone(ws_name, &repo_path).await;
+
     run_workspace_git_async(ws_name, Some(repo_subpath), &["fetch", "origin", base_ref])
         .await
         .map_err(|e| format!(

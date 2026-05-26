@@ -397,9 +397,12 @@ export function getBranchTimelineWithRevalidation(branchId: string): {
   fresh: Promise<BranchTimeline> | null;
 } {
   const entry = timelineCache.get(branchId);
-  const isFresh = entry && Date.now() - entry.fetchedAt < TIMELINE_FRESH_MS;
+  if (!entry) {
+    return { cached: null, fresh: getBranchTimeline(branchId) };
+  }
+  const isFresh = Date.now() - entry.fetchedAt < TIMELINE_FRESH_MS;
   return {
-    cached: entry?.timeline ?? null,
+    cached: entry.timeline,
     fresh: isFresh ? null : getBranchTimeline(branchId, { force: true }),
   };
 }

@@ -88,6 +88,7 @@ fn state(repo: &Path, fetch_mode: FetchMode) -> BranchGitState {
         "main",
         fetch_mode,
         WorktreeStatusScope::Full,
+        false,
     )
 }
 
@@ -214,6 +215,7 @@ fn detects_conflicted_worktree() {
         "main",
         FetchMode::Never,
         WorktreeStatusScope::Full,
+        false,
     );
 
     assert!(state.worktree.dirty);

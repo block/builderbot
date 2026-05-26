@@ -725,11 +725,18 @@ pub fn compute_local_branch_git_state(
     base_branch: &str,
     fetch_mode: FetchMode,
     worktree_scope: WorktreeStatusScope,
+    use_lite_env: bool,
 ) -> BranchGitState {
     let cache_key = format!("local:{}:{}:{}", repo.display(), branch_name, base_branch);
     compute_branch_git_state(
         &cache_key,
-        |args| cli::run(repo, args).map_err(|e| e.to_string()),
+        |args| {
+            if use_lite_env {
+                cli::run_smart(repo, args).map_err(|e| e.to_string())
+            } else {
+                cli::run(repo, args).map_err(|e| e.to_string())
+            }
+        },
         branch_name,
         base_branch,
         fetch_mode,

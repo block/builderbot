@@ -349,14 +349,17 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             let base_ref = git::origin_ref_for_branch(&branch.base_branch);
 
             let git_state_start = Instant::now();
-            // See remote branch above: foreground uses `Indexed` to skip
-            // untracked enumeration; refresh fills in the full counts.
+            // Foreground: `Indexed` skips the untracked-file walk and lite-env
+            // skips the per-project `$SHELL -ils` capture. A captured-env
+            // warm-up still fires in the background so the next non-foreground
+            // op (refresh, pull, discard) finds a ready snapshot.
             git_state = Some(git::compute_local_branch_git_state(
                 worktree_path,
                 &branch.branch_name,
                 &branch.base_branch,
                 git::FetchMode::Never,
                 git::WorktreeStatusScope::Indexed,
+                true,
             ));
             log::info!(
                 "[build_branch_timeline] {branch_id} local git_state took {}ms (worktree={})",
@@ -652,6 +655,7 @@ pub async fn refresh_branch_git_state(
                     &branch.base_branch,
                     fetch_mode,
                     git::WorktreeStatusScope::Full,
+                    false,
                 ))
             } else {
                 None
@@ -733,6 +737,7 @@ pub async fn pull_branch_ff_only(
             &branch.base_branch,
             git::FetchMode::Force,
             git::WorktreeStatusScope::Full,
+            false,
         );
         git::ensure_fast_forward_pullable(&state)?;
         git::fast_forward_to_ref(worktree, &state.upstream.r#ref).map_err(|e| e.to_string())?;
@@ -918,6 +923,7 @@ pub async fn discard_worktree_changes(
             &branch.base_branch,
             git::FetchMode::Never,
             git::WorktreeStatusScope::Full,
+            false,
         );
         ensure_worktree_discardable(&state)?;
         let changes = git::list_worktree_change_paths(worktree).map_err(|e| e.to_string())?;

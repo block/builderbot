@@ -100,8 +100,25 @@ fn run_with_env(repo: &Path, args: &[&str], source: EnvSource) -> Result<String,
 /// `GitNotFound` and `CommandFailed` cover the LFS-filter / missing-binary
 /// case. `NotARepo`, `InvalidUtf8`, and `InvalidPath` are env-independent — a
 /// retry would just waste a fork.
+///
+/// Also skips retry for `rev-parse --verify` failures on missing refs (the
+/// "Needed a single revision" shape), since those happen for unpublished
+/// branches whose `origin/<branch>` doesn't exist — a captured env can't
+/// conjure the ref into existence, and the retry would block on the ~8.5s
+/// `$SHELL -ils` capture for no gain.
 fn should_retry_with_captured(err: &GitError) -> bool {
-    matches!(err, GitError::GitNotFound | GitError::CommandFailed(_))
+    match err {
+        GitError::GitNotFound => true,
+        GitError::CommandFailed(msg) => !is_missing_ref_error(msg),
+        GitError::NotARepo(_) | GitError::InvalidUtf8 | GitError::InvalidPath(_) => false,
+    }
+}
+
+/// Detects the stderr shape `git rev-parse --verify <ref>` produces when the
+/// ref doesn't exist. Match is a substring check so the literal stays robust
+/// against surrounding whitespace / leading "fatal:" prefix.
+fn is_missing_ref_error(stderr: &str) -> bool {
+    stderr.contains("Needed a single revision")
 }
 
 /// Fire-and-forget warm-up of the captured shell env for `repo`. Coalesces
@@ -167,6 +184,18 @@ mod tests {
         assert!(!should_retry_with_captured(&GitError::InvalidPath(
             "/repo".into()
         )));
+    }
+
+    /// `rev-parse --verify` on a missing ref (e.g. an unpublished branch's
+    /// `origin/<branch>`) emits "Needed a single revision". A captured env
+    /// can't fix that, so we must not retry — otherwise every unpublished
+    /// branch eats the ~8.5s `$SHELL -ils` capture on first paint.
+    #[test]
+    fn retry_predicate_skips_missing_ref_error() {
+        let err = GitError::CommandFailed(
+            "fatal: Needed a single revision\nfatal: unknown revision\n".into(),
+        );
+        assert!(!should_retry_with_captured(&err));
     }
 
     /// Happy-path smoke test: `run_smart` on a real repo should return stdout

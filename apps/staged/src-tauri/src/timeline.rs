@@ -282,6 +282,10 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         let base_ref = git::origin_ref_for_branch(&branch.base_branch);
 
         let git_state_start = Instant::now();
+        // Foreground: skip untracked enumeration so first paint isn't blocked
+        // by a recursive working-tree walk on huge monorepos. The background
+        // refresh re-runs with `Full` and emits the corrected counts via
+        // `git-state-updated`.
         git_state = Some(git::compute_branch_git_state_batched(
             &cache_key,
             |script, args| {
@@ -291,6 +295,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             &branch.branch_name,
             &branch.base_branch,
             git::FetchMode::Never,
+            git::WorktreeStatusScope::Indexed,
         ));
         log::info!(
             "[build_branch_timeline] {branch_id} remote git_state took {}ms",
@@ -344,14 +349,16 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             let base_ref = git::origin_ref_for_branch(&branch.base_branch);
 
             let git_state_start = Instant::now();
-            // Foreground: lite-env skips the per-project `$SHELL -ils` capture.
-            // A captured-env warm-up still fires in the background so the next
-            // non-foreground op (refresh, pull, discard) finds a ready snapshot.
+            // Foreground: `Indexed` skips the untracked-file walk and lite-env
+            // skips the per-project `$SHELL -ils` capture. A captured-env
+            // warm-up still fires in the background so the next non-foreground
+            // op (refresh, pull, discard) finds a ready snapshot.
             git_state = Some(git::compute_local_branch_git_state(
                 worktree_path,
                 &branch.branch_name,
                 &branch.base_branch,
                 git::FetchMode::Never,
+                git::WorktreeStatusScope::Indexed,
                 true,
             ));
             log::info!(
@@ -363,12 +370,16 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             let identity_start = Instant::now();
             {
                 let path_str = wd.path.clone();
+                // `git config user.{name,email}` reads `.git/config` + `~/.gitconfig`
+                // — env-independent — so the lite path is enough and we don't
+                // want to block first paint on the per-project `$SHELL -ils`
+                // capture (~8.5s on cold cache).
                 identity = cached_git_user_identity(&format!("local:{path_str}"), || {
-                    let name = git::cli_run(worktree_path, &["config", "user.name"])
+                    let name = git::cli_run_smart(worktree_path, &["config", "user.name"])
                         .ok()
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty());
-                    let email = git::cli_run(worktree_path, &["config", "user.email"])
+                    let email = git::cli_run_smart(worktree_path, &["config", "user.email"])
                         .ok()
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty());
@@ -637,6 +648,7 @@ pub async fn refresh_branch_git_state(
                 &branch.branch_name,
                 &branch.base_branch,
                 fetch_mode,
+                git::WorktreeStatusScope::Full,
             ))
         } else if let Some(ref wd) = workdir {
             let worktree_path = Path::new(&wd.path);
@@ -646,6 +658,7 @@ pub async fn refresh_branch_git_state(
                     &branch.branch_name,
                     &branch.base_branch,
                     fetch_mode,
+                    git::WorktreeStatusScope::Full,
                     false,
                 ))
             } else {
@@ -705,6 +718,7 @@ pub async fn pull_branch_ff_only(
                 &branch.branch_name,
                 &branch.base_branch,
                 git::FetchMode::Force,
+                git::WorktreeStatusScope::Full,
             );
             git::ensure_fast_forward_pullable(&state)?;
             branches::run_workspace_git(
@@ -726,6 +740,7 @@ pub async fn pull_branch_ff_only(
             &branch.branch_name,
             &branch.base_branch,
             git::FetchMode::Force,
+            git::WorktreeStatusScope::Full,
             false,
         );
         git::ensure_fast_forward_pullable(&state)?;
@@ -887,6 +902,7 @@ pub async fn discard_worktree_changes(
                 &branch.branch_name,
                 &branch.base_branch,
                 git::FetchMode::Never,
+                git::WorktreeStatusScope::Full,
             );
             ensure_worktree_discardable(&state)?;
             let changes = remote_worktree_change_paths(ws_name, repo_subpath.as_deref())?;
@@ -910,6 +926,7 @@ pub async fn discard_worktree_changes(
             &branch.branch_name,
             &branch.base_branch,
             git::FetchMode::Never,
+            git::WorktreeStatusScope::Full,
             false,
         );
         ensure_worktree_discardable(&state)?;

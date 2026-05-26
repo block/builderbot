@@ -320,18 +320,19 @@ pub struct CommitInfo {
 /// Uses `merge-base` to find the actual fork point so that only the
 /// branch's own commits are returned, even after a rebase or when the
 /// base ref (e.g. `origin/main`) has moved forward.
+///
+/// Both inner calls run via `cli::run_smart` because this is on the
+/// foreground first-paint path — `merge-base` and `git log` are
+/// env-independent reads, so the lite path is correct and avoids
+/// blocking on the per-project `$SHELL -ils` capture.
 pub fn get_commits_since_base(worktree: &Path, base: &str) -> Result<Vec<CommitInfo>, GitError> {
-    // Find the merge-base (fork point) between the base ref and HEAD.
-    // This is more robust than a raw `base..HEAD` range because it
-    // handles the case where `base` has advanced beyond where the branch
-    // was originally created or last rebased onto.
-    let merge_base = super::refs::merge_base(worktree, base, "HEAD")?;
+    let mb_output = cli::run_smart(worktree, &["merge-base", base, "HEAD"])?;
+    let merge_base = mb_output.trim().to_string();
 
-    // Format: sha|short_sha|subject|author|author_email|timestamp
     let format = "--format=%H|%h|%s|%an|%ae|%ct";
     let range = format!("{merge_base}..HEAD");
 
-    let output = cli::run(worktree, &["log", format, &range])?;
+    let output = cli::run_smart(worktree, &["log", format, &range])?;
 
     let mut commits = Vec::new();
     for line in output.lines() {

@@ -16,36 +16,6 @@ pub enum FetchMode {
     Never,
 }
 
-/// Controls whether `git status` enumerates untracked files.
-///
-/// `Full` (`--untracked-files=all`) walks the entire working tree and on big
-/// monorepos like cash-server can take >15s. `Indexed` (`--untracked-files=no`)
-/// only consults the index for tracked-file modifications and returns in
-/// hundreds of ms. The foreground timeline path uses `Indexed` for first paint;
-/// the background `refresh_branch_git_state` (and destructive ops that need an
-/// accurate dirty/untracked count) uses `Full`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WorktreeStatusScope {
-    Indexed,
-    Full,
-}
-
-impl WorktreeStatusScope {
-    fn git_flag(self) -> &'static str {
-        match self {
-            WorktreeStatusScope::Indexed => "--untracked-files=no",
-            WorktreeStatusScope::Full => "--untracked-files=all",
-        }
-    }
-
-    fn script_arg(self) -> &'static str {
-        match self {
-            WorktreeStatusScope::Indexed => "uno",
-            WorktreeStatusScope::Full => "uall",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchGitState {
@@ -588,11 +558,11 @@ where
     }
 }
 
-fn compute_worktree_state<F>(run_git: &F, scope: WorktreeStatusScope) -> WorktreeGitState
+fn compute_worktree_state<F>(run_git: &F) -> WorktreeGitState
 where
     F: Fn(&[&str]) -> Result<String, String>,
 {
-    let Ok(output) = run_git(&["status", "--porcelain=1", scope.git_flag()]) else {
+    let Ok(output) = run_git(&["status", "--porcelain=1", "--untracked-files=all"]) else {
         return WorktreeGitState {
             dirty: false,
             modified: 0,
@@ -612,7 +582,6 @@ pub fn compute_branch_git_state<F>(
     branch_name: &str,
     base_branch: &str,
     fetch_mode: FetchMode,
-    worktree_scope: WorktreeStatusScope,
 ) -> BranchGitState
 where
     F: Fn(&[&str]) -> Result<String, String> + Sync,
@@ -642,7 +611,7 @@ where
         });
         let worktree_handle = s.spawn(|| {
             let t = std::time::Instant::now();
-            let r = compute_worktree_state(&run_git, worktree_scope);
+            let r = compute_worktree_state(&run_git);
             (r, t.elapsed().as_millis())
         });
 
@@ -724,7 +693,6 @@ pub fn compute_local_branch_git_state(
     branch_name: &str,
     base_branch: &str,
     fetch_mode: FetchMode,
-    worktree_scope: WorktreeStatusScope,
     use_lite_env: bool,
 ) -> BranchGitState {
     let cache_key = format!("local:{}:{}:{}", repo.display(), branch_name, base_branch);
@@ -740,7 +708,6 @@ pub fn compute_local_branch_git_state(
         branch_name,
         base_branch,
         fetch_mode,
-        worktree_scope,
     )
 }
 
@@ -789,11 +756,7 @@ pub fn needs_fetch(cache_key: &str, fetch_mode: FetchMode) -> bool {
 
 /// Compute fast (local-only) git state for a local branch.
 /// Returns HEAD, branch name, and worktree status without any fetch.
-pub fn compute_fast_local_git_state(
-    repo: &Path,
-    branch_name: &str,
-    worktree_scope: WorktreeStatusScope,
-) -> FastGitState {
+pub fn compute_fast_local_git_state(repo: &Path, branch_name: &str) -> FastGitState {
     let run_git = |args: &[&str]| -> Result<String, String> {
         cli::run(repo, args).map_err(|e| e.to_string())
     };
@@ -804,7 +767,7 @@ pub fn compute_fast_local_git_state(
                 .and_then(trim_non_empty)
         });
         let b = s.spawn(|| current_branch(&run_git));
-        let w = s.spawn(|| compute_worktree_state(&run_git, worktree_scope));
+        let w = s.spawn(|| compute_worktree_state(&run_git));
         (
             h.join().expect("head thread panicked"),
             b.join().expect("branch thread panicked"),
@@ -894,7 +857,6 @@ pub fn local_git_state_cache_key(repo: &Path, branch_name: &str, base_branch: &s
 ///   $4 = upstream_ref (empty to skip upstream resolution)
 ///   $5 = base_ref
 ///   $6 = "skip_fetch" to skip the fetch phase (cache fresh)
-///   $7 = "uno" (no untracked enumeration) or "uall" (full enumeration)
 const BATCH_GIT_STATE_SCRIPT: &str = concat!(
     "cd \"$1\" || exit 1\n",
     // --- Fetch phase (conditional) ---
@@ -925,9 +887,8 @@ const BATCH_GIT_STATE_SCRIPT: &str = concat!(
     "head_sha=$(git rev-parse HEAD 2>/dev/null || true)\n",
     "printf 'HEAD=%s\\n' \"$head_sha\"\n",
     "printf 'BRANCH=%s\\n' \"$(git branch --show-current 2>/dev/null || true)\"\n",
-    "if [ \"$7\" = 'uno' ]; then ut_flag='--untracked-files=no'; else ut_flag='--untracked-files=all'; fi\n",
     "echo STATUS_START\n",
-    "git status --porcelain=1 \"$ut_flag\" 2>/dev/null || true\n",
+    "git status --porcelain=1 --untracked-files=all 2>/dev/null || true\n",
     "echo STATUS_END\n",
     "[ -n \"$upstream_missing\" ] && echo 'UPSTREAM_MISSING=true'\n",
     "[ -n \"$fetch_err\" ] && printf 'FETCH_ERR=%s\\n' \"$fetch_err\"\n",
@@ -1126,15 +1087,13 @@ fn parse_worktree_from_status(status_output: &str) -> WorktreeGitState {
 /// Arguments:
 ///   $1 = repo_path
 ///   $2 = base_ref (e.g., "origin/main") — used for merge-base + git log
-///   $3 = "uno" (no untracked enumeration) or "uall" (full enumeration)
 const BATCH_FAST_SCRIPT: &str = concat!(
     "cd \"$1\" || exit 1\n",
     "head_sha=$(git rev-parse HEAD 2>/dev/null || true)\n",
     "printf 'HEAD=%s\\n' \"$head_sha\"\n",
     "printf 'BRANCH=%s\\n' \"$(git branch --show-current 2>/dev/null || true)\"\n",
-    "if [ \"$3\" = 'uno' ]; then ut_flag='--untracked-files=no'; else ut_flag='--untracked-files=all'; fi\n",
     "echo STATUS_START\n",
-    "git status --porcelain=1 \"$ut_flag\" 2>/dev/null || true\n",
+    "git status --porcelain=1 --untracked-files=all 2>/dev/null || true\n",
     "echo STATUS_END\n",
     // Commits using locally-cached refs
     "mb=$(git merge-base \"$2\" HEAD 2>/dev/null || true)\n",
@@ -1241,16 +1200,12 @@ pub fn compute_fast_git_state_batched<F>(
     run_script: &F,
     repo_path: &str,
     base_branch: &str,
-    worktree_scope: WorktreeStatusScope,
 ) -> Result<BatchFastOutput, String>
 where
     F: Fn(&str, &[&str]) -> Result<String, String>,
 {
     let base_ref = origin_ref_for_branch(base_branch);
-    let raw = run_script(
-        BATCH_FAST_SCRIPT,
-        &[repo_path, &base_ref, worktree_scope.script_arg()],
-    )?;
+    let raw = run_script(BATCH_FAST_SCRIPT, &[repo_path, &base_ref])?;
     Ok(parse_batch_fast_output(&raw))
 }
 
@@ -1268,7 +1223,6 @@ pub fn compute_branch_git_state_batched<F>(
     branch_name: &str,
     base_branch: &str,
     fetch_mode: FetchMode,
-    worktree_scope: WorktreeStatusScope,
 ) -> BranchGitState
 where
     F: Fn(&str, &[&str]) -> Result<String, String>,
@@ -1321,7 +1275,6 @@ where
             up_ref_arg,
             &base_ref,
             skip_fetch_arg,
-            worktree_scope.script_arg(),
         ],
     );
 

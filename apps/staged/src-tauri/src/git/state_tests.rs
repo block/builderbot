@@ -1,7 +1,4 @@
-use super::state::{
-    compute_local_branch_git_state, BranchGitState, FetchMode, UpstreamRelation,
-    WorktreeStatusScope,
-};
+use super::state::{compute_local_branch_git_state, BranchGitState, FetchMode, UpstreamRelation};
 use super::strip_git_env;
 use crate::test_utils::TempGitRepo;
 use std::fs;
@@ -82,14 +79,7 @@ fn remote_backed_feature() -> (TempGitRepo, TempPath) {
 }
 
 fn state(repo: &Path, fetch_mode: FetchMode) -> BranchGitState {
-    compute_local_branch_git_state(
-        repo,
-        "feature",
-        "main",
-        fetch_mode,
-        WorktreeStatusScope::Full,
-        false,
-    )
+    compute_local_branch_git_state(repo, "feature", "main", fetch_mode, false)
 }
 
 #[test]
@@ -209,14 +199,8 @@ fn detects_conflicted_worktree() {
     let output = command.output().unwrap();
     assert!(!output.status.success());
 
-    let state = compute_local_branch_git_state(
-        repo.path(),
-        "feature",
-        "main",
-        FetchMode::Never,
-        WorktreeStatusScope::Full,
-        false,
-    );
+    let state =
+        compute_local_branch_git_state(repo.path(), "feature", "main", FetchMode::Never, false);
 
     assert!(state.worktree.dirty);
     assert_eq!(state.worktree.conflicted, 1);

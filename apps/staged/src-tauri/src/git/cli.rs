@@ -132,11 +132,23 @@ fn should_retry_with_captured(err: &GitError) -> bool {
     }
 }
 
-/// Detects the stderr shape `git rev-parse --verify <ref>` produces when the
-/// ref doesn't exist. Match is a substring check so the literal stays robust
-/// against surrounding whitespace / leading "fatal:" prefix.
+/// Union of stderr shapes git produces when a ref doesn't resolve.
+///
+/// Spans `rev-parse --verify`, plain `rev-parse`, `merge-base` / `cat-file`,
+/// and `rev-list`. All four mean "the named ref doesn't exist" and none can
+/// be fixed by swapping envs, so adding them to the skip-retry set is
+/// strictly correct. Substrate is normalized by the `LC_ALL=C` / `LANG=C`
+/// pin in [`apply_env`], so we're matching git's canonical English wording.
 fn is_missing_ref_error(stderr: &str) -> bool {
-    stderr.contains("Needed a single revision")
+    const REF_RESOLVE_FAILURE_PATTERNS: &[&str] = &[
+        "Needed a single revision", // git rev-parse --verify
+        "unknown revision or path", // git rev-parse (ambiguous arg preamble)
+        "Not a valid object name",  // git merge-base / cat-file
+        "bad revision",             // git rev-list / rev-parse alt path
+    ];
+    REF_RESOLVE_FAILURE_PATTERNS
+        .iter()
+        .any(|p| stderr.contains(p))
 }
 
 /// Fire-and-forget warm-up of the captured shell env for `repo`. Coalesces
@@ -174,11 +186,25 @@ fn apply_env(command: &mut Command, repo: &Path, source: EnvSource) {
             }
         },
     }
+    pin_c_locale(command);
 }
 
 #[cfg(test)]
 fn apply_env(command: &mut Command, _repo: &Path, _source: EnvSource) {
     strip_git_env(command);
+    pin_c_locale(command);
+}
+
+/// Pin git's locale so stderr stays in English regardless of the captured
+/// shell snapshot or the host `LC_*`. The substring checks in
+/// [`is_missing_ref_error`] and the `NotARepo` parse depend on git's
+/// canonical wording; without this, a user with `LANG=ja_JP.UTF-8` would
+/// silently flip every unpublished-branch `compute_upstream_state` call back
+/// onto the ~8.5s captured-env retry path. `LANG` is belt-and-suspenders
+/// ahead of `LC_ALL` (POSIX says `LC_ALL` wins, but cheap to set both).
+fn pin_c_locale(command: &mut Command) {
+    command.env("LC_ALL", "C");
+    command.env("LANG", "C");
 }
 
 #[cfg(test)]
@@ -214,6 +240,35 @@ mod tests {
             "fatal: Needed a single revision\nfatal: unknown revision\n".into(),
         );
         assert!(!should_retry_with_captured(&err));
+    }
+
+    #[test]
+    fn retry_predicate_skips_unknown_revision_error() {
+        let err = GitError::CommandFailed(
+            "fatal: ambiguous argument 'origin/foo': unknown revision or path not in the working tree.\n".into(),
+        );
+        assert!(!should_retry_with_captured(&err));
+    }
+
+    #[test]
+    fn retry_predicate_skips_not_a_valid_object_name_error() {
+        let err = GitError::CommandFailed("fatal: Not a valid object name origin/foo\n".into());
+        assert!(!should_retry_with_captured(&err));
+    }
+
+    #[test]
+    fn retry_predicate_skips_bad_revision_error() {
+        let err = GitError::CommandFailed("fatal: bad revision 'origin/foo'\n".into());
+        assert!(!should_retry_with_captured(&err));
+    }
+
+    /// Guard against the broadened pattern set drifting wide enough to catch
+    /// env-sensitive failures. Anything that doesn't look like a ref-resolve
+    /// shape must still take the captured-env retry.
+    #[test]
+    fn retry_predicate_retries_unrecognized_command_failed() {
+        let err = GitError::CommandFailed("fatal: unable to access something\n".into());
+        assert!(should_retry_with_captured(&err));
     }
 
     /// Happy-path smoke test: `run_smart` on a real repo should return stdout

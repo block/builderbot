@@ -164,35 +164,40 @@ pub async fn execute_fix(check_id: String, fix_type: FixType) -> Result<(), Stri
 /// Internal primitive used by [`execute_fix`]. Not exposed publicly — callers
 /// should use `execute_fix` which looks up the command from static definitions.
 pub(crate) async fn execute_command(command: String) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
-        let (shell, args) = if std::path::Path::new("/bin/zsh").exists() {
-            ("/bin/zsh", vec!["-l", "-c", &command])
-        } else {
-            ("/bin/bash", vec!["-l", "-c", &command])
-        };
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-        let user = std::env::var("USER").unwrap_or_default();
-        let output = std::process::Command::new(shell)
-            .args(&args)
-            .env_clear()
-            .env("HOME", &home)
-            .env("USER", &user)
-            .env("TERM", "xterm-256color")
-            .current_dir(&home)
-            .output()
-            .map_err(|e| format!("Failed to run command: {e}"))?;
+    tokio::task::spawn_blocking(move || execute_command_blocking(&command))
+        .await
+        .unwrap_or_else(|e| Err(format!("Task failed: {e}")))
+}
 
-        if output.status.success() {
-            Ok(())
+/// Synchronous twin of [`execute_command`] for use inside `spawn_blocking`
+/// closures (e.g. per-check auth probes that run in the existing check
+/// parallelism).
+pub(crate) fn execute_command_blocking(command: &str) -> Result<(), String> {
+    let (shell, args) = if std::path::Path::new("/bin/zsh").exists() {
+        ("/bin/zsh", vec!["-l", "-c", command])
+    } else {
+        ("/bin/bash", vec!["-l", "-c", command])
+    };
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let user = std::env::var("USER").unwrap_or_default();
+    let output = std::process::Command::new(shell)
+        .args(&args)
+        .env_clear()
+        .env("HOME", &home)
+        .env("USER", &user)
+        .env("TERM", "xterm-256color")
+        .current_dir(&home)
+        .output()
+        .map_err(|e| format!("Failed to run command: {e}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() {
+            format!("Command failed with exit code {}", output.status)
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            Err(if stderr.is_empty() {
-                format!("Command failed with exit code {}", output.status)
-            } else {
-                stderr
-            })
-        }
-    })
-    .await
-    .unwrap_or_else(|e| Err(format!("Task failed: {e}")))
+            stderr
+        })
+    }
 }

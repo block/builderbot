@@ -3,8 +3,9 @@
 use std::process::Command;
 
 use crate::checks::CLONEFILE_FIX_COMMAND;
+use crate::execute_command_blocking;
 use crate::resolve::format_command_output;
-use crate::types::{CheckStatus, DoctorCheck, FixType, ResolvedBinary};
+use crate::types::{AuthStatus, CheckStatus, DoctorCheck, FixType, ResolvedBinary};
 
 /// Metadata for an individual AI agent check.
 pub struct AgentCheckInfo {
@@ -221,18 +222,52 @@ pub fn check_single_ai_agent(
             } else {
                 (resolved_path, None)
             };
+
+            let (auth_status, auth_output) = match info.auth_status_command {
+                Some(cmd) => match execute_command_blocking(cmd) {
+                    Ok(()) => (
+                        Some(AuthStatus::Authenticated),
+                        Some(format!("$ {cmd}\n(exit 0)")),
+                    ),
+                    Err(err) => (
+                        Some(AuthStatus::NotAuthenticated),
+                        Some(format!("$ {cmd}\n{err}")),
+                    ),
+                },
+                None if info.auth_command.is_some() => (Some(AuthStatus::NotApplicable), None),
+                None => (None, None),
+            };
+
+            let mut raw = format!("{header}\n{search}");
+            if let Some(extra) = auth_output {
+                raw.push('\n');
+                raw.push_str(&extra);
+            }
+
+            let (status, message, fix_type, fix_command) =
+                if matches!(auth_status, Some(AuthStatus::NotAuthenticated)) {
+                    (
+                        CheckStatus::Warn,
+                        "Installed, not authenticated".to_string(),
+                        info.auth_command.map(|_| FixType::Auth),
+                        info.auth_command.map(|s| s.to_string()),
+                    )
+                } else {
+                    (CheckStatus::Pass, "Installed".to_string(), None, None)
+                };
+
             DoctorCheck {
                 id: info.id.to_string(),
                 label: info.label.to_string(),
-                status: CheckStatus::Pass,
-                message: "Installed".to_string(),
+                status,
+                message,
                 fix_url: None,
-                fix_command: None,
-                fix_type: None,
+                fix_command,
+                fix_type,
                 path: main_path,
                 bridge_path,
-                raw_output: Some(format!("{header}\n{search}")),
-                auth_status: None,
+                raw_output: Some(raw),
+                auth_status,
                 installed_version: None,
                 latest_version: None,
                 update_available: None,
@@ -315,10 +350,32 @@ pub fn lookup_fix_command(check_id: &str, fix_type: &FixType) -> Option<String> 
             return match fix_type {
                 FixType::Command => info.install_command.map(|s| s.to_string()),
                 FixType::Bridge => info.bridge_install_command.map(|s| s.to_string()),
-                FixType::Auth => None,
+                FixType::Auth => info.auth_command.map(|s| s.to_string()),
             };
         }
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_fix_lookup_returns_agent_auth_command() {
+        assert_eq!(
+            lookup_fix_command("ai-agent-claude", &FixType::Auth).as_deref(),
+            Some("claude auth login"),
+        );
+        assert_eq!(
+            lookup_fix_command("ai-agent-copilot", &FixType::Auth).as_deref(),
+            Some("copilot login"),
+        );
+    }
+
+    #[test]
+    fn auth_fix_lookup_returns_none_for_agents_without_auth_command() {
+        assert_eq!(lookup_fix_command("ai-agent-goose", &FixType::Auth), None);
+    }
 }

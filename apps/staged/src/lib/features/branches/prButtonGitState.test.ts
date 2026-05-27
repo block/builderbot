@@ -19,6 +19,7 @@ function makeGitState(
       ahead: relation === 'localAhead' || relation === 'diverged' ? 1 : 0,
       behind: relation === 'originAhead' || relation === 'diverged' ? 1 : 0,
       mergeBaseSha: null,
+      behindBase: 0,
     },
     base: { ref: 'main', sha: null, commitsSinceFork: 0 },
     worktree: {

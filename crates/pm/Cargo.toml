@@ -12,5 +12,5 @@ chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1"
 dirs = "6"
 colored = "3"
-dialoguer = "0.12"
+dialoguer = "0.11"
 

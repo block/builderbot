@@ -78,7 +78,8 @@ pub struct UpstreamGitState {
     ///
     /// Non-zero means the remote branch tip is stale relative to base. The
     /// timeline UI uses this to disable "Rebase onto Origin" when rebasing
-    /// onto a behind-base remote tip would produce an unmergeable result.
+    /// onto a behind-base remote tip would skip the latest base commits and
+    /// almost always be the wrong action.
     pub behind_base: u32,
 }
 

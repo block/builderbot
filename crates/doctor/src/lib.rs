@@ -261,26 +261,58 @@ struct FreshnessTarget {
 /// The actual shell command is looked up from the static check definitions —
 /// the caller never sends a raw command string.
 pub async fn execute_fix(check_id: String, fix_type: FixType) -> Result<(), String> {
+    execute_fix_streaming(check_id, fix_type, |_| {}).await
+}
+
+/// Run a fix command and stream its output line-by-line to `on_line`.
+///
+/// `on_line` is invoked once per output line, with the trailing newline
+/// stripped. Both stdout and stderr lines are delivered through the same
+/// callback; ordering across the two streams is best-effort (each stream is
+/// in order internally, but interleaving between them depends on scheduling).
+///
+/// The callback runs on the tokio runtime's blocking pool — do not block in it
+/// for unbounded periods, but emitting Tauri events / writing to a channel is
+/// fine.
+pub async fn execute_fix_streaming<F>(
+    check_id: String,
+    fix_type: FixType,
+    on_line: F,
+) -> Result<(), String>
+where
+    F: FnMut(&str) + Send + 'static,
+{
     let command = lookup_fix_command(&check_id, &fix_type)
         .ok_or_else(|| format!("Unknown check '{check_id}' or fix type '{fix_type:?}'"))?;
 
-    execute_command(command).await
+    run_command_streaming(command, on_line).await
 }
 
-/// Run an arbitrary shell command in a login shell.
-///
-/// Internal primitive used by [`execute_fix`]. Not exposed publicly — callers
-/// should use `execute_fix` which looks up the command from static definitions.
-pub(crate) async fn execute_command(command: String) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || execute_command_blocking(&command))
+/// Async wrapper that runs `run_command_streaming_blocking` on the blocking pool.
+pub(crate) async fn run_command_streaming<F>(command: String, on_line: F) -> Result<(), String>
+where
+    F: FnMut(&str) + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || run_command_streaming_blocking(&command, on_line))
         .await
         .unwrap_or_else(|e| Err(format!("Task failed: {e}")))
 }
 
-/// Synchronous twin of [`execute_command`] for use inside `spawn_blocking`
-/// closures (e.g. per-check auth probes that run in the existing check
-/// parallelism).
-pub(crate) fn execute_command_blocking(command: &str) -> Result<(), String> {
+enum StreamLine {
+    Stdout(String),
+    Stderr(String),
+}
+
+/// Spawn `command` through a login shell, stream stdout/stderr lines to
+/// `on_line`, and return based on the process exit status. Stderr lines are
+/// also accumulated so a non-zero exit can surface a useful error message
+/// (matching the non-streaming behavior of the previous `execute_command`).
+fn run_command_streaming_blocking<F>(command: &str, mut on_line: F) -> Result<(), String>
+where
+    F: FnMut(&str),
+{
+    use std::io::{BufRead, BufReader};
+
     let (shell, args) = if std::path::Path::new("/bin/zsh").exists() {
         ("/bin/zsh", vec!["-l", "-c", command])
     } else {
@@ -288,31 +320,132 @@ pub(crate) fn execute_command_blocking(command: &str) -> Result<(), String> {
     };
     let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
     let user = std::env::var("USER").unwrap_or_default();
-    let output = std::process::Command::new(shell)
+
+    let mut child = std::process::Command::new(shell)
         .args(&args)
         .env_clear()
         .env("HOME", &home)
         .env("USER", &user)
         .env("TERM", "xterm-256color")
         .current_dir(&home)
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| format!("Failed to run command: {e}"))?;
 
-    if output.status.success() {
+    let stdout = child.stdout.take().expect("stdout was piped");
+    let stderr = child.stderr.take().expect("stderr was piped");
+
+    let (tx, rx) = std::sync::mpsc::channel::<StreamLine>();
+    let tx_err = tx.clone();
+
+    let stdout_thread = std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines().map_while(Result::ok) {
+            if tx.send(StreamLine::Stdout(line)).is_err() {
+                break;
+            }
+        }
+    });
+    let stderr_thread = std::thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        for line in reader.lines().map_while(Result::ok) {
+            if tx_err.send(StreamLine::Stderr(line)).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut stderr_accum = String::new();
+    for msg in rx.iter() {
+        match msg {
+            StreamLine::Stdout(s) => {
+                on_line(&s);
+            }
+            StreamLine::Stderr(s) => {
+                on_line(&s);
+                if !stderr_accum.is_empty() {
+                    stderr_accum.push('\n');
+                }
+                stderr_accum.push_str(&s);
+            }
+        }
+    }
+
+    let _ = stdout_thread.join();
+    let _ = stderr_thread.join();
+
+    let status = child
+        .wait()
+        .map_err(|e| format!("Failed to wait for command: {e}"))?;
+
+    if status.success() {
         Ok(())
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        Err(if stderr.is_empty() {
-            format!("Command failed with exit code {}", output.status)
+        let trimmed = stderr_accum.trim().to_string();
+        Err(if trimmed.is_empty() {
+            format!("Command failed with exit code {status}")
         } else {
-            stderr
+            trimmed
         })
     }
+}
+
+/// Synchronous, non-streaming variant for callers running inside an existing
+/// `spawn_blocking` closure (the auth probes in `check_single_ai_agent` use
+/// this — they need a sync result, not an `on_line` stream).
+pub(crate) fn execute_command_blocking(command: &str) -> Result<(), String> {
+    run_command_streaming_blocking(command, |_| {})
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use std::sync::{Arc, Mutex};
+
+    /// Streaming helper must invoke `on_line` for each output line of a
+    /// successful command. Lines from `.zshrc` etc. may also appear; we only
+    /// assert that our expected payload showed up.
+    #[tokio::test]
+    async fn run_command_streaming_emits_each_stdout_line() {
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+
+        let result = run_command_streaming(
+            "echo doctor-streaming-marker-hello && echo doctor-streaming-marker-world".to_string(),
+            move |line| {
+                lines_clone.lock().unwrap().push(line.to_string());
+            },
+        )
+        .await;
+
+        assert!(result.is_ok(), "streaming command failed: {result:?}");
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured
+                .iter()
+                .any(|l| l == "doctor-streaming-marker-hello"),
+            "did not see 'hello' marker; captured: {captured:?}",
+        );
+        assert!(
+            captured
+                .iter()
+                .any(|l| l == "doctor-streaming-marker-world"),
+            "did not see 'world' marker; captured: {captured:?}",
+        );
+    }
+
+    /// `execute_fix(|_| {})` and `execute_fix_streaming(.., |_| {})` must
+    /// produce identical results for the same fix lookup — `execute_fix` is
+    /// supposed to be a thin delegate.
+    #[tokio::test]
+    async fn execute_fix_delegates_to_streaming() {
+        let direct = execute_fix("ai-agent-nonexistent".to_string(), FixType::Auth).await;
+        let streamed =
+            execute_fix_streaming("ai-agent-nonexistent".to_string(), FixType::Auth, |_| {}).await;
+        assert_eq!(direct, streamed);
+    }
 
     /// Default `run_checks()` must not populate any of the version-freshness
     /// fields — guards against accidentally flipping the default to on

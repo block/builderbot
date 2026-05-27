@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { shouldShowPushChanges } from './prButtonGitState';
+import { derivePrPushAction, shouldShowPushChanges } from './prButtonGitState';
 import type { BranchGitState, UpstreamRelation } from '../../types';
 
 function makeGitState(
@@ -178,5 +178,134 @@ describe('shouldShowPushChanges', () => {
         }),
       })
     ).toBe(false);
+  });
+});
+
+describe('derivePrPushAction', () => {
+  it("returns 'push' when local is ahead of upstream", () => {
+    expect(
+      derivePrPushAction({
+        prNumber: 42,
+        prState: 'OPEN',
+        prHeadSha: 'prsha',
+        gitState: makeGitState('localAhead'),
+      })
+    ).toBe('push');
+  });
+
+  it("returns 'forcePush' when local has diverged from upstream", () => {
+    expect(
+      derivePrPushAction({
+        prNumber: 42,
+        prState: 'OPEN',
+        prHeadSha: 'prsha',
+        gitState: makeGitState('diverged'),
+      })
+    ).toBe('forcePush');
+  });
+
+  it("returns 'none' when local is in sync with upstream", () => {
+    expect(
+      derivePrPushAction({
+        prNumber: 42,
+        prState: 'OPEN',
+        prHeadSha: 'prsha',
+        gitState: makeGitState('inSync'),
+      })
+    ).toBe('none');
+  });
+
+  it("returns 'none' when origin is ahead of local", () => {
+    expect(
+      derivePrPushAction({
+        prNumber: 42,
+        prState: 'OPEN',
+        prHeadSha: 'prsha',
+        gitState: makeGitState('originAhead'),
+      })
+    ).toBe('none');
+  });
+
+  it("returns 'push' for missing upstream with differing SHAs (fork PR fallback)", () => {
+    // We deliberately don't classify fork PRs as 'forcePush' up-front —
+    // the backend's non-FF rejection still drives that path through
+    // showForcePushDialog.
+    expect(
+      derivePrPushAction({
+        prNumber: 42,
+        prState: 'OPEN',
+        prHeadSha: 'prsha',
+        gitState: makeGitState('missing', { headSha: 'localsha' }),
+      })
+    ).toBe('push');
+  });
+
+  it("returns 'none' for missing upstream when SHAs match", () => {
+    expect(
+      derivePrPushAction({
+        prNumber: 42,
+        prState: 'OPEN',
+        prHeadSha: 'samesha',
+        gitState: makeGitState('missing', { headSha: 'samesha' }),
+      })
+    ).toBe('none');
+  });
+
+  it("returns 'none' for missing upstream when prHeadSha is null", () => {
+    expect(
+      derivePrPushAction({
+        prNumber: 42,
+        prState: 'OPEN',
+        prHeadSha: null,
+        gitState: makeGitState('missing'),
+      })
+    ).toBe('none');
+  });
+
+  it("returns 'none' for merged PRs even when local has diverged", () => {
+    expect(
+      derivePrPushAction({
+        prNumber: 42,
+        prState: 'MERGED',
+        prHeadSha: 'prsha',
+        gitState: makeGitState('diverged'),
+      })
+    ).toBe('none');
+  });
+
+  it("returns 'none' when the branch has no PR yet", () => {
+    expect(
+      derivePrPushAction({
+        prNumber: null,
+        prState: null,
+        prHeadSha: null,
+        gitState: makeGitState('diverged'),
+      })
+    ).toBe('none');
+  });
+
+  it("returns 'none' when git state has not loaded yet", () => {
+    expect(
+      derivePrPushAction({
+        prNumber: 42,
+        prState: 'OPEN',
+        prHeadSha: 'prsha',
+        gitState: null,
+      })
+    ).toBe('none');
+  });
+
+  it("returns 'none' when a different branch is checked out (diverged would otherwise apply)", () => {
+    expect(
+      derivePrPushAction({
+        prNumber: 42,
+        prState: 'OPEN',
+        prHeadSha: 'prsha',
+        gitState: makeGitState('diverged', {
+          expectedBranchMatches: false,
+          currentBranch: 'main',
+        }),
+      })
+    ).toBe('none');
   });
 });

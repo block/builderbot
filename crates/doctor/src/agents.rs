@@ -53,7 +53,7 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         install_command: Some("curl -fsSL https://claude.ai/install.sh | bash"),
         bridge_install_url: Some("https://github.com/zed-industries/claude-agent-acp#installation"),
         bridge_install_command: Some("npm install -g @agentclientprotocol/claude-agent-acp"),
-        auth_command: Some("claude /login"),
+        auth_command: Some("claude auth login"),
         auth_status_command: Some("claude auth status"),
     },
     AgentCheckInfo {

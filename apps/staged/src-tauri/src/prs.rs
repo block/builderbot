@@ -251,9 +251,17 @@ fn build_commit_pipeline_steps(
                     " The branch's configured base is `origin/{base_branch}`; the requested target `origin/{rebase_target}` is different. If `origin/{rebase_target}` is itself behind `origin/{base_branch}` by a non-trivial amount, surface that to the user before continuing — the rebase target may be wrong."
                 )
             };
+            let (fetch_label, rebase_label) = if base_branch == rebase_target {
+                ("Fetch latest base".to_string(), "Rebase onto base".to_string())
+            } else {
+                (
+                    format!("Fetch origin/{rebase_target}"),
+                    format!("Rebase onto origin/{rebase_target}"),
+                )
+            };
             vec![
                 PipelineStep::Command {
-                    label: "Fetch latest base".to_string(),
+                    label: fetch_label,
                     command: git_fetch_with_fallback(rebase_target),
                     on_failure: FailureStrategy::HandoffToAi {
                         prompt_template: format!(
@@ -262,7 +270,7 @@ fn build_commit_pipeline_steps(
                     },
                 },
                 PipelineStep::Command {
-                    label: "Rebase onto base".to_string(),
+                    label: rebase_label,
                     command: format!("git rebase --signoff origin/{rebase_target}"),
                     on_failure: FailureStrategy::HandoffToAi {
                         prompt_template: format!(
@@ -1289,13 +1297,15 @@ mod tests {
     fn rebase_pipeline_uses_signoff() {
         let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "main");
 
-        let (_, command, _) = command_at(&steps, 0);
+        let (label, command, _) = command_at(&steps, 0);
+        assert_eq!(label, "Fetch latest base");
         assert_eq!(
             command,
             "if ! git fetch origin main; then git -c 'url.https://github.com/.insteadOf=git@github.com:' fetch origin main; fi"
         );
 
-        let (_, command, _) = command_at(&steps, 1);
+        let (label, command, _) = command_at(&steps, 1);
+        assert_eq!(label, "Rebase onto base");
         assert_eq!(command, "git rebase --signoff origin/main");
     }
 
@@ -1303,13 +1313,15 @@ mod tests {
     fn rebase_pipeline_targets_origin_branch_when_target_differs() {
         let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "feature-branch");
 
-        let (_, command, _) = command_at(&steps, 0);
+        let (label, command, _) = command_at(&steps, 0);
+        assert_eq!(label, "Fetch origin/feature-branch");
         assert_eq!(
             command,
             "if ! git fetch origin feature-branch; then git -c 'url.https://github.com/.insteadOf=git@github.com:' fetch origin feature-branch; fi"
         );
 
-        let (_, command, _) = command_at(&steps, 1);
+        let (label, command, _) = command_at(&steps, 1);
+        assert_eq!(label, "Rebase onto origin/feature-branch");
         assert_eq!(command, "git rebase --signoff origin/feature-branch");
     }
 

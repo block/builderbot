@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use super::types::ResolvedBinary;
+use super::types::{InstallSource, ResolvedBinary};
 
 /// Resolve a binary by trying login shell path lookup, common install paths,
 /// then npm global install dirs.
@@ -31,10 +31,11 @@ pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
                         "    {shell} -l -c '{lookup_cmd}' => {} (resolved)",
                         path.display()
                     ));
+                    let install_source = Some(detect_install_source(path));
                     return ResolvedBinary {
                         path: Some(path.clone()),
                         search_output: lines.join("\n"),
-                        install_source: None,
+                        install_source,
                     };
                 }
 
@@ -69,10 +70,11 @@ pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
         let path = PathBuf::from(dir).join(cmd);
         if is_executable_file(&path) {
             lines.push(format!("    {} => found (resolved)", path.display()));
+            let install_source = Some(detect_install_source(&path));
             return ResolvedBinary {
                 path: Some(path),
                 search_output: lines.join("\n"),
-                install_source: None,
+                install_source,
             };
         }
         lines.push(format!("    {} => not found", path.display()));
@@ -92,10 +94,11 @@ pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
             let path = dir.join(cmd);
             if path.exists() {
                 lines.push(format!("    {} => found (resolved)", path.display()));
+                let install_source = Some(detect_install_source(&path));
                 return ResolvedBinary {
                     path: Some(path),
                     search_output: lines.join("\n"),
-                    install_source: None,
+                    install_source,
                 };
             }
             lines.push(format!("    {} => not found", path.display()));
@@ -112,10 +115,11 @@ pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
         let path = npm_bin_dir.join(cmd);
         if path.exists() {
             lines.push(format!("    {} => found (resolved)", path.display()));
+            let install_source = Some(detect_install_source(&path));
             return ResolvedBinary {
                 path: Some(path),
                 search_output: lines.join("\n"),
-                install_source: None,
+                install_source,
             };
         }
         lines.push(format!("    {} => not found", path.display()));
@@ -226,6 +230,74 @@ fn npm_global_bin_dir(lines: &mut Vec<String>) -> Option<PathBuf> {
     let bin = PathBuf::from(prefix).join("bin");
     lines.push(format!("    npm prefix -g => {}", bin.display()));
     Some(bin)
+}
+
+/// Infer how a binary was installed from its path alone — no subprocess or
+/// network probes. Path-prefix heuristics cover Brew, Cargo, Mise, Asdf, Npm
+/// (mirroring the dirs in [`npm_search_dirs`]), and the System dirs; anything
+/// else (including `~/.local/bin` curl-pipe installs, which can't be
+/// fingerprinted reliably from the path) is reported as [`InstallSource::Unknown`].
+pub(crate) fn detect_install_source(path: &Path) -> InstallSource {
+    let home = std::env::home_dir();
+    detect_install_source_with_home(path, home.as_deref())
+}
+
+/// Testable inner: same logic as [`detect_install_source`] but takes the home
+/// directory as a parameter so unit tests can inject a fixed value.
+fn detect_install_source_with_home(path: &Path, home: Option<&Path>) -> InstallSource {
+    // Homebrew-managed nvm — checked before the generic `/opt/homebrew/`
+    // Brew prefix, since this path is a strict subset of it.
+    if path.starts_with("/opt/homebrew/opt/nvm/versions/node") {
+        return InstallSource::Npm;
+    }
+
+    // Brew (path-prefix). `/usr/local/Cellar` covers Intel-mac brew; if a
+    // binary appears as `/usr/local/bin/<x>` that's a symlink into Cellar, we
+    // only follow the chain if `canonicalize` succeeds cheaply.
+    if path.starts_with("/opt/homebrew/")
+        || path.starts_with("/usr/local/Cellar/")
+        || path.starts_with("/home/linuxbrew/.linuxbrew/")
+    {
+        return InstallSource::Brew;
+    }
+    if path.starts_with("/usr/local/bin/") {
+        if let Ok(canonical) = path.canonicalize() {
+            if canonical.starts_with("/usr/local/Cellar/") {
+                return InstallSource::Brew;
+            }
+        }
+    }
+
+    if let Some(home) = home {
+        if path.starts_with(home.join(".cargo/bin")) {
+            return InstallSource::Cargo;
+        }
+        if path.starts_with(home.join(".local/share/mise")) || path.starts_with(home.join(".mise"))
+        {
+            return InstallSource::Mise;
+        }
+        if path.starts_with(home.join(".asdf")) {
+            return InstallSource::Asdf;
+        }
+        if path.starts_with(home.join(".npm-global/bin"))
+            || path.starts_with(home.join(".npm/bin"))
+            || path.starts_with(home.join(".nvm/versions/node"))
+        {
+            return InstallSource::Npm;
+        }
+    }
+
+    // System dirs. Checked last so e.g. a Brew binary surfacing at
+    // `/usr/local/bin/x` was already classified above.
+    if path.starts_with("/usr/bin/")
+        || path.starts_with("/bin/")
+        || path.starts_with("/usr/sbin/")
+        || path.starts_with("/sbin/")
+    {
+        return InstallSource::System;
+    }
+
+    InstallSource::Unknown
 }
 
 /// Format the raw output of a command invocation for debug diagnostics.
@@ -354,6 +426,99 @@ mod tests {
         assert!(
             dirs.iter().any(|p| p == &home.join(".npm/bin")),
             "missing ~/.npm/bin in {dirs:?}"
+        );
+    }
+
+    #[test]
+    fn detect_install_source_classifies_brew() {
+        assert_eq!(
+            detect_install_source_with_home(Path::new("/opt/homebrew/bin/git"), None),
+            InstallSource::Brew,
+        );
+        assert_eq!(
+            detect_install_source_with_home(Path::new("/home/linuxbrew/.linuxbrew/bin/git"), None),
+            InstallSource::Brew,
+        );
+    }
+
+    #[test]
+    fn detect_install_source_classifies_system() {
+        assert_eq!(
+            detect_install_source_with_home(Path::new("/usr/bin/git"), None),
+            InstallSource::System,
+        );
+        assert_eq!(
+            detect_install_source_with_home(Path::new("/bin/sh"), None),
+            InstallSource::System,
+        );
+    }
+
+    #[test]
+    fn detect_install_source_classifies_cargo_under_home() {
+        let home = PathBuf::from("/home/test");
+        assert_eq!(
+            detect_install_source_with_home(&home.join(".cargo/bin/cargo"), Some(home.as_path())),
+            InstallSource::Cargo,
+        );
+    }
+
+    #[test]
+    fn detect_install_source_classifies_npm_dirs() {
+        let home = PathBuf::from("/home/test");
+        assert_eq!(
+            detect_install_source_with_home(
+                &home.join(".npm-global/bin/foo"),
+                Some(home.as_path())
+            ),
+            InstallSource::Npm,
+        );
+        assert_eq!(
+            detect_install_source_with_home(
+                &home.join(".nvm/versions/node/v20.10.0/bin/foo"),
+                Some(home.as_path())
+            ),
+            InstallSource::Npm,
+        );
+        assert_eq!(
+            detect_install_source_with_home(
+                Path::new("/opt/homebrew/opt/nvm/versions/node/v20.10.0/bin/foo"),
+                None,
+            ),
+            InstallSource::Npm,
+        );
+    }
+
+    #[test]
+    fn detect_install_source_classifies_mise_and_asdf() {
+        let home = PathBuf::from("/home/test");
+        assert_eq!(
+            detect_install_source_with_home(
+                &home.join(".local/share/mise/installs/node/20/bin/foo"),
+                Some(home.as_path()),
+            ),
+            InstallSource::Mise,
+        );
+        assert_eq!(
+            detect_install_source_with_home(
+                &home.join(".asdf/installs/nodejs/20/bin/foo"),
+                Some(home.as_path()),
+            ),
+            InstallSource::Asdf,
+        );
+    }
+
+    #[test]
+    fn detect_install_source_unknown_for_curl_pipe_and_other() {
+        let home = PathBuf::from("/home/test");
+        // ~/.local/bin and ~/bin are common curl-pipe targets but unreliable to
+        // fingerprint from path alone — Unknown beats false positives.
+        assert_eq!(
+            detect_install_source_with_home(&home.join(".local/bin/foo"), Some(home.as_path())),
+            InstallSource::Unknown,
+        );
+        assert_eq!(
+            detect_install_source_with_home(Path::new("/tmp/weird/foo"), Some(home.as_path())),
+            InstallSource::Unknown,
         );
     }
 

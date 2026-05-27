@@ -62,7 +62,7 @@ pub fn check_git(resolved: &ResolvedBinary) -> DoctorCheck {
                 installed_version: None,
                 latest_version: None,
                 update_available: None,
-                install_source: None,
+                install_source: resolved.install_source.clone(),
             }
         }
         Ok(output) => {
@@ -86,7 +86,7 @@ pub fn check_git(resolved: &ResolvedBinary) -> DoctorCheck {
                 installed_version: None,
                 latest_version: None,
                 update_available: None,
-                install_source: None,
+                install_source: resolved.install_source.clone(),
             }
         }
         Err(e) => DoctorCheck {
@@ -104,7 +104,7 @@ pub fn check_git(resolved: &ResolvedBinary) -> DoctorCheck {
             installed_version: None,
             latest_version: None,
             update_available: None,
-            install_source: None,
+            install_source: resolved.install_source.clone(),
         },
     }
 }
@@ -164,7 +164,7 @@ pub fn check_gh(resolved: &ResolvedBinary) -> DoctorCheck {
                 installed_version: None,
                 latest_version: None,
                 update_available: None,
-                install_source: None,
+                install_source: resolved.install_source.clone(),
             }
         }
         Ok(output) => {
@@ -188,7 +188,7 @@ pub fn check_gh(resolved: &ResolvedBinary) -> DoctorCheck {
                 installed_version: None,
                 latest_version: None,
                 update_available: None,
-                install_source: None,
+                install_source: resolved.install_source.clone(),
             }
         }
         Err(e) => DoctorCheck {
@@ -206,7 +206,7 @@ pub fn check_gh(resolved: &ResolvedBinary) -> DoctorCheck {
             installed_version: None,
             latest_version: None,
             update_available: None,
-            install_source: None,
+            install_source: resolved.install_source.clone(),
         },
     }
 }
@@ -371,7 +371,7 @@ pub fn check_git_lfs(git: &ResolvedBinary, git_lfs: &ResolvedBinary) -> DoctorCh
                 installed_version: None,
                 latest_version: None,
                 update_available: None,
-                install_source: None,
+                install_source: git_lfs.install_source.clone(),
             }
         }
         Ok(output) => {
@@ -476,7 +476,7 @@ pub fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
                     installed_version: None,
                     latest_version: None,
                     update_available: None,
-                    install_source: None,
+                    install_source: git.install_source.clone(),
                 }
             } else {
                 DoctorCheck {
@@ -495,7 +495,7 @@ pub fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
                     installed_version: None,
                     latest_version: None,
                     update_available: None,
-                    install_source: None,
+                    install_source: git.install_source.clone(),
                 }
             }
         }
@@ -520,7 +520,7 @@ pub fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
                 installed_version: None,
                 latest_version: None,
                 update_available: None,
-                install_source: None,
+                install_source: git.install_source.clone(),
             }
         }
         Err(e) => DoctorCheck {
@@ -540,7 +540,7 @@ pub fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
             installed_version: None,
             latest_version: None,
             update_available: None,
-            install_source: None,
+            install_source: git.install_source.clone(),
         },
     }
 }

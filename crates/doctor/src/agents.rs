@@ -136,10 +136,15 @@ pub fn check_single_ai_agent(
         .collect();
     let search = search_lines.join("\n");
 
-    let resolved_path = resolved_cmds
-        .iter()
-        .find_map(|rb| rb.path.as_ref())
+    let resolved_bridge: Option<&ResolvedBinary> =
+        resolved_cmds.iter().find(|rb| rb.path.is_some());
+    let resolved_path = resolved_bridge
+        .and_then(|rb| rb.path.as_ref())
         .map(|p| p.to_string_lossy().to_string());
+    // Prefer the bridge's install_source — that's the binary the UI cares about
+    // for "how did your acp adapter get installed". For goose (no separate
+    // main_command) the bridge is the main binary itself, so this is correct.
+    let bridge_install_source = resolved_bridge.and_then(|rb| rb.install_source.clone());
 
     if let Some(ref path_str) = resolved_path {
         if info.id == "ai-agent-goose" {
@@ -165,7 +170,7 @@ pub fn check_single_ai_agent(
                         installed_version: None,
                         latest_version: None,
                         update_available: None,
-                        install_source: None,
+                        install_source: bridge_install_source.clone(),
                     }
                 }
                 Ok(output) => {
@@ -190,7 +195,7 @@ pub fn check_single_ai_agent(
                         installed_version: None,
                         latest_version: None,
                         update_available: None,
-                        install_source: None,
+                        install_source: bridge_install_source.clone(),
                     }
                 }
                 Err(e) => DoctorCheck {
@@ -210,7 +215,7 @@ pub fn check_single_ai_agent(
                     installed_version: None,
                     latest_version: None,
                     update_available: None,
-                    install_source: None,
+                    install_source: bridge_install_source.clone(),
                 },
             }
         } else {
@@ -271,7 +276,7 @@ pub fn check_single_ai_agent(
                 installed_version: None,
                 latest_version: None,
                 update_available: None,
-                install_source: None,
+                install_source: bridge_install_source,
             }
         }
     } else {
@@ -280,6 +285,11 @@ pub fn check_single_ai_agent(
         if let Some(main_path) = resolved_main.as_ref().and_then(|rm| rm.path.as_ref()) {
             let bridge_cmd = info.commands[0];
             let main_search = &resolved_main.as_ref().unwrap().search_output;
+            // Bridge wasn't found, so fall back to the main binary's
+            // install_source — the only resolved path we have to describe.
+            let main_install_source = resolved_main
+                .as_ref()
+                .and_then(|rm| rm.install_source.clone());
             return DoctorCheck {
                 id: info.id.to_string(),
                 label: info.label.to_string(),
@@ -301,7 +311,7 @@ pub fn check_single_ai_agent(
                 installed_version: None,
                 latest_version: None,
                 update_available: None,
-                install_source: None,
+                install_source: main_install_source,
             };
         }
 

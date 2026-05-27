@@ -599,7 +599,13 @@
       return;
     }
     if (prState === 'created' && hasUnpushed && pushState === 'idle') {
-      handlePush(pushAction === 'forcePush' || optionHeld);
+      const wantsForcePush = pushAction === 'forcePush' || optionHeld;
+      if (wantsForcePush && !optionHeld) {
+        // Force push without an explicit alt override — confirm first.
+        showForcePushDialog = true;
+      } else {
+        handlePush(wantsForcePush);
+      }
     } else if (prState === 'created') {
       const url = prUrl ?? cachedPrUrl;
       if (url) {

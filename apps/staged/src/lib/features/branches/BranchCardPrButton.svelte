@@ -33,7 +33,7 @@
     type CompletedPushOutcome,
   } from './branchCardHelpers';
   import { buildPrButtonTitle } from './prButtonTooltip';
-  import { shouldShowPushChanges } from './prButtonGitState';
+  import { derivePrPushAction } from './prButtonGitState';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { prStateStore, type PrState } from '../../stores/prState.svelte';
@@ -107,17 +107,18 @@
   let prStatusDraft = $state<boolean | null>(null);
   let failedChecks = $state<PrFailedCheck[]>([]);
 
-  // Derive hasUnpushed from the git-state upstream relation when available,
+  // Derive push action from the git-state upstream relation when available,
   // falling back to a HEAD/PR SHA comparison only when upstream is missing
   // (e.g. fork PRs without an `origin/<branch>` ref).
-  let hasUnpushed = $derived(
-    shouldShowPushChanges({
+  let pushAction = $derived(
+    derivePrPushAction({
       prNumber: branch.prNumber,
       prState: branch.prState,
       prHeadSha,
       gitState: timeline?.gitState ?? null,
     })
   );
+  let hasUnpushed = $derived(pushAction !== 'none');
 
   // Sync local PR status state when branch prop changes
   let syncedBranchId = $state<string | null>(null);
@@ -357,7 +358,9 @@
     if (pushState === 'pushing') return 'Pushing… (click to view)';
     if (pushState === 'error') return 'Push failed — click for details';
     if (prState === 'created' && hasUnpushed) {
-      return optionHeld ? 'Force push to remote' : 'Push changes to remote';
+      return pushAction === 'forcePush' || optionHeld
+        ? 'Force push to remote'
+        : 'Push changes to remote';
     }
     if (prState === 'created') {
       if (prStatusState === 'MERGED') return 'Merged';
@@ -596,7 +599,7 @@
       return;
     }
     if (prState === 'created' && hasUnpushed && pushState === 'idle') {
-      handlePush(optionHeld);
+      handlePush(pushAction === 'forcePush' || optionHeld);
     } else if (prState === 'created') {
       const url = prUrl ?? cachedPrUrl;
       if (url) {
@@ -683,7 +686,7 @@
       {:else if pushState === 'error'}
         Push failed
       {:else if prState === 'created' && hasUnpushed}
-        {optionHeld ? 'Force push' : 'Push changes'}
+        {pushAction === 'forcePush' || optionHeld ? 'Force push' : 'Push changes'}
       {:else if prState === 'created'}
         {#if prStatusText}
           {prStatusText}

@@ -1274,7 +1274,11 @@ dependencies = [
 name = "doctor"
 version = "0.1.0"
 dependencies = [
+ "dirs",
+ "futures",
+ "reqwest",
  "serde",
+ "serde_json",
  "tokio",
 ]
 
@@ -4162,6 +4166,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "encoding_rs",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "h2",

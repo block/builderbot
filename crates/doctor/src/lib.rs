@@ -6,17 +6,23 @@
 
 pub mod agents;
 pub mod checks;
+pub(crate) mod freshness;
+pub(crate) mod package_ids;
 pub mod resolve;
 pub mod types;
 
 pub use types::{CheckStatus, DoctorCheck, DoctorReport, FixType};
 
 use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use agents::{check_single_ai_agent, lookup_fix_command, AI_AGENT_CHECKS};
 use checks::{check_clonefile, check_gh, check_gh_auth, check_git, check_git_lfs};
+use freshness::{fetch_version_info, load_cache, save_cache};
+use package_ids::lookup_package_id;
 use resolve::resolve_binary;
-use types::ResolvedBinary;
+use types::{InstallSource, ResolvedBinary};
 
 /// Fallback check returned when a spawn_blocking task panics.
 fn empty_check(id: &str, label: &str) -> DoctorCheck {
@@ -39,8 +45,38 @@ fn empty_check(id: &str, label: &str) -> DoctorCheck {
     }
 }
 
-/// Run all health checks and return the report.
+/// Options controlling optional, slower passes layered on top of the core
+/// check set. Defaults preserve the original [`run_checks`] behavior — no
+/// network, no extra subprocess fan-out.
+#[derive(Debug, Clone, Default)]
+pub struct RunChecksOptions {
+    /// If true, populate `installed_version`/`latest_version`/`update_available`
+    /// on each check by probing the binary and the relevant registry.
+    pub check_freshness: bool,
+    /// If true (in combination with `check_freshness`), skip the remote
+    /// registry lookups — only the local installed-version probe runs.
+    pub offline: bool,
+}
+
+/// Run all health checks and return the report. Equivalent to
+/// `run_checks_with_options(RunChecksOptions::default())`.
 pub async fn run_checks() -> DoctorReport {
+    run_checks_with_options(RunChecksOptions::default()).await
+}
+
+/// Run all health checks with explicit options. Existing callers that want
+/// the cheap, no-network path should keep using [`run_checks`].
+pub async fn run_checks_with_options(opts: RunChecksOptions) -> DoctorReport {
+    let report = collect_base_report().await;
+
+    if opts.check_freshness {
+        populate_freshness(report, opts.offline).await
+    } else {
+        report
+    }
+}
+
+async fn collect_base_report() -> DoctorReport {
     let mut binary_names: Vec<&'static str> = vec!["git", "gh", "git-lfs"];
     for info in AI_AGENT_CHECKS {
         for cmd in info.commands {
@@ -148,6 +184,78 @@ pub async fn run_checks() -> DoctorReport {
     DoctorReport { checks }
 }
 
+/// Post-hoc pass: for every check that has a usable binary path and a known
+/// package id, run the installed/latest version probes in parallel and update
+/// the corresponding fields on the report. The on-disk cache is read once at
+/// the start and written once at the end.
+async fn populate_freshness(mut report: DoctorReport, offline: bool) -> DoctorReport {
+    let cache = Arc::new(Mutex::new(load_cache()));
+
+    let mut targets: Vec<FreshnessTarget> = Vec::new();
+    for check in &report.checks {
+        // Prefer the bridge path when present (matches the install_source the
+        // check carries — see check_single_ai_agent).
+        let path_str = check.bridge_path.as_deref().or(check.path.as_deref());
+        let Some(path_str) = path_str else { continue };
+
+        let package_id = check
+            .install_source
+            .clone()
+            .and_then(|src| lookup_package_id(&check.id, src))
+            .map(|s| s.to_string());
+
+        targets.push(FreshnessTarget {
+            id: check.id.clone(),
+            path: PathBuf::from(path_str),
+            install_source: check.install_source.clone(),
+            package_id,
+        });
+    }
+
+    let futures = targets.into_iter().map(|t| {
+        let cache = cache.clone();
+        async move {
+            let info = fetch_version_info(
+                t.install_source,
+                t.package_id.as_deref(),
+                &t.path,
+                &["--version"],
+                offline,
+                cache,
+            )
+            .await;
+            (t.id, info)
+        }
+    });
+
+    let results = futures::future::join_all(futures).await;
+    let mut by_id: HashMap<String, freshness::VersionInfo> = HashMap::new();
+    for (id, info) in results {
+        by_id.insert(id, info);
+    }
+
+    for check in &mut report.checks {
+        if let Some(info) = by_id.remove(&check.id) {
+            check.installed_version = info.installed;
+            check.latest_version = info.latest;
+            check.update_available = info.update_available;
+        }
+    }
+
+    if let Ok(guard) = cache.lock() {
+        save_cache(&guard);
+    }
+
+    report
+}
+
+struct FreshnessTarget {
+    id: String,
+    path: PathBuf,
+    install_source: Option<InstallSource>,
+    package_id: Option<String>,
+}
+
 /// Run a fix command for a doctor check, identified by check ID and fix type.
 ///
 /// The actual shell command is looked up from the static check definitions —
@@ -199,5 +307,38 @@ pub(crate) fn execute_command_blocking(command: &str) -> Result<(), String> {
         } else {
             stderr
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Default `run_checks()` must not populate any of the version-freshness
+    /// fields — guards against accidentally flipping the default to on
+    /// (which would slow down every staged Tauri app launch).
+    #[tokio::test]
+    async fn run_checks_default_leaves_freshness_fields_empty() {
+        let report = run_checks().await;
+        for check in &report.checks {
+            assert!(
+                check.installed_version.is_none(),
+                "check {} unexpectedly populated installed_version = {:?}",
+                check.id,
+                check.installed_version,
+            );
+            assert!(
+                check.latest_version.is_none(),
+                "check {} unexpectedly populated latest_version = {:?}",
+                check.id,
+                check.latest_version,
+            );
+            assert!(
+                check.update_available.is_none(),
+                "check {} unexpectedly populated update_available = {:?}",
+                check.id,
+                check.update_available,
+            );
+        }
     }
 }

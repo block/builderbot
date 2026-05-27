@@ -20,32 +20,30 @@ pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
                     continue;
                 }
 
-                match candidate_from_shell_output(stdout.as_ref()) {
-                    Some(path) if is_executable_file(&path) => {
-                        lines.push(format!(
-                            "    {shell} -l -c '{lookup_cmd}' => {} (resolved)",
-                            path.display()
-                        ));
-                        return ResolvedBinary {
-                            path: Some(path),
-                            search_output: lines.join("\n"),
-                        };
-                    }
-                    Some(path) => {
-                        lines.push(format!(
-                            "    {shell} -l -c '{lookup_cmd}' => {} (ignored: not an executable file)",
-                            path.display()
-                        ));
-                    }
-                    None if stdout.trim().is_empty() => {
-                        lines.push(format!("    {shell} -l -c '{lookup_cmd}' => not found"));
-                    }
-                    None => {
-                        lines.push(format!(
-                            "    {shell} -l -c '{lookup_cmd}' => {} (ignored: not an absolute path)",
-                            summarize_output(stdout.as_ref())
-                        ));
-                    }
+                let candidate_paths = candidate_paths_from_shell_output(stdout.as_ref());
+                if let Some(path) = candidate_paths.iter().find(|path| is_executable_file(path)) {
+                    lines.push(format!(
+                        "    {shell} -l -c '{lookup_cmd}' => {} (resolved)",
+                        path.display()
+                    ));
+                    return ResolvedBinary {
+                        path: Some(path.clone()),
+                        search_output: lines.join("\n"),
+                    };
+                }
+
+                if let Some(path) = candidate_paths.first() {
+                    lines.push(format!(
+                        "    {shell} -l -c '{lookup_cmd}' => {} (ignored: not an executable file)",
+                        path.display()
+                    ));
+                } else if stdout.trim().is_empty() {
+                    lines.push(format!("    {shell} -l -c '{lookup_cmd}' => not found"));
+                } else {
+                    lines.push(format!(
+                        "    {shell} -l -c '{lookup_cmd}' => {} (ignored: not an absolute path)",
+                        summarize_output(stdout.as_ref())
+                    ));
                 }
             }
             Err(e) => {
@@ -92,18 +90,13 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn candidate_from_shell_output(output: &str) -> Option<PathBuf> {
-    let mut lines = output
+fn candidate_paths_from_shell_output(output: &str) -> Vec<PathBuf> {
+    output
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty());
-    let candidate = lines.next()?;
-    if lines.next().is_some() {
-        return None;
-    }
-
-    let path = PathBuf::from(candidate);
-    path.is_absolute().then_some(path)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .collect()
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -152,27 +145,41 @@ pub fn format_command_output(cmd_desc: &str, output: &std::process::Output) -> S
 
 #[cfg(test)]
 mod tests {
-    use super::{candidate_from_shell_output, is_executable_file, shell_quote};
+    use super::{candidate_paths_from_shell_output, is_executable_file, shell_quote};
     use std::fs::{self, File};
     use std::path::PathBuf;
 
     #[test]
     fn candidate_accepts_single_absolute_path() {
         assert_eq!(
-            candidate_from_shell_output("/opt/homebrew/bin/git\n"),
-            Some(PathBuf::from("/opt/homebrew/bin/git"))
+            candidate_paths_from_shell_output("/opt/homebrew/bin/git\n"),
+            vec![PathBuf::from("/opt/homebrew/bin/git")]
+        );
+    }
+
+    #[test]
+    fn candidate_tolerates_startup_output_before_absolute_path() {
+        assert_eq!(
+            candidate_paths_from_shell_output("hello from shell init\n/opt/homebrew/bin/git\n"),
+            vec![PathBuf::from("/opt/homebrew/bin/git")]
         );
     }
 
     #[test]
     fn candidate_rejects_function_body_output() {
         let output = "git () {\n\tcommand git \"$@\"\n}\n";
-        assert_eq!(candidate_from_shell_output(output), None);
+        assert_eq!(
+            candidate_paths_from_shell_output(output),
+            Vec::<PathBuf>::new()
+        );
     }
 
     #[test]
     fn candidate_rejects_relative_or_command_name_output() {
-        assert_eq!(candidate_from_shell_output("git\n"), None);
+        assert_eq!(
+            candidate_paths_from_shell_output("git\n"),
+            Vec::<PathBuf>::new()
+        );
     }
 
     #[test]

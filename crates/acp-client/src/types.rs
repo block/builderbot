@@ -207,7 +207,7 @@ fn find_via_login_shell(cmd: &str) -> Option<PathBuf> {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        if let Some(path) = candidate_from_shell_output(stdout.as_ref()) {
+        for path in candidate_paths_from_shell_output(stdout.as_ref()) {
             if is_executable_file(&path) {
                 return Some(path);
             }
@@ -220,18 +220,12 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn candidate_from_shell_output(output: &str) -> Option<PathBuf> {
-    let mut lines = output
+fn candidate_paths_from_shell_output(output: &str) -> impl Iterator<Item = PathBuf> + '_ {
+    output
         .lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty());
-    let candidate = lines.next()?;
-    if lines.next().is_some() {
-        return None;
-    }
-
-    let path = PathBuf::from(candidate);
-    path.is_absolute().then_some(path)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -263,4 +257,29 @@ pub(crate) fn blox_acp_command(agent_id: &str) -> Option<String> {
         parts.extend(a.acp_args.iter().copied());
         parts.join(",")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::candidate_paths_from_shell_output;
+    use std::path::PathBuf;
+
+    #[test]
+    fn candidate_paths_tolerate_startup_output_before_absolute_path() {
+        let paths: Vec<_> = candidate_paths_from_shell_output(
+            "hello from shell init\n/opt/homebrew/bin/codex-acp\n",
+        )
+        .collect();
+
+        assert_eq!(paths, vec![PathBuf::from("/opt/homebrew/bin/codex-acp")]);
+    }
+
+    #[test]
+    fn candidate_paths_ignore_relative_lines_and_function_bodies() {
+        let paths: Vec<_> =
+            candidate_paths_from_shell_output("codex-acp () {\n\tcommand codex-acp \"$@\"\n}\n")
+                .collect();
+
+        assert!(paths.is_empty());
+    }
 }

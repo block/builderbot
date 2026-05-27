@@ -1037,6 +1037,7 @@
               onclick={onNewNote}
               disabled={newSessionDisabled}
               title="New note"
+              aria-label="New note"
             >
               <FileText class="add-item-icon-default" size={18} />
               <Plus class="add-item-icon-compact" size={18} />
@@ -1051,6 +1052,7 @@
               onclick={onNewCommit}
               disabled={newSessionDisabled}
               title="New commit"
+              aria-label="New commit"
             >
               <GitCommitVertical class="add-item-icon-default" size={18} />
               <Plus class="add-item-icon-compact" size={18} />
@@ -1065,6 +1067,7 @@
               onclick={(e) => onNewReview?.(e)}
               disabled={newSessionDisabled}
               title="New code review"
+              aria-label="New code review"
             >
               <FileSearch class="add-item-icon-default" size={18} />
               <Plus class="add-item-icon-compact" size={18} />
@@ -1089,6 +1092,8 @@
   .timeline {
     display: flex;
     flex-direction: column;
+    container-type: inline-size;
+    container-name: timeline;
   }
 
   .no-items {
@@ -1240,18 +1245,40 @@
     cursor: not-allowed;
   }
 
-  @media (max-width: 768px) {
-    .add-item-btn :global(.add-item-icon-default),
-    .label-full {
+  @container timeline (max-width: 768px) {
+    .add-item-btn:not(.add-item-btn-enlarged) :global(.add-item-icon-default),
+    .add-item-btn:not(.add-item-btn-enlarged) .label-full {
       display: none;
     }
 
-    .add-item-btn :global(.add-item-icon-compact) {
+    .add-item-btn:not(.add-item-btn-enlarged) :global(.add-item-icon-compact) {
       display: block;
     }
 
-    .label-compact {
+    .add-item-btn:not(.add-item-btn-enlarged) .label-compact {
       display: inline;
+    }
+  }
+
+  @container timeline (max-width: 480px) {
+    .add-item-btn:not(.add-item-btn-enlarged) :global(.add-item-icon-default) {
+      display: block;
+    }
+
+    .add-item-btn:not(.add-item-btn-enlarged) :global(.add-item-icon-compact) {
+      display: block;
+      width: 10px;
+      height: 10px;
+    }
+
+    .add-item-btn:not(.add-item-btn-enlarged) .label-full,
+    .add-item-btn:not(.add-item-btn-enlarged) .label-compact {
+      display: none;
+    }
+
+    .add-item-btn:not(.add-item-btn-enlarged) {
+      padding: 4px 6px;
+      gap: 2px;
     }
   }
 </style>

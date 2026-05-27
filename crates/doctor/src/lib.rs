@@ -31,6 +31,11 @@ fn empty_check(id: &str, label: &str) -> DoctorCheck {
         path: None,
         bridge_path: None,
         raw_output: None,
+        auth_status: None,
+        installed_version: None,
+        latest_version: None,
+        update_available: None,
+        install_source: None,
     }
 }
 
@@ -65,6 +70,7 @@ pub async fn run_checks() -> DoctorReport {
     let fallback = ResolvedBinary {
         path: None,
         search_output: "resolution task panicked".to_string(),
+        install_source: None,
     };
     let r_git = resolved
         .get("git")

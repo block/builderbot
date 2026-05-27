@@ -33,6 +33,7 @@ pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
                     return ResolvedBinary {
                         path: Some(path.clone()),
                         search_output: lines.join("\n"),
+                        install_source: None,
                     };
                 }
 
@@ -70,6 +71,7 @@ pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
             return ResolvedBinary {
                 path: Some(path),
                 search_output: lines.join("\n"),
+                install_source: None,
             };
         }
         lines.push(format!("    {} => not found", path.display()));
@@ -79,6 +81,7 @@ pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
     ResolvedBinary {
         path: None,
         search_output: lines.join("\n"),
+        install_source: None,
     }
 }
 

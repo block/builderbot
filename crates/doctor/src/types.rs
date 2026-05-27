@@ -20,6 +20,31 @@ pub enum FixType {
     Command,
     /// A shell command to install the ACP bridge binary.
     Bridge,
+    /// A shell command that triggers an authentication flow.
+    Auth,
+}
+
+/// Authentication state for a check that probes credentials.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AuthStatus {
+    Authenticated,
+    NotAuthenticated,
+    NotApplicable,
+}
+
+/// How a binary was installed on disk.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum InstallSource {
+    Brew,
+    Npm,
+    Cargo,
+    Mise,
+    Asdf,
+    CurlPipe,
+    System,
+    Unknown,
 }
 
 /// A single health-check result shown in the UI.
@@ -48,6 +73,16 @@ pub struct DoctorCheck {
     /// Raw debug output: command stdout/stderr, search paths tried, etc.
     /// Used by the "Copy details" feature for support diagnostics.
     pub raw_output: Option<String>,
+    /// Authentication status, when the check probes credentials.
+    pub auth_status: Option<AuthStatus>,
+    /// Installed version string, if detected.
+    pub installed_version: Option<String>,
+    /// Latest available version string, if known.
+    pub latest_version: Option<String>,
+    /// Whether a newer version is available than the installed one.
+    pub update_available: Option<bool>,
+    /// How the binary was installed (brew, npm, cargo, etc.), if detected.
+    pub install_source: Option<InstallSource>,
 }
 
 /// The full report returned to the frontend.
@@ -62,4 +97,5 @@ pub struct DoctorReport {
 pub struct ResolvedBinary {
     pub path: Option<PathBuf>,
     pub search_output: String,
+    pub install_source: Option<InstallSource>,
 }

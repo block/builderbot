@@ -24,6 +24,10 @@ pub struct AgentCheckInfo {
     pub bridge_install_url: Option<&'static str>,
     /// Shell command to install the ACP bridge (used as fix_command for partial installs).
     pub bridge_install_command: Option<&'static str>,
+    /// Shell command that triggers an interactive authentication flow for this agent.
+    pub auth_command: Option<&'static str>,
+    /// Shell command that reports whether the user is currently authenticated.
+    pub auth_status_command: Option<&'static str>,
 }
 
 /// All AI agents we check for individually.
@@ -37,6 +41,8 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         install_command: None,
         bridge_install_url: None,
         bridge_install_command: None,
+        auth_command: None,
+        auth_status_command: None,
     },
     AgentCheckInfo {
         id: "ai-agent-claude",
@@ -47,6 +53,8 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         install_command: Some("curl -fsSL https://claude.ai/install.sh | bash"),
         bridge_install_url: Some("https://github.com/zed-industries/claude-agent-acp#installation"),
         bridge_install_command: Some("npm install -g @zed-industries/claude-agent-acp"),
+        auth_command: None,
+        auth_status_command: None,
     },
     AgentCheckInfo {
         id: "ai-agent-codex",
@@ -57,6 +65,8 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         install_command: Some("brew install --cask codex"),
         bridge_install_url: Some("https://github.com/zed-industries/codex-acp#installation"),
         bridge_install_command: Some("npm install -g @zed-industries/codex-acp"),
+        auth_command: None,
+        auth_status_command: None,
     },
     AgentCheckInfo {
         id: "ai-agent-pi",
@@ -67,6 +77,8 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         install_command: None,
         bridge_install_url: None,
         bridge_install_command: None,
+        auth_command: None,
+        auth_status_command: None,
     },
     AgentCheckInfo {
         id: "ai-agent-amp",
@@ -77,6 +89,8 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         install_command: Some("curl -fsSL https://ampcode.com/install.sh | bash"),
         bridge_install_url: Some("https://www.npmjs.com/package/amp-acp"),
         bridge_install_command: Some("npm install -g amp-acp"),
+        auth_command: None,
+        auth_status_command: None,
     },
 ];
 
@@ -122,6 +136,11 @@ pub fn check_single_ai_agent(
                         path: resolved_path,
                         bridge_path: None,
                         raw_output: Some(raw),
+                        auth_status: None,
+                        installed_version: None,
+                        latest_version: None,
+                        update_available: None,
+                        install_source: None,
                     }
                 }
                 Ok(output) => {
@@ -142,6 +161,11 @@ pub fn check_single_ai_agent(
                         path: resolved_path,
                         bridge_path: None,
                         raw_output: Some(raw),
+                        auth_status: None,
+                        installed_version: None,
+                        latest_version: None,
+                        update_available: None,
+                        install_source: None,
                     }
                 }
                 Err(e) => DoctorCheck {
@@ -157,6 +181,11 @@ pub fn check_single_ai_agent(
                     raw_output: Some(format!(
                         "{header}\n$ goose acp --help\nerror: {e}\n{search}"
                     )),
+                    auth_status: None,
+                    installed_version: None,
+                    latest_version: None,
+                    update_available: None,
+                    install_source: None,
                 },
             }
         } else {
@@ -179,6 +208,11 @@ pub fn check_single_ai_agent(
                 path: main_path,
                 bridge_path,
                 raw_output: Some(format!("{header}\n{search}")),
+                auth_status: None,
+                installed_version: None,
+                latest_version: None,
+                update_available: None,
+                install_source: None,
             }
         }
     } else {
@@ -204,6 +238,11 @@ pub fn check_single_ai_agent(
                 path: Some(main_path.to_string_lossy().to_string()),
                 bridge_path: None,
                 raw_output: Some(format!("{header}\n{search}\n{main_search}")),
+                auth_status: None,
+                installed_version: None,
+                latest_version: None,
+                update_available: None,
+                install_source: None,
             };
         }
 
@@ -228,6 +267,11 @@ pub fn check_single_ai_agent(
             path: None,
             bridge_path: None,
             raw_output: Some(format!("{header}\n{search}{extra_search}")),
+            auth_status: None,
+            installed_version: None,
+            latest_version: None,
+            update_available: None,
+            install_source: None,
         }
     }
 }
@@ -247,6 +291,7 @@ pub fn lookup_fix_command(check_id: &str, fix_type: &FixType) -> Option<String> 
             return match fix_type {
                 FixType::Command => info.install_command.map(|s| s.to_string()),
                 FixType::Bridge => info.bridge_install_command.map(|s| s.to_string()),
+                FixType::Auth => None,
             };
         }
     }

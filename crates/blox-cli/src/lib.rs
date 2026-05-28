@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -118,18 +118,16 @@ where
 /// Find a CLI binary by command name.
 ///
 /// Searches in order:
-/// 1. Login shell `which` (picks up user's PATH from shell rc files)
+/// 1. Login shell path lookup (picks up user's PATH from shell rc files)
 /// 2. Common install locations
 pub fn find_command(cmd: &str) -> Option<PathBuf> {
     if let Some(path) = find_via_login_shell(cmd) {
-        if path.exists() {
-            return Some(path);
-        }
+        return Some(path);
     }
 
     for dir in COMMON_PATHS {
         let path = PathBuf::from(dir).join(cmd);
-        if path.exists() {
+        if is_executable_file(&path) {
             return Some(path);
         }
     }
@@ -138,23 +136,62 @@ pub fn find_command(cmd: &str) -> Option<PathBuf> {
 }
 
 fn find_via_login_shell(cmd: &str) -> Option<PathBuf> {
-    let which_cmd = format!("which {cmd}");
+    let quoted = shell_quote(cmd);
+    let lookups = [
+        ("/bin/zsh", format!("whence -p -- {quoted}")),
+        ("/bin/bash", format!("type -P -- {quoted}")),
+    ];
 
-    for shell in ["/bin/zsh", "/bin/bash"] {
-        if let Ok(output) = Command::new(shell).args(["-l", "-c", &which_cmd]).output() {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if let Some(path_str) = stdout.lines().rfind(|line| !line.is_empty()) {
-                    let path_str = path_str.trim();
-                    if !path_str.is_empty() && path_str.starts_with('/') {
-                        return Some(PathBuf::from(path_str));
-                    }
-                }
-            }
+    for (shell, lookup_cmd) in lookups {
+        let Ok(output) = Command::new(shell).args(["-l", "-c", &lookup_cmd]).output() else {
+            continue;
+        };
+        if !output.status.success() {
+            continue;
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(path) = candidate_paths_from_shell_output(stdout.as_ref())
+            .filter(|path| is_executable_file(path))
+            .last()
+        {
+            return Some(path);
         }
     }
 
     None
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn candidate_paths_from_shell_output(output: &str) -> impl Iterator<Item = PathBuf> + '_ {
+    output
+        .lines()
+        .map(str::trim)
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 /// Locate the `sq` binary.
@@ -602,5 +639,51 @@ mod tests {
     fn strip_ansi_preserves_non_escape_special_chars() {
         let input = "line1\nline2\ttab";
         assert_eq!(strip_ansi_escape_sequences(input), "line1\nline2\ttab");
+    }
+
+    #[test]
+    fn candidate_paths_tolerate_startup_output_before_absolute_path() {
+        let paths: Vec<_> =
+            candidate_paths_from_shell_output("hello from shell init\n/opt/homebrew/bin/sq\n")
+                .collect();
+
+        assert_eq!(paths, vec![PathBuf::from("/opt/homebrew/bin/sq")]);
+    }
+
+    #[test]
+    fn candidate_paths_ignore_relative_lines_and_function_bodies() {
+        let paths: Vec<_> =
+            candidate_paths_from_shell_output("sq () {\n\tcommand sq \"$@\"\n}\n").collect();
+
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn login_shell_picks_last_executable_absolute_path() {
+        // Simulates a rc file printing an absolute path of an unrelated
+        // executable before the shell builtin prints the real lookup answer.
+        let dir = std::env::temp_dir().join(format!("blox-cli-last-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let decoy = dir.join("decoy");
+        let real = dir.join("real");
+        std::fs::File::create(&decoy).unwrap();
+        std::fs::File::create(&real).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&decoy, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let stdout = format!("{}\n{}\n", decoy.display(), real.display());
+        let picked = candidate_paths_from_shell_output(&stdout)
+            .filter(|p| is_executable_file(p))
+            .last();
+
+        assert_eq!(picked, Some(real));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

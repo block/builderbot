@@ -99,8 +99,7 @@ if let Some(agent) = find_acp_agent_by_id("goose") {
 ## How It Works
 
 1. **Discovery**: Searches for agent executables using:
-   - Login shell `which` command (to get user's PATH)
-   - Direct command execution
+   - Login shell path lookup (to get user's PATH)
    - Common installation paths (`/opt/homebrew/bin`, `/usr/local/bin`, etc.)
 
 2. **Execution**:

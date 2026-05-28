@@ -49,7 +49,7 @@
   let assistantMessagesAfterNote = $state(0);
   let chatButtonLabel = $derived(formatChatButtonLabel(assistantMessagesAfterNote));
   let canOpenSession = $derived(Boolean(sessionId && onOpenSession));
-  let showFloatingChatInfo = $derived(canOpenSession && assistantMessagesAfterNote > 0);
+  let showChatInfo = $derived(canOpenSession && assistantMessagesAfterNote > 0);
 
   // Search state
   let searchVisible = $state(false);
@@ -255,12 +255,7 @@
     </header>
     <div class="modal-body">
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div
-        class:has-floating-chat-info={showFloatingChatInfo}
-        class="modal-content"
-        bind:this={contentEl}
-        onclick={handleExternalLinkClick}
-      >
+      <div class="modal-content" bind:this={contentEl} onclick={handleExternalLinkClick}>
         {#if content.trim()}
           <div class="markdown-content">
             {@html renderMarkdown(content)}
@@ -269,20 +264,22 @@
           <p class="empty-note">This note has no content.</p>
         {/if}
       </div>
-      {#if showFloatingChatInfo}
-        <button
-          class="floating-chat-info"
-          onclick={() => onOpenSession?.(sessionId!)}
-          title="Open chat session"
-        >
-          <MessageCircle size={16} aria-hidden="true" />
-          <span>{chatButtonLabel}</span>
-        </button>
-      {/if}
     </div>
-    {#if nextSteps && onStartSession && (nextSteps.noteStep || nextSteps.commitStep)}
+    {#if showChatInfo || (nextSteps && onStartSession && (nextSteps.noteStep || nextSteps.commitStep))}
       <div class="next-steps">
-        {#if nextSteps.noteStep}
+        {#if showChatInfo}
+          <div class="chat-info-row">
+            <button
+              class="chat-info-capsule"
+              onclick={() => onOpenSession?.(sessionId!)}
+              title="Open chat session"
+            >
+              <MessageCircle size={16} aria-hidden="true" />
+              <span>{chatButtonLabel}</span>
+            </button>
+          </div>
+        {/if}
+        {#if nextSteps && onStartSession && nextSteps.noteStep}
           <div class="next-step-row">
             <span class="next-step-prompt">{nextSteps.noteStep}</span>
             <button
@@ -293,7 +290,7 @@
             </button>
           </div>
         {/if}
-        {#if nextSteps.commitStep}
+        {#if nextSteps && onStartSession && nextSteps.commitStep}
           <div class="next-step-row">
             <span class="next-step-prompt">{nextSteps.commitStep}</span>
             <button
@@ -428,51 +425,6 @@
     overflow-y: auto;
     padding: 24px;
     min-height: 0;
-  }
-
-  .modal-content.has-floating-chat-info {
-    padding-bottom: 96px;
-  }
-
-  .floating-chat-info {
-    position: absolute;
-    left: 50%;
-    bottom: 16px;
-    transform: translateX(-50%);
-    z-index: 2;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    box-sizing: border-box;
-    width: max-content;
-    max-width: calc(100% - 48px);
-    min-height: 44px;
-    padding: 10px 14px;
-    background: var(--bg-chrome);
-    border: 1px solid var(--border-muted);
-    border-radius: 8px;
-    box-shadow: 0 4px 14px color-mix(in srgb, var(--shadow-overlay) 40%, transparent);
-    color: var(--text-primary);
-    cursor: pointer;
-    font-size: var(--size-sm);
-    font-weight: 500;
-    transition:
-      background-color 0.1s,
-      border-color 0.1s,
-      color 0.1s;
-  }
-
-  .floating-chat-info:hover {
-    background: var(--bg-hover);
-    border-color: var(--text-muted);
-  }
-
-  .floating-chat-info span {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .modal-content::-webkit-scrollbar {
@@ -675,6 +627,45 @@
     background: var(--commit-bg-emphasis);
   }
 
+  .chat-info-row {
+    display: flex;
+    justify-content: center;
+  }
+
+  .chat-info-capsule {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    box-sizing: border-box;
+    max-width: 100%;
+    min-height: 36px;
+    padding: 8px 14px;
+    background: var(--bg-chrome);
+    border: 1px solid var(--border-muted);
+    border-radius: 8px;
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: var(--size-sm);
+    font-weight: 500;
+    transition:
+      background-color 0.1s,
+      border-color 0.1s,
+      color 0.1s;
+  }
+
+  .chat-info-capsule:hover {
+    background: var(--bg-hover);
+    border-color: var(--text-muted);
+  }
+
+  .chat-info-capsule span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   @media (max-width: 700px) {
     .modal {
       width: 100vw;
@@ -701,15 +692,6 @@
 
     .modal-content {
       padding: 16px;
-    }
-
-    .modal-content.has-floating-chat-info {
-      padding-bottom: 88px;
-    }
-
-    .floating-chat-info {
-      bottom: 12px;
-      max-width: calc(100% - 32px);
     }
 
     .next-steps {

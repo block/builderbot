@@ -192,6 +192,34 @@ mod tests {
     }
 
     #[test]
+    fn picks_last_executable_when_rc_file_echoes_absolute_path() {
+        // Simulates a rc file printing an absolute path of an unrelated
+        // executable before the shell builtin prints the real lookup answer.
+        let dir = std::env::temp_dir().join(format!("doctor-resolve-last-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let decoy = dir.join("decoy");
+        let real = dir.join("real");
+        File::create(&decoy).unwrap();
+        File::create(&real).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&decoy, fs::Permissions::from_mode(0o755)).unwrap();
+            fs::set_permissions(&real, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let stdout = format!("{}\n{}\n", decoy.display(), real.display());
+        let candidates = candidate_paths_from_shell_output(&stdout);
+        let picked = candidates.iter().rev().find(|p| is_executable_file(p));
+
+        assert_eq!(picked, Some(&real));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn executable_file_validation_checks_file_and_mode() {
         let dir = std::env::temp_dir().join(format!("doctor-resolve-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);

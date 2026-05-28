@@ -262,7 +262,7 @@ pub(crate) fn blox_acp_command(agent_id: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::candidate_paths_from_shell_output;
+    use super::{candidate_paths_from_shell_output, is_executable_file};
     use std::path::PathBuf;
 
     #[test]
@@ -282,5 +282,34 @@ mod tests {
                 .collect();
 
         assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn login_shell_picks_last_executable_absolute_path() {
+        // Simulates a rc file printing an absolute path of an unrelated
+        // executable before the shell builtin prints the real lookup answer.
+        let dir = std::env::temp_dir().join(format!("acp-client-last-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let decoy = dir.join("decoy");
+        let real: PathBuf = dir.join("real");
+        std::fs::File::create(&decoy).unwrap();
+        std::fs::File::create(&real).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&decoy, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let stdout = format!("{}\n{}\n", decoy.display(), real.display());
+        let picked = candidate_paths_from_shell_output(&stdout)
+            .filter(|p| is_executable_file(p))
+            .last();
+
+        assert_eq!(picked, Some(real));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

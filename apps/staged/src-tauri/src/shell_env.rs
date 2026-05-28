@@ -476,6 +476,22 @@ async fn capture_shell_env(
         .stderr(Stdio::null())
         .kill_on_drop(true);
 
+    // Detach from the parent's controlling TTY so an interactive `$SHELL -ils`
+    // can't `tcsetpgrp` onto the user's terminal or mutate its modes via
+    // rcfiles. Without this, the spawned shell inherits the staged binary's
+    // ctty (the user's real /dev/tty up the chain), and on exit leaves the
+    // user's TTY foreground-PG pointing at a dead PGID — the outer zsh later
+    // dies with EIO on read.
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: `setsid()` is async-signal-safe.
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+
     let mut child = cmd.spawn()?;
     {
         let mut stdin = child
@@ -533,6 +549,17 @@ fn capture_shell_env_blocking(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+
+    // See `capture_shell_env` for why this is required.
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: `setsid()` is async-signal-safe.
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
 
     let mut child = cmd.spawn()?;
     {

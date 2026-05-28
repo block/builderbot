@@ -417,6 +417,19 @@ export function refreshBranchGitState(
   });
 }
 
+export interface ParentBranchCommit {
+  sha: string;
+  shortSha: string;
+  subject: string;
+  author: string;
+  authorEmail: string;
+  timestamp: number;
+}
+
+export function listParentBranchCommits(branchId: string): Promise<ParentBranchCommit[]> {
+  return invokeCommand('list_parent_branch_commits', { branchId });
+}
+
 export function invalidateProjectBranchTimelines(branchIds: string[]): void {
   for (const id of branchIds) {
     timelineCache.delete(id);

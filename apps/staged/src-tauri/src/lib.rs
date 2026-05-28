@@ -2193,6 +2193,7 @@ pub fn run() {
             // Timeline
             timeline::get_branch_timeline,
             timeline::refresh_branch_git_state,
+            timeline::list_parent_branch_commits,
             timeline::pull_branch_ff_only,
             // Notes
             note_commands::create_note,

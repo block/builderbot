@@ -207,10 +207,11 @@ fn find_via_login_shell(cmd: &str) -> Option<PathBuf> {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        for path in candidate_paths_from_shell_output(stdout.as_ref()) {
-            if is_executable_file(&path) {
-                return Some(path);
-            }
+        if let Some(path) = candidate_paths_from_shell_output(stdout.as_ref())
+            .filter(|path| is_executable_file(path))
+            .last()
+        {
+            return Some(path);
         }
     }
     None

@@ -21,7 +21,11 @@ pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
                 }
 
                 let candidate_paths = candidate_paths_from_shell_output(stdout.as_ref());
-                if let Some(path) = candidate_paths.iter().find(|path| is_executable_file(path)) {
+                if let Some(path) = candidate_paths
+                    .iter()
+                    .rev()
+                    .find(|path| is_executable_file(path))
+                {
                     lines.push(format!(
                         "    {shell} -l -c '{lookup_cmd}' => {} (resolved)",
                         path.display()

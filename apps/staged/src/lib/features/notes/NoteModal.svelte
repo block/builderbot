@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { X, Copy, Check } from 'lucide-svelte';
+  import { X, Copy, Check, MessageCircle } from 'lucide-svelte';
   import { marked } from 'marked';
   import { sanitize } from '../../shared/sanitize';
   import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
@@ -268,10 +268,14 @@
     {#if showChatInfo || (nextSteps && onStartSession && (nextSteps.noteStep || nextSteps.commitStep))}
       <div class="next-steps">
         {#if showChatInfo}
-          <div class="next-step-row">
-            <span class="next-step-prompt">{chatButtonLabel}</span>
-            <button class="next-step-btn chat-btn" onclick={() => onOpenSession?.(sessionId!)}>
-              View chat
+          <div class="chat-info-row">
+            <button
+              class="chat-info-capsule"
+              onclick={() => onOpenSession?.(sessionId!)}
+              title="Open chat session"
+            >
+              <MessageCircle size={16} aria-hidden="true" />
+              <span>{chatButtonLabel}</span>
             </button>
           </div>
         {/if}
@@ -623,13 +627,43 @@
     background: var(--commit-bg-emphasis);
   }
 
-  .next-step-btn.chat-btn {
-    color: var(--text-primary);
-    background: var(--bg-hover);
+  .chat-info-row {
+    display: flex;
+    justify-content: center;
   }
 
-  .next-step-btn.chat-btn:hover {
-    background: var(--bg-elevated);
+  .chat-info-capsule {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    box-sizing: border-box;
+    max-width: 100%;
+    min-height: 36px;
+    padding: 8px 14px;
+    background: var(--bg-chrome);
+    border: 1px solid var(--border-muted);
+    border-radius: 8px;
+    color: var(--text-primary);
+    cursor: pointer;
+    font-size: var(--size-sm);
+    font-weight: 500;
+    transition:
+      background-color 0.1s,
+      border-color 0.1s,
+      color 0.1s;
+  }
+
+  .chat-info-capsule:hover {
+    background: var(--bg-hover);
+    border-color: var(--text-muted);
+  }
+
+  .chat-info-capsule span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   @media (max-width: 700px) {

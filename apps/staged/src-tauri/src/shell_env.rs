@@ -484,7 +484,6 @@ async fn capture_shell_env(
     // dies with EIO on read.
     #[cfg(unix)]
     unsafe {
-        use std::os::unix::process::CommandExt;
         // SAFETY: `setsid()` is async-signal-safe.
         cmd.pre_exec(|| {
             libc::setsid();

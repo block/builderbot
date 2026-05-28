@@ -175,7 +175,9 @@
   });
 
   let filteredRecentRepos = $derived(
-    excludeRepos ? recentRepos.filter((r) => !excludeRepos.has(r.githubRepo)) : recentRepos
+    excludeRepos
+      ? recentRepos.filter((r) => !excludeRepos.has(`${r.githubRepo}\x00${r.subpath ?? ''}`))
+      : recentRepos
   );
 
   const dark = $derived(darkMode.value);

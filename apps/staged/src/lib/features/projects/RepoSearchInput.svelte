@@ -72,13 +72,13 @@
     const seen = new Set<string>();
     const result: Array<{ type: 'recent' | 'repo'; data: RecentRepo | GitHubRepo }> = [];
 
-    if (directFetchRepo && !excludeRepos.has(directFetchRepo.nameWithOwner)) {
+    if (directFetchRepo) {
       result.push({ type: 'repo', data: directFetchRepo });
       seen.add(directFetchRepo.nameWithOwner);
     }
 
     for (const r of searchResults) {
-      if (!seen.has(r.nameWithOwner) && !excludeRepos.has(r.nameWithOwner)) {
+      if (!seen.has(r.nameWithOwner)) {
         result.push({ type: 'repo', data: r });
         seen.add(r.nameWithOwner);
       }
@@ -94,7 +94,7 @@
       : repos;
 
     for (const r of filtered) {
-      if (!seen.has(r.nameWithOwner) && !excludeRepos.has(r.nameWithOwner)) {
+      if (!seen.has(r.nameWithOwner)) {
         result.push({ type: 'repo', data: r });
         seen.add(r.nameWithOwner);
       }
@@ -105,7 +105,9 @@
 
   let filteredRecentRepos = $derived.by(() => {
     const q = query.toLowerCase().trim();
-    const base = recentRepos.filter((r) => !excludeRepos.has(r.githubRepo));
+    const base = recentRepos.filter(
+      (r) => !excludeRepos.has(`${r.githubRepo}\x00${r.subpath ?? ''}`)
+    );
     return q ? base.filter((r) => r.githubRepo.toLowerCase().includes(q)) : base;
   });
 
@@ -125,7 +127,11 @@
 
   onMount(async () => {
     if (autofocus) {
-      inputEl?.focus();
+      // Defer so the click that opened our parent modal finishes bubbling
+      // before we open the dropdown. Otherwise the trailing window-level
+      // handleClickOutside (registered when this component mounted) sees a
+      // target outside our wrapper and closes the dropdown we just opened.
+      setTimeout(() => inputEl?.focus(), 0);
     }
     try {
       recentRepos = await commands.listRecentRepos(10);
@@ -148,6 +154,7 @@
   }
 
   async function handleInput() {
+    dropdownOpen = true;
     const trimmed = query.trim();
 
     const parsed = parseGitHubUrl(trimmed);

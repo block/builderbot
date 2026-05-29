@@ -102,7 +102,6 @@
   }
 
   function scheduleOpen() {
-    if (count <= 0) return;
     if (closeTimer) {
       clearTimeout(closeTimer);
       closeTimer = null;

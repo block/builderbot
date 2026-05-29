@@ -688,7 +688,7 @@ pub async fn list_parent_branch_commits(
             let output = match branches::run_workspace_git(
                 ws_name,
                 repo_subpath.as_deref(),
-                &["log", format_arg, &range],
+                &["log", "--max-count=26", format_arg, &range],
             ) {
                 Ok(o) => o,
                 Err(_) => return Ok(Vec::new()),
@@ -716,7 +716,10 @@ pub async fn list_parent_branch_commits(
             Ok(mb_output) => format!("{}..{base_ref}", mb_output.trim()),
             Err(_) => base_ref.clone(),
         };
-        let output = match git::cli_run_smart(worktree_path, &["log", format_arg, &range]) {
+        let output = match git::cli_run_smart(
+            worktree_path,
+            &["log", "--max-count=26", format_arg, &range],
+        ) {
             Ok(o) => o,
             Err(_) => return Ok(Vec::new()),
         };

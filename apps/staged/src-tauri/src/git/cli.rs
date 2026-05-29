@@ -92,6 +92,8 @@ fn run_with_env(repo: &Path, args: &[&str], source: EnvSource) -> Result<String,
     let mut command = Command::new("git");
     command.args(["-C", repo_str]).args(args);
     apply_env(&mut command, repo, source);
+    force_non_interactive(&mut command);
+    detach_from_ctty(&mut command);
 
     let output = command.output().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -195,6 +197,53 @@ fn apply_env(command: &mut Command, _repo: &Path, _source: EnvSource) {
     pin_c_locale(command);
 }
 
+/// Make git/ssh refuse to prompt at the semantic level. Even if a future
+/// refactor reattaches a controlling TTY, ssh will fail fast with
+/// `Permission denied` instead of stealing the user's terminal to ask for a
+/// passphrase. Pairs with [`detach_from_ctty`] for defense in depth.
+///
+/// Respects a user-provided `GIT_SSH_COMMAND` from the captured shell env
+/// (e.g. a corporate ssh wrapper that pins identity files or routes through a
+/// jump host). When the user has set their own, we trust them not to prompt
+/// interactively and rely solely on [`detach_from_ctty`] to keep a passphrase
+/// prompt from stealing the user's TTY.
+fn force_non_interactive(command: &mut Command) {
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    if !has_env(command, "GIT_SSH_COMMAND") {
+        command.env(
+            "GIT_SSH_COMMAND",
+            "ssh -o BatchMode=yes -o ConnectTimeout=10",
+        );
+    }
+}
+
+/// Whether `command` has `key` explicitly set to a value (i.e. via
+/// [`Command::env`], not removed via [`Command::env_remove`]). Used to detect
+/// vars carried in from the captured shell env so we don't clobber them.
+fn has_env(command: &Command, key: &str) -> bool {
+    command
+        .get_envs()
+        .any(|(k, v)| v.is_some() && k == std::ffi::OsStr::new(key))
+}
+
+/// Detach the spawned git from the parent's controlling TTY. Without this,
+/// ssh can `open("/dev/tty", O_RDWR)` directly and bypass the piped stdio
+/// to prompt on the user's real terminal — and worse, `tcsetpgrp` the user's
+/// TTY onto a soon-to-die PGID, which later wedges the outer zsh with EIO.
+fn detach_from_ctty(command: &mut Command) {
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: `setsid()` is async-signal-safe.
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
 /// Pin git's locale so stderr stays in English regardless of the captured
 /// shell snapshot or the host `LC_*`. The substring checks in
 /// [`is_missing_ref_error`] and the `NotARepo` parse depend on git's
@@ -295,5 +344,36 @@ mod tests {
             matches!(err, GitError::NotARepo(_)),
             "expected NotARepo, got {err:?}"
         );
+    }
+
+    /// Without a user-provided `GIT_SSH_COMMAND` (the common case),
+    /// `force_non_interactive` injects the BatchMode/ConnectTimeout default so
+    /// ssh fails fast instead of prompting.
+    #[test]
+    fn force_non_interactive_injects_default_ssh_command() {
+        let mut cmd = Command::new("git");
+        force_non_interactive(&mut cmd);
+        let ssh = cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("GIT_SSH_COMMAND"))
+            .and_then(|(_, v)| v)
+            .expect("GIT_SSH_COMMAND should be set");
+        assert_eq!(ssh, "ssh -o BatchMode=yes -o ConnectTimeout=10");
+    }
+
+    /// A `GIT_SSH_COMMAND` carried in from the captured shell env (e.g. a
+    /// corporate ssh wrapper) must not be clobbered. Users who set this
+    /// have accepted responsibility for non-interactive behavior themselves.
+    #[test]
+    fn force_non_interactive_respects_user_ssh_command() {
+        let mut cmd = Command::new("git");
+        cmd.env("GIT_SSH_COMMAND", "/usr/local/bin/my-ssh-wrapper");
+        force_non_interactive(&mut cmd);
+        let ssh = cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("GIT_SSH_COMMAND"))
+            .and_then(|(_, v)| v)
+            .expect("GIT_SSH_COMMAND should still be set");
+        assert_eq!(ssh, "/usr/local/bin/my-ssh-wrapper");
     }
 }

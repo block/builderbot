@@ -144,6 +144,38 @@ struct GitStateUpdatedPayload {
     git_state: git::BranchGitState,
 }
 
+/// A single commit on the parent branch that hasn't yet been merged into the
+/// current branch — returned by `list_parent_branch_commits` for the hover
+/// popover on the parent-branch capsule.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentBranchCommit {
+    pub sha: String,
+    pub short_sha: String,
+    pub subject: String,
+    pub author: String,
+    pub author_email: String,
+    pub timestamp: i64,
+}
+
+fn parse_parent_commit_lines(lines: &[String]) -> Vec<ParentBranchCommit> {
+    let mut commits = Vec::new();
+    for line in lines {
+        let parts: Vec<&str> = line.splitn(6, '|').collect();
+        if parts.len() >= 6 {
+            commits.push(ParentBranchCommit {
+                sha: parts[0].to_string(),
+                short_sha: parts[1].to_string(),
+                subject: parts[2].to_string(),
+                author: parts[3].to_string(),
+                author_email: parts[4].to_string(),
+                timestamp: parts[5].parse().unwrap_or(0),
+            });
+        }
+    }
+    commits
+}
+
 /// Parse `%H|%h|%s|%an|%ae|%ct` formatted commit lines into timeline items,
 /// looking up DB metadata for session linkage.
 fn parse_commit_lines(
@@ -620,6 +652,86 @@ pub async fn refresh_branch_git_state(
     })
     .await
     .map_err(|e| format!("Git state refresh task failed: {e}"))?
+}
+
+/// Return the commits on the parent branch that aren't yet in this branch's
+/// ancestry — i.e. the same `merge-base(HEAD, origin/{base})..origin/{base}`
+/// range that `commitsSinceFork` counts. Read-only against locally cached
+/// refs; the count's own fetch round-trip is what keeps `origin/{base}`
+/// current.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn list_parent_branch_commits(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<Vec<ParentBranchCommit>, String> {
+    let store = crate::get_store(&store)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let branch = store
+            .get_branch(&branch_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+        let base_ref = git::origin_ref_for_branch(&branch.base_branch);
+        let format_arg = "--format=%H|%h|%s|%an|%ae|%ct";
+
+        if let Some(ref ws_name) = branch.workspace_name {
+            let repo_subpath = branches::resolve_branch_workspace_subpath(&store, &branch)?;
+            let range = match branches::run_workspace_git(
+                ws_name,
+                repo_subpath.as_deref(),
+                &["merge-base", &base_ref, "HEAD"],
+            ) {
+                Ok(mb_output) => format!("{}..{base_ref}", mb_output.trim()),
+                Err(_) => base_ref.clone(),
+            };
+            let output = match branches::run_workspace_git(
+                ws_name,
+                repo_subpath.as_deref(),
+                &["log", "--max-count=26", format_arg, &range],
+            ) {
+                Ok(o) => o,
+                Err(_) => return Ok(Vec::new()),
+            };
+            let lines: Vec<String> = output
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(|l| l.to_string())
+                .collect();
+            return Ok(parse_parent_commit_lines(&lines));
+        }
+
+        let workdir = store
+            .get_workdir_for_branch(&branch_id)
+            .map_err(|e| e.to_string())?;
+        let Some(wd) = workdir else {
+            return Ok(Vec::new());
+        };
+        let worktree_path = Path::new(&wd.path);
+        if !worktree_path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let range = match git::cli_run_smart(worktree_path, &["merge-base", &base_ref, "HEAD"]) {
+            Ok(mb_output) => format!("{}..{base_ref}", mb_output.trim()),
+            Err(_) => base_ref.clone(),
+        };
+        let output = match git::cli_run_smart(
+            worktree_path,
+            &["log", "--max-count=26", format_arg, &range],
+        ) {
+            Ok(o) => o,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let lines: Vec<String> = output
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect();
+        Ok(parse_parent_commit_lines(&lines))
+    })
+    .await
+    .map_err(|e| format!("List parent branch commits task failed: {e}"))?
 }
 
 #[tauri::command(rename_all = "camelCase")]

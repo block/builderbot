@@ -1308,6 +1308,7 @@
   {:else if isLocal && !branch.worktreePath && worktreeError}
     <div class="card-header">
       <BranchCardHeaderInfo
+        branchId={branch.id}
         branchName={branch.branchName}
         {repoLabel}
         baseBranch={formatBaseBranch(branch.baseBranch)}
@@ -1347,6 +1348,7 @@
         <Sprout size={14} class="header-icon pr-status-clean" />
       {/if}
       <BranchCardHeaderInfo
+        branchId={branch.id}
         branchName={branch.branchName}
         {repoLabel}
         baseBranch={isRemote

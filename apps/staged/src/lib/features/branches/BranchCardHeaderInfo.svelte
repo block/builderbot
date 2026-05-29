@@ -3,9 +3,11 @@
   import { AlertTriangle, ChevronRight } from 'lucide-svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
+  import ParentBranchCommitsHover from './ParentBranchCommitsHover.svelte';
   import type { ProjectRepo } from '../../types';
 
   interface Props {
+    branchId?: string;
     branchName: string;
     repoLabel?: ProjectRepo | null;
     baseBranch?: string | null;
@@ -18,6 +20,7 @@
   }
 
   let {
+    branchId,
     branchName,
     repoLabel = null,
     baseBranch = null,
@@ -30,16 +33,26 @@
   }: Props = $props();
 </script>
 
+{#snippet capsule()}
+  <span class="branch-capsule" title={baseBranch}>
+    {baseBranch}{#if parentAheadCount > 0}<span
+        class="ahead-count"
+        transition:fade={{ duration: 150 }}
+      >
+        +{parentAheadCount}</span
+      >{/if}
+  </span>
+{/snippet}
+
 {#snippet parentPill()}
   {#if baseBranch}
-    <span class="branch-capsule" title={baseBranch}>
-      {baseBranch}{#if parentAheadCount > 0}<span
-          class="ahead-count"
-          transition:fade={{ duration: 150 }}
-        >
-          +{parentAheadCount}</span
-        >{/if}
-    </span>
+    {#if parentAheadCount > 0 && branchId}
+      <ParentBranchCommitsHover {branchId} {baseBranch} count={parentAheadCount}>
+        {@render capsule()}
+      </ParentBranchCommitsHover>
+    {:else}
+      {@render capsule()}
+    {/if}
     {#if parentAheadCount > 0 && onRebase}
       <button
         class="rebase-btn"

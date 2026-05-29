@@ -92,6 +92,8 @@ fn run_with_env(repo: &Path, args: &[&str], source: EnvSource) -> Result<String,
     let mut command = Command::new("git");
     command.args(["-C", repo_str]).args(args);
     apply_env(&mut command, repo, source);
+    force_non_interactive(&mut command);
+    detach_from_ctty(&mut command);
 
     let output = command.output().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -193,6 +195,36 @@ fn apply_env(command: &mut Command, repo: &Path, source: EnvSource) {
 fn apply_env(command: &mut Command, _repo: &Path, _source: EnvSource) {
     strip_git_env(command);
     pin_c_locale(command);
+}
+
+/// Make git/ssh refuse to prompt at the semantic level. Even if a future
+/// refactor reattaches a controlling TTY, ssh will fail fast with
+/// `Permission denied` instead of stealing the user's terminal to ask for a
+/// passphrase. Pairs with [`detach_from_ctty`] for defense in depth.
+fn force_non_interactive(command: &mut Command) {
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    command.env(
+        "GIT_SSH_COMMAND",
+        "ssh -o BatchMode=yes -o ConnectTimeout=10",
+    );
+}
+
+/// Detach the spawned git from the parent's controlling TTY. Without this,
+/// ssh can `open("/dev/tty", O_RDWR)` directly and bypass the piped stdio
+/// to prompt on the user's real terminal — and worse, `tcsetpgrp` the user's
+/// TTY onto a soon-to-die PGID, which later wedges the outer zsh with EIO.
+fn detach_from_ctty(command: &mut Command) {
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: `setsid()` is async-signal-safe.
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+    #[cfg(not(unix))]
+    let _ = command;
 }
 
 /// Pin git's locale so stderr stays in English regardless of the captured

@@ -201,12 +201,29 @@ fn apply_env(command: &mut Command, _repo: &Path, _source: EnvSource) {
 /// refactor reattaches a controlling TTY, ssh will fail fast with
 /// `Permission denied` instead of stealing the user's terminal to ask for a
 /// passphrase. Pairs with [`detach_from_ctty`] for defense in depth.
+///
+/// Respects a user-provided `GIT_SSH_COMMAND` from the captured shell env
+/// (e.g. a corporate ssh wrapper that pins identity files or routes through a
+/// jump host). When the user has set their own, we trust them not to prompt
+/// interactively and rely solely on [`detach_from_ctty`] to keep a passphrase
+/// prompt from stealing the user's TTY.
 fn force_non_interactive(command: &mut Command) {
     command.env("GIT_TERMINAL_PROMPT", "0");
-    command.env(
-        "GIT_SSH_COMMAND",
-        "ssh -o BatchMode=yes -o ConnectTimeout=10",
-    );
+    if !has_env(command, "GIT_SSH_COMMAND") {
+        command.env(
+            "GIT_SSH_COMMAND",
+            "ssh -o BatchMode=yes -o ConnectTimeout=10",
+        );
+    }
+}
+
+/// Whether `command` has `key` explicitly set to a value (i.e. via
+/// [`Command::env`], not removed via [`Command::env_remove`]). Used to detect
+/// vars carried in from the captured shell env so we don't clobber them.
+fn has_env(command: &Command, key: &str) -> bool {
+    command
+        .get_envs()
+        .any(|(k, v)| v.is_some() && k == std::ffi::OsStr::new(key))
 }
 
 /// Detach the spawned git from the parent's controlling TTY. Without this,
@@ -327,5 +344,36 @@ mod tests {
             matches!(err, GitError::NotARepo(_)),
             "expected NotARepo, got {err:?}"
         );
+    }
+
+    /// Without a user-provided `GIT_SSH_COMMAND` (the common case),
+    /// `force_non_interactive` injects the BatchMode/ConnectTimeout default so
+    /// ssh fails fast instead of prompting.
+    #[test]
+    fn force_non_interactive_injects_default_ssh_command() {
+        let mut cmd = Command::new("git");
+        force_non_interactive(&mut cmd);
+        let ssh = cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("GIT_SSH_COMMAND"))
+            .and_then(|(_, v)| v)
+            .expect("GIT_SSH_COMMAND should be set");
+        assert_eq!(ssh, "ssh -o BatchMode=yes -o ConnectTimeout=10");
+    }
+
+    /// A `GIT_SSH_COMMAND` carried in from the captured shell env (e.g. a
+    /// corporate ssh wrapper) must not be clobbered. Users who set this
+    /// have accepted responsibility for non-interactive behavior themselves.
+    #[test]
+    fn force_non_interactive_respects_user_ssh_command() {
+        let mut cmd = Command::new("git");
+        cmd.env("GIT_SSH_COMMAND", "/usr/local/bin/my-ssh-wrapper");
+        force_non_interactive(&mut cmd);
+        let ssh = cmd
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("GIT_SSH_COMMAND"))
+            .and_then(|(_, v)| v)
+            .expect("GIT_SSH_COMMAND should still be set");
+        assert_eq!(ssh, "/usr/local/bin/my-ssh-wrapper");
     }
 }

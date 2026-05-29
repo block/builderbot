@@ -188,7 +188,7 @@
     onmouseleave={scheduleClose}
   >
     <div class="popover-header">
-      <span class="popover-title">{baseBranch}</span>
+      <span class="popover-title">Upstream changes in <strong>{baseBranch}</strong></span>
       <span class="popover-count">+{count}</span>
     </div>
     {#if loading && commits === null}
@@ -225,6 +225,7 @@
     display: inline-flex;
     align-items: center;
     min-width: 0;
+    cursor: default;
   }
 
   .commits-popover {

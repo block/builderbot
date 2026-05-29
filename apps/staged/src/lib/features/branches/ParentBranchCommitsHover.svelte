@@ -68,18 +68,24 @@
     if (commits !== null || loading) return;
     loading = true;
     error = null;
-    const version = ++loadVersion;
     try {
-      const result = await listParentBranchCommits(branchId);
-      if (version !== loadVersion) return;
-      commits = result;
-    } catch (e) {
-      if (version !== loadVersion) return;
-      error = e instanceof Error ? e.message : String(e);
-    } finally {
-      if (version === loadVersion) {
-        loading = false;
+      while (open) {
+        const version = ++loadVersion;
+        try {
+          const result = await listParentBranchCommits(branchId);
+          if (version === loadVersion) {
+            commits = result;
+            return;
+          }
+        } catch (e) {
+          if (version === loadVersion) {
+            error = e instanceof Error ? e.message : String(e);
+            return;
+          }
+        }
       }
+    } finally {
+      loading = false;
       await placePopover();
     }
   }

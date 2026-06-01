@@ -8,9 +8,14 @@
       "layers" : [
         {
           "glass" : true,
-          "hidden" : false,
+          "hidden" : true,
           "image-name" : "staged lines 5.svg",
           "name" : "lines"
+        },
+        {
+          "fill" : "none",
+          "image-name" : "staged white lines.svg",
+          "name" : "staged white lines"
         },
         {
           "fill" : {

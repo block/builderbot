@@ -1,5 +1,5 @@
 <svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect width="1024" height="1024" fill="black"/>
+
 
   <!-- Each colored shape is a single path that smoothly bulges the line
        into its disc, like the original pre-redesign icon.
@@ -9,17 +9,17 @@
   <g transform="scale(2.316742081448)">
     <!-- Green: line through middle disc -->
     <g transform="translate(221 221) rotate(-45)">
-      <path d="M -341.13 -12 H -50 C -30 -12 -37.32 -24.64 -20 -34.64 A 40 40 0 0 1 20 -34.64 C 37.32 -24.64 30 -12 50 -12 H 341.13 A 12 12 0 0 1 341.13 12 H 50 C 30 12 37.32 24.64 20 34.64 A 40 40 0 0 1 -20 34.64 C -37.32 24.64 -30 12 -50 12 H -341.13 A 12 12 0 0 1 -341.13 -12 Z" fill="#00e676"/>
+      <path d="M -341.13 -12 H -50 C -30 -12 -37.32 -24.64 -20 -34.64 A 40 40 0 0 1 20 -34.64 C 37.32 -24.64 30 -12 50 -12 H 341.13 A 12 12 0 0 1 341.13 12 H 50 C 30 12 37.32 24.64 20 34.64 A 40 40 0 0 1 -20 34.64 C -37.32 24.64 -30 12 -50 12 H -341.13 A 12 12 0 0 1 -341.13 -12 Z" fill="#ffffff"/>
     </g>
 
     <!-- Orange: line ending in upper disc -->
     <g transform="translate(221 111) rotate(-45)">
-      <path d="M -383.25 -12 H -50 C -30 -12 -37.32 -24.64 -20 -34.64 A 40 40 0 1 1 -20 34.64 C -37.32 24.64 -30 12 -50 12 H -383.25 A 12 12 0 0 1 -383.25 -12 Z" fill="#ff9100"/>
+      <path d="M -383.25 -12 H -50 C -30 -12 -37.32 -24.64 -20 -34.64 A 40 40 0 1 1 -20 34.64 C -37.32 24.64 -30 12 -50 12 H -383.25 A 12 12 0 0 1 -383.25 -12 Z" fill="#ffffff"/>
     </g>
 
     <!-- Purple: line starting from lower disc -->
     <g transform="translate(221 331) rotate(-45)">
-      <path d="M 383.25 -12 H 50 C 30 -12 37.32 -24.64 20 -34.64 A 40 40 0 1 0 20 34.64 C 37.32 24.64 30 12 50 12 H 383.25 A 12 12 0 0 0 383.25 -12 Z" fill="#ea80fc"/>
+      <path d="M 383.25 -12 H 50 C 30 -12 37.32 -24.64 20 -34.64 A 40 40 0 1 0 20 34.64 C 37.32 24.64 30 12 50 12 H 383.25 A 12 12 0 0 0 383.25 -12 Z" fill="#ffffff"/>
     </g>
   </g>
 </svg>

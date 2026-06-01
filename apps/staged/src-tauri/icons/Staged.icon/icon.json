@@ -7,15 +7,31 @@
     {
       "layers" : [
         {
+          "blend-mode" : "normal",
           "glass" : true,
-          "hidden" : true,
+          "hidden" : false,
           "image-name" : "staged lines 5.svg",
-          "name" : "lines"
+          "name" : "lines",
+          "position" : {
+            "scale" : 1.15,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
         },
         {
           "fill" : "none",
+          "hidden" : true,
           "image-name" : "staged white lines.svg",
-          "name" : "staged white lines"
+          "name" : "staged white lines",
+          "position" : {
+            "scale" : 1.15,
+            "translation-in-points" : [
+              0,
+              0
+            ]
+          }
         },
         {
           "fill" : {

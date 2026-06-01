@@ -9,7 +9,7 @@
         {
           "blend-mode" : "normal",
           "glass" : true,
-          "hidden" : false,
+          "hidden" : true,
           "image-name" : "staged lines 5.svg",
           "name" : "lines",
           "position" : {
@@ -22,7 +22,7 @@
         },
         {
           "fill" : "none",
-          "hidden" : true,
+          "hidden" : false,
           "image-name" : "staged white lines.svg",
           "name" : "staged white lines",
           "position" : {

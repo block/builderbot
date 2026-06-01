@@ -13,7 +13,9 @@
 <span class="staged-icon" style={`--staged-icon-size: ${size}px`} aria-hidden="true">
   <img
     class="icon-layer light"
-    src="/icons/staged-monochrome.png"
+    src="/icons/staged-monochrome-128.png"
+    srcset="/icons/staged-monochrome-64.png 64w, /icons/staged-monochrome-128.png 128w, /icons/staged-monochrome-256.png 256w"
+    sizes={`${size}px`}
     width={size}
     height={size}
     alt=""
@@ -21,7 +23,9 @@
   />
   <img
     class="icon-layer dark"
-    src="/icons/staged-clear.png"
+    src="/icons/staged-clear-128.png"
+    srcset="/icons/staged-clear-64.png 64w, /icons/staged-clear-128.png 128w, /icons/staged-clear-256.png 256w"
+    sizes={`${size}px`}
     width={size}
     height={size}
     alt=""

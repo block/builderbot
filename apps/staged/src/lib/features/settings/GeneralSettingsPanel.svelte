@@ -6,14 +6,17 @@
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import * as Select from '$lib/components/ui/select';
   import * as Popover from '$lib/components/ui/popover';
+  import * as ToggleGroup from '$lib/components/ui/toggle-group';
   import { Label } from '$lib/components/ui/label';
   import {
     preferences,
     getAvailableSyntaxThemes,
-    selectSyntaxTheme,
+    selectDiffTheme,
+    setMode,
     setAutoReviewMode,
     loadAllThemePreviewColors,
     isLightTheme,
+    type AppMode,
     type AutoReviewMode,
     type ThemePreviewColors,
   } from './preferences.svelte';
@@ -21,6 +24,12 @@
   const autoReviewOptions: { value: AutoReviewMode; label: string }[] = [
     { value: 'never', label: 'Never' },
     { value: 'after-changes', label: 'After changes' },
+  ];
+
+  const modeOptions: { value: AppMode; label: string }[] = [
+    { value: 'light', label: 'Light' },
+    { value: 'dark', label: 'Dark' },
+    { value: 'system', label: 'System' },
   ];
 
   type ThemeFilter = 'all' | 'light' | 'dark';
@@ -39,7 +48,7 @@
         )
   );
 
-  const activeColors = $derived(previewColors.get(preferences.syntaxTheme));
+  const activeColors = $derived(previewColors.get(preferences.diffTheme));
 
   onMount(() => {
     loadAllThemePreviewColors().then((colors) => {
@@ -48,7 +57,7 @@
   });
 
   function handleThemeSelect(name: string) {
-    selectSyntaxTheme(name);
+    selectDiffTheme(name);
     dropdownOpen = false;
   }
 </script>
@@ -66,12 +75,33 @@
 
   <div class="panel-body">
     <div class="field">
-      <span class="field-label">Theme</span>
+      <span class="field-label">Appearance</span>
+      <ToggleGroup.Root
+        type="single"
+        variant="outline"
+        value={preferences.mode}
+        onValueChange={(v) => v && setMode(v as AppMode)}
+        class="w-fit"
+      >
+        {#each modeOptions as opt (opt.value)}
+          <ToggleGroup.Item value={opt.value} aria-label={opt.label}>
+            {opt.label}
+          </ToggleGroup.Item>
+        {/each}
+      </ToggleGroup.Root>
+      <p class="field-description">
+        <Info size={12} />
+        The app's light or dark mode. System follows your operating system.
+      </p>
+    </div>
+
+    <div class="field">
+      <span class="field-label">Diff theme</span>
       <Popover.Root bind:open={dropdownOpen}>
         <Popover.Trigger class="theme-dropdown-trigger">
           <span class="trigger-swatch" style:background={activeColors?.bg ?? 'var(--bg-primary)'}>
             <span style:color={activeColors?.fg ?? 'var(--text-primary)'}
-              >{preferences.syntaxTheme}</span
+              >{preferences.diffTheme}</span
             >
           </span>
           <ChevronDown size={14} />
@@ -94,7 +124,7 @@
           </div>
           {#each themes as theme (theme.name)}
             {@const colors = previewColors.get(theme.name)}
-            {@const isActive = preferences.syntaxTheme === theme.name}
+            {@const isActive = preferences.diffTheme === theme.name}
             <button
               class="theme-swatch"
               class:active={isActive}
@@ -116,6 +146,10 @@
           {/each}
         </Popover.Content>
       </Popover.Root>
+      <p class="field-description">
+        <Info size={12} />
+        Syntax highlighting and colors for the diff viewer only.
+      </p>
     </div>
 
     <div class="field">

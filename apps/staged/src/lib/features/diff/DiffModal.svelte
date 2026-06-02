@@ -32,7 +32,7 @@
   import DiffCommitSessionLauncher from './DiffCommitSessionLauncher.svelte';
   import DiffReferenceSection from './DiffReferenceSection.svelte';
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
-  import { getPreferredAgent } from '../settings/preferences.svelte';
+  import { getPreferredAgent, preferences } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { createDiffViewerState } from './diffViewerState.svelte';
   import { createReviewState } from './reviewState.svelte';
@@ -976,6 +976,17 @@
     checkSearchInitialization();
   });
 
+  // Scope the diff theme's CSS variables onto the diff-viewer container so the
+  // diff area reflects the chosen diff theme while the app chrome stays on its
+  // fixed light/dark mode.
+  $effect(() => {
+    const el = diffViewerContainerEl;
+    if (!el) return;
+    for (const [prop, value] of Object.entries(preferences.diffThemeVars)) {
+      el.style.setProperty(prop, value);
+    }
+  });
+
   // Set up keyboard navigation for diff viewer and search
   $effect(() => {
     // Create search navigation handlers
@@ -1357,6 +1368,7 @@
           annotations={revealedAnnotations}
           {annotationsRevealed}
           searchState={searchState.state}
+          syntaxThemeVersion={preferences.diffThemeVersion}
           onAddComment={readonly ? undefined : handleAddComment}
           onUpdateComment={readonly ? undefined : handleUpdateComment}
           onDeleteComment={readonly ? undefined : handleDeleteCommentFromViewer}

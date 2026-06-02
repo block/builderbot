@@ -149,7 +149,7 @@
   --border: var(--border-muted);
   --input: var(--border-muted);
   --ring: var(--border-emphasis);
-  --radius: 4px; /* invented — Staged has no radius token */
+  --radius: 8px; /* invented — Staged has no radius token; sized to restore pre-shadcn button roundness (md≈6.4px, lg=8px) */
 
   /* ── Gaps: shadcn tokens with no Staged analogue. Button (Step 4) does not
    *    consume these; later shadcn primitives (sidebar, chart) will force a

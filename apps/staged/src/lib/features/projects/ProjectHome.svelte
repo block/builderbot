@@ -761,12 +761,6 @@
             onRetryWorktree={(branchId) => setupBranchWorktree(branchId, project.id)}
             onResumeWorkspace={(workspaceName) =>
               workspaceLifecycle.resumeWorkspace(project.id, workspaceName)}
-            onDismissReason={(projectRepoId) => {
-              const repo = reposById.get(projectRepoId);
-              if (repo) {
-                reposById = new Map(reposById).set(projectRepoId, { ...repo, reason: null });
-              }
-            }}
           />
         {/each}
       </div>

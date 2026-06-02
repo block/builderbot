@@ -5,24 +5,28 @@
   backdrop click dismissal.
 -->
 <script lang="ts">
-  import { X, Trash2 } from 'lucide-svelte';
+  import X from '@lucide/svelte/icons/x';
+  import Trash2 from '@lucide/svelte/icons/trash-2';
+  import * as Dialog from '$lib/components/ui/dialog';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
   import { getImageData } from '../../api/commands';
-  import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import { viewport } from '../../shared/viewport.svelte';
 
   interface Props {
+    open: boolean;
     imageId: string;
     filename: string;
     onClose: () => void;
     onDelete?: () => void;
   }
 
-  let { imageId, filename, onClose, onDelete }: Props = $props();
+  let { open, imageId, filename, onClose, onDelete }: Props = $props();
   let dataUrl = $state<string | null>(null);
   let loading = $state(true);
-  const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
 
   $effect(() => {
+    if (!open) return;
     loading = true;
     dataUrl = null;
     getImageData(imageId)
@@ -34,46 +38,59 @@
         loading = false;
       });
   });
-
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      onClose();
-    }
-  }
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
-
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<!-- svelte-ignore a11y_click_events_have_key_events -->
-<div
-  class="modal-backdrop"
-  role="dialog"
-  aria-modal="true"
-  tabindex="-1"
-  onpointerdown={backdropDismiss.handlePointerDown}
-  onclick={backdropDismiss.handleClick}
->
-  <!-- svelte-ignore a11y_no_static_element_interactions a11y_click_events_have_key_events -->
-  <div class="modal" role="presentation" onclick={(e) => e.stopPropagation()}>
-    <header class="modal-header">
-      <span class="filename">{filename}</span>
+<Dialog.Root {open} onOpenChange={(v) => !v && onClose()}>
+  <Dialog.Content
+    class="max-w-[90vw] max-h-[90vh] w-auto bg-background p-0 gap-0 overflow-hidden border border-[var(--border-subtle)] flex flex-col"
+    showCloseButton={false}
+  >
+    <Dialog.Header
+      class="flex-row items-center justify-between gap-3 px-4 py-3 border-b border-[var(--border-subtle)]"
+    >
+      <Dialog.Title
+        class="flex-1 min-w-0 text-[var(--size-sm)] font-medium text-foreground overflow-hidden text-ellipsis whitespace-nowrap"
+        >{filename}</Dialog.Title
+      >
       <div class="header-actions">
         {#if onDelete}
-          <button class="delete-btn" onclick={onDelete} title="Delete image">
-            <Trash2 size={16} />
-          </button>
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="ghost"
+                  size="icon-sm"
+                  onclick={onDelete}
+                  class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-destructive [&_svg]:!size-4"
+                >
+                  <Trash2 size={16} />
+                </Button>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>Delete image</Tooltip.Content>
+          </Tooltip.Root>
         {/if}
-        <button
-          class="close-btn"
-          onclick={onClose}
-          title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
-        >
-          <X size={18} />
-        </button>
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            {#snippet child({ props })}
+              <Button
+                {...props}
+                variant="ghost"
+                size="icon-sm"
+                onclick={onClose}
+                class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-[18px]"
+              >
+                <X size={18} />
+              </Button>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content>
+            {viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
+          </Tooltip.Content>
+        </Tooltip.Root>
       </div>
-    </header>
+    </Dialog.Header>
     <div class="modal-body">
       {#if loading}
         <div class="placeholder">Loading...</div>
@@ -83,102 +100,15 @@
         <div class="placeholder error">Failed to load image</div>
       {/if}
     </div>
-  </div>
-</div>
+  </Dialog.Content>
+</Dialog.Root>
 
 <style>
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: var(--shadow-overlay);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-  }
-
-  .modal {
-    display: flex;
-    flex-direction: column;
-    max-width: 90vw;
-    max-height: 90vh;
-    background: var(--bg-primary);
-    border-radius: 12px;
-    border: 1px solid var(--border-subtle);
-    box-shadow: var(--shadow-elevated);
-    overflow: hidden;
-  }
-
-  .modal-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--border-subtle);
-    gap: 12px;
-  }
-
-  .filename {
-    font-size: var(--size-sm);
-    font-weight: 500;
-    color: var(--text-primary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    min-width: 0;
-  }
-
   .header-actions {
     display: flex;
     align-items: center;
     gap: 4px;
     flex-shrink: 0;
-  }
-
-  .close-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    background: none;
-    border: none;
-    border-radius: 6px;
-    color: var(--text-muted);
-    cursor: pointer;
-    flex-shrink: 0;
-    transition:
-      color 0.15s,
-      background-color 0.15s;
-  }
-
-  .close-btn:hover {
-    color: var(--text-primary);
-    background-color: var(--bg-hover);
-  }
-
-  .delete-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    background: none;
-    border: none;
-    border-radius: 6px;
-    color: var(--text-muted);
-    cursor: pointer;
-    flex-shrink: 0;
-    transition:
-      color 0.15s,
-      background-color 0.15s;
-  }
-
-  .delete-btn:hover {
-    color: var(--ui-danger);
-    background-color: var(--bg-hover);
   }
 
   .modal-body {
@@ -206,31 +136,5 @@
 
   .placeholder.error {
     color: var(--ui-danger);
-  }
-
-  @media (max-width: 640px) {
-    .modal {
-      width: 100vw;
-      max-width: none;
-      height: 100vh;
-      height: 100dvh;
-      max-height: none;
-      border-radius: 0;
-      box-shadow: none;
-    }
-
-    .close-btn,
-    .delete-btn {
-      width: 40px;
-      height: 40px;
-    }
-
-    .modal-body {
-      padding: 12px;
-    }
-
-    .modal-body img {
-      max-height: calc(100dvh - 80px);
-    }
   }
 </style>

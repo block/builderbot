@@ -8,22 +8,21 @@
   import { onMount, onDestroy } from 'svelte';
   import { slide, fade } from 'svelte/transition';
   import { cubicOut } from 'svelte/easing';
-  import {
-    GitBranch,
-    Play,
-    Hammer,
-    FlaskConical,
-    Check,
-    CheckCircle,
-    Wrench,
-    AlertCircle,
-    StopCircle,
-    Copy,
-    Zap,
-    Wand2,
-    ExternalLink,
-    Trash2,
-  } from 'lucide-svelte';
+  import GitBranch from '@lucide/svelte/icons/git-branch';
+  import Play from '@lucide/svelte/icons/play';
+  import Hammer from '@lucide/svelte/icons/hammer';
+  import FlaskConical from '@lucide/svelte/icons/flask-conical';
+  import Check from '@lucide/svelte/icons/check';
+  import CheckCircle from '@lucide/svelte/icons/check-circle';
+  import Wrench from '@lucide/svelte/icons/wrench';
+  import AlertCircle from '@lucide/svelte/icons/alert-circle';
+  import StopCircle from '@lucide/svelte/icons/stop-circle';
+  import Copy from '@lucide/svelte/icons/copy';
+  import Zap from '@lucide/svelte/icons/zap';
+  import Wand2 from '@lucide/svelte/icons/wand-2';
+  import ExternalLink from '@lucide/svelte/icons/external-link';
+  import Trash2 from '@lucide/svelte/icons/trash-2';
+  import MoreVertical from '@lucide/svelte/icons/more-vertical';
   import Spinner from '../../shared/Spinner.svelte';
   import SineWave from '../../shared/SineWave.svelte';
   import ActionOutputModal from '../actions/ActionOutputModal.svelte';
@@ -51,12 +50,33 @@
     getSecondaryRunningActions,
     groupActionsByType,
   } from './branchCardHelpers';
-  import { alerts } from '../../shared/alerts.svelte';
+  import { toast } from 'svelte-sonner';
   import { bloxEnv } from '../../stores/bloxEnv.svelte';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState } from '../agents/agent.svelte';
-  import MoreMenu from '../../shared/menu/MoreMenu.svelte';
-  import type { MenuItem } from '../../shared/menu/types';
+  import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
+
+  type MenuIconComponent = typeof MoreVertical;
+  type ActionMenuItem = {
+    type: 'action';
+    label: string;
+    icon?: MenuIconComponent;
+    iconSrc?: string;
+    disabled?: boolean;
+    danger?: boolean;
+    onSelect: () => void | Promise<void>;
+  };
+  type SeparatorMenuItem = { type: 'separator' };
+  type SubmenuMenuItem = {
+    type: 'submenu';
+    label: string;
+    icon?: MenuIconComponent;
+    disabled?: boolean;
+    children: MenuItem[];
+  };
+  type MenuItem = ActionMenuItem | SeparatorMenuItem | SubmenuMenuItem;
 
   interface Props {
     branch: Branch;
@@ -124,11 +144,9 @@
   }
 
   function notifyError(title: string, e: unknown): void {
-    alerts.show({
-      tone: 'error',
-      title,
-      message: e instanceof Error ? e.message : String(e),
-      durationMs: 0,
+    toast.error(title, {
+      description: e instanceof Error ? e.message : String(e),
+      duration: Infinity,
     });
   }
 
@@ -597,92 +615,10 @@
     return items;
   }
 
-  let moreMenuItems = $derived.by<MenuItem[]>(() => {
-    const items: MenuItem[] = [];
-
-    if (!isSettingUp) {
-      if (isRemote && branch.workspaceName) {
-        items.push({
-          type: 'action',
-          label: 'Copy Workspace Name',
-          icon: Copy,
-          onSelect: () => {
-            navigator.clipboard.writeText(branch.workspaceName!);
-          },
-        });
-      }
-
-      if (hasActionsForSubmenu) {
-        items.push({
-          type: 'submenu',
-          label: 'Actions',
-          icon: Play,
-          children: buildActionMenuItems(),
-        });
-      }
-
-      if (isLocal && branch.worktreePath && openerApps.length > 0) {
-        items.push(
-          { type: 'separator' },
-          {
-            type: 'submenu',
-            label: 'Open In',
-            icon: ExternalLink,
-            children: buildOpenInMenuItems(),
-          }
-        );
-      } else if (isLocal && branch.worktreePath) {
-        items.push(
-          { type: 'separator' },
-          {
-            type: 'action',
-            label: 'Copy Worktree Path',
-            icon: Copy,
-            onSelect: handleCopyPath,
-          }
-        );
-      }
-
-      items.push(
-        { type: 'separator' },
-        {
-          type: 'action',
-          label: 'Rename Branch',
-          icon: GitBranch,
-          onSelect: handleRenameFromMenu,
-        },
-        {
-          type: 'action',
-          label: 'Rebase Branch',
-          icon: GitBranch,
-          disabled: newCommitDisabled,
-          onSelect: () => onRebaseBranch?.(),
-        }
-      );
-
-      if (commitCount >= 2) {
-        items.push({
-          type: 'action',
-          label: 'Squash Commits',
-          icon: GitBranch,
-          disabled: newCommitDisabled,
-          onSelect: () => onSquashCommits?.(),
-        });
-      }
-
-      items.push({ type: 'separator' });
-    }
-
-    items.push({
-      type: 'action',
-      label: 'Delete Repo',
-      icon: Trash2,
-      danger: true,
-      onSelect: handleDeleteFromMenu,
-    });
-
-    return items;
-  });
+  let actionMenuItems = $derived.by(() => (hasActionsForSubmenu ? buildActionMenuItems() : []));
+  let openInMenuItems = $derived.by(() =>
+    isLocal && branch.worktreePath && openerApps.length > 0 ? buildOpenInMenuItems() : []
+  );
 </script>
 
 <!-- Running actions (excluding primary action) -->
@@ -697,49 +633,62 @@
       class:fading={execution.fading}
       transition:slideAndFade={{ duration: 300, axis: 'x' }}
     >
-      <button
-        class="running-action-button"
-        class:running={isRunning}
-        class:stopping={isStopping}
-        class:completed={execution.status === 'completed'}
-        class:failed={execution.status === 'failed'}
-        class:show-stop={showStopIcon}
-        onclick={() => {
-          if (isRunning && altHeld && !isStopping) {
-            handleStopAction(execution.executionId, execution.actionName);
-          } else {
-            handleShowActionOutput(execution);
-          }
-        }}
-        title={isStopping
-          ? 'Stopping…'
-          : showStopIcon
-            ? `Stop ${execution.actionName}`
-            : isRunning
-              ? `View output for ${execution.actionName}`
-              : execution.status === 'completed'
-                ? `${execution.actionName} completed`
-                : execution.status === 'failed'
-                  ? `${execution.actionName} failed`
-                  : execution.actionName}
-      >
-        {#if isStopping}
-          <Spinner size={12} class="danger" />
-        {:else if showStopIcon}
-          <StopCircle size={12} />
-        {:else if isRunning && phase && phase.type !== 'building' && execution.actionType === 'run'}
-          <SineWave size={12} />
-        {:else if isRunning}
-          <Spinner size={12} />
-        {:else if execution.status === 'completed'}
-          <CheckCircle size={12} />
-        {:else if execution.status === 'failed'}
-          <AlertCircle size={12} />
-        {:else}
-          <StopCircle size={12} />
-        {/if}
-        {execution.actionName}
-      </button>
+      <Tooltip.Root>
+        <Tooltip.Trigger>
+          {#snippet child({ props })}
+            <Button
+              {...props}
+              variant="ghost"
+              class={[
+                'h-auto whitespace-nowrap rounded-full border bg-[var(--bg-elevated)] border-[var(--border-muted)] px-3 py-1.5 gap-1.5 text-xs text-foreground hover:bg-[var(--bg-hover)] hover:border-[var(--border-focus)] [&_svg]:!size-3',
+                execution.status === 'completed' &&
+                  'border-[var(--status-added)] text-[var(--status-added)]',
+                execution.status === 'failed' && 'border-destructive text-destructive',
+                isStopping &&
+                  'opacity-60 hover:bg-[var(--bg-elevated)] hover:border-[var(--border-muted)]',
+                showStopIcon && 'border-destructive text-destructive',
+              ]}
+              onclick={() => {
+                if (isRunning && altHeld && !isStopping) {
+                  handleStopAction(execution.executionId, execution.actionName);
+                } else {
+                  handleShowActionOutput(execution);
+                }
+              }}
+            >
+              {#if isStopping}
+                <Spinner size={12} class="danger" />
+              {:else if showStopIcon}
+                <StopCircle size={12} />
+              {:else if isRunning && phase && phase.type !== 'building' && execution.actionType === 'run'}
+                <SineWave size={12} />
+              {:else if isRunning}
+                <Spinner size={12} />
+              {:else if execution.status === 'completed'}
+                <CheckCircle size={12} />
+              {:else if execution.status === 'failed'}
+                <AlertCircle size={12} />
+              {:else}
+                <StopCircle size={12} />
+              {/if}
+              {execution.actionName}
+            </Button>
+          {/snippet}
+        </Tooltip.Trigger>
+        <Tooltip.Content>
+          {isStopping
+            ? 'Stopping…'
+            : showStopIcon
+              ? `Stop ${execution.actionName}`
+              : isRunning
+                ? `View output for ${execution.actionName}`
+                : execution.status === 'completed'
+                  ? `${execution.actionName} completed`
+                  : execution.status === 'failed'
+                    ? `${execution.actionName} failed`
+                    : execution.actionName}
+        </Tooltip.Content>
+      </Tooltip.Root>
     </div>
   {/each}
   <!-- Primary run action button -->
@@ -762,175 +711,315 @@
       {#if isRunning && hasEndpoint && phase?.type === 'running' && phase.endpoint}
         <!-- Pill-shaped button when running with endpoint -->
         <div class="primary-action-pill">
-          <button
-            class="primary-action-pill-main"
-            class:stopping={isStopping}
-            class:show-stop={showStopIcon}
-            onclick={() => {
-              if (altHeld && !isStopping && execution) {
-                handleStopAction(execution.executionId, primaryRunAction.name);
-              } else if (execution) {
-                handleShowActionOutput(execution);
-              }
-            }}
-            title={isStopping
-              ? 'Stopping…'
-              : showStopIcon
-                ? `Stop ${primaryRunAction.name}`
-                : `View output for ${primaryRunAction.name}`}
-          >
-            {#if isStopping}
-              <Spinner size={14} class="danger" />
-            {:else if showStopIcon}
-              <StopCircle size={14} />
-            {:else}
-              <SineWave size={14} />
-            {/if}
-          </button>
-          <button
-            class="primary-action-pill-copy"
-            onclick={(e) => {
-              e.stopPropagation();
-              if (phase?.type === 'running' && phase.endpoint && execution && copyUrl) {
-                navigator.clipboard.writeText(copyUrl).catch(() => {});
-                const id = execution.executionId;
-                if (endpointCopiedTimers[id]) clearTimeout(endpointCopiedTimers[id]);
-                endpointCopied[id] = true;
-                endpointCopiedTimers[id] = setTimeout(() => {
-                  delete endpointCopied[id];
-                  delete endpointCopiedTimers[id];
-                }, 1500);
-              }
-            }}
-            title="Copy endpoint: {copyUrl}"
-          >
-            {#if execution && endpointCopied[execution.executionId]}
-              <span
-                class="copy-icon-wrapper"
-                in:fade={{ duration: 150 }}
-                out:fade={{ duration: 150 }}
-              >
-                <Check size={12} />
-              </span>
-            {:else}
-              <span
-                class="copy-icon-wrapper"
-                in:fade={{ duration: 150 }}
-                out:fade={{ duration: 150 }}
-              >
-                <Copy size={12} />
-              </span>
-            {/if}
-          </button>
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="ghost"
+                  class={[
+                    'size-7 rounded-full border-0 bg-transparent text-muted-foreground hover:bg-transparent hover:text-foreground [&_svg]:!size-3.5',
+                    isStopping && 'opacity-60',
+                    showStopIcon && 'text-destructive',
+                  ]}
+                  onclick={() => {
+                    if (altHeld && !isStopping && execution) {
+                      handleStopAction(execution.executionId, primaryRunAction.name);
+                    } else if (execution) {
+                      handleShowActionOutput(execution);
+                    }
+                  }}
+                >
+                  {#if isStopping}
+                    <Spinner size={14} class="danger" />
+                  {:else if showStopIcon}
+                    <StopCircle size={14} />
+                  {:else}
+                    <SineWave size={14} />
+                  {/if}
+                </Button>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>
+              {isStopping
+                ? 'Stopping…'
+                : showStopIcon
+                  ? `Stop ${primaryRunAction.name}`
+                  : `View output for ${primaryRunAction.name}`}
+            </Tooltip.Content>
+          </Tooltip.Root>
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="ghost"
+                  class="relative size-7 rounded-none border-0 border-l border-l-[var(--border-muted)] bg-transparent text-muted-foreground hover:bg-[var(--bg-elevated)] hover:text-foreground [&_svg]:!size-3"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    if (phase?.type === 'running' && phase.endpoint && execution && copyUrl) {
+                      navigator.clipboard.writeText(copyUrl).catch(() => {});
+                      const id = execution.executionId;
+                      if (endpointCopiedTimers[id]) clearTimeout(endpointCopiedTimers[id]);
+                      endpointCopied[id] = true;
+                      endpointCopiedTimers[id] = setTimeout(() => {
+                        delete endpointCopied[id];
+                        delete endpointCopiedTimers[id];
+                      }, 1500);
+                    }
+                  }}
+                >
+                  {#if execution && endpointCopied[execution.executionId]}
+                    <span
+                      class="copy-icon-wrapper"
+                      in:fade={{ duration: 150 }}
+                      out:fade={{ duration: 150 }}
+                    >
+                      <Check size={12} />
+                    </span>
+                  {:else}
+                    <span
+                      class="copy-icon-wrapper"
+                      in:fade={{ duration: 150 }}
+                      out:fade={{ duration: 150 }}
+                    >
+                      <Copy size={12} />
+                    </span>
+                  {/if}
+                </Button>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>Copy endpoint: {copyUrl}</Tooltip.Content>
+          </Tooltip.Root>
         </div>
       {:else}
         <!-- Standard circular button -->
-        <button
-          class="primary-action-button"
-          class:running={isRunning}
-          class:stopping={isStopping}
-          class:completed={execution?.status === 'completed'}
-          class:failed={execution?.status === 'failed'}
-          class:show-stop={showStopIcon}
-          onclick={() => {
-            if (isRunning && altHeld && !isStopping && execution) {
-              handleStopAction(execution.executionId, primaryRunAction.name);
-            } else if (isRunning && execution) {
-              handleShowActionOutput(execution);
-            } else if (isStopping && execution) {
-              handleShowActionOutput(execution);
-            } else {
-              handleRunAction(primaryRunAction);
-            }
-          }}
-          title={isStopping
-            ? 'Stopping…'
-            : showStopIcon
-              ? `Stop ${primaryRunAction.name}`
-              : isRunning
-                ? `View output for ${primaryRunAction.name}`
-                : execution?.status === 'completed'
-                  ? `${primaryRunAction.name} completed`
-                  : execution?.status === 'failed'
-                    ? `${primaryRunAction.name} failed`
-                    : primaryRunAction.name}
-        >
-          {#if isStopping}
-            <Spinner size={14} class="danger" />
-          {:else if showStopIcon}
-            <StopCircle size={14} />
-          {:else if isRunning && phase?.type === 'building'}
-            <Spinner size={14} />
-          {:else if isRunning}
-            <SineWave size={14} />
-          {:else if execution?.status === 'completed'}
-            <CheckCircle size={14} />
-          {:else if execution?.status === 'failed'}
-            <AlertCircle size={14} />
-          {:else}
-            <Play size={14} />
-          {/if}
-        </button>
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            {#snippet child({ props })}
+              <Button
+                {...props}
+                variant="ghost"
+                class={[
+                  'size-7 rounded-full border-0 bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)] [&_svg]:!size-3.5',
+                  isRunning &&
+                    'bg-[var(--bg-hover)] text-muted-foreground hover:bg-[var(--bg-elevated)]',
+                  execution?.status === 'completed' &&
+                    'bg-[var(--bg-hover)] text-[var(--status-added)] hover:bg-[var(--bg-hover)]',
+                  execution?.status === 'failed' &&
+                    'bg-[var(--bg-hover)] text-destructive hover:bg-[var(--bg-hover)]',
+                  isStopping && 'opacity-60 hover:bg-[var(--bg-elevated)]',
+                  showStopIcon && 'text-destructive',
+                ]}
+                onclick={() => {
+                  if (isRunning && altHeld && !isStopping && execution) {
+                    handleStopAction(execution.executionId, primaryRunAction.name);
+                  } else if (isRunning && execution) {
+                    handleShowActionOutput(execution);
+                  } else if (isStopping && execution) {
+                    handleShowActionOutput(execution);
+                  } else {
+                    handleRunAction(primaryRunAction);
+                  }
+                }}
+              >
+                {#if isStopping}
+                  <Spinner size={14} class="danger" />
+                {:else if showStopIcon}
+                  <StopCircle size={14} />
+                {:else if isRunning && phase?.type === 'building'}
+                  <Spinner size={14} />
+                {:else if isRunning}
+                  <SineWave size={14} />
+                {:else if execution?.status === 'completed'}
+                  <CheckCircle size={14} />
+                {:else if execution?.status === 'failed'}
+                  <AlertCircle size={14} />
+                {:else}
+                  <Play size={14} />
+                {/if}
+              </Button>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content>
+            {isStopping
+              ? 'Stopping…'
+              : showStopIcon
+                ? `Stop ${primaryRunAction.name}`
+                : isRunning
+                  ? `View output for ${primaryRunAction.name}`
+                  : execution?.status === 'completed'
+                    ? `${primaryRunAction.name} completed`
+                    : execution?.status === 'failed'
+                      ? `${primaryRunAction.name} failed`
+                      : primaryRunAction.name}
+          </Tooltip.Content>
+        </Tooltip.Root>
       {/if}
     </div>
   {/if}
 {/if}
-<MoreMenu items={moreMenuItems} ariaLabel="Branch actions" title="More options" minWidth={160} />
+{#snippet renderSubItems(items: MenuItem[])}
+  {#each items as item, i (i)}
+    {#if item.type === 'separator'}
+      <DropdownMenu.Separator />
+    {:else if item.type === 'action'}
+      <DropdownMenu.Item disabled={item.disabled} onSelect={item.onSelect}>
+        {#if item.icon}
+          {@const Icon = item.icon}
+          <Icon size={14} />
+        {:else if item.iconSrc}
+          <img src={item.iconSrc} alt="" width="14" height="14" class="shrink-0 rounded-[3px]" />
+        {/if}
+        {item.label}
+      </DropdownMenu.Item>
+    {/if}
+  {/each}
+{/snippet}
 
-{#if actionOutputModal}
-  <ActionOutputModal
-    executionId={actionOutputModal.executionId}
-    branchId={branch.id}
-    actionName={actionOutputModal.actionName}
-    isStopping={actionOutputModal.isStopping}
-    onClose={() => (actionOutputModal = null)}
-    onRunAgain={async () => {
-      const action = actions.find((a) => a.id === actionOutputModal?.actionId);
-      if (!action) return;
+<DropdownMenu.Root>
+  <DropdownMenu.Trigger
+    class="inline-flex h-7 w-7 items-center justify-center rounded-md text-[var(--text-faint)] transition-colors hover:bg-[var(--bg-hover)] hover:text-foreground focus-visible:bg-[var(--bg-hover)] focus-visible:text-foreground focus-visible:outline-none data-[state=open]:bg-[var(--bg-hover)] data-[state=open]:text-foreground disabled:cursor-not-allowed disabled:opacity-45"
+    aria-label="More options"
+    title="More options"
+  >
+    <MoreVertical size={16} />
+  </DropdownMenu.Trigger>
+  <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[160px]">
+    {#if !isSettingUp}
+      {#if isRemote && branch.workspaceName}
+        <DropdownMenu.Item
+          onSelect={() => {
+            navigator.clipboard.writeText(branch.workspaceName!);
+          }}
+        >
+          <Copy size={14} /> Copy Workspace Name
+        </DropdownMenu.Item>
+      {/if}
+      {#if hasActionsForSubmenu}
+        <DropdownMenu.Sub>
+          <DropdownMenu.SubTrigger>
+            <Play size={14} /> Actions
+          </DropdownMenu.SubTrigger>
+          <DropdownMenu.SubContent class="min-w-[160px]">
+            {#each actionMenuItems as item, i (i)}
+              {#if item.type === 'separator'}
+                <DropdownMenu.Separator />
+              {:else if item.type === 'submenu'}
+                <DropdownMenu.Sub>
+                  <DropdownMenu.SubTrigger>
+                    {#if item.icon}
+                      {@const Icon = item.icon}
+                      <Icon size={14} />
+                    {/if}
+                    {item.label}
+                  </DropdownMenu.SubTrigger>
+                  <DropdownMenu.SubContent class="min-w-[160px]">
+                    {@render renderSubItems(item.children)}
+                  </DropdownMenu.SubContent>
+                </DropdownMenu.Sub>
+              {:else}
+                <DropdownMenu.Item disabled={item.disabled} onSelect={item.onSelect}>
+                  {#if item.icon}
+                    {@const Icon = item.icon}
+                    <Icon size={14} />
+                  {/if}
+                  {item.label}
+                </DropdownMenu.Item>
+              {/if}
+            {/each}
+          </DropdownMenu.SubContent>
+        </DropdownMenu.Sub>
+      {/if}
+      {#if isLocal && branch.worktreePath && openerApps.length > 0}
+        <DropdownMenu.Separator />
+        <DropdownMenu.Sub>
+          <DropdownMenu.SubTrigger>
+            <ExternalLink size={14} /> Open In
+          </DropdownMenu.SubTrigger>
+          <DropdownMenu.SubContent class="min-w-[160px]">
+            {@render renderSubItems(openInMenuItems)}
+          </DropdownMenu.SubContent>
+        </DropdownMenu.Sub>
+      {:else if isLocal && branch.worktreePath}
+        <DropdownMenu.Separator />
+        <DropdownMenu.Item onSelect={handleCopyPath}>
+          <Copy size={14} /> Copy Worktree Path
+        </DropdownMenu.Item>
+      {/if}
+      <DropdownMenu.Separator />
+      <DropdownMenu.Item onSelect={handleRenameFromMenu}>
+        <GitBranch size={14} /> Rename Branch
+      </DropdownMenu.Item>
+      <DropdownMenu.Item disabled={newCommitDisabled} onSelect={() => onRebaseBranch?.()}>
+        <GitBranch size={14} /> Rebase Branch
+      </DropdownMenu.Item>
+      {#if commitCount >= 2}
+        <DropdownMenu.Item disabled={newCommitDisabled} onSelect={() => onSquashCommits?.()}>
+          <GitBranch size={14} /> Squash Commits
+        </DropdownMenu.Item>
+      {/if}
+      <DropdownMenu.Separator />
+    {/if}
+    <DropdownMenu.Item variant="destructive" onSelect={handleDeleteFromMenu}>
+      <Trash2 size={14} /> Delete Repo
+    </DropdownMenu.Item>
+  </DropdownMenu.Content>
+</DropdownMenu.Root>
 
-      // Clean up stale executions of this action
-      const staleExecutions = runningActions.filter(
-        (a) => a.actionId === action.id && a.status !== 'running'
-      );
-      for (const stale of staleExecutions) {
-        clearActionExecution(stale.executionId).catch(() => {});
-      }
-      runningActions = runningActions.filter(
-        (a) => !(a.actionId === action.id && a.status !== 'running')
-      );
+<ActionOutputModal
+  open={actionOutputModal !== null}
+  executionId={actionOutputModal?.executionId ?? ''}
+  branchId={branch.id}
+  actionName={actionOutputModal?.actionName ?? ''}
+  isStopping={actionOutputModal?.isStopping}
+  onClose={() => (actionOutputModal = null)}
+  onRunAgain={async () => {
+    const action = actions.find((a) => a.id === actionOutputModal?.actionId);
+    if (!action) return;
 
-      // If already running, just switch the modal to that execution
-      const existingExecution = runningActions.find(
-        (a) => a.actionId === action.id && a.status === 'running'
-      );
-      if (existingExecution) {
-        actionOutputModal = {
-          executionId: existingExecution.executionId,
-          actionId: action.id,
-          actionName: action.name,
-          isStopping: stoppingExecutions.has(existingExecution.executionId),
-        };
-        return;
-      }
+    // Clean up stale executions of this action
+    const staleExecutions = runningActions.filter(
+      (a) => a.actionId === action.id && a.status !== 'running'
+    );
+    for (const stale of staleExecutions) {
+      clearActionExecution(stale.executionId).catch(() => {});
+    }
+    runningActions = runningActions.filter(
+      (a) => !(a.actionId === action.id && a.status !== 'running')
+    );
 
-      try {
-        const provider = getPreferredAgent(agentState.providers) ?? undefined;
-        const newExecutionId = await runBranchAction(branch.id, action.id, provider);
-        // Keep the modal open and switch to the new execution
-        actionOutputModal = {
-          executionId: newExecutionId,
-          actionId: action.id,
-          actionName: action.name,
-          isStopping: false,
-        };
-      } catch (e) {
-        console.error('Failed to run action:', e);
-        notifyError(`Failed to run action "${action.name}"`, e);
-      }
-    }}
-    {onNoteCreated}
-  />
-{/if}
+    // If already running, just switch the modal to that execution
+    const existingExecution = runningActions.find(
+      (a) => a.actionId === action.id && a.status === 'running'
+    );
+    if (existingExecution) {
+      actionOutputModal = {
+        executionId: existingExecution.executionId,
+        actionId: action.id,
+        actionName: action.name,
+        isStopping: stoppingExecutions.has(existingExecution.executionId),
+      };
+      return;
+    }
+
+    try {
+      const provider = getPreferredAgent(agentState.providers) ?? undefined;
+      const newExecutionId = await runBranchAction(branch.id, action.id, provider);
+      // Keep the modal open and switch to the new execution
+      actionOutputModal = {
+        executionId: newExecutionId,
+        actionId: action.id,
+        actionName: action.name,
+        isStopping: false,
+      };
+    } catch (e) {
+      console.error('Failed to run action:', e);
+      notifyError(`Failed to run action "${action.name}"`, e);
+    }
+  }}
+  {onNoteCreated}
+/>
 
 <style>
   /* Primary action button — circular icon-only */
@@ -938,63 +1027,6 @@
     display: flex;
     align-items: center;
     overflow: hidden;
-  }
-
-  .primary-action-button {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    background: var(--bg-elevated);
-    border: none;
-    border-radius: 50%;
-    color: var(--text-base);
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .primary-action-button:hover {
-    background: var(--bg-hover);
-  }
-
-  .primary-action-button.running {
-    background: var(--bg-hover);
-    color: var(--text-muted);
-  }
-
-  .primary-action-button.running:hover {
-    background: var(--bg-elevated);
-  }
-
-  .primary-action-button.completed {
-    background: var(--bg-hover);
-    color: var(--status-added);
-  }
-
-  .primary-action-button.failed {
-    background: var(--bg-hover);
-    color: var(--ui-danger);
-  }
-
-  .primary-action-button.stopping {
-    opacity: 0.6;
-    cursor: pointer;
-  }
-
-  .primary-action-button.stopping:hover {
-    background: var(--bg-elevated);
-  }
-
-  .primary-action-button.show-stop {
-    color: var(--ui-danger);
-  }
-
-  .primary-action-button :global(svg) {
-    flex-shrink: 0;
-    width: 14px;
-    height: 14px;
   }
 
   /* Primary action pill (endpoint running state) */
@@ -1007,68 +1039,11 @@
     overflow: hidden;
   }
 
-  .primary-action-pill-main {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .primary-action-pill-main:hover {
-    color: var(--text-base);
-  }
-
-  .primary-action-pill-main.stopping {
-    opacity: 0.6;
-  }
-
-  .primary-action-pill-main.show-stop {
-    color: var(--ui-danger);
-  }
-
-  .primary-action-pill-main :global(svg) {
-    flex-shrink: 0;
-    width: 14px;
-    height: 14px;
-  }
-
-  .primary-action-pill-copy {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    position: relative;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    background: none;
-    border: none;
-    border-left: 1px solid var(--border-muted);
-    color: var(--text-muted);
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
   .copy-icon-wrapper {
     position: absolute;
     display: flex;
     align-items: center;
     justify-content: center;
-  }
-
-  .primary-action-pill-copy:hover {
-    color: var(--text-base);
-    background: var(--bg-elevated);
-  }
-
-  .primary-action-pill-copy :global(svg) {
-    flex-shrink: 0;
   }
 
   /* Running actions */
@@ -1085,56 +1060,5 @@
     transition:
       opacity 0.3s ease,
       transform 0.3s ease;
-  }
-
-  .running-action-button {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 12px;
-    background: var(--bg-elevated);
-    border: 1px solid var(--border-muted);
-    border-radius: 999px;
-    color: var(--text-primary);
-    font-size: var(--size-xs);
-    cursor: pointer;
-    white-space: nowrap;
-    transition:
-      background-color 0.15s ease,
-      border-color 0.15s ease;
-  }
-
-  .running-action-button:hover {
-    background: var(--bg-hover);
-    border-color: var(--border-focus);
-  }
-
-  .running-action-button.completed {
-    border-color: var(--status-added);
-    color: var(--status-added);
-  }
-
-  .running-action-button.failed {
-    border-color: var(--ui-danger);
-    color: var(--ui-danger);
-  }
-
-  .running-action-button.stopping {
-    opacity: 0.6;
-    cursor: pointer;
-  }
-
-  .running-action-button.stopping:hover {
-    background: var(--bg-elevated);
-    border-color: var(--border-muted);
-  }
-
-  .running-action-button.show-stop {
-    border-color: var(--ui-danger);
-    color: var(--ui-danger);
-  }
-
-  .running-action-button :global(svg) {
-    flex-shrink: 0;
   }
 </style>

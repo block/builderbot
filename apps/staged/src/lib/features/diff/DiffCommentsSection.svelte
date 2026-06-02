@@ -1,14 +1,14 @@
 <script lang="ts">
-  import {
-    AlertTriangle,
-    Bot,
-    Check,
-    ChevronRight,
-    Copy,
-    MessageSquare,
-    Trash2,
-    Undo2,
-  } from 'lucide-svelte';
+  import AlertTriangle from '@lucide/svelte/icons/alert-triangle';
+  import Bot from '@lucide/svelte/icons/bot';
+  import Check from '@lucide/svelte/icons/check';
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import Copy from '@lucide/svelte/icons/copy';
+  import MessageSquare from '@lucide/svelte/icons/message-square';
+  import Trash2 from '@lucide/svelte/icons/trash-2';
+  import Undo2 from '@lucide/svelte/icons/undo-2';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
   import type { Comment } from '../../types';
   import { formatLineRange, truncateText } from './diffModalHelpers';
 
@@ -77,21 +77,47 @@
   </div>
   <div class="section-right">
     {#if comments.length > 0}
-      <button
-        class="copy-btn"
-        class:copied={copiedFeedback}
-        onclick={onCopyAll}
-        title="Copy all comments"
-      >
-        {#if copiedFeedback}
-          <Check size={12} />
-        {:else}
-          <Copy size={12} />
-        {/if}
-      </button>
-      <button class="delete-all-btn" onclick={onDeleteAll} title="Delete all comments">
-        <Trash2 size={12} />
-      </button>
+      <Tooltip.Root>
+        <Tooltip.Trigger>
+          {#snippet child({ props })}
+            <Button
+              {...props}
+              variant="ghost"
+              size="icon"
+              class={[
+                'size-auto rounded-[3px] p-0.5 shadow-none hover:bg-[var(--bg-hover)] [&_svg]:!size-3',
+                copiedFeedback
+                  ? 'text-[var(--status-added)] hover:text-[var(--status-added)]'
+                  : 'text-muted-foreground hover:text-foreground',
+              ]}
+              onclick={onCopyAll}
+            >
+              {#if copiedFeedback}
+                <Check size={12} />
+              {:else}
+                <Copy size={12} />
+              {/if}
+            </Button>
+          {/snippet}
+        </Tooltip.Trigger>
+        <Tooltip.Content>Copy all comments</Tooltip.Content>
+      </Tooltip.Root>
+      <Tooltip.Root>
+        <Tooltip.Trigger>
+          {#snippet child({ props })}
+            <Button
+              {...props}
+              variant="ghost"
+              size="icon"
+              class="size-auto rounded-[3px] p-0.5 text-muted-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-destructive [&_svg]:!size-3"
+              onclick={onDeleteAll}
+            >
+              <Trash2 size={12} />
+            </Button>
+          {/snippet}
+        </Tooltip.Trigger>
+        <Tooltip.Content>Delete all comments</Tooltip.Content>
+      </Tooltip.Root>
     {/if}
   </div>
 </div>
@@ -100,7 +126,7 @@
   <ul class="tree-section comments-section">
     {#each comments as comment (comment.id)}
       <li class="tree-item-wrapper">
-        <div class="comment-item-container">
+        <div class="comment-item-container group/comment">
           <button
             class="tree-item comment-item"
             class:selected={selectedCommentId === comment.id}
@@ -109,16 +135,25 @@
           >
             {@render commentItemContent(comment)}
           </button>
-          <button
-            class="comment-delete-btn"
-            onclick={(e) => {
-              e.stopPropagation();
-              onDeleteComment(comment.id);
-            }}
-            title="Delete comment"
-          >
-            <Trash2 size={12} />
-          </button>
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="ghost"
+                  size="icon"
+                  class="absolute top-1/2 right-3 z-10 size-auto -translate-y-1/2 rounded p-1 text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-primary)] hover:text-[var(--status-deleted)] group-hover/comment:opacity-100 [&_svg]:!size-3"
+                  onclick={(e: MouseEvent) => {
+                    e.stopPropagation();
+                    onDeleteComment(comment.id);
+                  }}
+                >
+                  <Trash2 size={12} />
+                </Button>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>Delete comment</Tooltip.Content>
+          </Tooltip.Root>
         </div>
       </li>
     {/each}
@@ -126,32 +161,45 @@
 {/if}
 
 {#if deletedComments.length > 0}
-  <button class="deleted-toggle" onclick={() => (deletedExpanded = !deletedExpanded)}>
+  <Button
+    variant="ghost"
+    class="flex h-auto w-full items-center justify-start gap-1 rounded-none px-3 py-1 text-[length:calc(var(--size-xs)-1px)] font-semibold tracking-[0.03em] text-[var(--text-faint)] uppercase shadow-none hover:bg-[var(--bg-hover)] hover:text-muted-foreground"
+    onclick={() => (deletedExpanded = !deletedExpanded)}
+  >
     <span class="deleted-toggle-icon" class:expanded={deletedExpanded}>
       <ChevronRight size={12} />
     </span>
-    <span class="deleted-toggle-label">Deleted</span>
+    <span>Deleted</span>
     <span class="count-capsule">{deletedComments.length}</span>
-  </button>
+  </Button>
 
   {#if deletedExpanded}
     <ul class="tree-section comments-section deleted-comments-section">
       {#each deletedComments as comment (comment.id)}
         <li class="tree-item-wrapper">
-          <div class="comment-item-container deleted-comment">
+          <div class="comment-item-container deleted-comment group/comment">
             <div class="tree-item comment-item" style="padding-left: 8px">
               {@render commentItemContent(comment)}
             </div>
-            <button
-              class="comment-restore-btn"
-              onclick={(e) => {
-                e.stopPropagation();
-                onRestoreComment(comment.id);
-              }}
-              title="Restore comment"
-            >
-              <Undo2 size={12} />
-            </button>
+            <Tooltip.Root>
+              <Tooltip.Trigger>
+                {#snippet child({ props })}
+                  <Button
+                    {...props}
+                    variant="ghost"
+                    size="icon"
+                    class="absolute top-1/2 right-3 z-10 size-auto -translate-y-1/2 rounded p-1 text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-primary)] hover:text-[var(--status-added)] group-hover/comment:opacity-100 [&_svg]:!size-3"
+                    onclick={(e: MouseEvent) => {
+                      e.stopPropagation();
+                      onRestoreComment(comment.id);
+                    }}
+                  >
+                    <Undo2 size={12} />
+                  </Button>
+                {/snippet}
+              </Tooltip.Trigger>
+              <Tooltip.Content>Restore comment</Tooltip.Content>
+            </Tooltip.Root>
           </div>
         </li>
       {/each}
@@ -345,92 +393,7 @@
     white-space: nowrap;
   }
 
-  .comment-delete-btn {
-    position: absolute;
-    right: 12px;
-    top: 50%;
-    transform: translateY(-50%);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 4px;
-    background: none;
-    border: none;
-    border-radius: 4px;
-    color: var(--text-faint);
-    cursor: pointer;
-    opacity: 0;
-    transition:
-      opacity 0.1s,
-      color 0.1s,
-      background-color 0.1s;
-    z-index: 1;
-  }
-
-  .comment-item-container:hover .comment-delete-btn {
-    opacity: 1;
-  }
-
-  .comment-delete-btn:hover {
-    color: var(--status-deleted);
-    background-color: var(--bg-primary);
-  }
-
-  .copy-btn,
-  .delete-all-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 2px;
-    background: none;
-    border: none;
-    border-radius: 3px;
-    color: var(--text-muted);
-    cursor: pointer;
-    transition:
-      background-color 0.1s,
-      color 0.1s;
-  }
-
-  .copy-btn:hover {
-    background-color: var(--bg-hover);
-    color: var(--text-primary);
-  }
-
-  .copy-btn.copied {
-    color: var(--status-added);
-  }
-
-  .delete-all-btn:hover {
-    background-color: var(--bg-hover);
-    color: var(--status-deleted);
-  }
-
   /* Deleted comments section */
-
-  .deleted-toggle {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 12px;
-    background: none;
-    border: none;
-    color: var(--text-faint);
-    font-size: calc(var(--size-xs) - 1px);
-    font-weight: 600;
-    letter-spacing: 0.03em;
-    cursor: pointer;
-    width: 100%;
-    text-align: left;
-    transition:
-      color 0.1s,
-      background-color 0.1s;
-  }
-
-  .deleted-toggle:hover {
-    color: var(--text-muted);
-    background-color: var(--bg-hover);
-  }
 
   .deleted-toggle-icon {
     display: flex;
@@ -440,10 +403,6 @@
 
   .deleted-toggle-icon.expanded {
     transform: rotate(90deg);
-  }
-
-  .deleted-toggle-label {
-    text-transform: uppercase;
   }
 
   .deleted-comments-section {
@@ -460,36 +419,5 @@
 
   .deleted-comment .tree-item {
     cursor: default;
-  }
-
-  .comment-restore-btn {
-    position: absolute;
-    right: 12px;
-    top: 50%;
-    transform: translateY(-50%);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 4px;
-    background: none;
-    border: none;
-    border-radius: 4px;
-    color: var(--text-faint);
-    cursor: pointer;
-    opacity: 0;
-    transition:
-      opacity 0.1s,
-      color 0.1s,
-      background-color 0.1s;
-    z-index: 1;
-  }
-
-  .comment-item-container:hover .comment-restore-btn {
-    opacity: 1;
-  }
-
-  .comment-restore-btn:hover {
-    color: var(--status-added);
-    background-color: var(--bg-primary);
   }
 </style>

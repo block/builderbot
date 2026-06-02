@@ -7,14 +7,14 @@
   import { onMount, tick } from 'svelte';
   import { fade } from 'svelte/transition';
   import { listenToEvent } from '../../transport';
-  import {
-    Cloud,
-    GitPullRequest,
-    GitPullRequestClosed,
-    GitPullRequestDraft,
-    Plus,
-    Sprout,
-  } from 'lucide-svelte';
+  import Cloud from '@lucide/svelte/icons/cloud';
+  import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
+  import GitPullRequestClosed from '@lucide/svelte/icons/git-pull-request-closed';
+  import GitPullRequestDraft from '@lucide/svelte/icons/git-pull-request-draft';
+  import Mail from '@lucide/svelte/icons/mail';
+  import Plus from '@lucide/svelte/icons/plus';
+  import Sprout from '@lucide/svelte/icons/sprout';
+  import Trash2 from '@lucide/svelte/icons/trash-2';
   import type {
     Project,
     ProjectRepo,
@@ -37,14 +37,15 @@
   import { selectProject, showAllRepos } from '../layout/navigation.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import ProjectsSidebar from './ProjectsSidebar.svelte';
-  import ProjectContextMenu from './ProjectContextMenu.svelte';
   import { getProjectStatus } from './projectStatus';
+  import * as ContextMenu from '$lib/components/ui/context-menu';
   import SplashScreen from './SplashScreen.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import SineWave from '../../shared/SineWave.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
-  import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
-  import { alerts } from '../../shared/alerts.svelte';
+  import { toast } from 'svelte-sonner';
+  import * as AlertDialog from '$lib/components/ui/alert-dialog';
+  import { Button } from '$lib/components/ui/button';
 
   import { setProjects } from './projectsSidebarState.svelte';
   import {
@@ -69,7 +70,6 @@
   let isCommandKeyHeld = $state(false);
   let deletingProjectNames = $state<Map<string, string>>(new Map());
   let projectToDelete = $state<Project | null>(null);
-  let projectMenu = $state<{ project: Project; x: number; y: number } | null>(null);
   let reposByProject = $state<Map<string, ProjectRepo[]>>(new Map());
   let reposHydrating = $state(false);
   let mainPanelEl = $state<HTMLDivElement | null>(null);
@@ -404,11 +404,7 @@
     } catch (e) {
       console.error('[ProjectsList] Failed to clone repo:', e);
       const message = e instanceof Error ? e.message : String(e);
-      alerts.show({
-        tone: 'error',
-        title: 'Failed to clone repo',
-        message,
-      });
+      toast.error('Failed to clone repo', { description: message });
     }
   }
 
@@ -456,23 +452,11 @@
   }
 
   function openProject(projectId: string) {
-    closeProjectMenu();
     if (isProjectDeleting(projectId)) return;
     if (mainPanelEl) {
       setProjectsListScrollTop(mainPanelEl.scrollTop);
     }
     selectProject(projectId);
-  }
-
-  function closeProjectMenu() {
-    projectMenu = null;
-  }
-
-  function openProjectMenu(event: MouseEvent, project: Project, deleting: boolean) {
-    if (deleting) return;
-    event.preventDefault();
-    event.stopPropagation();
-    projectMenu = { project, x: event.clientX, y: event.clientY };
   }
 
   function handleMarkProjectUnread(project: Project) {
@@ -519,11 +503,7 @@
     } catch (e) {
       console.error('Failed to delete project:', e);
       const message = e instanceof Error ? e.message : String(e);
-      alerts.show({
-        tone: 'error',
-        title: 'Unable to delete project',
-        message,
-      });
+      toast.error('Unable to delete project', { description: message });
     } finally {
       const next = new Map(deletingProjectNames);
       next.delete(id);
@@ -650,7 +630,12 @@
           <div class="repos-section">
             <div class="repos-header">
               <h2 class="repos-title">Repos</h2>
-              <button class="view-all-btn" onclick={showAllRepos}> View all </button>
+              <Button
+                variant="ghost"
+                size="sm"
+                class="h-7 text-muted-foreground"
+                onclick={showAllRepos}>View all</Button
+              >
             </div>
             <div class="repos-scroll-row">
               {#each homeRepos as repo (repo.githubRepo + ':' + repo.subpath)}
@@ -666,10 +651,15 @@
 
         <div class="title-row">
           <h1>Projects</h1>
-          <button class="new-project-btn" onclick={() => (showNewProjectModal = true)}>
+          <Button
+            variant="outline"
+            size="sm"
+            class="gap-1.5 border-transparent bg-[var(--bg-elevated)] font-semibold shadow-none hover:bg-[var(--bg-hover)]"
+            onclick={() => (showNewProjectModal = true)}
+          >
             <Plus size={14} />
             New project
-          </button>
+          </Button>
         </div>
         {#if projects.length > 0}
           <div class="filter-bar">
@@ -723,122 +713,145 @@
             {@const workspaceStatus =
               project.location === 'remote' ? getProjectWorkspaceStatus(project.id) : null}
             <div class="project-card-wrapper" use:trackProjectCard={project.id}>
-              <button
-                class="project-card"
-                class:deleting={status.kind === 'deleting'}
-                onclick={() => openProject(project.id)}
-                oncontextmenu={(event: MouseEvent) =>
-                  openProjectMenu(event, project, status.kind === 'deleting')}
-                disabled={status.kind === 'deleting'}
-                title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
-              >
-                {#if viewport.showShortcutHints && isCommandKeyHeld && index < 9}
-                  <div class="keyboard-shortcut-overlay">
-                    <span class="command-icon">⌘</span>
-                    <span class="number">{index + 1}</span>
-                  </div>
-                {/if}
-                {#if status.runActionPhase === 'running' && status.kind === 'running'}
-                  <div
-                    class="status-indicator wave-spinner"
-                    in:fade={{ duration: 300, delay: 150 }}
-                    out:fade={{ duration: 150 }}
+              <ContextMenu.Root>
+                <ContextMenu.Trigger class="contents" disabled={status.kind === 'deleting'}>
+                  <button
+                    class="project-card"
+                    class:deleting={status.kind === 'deleting'}
+                    onclick={() => openProject(project.id)}
+                    disabled={status.kind === 'deleting'}
+                    title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
                   >
-                    <SineWave size={14} />
-                    <Spinner size={14} />
-                  </div>
-                {:else if status.runActionPhase === 'running'}
-                  <div
-                    class="status-indicator wave"
-                    in:fade={{ duration: 300, delay: 150 }}
-                    out:fade={{ duration: 150 }}
-                  >
-                    <SineWave size={14} />
-                  </div>
-                {:else if status.kind === 'runAction' || status.kind === 'running'}
-                  <div
-                    class="status-indicator spinner"
-                    in:fade={{ duration: 300, delay: 150 }}
-                    out:fade={{ duration: 150 }}
-                  >
-                    <Spinner size={14} />
-                  </div>
-                {:else if status.kind === 'unread'}
-                  <div
-                    class="status-indicator unread-dot"
-                    in:fade={{ duration: 300, delay: 150 }}
-                    out:fade={{ duration: 150 }}
-                  ></div>
-                {/if}
-                <div class="card-header">
-                  {#if project.location === 'remote'}
-                    <Cloud size={16} class={cloudStatusClass(workspaceStatus)} />
-                  {:else if prStatus === 'merged'}
-                    <GitPullRequest size={16} class="pr-status-merged" />
-                  {:else if prStatus === 'checks_failing'}
-                    <GitPullRequest size={16} class="pr-status-checks-failing" />
-                  {:else if prStatus === 'open'}
-                    <GitPullRequest size={16} />
-                  {:else if prStatus === 'closed'}
-                    <GitPullRequestClosed size={16} />
-                  {:else if prStatus === 'conflict'}
-                    <GitPullRequestClosed size={16} class="pr-status-conflict" />
-                  {:else if projectHasCodeChanges(projectBranches.get(project.id) || [])}
-                    <GitPullRequestDraft size={16} class="pr-status-draft" />
-                  {:else}
-                    <Sprout size={16} class="pr-status-clean" />
-                  {/if}
-                  <span>{projectDisplayName(project)}</span>
-                </div>
-                {#if status.kind === 'deleting'}
-                  <div class="deleting-pill" role="status" aria-live="polite">Deleting…</div>
-                {/if}
-                <div class="repo">
-                  {#if repos.length > 0}
-                    {#each [...repos].sort((a, b) => {
-                      const aKey = a.subpath ? `${a.githubRepo}/${a.subpath}` : a.githubRepo;
-                      const bKey = b.subpath ? `${b.githubRepo}/${b.subpath}` : b.githubRepo;
-                      return aKey.localeCompare(bKey);
-                    }) as r}
-                      {@const badge = repoBadgeStore.lookup(r.githubRepo, r.subpath)}
-                      {#if badge}
-                        <span
-                          class="repo-badge-label"
-                          style="background: {badgeBg(badge.hue, darkMode.value)}; color: {badgeFg(
-                            badge.hue,
-                            darkMode.value
-                          )};"
-                        >
-                          <RepoLabel githubRepo={r.headRepo ?? r.githubRepo} subpath={r.subpath} />
-                        </span>
-                      {:else}
-                        <span class="repo-line">
-                          <RepoLabel githubRepo={r.headRepo ?? r.githubRepo} subpath={r.subpath} />
-                        </span>
-                      {/if}
-                    {/each}
-                  {:else if project.githubRepo}
-                    {@const badge = repoBadgeStore.lookup(project.githubRepo, project.subpath)}
-                    {#if badge}
-                      <span
-                        class="repo-badge-label"
-                        style="background: {badgeBg(badge.hue, darkMode.value)}; color: {badgeFg(
-                          badge.hue,
-                          darkMode.value
-                        )};"
-                      >
-                        <RepoLabel githubRepo={project.githubRepo} subpath={project.subpath} />
-                      </span>
-                    {:else}
-                      <span class="repo-line">
-                        <RepoLabel githubRepo={project.githubRepo} subpath={project.subpath} />
-                      </span>
+                    {#if viewport.showShortcutHints && isCommandKeyHeld && index < 9}
+                      <div class="keyboard-shortcut-overlay">
+                        <span class="command-icon">⌘</span>
+                        <span class="number">{index + 1}</span>
+                      </div>
                     {/if}
-                  {:else}
-                    No repo attached
-                  {/if}
-                </div>
-              </button>
+                    {#if status.runActionPhase === 'running' && status.kind === 'running'}
+                      <div
+                        class="status-indicator wave-spinner"
+                        in:fade={{ duration: 300, delay: 150 }}
+                        out:fade={{ duration: 150 }}
+                      >
+                        <SineWave size={14} />
+                        <Spinner size={14} />
+                      </div>
+                    {:else if status.runActionPhase === 'running'}
+                      <div
+                        class="status-indicator wave"
+                        in:fade={{ duration: 300, delay: 150 }}
+                        out:fade={{ duration: 150 }}
+                      >
+                        <SineWave size={14} />
+                      </div>
+                    {:else if status.kind === 'runAction' || status.kind === 'running'}
+                      <div
+                        class="status-indicator spinner"
+                        in:fade={{ duration: 300, delay: 150 }}
+                        out:fade={{ duration: 150 }}
+                      >
+                        <Spinner size={14} />
+                      </div>
+                    {:else if status.kind === 'unread'}
+                      <div
+                        class="status-indicator unread-dot"
+                        in:fade={{ duration: 300, delay: 150 }}
+                        out:fade={{ duration: 150 }}
+                      ></div>
+                    {/if}
+                    <div class="card-header">
+                      {#if project.location === 'remote'}
+                        <Cloud size={16} class={cloudStatusClass(workspaceStatus)} />
+                      {:else if prStatus === 'merged'}
+                        <GitPullRequest size={16} class="pr-status-merged" />
+                      {:else if prStatus === 'checks_failing'}
+                        <GitPullRequest size={16} class="pr-status-checks-failing" />
+                      {:else if prStatus === 'open'}
+                        <GitPullRequest size={16} />
+                      {:else if prStatus === 'closed'}
+                        <GitPullRequestClosed size={16} />
+                      {:else if prStatus === 'conflict'}
+                        <GitPullRequestClosed size={16} class="pr-status-conflict" />
+                      {:else if projectHasCodeChanges(projectBranches.get(project.id) || [])}
+                        <GitPullRequestDraft size={16} class="pr-status-draft" />
+                      {:else}
+                        <Sprout size={16} class="pr-status-clean" />
+                      {/if}
+                      <span>{projectDisplayName(project)}</span>
+                    </div>
+                    {#if status.kind === 'deleting'}
+                      <div class="deleting-pill" role="status" aria-live="polite">Deleting…</div>
+                    {/if}
+                    <div class="repo">
+                      {#if repos.length > 0}
+                        {#each [...repos].sort((a, b) => {
+                          const aKey = a.subpath ? `${a.githubRepo}/${a.subpath}` : a.githubRepo;
+                          const bKey = b.subpath ? `${b.githubRepo}/${b.subpath}` : b.githubRepo;
+                          return aKey.localeCompare(bKey);
+                        }) as r}
+                          {@const badge = repoBadgeStore.lookup(r.githubRepo, r.subpath)}
+                          {#if badge}
+                            <span
+                              class="repo-badge-label"
+                              style="background: {badgeBg(
+                                badge.hue,
+                                darkMode.value
+                              )}; color: {badgeFg(badge.hue, darkMode.value)};"
+                            >
+                              <RepoLabel
+                                githubRepo={r.headRepo ?? r.githubRepo}
+                                subpath={r.subpath}
+                              />
+                            </span>
+                          {:else}
+                            <span class="repo-line">
+                              <RepoLabel
+                                githubRepo={r.headRepo ?? r.githubRepo}
+                                subpath={r.subpath}
+                              />
+                            </span>
+                          {/if}
+                        {/each}
+                      {:else if project.githubRepo}
+                        {@const badge = repoBadgeStore.lookup(project.githubRepo, project.subpath)}
+                        {#if badge}
+                          <span
+                            class="repo-badge-label"
+                            style="background: {badgeBg(
+                              badge.hue,
+                              darkMode.value
+                            )}; color: {badgeFg(badge.hue, darkMode.value)};"
+                          >
+                            <RepoLabel githubRepo={project.githubRepo} subpath={project.subpath} />
+                          </span>
+                        {:else}
+                          <span class="repo-line">
+                            <RepoLabel githubRepo={project.githubRepo} subpath={project.subpath} />
+                          </span>
+                        {/if}
+                      {:else}
+                        No repo attached
+                      {/if}
+                    </div>
+                  </button>
+                </ContextMenu.Trigger>
+                <ContextMenu.Content class="min-w-[172px]">
+                  <ContextMenu.Item
+                    disabled={status.kind === 'deleting'}
+                    onSelect={() => handleMarkProjectUnread(project)}
+                  >
+                    <Mail size={14} /> Mark as Unread
+                  </ContextMenu.Item>
+                  <ContextMenu.Item
+                    variant="destructive"
+                    disabled={status.kind === 'deleting'}
+                    onSelect={() => handleRemoveProject(project)}
+                  >
+                    <Trash2 size={14} /> Remove Project
+                  </ContextMenu.Item>
+                </ContextMenu.Content>
+              </ContextMenu.Root>
               <div class="card-location">
                 {projectSubtitle(repoCount, sessionTypes, status.runActionPhase)}
               </div>
@@ -850,31 +863,33 @@
   </div>
 </div>
 
-{#if showNewProjectModal && projects.length > 0}
-  <NewProjectModal onCreated={handleProjectCreated} onClose={() => (showNewProjectModal = false)} />
-{/if}
+<NewProjectModal
+  open={showNewProjectModal && projects.length > 0}
+  onCreated={handleProjectCreated}
+  onClose={() => (showNewProjectModal = false)}
+/>
 
-{#if projectMenu}
-  {@const menuProject = projectMenu.project}
-  <ProjectContextMenu
-    x={projectMenu.x}
-    y={projectMenu.y}
-    onMarkAsUnread={() => handleMarkProjectUnread(menuProject)}
-    onRemoveProject={() => handleRemoveProject(menuProject)}
-    onClose={closeProjectMenu}
-  />
-{/if}
-
-{#if projectToDelete}
-  <ConfirmDialog
-    title="Remove Project"
-    message={`Remove "${projectDisplayName(projectToDelete)}" from Staged? There are unmerged changes in this project's branches. Deleting this project will lose any changes not pushed to GitHub.`}
-    confirmLabel="Remove"
-    danger={true}
-    onConfirm={confirmDeleteProject}
-    onCancel={() => (projectToDelete = null)}
-  />
-{/if}
+<AlertDialog.Root
+  open={projectToDelete !== null}
+  onOpenChange={(v) => !v && (projectToDelete = null)}
+>
+  <AlertDialog.Content>
+    {#if projectToDelete}
+      <AlertDialog.Header>
+        <AlertDialog.Title>Remove Project</AlertDialog.Title>
+        <AlertDialog.Description>
+          {`Remove "${projectDisplayName(projectToDelete)}" from Staged? There are unmerged changes in this project's branches. Deleting this project will lose any changes not pushed to GitHub.`}
+        </AlertDialog.Description>
+      </AlertDialog.Header>
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+        <AlertDialog.Action variant="destructive" onclick={confirmDeleteProject}>
+          Remove
+        </AlertDialog.Action>
+      </AlertDialog.Footer>
+    {/if}
+  </AlertDialog.Content>
+</AlertDialog.Root>
 
 <style>
   .projects-list-page {
@@ -932,26 +947,6 @@
     font-size: var(--size-xl);
     font-weight: 700;
     color: var(--text-primary);
-  }
-
-  .new-project-btn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 14px;
-    border: none;
-    border-radius: 8px;
-    background-color: var(--bg-elevated);
-    color: var(--text-primary);
-    font-size: var(--size-sm);
-    font-weight: 600;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .new-project-btn:hover {
-    color: var(--text-primary);
-    background-color: var(--bg-hover);
   }
 
   .filter-bar {
@@ -1069,23 +1064,6 @@
     font-size: var(--size-lg);
     font-weight: 700;
     color: var(--text-primary);
-  }
-
-  .view-all-btn {
-    padding: 4px 10px;
-    border: none;
-    border-radius: 6px;
-    background: none;
-    color: var(--text-muted);
-    font-size: var(--size-sm);
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .view-all-btn:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover);
   }
 
   .repos-scroll-row {
@@ -1343,7 +1321,7 @@
       gap: 12px;
     }
 
-    .new-project-btn {
+    .title-row :global(button) {
       min-height: 40px;
       padding: 8px 12px;
       flex-shrink: 0;

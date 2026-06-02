@@ -7,7 +7,8 @@
   hidden state across app launches.
 -->
 <script lang="ts">
-  import { Plus, X } from 'lucide-svelte';
+  import Plus from '@lucide/svelte/icons/plus';
+  import X from '@lucide/svelte/icons/x';
   import type { Project, ProjectRepo, SuggestedRepo } from '../../types';
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
   import * as commands from '../../api/commands';
@@ -17,6 +18,8 @@
   import * as badge from '../../shared/badgeColors';
   import Spinner from '../../shared/Spinner.svelte';
   import { getStoreValue, setStoreValue } from '../../shared/persistentStore';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
 
   interface Props {
     project: Project;
@@ -122,9 +125,21 @@
   <div class="suggested-repos">
     <div class="suggested-header">
       <span class="suggested-title">Suggested repos</span>
-      <button class="dismiss-btn" onclick={handleDismiss} title="Dismiss suggestions">
-        <X size={14} />
-      </button>
+      <Tooltip.Root>
+        <Tooltip.Trigger>
+          {#snippet child({ props })}
+            <Button
+              {...props}
+              variant="ghost"
+              class="size-[22px] rounded-[4px] p-0 text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-secondary)] [&_svg]:!size-3.5"
+              onclick={handleDismiss}
+            >
+              <X size={14} />
+            </Button>
+          {/snippet}
+        </Tooltip.Trigger>
+        <Tooltip.Content>Dismiss suggestions</Tooltip.Content>
+      </Tooltip.Root>
     </div>
     <div class="suggested-list">
       {#each suggestions as suggestion (suggestionKey(suggestion))}
@@ -181,28 +196,6 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-  }
-
-  .dismiss-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 22px;
-    height: 22px;
-    padding: 0;
-    border: none;
-    border-radius: 4px;
-    background: transparent;
-    color: var(--text-faint);
-    cursor: pointer;
-    transition:
-      color 0.15s,
-      background 0.15s;
-  }
-
-  .dismiss-btn:hover {
-    color: var(--text-secondary);
-    background: var(--bg-hover);
   }
 
   .suggested-list {

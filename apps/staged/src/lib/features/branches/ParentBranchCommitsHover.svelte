@@ -4,6 +4,7 @@
   import { listenToEvent } from '../../transport';
   import { listParentBranchCommits, type ParentBranchCommit } from '../../commands';
   import { formatRelativeTimeSeconds } from '../../shared/relativeTime.svelte';
+  import * as Tooltip from '$lib/components/ui/tooltip';
   import type { BranchGitState } from '../../types';
 
   interface Props {
@@ -207,9 +208,23 @@
         {#each visibleCommits as commit (commit.sha)}
           <li class="commit-row">
             <div class="commit-main">
-              <div class="commit-subject" title={commit.subject}>{commit.subject}</div>
+              <Tooltip.Root>
+                <Tooltip.Trigger>
+                  {#snippet child({ props })}
+                    <div class="commit-subject" {...props}>{commit.subject}</div>
+                  {/snippet}
+                </Tooltip.Trigger>
+                <Tooltip.Content>{commit.subject}</Tooltip.Content>
+              </Tooltip.Root>
               <div class="commit-meta">
-                <span class="commit-author" title={commit.authorEmail}>{commit.author}</span>
+                <Tooltip.Root>
+                  <Tooltip.Trigger>
+                    {#snippet child({ props })}
+                      <span class="commit-author" {...props}>{commit.author}</span>
+                    {/snippet}
+                  </Tooltip.Trigger>
+                  <Tooltip.Content>{commit.authorEmail}</Tooltip.Content>
+                </Tooltip.Root>
                 <span class="commit-dot">·</span>
                 <span class="commit-time">{formatRelativeTimeSeconds(commit.timestamp)}</span>
               </div>

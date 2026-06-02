@@ -6,10 +6,15 @@
 -->
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { X, Copy, Check, MessageCircle } from 'lucide-svelte';
+  import X from '@lucide/svelte/icons/x';
+  import Copy from '@lucide/svelte/icons/copy';
+  import Check from '@lucide/svelte/icons/check';
+  import MessageCircle from '@lucide/svelte/icons/message-circle';
   import { marked } from 'marked';
+  import * as Dialog from '$lib/components/ui/dialog';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
   import { sanitize } from '../../shared/sanitize';
-  import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
   import { countAssistantMessagesAfter, handleExternalLinkClick } from '../../api/commands';
   import { formatChatButtonLabel } from '../sessions/noteFreshness';
   import InContentSearch from '../../shared/InContentSearch.svelte';
@@ -20,6 +25,7 @@
   marked.setOptions({ breaks: true, gfm: true });
 
   interface Props {
+    open: boolean;
     title: string;
     content: string;
     onClose: () => void;
@@ -34,6 +40,7 @@
   }
 
   let {
+    open,
     title,
     content,
     onClose,
@@ -45,7 +52,6 @@
   }: Props = $props();
 
   let copied = $state(false);
-  const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
   let assistantMessagesAfterNote = $state(0);
   let chatButtonLabel = $derived(formatChatButtonLabel(assistantMessagesAfterNote));
   let canOpenSession = $derived(Boolean(sessionId && onOpenSession));
@@ -111,19 +117,6 @@
     }
   }
 
-  function handleKeydown(e: KeyboardEvent) {
-    // Handle Escape key
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      if (searchVisible) {
-        closeSearch();
-      } else {
-        onClose();
-      }
-      return;
-    }
-  }
-
   function openSearch() {
     searchVisible = true;
   }
@@ -165,15 +158,12 @@
   function nextMatch() {
     if (matchElements.length === 0) return;
 
-    // Remove current class from old match
     if (matchElements[currentMatchIndex]) {
       matchElements[currentMatchIndex].classList.remove('search-match-current');
     }
 
-    // Cycle to next match (wrap around)
     currentMatchIndex = (currentMatchIndex + 1) % matchElements.length;
 
-    // Add current class to new match
     matchElements[currentMatchIndex].classList.add('search-match-current');
     scrollToMatch(matchElements[currentMatchIndex]);
   }
@@ -181,37 +171,41 @@
   function previousMatch() {
     if (matchElements.length === 0) return;
 
-    // Remove current class from old match
     if (matchElements[currentMatchIndex]) {
       matchElements[currentMatchIndex].classList.remove('search-match-current');
     }
 
-    // Cycle to previous match (wrap around)
     currentMatchIndex = (currentMatchIndex - 1 + matchElements.length) % matchElements.length;
 
-    // Add current class to new match
     matchElements[currentMatchIndex].classList.add('search-match-current');
     scrollToMatch(matchElements[currentMatchIndex]);
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
-
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<div
-  class="modal-backdrop"
-  role="dialog"
-  aria-modal="true"
-  tabindex="-1"
-  onpointerdown={backdropDismiss.handlePointerDown}
-  onclick={backdropDismiss.handleClick}
-  onkeydown={(e) => e.key === 'Escape' && onClose()}
+<Dialog.Root
+  {open}
+  onOpenChange={(v) => {
+    if (!v) {
+      if (searchVisible) {
+        closeSearch();
+      }
+      onClose();
+    }
+  }}
 >
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="modal" role="presentation" onclick={(e) => e.stopPropagation()}>
-    <header class="modal-header">
+  <Dialog.Content
+    class="sm:max-w-[700px] h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col"
+    showCloseButton={false}
+  >
+    <Dialog.Header
+      class="flex-row items-center justify-between gap-3 px-4 py-3 border-b border-[var(--border-subtle)] flex-shrink-0"
+    >
       <div class="header-content">
-        <span class="header-title">{title}</span>
+        <Dialog.Title
+          class="text-[var(--size-sm)] font-semibold text-foreground overflow-hidden text-ellipsis whitespace-nowrap"
+        >
+          {title}
+        </Dialog.Title>
       </div>
       <InContentSearch
         visible={searchVisible}
@@ -223,38 +217,70 @@
         onClose={closeSearch}
       />
       <div class="header-actions">
-        <button
-          class="header-btn"
-          class:copied
-          onclick={handleShare}
-          title={copied ? 'Copied!' : 'Copy note to clipboard'}
-        >
-          {#if copied}
-            <Check size={16} />
-          {:else}
-            <Copy size={16} />
-          {/if}
-        </button>
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            {#snippet child({ props })}
+              <Button
+                {...props}
+                variant="outline"
+                size="sm"
+                class={[
+                  'h-7 shrink-0 gap-1 border-[var(--border-muted)] bg-transparent px-2.5 text-xs text-muted-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground',
+                  copied && 'text-[var(--status-added)] hover:text-[var(--status-added)]',
+                ]}
+                onclick={handleShare}
+              >
+                {#if copied}
+                  <Check size={16} />
+                {:else}
+                  <Copy size={16} />
+                {/if}
+              </Button>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content>{copied ? 'Copied!' : 'Copy note to clipboard'}</Tooltip.Content>
+        </Tooltip.Root>
         {#if canOpenSession}
-          <button
-            class="header-btn"
-            onclick={() => onOpenSession?.(sessionId!)}
-            title="Open chat session"
-          >
-            View chat
-          </button>
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="outline"
+                  size="sm"
+                  class="h-7 shrink-0 gap-1 border-[var(--border-muted)] bg-transparent px-2.5 text-xs text-muted-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+                  onclick={() => onOpenSession?.(sessionId!)}
+                >
+                  View chat
+                </Button>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>Open chat session</Tooltip.Content>
+          </Tooltip.Root>
         {/if}
-        <button
-          class="close-btn"
-          onclick={onClose}
-          title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
-        >
-          <X size={16} />
-        </button>
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            {#snippet child({ props })}
+              <Button
+                {...props}
+                variant="ghost"
+                size="icon-sm"
+                class="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
+                onclick={onClose}
+              >
+                <X size={16} />
+              </Button>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content>
+            {viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
+          </Tooltip.Content>
+        </Tooltip.Root>
       </div>
-    </header>
+    </Dialog.Header>
     <div class="modal-body">
-      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="modal-content" bind:this={contentEl} onclick={handleExternalLinkClick}>
         {#if content.trim()}
           <div class="markdown-content">
@@ -269,77 +295,56 @@
       <div class="next-steps">
         {#if showChatInfo}
           <div class="chat-info-row">
-            <button
-              class="chat-info-capsule"
-              onclick={() => onOpenSession?.(sessionId!)}
-              title="Open chat session"
-            >
-              <MessageCircle size={16} aria-hidden="true" />
-              <span>{chatButtonLabel}</span>
-            </button>
+            <Tooltip.Root>
+              <Tooltip.Trigger>
+                {#snippet child({ props })}
+                  <Button
+                    {...props}
+                    variant="outline"
+                    class="h-auto min-h-9 max-w-full gap-2 border-[var(--border-muted)] bg-[var(--bg-chrome)] px-3.5 py-2 text-sm font-medium text-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+                    onclick={() => onOpenSession?.(sessionId!)}
+                  >
+                    <MessageCircle size={16} aria-hidden="true" />
+                    <span class="min-w-0 truncate">{chatButtonLabel}</span>
+                  </Button>
+                {/snippet}
+              </Tooltip.Trigger>
+              <Tooltip.Content>Open chat session</Tooltip.Content>
+            </Tooltip.Root>
           </div>
         {/if}
         {#if nextSteps && onStartSession && nextSteps.noteStep}
           <div class="next-step-row">
             <span class="next-step-prompt">{nextSteps.noteStep}</span>
-            <button
-              class="next-step-btn note-btn"
+            <Button
+              variant="outline"
+              size="sm"
+              class="h-auto shrink-0 rounded-md border-transparent bg-[var(--note-bg)] px-3 py-1 text-xs font-medium text-[var(--note-color)] shadow-none hover:border-transparent hover:bg-[var(--note-bg-emphasis)] hover:text-[var(--note-color)]"
               onclick={() => onStartSession('note', nextSteps!.noteStep!)}
             >
               Start note
-            </button>
+            </Button>
           </div>
         {/if}
         {#if nextSteps && onStartSession && nextSteps.commitStep}
           <div class="next-step-row">
             <span class="next-step-prompt">{nextSteps.commitStep}</span>
-            <button
-              class="next-step-btn commit-btn"
+            <Button
+              variant="outline"
+              size="sm"
+              class="h-auto shrink-0 rounded-md border-transparent bg-[var(--commit-bg)] px-3 py-1 text-xs font-medium text-[var(--commit-color)] shadow-none hover:border-transparent hover:bg-[var(--commit-bg-emphasis)] hover:text-[var(--commit-color)]"
               onclick={() => onStartSession('commit', nextSteps!.commitStep!)}
             >
               Start commit
-            </button>
+            </Button>
           </div>
         {/if}
       </div>
     {/if}
-  </div>
-</div>
+  </Dialog.Content>
+</Dialog.Root>
 
 <style>
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: var(--shadow-overlay);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-  }
-
-  .modal {
-    display: flex;
-    flex-direction: column;
-    width: 700px;
-    height: 80vh;
-    max-height: 900px;
-    background: var(--bg-chrome);
-    border-radius: 12px;
-    overflow: hidden;
-    box-shadow: var(--shadow-elevated);
-  }
-
-  .modal-header {
-    position: relative;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 12px 16px;
-    border-bottom: 1px solid var(--border-subtle);
-    flex-shrink: 0;
-    gap: 12px;
-  }
-
   .header-content {
     display: flex;
     align-items: center;
@@ -348,69 +353,11 @@
     flex: 1;
   }
 
-  .header-title {
-    font-size: var(--size-sm);
-    font-weight: 600;
-    color: var(--text-primary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .close-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 4px;
-    background: none;
-    border: none;
-    border-radius: 6px;
-    color: var(--text-muted);
-    cursor: pointer;
-    flex-shrink: 0;
-    transition:
-      color 0.1s,
-      background-color 0.1s;
-  }
-
-  .close-btn:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover);
-  }
-
   .header-actions {
     display: flex;
     align-items: center;
     gap: 4px;
     flex-shrink: 0;
-  }
-
-  .header-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 4px 10px;
-    background: none;
-    border: 1px solid var(--border-muted);
-    border-radius: 6px;
-    color: var(--text-muted);
-    cursor: pointer;
-    flex-shrink: 0;
-    font-size: 12px;
-    transition:
-      color 0.1s,
-      background-color 0.1s,
-      border-color 0.1s;
-  }
-
-  .header-btn:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover);
-    border-color: var(--text-muted);
-  }
-
-  .header-btn.copied {
-    color: var(--status-added);
   }
 
   .modal-body {
@@ -598,104 +545,8 @@
     min-width: 0;
   }
 
-  .next-step-btn {
-    flex-shrink: 0;
-    padding: 4px 12px;
-    border: none;
-    border-radius: 6px;
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background-color 0.1s;
-  }
-
-  .next-step-btn.note-btn {
-    color: var(--note-color);
-    background: var(--note-bg);
-  }
-
-  .next-step-btn.note-btn:hover {
-    background: var(--note-bg-emphasis);
-  }
-
-  .next-step-btn.commit-btn {
-    color: var(--commit-color);
-    background: var(--commit-bg);
-  }
-
-  .next-step-btn.commit-btn:hover {
-    background: var(--commit-bg-emphasis);
-  }
-
   .chat-info-row {
     display: flex;
     justify-content: center;
-  }
-
-  .chat-info-capsule {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    box-sizing: border-box;
-    max-width: 100%;
-    min-height: 36px;
-    padding: 8px 14px;
-    background: var(--bg-chrome);
-    border: 1px solid var(--border-muted);
-    border-radius: 8px;
-    color: var(--text-primary);
-    cursor: pointer;
-    font-size: var(--size-sm);
-    font-weight: 500;
-    transition:
-      background-color 0.1s,
-      border-color 0.1s,
-      color 0.1s;
-  }
-
-  .chat-info-capsule:hover {
-    background: var(--bg-hover);
-    border-color: var(--text-muted);
-  }
-
-  .chat-info-capsule span {
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  @media (max-width: 700px) {
-    .modal {
-      width: 100vw;
-      height: 100vh;
-      height: 100dvh;
-      max-height: none;
-      border-radius: 0;
-      box-shadow: none;
-    }
-
-    .modal-header {
-      padding: 12px;
-    }
-
-    .header-btn,
-    .close-btn {
-      min-height: 40px;
-    }
-
-    .close-btn {
-      width: 40px;
-      padding: 0;
-    }
-
-    .modal-content {
-      padding: 16px;
-    }
-
-    .next-steps {
-      padding: 12px;
-    }
   }
 </style>

@@ -13,18 +13,18 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import {
-    X,
-    ArrowLeft,
-    ChevronDown,
-    GitBranch,
-    GitCommitHorizontal,
-    PanelRightOpen,
-  } from 'lucide-svelte';
+  import X from '@lucide/svelte/icons/x';
+  import ArrowLeft from '@lucide/svelte/icons/arrow-left';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import GitBranch from '@lucide/svelte/icons/git-branch';
+  import GitCommitHorizontal from '@lucide/svelte/icons/git-commit-horizontal';
+  import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
   import { getWindowSync } from '../../transport';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
-  import { alerts } from '../../shared/alerts.svelte';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
+  import { toast } from 'svelte-sonner';
   import { formatRelativeTimeSeconds } from '../../shared/relativeTime.svelte';
   import { DiffViewer, CrossFileSearchBar } from '@builderbot/diff-viewer/components';
   import DiffCommentsSection from './DiffCommentsSection.svelte';
@@ -475,16 +475,11 @@
       }
 
       const label = mode === 'note' ? 'Note' : 'Commit';
-      alerts.show({
-        tone: 'success',
-        message: `${label} session ${hasRunning ? 'queued' : 'started'}`,
-      });
+      toast.success(`${label} session ${hasRunning ? 'queued' : 'started'}`);
     } catch (e) {
-      alerts.show({
-        tone: 'error',
-        title: `Unable to start ${mode} session`,
-        message: e instanceof Error ? e.message : String(e),
-        durationMs: 0,
+      toast.error(`Unable to start ${mode} session`, {
+        description: e instanceof Error ? e.message : String(e),
+        duration: Infinity,
       });
     }
   }
@@ -557,16 +552,11 @@
       }
 
       const label = data.mode === 'note' ? 'Note' : data.mode === 'commit' ? 'Commit' : 'Review';
-      alerts.show({
-        tone: 'success',
-        message: `${label} session ${hasRunning ? 'queued' : 'started'}`,
-      });
+      toast.success(`${label} session ${hasRunning ? 'queued' : 'started'}`);
     } catch (e) {
-      alerts.show({
-        tone: 'error',
-        title: `Unable to start ${data.mode} session`,
-        message: e instanceof Error ? e.message : String(e),
-        durationMs: 0,
+      toast.error(`Unable to start ${data.mode} session`, {
+        description: e instanceof Error ? e.message : String(e),
+        duration: Infinity,
       });
     }
   }
@@ -592,10 +582,8 @@
     if (comment.githubCommentId != null && !comment.githubCommentStale) {
       const url = getGithubCommentUrl(comment);
       if (!url) {
-        alerts.show({
-          tone: 'error',
-          title: 'Unable to open GitHub comment',
-          message: 'The comment URL is not available.',
+        toast.error('Unable to open GitHub comment', {
+          description: 'The comment URL is not available.',
         });
         return;
       }
@@ -603,10 +591,8 @@
       try {
         await commands.openUrl(url);
       } catch (e) {
-        alerts.show({
-          tone: 'error',
-          title: 'Unable to open GitHub comment',
-          message: e instanceof Error ? e.message : String(e),
+        toast.error('Unable to open GitHub comment', {
+          description: e instanceof Error ? e.message : String(e),
         });
       }
       return;
@@ -631,11 +617,9 @@
         );
       }
     } catch (e) {
-      alerts.show({
-        tone: 'error',
-        title: 'Failed to post comment',
-        message: e instanceof Error ? e.message : String(e),
-        durationMs: 0,
+      toast.error('Failed to post comment', {
+        description: e instanceof Error ? e.message : String(e),
+        duration: Infinity,
       });
     } finally {
       sendingCommentIds = new Set([...sendingCommentIds].filter((id) => id !== comment.id));
@@ -1233,13 +1217,22 @@
     <div class="title-bar" onpointerdown={startDrag}>
       <div class="traffic-light-spacer"></div>
       <div class="left-actions">
-        <button
-          class="icon-btn"
-          onclick={onClose}
-          title={viewport.showShortcutHints ? 'Back (Esc)' : 'Back'}
-        >
-          <ArrowLeft size={14} />
-        </button>
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            {#snippet child({ props })}
+              <Button
+                {...props}
+                variant="ghost"
+                size="icon"
+                class="size-auto shrink-0 rounded-md p-[5px] text-muted-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-35 [&_svg]:!size-3.5"
+                onclick={onClose}
+              >
+                <ArrowLeft size={14} />
+              </Button>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content>{viewport.showShortcutHints ? 'Back (Esc)' : 'Back'}</Tooltip.Content>
+        </Tooltip.Root>
       </div>
       <div class="title-content">
         {#if projectName}
@@ -1252,24 +1245,33 @@
       <div class="drag-spacer"></div>
       {#if showContextSwitcher}
         <div class="context-switcher">
-          <button
-            type="button"
-            class="context-switcher-btn"
-            disabled={switchingContext}
-            onclick={() => (showContextDropdown ? closeDropdown() : openDropdown())}
-            onkeydown={handleDropdownKeydown}
-            aria-expanded={showContextDropdown}
-            aria-haspopup="listbox"
-            title="Switch diff context"
-          >
-            {#if activeScope === 'branch'}
-              <GitBranch size={12} />
-            {:else}
-              <GitCommitHorizontal size={12} />
-            {/if}
-            <span class="context-label">{contextLabel}</span>
-            <ChevronDown size={12} />
-          </button>
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <span {...props} class="inline-flex">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    class="h-auto gap-1.5 rounded-md border-[var(--border-subtle)] bg-transparent px-2.5 py-1 text-xs font-medium text-muted-foreground shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-3"
+                    disabled={switchingContext}
+                    onclick={() => (showContextDropdown ? closeDropdown() : openDropdown())}
+                    onkeydown={handleDropdownKeydown}
+                    aria-expanded={showContextDropdown}
+                    aria-haspopup="listbox"
+                  >
+                    {#if activeScope === 'branch'}
+                      <GitBranch size={12} />
+                    {:else}
+                      <GitCommitHorizontal size={12} />
+                    {/if}
+                    <span class="context-label">{contextLabel}</span>
+                    <ChevronDown size={12} />
+                  </Button>
+                </span>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>Switch diff context</Tooltip.Content>
+          </Tooltip.Root>
           {#if showContextDropdown}
             <div class="context-dropdown" role="listbox" aria-label="Diff context">
               {#each reversedCommits as commit, i (commit.sha)}
@@ -1310,14 +1312,23 @@
         </div>
       {/if}
       {#if isSmallDiffViewport}
-        <button
-          class="icon-btn mobile-sidebar-trigger"
-          onclick={() => (showMobileSidebar = true)}
-          title="Show changed files"
-          aria-label="Show changed files"
-        >
-          <PanelRightOpen size={14} />
-        </button>
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            {#snippet child({ props })}
+              <Button
+                {...props}
+                variant="ghost"
+                size="icon"
+                class="size-auto shrink-0 rounded-md p-[5px] text-muted-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-35 [&_svg]:!size-3.5"
+                onclick={() => (showMobileSidebar = true)}
+                aria-label="Show changed files"
+              >
+                <PanelRightOpen size={14} />
+              </Button>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content>Show changed files</Tooltip.Content>
+        </Tooltip.Root>
       {/if}
     </div>
 
@@ -1371,14 +1382,23 @@
       <div class="mobile-sidebar-dialog">
         <div class="mobile-sidebar-header">
           <span class="mobile-sidebar-title">Changed files</span>
-          <button
-            class="icon-btn"
-            onclick={() => (showMobileSidebar = false)}
-            title="Close changed files"
-            aria-label="Close changed files"
-          >
-            <X size={14} />
-          </button>
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="ghost"
+                  size="icon"
+                  class="size-auto shrink-0 rounded-md p-[5px] text-muted-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-35 [&_svg]:!size-3.5"
+                  onclick={() => (showMobileSidebar = false)}
+                  aria-label="Close changed files"
+                >
+                  <X size={14} />
+                </Button>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>Close changed files</Tooltip.Content>
+          </Tooltip.Root>
         </div>
         <div class="mobile-sidebar-body">
           {@render fileSidebarContents()}
@@ -1389,6 +1409,7 @@
 
   {#if showNewSessionModal && branch}
     <NewSessionModal
+      open={true}
       {branch}
       mode={newSessionMode}
       initialPrompt={newSessionPrefill}
@@ -1473,32 +1494,6 @@
     min-width: 20px;
   }
 
-  .icon-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 5px;
-    background: transparent;
-    border: none;
-    border-radius: 6px;
-    color: var(--text-muted);
-    cursor: pointer;
-    -webkit-app-region: no-drag;
-    transition:
-      color 0.1s,
-      background-color 0.1s;
-  }
-
-  .icon-btn:hover:not(:disabled) {
-    color: var(--text-primary);
-    background-color: var(--bg-hover);
-  }
-
-  .icon-btn:disabled {
-    opacity: 0.35;
-    cursor: not-allowed;
-  }
-
   /* ========================================================================
    * Context switcher
    * ====================================================================== */
@@ -1506,31 +1501,6 @@
   .context-switcher {
     position: relative;
     -webkit-app-region: no-drag;
-  }
-
-  .context-switcher-btn {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    padding: 4px 10px;
-    background: none;
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    color: var(--text-muted);
-    font-size: var(--size-xs);
-    font-weight: 500;
-    font-family: inherit;
-    cursor: pointer;
-    transition:
-      color 0.15s,
-      border-color 0.15s,
-      background-color 0.15s;
-  }
-
-  .context-switcher-btn:hover {
-    color: var(--text-primary);
-    border-color: var(--border-muted);
-    background: var(--bg-hover);
   }
 
   .context-label {
@@ -1701,10 +1671,6 @@
     overflow: hidden;
   }
 
-  .mobile-sidebar-trigger {
-    display: none;
-  }
-
   .mobile-sidebar-backdrop {
     position: fixed;
     inset: 0;
@@ -1803,10 +1769,6 @@
 
     .context-label {
       max-width: 96px;
-    }
-
-    .mobile-sidebar-trigger {
-      display: flex;
     }
 
     .modal-body {

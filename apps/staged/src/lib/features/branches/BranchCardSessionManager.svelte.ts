@@ -14,7 +14,7 @@ import * as commands from '../../api/commands';
 import { isSessionActive } from '../../shared/sessionStatus';
 import { getPreferredAgent } from '../settings/preferences.svelte';
 import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
-import { alerts } from '../../shared/alerts.svelte';
+import { toast } from 'svelte-sonner';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
 import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
@@ -324,11 +324,9 @@ export default class BranchCardSessionManager {
       this.loadTimeline();
     } catch (e) {
       this.pendingSessionItems = this.pendingSessionItems.filter((item) => item.key !== pendingKey);
-      alerts.show({
-        tone: 'error',
-        title: 'Unable to start session',
-        message: e instanceof Error ? e.message : String(e),
-        durationMs: 0,
+      toast.error('Unable to start session', {
+        description: e instanceof Error ? e.message : String(e),
+        duration: Infinity,
       });
     }
   }
@@ -382,11 +380,9 @@ export default class BranchCardSessionManager {
       this.loadTimeline();
     } catch (e) {
       this.pendingSessionItems = this.pendingSessionItems.filter((item) => item.key !== pendingKey);
-      alerts.show({
-        tone: 'error',
-        title: 'Unable to queue session',
-        message: e instanceof Error ? e.message : String(e),
-        durationMs: 0,
+      toast.error('Unable to queue session', {
+        description: e instanceof Error ? e.message : String(e),
+        duration: Infinity,
       });
     }
   }

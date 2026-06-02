@@ -10,7 +10,10 @@
   import { onDestroy } from 'svelte';
   import type { Snippet } from 'svelte';
   import { slide } from 'svelte/transition';
-  import { FileText, GitCommitVertical, FileSearch, Plus } from 'lucide-svelte';
+  import FileText from '@lucide/svelte/icons/file-text';
+  import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
+  import FileSearch from '@lucide/svelte/icons/file-search';
+  import Plus from '@lucide/svelte/icons/plus';
   import { isResumableReason } from '../../types';
   import type {
     BranchGitState,
@@ -19,8 +22,9 @@
   } from '../../types';
   import type { NoteClickInfo } from '../sessions/noteFreshness';
   import TimelineRow from './TimelineRow.svelte';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
   import type { TimelineItemType, TimelineBadge } from './TimelineRow.svelte';
-  import TimelineContextMenu from './TimelineContextMenu.svelte';
   import { escapeHtml, hasHashtagTokens, renderHashtagTokens } from '../sessions/hashtagItems';
   import {
     formatRelativeTime,
@@ -787,9 +791,6 @@
     items.length === 0 && pendingDropNotes.length === 0 && pendingItems.length === 0
   );
 
-  // ── Context menu (single instance for all rows) ───────────────────────
-  let contextMenuRef: TimelineContextMenu | undefined = $state();
-
   // ── Handlers ──────────────────────────────────────────────────────────
 
   function handleItemClick(item: DisplayItem) {
@@ -920,7 +921,7 @@
           commitSha={item.commitSha}
           hashtagRef={item.hashtagRef}
           showConnector={item.showConnector}
-          onContextMenu={(e) => contextMenuRef?.open(e)}
+          {onNewSessionReferring}
           {onSessionClick}
           onItemClick={() => handleItemClick(item)}
           onDeleteClick={!isDeletable(item) || item.deleteDisabledReason
@@ -1001,7 +1002,7 @@
           commitSha={item.commitSha}
           hashtagRef={item.hashtagRef}
           showConnector={item.showConnector}
-          onContextMenu={(e) => contextMenuRef?.open(e)}
+          {onNewSessionReferring}
           {onSessionClick}
           onItemClick={() => handleItemClick(item)}
           onDeleteClick={!isDeletable(item) || item.deleteDisabledReason
@@ -1031,49 +1032,154 @@
       <div class="footer-row" class:footer-row-enlarged={actionButtonsEnlarged}>
         <div class="footer-left-actions" class:footer-left-actions-enlarged={actionButtonsEnlarged}>
           {#if onNewNote}
-            <button
-              class="add-item-btn note-btn"
-              class:add-item-btn-enlarged={actionButtonsEnlarged}
-              onclick={onNewNote}
-              disabled={newSessionDisabled}
-              title="New note"
-              aria-label="New note"
-            >
-              <FileText class="add-item-icon-default" size={18} />
-              <Plus class="add-item-icon-compact" size={18} />
-              <span class="label-full">New note</span>
-              <span class="label-compact">Note</span>
-            </button>
+            <Tooltip.Root>
+              <Tooltip.Trigger>
+                {#snippet child({ props })}
+                  <span
+                    {...props}
+                    class={actionButtonsEnlarged ? 'inline-flex flex-1' : 'inline-flex'}
+                  >
+                    <Button
+                      variant="ghost"
+                      onclick={onNewNote}
+                      disabled={newSessionDisabled}
+                      aria-label="New note"
+                      class={[
+                        'inline-flex items-center font-medium transition-all duration-300 disabled:opacity-30 disabled:cursor-not-allowed',
+                        '[&_svg]:!text-[var(--note-color)] [&_svg]:transition-all [&_svg]:duration-300',
+                        actionButtonsEnlarged
+                          ? 'flex-1 justify-center gap-2 px-1.5 py-2.5 h-auto rounded-lg border border-solid border-transparent bg-[var(--bg-elevated)] text-sm text-[var(--text-muted)] hover:not-disabled:bg-[var(--note-bg)] hover:not-disabled:text-[var(--note-color)] [&_svg]:!size-[18px]'
+                          : 'gap-[5px] px-2.5 py-1 h-auto rounded-md border border-dashed border-[var(--border-subtle)] bg-transparent text-xs text-[var(--text-muted)] hover:not-disabled:border-[var(--note-color)] hover:not-disabled:bg-[var(--note-bg)] hover:not-disabled:text-[var(--note-color)] [&_svg]:!size-[13px] @max-[480px]/timeline:gap-0.5 @max-[480px]/timeline:px-1.5',
+                      ]}
+                    >
+                      <FileText
+                        class={actionButtonsEnlarged
+                          ? ''
+                          : '@max-3xl/timeline:hidden @max-[480px]/timeline:inline-block'}
+                        size={18}
+                      />
+                      <Plus
+                        class={actionButtonsEnlarged
+                          ? 'hidden'
+                          : 'hidden @max-3xl/timeline:inline-block @max-[480px]/timeline:!size-[10px]'}
+                        size={18}
+                      />
+                      <span class={!actionButtonsEnlarged ? '@max-3xl/timeline:hidden' : ''}
+                        >New note</span
+                      >
+                      <span
+                        class={[
+                          'hidden',
+                          !actionButtonsEnlarged &&
+                            '@max-3xl/timeline:inline @max-[480px]/timeline:hidden',
+                        ]}>Note</span
+                      >
+                    </Button>
+                  </span>
+                {/snippet}
+              </Tooltip.Trigger>
+              <Tooltip.Content>New note</Tooltip.Content>
+            </Tooltip.Root>
           {/if}
           {#if onNewCommit}
-            <button
-              class="add-item-btn commit-btn"
-              class:add-item-btn-enlarged={actionButtonsEnlarged}
-              onclick={onNewCommit}
-              disabled={newSessionDisabled}
-              title="New commit"
-              aria-label="New commit"
-            >
-              <GitCommitVertical class="add-item-icon-default" size={18} />
-              <Plus class="add-item-icon-compact" size={18} />
-              <span class="label-full">New commit</span>
-              <span class="label-compact">Commit</span>
-            </button>
+            <Tooltip.Root>
+              <Tooltip.Trigger>
+                {#snippet child({ props })}
+                  <span
+                    {...props}
+                    class={actionButtonsEnlarged ? 'inline-flex flex-1' : 'inline-flex'}
+                  >
+                    <Button
+                      variant="ghost"
+                      onclick={onNewCommit}
+                      disabled={newSessionDisabled}
+                      aria-label="New commit"
+                      class={[
+                        'inline-flex items-center font-medium transition-all duration-300 disabled:opacity-30 disabled:cursor-not-allowed',
+                        '[&_svg]:!text-[var(--commit-color)] [&_svg]:transition-all [&_svg]:duration-300',
+                        actionButtonsEnlarged
+                          ? 'flex-1 justify-center gap-2 px-1.5 py-2.5 h-auto rounded-lg border border-solid border-transparent bg-[var(--bg-elevated)] text-sm text-[var(--text-muted)] hover:not-disabled:bg-[var(--commit-bg)] hover:not-disabled:text-[var(--commit-color)] [&_svg]:!size-[18px]'
+                          : 'gap-[5px] px-2.5 py-1 h-auto rounded-md border border-dashed border-[var(--border-subtle)] bg-transparent text-xs text-[var(--text-muted)] hover:not-disabled:border-[var(--commit-color)] hover:not-disabled:bg-[var(--commit-bg)] hover:not-disabled:text-[var(--commit-color)] [&_svg]:!size-[13px] @max-[480px]/timeline:gap-0.5 @max-[480px]/timeline:px-1.5',
+                      ]}
+                    >
+                      <GitCommitVertical
+                        class={actionButtonsEnlarged
+                          ? ''
+                          : '@max-3xl/timeline:hidden @max-[480px]/timeline:inline-block'}
+                        size={18}
+                      />
+                      <Plus
+                        class={actionButtonsEnlarged
+                          ? 'hidden'
+                          : 'hidden @max-3xl/timeline:inline-block @max-[480px]/timeline:!size-[10px]'}
+                        size={18}
+                      />
+                      <span class={!actionButtonsEnlarged ? '@max-3xl/timeline:hidden' : ''}
+                        >New commit</span
+                      >
+                      <span
+                        class={[
+                          'hidden',
+                          !actionButtonsEnlarged &&
+                            '@max-3xl/timeline:inline @max-[480px]/timeline:hidden',
+                        ]}>Commit</span
+                      >
+                    </Button>
+                  </span>
+                {/snippet}
+              </Tooltip.Trigger>
+              <Tooltip.Content>New commit</Tooltip.Content>
+            </Tooltip.Root>
           {/if}
           {#if onNewReview}
-            <button
-              class="add-item-btn review-btn"
-              class:add-item-btn-enlarged={actionButtonsEnlarged}
-              onclick={(e) => onNewReview?.(e)}
-              disabled={newSessionDisabled}
-              title="New code review"
-              aria-label="New code review"
-            >
-              <FileSearch class="add-item-icon-default" size={18} />
-              <Plus class="add-item-icon-compact" size={18} />
-              <span class="label-full">New code review</span>
-              <span class="label-compact">Code review</span>
-            </button>
+            <Tooltip.Root>
+              <Tooltip.Trigger>
+                {#snippet child({ props })}
+                  <span
+                    {...props}
+                    class={actionButtonsEnlarged ? 'inline-flex flex-1' : 'inline-flex'}
+                  >
+                    <Button
+                      variant="ghost"
+                      onclick={(e) => onNewReview?.(e)}
+                      disabled={newSessionDisabled}
+                      aria-label="New code review"
+                      class={[
+                        'inline-flex items-center font-medium transition-all duration-300 disabled:opacity-30 disabled:cursor-not-allowed',
+                        '[&_svg]:!text-[var(--review-color)] [&_svg]:transition-all [&_svg]:duration-300',
+                        actionButtonsEnlarged
+                          ? 'flex-1 justify-center gap-2 px-1.5 py-2.5 h-auto rounded-lg border border-solid border-transparent bg-[var(--bg-elevated)] text-sm text-[var(--text-muted)] hover:not-disabled:bg-[var(--review-bg)] hover:not-disabled:text-[var(--review-color)] [&_svg]:!size-[18px]'
+                          : 'gap-[5px] px-2.5 py-1 h-auto rounded-md border border-dashed border-[var(--border-subtle)] bg-transparent text-xs text-[var(--text-muted)] hover:not-disabled:border-[var(--review-color)] hover:not-disabled:bg-[var(--review-bg)] hover:not-disabled:text-[var(--review-color)] [&_svg]:!size-[13px] @max-[480px]/timeline:gap-0.5 @max-[480px]/timeline:px-1.5',
+                      ]}
+                    >
+                      <FileSearch
+                        class={actionButtonsEnlarged
+                          ? ''
+                          : '@max-3xl/timeline:hidden @max-[480px]/timeline:inline-block'}
+                        size={18}
+                      />
+                      <Plus
+                        class={actionButtonsEnlarged
+                          ? 'hidden'
+                          : 'hidden @max-3xl/timeline:inline-block @max-[480px]/timeline:!size-[10px]'}
+                        size={18}
+                      />
+                      <span class={!actionButtonsEnlarged ? '@max-3xl/timeline:hidden' : ''}
+                        >New code review</span
+                      >
+                      <span
+                        class={[
+                          'hidden',
+                          !actionButtonsEnlarged &&
+                            '@max-3xl/timeline:inline @max-[480px]/timeline:hidden',
+                        ]}>Code review</span
+                      >
+                    </Button>
+                  </span>
+                {/snippet}
+              </Tooltip.Trigger>
+              <Tooltip.Content>New code review</Tooltip.Content>
+            </Tooltip.Root>
           {/if}
         </div>
         {#if footerActions && !actionButtonsEnlarged}
@@ -1083,8 +1189,6 @@
     {/if}
   </div>
 {/if}
-
-<TimelineContextMenu bind:this={contextMenuRef} {onNewSessionReferring} />
 
 <style>
   /* ── Timeline ────────────────────────────────────────────────────────── */
@@ -1138,147 +1242,5 @@
   .footer-left-actions-enlarged {
     gap: 10px;
     flex: 1;
-  }
-
-  .add-item-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 4px 10px;
-    border-radius: 6px;
-    border: 1px dashed var(--border-subtle);
-    background: transparent;
-    color: var(--text-muted);
-    font-size: var(--size-xs);
-    font-weight: 500;
-    cursor: pointer;
-    transition:
-      color 0.15s,
-      border-color 0.15s,
-      background-color 0.15s,
-      padding 0.3s ease,
-      border-radius 0.3s ease,
-      gap 0.3s ease,
-      font-size 0.3s ease,
-      flex 0.3s ease,
-      border-style 0.3s ease;
-  }
-
-  .add-item-btn :global(svg) {
-    transition:
-      width 0.3s ease,
-      height 0.3s ease;
-    width: 13px;
-    height: 13px;
-  }
-
-  .add-item-btn :global(.add-item-icon-compact),
-  .label-compact {
-    display: none;
-  }
-
-  .add-item-btn-enlarged {
-    flex: 1;
-    justify-content: center;
-    gap: 8px;
-    padding: 10px 6px;
-    border-radius: 8px;
-    border-color: transparent;
-    border-style: solid;
-    background: var(--bg-elevated);
-    font-size: var(--size-sm);
-  }
-
-  .add-item-btn-enlarged :global(svg) {
-    width: 18px;
-    height: 18px;
-  }
-
-  .add-item-btn-enlarged.note-btn:hover:not(:disabled) {
-    color: var(--note-color);
-    background-color: var(--note-bg);
-  }
-
-  .add-item-btn-enlarged.commit-btn:hover:not(:disabled) {
-    color: var(--commit-color);
-    background-color: var(--commit-bg);
-  }
-
-  .add-item-btn-enlarged.review-btn:hover:not(:disabled) {
-    color: var(--review-color);
-    background-color: var(--review-bg);
-  }
-
-  /* Colored icons only in passive state */
-  .add-item-btn.note-btn :global(svg) {
-    color: var(--note-color);
-  }
-
-  .add-item-btn.commit-btn :global(svg) {
-    color: var(--commit-color);
-  }
-
-  .add-item-btn.review-btn :global(svg) {
-    color: var(--review-color);
-  }
-
-  .add-item-btn.note-btn:hover:not(:disabled) {
-    color: var(--note-color);
-    border-color: var(--note-color);
-    background-color: var(--note-bg);
-  }
-
-  .add-item-btn.commit-btn:hover:not(:disabled) {
-    color: var(--commit-color);
-    border-color: var(--commit-color);
-    background-color: var(--commit-bg);
-  }
-
-  .add-item-btn.review-btn:hover:not(:disabled) {
-    color: var(--review-color);
-    border-color: var(--review-color);
-    background-color: var(--review-bg);
-  }
-
-  .add-item-btn:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-  }
-
-  @container timeline (max-width: 768px) {
-    .add-item-btn:not(.add-item-btn-enlarged) :global(.add-item-icon-default),
-    .add-item-btn:not(.add-item-btn-enlarged) .label-full {
-      display: none;
-    }
-
-    .add-item-btn:not(.add-item-btn-enlarged) :global(.add-item-icon-compact) {
-      display: block;
-    }
-
-    .add-item-btn:not(.add-item-btn-enlarged) .label-compact {
-      display: inline;
-    }
-  }
-
-  @container timeline (max-width: 480px) {
-    .add-item-btn:not(.add-item-btn-enlarged) :global(.add-item-icon-default) {
-      display: block;
-    }
-
-    .add-item-btn:not(.add-item-btn-enlarged) :global(.add-item-icon-compact) {
-      display: block;
-      width: 10px;
-      height: 10px;
-    }
-
-    .add-item-btn:not(.add-item-btn-enlarged) .label-full,
-    .add-item-btn:not(.add-item-btn-enlarged) .label-compact {
-      display: none;
-    }
-
-    .add-item-btn:not(.add-item-btn-enlarged) {
-      padding: 4px 6px;
-      gap: 2px;
-    }
   }
 </style>

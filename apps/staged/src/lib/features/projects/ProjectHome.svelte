@@ -23,9 +23,10 @@
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
   import NewProjectModal from './NewProjectModal.svelte';
   import ProjectsSidebar from './ProjectsSidebar.svelte';
-  import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
   import SplashScreen from './SplashScreen.svelte';
-  import { alerts } from '../../shared/alerts.svelte';
+  import * as AlertDialog from '$lib/components/ui/alert-dialog';
+  import { Button } from '$lib/components/ui/button';
+  import { toast } from 'svelte-sonner';
   import { setProjects } from './projectsSidebarState.svelte';
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
@@ -508,11 +509,7 @@
     } catch (e) {
       console.error('Failed to delete project:', e);
       const message = e instanceof Error ? e.message : String(e);
-      alerts.show({
-        tone: 'error',
-        title: 'Unable to delete project',
-        message,
-      });
+      toast.error('Unable to delete project', { description: message });
     } finally {
       const next = new Map(deletingProjectNames);
       next.delete(id);
@@ -564,11 +561,9 @@
     } catch (e) {
       console.error('Failed to add repo:', e);
       const message = e instanceof Error ? e.message : String(e);
-      alerts.show({
-        tone: 'error',
-        title: 'Unable to add repository',
-        message,
-        durationMs: 0,
+      toast.error('Unable to add repository', {
+        description: message,
+        duration: Infinity,
       });
     }
   }
@@ -696,10 +691,10 @@
               Not ready? Install <code>v{storeIncompat.dbAppVersion}</code> instead.
             </p>
             <div class="update-actions">
-              <button class="close-button" onclick={handleClose}>Close</button>
-              <button class="reset-button" onclick={handleResetStore} disabled={resetting}>
+              <Button variant="ghost" size="sm" onclick={handleClose}>Close</Button>
+              <Button variant="outline" size="sm" onclick={handleResetStore} disabled={resetting}>
                 {resetting ? 'Resetting…' : 'Reset & Update'}
-              </button>
+              </Button>
             </div>
           </div>
         </div>
@@ -718,7 +713,7 @@
           <div class="update-footer">
             <div></div>
             <div class="update-actions">
-              <button class="close-button" onclick={handleClose}>Close</button>
+              <Button variant="ghost" size="sm" onclick={handleClose}>Close</Button>
             </div>
           </div>
         </div>
@@ -769,33 +764,57 @@
 </div>
 
 <!-- New project modal (only when projects exist; splash screen handles inline form otherwise) -->
-{#if showNewProjectModal && hasContent}
-  <NewProjectModal onCreated={handleProjectCreated} onClose={() => (showNewProjectModal = false)} />
-{/if}
+<NewProjectModal
+  open={showNewProjectModal && hasContent}
+  onCreated={handleProjectCreated}
+  onClose={() => (showNewProjectModal = false)}
+/>
 
 <!-- Delete project confirmation -->
-{#if projectToDelete}
-  <ConfirmDialog
-    title="Remove Project"
-    message={`Remove "${projectDisplayName(projectToDelete)}" from Staged? There are unmerged changes in this project's branches. Deleting this project will lose any changes not pushed to GitHub.`}
-    confirmLabel="Remove"
-    danger={true}
-    onConfirm={confirmDeleteProject}
-    onCancel={() => (projectToDelete = null)}
-  />
-{/if}
+<AlertDialog.Root
+  open={projectToDelete !== null}
+  onOpenChange={(v) => !v && (projectToDelete = null)}
+>
+  <AlertDialog.Content>
+    {#if projectToDelete}
+      <AlertDialog.Header>
+        <AlertDialog.Title>Remove Project</AlertDialog.Title>
+        <AlertDialog.Description>
+          {`Remove "${projectDisplayName(projectToDelete)}" from Staged? There are unmerged changes in this project's branches. Deleting this project will lose any changes not pushed to GitHub.`}
+        </AlertDialog.Description>
+      </AlertDialog.Header>
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+        <AlertDialog.Action variant="destructive" onclick={confirmDeleteProject}>
+          Remove
+        </AlertDialog.Action>
+      </AlertDialog.Footer>
+    {/if}
+  </AlertDialog.Content>
+</AlertDialog.Root>
 
 <!-- Delete branch confirmation -->
-{#if branchToDelete}
-  <ConfirmDialog
-    title="Delete Repo"
-    message={`Delete repo for branch "${branchToDelete.branch.branchName}"? This removes its tracked branch and local worktree/remote workspace.`}
-    confirmLabel="Delete"
-    danger={true}
-    onConfirm={confirmDeleteBranch}
-    onCancel={() => (branchToDelete = null)}
-  />
-{/if}
+<AlertDialog.Root
+  open={branchToDelete !== null}
+  onOpenChange={(v) => !v && (branchToDelete = null)}
+>
+  <AlertDialog.Content>
+    {#if branchToDelete}
+      <AlertDialog.Header>
+        <AlertDialog.Title>Delete Repo</AlertDialog.Title>
+        <AlertDialog.Description>
+          {`Delete repo for branch "${branchToDelete.branch.branchName}"? This removes its tracked branch and local worktree/remote workspace.`}
+        </AlertDialog.Description>
+      </AlertDialog.Header>
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+        <AlertDialog.Action variant="destructive" onclick={confirmDeleteBranch}>
+          Delete
+        </AlertDialog.Action>
+      </AlertDialog.Footer>
+    {/if}
+  </AlertDialog.Content>
+</AlertDialog.Root>
 
 <style>
   .project-home {
@@ -906,44 +925,6 @@
     flex-shrink: 0;
   }
 
-  .close-button {
-    padding: 7px 16px;
-    background: none;
-    border: 1px solid var(--border-muted);
-    border-radius: 8px;
-    color: var(--text-muted);
-    font-size: var(--size-sm);
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .close-button:hover {
-    border-color: var(--border-emphasis);
-    color: var(--text-primary);
-  }
-
-  .reset-button {
-    padding: 7px 16px;
-    background-color: var(--ui-accent);
-    border: none;
-    border-radius: 8px;
-    color: var(--bg-deepest);
-    font-size: var(--size-sm);
-    font-weight: 600;
-    cursor: pointer;
-    transition: background-color 0.15s ease;
-  }
-
-  .reset-button:hover {
-    background-color: var(--ui-accent-hover);
-  }
-
-  .reset-button:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-
   /* Projects list */
   .projects-list {
     width: 100%;
@@ -975,8 +956,7 @@
       justify-content: flex-end;
     }
 
-    .close-button,
-    .reset-button {
+    .update-actions :global(button) {
       min-height: 40px;
     }
 

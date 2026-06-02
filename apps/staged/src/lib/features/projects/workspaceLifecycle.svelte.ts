@@ -1,6 +1,6 @@
 import type { Branch, WorkspaceStatus } from '../../types';
 import * as commands from '../../api/commands';
-import { alerts } from '../../shared/alerts.svelte';
+import { toast } from 'svelte-sonner';
 import { getPreferredAgent } from '../settings/preferences.svelte';
 import { agentState } from '../agents/agent.svelte';
 
@@ -204,11 +204,9 @@ class WorkspaceLifecycleController {
         this.workspaceErrors = new Map(this.workspaceErrors).set(id, message);
       }
       this.version++;
-      alerts.show({
-        tone: 'error',
-        title: 'Unable to resume workspace',
-        message,
-        durationMs: 0,
+      toast.error('Unable to resume workspace', {
+        description: message,
+        duration: Infinity,
       });
     }
   }
@@ -418,11 +416,9 @@ class WorkspaceLifecycleController {
             this.workspaceErrors = new Map(this.workspaceErrors).set(branchId, message);
             this.version++;
             this.handleWorkspaceStatusChange(projectId, branchId, 'error');
-            alerts.show({
-              tone: 'error',
-              title: 'Unable to start workspace',
-              message,
-              durationMs: 0,
+            toast.error('Unable to start workspace', {
+              description: message,
+              duration: Infinity,
             });
           } finally {
             this.pendingSetupBranches.delete(branchId);

@@ -6,10 +6,15 @@
   install page, or a "Fix" button that runs a shell command.
 -->
 <script lang="ts">
-  import { CheckCircle, AlertTriangle, XCircle, ExternalLink, Wrench } from 'lucide-svelte';
+  import CheckCircle from '@lucide/svelte/icons/check-circle';
+  import AlertTriangle from '@lucide/svelte/icons/alert-triangle';
+  import XCircle from '@lucide/svelte/icons/x-circle';
+  import ExternalLink from '@lucide/svelte/icons/external-link';
+  import Wrench from '@lucide/svelte/icons/wrench';
   import { openUrl, runDoctorFix } from '../../api/commands';
   import type { DoctorCheck } from '../../api/commands';
-  import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
+  import { Button } from '$lib/components/ui/button';
+  import * as AlertDialog from '$lib/components/ui/alert-dialog';
 
   let {
     check,
@@ -79,32 +84,45 @@
   </div>
 
   {#if check.fixType && check.fixCommand && check.status !== 'pass'}
-    <button class="fix-btn" onclick={promptFix}>
+    <Button variant="outline" size="sm" onclick={promptFix}>
       <Wrench size={14} />
       Fix
-    </button>
+    </Button>
   {/if}
 
   {#if check.fixUrl && check.status !== 'pass'}
-    <button class="install-btn" onclick={() => openUrl(check.fixUrl!)}>
+    <Button variant="ghost" size="icon" onclick={() => openUrl(check.fixUrl!)}>
       <ExternalLink size={14} />
-    </button>
+    </Button>
   {/if}
 </div>
 
-{#if showFixDialog}
-  <ConfirmDialog
-    title="Run fix command?"
-    message={check.fixCommand!}
-    confirmLabel={fixing ? 'Running' : fixError ? 'Retry' : 'Run'}
-    cancelLabel="Cancel"
-    confirmDisabled={fixing}
-    cancelDisabled={fixing}
-    error={fixError}
-    onConfirm={confirmFix}
-    onCancel={cancelFix}
-  />
-{/if}
+<AlertDialog.Root bind:open={showFixDialog}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Run fix command?</AlertDialog.Title>
+      <AlertDialog.Description class="max-h-[42vh] overflow-auto whitespace-pre-line">
+        {check.fixCommand}
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    {#if fixError}
+      <p class="text-destructive text-sm">{fixError}</p>
+    {/if}
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel disabled={fixing} onclick={cancelFix}>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action
+        variant="outline"
+        disabled={fixing}
+        onclick={(e) => {
+          e.preventDefault();
+          confirmFix();
+        }}
+      >
+        {fixing ? 'Running' : fixError ? 'Retry' : 'Run'}
+      </AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
 
 <style>
   .check-row {
@@ -162,50 +180,5 @@
     font-family: monospace;
     overflow-wrap: break-word;
     word-wrap: break-word;
-  }
-
-  .fix-btn {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    flex-shrink: 0;
-    padding: 4px 8px;
-    background: none;
-    border: 1px solid var(--border-primary, rgba(255, 255, 255, 0.1));
-    color: var(--text-muted);
-    cursor: pointer;
-    border-radius: 4px;
-    font-size: var(--size-xs);
-    transition:
-      color 0.1s,
-      background 0.1s,
-      border-color 0.1s;
-  }
-
-  .fix-btn:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover, rgba(255, 255, 255, 0.06));
-    border-color: var(--border-hover, rgba(255, 255, 255, 0.2));
-  }
-
-  .install-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    padding: 4px;
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    border-radius: 4px;
-    transition:
-      color 0.1s,
-      background 0.1s;
-  }
-
-  .install-btn:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover, rgba(255, 255, 255, 0.06));
   }
 </style>

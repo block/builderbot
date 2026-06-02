@@ -4,23 +4,22 @@
   Wraps RepoConfigForm in a dialog overlay with an "Add Repository" action button.
 -->
 <script lang="ts">
-  import { X } from 'lucide-svelte';
   import { slide } from 'svelte/transition';
-  import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
-  import FormButton from '../../shared/FormButton.svelte';
+  import * as Dialog from '$lib/components/ui/dialog';
+  import { Button } from '$lib/components/ui/button';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoConfigForm from './RepoConfigForm.svelte';
   import type { PullRequest } from '../../types';
   import type { RepoSelection } from '../../shared/githubUrl';
 
   interface Props {
+    open: boolean;
     excludeRepos?: Set<string>;
     onAdded: (selection: RepoSelection) => void;
     onClose: () => void;
   }
 
-  let { excludeRepos, onAdded, onClose }: Props = $props();
-  const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
+  let { open, excludeRepos, onAdded, onClose }: Props = $props();
 
   let selectedRepo = $state<string | null>(null);
   let headRepo = $state<string | null>(null);
@@ -95,206 +94,55 @@
     }
   }
 
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      onClose();
-      return;
-    }
-
-    if (e.key === 'Enter') {
-      const target = e.target as HTMLElement;
-      if (target.closest('.repo-search-wrapper')) return;
-      if (target.closest('.subpath-input-wrapper')) return;
-      if (target.closest('.branch-picker-wrapper')) return;
-      e.preventDefault();
-      handleAdd();
-    }
+  function handleSubmit(e: SubmitEvent) {
+    e.preventDefault();
+    handleAdd();
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
+<Dialog.Root {open} onOpenChange={(v) => !v && onClose()}>
+  <Dialog.Content class="sm:max-w-[460px] gap-3.5">
+    <Dialog.Header>
+      <Dialog.Title>Add Repository</Dialog.Title>
+    </Dialog.Header>
 
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<div
-  class="modal-backdrop"
-  role="dialog"
-  aria-modal="true"
-  tabindex="-1"
-  onpointerdown={backdropDismiss.handlePointerDown}
-  onclick={backdropDismiss.handleClick}
-  onkeydown={(e) => e.key === 'Escape' && onClose()}
->
-  <div class="modal">
-    <div class="modal-header">
-      <h2>Add Repository</h2>
-      <button class="close-button" onclick={onClose}>
-        <X size={18} />
-      </button>
-    </div>
+    <form class="flex flex-col gap-3.5" onsubmit={handleSubmit}>
+      <RepoConfigForm
+        bind:selectedRepo
+        bind:headRepo
+        bind:subpath
+        bind:branchName
+        bind:isNewBranch
+        bind:matchedPr
+        bind:defaultBranch
+        bind:api={repoConfigApi}
+        {excludeRepos}
+        autofocus
+      />
 
-    <div class="modal-body">
-      <div class="add-repo-form">
-        <RepoConfigForm
-          bind:selectedRepo
-          bind:headRepo
-          bind:subpath
-          bind:branchName
-          bind:isNewBranch
-          bind:matchedPr
-          bind:defaultBranch
-          bind:api={repoConfigApi}
-          {excludeRepos}
-          autofocus
-        />
+      {#if error}
+        <div class="error-message" transition:slide={{ duration: 150 }}>{error}</div>
+      {/if}
 
-        {#if error}
-          <div class="error-message" transition:slide={{ duration: 150 }}>{error}</div>
-        {/if}
-
-        <div class="actions">
-          <FormButton
-            variant="primary"
-            class="full-width-btn"
-            onclick={handleAdd}
-            disabled={!selectedRepo || saving}
-          >
-            {#if saving}
-              <span class="button-content">
-                <Spinner size={14} />
-                <span>Adding...</span>
-              </span>
-            {:else}
-              Add
-            {/if}
-          </FormButton>
-        </div>
+      <div class="flex justify-end gap-2">
+        <Button type="submit" variant="outline" class="w-full" disabled={!selectedRepo || saving}>
+          {#if saving}
+            <span class="inline-flex items-center gap-1.5">
+              <Spinner size={14} />
+              <span>Adding...</span>
+            </span>
+          {:else}
+            Add
+          {/if}
+        </Button>
       </div>
-    </div>
-  </div>
-</div>
+    </form>
+  </Dialog.Content>
+</Dialog.Root>
 
 <style>
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background-color: var(--shadow-overlay);
-    display: flex;
-    align-items: flex-start;
-    justify-content: center;
-    padding-top: 12vh;
-    z-index: 1000;
-  }
-
-  .modal {
-    width: 460px;
-    max-width: 90vw;
-    background-color: var(--bg-chrome);
-    border-radius: 12px;
-    box-shadow: var(--shadow-elevated);
-    display: flex;
-    flex-direction: column;
-  }
-
-  .modal-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 16px;
-    border-bottom: none;
-    border-radius: 12px 12px 0 0;
-  }
-
-  .modal-header h2 {
-    flex: 1;
-    margin: 0;
-    font-size: var(--size-md);
-    font-weight: 500;
-    color: var(--text-primary);
-  }
-
-  .close-button {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    background: transparent;
-    border: none;
-    border-radius: 4px;
-    color: var(--text-muted);
-    cursor: pointer;
-  }
-
-  .close-button:hover {
-    background-color: var(--bg-hover);
-    color: var(--text-primary);
-  }
-
-  .modal-body {
-    padding: 16px;
-  }
-
-  .add-repo-form {
-    display: flex;
-    flex-direction: column;
-    gap: 14px;
-  }
-
   .error-message {
     color: var(--ui-danger);
     font-size: var(--size-xs);
-  }
-
-  .actions {
-    display: flex;
-    justify-content: flex-end;
-    gap: 8px;
-  }
-
-  :global(.full-width-btn) {
-    width: 100%;
-  }
-
-  .button-content {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-  }
-
-  @media (max-width: 640px) {
-    .modal-backdrop {
-      align-items: stretch;
-      padding-top: 0;
-    }
-
-    .modal {
-      width: 100vw;
-      max-width: none;
-      height: 100vh;
-      height: 100dvh;
-      border-radius: 0;
-      box-shadow: none;
-    }
-
-    .modal-header {
-      flex-shrink: 0;
-      padding: 12px 16px;
-      border-bottom: 1px solid var(--border-subtle);
-      border-radius: 0;
-    }
-
-    .close-button {
-      width: 40px;
-      height: 40px;
-    }
-
-    .modal-body {
-      flex: 1;
-      min-height: 0;
-      overflow: auto;
-      padding: 16px;
-    }
   }
 </style>

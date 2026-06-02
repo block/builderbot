@@ -1,25 +1,27 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from 'svelte';
-  import {
-    FolderGit2,
-    Play,
-    Hammer,
-    FlaskConical,
-    Wand2,
-    CheckCircle,
-    Zap,
-    Plus,
-    Trash2,
-    Save,
-    Pencil,
-    Code2,
-    Search,
-  } from 'lucide-svelte';
+  import FolderGit2 from '@lucide/svelte/icons/folder-git-2';
+  import Play from '@lucide/svelte/icons/play';
+  import Hammer from '@lucide/svelte/icons/hammer';
+  import FlaskConical from '@lucide/svelte/icons/flask-conical';
+  import Wand2 from '@lucide/svelte/icons/wand-2';
+  import CheckCircle from '@lucide/svelte/icons/check-circle';
+  import Zap from '@lucide/svelte/icons/zap';
+  import Plus from '@lucide/svelte/icons/plus';
+  import Trash2 from '@lucide/svelte/icons/trash-2';
+  import Save from '@lucide/svelte/icons/save';
+  import Pencil from '@lucide/svelte/icons/pencil';
+  import Code2 from '@lucide/svelte/icons/code-2';
+  import Search from '@lucide/svelte/icons/search';
   import Spinner from '../../shared/Spinner.svelte';
-  import FormInput from '../../shared/FormInput.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import RepoBadge from '../../shared/RepoBadge.svelte';
-  import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
+  import { Button } from '$lib/components/ui/button';
+  import { Input } from '$lib/components/ui/input';
+  import * as Select from '$lib/components/ui/select';
+  import * as AlertDialog from '$lib/components/ui/alert-dialog';
+  import { Checkbox } from '$lib/components/ui/checkbox';
+  import { Label } from '$lib/components/ui/label';
   import type { ActionContext, ProjectAction } from '../../api/commands';
   import * as commands from '../../api/commands';
   import {
@@ -29,7 +31,7 @@
   } from '../actions/actions';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { matchesRepoSearch } from './repoContextSearch';
-  import { alerts } from '../../shared/alerts.svelte';
+  import { toast } from 'svelte-sonner';
   import { getPreferredAgent } from './preferences.svelte';
   import { agentState } from '../agents/agent.svelte';
 
@@ -329,7 +331,7 @@
       await loadContexts();
     } catch (e) {
       console.error('Failed to detect actions:', e);
-      alerts.error(String(e), 'Failed to detect actions');
+      toast.error('Failed to detect actions', { description: String(e) });
     } finally {
       detecting = false;
     }
@@ -542,7 +544,12 @@
       <div class="sidebar-title">Repos</div>
       <label class="sidebar-search">
         <Search size={14} />
-        <FormInput bind:value={repoSearch} placeholder="Search" aria-label="Search repos" />
+        <Input
+          bind:value={repoSearch}
+          placeholder="Search"
+          aria-label="Search repos"
+          class="min-h-9 px-3 py-2"
+        />
       </label>
       {#if loadingContexts}
         <div class="loading-side"><Spinner size={14} /> Loading...</div>
@@ -661,8 +668,9 @@
         </div>
 
         <div class="actions-header">
-          <button
-            class="danger-btn"
+          <Button
+            variant="destructive"
+            size="sm"
             onclick={() => (showDeleteRepoConfirm = true)}
             disabled={deletingRepo}
           >
@@ -672,20 +680,22 @@
               <Trash2 size={14} />
             {/if}
             Delete Repo
-          </button>
+          </Button>
           {#if selectedContext}
             {#if actions.length > 0}
-              <button
-                class="secondary-btn"
+              <Button
+                variant="outline"
+                size="sm"
                 onclick={() => (showDeleteAllConfirm = true)}
                 disabled={deletingRepo}
               >
                 <Trash2 size={14} />
                 Delete All Actions
-              </button>
+              </Button>
             {/if}
-            <button
-              class="secondary-btn"
+            <Button
+              variant="outline"
+              size="sm"
               onclick={detectActions}
               disabled={detecting || deletingRepo}
             >
@@ -695,11 +705,11 @@
                 <Zap size={14} />
               {/if}
               Detect Actions
-            </button>
-            <button class="primary-btn" onclick={startAddAction} disabled={deletingRepo}>
+            </Button>
+            <Button variant="outline" size="sm" onclick={startAddAction} disabled={deletingRepo}>
               <Plus size={14} />
               Add Action
-            </button>
+            </Button>
           {/if}
         </div>
 
@@ -736,12 +746,21 @@
                         </div>
                       </div>
                       <div class="action-buttons">
-                        <button class="icon-btn" onclick={() => startEditAction(action)}>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onclick={() => startEditAction(action)}
+                        >
                           <Pencil size={13} />
-                        </button>
-                        <button class="icon-btn danger" onclick={() => deleteAction(action.id)}>
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          class="hover:text-destructive"
+                          onclick={() => deleteAction(action.id)}
+                        >
                           <Trash2 size={13} />
-                        </button>
+                        </Button>
                       </div>
                     </div>
                   {/each}
@@ -756,8 +775,8 @@
 
   {#if editingAction}
     <div class="editor">
-      <input bind:value={editForm.name} placeholder="Action name" />
-      <input
+      <Input bind:value={editForm.name} placeholder="Action name" />
+      <Input
         bind:value={editForm.command}
         placeholder="Command"
         autocomplete="off"
@@ -765,53 +784,72 @@
         autocapitalize="off"
         spellcheck="false"
       />
-      <select bind:value={editForm.actionType}>
-        <option value="run">run</option>
-        <option value="prerun">prerun</option>
-        <option value="build">build</option>
-        <option value="test">test</option>
-        <option value="format">format</option>
-        <option value="check">check</option>
-        <option value="cleanUp">cleanUp</option>
-      </select>
-      <label class="checkbox-row">
-        <input type="checkbox" bind:checked={editForm.autoCommit} />
-        Auto-commit
-      </label>
+      <Select.Root
+        type="single"
+        value={editForm.actionType}
+        onValueChange={(v) => (editForm.actionType = v as ActionType)}
+      >
+        <Select.Trigger class="w-full">
+          {editForm.actionType}
+        </Select.Trigger>
+        <Select.Content>
+          {#each ['run', 'prerun', 'build', 'test', 'format', 'check', 'cleanUp'] as t (t)}
+            <Select.Item value={t} label={t}>{t}</Select.Item>
+          {/each}
+        </Select.Content>
+      </Select.Root>
+      <div class="flex items-center gap-1.5">
+        <Checkbox id="auto-commit" bind:checked={editForm.autoCommit} />
+        <Label for="auto-commit" class="text-muted-foreground text-sm">Auto-commit</Label>
+      </div>
       <div class="editor-buttons">
-        <button class="secondary-btn" onclick={cancelEdit}>Cancel</button>
-        <button class="primary-btn" onclick={saveAction}>
+        <Button variant="ghost" size="sm" onclick={cancelEdit}>Cancel</Button>
+        <Button variant="outline" size="sm" onclick={saveAction}>
           <Save size={14} />
           Save
-        </button>
+        </Button>
       </div>
     </div>
   {/if}
 </div>
 
-{#if showDeleteRepoConfirm && selectedEntry}
-  <ConfirmDialog
-    title="Delete Repo"
-    message={selectedContextAttachments.length > 0
-      ? `Delete "${repoDisplay(selectedEntry.githubRepo, selectedEntry.subpath)}" from Staged? This removes ${formatProjectCount(selectedContextAttachments.length)} and deletes tracked worktrees/workspaces tied to this repo.`
-      : `Delete "${repoDisplay(selectedEntry.githubRepo, selectedEntry.subpath)}" from Staged? This removes its repo settings and actions.`}
-    confirmLabel="Delete Repo"
-    danger={true}
-    onConfirm={deleteRepo}
-    onCancel={() => (showDeleteRepoConfirm = false)}
-  />
-{/if}
+<AlertDialog.Root bind:open={showDeleteRepoConfirm}>
+  <AlertDialog.Content>
+    {#if selectedEntry}
+      <AlertDialog.Header>
+        <AlertDialog.Title>Delete Repo</AlertDialog.Title>
+        <AlertDialog.Description>
+          {selectedContextAttachments.length > 0
+            ? `Delete "${repoDisplay(selectedEntry.githubRepo, selectedEntry.subpath)}" from Staged? This removes ${formatProjectCount(selectedContextAttachments.length)} and deletes tracked worktrees/workspaces tied to this repo.`
+            : `Delete "${repoDisplay(selectedEntry.githubRepo, selectedEntry.subpath)}" from Staged? This removes its repo settings and actions.`}
+        </AlertDialog.Description>
+      </AlertDialog.Header>
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+        <AlertDialog.Action variant="destructive" onclick={deleteRepo}>
+          Delete Repo
+        </AlertDialog.Action>
+      </AlertDialog.Footer>
+    {/if}
+  </AlertDialog.Content>
+</AlertDialog.Root>
 
-{#if showDeleteAllConfirm}
-  <ConfirmDialog
-    title="Delete All Actions"
-    message="Are you sure you want to delete all actions for this repo? This action cannot be undone."
-    confirmLabel="Delete All"
-    danger={true}
-    onConfirm={deleteAllActions}
-    onCancel={() => (showDeleteAllConfirm = false)}
-  />
-{/if}
+<AlertDialog.Root bind:open={showDeleteAllConfirm}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Delete All Actions</AlertDialog.Title>
+      <AlertDialog.Description>
+        Are you sure you want to delete all actions for this repo? This action cannot be undone.
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action variant="destructive" onclick={deleteAllActions}>
+        Delete All
+      </AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
 
 <style>
   .actions-settings-panel {
@@ -848,28 +886,6 @@
     color: var(--text-muted);
   }
 
-  .icon-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    border: none;
-    border-radius: 6px;
-    background: transparent;
-    color: var(--text-muted);
-    cursor: pointer;
-  }
-
-  .icon-btn:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
-  }
-
-  .icon-btn.danger:hover {
-    color: var(--ui-danger);
-  }
-
   .panel-body {
     display: grid;
     grid-template-columns: 260px 1fr;
@@ -901,13 +917,6 @@
     margin-bottom: 10px;
     padding: 0 2px;
     color: var(--text-faint);
-  }
-
-  .sidebar-search :global(.form-input) {
-    min-width: 0;
-    min-height: 36px;
-    padding: 8px 12px;
-    font-size: var(--size-md);
   }
 
   .context-list {
@@ -1126,48 +1135,6 @@
     margin-bottom: 12px;
   }
 
-  .primary-btn,
-  .secondary-btn,
-  .danger-btn {
-    border: 1px solid var(--border-muted);
-    border-radius: 8px;
-    padding: 7px 10px;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-size: var(--size-sm);
-    cursor: pointer;
-  }
-
-  .primary-btn {
-    background: var(--ui-accent);
-    border-color: var(--ui-accent);
-    color: white;
-  }
-
-  .secondary-btn {
-    background: var(--bg-primary);
-    color: var(--text-primary);
-  }
-
-  .danger-btn {
-    background: var(--bg-primary);
-    border-color: var(--ui-danger);
-    color: var(--ui-danger);
-  }
-
-  .danger-btn:hover:not(:disabled) {
-    background: var(--ui-danger);
-    color: white;
-  }
-
-  .primary-btn:disabled,
-  .secondary-btn:disabled,
-  .danger-btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-
   .actions-list {
     display: flex;
     flex-direction: column;
@@ -1233,24 +1200,6 @@
     align-items: center;
   }
 
-  .editor input,
-  .editor select {
-    padding: 8px 10px;
-    border-radius: 8px;
-    border: 1px solid var(--border-muted);
-    background: var(--bg-primary);
-    color: var(--text-primary);
-    min-width: 0;
-  }
-
-  .checkbox-row {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--text-muted);
-    font-size: var(--size-sm);
-  }
-
   .editor-buttons {
     display: inline-flex;
     gap: 8px;
@@ -1273,7 +1222,7 @@
       flex-direction: column;
     }
 
-    .actions-header button {
+    .actions-header :global(button) {
       flex: 1 1 auto;
       justify-content: center;
     }

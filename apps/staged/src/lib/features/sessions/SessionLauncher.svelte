@@ -11,15 +11,24 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { listenToEvent, type UnlistenFn } from '../../transport';
-  import { Plus, X, CheckCircle, AlertCircle, Ban, Eye, Trash2 } from 'lucide-svelte';
+  import Plus from '@lucide/svelte/icons/plus';
+  import X from '@lucide/svelte/icons/x';
+  import CheckCircle from '@lucide/svelte/icons/check-circle';
+  import AlertCircle from '@lucide/svelte/icons/alert-circle';
+  import Ban from '@lucide/svelte/icons/ban';
+  import Eye from '@lucide/svelte/icons/eye';
+  import Trash2 from '@lucide/svelte/icons/trash-2';
   import type { Session, SessionStatus, SessionStatusPayload } from '../../types';
   import { startSession, deleteSession } from '../../api/commands';
   import SessionModal from './SessionModal.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import { agentState } from '../agents/agent.svelte';
   import { getPreferredAgent } from '../settings/preferences.svelte';
-  import { alerts } from '../../shared/alerts.svelte';
+  import { toast } from 'svelte-sonner';
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
+  import { Input } from '$lib/components/ui/input';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
 
   interface Props {
     onClose: () => void;
@@ -92,11 +101,9 @@
       sessions = [...sessions, s];
       prompt = '';
     } catch (e) {
-      alerts.show({
-        tone: 'error',
-        title: 'Unable to start session',
-        message: e instanceof Error ? e.message : String(e),
-        durationMs: 0,
+      toast.error('Unable to start session', {
+        description: e instanceof Error ? e.message : String(e),
+        duration: Infinity,
       });
     } finally {
       creating = false;
@@ -119,11 +126,9 @@
       closeModal(id);
       sessions = sessions.filter((s) => s.id !== id);
     } catch (e) {
-      alerts.show({
-        tone: 'error',
-        title: 'Unable to delete session',
-        message: e instanceof Error ? e.message : String(e),
-        durationMs: 0,
+      toast.error('Unable to delete session', {
+        description: e instanceof Error ? e.message : String(e),
+        duration: Infinity,
       });
     }
   }
@@ -161,33 +166,56 @@
 <div class="launcher">
   <div class="launcher-header">
     <span class="launcher-title">Sessions</span>
-    <button class="icon-btn" onclick={onClose} title="Close">
-      <X size={14} />
-    </button>
+    <Tooltip.Root>
+      <Tooltip.Trigger>
+        {#snippet child({ props })}
+          <Button
+            {...props}
+            variant="ghost"
+            size="icon"
+            class="size-7 rounded-md text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-3.5"
+            onclick={onClose}
+          >
+            <X size={14} />
+          </Button>
+        {/snippet}
+      </Tooltip.Trigger>
+      <Tooltip.Content>Close</Tooltip.Content>
+    </Tooltip.Root>
   </div>
 
   <!-- Create form -->
   <div class="create-row">
-    <input
+    <Input
       type="text"
-      class="create-input"
       placeholder="Session prompt…"
       bind:value={prompt}
       onkeydown={handleKeydown}
       disabled={creating}
+      class="flex-1"
     />
-    <button
-      class="icon-btn accent"
-      onclick={handleCreate}
-      disabled={creating || !prompt.trim()}
-      title="Create session"
-    >
-      {#if creating}
-        <Spinner size={14} />
-      {:else}
-        <Plus size={14} />
-      {/if}
-    </button>
+    <Tooltip.Root>
+      <Tooltip.Trigger>
+        {#snippet child({ props })}
+          <span {...props} class="inline-flex">
+            <Button
+              variant="ghost"
+              size="icon"
+              class="size-7 rounded-md text-[var(--ui-accent)] hover:bg-[var(--bg-hover)] hover:text-[var(--ui-accent)] [&_svg]:!size-3.5"
+              onclick={handleCreate}
+              disabled={creating || !prompt.trim()}
+            >
+              {#if creating}
+                <Spinner size={14} />
+              {:else}
+                <Plus size={14} />
+              {/if}
+            </Button>
+          </span>
+        {/snippet}
+      </Tooltip.Trigger>
+      <Tooltip.Content>Create session</Tooltip.Content>
+    </Tooltip.Root>
   </div>
 
   <!-- Session list -->
@@ -208,21 +236,40 @@
             <span class="session-id">{s.id.slice(0, 8)}</span>
           </div>
           <div class="session-actions">
-            <button
-              class="mini-btn"
-              onclick={() => openModal(s.id)}
-              title="Open session viewer"
-              disabled={openModals.has(s.id)}
-            >
-              <Eye size={12} />
-            </button>
-            <button
-              class="mini-btn danger"
-              onclick={() => handleDelete(s.id)}
-              title="Delete session"
-            >
-              <Trash2 size={12} />
-            </button>
+            <Tooltip.Root>
+              <Tooltip.Trigger>
+                {#snippet child({ props })}
+                  <span {...props} class="inline-flex">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      class="size-[22px] rounded text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-3"
+                      onclick={() => openModal(s.id)}
+                      disabled={openModals.has(s.id)}
+                    >
+                      <Eye size={12} />
+                    </Button>
+                  </span>
+                {/snippet}
+              </Tooltip.Trigger>
+              <Tooltip.Content>Open session viewer</Tooltip.Content>
+            </Tooltip.Root>
+            <Tooltip.Root>
+              <Tooltip.Trigger>
+                {#snippet child({ props })}
+                  <Button
+                    {...props}
+                    variant="ghost"
+                    size="icon"
+                    class="size-[22px] rounded text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-destructive [&_svg]:!size-3"
+                    onclick={() => handleDelete(s.id)}
+                  >
+                    <Trash2 size={12} />
+                  </Button>
+                {/snippet}
+              </Tooltip.Trigger>
+              <Tooltip.Content>Delete session</Tooltip.Content>
+            </Tooltip.Root>
           </div>
         </div>
       {/each}
@@ -232,9 +279,12 @@
   {/if}
 </div>
 
-<!-- Open SessionModals — one per open session, stacked -->
+<!-- Open SessionModals — one per open session, stacked.
+     Each modal is keyed and conditionally mounted by {#each}; bits-ui exit
+     animations don't play here since closeModal removes the entry outright. -->
 {#each [...openModals] as modalSessionId (modalSessionId)}
   <SessionModal
+    open={true}
     sessionId={modalSessionId}
     repoDir={null}
     onClose={() => closeModal(modalSessionId)}
@@ -276,25 +326,6 @@
     display: flex;
     gap: 6px;
     padding: 10px 14px;
-  }
-
-  .create-input {
-    flex: 1;
-    padding: 6px 10px;
-    background: var(--bg-primary);
-    border: 1px solid var(--border-muted);
-    border-radius: 6px;
-    color: var(--text-primary);
-    font-size: var(--size-md);
-  }
-
-  .create-input::placeholder {
-    color: var(--text-faint);
-  }
-
-  .create-input:focus {
-    outline: none;
-    border-color: var(--border-emphasis);
   }
 
   /* Session list */
@@ -366,73 +397,6 @@
     align-items: center;
     gap: 2px;
     flex-shrink: 0;
-  }
-
-  /* Buttons */
-  .icon-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    background: none;
-    border: none;
-    border-radius: 6px;
-    color: var(--text-muted);
-    cursor: pointer;
-    transition:
-      color 0.1s,
-      background-color 0.1s;
-  }
-
-  .icon-btn:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover);
-  }
-
-  .icon-btn:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-
-  .icon-btn.accent {
-    color: var(--ui-accent);
-  }
-
-  .icon-btn.accent:hover {
-    background: var(--bg-hover);
-  }
-
-  .mini-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 22px;
-    height: 22px;
-    padding: 0;
-    background: none;
-    border: none;
-    border-radius: 4px;
-    color: var(--text-muted);
-    cursor: pointer;
-    transition:
-      color 0.1s,
-      background-color 0.1s;
-  }
-
-  .mini-btn:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover);
-  }
-
-  .mini-btn:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-  }
-
-  .mini-btn.danger:hover {
-    color: var(--ui-danger);
   }
 
   .empty-hint {

@@ -1,6 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Settings2, Info, Check, ChevronDown } from 'lucide-svelte';
+  import Settings2 from '@lucide/svelte/icons/settings-2';
+  import Info from '@lucide/svelte/icons/info';
+  import Check from '@lucide/svelte/icons/check';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import * as Select from '$lib/components/ui/select';
+  import * as Popover from '$lib/components/ui/popover';
+  import { Label } from '$lib/components/ui/label';
   import {
     preferences,
     getAvailableSyntaxThemes,
@@ -32,7 +38,6 @@
           themeFilter === 'light' ? isLightTheme(t.name) : !isLightTheme(t.name)
         )
   );
-  let dropdownRef = $state<HTMLDivElement | null>(null);
 
   const activeColors = $derived(previewColors.get(preferences.syntaxTheme));
 
@@ -40,20 +45,7 @@
     loadAllThemePreviewColors().then((colors) => {
       previewColors = colors;
     });
-
-    function handleClickOutside(e: MouseEvent) {
-      if (dropdownRef && !dropdownRef.contains(e.target as Node)) {
-        dropdownOpen = false;
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
   });
-
-  function handleAutoReviewChange(e: Event) {
-    const select = e.target as HTMLSelectElement;
-    setAutoReviewMode(select.value as AutoReviewMode);
-  }
 
   function handleThemeSelect(name: string) {
     selectSyntaxTheme(name);
@@ -75,68 +67,75 @@
   <div class="panel-body">
     <div class="field">
       <span class="field-label">Theme</span>
-      <div class="theme-dropdown" bind:this={dropdownRef}>
-        <button class="theme-dropdown-trigger" onclick={() => (dropdownOpen = !dropdownOpen)}>
+      <Popover.Root bind:open={dropdownOpen}>
+        <Popover.Trigger class="theme-dropdown-trigger">
           <span class="trigger-swatch" style:background={activeColors?.bg ?? 'var(--bg-primary)'}>
             <span style:color={activeColors?.fg ?? 'var(--text-primary)'}
               >{preferences.syntaxTheme}</span
             >
           </span>
           <ChevronDown size={14} />
-        </button>
-
-        {#if dropdownOpen}
-          <div class="theme-dropdown-panel">
-            <div class="theme-filters">
-              {#each ['all', 'light', 'dark'] as filter (filter)}
-                <button
-                  class="theme-filter-btn"
-                  class:active={themeFilter === filter}
-                  onclick={() => (themeFilter = filter as ThemeFilter)}
-                >
-                  {filter.charAt(0).toUpperCase() + filter.slice(1)}
-                </button>
-              {/each}
-            </div>
-            {#each themes as theme (theme.name)}
-              {@const colors = previewColors.get(theme.name)}
-              {@const isActive = preferences.syntaxTheme === theme.name}
+        </Popover.Trigger>
+        <Popover.Content
+          align="start"
+          sideOffset={4}
+          class="theme-dropdown-panel w-[var(--bits-popover-anchor-width)] ring-0"
+        >
+          <div class="theme-filters">
+            {#each ['all', 'light', 'dark'] as filter (filter)}
               <button
-                class="theme-swatch"
-                class:active={isActive}
-                style:background={colors?.bg ?? 'var(--bg-primary)'}
-                style:border-color={isActive
-                  ? (colors?.comment ?? 'var(--border-emphasis)')
-                  : 'transparent'}
-                onclick={() => handleThemeSelect(theme.name)}
+                class="theme-filter-btn"
+                class:active={themeFilter === filter}
+                onclick={() => (themeFilter = filter as ThemeFilter)}
               >
-                <span class="swatch-name" style:color={colors?.fg ?? 'var(--text-primary)'}
-                  >{theme.name}</span
-                >
-                {#if isActive}
-                  <span class="swatch-check" style:color={colors?.comment ?? 'var(--text-muted)'}>
-                    <Check size={14} />
-                  </span>
-                {/if}
+                {filter.charAt(0).toUpperCase() + filter.slice(1)}
               </button>
             {/each}
           </div>
-        {/if}
-      </div>
+          {#each themes as theme (theme.name)}
+            {@const colors = previewColors.get(theme.name)}
+            {@const isActive = preferences.syntaxTheme === theme.name}
+            <button
+              class="theme-swatch"
+              class:active={isActive}
+              style:background={colors?.bg ?? 'var(--bg-primary)'}
+              style:border-color={isActive
+                ? (colors?.comment ?? 'var(--border-emphasis)')
+                : 'transparent'}
+              onclick={() => handleThemeSelect(theme.name)}
+            >
+              <span class="swatch-name" style:color={colors?.fg ?? 'var(--text-primary)'}
+                >{theme.name}</span
+              >
+              {#if isActive}
+                <span class="swatch-check" style:color={colors?.comment ?? 'var(--text-muted)'}>
+                  <Check size={14} />
+                </span>
+              {/if}
+            </button>
+          {/each}
+        </Popover.Content>
+      </Popover.Root>
     </div>
 
     <div class="field">
-      <label class="field-label" for="auto-review-select">Auto start code reviews</label>
-      <select
-        id="auto-review-select"
-        class="theme-select"
-        value={preferences.autoReviewMode}
-        onchange={handleAutoReviewChange}
+      <Label for="auto-review-select" class="text-foreground text-sm font-semibold"
+        >Auto start code reviews</Label
       >
-        {#each autoReviewOptions as opt (opt.value)}
-          <option value={opt.value}>{opt.label}</option>
-        {/each}
-      </select>
+      <Select.Root
+        type="single"
+        value={preferences.autoReviewMode}
+        onValueChange={(v) => setAutoReviewMode(v as AutoReviewMode)}
+      >
+        <Select.Trigger id="auto-review-select" class="w-full max-w-[320px]">
+          {autoReviewOptions.find((o) => o.value === preferences.autoReviewMode)?.label ?? ''}
+        </Select.Trigger>
+        <Select.Content>
+          {#each autoReviewOptions as opt (opt.value)}
+            <Select.Item value={opt.value} label={opt.label}>{opt.label}</Select.Item>
+          {/each}
+        </Select.Content>
+      </Select.Root>
       <p class="field-description">
         <Info size={12} />
         {#if preferences.autoReviewMode === 'after-changes'}
@@ -220,37 +219,12 @@
     color: var(--text-primary);
   }
 
-  .theme-select {
-    width: 100%;
-    max-width: 320px;
-    padding: 6px 10px;
-    background: var(--bg-primary);
-    border: 1px solid var(--border-muted);
-    border-radius: 5px;
-    color: var(--text-primary);
-    font-size: var(--size-md);
-    cursor: pointer;
-    transition:
-      border-color 0.1s,
-      background-color 0.1s;
-  }
-
-  .theme-select:focus {
-    outline: none;
-    border-color: var(--border-emphasis);
-    background-color: var(--bg-hover);
-  }
-
-  .theme-dropdown {
-    position: relative;
-    max-width: 320px;
-  }
-
-  .theme-dropdown-trigger {
+  :global(.theme-dropdown-trigger) {
     display: flex;
     align-items: center;
     gap: 8px;
     width: 100%;
+    max-width: 320px;
     padding: 0;
     background: none;
     border: 1px solid var(--border-muted);
@@ -264,7 +238,7 @@
       background-color 0.1s;
   }
 
-  .theme-dropdown-trigger:hover {
+  :global(.theme-dropdown-trigger:hover) {
     border-color: var(--border-emphasis);
   }
 
@@ -278,17 +252,13 @@
     border-radius: 4px 0 0 4px;
   }
 
-  .theme-dropdown-trigger :global(svg) {
+  :global(.theme-dropdown-trigger svg) {
     flex-shrink: 0;
     margin-right: 8px;
     color: var(--text-muted);
   }
 
-  .theme-dropdown-panel {
-    position: absolute;
-    top: calc(100% + 4px);
-    left: 0;
-    right: 0;
+  :global(.theme-dropdown-panel) {
     max-height: 320px;
     overflow-y: auto;
     display: flex;
@@ -299,7 +269,6 @@
     border: 1px solid var(--border-muted);
     border-radius: 5px;
     box-shadow: var(--shadow-elevated);
-    z-index: 10;
   }
 
   .theme-filters {

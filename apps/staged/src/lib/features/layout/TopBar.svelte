@@ -6,7 +6,10 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { PanelLeftClose, PanelLeftOpen, Plus, SlidersHorizontal } from 'lucide-svelte';
+  import PanelLeftClose from '@lucide/svelte/icons/panel-left-close';
+  import PanelLeftOpen from '@lucide/svelte/icons/panel-left-open';
+  import Plus from '@lucide/svelte/icons/plus';
+  import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
   import { getWindowSync } from '../../transport';
   import { navigation, openSettings } from './navigation.svelte';
   import {
@@ -15,6 +18,8 @@
     setProjectsSidebarCollapsed,
   } from '../projects/projectsSidebarState.svelte';
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
 
   onMount(() => {
     const stopWatchingViewport = watchViewport();
@@ -46,43 +51,78 @@
   <div class="traffic-light-spacer"></div>
   {#if !viewport.isMobile}
     <div class="left-actions">
-      <button
-        class="icon-btn"
-        onclick={toggleProjectsSidebar}
-        disabled={!projectsSidebarState.hasProjects}
-        title={sidebarOpen ? 'Hide projects sidebar' : 'Show projects sidebar'}
-      >
-        {#if !sidebarOpen || !projectsSidebarState.hasProjects}
-          <PanelLeftOpen size={14} />
-        {:else}
-          <PanelLeftClose size={14} />
-        {/if}
-      </button>
+      <Tooltip.Root>
+        <Tooltip.Trigger>
+          {#snippet child({ props })}
+            <span {...props} class="inline-flex">
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                class="max-md:size-10 [&_svg]:size-3.5"
+                onclick={toggleProjectsSidebar}
+                disabled={!projectsSidebarState.hasProjects}
+              >
+                {#if !sidebarOpen || !projectsSidebarState.hasProjects}
+                  <PanelLeftOpen size={14} />
+                {:else}
+                  <PanelLeftClose size={14} />
+                {/if}
+              </Button>
+            </span>
+          {/snippet}
+        </Tooltip.Trigger>
+        <Tooltip.Content>
+          {sidebarOpen ? 'Hide projects sidebar' : 'Show projects sidebar'}
+        </Tooltip.Content>
+      </Tooltip.Root>
     </div>
   {/if}
   <div class="drag-spacer"></div>
 
   <div class="top-bar-actions">
-    <button
-      class="icon-btn"
-      onclick={() => window.dispatchEvent(new CustomEvent('staged:new-project'))}
-      disabled={navigation.activeView === 'settings'}
-      title={navigation.activeView === 'settings'
-        ? 'Unavailable while viewing settings'
-        : viewport.showShortcutHints
-          ? 'New project (⌘N)'
-          : 'New project'}
-    >
-      <Plus size={14} />
-    </button>
+    <Tooltip.Root>
+      <Tooltip.Trigger>
+        {#snippet child({ props })}
+          <span {...props} class="inline-flex">
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              class="max-md:size-10 [&_svg]:size-3.5"
+              onclick={() => window.dispatchEvent(new CustomEvent('staged:new-project'))}
+              disabled={navigation.activeView === 'settings'}
+            >
+              <Plus size={14} />
+            </Button>
+          </span>
+        {/snippet}
+      </Tooltip.Trigger>
+      <Tooltip.Content>
+        {navigation.activeView === 'settings'
+          ? 'Unavailable while viewing settings'
+          : viewport.showShortcutHints
+            ? 'New project (⌘N)'
+            : 'New project'}
+      </Tooltip.Content>
+    </Tooltip.Root>
 
-    <button
-      class="icon-btn"
-      onclick={() => openSettings()}
-      title={viewport.showShortcutHints ? 'Settings (⌘,)' : 'Settings'}
-    >
-      <SlidersHorizontal size={14} />
-    </button>
+    <Tooltip.Root>
+      <Tooltip.Trigger>
+        {#snippet child({ props })}
+          <Button
+            {...props}
+            variant="ghost"
+            size="icon-xs"
+            class="max-md:size-10 [&_svg]:size-3.5"
+            onclick={() => openSettings()}
+          >
+            <SlidersHorizontal size={14} />
+          </Button>
+        {/snippet}
+      </Tooltip.Trigger>
+      <Tooltip.Content>
+        {viewport.showShortcutHints ? 'Settings (⌘,)' : 'Settings'}
+      </Tooltip.Content>
+    </Tooltip.Root>
   </div>
 </div>
 
@@ -120,32 +160,6 @@
     gap: 4px;
   }
 
-  .icon-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 5px;
-    background: transparent;
-    border: none;
-    border-radius: 6px;
-    color: var(--text-muted);
-    cursor: pointer;
-    -webkit-app-region: no-drag;
-    transition:
-      color 0.1s,
-      background-color 0.1s;
-  }
-
-  .icon-btn:hover:not(:disabled) {
-    color: var(--text-primary);
-    background-color: var(--bg-hover);
-  }
-
-  .icon-btn:disabled {
-    opacity: 0.35;
-    cursor: not-allowed;
-  }
-
   @media (max-width: 768px) {
     .top-bar {
       padding: 6px 8px;
@@ -153,12 +167,6 @@
 
     .traffic-light-spacer {
       width: 58px;
-    }
-
-    .icon-btn {
-      width: 40px;
-      height: 40px;
-      padding: 0;
     }
   }
 </style>

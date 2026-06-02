@@ -7,9 +7,15 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { Search, Lock, Globe, Clock, Plus, Command } from 'lucide-svelte';
+  import Search from '@lucide/svelte/icons/search';
+  import Lock from '@lucide/svelte/icons/lock';
+  import Globe from '@lucide/svelte/icons/globe';
+  import Clock from '@lucide/svelte/icons/clock';
+  import Plus from '@lucide/svelte/icons/plus';
+  import Command from '@lucide/svelte/icons/command';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
+  import { Input } from '$lib/components/ui/input';
   import * as commands from '../../api/commands';
   import type { GitHubRepo, RecentRepo } from '../../types';
   import { parseGitHubUrl, type RepoSelection } from '../../shared/githubUrl';
@@ -279,8 +285,8 @@
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div class="search-input" class:disabled onclick={() => inputEl?.focus()}>
     <Search size={14} class="search-icon" />
-    <input
-      bind:this={inputEl}
+    <Input
+      bind:ref={inputEl}
       bind:value={query}
       type="text"
       placeholder="Search or paste a repository..."
@@ -290,6 +296,7 @@
       {disabled}
       oninput={handleInput}
       onfocus={handleFocus}
+      class="border-0 bg-transparent shadow-none px-0 py-0 h-auto min-h-0 focus-visible:ring-0 focus-visible:border-0 md:text-base"
     />
   </div>
 
@@ -416,25 +423,6 @@
   :global(.search-icon) {
     color: var(--text-faint);
     flex-shrink: 0;
-  }
-
-  .search-input input {
-    flex: 1;
-    background: transparent;
-    border: none;
-    outline: none;
-    font-size: var(--size-md);
-    color: var(--text-primary);
-    padding: 0;
-    font-family: inherit;
-  }
-
-  .search-input input::placeholder {
-    color: var(--text-faint);
-  }
-
-  .search-input input:disabled {
-    cursor: not-allowed;
   }
 
   .repo-dropdown {

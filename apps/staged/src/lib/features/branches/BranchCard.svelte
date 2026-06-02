@@ -12,16 +12,14 @@
 -->
 <script lang="ts">
   import { untrack } from 'svelte';
-  import {
-    FileDiff,
-    AlertCircle,
-    Cloud,
-    Trash2,
-    GitPullRequest,
-    GitPullRequestClosed,
-    GitPullRequestDraft,
-    Sprout,
-  } from 'lucide-svelte';
+  import FileDiff from '@lucide/svelte/icons/file-diff';
+  import AlertCircle from '@lucide/svelte/icons/alert-circle';
+  import Cloud from '@lucide/svelte/icons/cloud';
+  import Trash2 from '@lucide/svelte/icons/trash-2';
+  import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
+  import GitPullRequestClosed from '@lucide/svelte/icons/git-pull-request-closed';
+  import GitPullRequestDraft from '@lucide/svelte/icons/git-pull-request-draft';
+  import Sprout from '@lucide/svelte/icons/sprout';
   import Spinner from '../../shared/Spinner.svelte';
   import { isSessionActive } from '../../shared/sessionStatus';
   import { deleteSessionLinkedItem } from '../../shared/deleteSessionLinkedItem';
@@ -44,7 +42,9 @@
   import SessionModal from '../sessions/SessionModal.svelte';
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
-  import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
+  import * as AlertDialog from '$lib/components/ui/alert-dialog';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
   import {
     fileNameFromPath,
     formatBaseBranch,
@@ -58,7 +58,7 @@
   import RemoteWorkspaceStatusBadge from './RemoteWorkspaceStatusBadge.svelte';
   import RemoteWorkspaceStatusView from './RemoteWorkspaceStatusView.svelte';
   import { branchTimelineReadyKey } from './branchTimelineReady';
-  import { alerts } from '../../shared/alerts.svelte';
+  import { toast } from 'svelte-sonner';
   import { aggregateProjectPrStatus } from '../../shared/utils';
   import { timelineToHashtagItems, projectNotesToHashtagItems } from '../sessions/hashtagItems';
   import { getPreferredAgent } from '../settings/preferences.svelte';
@@ -113,11 +113,9 @@
   }
 
   function notifyError(title: string, e: unknown): void {
-    alerts.show({
-      tone: 'error',
-      title,
-      message: e instanceof Error ? e.message : String(e),
-      durationMs: 0,
+    toast.error(title, {
+      description: e instanceof Error ? e.message : String(e),
+      duration: Infinity,
     });
   }
 
@@ -986,11 +984,9 @@
     }
 
     if (preview.conflictedPaths.length > 0) {
-      alerts.show({
-        tone: 'error',
-        title: 'Conflicts need manual recovery',
-        message: preview.conflictedPaths.join('\n'),
-        durationMs: 0,
+      toast.error('Conflicts need manual recovery', {
+        description: preview.conflictedPaths.join('\n'),
+        duration: Infinity,
       });
       return;
     }
@@ -1226,7 +1222,9 @@
           } catch (e) {
             const reason = e instanceof Error ? e.message : typeof e === 'string' ? e : null;
             const detail = reason ?? 'it may be a binary file';
-            alerts.error(`Could not read "${fileNameFromPath(filePath)}" \u2014 ${detail}`);
+            toast.error('Error', {
+              description: `Could not read "${fileNameFromPath(filePath)}" \u2014 ${detail}`,
+            });
           } finally {
             pendingDropNotes = pendingDropNotes.filter((p) => p.key !== placeholders[i].key);
           }
@@ -1296,9 +1294,22 @@
         baseBranch={formatBaseBranch(branch.baseBranch)}
       />
       <div class="header-actions">
-        <button class="more-button" onclick={() => onDelete?.()} title="Delete branch">
-          <Trash2 size={16} />
-        </button>
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            {#snippet child({ props })}
+              <Button
+                {...props}
+                variant="ghost"
+                size="icon-sm"
+                onclick={() => onDelete?.()}
+                class="size-7 text-[var(--text-faint)]"
+              >
+                <Trash2 size={16} />
+              </Button>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content>Delete branch</Tooltip.Content>
+        </Tooltip.Root>
       </div>
     </div>
     <div class="card-content">
@@ -1307,7 +1318,7 @@
           <AlertCircle size={14} />
           <span>Failed to create worktree: {worktreeError}</span>
         </div>
-        <button class="worktree-retry-btn" onclick={() => onRetryWorktree?.()}> Retry </button>
+        <Button variant="outline" size="sm" onclick={() => onRetryWorktree?.()}>Retry</Button>
       </div>
     </div>
   {:else}
@@ -1385,7 +1396,7 @@
       {:else if error && !timeline}
         <div class="error">
           <span>{error}</span>
-          <button class="retry-btn" onclick={() => loadTimeline()}>Retry</button>
+          <Button variant="outline" size="xs" onclick={() => loadTimeline()}>Retry</Button>
         </div>
       {:else if timeline || isSettingUp}
         <BranchTimeline
@@ -1407,12 +1418,12 @@
               .then(() => loadTimeline())
               .catch((e) => {
                 console.error('Failed to resume session:', e);
-                alerts.error(
-                  e instanceof Error
-                    ? e.message
-                    : 'Could not resume the session. Please try again.',
-                  'Resume failed'
-                );
+                toast.error('Resume failed', {
+                  description:
+                    e instanceof Error
+                      ? e.message
+                      : 'Could not resume the session. Please try again.',
+                });
               });
           }}
           onCommitClick={handleCommitClick}
@@ -1474,17 +1485,26 @@
                   }}
                 />
                 {#if hasCodeChanges}
-                  <button
-                    class="pr-btn diff-btn"
-                    onclick={() => {
-                      reviewDiffTarget = null;
-                      showBranchDiff = true;
-                    }}
-                    title="View diff"
-                  >
-                    <FileDiff size={13} />
-                    <span>Diff</span>
-                  </button>
+                  <Tooltip.Root>
+                    <Tooltip.Trigger>
+                      {#snippet child({ props })}
+                        <Button
+                          {...props}
+                          variant="outline"
+                          size="sm"
+                          onclick={() => {
+                            reviewDiffTarget = null;
+                            showBranchDiff = true;
+                          }}
+                          class="text-xs"
+                        >
+                          <FileDiff size={13} />
+                          <span>Diff</span>
+                        </Button>
+                      {/snippet}
+                    </Tooltip.Trigger>
+                    <Tooltip.Content>View diff</Tooltip.Content>
+                  </Tooltip.Root>
                 {/if}
               </div>
             {/if}
@@ -1563,40 +1583,38 @@
   />
 {/if}
 
-{#if openNote}
-  <NoteModal
-    title={openNote.title}
-    content={openNote.content}
-    sessionId={openNote.sessionId}
-    noteUpdatedAt={openNote.noteUpdatedAt}
-    nextSteps={openNote.nextSteps}
-    onClose={() => (openNote = null)}
-    onOpenSession={(sid) => {
-      openNote = null;
-      sessionMgr.openSessionId = sid;
-    }}
-    onStartSession={(mode, prefill) => {
-      const noteRef = openNote?.noteId ? `Re: #note:${openNote.noteId}` : '';
-      openNote = null;
-      void sessionMgr.startOrQueueSession(mode, noteRef ? `${noteRef}\n${prefill}` : prefill);
-    }}
-  />
-{/if}
+<NoteModal
+  open={openNote !== null}
+  title={openNote?.title ?? ''}
+  content={openNote?.content ?? ''}
+  sessionId={openNote?.sessionId}
+  noteUpdatedAt={openNote?.noteUpdatedAt}
+  nextSteps={openNote?.nextSteps}
+  onClose={() => (openNote = null)}
+  onOpenSession={(sid) => {
+    openNote = null;
+    sessionMgr.openSessionId = sid;
+  }}
+  onStartSession={(mode, prefill) => {
+    const noteRef = openNote?.noteId ? `Re: #note:${openNote.noteId}` : '';
+    openNote = null;
+    void sessionMgr.startOrQueueSession(mode, noteRef ? `${noteRef}\n${prefill}` : prefill);
+  }}
+/>
 
-{#if viewImageId}
-  <ImageViewerModal
-    imageId={viewImageId}
-    filename={viewImageFilename}
-    onClose={() => {
-      viewImageId = null;
-    }}
-    onDelete={() => {
-      if (viewImageId) {
-        handleDeleteImage(viewImageId);
-      }
-    }}
-  />
-{/if}
+<ImageViewerModal
+  open={viewImageId !== null}
+  imageId={viewImageId ?? ''}
+  filename={viewImageFilename}
+  onClose={() => {
+    viewImageId = null;
+  }}
+  onDelete={() => {
+    if (viewImageId) {
+      handleDeleteImage(viewImageId);
+    }
+  }}
+/>
 
 {#if sessionMgr.showNewSession}
   {@const commitPrefillBase = suggestedPrefill.commit}
@@ -1621,6 +1639,7 @@
     (sessionMgr.newSessionMode === 'commit' && !!suggestedPrefill.commitRef) ||
     (sessionMgr.newSessionMode === 'note' && !!suggestedPrefill.noteRef)}
   <NewSessionModal
+    open={true}
     {branch}
     mode={sessionMgr.newSessionMode}
     {repoLabel}
@@ -1645,87 +1664,99 @@
   />
 {/if}
 
-{#if sessionMgr.openSessionId}
-  <SessionModal
-    sessionId={sessionMgr.openSessionId}
-    repoDir={branch.worktreePath}
-    branchId={branch.id}
-    projectId={branch.projectId}
-    {repoLabel}
-    noteInfo={findNoteForSession(sessionMgr.openSessionId)}
-    onOpenNote={(note) => {
-      const sid = sessionMgr.openSessionId;
-      sessionMgr.openSessionId = null;
-      openNote = {
-        noteId: note.id,
-        title: note.title,
-        content: note.content,
-        sessionId: sid ?? undefined,
-        noteUpdatedAt: note.updatedAt,
-        nextSteps: computeNoteNextSteps(note.id),
-      };
-    }}
-    onClose={async () => {
-      const closedSessionId = sessionMgr.openSessionId;
-      sessionMgr.openSessionId = null;
-      loadTimeline();
-      // If the closed modal was the PR session, check if it finished while open
-      if (
-        prButton &&
-        closedSessionId &&
-        closedSessionId === prButton.getPrSessionId() &&
-        prButton.getPrCreatingState() === 'creating'
-      ) {
-        try {
-          const session = await commands.getSession(closedSessionId);
-          if (session && session.status !== 'running') {
-            prButton.handlePrSessionComplete(session.status);
-          }
-        } catch {
-          // Ignore — the polling fallback will catch it
+<SessionModal
+  open={sessionMgr.openSessionId !== null}
+  sessionId={sessionMgr.openSessionId ?? ''}
+  repoDir={branch.worktreePath}
+  branchId={branch.id}
+  projectId={branch.projectId}
+  {repoLabel}
+  noteInfo={sessionMgr.openSessionId ? findNoteForSession(sessionMgr.openSessionId) : null}
+  onOpenNote={(note) => {
+    const sid = sessionMgr.openSessionId;
+    sessionMgr.openSessionId = null;
+    openNote = {
+      noteId: note.id,
+      title: note.title,
+      content: note.content,
+      sessionId: sid ?? undefined,
+      noteUpdatedAt: note.updatedAt,
+      nextSteps: computeNoteNextSteps(note.id),
+    };
+  }}
+  onClose={async () => {
+    const closedSessionId = sessionMgr.openSessionId;
+    sessionMgr.openSessionId = null;
+    loadTimeline();
+    // If the closed modal was the PR session, check if it finished while open
+    if (
+      prButton &&
+      closedSessionId &&
+      closedSessionId === prButton.getPrSessionId() &&
+      prButton.getPrCreatingState() === 'creating'
+    ) {
+      try {
+        const session = await commands.getSession(closedSessionId);
+        if (session && session.status !== 'running') {
+          prButton.handlePrSessionComplete(session.status);
         }
+      } catch {
+        // Ignore — the polling fallback will catch it
       }
-      // If the closed modal was the push session, check if it finished while open
-      if (
-        prButton &&
-        closedSessionId &&
-        closedSessionId === prButton.getPushSessionId() &&
-        prButton.getPushingState() === 'pushing'
-      ) {
-        try {
-          const session = await commands.getSession(closedSessionId);
-          if (session && session.status !== 'running') {
-            prButton.handlePushSessionComplete(session.status, session);
-          }
-        } catch {
-          // Ignore — the polling fallback will catch it
+    }
+    // If the closed modal was the push session, check if it finished while open
+    if (
+      prButton &&
+      closedSessionId &&
+      closedSessionId === prButton.getPushSessionId() &&
+      prButton.getPushingState() === 'pushing'
+    ) {
+      try {
+        const session = await commands.getSession(closedSessionId);
+        if (session && session.status !== 'running') {
+          prButton.handlePushSessionComplete(session.status, session);
         }
+      } catch {
+        // Ignore — the polling fallback will catch it
       }
-    }}
-  />
-{/if}
+    }
+  }}
+/>
 
-{#if showForcePushDialog}
-  <ConfirmDialog
-    title="Force Push"
-    message="The remote branch has commits that would be lost. Do you want to force push? This will overwrite the remote branch with your local version."
-    confirmLabel="Force Push"
-    danger
-    onConfirm={confirmForcePush}
-    onCancel={() => (showForcePushDialog = false)}
-  />
-{/if}
+<AlertDialog.Root bind:open={showForcePushDialog}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Force Push</AlertDialog.Title>
+      <AlertDialog.Description>
+        The remote branch has commits that would be lost. Do you want to force push? This will
+        overwrite the remote branch with your local version.
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action variant="destructive" onclick={confirmForcePush}>
+        Force Push
+      </AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
 
-{#if confirmDelete}
-  <ConfirmDialog
-    title={confirmDelete.title}
-    message={confirmDelete.message}
-    confirmLabel={confirmDelete.confirmLabel ?? 'Delete'}
-    danger
-    onConfirm={confirmDelete.onConfirm}
-    onCancel={() => (confirmDelete = null)}
-  />
-{/if}
+<AlertDialog.Root open={confirmDelete !== null} onOpenChange={(v) => !v && (confirmDelete = null)}>
+  <AlertDialog.Content>
+    {#if confirmDelete}
+      <AlertDialog.Header>
+        <AlertDialog.Title>{confirmDelete.title}</AlertDialog.Title>
+        <AlertDialog.Description>{confirmDelete.message}</AlertDialog.Description>
+      </AlertDialog.Header>
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+        <AlertDialog.Action variant="destructive" onclick={confirmDelete.onConfirm}>
+          {confirmDelete.confirmLabel ?? 'Delete'}
+        </AlertDialog.Action>
+      </AlertDialog.Footer>
+    {/if}
+  </AlertDialog.Content>
+</AlertDialog.Root>
 
 <style>
   .branch-card {
@@ -1814,24 +1845,6 @@
     stroke: var(--text-muted);
   }
 
-  .more-button {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 6px;
-    background: transparent;
-    border: none;
-    border-radius: 6px;
-    color: var(--text-faint);
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .more-button:hover {
-    background-color: var(--bg-hover);
-    color: var(--text-primary);
-  }
-
   :global(.branch-icon) {
     color: var(--branch-color);
     flex-shrink: 0;
@@ -1859,21 +1872,6 @@
     font-size: var(--size-sm);
   }
 
-  .error .retry-btn {
-    padding: 2px 10px;
-    border-radius: 4px;
-    border: 1px solid var(--border-subtle);
-    background: none;
-    color: var(--text-muted);
-    font-size: var(--size-xs);
-    cursor: pointer;
-  }
-
-  .error .retry-btn:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover);
-  }
-
   /* Worktree error state */
   .worktree-error {
     display: flex;
@@ -1897,59 +1895,10 @@
     margin-top: 1px;
   }
 
-  .worktree-retry-btn {
-    flex-shrink: 0;
-    padding: 5px 14px;
-    background: none;
-    border: 1px solid var(--border-muted);
-    border-radius: 6px;
-    color: var(--text-primary);
-    font-size: var(--size-xs);
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .worktree-retry-btn:hover {
-    border-color: var(--ui-accent);
-    color: var(--ui-accent);
-    background-color: var(--bg-hover);
-  }
-
   /* Footer right actions (PR and diff buttons) */
   .footer-right-actions {
     display: flex;
     align-items: center;
     gap: 4px;
-  }
-
-  /* Diff button (reuses pr-btn style) */
-  .pr-btn {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    padding: 4px 10px;
-    background: none;
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    color: var(--text-muted);
-    font-size: var(--size-xs);
-    font-weight: 500;
-    cursor: pointer;
-    transition:
-      color 0.15s,
-      border-color 0.15s,
-      background-color 0.15s;
-    white-space: nowrap;
-  }
-
-  .pr-btn:hover:not(:disabled) {
-    color: var(--text-primary);
-    border-color: var(--border-muted);
-    background: var(--bg-hover);
-  }
-
-  .pr-btn :global(svg) {
-    flex-shrink: 0;
   }
 </style>

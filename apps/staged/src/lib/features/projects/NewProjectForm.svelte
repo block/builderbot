@@ -6,12 +6,14 @@
 -->
 <script lang="ts">
   import { slide } from 'svelte/transition';
-  import { Monitor, Cloud } from 'lucide-svelte';
+  import Monitor from '@lucide/svelte/icons/monitor';
+  import Cloud from '@lucide/svelte/icons/cloud';
   import type { Project } from '../../types';
   import * as commands from '../../api/commands';
-  import FormInput from '../../shared/FormInput.svelte';
-  import FormButton from '../../shared/FormButton.svelte';
-  import FormToggle from '../../shared/FormToggle.svelte';
+  import { Input } from '$lib/components/ui/input';
+  import { Button } from '$lib/components/ui/button';
+  import { Label } from '$lib/components/ui/label';
+  import * as ToggleGroup from '$lib/components/ui/toggle-group';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoConfigForm from './RepoConfigForm.svelte';
   import type { BranchSelection } from './RepoConfigForm.svelte';
@@ -150,6 +152,11 @@
     }
   }
 
+  let nameInputRef = $state<HTMLInputElement | null>(null);
+  $effect(() => {
+    nameInputRef?.focus();
+  });
+
   function handleNameInput() {
     const parsed = parseGitHubUrl(name);
     if (parsed) {
@@ -167,8 +174,8 @@
 
 <div class="new-project-form">
   <div class="form-group">
-    <label for="project-name">Name</label>
-    <FormInput
+    <Label for="project-name" class="text-muted-foreground text-xs">Name</Label>
+    <Input
       bind:value={name}
       id="project-name"
       placeholder="e.g., Add dark mode, Fix login bug"
@@ -177,32 +184,34 @@
       autocorrect="off"
       autocapitalize="off"
       spellcheck={false}
-      autofocus
       oninput={handleNameInput}
+      class="min-h-[42px] rounded-[10px] px-3.5 py-2.5 text-base"
+      bind:ref={nameInputRef}
     />
   </div>
 
   {#if remoteProjectsAvailable}
     <div class="form-group">
       <div class="field-label">Location</div>
-      <FormToggle
+      <ToggleGroup.Root
+        type="single"
         bind:value={location}
-        options={[
-          {
-            value: 'local',
-            label: 'Local',
-            description: 'Run agents on your machine',
-            icon: Monitor,
-          },
-          {
-            value: 'remote',
-            label: 'Remote',
-            description: 'Run agents in the cloud',
-            icon: Cloud,
-          },
-        ]}
         disabled={saving}
-      />
+        class="flex flex-col gap-2"
+      >
+        {#each [{ value: 'local', label: 'Local', description: 'Run agents on your machine', icon: Monitor }, { value: 'remote', label: 'Remote', description: 'Run agents in the cloud', icon: Cloud }] as option}
+          <ToggleGroup.Item
+            value={option.value}
+            class="flex h-auto w-full items-center justify-start gap-3 rounded-[10px] border-[1.5px] border-border px-4 py-3.5 text-left text-muted-foreground hover:border-ring hover:bg-transparent hover:text-foreground data-[state=on]:border-foreground data-[state=on]:bg-foreground data-[state=on]:text-background"
+          >
+            <option.icon size={22} class="shrink-0" />
+            <span class="flex min-w-0 flex-col gap-0.5">
+              <span class="text-sm font-medium">{option.label}</span>
+              <span class="text-xs opacity-70">{option.description}</span>
+            </span>
+          </ToggleGroup.Item>
+        {/each}
+      </ToggleGroup.Root>
     </div>
   {/if}
 
@@ -226,23 +235,23 @@
 
   <div class="actions">
     {#if onCancel}
-      <FormButton onclick={onCancel} disabled={saving}>Cancel</FormButton>
+      <Button variant="ghost" onclick={onCancel} disabled={saving}>Cancel</Button>
     {/if}
-    <FormButton
-      variant="primary"
-      class={!onCancel ? 'full-width-btn' : ''}
+    <Button
+      variant="outline"
+      class={!onCancel ? 'w-full' : ''}
       onclick={handleCreate}
       disabled={!canCreate}
     >
       {#if saving}
-        <span class="button-content">
+        <span class="inline-flex items-center gap-1.5">
           <Spinner size={14} />
           <span>Creating...</span>
         </span>
       {:else}
         Create Project
       {/if}
-    </FormButton>
+    </Button>
   </div>
 </div>
 
@@ -257,11 +266,6 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-  }
-
-  label {
-    font-size: var(--size-xs);
-    color: var(--text-muted);
   }
 
   .field-label {
@@ -280,22 +284,12 @@
     gap: 8px;
   }
 
-  :global(.full-width-btn) {
-    width: 100%;
-  }
-
-  .button-content {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-  }
-
   @media (max-width: 640px) {
     .actions {
       flex-direction: column-reverse;
     }
 
-    .actions :global(.form-btn) {
+    .actions :global(button) {
       width: 100%;
       min-height: 44px;
     }

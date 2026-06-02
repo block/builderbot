@@ -1,5 +1,8 @@
 <script lang="ts">
-  import { Eye, X } from 'lucide-svelte';
+  import Eye from '@lucide/svelte/icons/eye';
+  import X from '@lucide/svelte/icons/x';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
 
   interface ReferenceFile {
     path: string;
@@ -30,29 +33,45 @@
   <ul class="tree-section reference-section">
     {#each referenceFiles as refFile (refFile.path)}
       <li class="tree-item-wrapper">
-        <div
-          class="tree-item file-item reference-item"
-          class:selected={selectedFile === refFile.path}
-          style="padding-left: 8px"
-          role="button"
-          tabindex="0"
-          onclick={() => onSelectFile(refFile.path)}
-          onkeydown={(e) => e.key === 'Enter' && onSelectFile(refFile.path)}
-          title={refFile.path}
-        >
-          <span class="reference-icon"><Eye size={16} /></span>
-          <span class="file-name truncate-start">{refFile.path}</span>
-          <button
-            class="remove-btn"
-            onclick={(e) => {
-              e.stopPropagation();
-              onRemoveReferenceFile(refFile.path);
-            }}
-            title="Remove reference file"
-          >
-            <X size={12} />
-          </button>
-        </div>
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            {#snippet child({ props })}
+              <div
+                {...props}
+                class="tree-item file-item reference-item group/ref-item"
+                class:selected={selectedFile === refFile.path}
+                style="padding-left: 8px"
+                role="button"
+                tabindex="0"
+                onclick={() => onSelectFile(refFile.path)}
+                onkeydown={(e) => e.key === 'Enter' && onSelectFile(refFile.path)}
+              >
+                <span class="reference-icon"><Eye size={16} /></span>
+                <span class="file-name truncate-start">{refFile.path}</span>
+                <Tooltip.Root>
+                  <Tooltip.Trigger>
+                    {#snippet child({ props: removeProps })}
+                      <Button
+                        {...removeProps}
+                        variant="ghost"
+                        size="icon"
+                        class="ml-auto size-auto shrink-0 rounded-[3px] p-0.5 text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/ref-item:opacity-100 [&_svg]:!size-3"
+                        onclick={(e: MouseEvent) => {
+                          e.stopPropagation();
+                          onRemoveReferenceFile(refFile.path);
+                        }}
+                      >
+                        <X size={12} />
+                      </Button>
+                    {/snippet}
+                  </Tooltip.Trigger>
+                  <Tooltip.Content>Remove reference file</Tooltip.Content>
+                </Tooltip.Root>
+              </div>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content>{refFile.path}</Tooltip.Content>
+        </Tooltip.Root>
       </li>
     {/each}
   </ul>
@@ -192,33 +211,5 @@
     justify-content: center;
     flex-shrink: 0;
     color: var(--text-muted);
-  }
-
-  .remove-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 2px;
-    background: none;
-    border: none;
-    border-radius: 3px;
-    color: var(--text-faint);
-    cursor: pointer;
-    opacity: 0;
-    transition:
-      opacity 0.1s,
-      background-color 0.1s,
-      color 0.1s;
-    margin-left: auto;
-    flex-shrink: 0;
-  }
-
-  .reference-item:hover .remove-btn {
-    opacity: 1;
-  }
-
-  .remove-btn:hover {
-    background-color: var(--bg-hover);
-    color: var(--text-primary);
   }
 </style>

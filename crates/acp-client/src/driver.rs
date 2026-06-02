@@ -310,12 +310,13 @@ impl AgentDriver for AcpDriver {
 
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            // NOTE: stderr is discarded for both local and remote spawns. For local
-            // shells this means shell init errors (e.g. Hermit activation failures,
-            // .zshrc syntax errors) are silently swallowed. The agent will still run
-            // but without the hermit-managed toolchain. Consider piping stderr (as
-            // the actions executor does) and logging it to aid debugging.
-            .stderr(Stdio::null())
+            // Pipe stderr and log it. Shell init failures (Hermit activation
+            // errors, .zshrc syntax errors) and — crucially — a failed shebang
+            // (`env: node: No such file or directory` when the agent binary's
+            // interpreter isn't on PATH) all surface here. Without this the agent
+            // dies before the `initialize` response and the only symptom is an
+            // opaque "server shut down unexpectedly".
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         // Put remote proxies in their own process group so we can send
         // SIGINT to the entire group (sq + its child processes) for graceful
@@ -341,6 +342,22 @@ impl AgentDriver for AcpDriver {
             )
         })?;
 
+        // Drain the agent's stderr to the log so spawn/shebang failures are
+        // visible instead of vanishing into a generic "server shut down".
+        if let Some(stderr) = child.stderr.take() {
+            let agent_label = self.agent_label.clone();
+            let session_id = session_id.to_string();
+            tokio::task::spawn_local(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    log::warn!("[{agent_label} stderr][session {session_id}] {line}");
+                }
+            });
+        }
+
         let mut stdin = child
             .stdin
             .take()
@@ -352,15 +369,31 @@ impl AgentDriver for AcpDriver {
         // with the agent binary — from this point on, stdin belongs to the
         // agent's JSON-RPC transport.
         if is_local_shell {
-            let exec_line = format!(
-                "exec {} {}\n",
-                shell_quote(&self.binary_path.to_string_lossy()),
-                self.acp_args
-                    .iter()
-                    .map(|a| shell_quote(a))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            );
+            let quoted_binary = shell_quote(&self.binary_path.to_string_lossy());
+            let quoted_args = self
+                .acp_args
+                .iter()
+                .map(|a| shell_quote(a))
+                .collect::<Vec<_>>()
+                .join(" ");
+            // Prepend the agent binary's own directory to PATH for the exec.
+            // Many agents (e.g. `claude-agent-acp`) are `#!/usr/bin/env node`
+            // scripts whose interpreter lives alongside the binary. The session
+            // working directory's shell init may not expose a compatible `node`
+            // (Hermit/direnv can replace PATH, nvm may not activate), in which
+            // case the shebang fails with `env: node: No such file or directory`
+            // and the agent dies before responding — surfacing only as "server
+            // shut down unexpectedly". Pinning the binary's dir on PATH ensures
+            // the interpreter that ships with the agent is always found.
+            let exec_line = match self.binary_path.parent() {
+                Some(bin_dir) => format!(
+                    "exec env PATH={}:\"$PATH\" {} {}\n",
+                    shell_quote(&bin_dir.to_string_lossy()),
+                    quoted_binary,
+                    quoted_args
+                ),
+                None => format!("exec {quoted_binary} {quoted_args}\n"),
+            };
             stdin
                 .write_all(exec_line.as_bytes())
                 .await

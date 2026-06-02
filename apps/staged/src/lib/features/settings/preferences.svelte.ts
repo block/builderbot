@@ -82,7 +82,7 @@ const LIGHT_BASE: ModeBaseColors = {
   bg: '#ffffff',
   fg: '#24292e',
   comment: '#6e7781',
-  gitColors: { added: '#1a7f37', deleted: '#cf222e', modified: '#9a6700' },
+  gitColors: { added: '#28a745', deleted: '#d73a49', modified: '#2188ff' },
 };
 
 // =============================================================================

@@ -135,10 +135,6 @@ export function setPrimaryProjectRepo(projectId: string, projectRepoId: string):
   return invokeCommand('set_primary_project_repo', { projectId, projectRepoId });
 }
 
-export function clearProjectRepoReason(projectRepoId: string): Promise<void> {
-  return invokeCommand('clear_project_repo_reason', { projectRepoId });
-}
-
 export function getSuggestedRepos(projectId: string, limit?: number): Promise<SuggestedRepo[]> {
   return invokeCommand('get_suggested_repos', { projectId, limit: limit ?? null });
 }

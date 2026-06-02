@@ -55,7 +55,6 @@
   import BranchCardActionsBar from './BranchCardActionsBar.svelte';
   import BranchCardPrButton from './BranchCardPrButton.svelte';
   import BranchCardSessionManager from './BranchCardSessionManager.svelte';
-  import ReasonBanner from './ReasonBanner.svelte';
   import RemoteWorkspaceStatusBadge from './RemoteWorkspaceStatusBadge.svelte';
   import RemoteWorkspaceStatusView from './RemoteWorkspaceStatusView.svelte';
   import { branchTimelineReadyKey } from './branchTimelineReady';
@@ -78,7 +77,6 @@
     onDelete?: () => void;
     onRename?: (branchName: string) => void;
     onRetryWorktree?: () => void;
-    onDismissReason?: (projectRepoId: string) => void;
   }
 
   let {
@@ -91,7 +89,6 @@
     onDelete,
     onRename,
     onRetryWorktree,
-    onDismissReason,
   }: Props = $props();
 
   // Determine if this is a local or remote branch
@@ -1201,21 +1198,6 @@
   }
 
   // =========================================================================
-  // Repo reason banner
-  // =========================================================================
-
-  async function handleDismissReason() {
-    if (branch.projectRepoId) {
-      try {
-        await commands.clearProjectRepoReason(branch.projectRepoId);
-        onDismissReason?.(branch.projectRepoId);
-      } catch (e) {
-        console.error('Failed to clear repo reason:', e);
-      }
-    }
-  }
-
-  // =========================================================================
   // Drag-and-drop text files → notes (via Tauri native drag-drop events)
   // =========================================================================
 
@@ -1389,7 +1371,6 @@
     </div>
 
     <div class="card-content">
-      <ReasonBanner reason={repoLabel?.reason} onDismiss={handleDismissReason} />
       {#if isRemote && (remoteWorkspaceStatus === 'stopped' || remoteWorkspaceStatus === 'suspended' || remoteWorkspaceStatus === 'error')}
         <RemoteWorkspaceStatusView
           status={remoteWorkspaceStatus}

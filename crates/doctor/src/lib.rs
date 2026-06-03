@@ -19,7 +19,9 @@ use std::sync::{Arc, Mutex};
 
 use agents::{check_single_ai_agent, lookup_fix_command, AI_AGENT_CHECKS};
 use checks::{check_clonefile, check_gh, check_gh_auth, check_git, check_git_lfs};
-use freshness::{fetch_version_info, is_self_updating, load_cache, save_cache};
+use freshness::{
+    fetch_version_info, is_self_updating, load_cache, save_cache, select_installed_probe,
+};
 use package_ids::{lookup_package_id, LatestSource};
 use resolve::resolve_binary;
 use types::{AgentVersionInfo, InstallSource, ResolvedBinary};
@@ -272,6 +274,7 @@ async fn populate_freshness(
                     path: PathBuf::from(path),
                     latest_source,
                     package_id,
+                    install_source: readout.install_source.clone(),
                 });
             }
             if let (Some(readout), Some(path)) = (&check.bridge, check.bridge_path.as_deref()) {
@@ -283,6 +286,7 @@ async fn populate_freshness(
                     path: PathBuf::from(path),
                     latest_source,
                     package_id,
+                    install_source: readout.install_source.clone(),
                 });
             }
         } else {
@@ -298,6 +302,7 @@ async fn populate_freshness(
                 path: PathBuf::from(path_str),
                 latest_source,
                 package_id,
+                install_source: check.install_source.clone(),
             });
         }
     }
@@ -306,11 +311,14 @@ async fn populate_freshness(
         let cache = cache.clone();
         let npm_registry = npm_registry.clone();
         async move {
+            // npm-distributed bridges don't honor `--version`; read their
+            // installed version straight from the owning `package.json`.
+            let probe = select_installed_probe(t.install_source.as_ref(), t.package_id.as_deref());
             let info = fetch_version_info(
                 t.latest_source,
                 t.package_id.as_deref(),
                 &t.path,
-                &["--version"],
+                probe,
                 offline,
                 npm_registry.as_deref(),
                 cache,
@@ -383,6 +391,7 @@ struct FreshnessTarget {
     path: PathBuf,
     latest_source: Option<LatestSource>,
     package_id: Option<String>,
+    install_source: Option<InstallSource>,
 }
 
 /// Run a fix command for a doctor check, identified by check ID and fix type.

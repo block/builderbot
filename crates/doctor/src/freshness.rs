@@ -185,9 +185,7 @@ fn find_semver_in_line(line: &str) -> Option<String> {
 /// `None` if any of the first three numeric components is missing.
 fn parse_semver_triple(v: &str) -> Option<(u64, u64, u64)> {
     let trimmed = v.trim().trim_start_matches('v');
-    let core = trimmed
-        .split(|c: char| c == '-' || c == '+' || c == ' ')
-        .next()?;
+    let core = trimmed.split(['-', '+', ' ']).next()?;
     let mut parts = core.split('.');
     let major = parts.next()?.parse::<u64>().ok()?;
     let minor = parts.next()?.parse::<u64>().ok()?;

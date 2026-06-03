@@ -1,13 +1,14 @@
 //! AI agent checks and fix command lookup.
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::checks::CLONEFILE_FIX_COMMAND;
-use crate::execute_command_blocking;
 use crate::resolve::format_command_output;
 use crate::types::{
     AgentVersionInfo, AuthStatus, CheckStatus, DoctorCheck, FixType, InstallSource, ResolvedBinary,
 };
+use crate::{execute_command_with_path_prefix, ExecOutcome};
 
 /// Metadata for an individual AI agent check.
 pub struct AgentCheckInfo {
@@ -159,6 +160,59 @@ pub(crate) fn apply_npm_registry(command: &str, registry: Option<&str>) -> Strin
 /// preceded by other tokens.
 fn is_npm_command(command: &str) -> bool {
     command.starts_with("npm ") || command.contains("npm install") || command.contains("npm view")
+}
+
+/// Parent directories of every resolved binary behind a check, deduplicated.
+/// Used to build a PATH prefix for the auth probe so the agent is findable
+/// even when the parent process has a restricted PATH (Finder/launchd case).
+/// Order: main first, then bridges, in the order they were resolved.
+fn collect_resolved_bin_dirs(
+    main: Option<&ResolvedBinary>,
+    bridges: &[ResolvedBinary],
+) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut push = |p: &Path| {
+        if let Some(parent) = p.parent() {
+            let pb = parent.to_path_buf();
+            if !out.contains(&pb) {
+                out.push(pb);
+            }
+        }
+    };
+    if let Some(m) = main {
+        if let Some(p) = m.path.as_deref() {
+            push(p);
+        }
+    }
+    for b in bridges {
+        if let Some(p) = b.path.as_deref() {
+            push(p);
+        }
+    }
+    out
+}
+
+/// Build the resolve-trace portion of an agent check's `raw_output`. When the
+/// agent has a separate `main_command`, prepends the main CLI's resolve trace
+/// so the happy path explains *both* binaries' resolution, not just the
+/// bridge's. Single-binary agents (no `main_command`) leave only the bridge
+/// trace, which is the binary that was searched for.
+fn build_raw_with_main_search(
+    header: &str,
+    info: &AgentCheckInfo,
+    resolved_main: Option<&ResolvedBinary>,
+    bridge_search: &str,
+) -> String {
+    match (info.main_command, resolved_main) {
+        (Some(main_cmd), Some(rm)) => {
+            let bridge_cmd = info.commands.first().copied().unwrap_or("");
+            format!(
+                "{header}\n# main CLI ({main_cmd}):\n{}\n# ACP bridge ({bridge_cmd}):\n{bridge_search}",
+                rm.search_output,
+            )
+        }
+        _ => format!("{header}\n{bridge_search}"),
+    }
 }
 
 /// Resolve the effective install source for an agent binary. Generic path and
@@ -333,38 +387,77 @@ pub fn check_single_ai_agent(
                 (version_readout(bridge_install_source.clone()), None)
             };
 
+            // Build a PATH prefix from the resolved binary directories so the
+            // auth probe can find the agent even when the parent process was
+            // launched with a restricted PATH (Finder/launchd case). The probe
+            // command itself is left intact — only PATH is augmented.
+            let auth_path_prefix = collect_resolved_bin_dirs(resolved_main, resolved_cmds);
+
             let (auth_status, auth_output) = match info.auth_status_command {
-                Some(cmd) => match execute_command_blocking(cmd) {
-                    Ok(()) => (
+                Some(cmd) => match execute_command_with_path_prefix(cmd, &auth_path_prefix) {
+                    ExecOutcome::Ok => (
                         Some(AuthStatus::Authenticated),
                         Some(format!("$ {cmd}\n(exit 0)")),
                     ),
-                    Err(err) => (
+                    // Shell itself couldn't be spawned — we have no signal at
+                    // all about auth state.
+                    ExecOutcome::Spawn(e) => (
+                        Some(AuthStatus::Unknown),
+                        Some(format!("$ {cmd}\n(spawn failure: {e})")),
+                    ),
+                    // Exit 127 means the shell couldn't find the command —
+                    // PATH-shadowed or uninstalled. Not the same as "signed
+                    // out"; report Unknown so the UI doesn't offer a useless
+                    // `... auth login` fix.
+                    ExecOutcome::Exit {
+                        code: Some(127),
+                        stderr,
+                    } => (
+                        Some(AuthStatus::Unknown),
+                        Some(format!(
+                            "$ {cmd}\n(command not found / exit 127)\n{}",
+                            stderr.trim_end(),
+                        )),
+                    ),
+                    // Genuine non-zero exit — the command ran and rejected us.
+                    ExecOutcome::Exit { code, stderr } => (
                         Some(AuthStatus::NotAuthenticated),
-                        Some(format!("$ {cmd}\n{err}")),
+                        Some(format!(
+                            "$ {cmd}\n(exit {})\n{}",
+                            code.map(|c| c.to_string())
+                                .unwrap_or_else(|| "signal".to_string()),
+                            stderr.trim_end(),
+                        )),
                     ),
                 },
                 None if info.auth_command.is_some() => (Some(AuthStatus::NotApplicable), None),
                 None => (None, None),
             };
 
-            let mut raw = format!("{header}\n{search}");
+            let mut raw = build_raw_with_main_search(&header, info, resolved_main, &search);
             if let Some(extra) = auth_output {
                 raw.push('\n');
                 raw.push_str(&extra);
             }
 
-            let (status, message, fix_type, fix_command) =
-                if matches!(auth_status, Some(AuthStatus::NotAuthenticated)) {
-                    (
-                        CheckStatus::Warn,
-                        "Installed, not authenticated".to_string(),
-                        info.auth_command.map(|_| FixType::Auth),
-                        info.auth_command.map(|s| s.to_string()),
-                    )
-                } else {
-                    (CheckStatus::Pass, "Installed".to_string(), None, None)
-                };
+            let (status, message, fix_type, fix_command) = match auth_status {
+                Some(AuthStatus::NotAuthenticated) => (
+                    CheckStatus::Warn,
+                    "Installed, not authenticated".to_string(),
+                    info.auth_command.map(|_| FixType::Auth),
+                    info.auth_command.map(|s| s.to_string()),
+                ),
+                // PATH-shadowed / command not found: we can't tell. Surface
+                // the state but don't offer an auth fix — `claude auth login`
+                // won't help if `claude` isn't on PATH.
+                Some(AuthStatus::Unknown) => (
+                    CheckStatus::Warn,
+                    "Installed, auth status unknown".to_string(),
+                    None,
+                    None,
+                ),
+                _ => (CheckStatus::Pass, "Installed".to_string(), None, None),
+            };
 
             DoctorCheck {
                 id: info.id.to_string(),
@@ -684,6 +777,68 @@ mod tests {
             apply_npm_registry("claude auth login", Some("https://artifactory/npm")),
             "claude auth login",
         );
+    }
+
+    /// On the happy path (both main and bridge resolved), `raw_output` includes
+    /// the main CLI's resolve trace alongside the bridge's, with clear labels
+    /// and a stable main-first ordering — diagnoses PATH-shadowed agents from
+    /// the Copy details payload alone.
+    #[test]
+    fn raw_output_includes_main_and_bridge_resolve_traces() {
+        let bridge = ResolvedBinary {
+            path: Some(PathBuf::from("/n/bin/pi-acp")),
+            search_output: "BRIDGE-SEARCH-MARKER".to_string(),
+            install_source: Some(InstallSource::Npm),
+        };
+        let main = ResolvedBinary {
+            path: Some(PathBuf::from("/c/bin/pi")),
+            search_output: "MAIN-SEARCH-MARKER".to_string(),
+            install_source: Some(InstallSource::Cargo),
+        };
+        let check = check_single_ai_agent(
+            agent("ai-agent-pi"),
+            true,
+            std::slice::from_ref(&bridge),
+            Some(&main),
+            None,
+        );
+        let raw = check.raw_output.expect("raw_output set");
+        let main_at = raw
+            .find("MAIN-SEARCH-MARKER")
+            .expect("main trace in raw_output");
+        let bridge_at = raw
+            .find("BRIDGE-SEARCH-MARKER")
+            .expect("bridge trace in raw_output");
+        assert!(
+            main_at < bridge_at,
+            "main should appear before bridge; raw_output:\n{raw}",
+        );
+        assert!(
+            raw.contains("# main CLI") && raw.contains("# ACP bridge"),
+            "expected labeled sections; raw_output:\n{raw}",
+        );
+    }
+
+    #[test]
+    fn collect_resolved_bin_dirs_dedupes_and_preserves_order() {
+        let main = ResolvedBinary {
+            path: Some(PathBuf::from("/tmp/a/main")),
+            search_output: String::new(),
+            install_source: None,
+        };
+        let b1 = ResolvedBinary {
+            path: Some(PathBuf::from("/tmp/b/bridge1")),
+            search_output: String::new(),
+            install_source: None,
+        };
+        // Same dir as main — should dedupe.
+        let b2 = ResolvedBinary {
+            path: Some(PathBuf::from("/tmp/a/another")),
+            search_output: String::new(),
+            install_source: None,
+        };
+        let dirs = collect_resolved_bin_dirs(Some(&main), &[b1, b2]);
+        assert_eq!(dirs, vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")],);
     }
 
     #[test]

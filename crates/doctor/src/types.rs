@@ -31,6 +31,12 @@ pub enum AuthStatus {
     Authenticated,
     NotAuthenticated,
     NotApplicable,
+    /// Probe couldn't determine auth state because the agent's
+    /// `auth_status_command` failed to spawn or exited with 127 (command not
+    /// found). Distinct from `NotAuthenticated`: a PATH-shadowed agent isn't
+    /// signed out, we just can't tell. Downstream consumers should treat this
+    /// as informational (no auth fix to offer).
+    Unknown,
 }
 
 /// How a binary was installed on disk.

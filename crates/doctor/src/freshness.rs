@@ -757,6 +757,34 @@ mod tests {
         );
     }
 
+    /// Exercises the Claude main CLI's new npm package id end-to-end at the
+    /// freshness layer: when claude is npm-installed under nvm, its main
+    /// readout walks up to `@anthropic-ai/claude-code`'s `package.json`.
+    #[test]
+    fn package_json_resolves_claude_main_npm_layout() {
+        let root = scratch_dir("pj-claude-main");
+        let pkg = root.join("node_modules/@anthropic-ai/claude-code");
+        std::fs::create_dir_all(pkg.join("cli")).unwrap();
+        let entry = pkg.join("cli/cli.js");
+        std::fs::write(&entry, "// node script\n").unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            br#"{"name": "@anthropic-ai/claude-code", "version": "2.1.0"}"#,
+        )
+        .unwrap();
+
+        // npm leaves a `claude` symlink in `bin/`.
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        let bin = root.join("bin/claude");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&entry, &bin).unwrap();
+
+        assert_eq!(
+            installed_version_from_package_json(&bin, Some("@anthropic-ai/claude-code")).as_deref(),
+            Some("2.1.0"),
+        );
+    }
+
     #[test]
     fn package_json_missing_returns_none() {
         let root = scratch_dir("pj-missing");

@@ -22,7 +22,7 @@ use checks::{check_clonefile, check_gh, check_gh_auth, check_git, check_git_lfs}
 use freshness::{
     fetch_version_info, is_self_updating, load_cache, save_cache, select_installed_probe,
 };
-use package_ids::{lookup_package_id, LatestSource};
+use package_ids::{lookup_package_id, LatestSource, Role};
 use resolve::resolve_binary;
 use types::{AgentVersionInfo, InstallSource, ResolvedBinary};
 
@@ -217,10 +217,11 @@ enum ReadoutSlot {
 fn resolve_package(
     check_id: &str,
     source: Option<&InstallSource>,
+    role: Role,
 ) -> (Option<String>, Option<LatestSource>) {
     source
         .cloned()
-        .and_then(|src| lookup_package_id(check_id, src))
+        .and_then(|src| lookup_package_id(check_id, src, role))
         .map(|(pkg, latest)| (Some(pkg.to_string()), Some(latest)))
         .unwrap_or((None, None))
 }
@@ -267,7 +268,7 @@ async fn populate_freshness(
         if is_agent {
             if let (Some(readout), Some(path)) = (&check.main, check.path.as_deref()) {
                 let (package_id, latest_source) =
-                    resolve_package(&check.id, readout.install_source.as_ref());
+                    resolve_package(&check.id, readout.install_source.as_ref(), Role::Main);
                 targets.push(FreshnessTarget {
                     id: check.id.clone(),
                     slot: ReadoutSlot::Main,
@@ -279,7 +280,7 @@ async fn populate_freshness(
             }
             if let (Some(readout), Some(path)) = (&check.bridge, check.bridge_path.as_deref()) {
                 let (package_id, latest_source) =
-                    resolve_package(&check.id, readout.install_source.as_ref());
+                    resolve_package(&check.id, readout.install_source.as_ref(), Role::Bridge);
                 targets.push(FreshnessTarget {
                     id: check.id.clone(),
                     slot: ReadoutSlot::Bridge,
@@ -295,7 +296,7 @@ async fn populate_freshness(
             let path_str = check.bridge_path.as_deref().or(check.path.as_deref());
             let Some(path_str) = path_str else { continue };
             let (package_id, latest_source) =
-                resolve_package(&check.id, check.install_source.as_ref());
+                resolve_package(&check.id, check.install_source.as_ref(), Role::Any);
             targets.push(FreshnessTarget {
                 id: check.id.clone(),
                 slot: ReadoutSlot::Flat,
@@ -469,6 +470,98 @@ enum StreamLine {
     Stderr(String),
 }
 
+/// Build the login-shell `Command` used by every doctor exec path. Optionally
+/// prepends `path_prefix` directories to the child `PATH` so a binary that's
+/// only findable in the resolved location (e.g. an nvm bin dir) is visible to
+/// the spawned shell even when the parent process was launched with a
+/// restricted `PATH` (the macOS Finder/launchd case). When `path_prefix` is
+/// empty the env layout is byte-identical to the previous implementation, so
+/// existing call sites are unaffected.
+fn build_shell_command(command: &str, path_prefix: &[PathBuf]) -> std::process::Command {
+    let (shell, args) = if std::path::Path::new("/bin/zsh").exists() {
+        ("/bin/zsh", vec!["-l", "-c", command])
+    } else {
+        ("/bin/bash", vec!["-l", "-c", command])
+    };
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
+    let user = std::env::var("USER").unwrap_or_default();
+
+    let mut cmd = std::process::Command::new(shell);
+    cmd.args(&args)
+        .env_clear()
+        .env("HOME", &home)
+        .env("USER", &user)
+        .env("TERM", "xterm-256color")
+        .current_dir(&home);
+    if !path_prefix.is_empty() {
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut path = String::new();
+        for p in path_prefix {
+            let s = p.to_string_lossy().to_string();
+            if !seen.insert(s.clone()) {
+                continue;
+            }
+            if !path.is_empty() {
+                path.push(':');
+            }
+            path.push_str(&s);
+        }
+        // Conservative fallback ~ what login zsh on macOS sees before
+        // /etc/zprofile augments it. Keeps the rest of the resolved-binary
+        // dir's command graph reachable (e.g. node, npm) without depending on
+        // the parent process's PATH.
+        path.push_str(":/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+        cmd.env("PATH", path);
+    }
+    cmd
+}
+
+/// Detailed outcome of running a command. Lets the caller distinguish
+/// `command not found` (exit 127 from the shell, or a spawn failure on the
+/// shell itself) from a genuine non-zero exit — important for the auth probe,
+/// where the former means "we can't tell" and the latter means "not signed in".
+#[derive(Debug)]
+pub(crate) enum ExecOutcome {
+    Ok,
+    /// The shell itself couldn't be spawned (or `wait()` failed). Rare; means
+    /// we have no signal at all from the inner command.
+    Spawn(std::io::Error),
+    /// The shell ran, the inner command exited non-zero. Code is `Some(127)`
+    /// when the shell reports "command not found".
+    Exit {
+        code: Option<i32>,
+        stderr: String,
+    },
+}
+
+/// Run `command` through a login shell, with the caller-supplied `path_prefix`
+/// prepended to the child `PATH`. Returns the detailed exec outcome. No
+/// streaming — used by the auth probe which wants a single sync result.
+pub(crate) fn execute_command_with_path_prefix(
+    command: &str,
+    path_prefix: &[PathBuf],
+) -> ExecOutcome {
+    let mut cmd = build_shell_command(command, path_prefix);
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return ExecOutcome::Spawn(e),
+    };
+    let output = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(e) => return ExecOutcome::Spawn(e),
+    };
+    if output.status.success() {
+        ExecOutcome::Ok
+    } else {
+        ExecOutcome::Exit {
+            code: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        }
+    }
+}
+
 /// Spawn `command` through a login shell, stream stdout/stderr lines to
 /// `on_line`, and return based on the process exit status. Stderr lines are
 /// also accumulated so a non-zero exit can surface a useful error message
@@ -479,21 +572,7 @@ where
 {
     use std::io::{BufRead, BufReader};
 
-    let (shell, args) = if std::path::Path::new("/bin/zsh").exists() {
-        ("/bin/zsh", vec!["-l", "-c", command])
-    } else {
-        ("/bin/bash", vec!["-l", "-c", command])
-    };
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    let user = std::env::var("USER").unwrap_or_default();
-
-    let mut child = std::process::Command::new(shell)
-        .args(&args)
-        .env_clear()
-        .env("HOME", &home)
-        .env("USER", &user)
-        .env("TERM", "xterm-256color")
-        .current_dir(&home)
+    let mut child = build_shell_command(command, &[])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -557,13 +636,6 @@ where
     }
 }
 
-/// Synchronous, non-streaming variant for callers running inside an existing
-/// `spawn_blocking` closure (the auth probes in `check_single_ai_agent` use
-/// this — they need a sync result, not an `on_line` stream).
-pub(crate) fn execute_command_blocking(command: &str) -> Result<(), String> {
-    run_command_streaming_blocking(command, |_| {})
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,6 +683,67 @@ mod tests {
         let streamed =
             execute_fix_streaming("ai-agent-nonexistent".to_string(), FixType::Auth, |_| {}).await;
         assert_eq!(direct, streamed);
+    }
+
+    /// A command not found by the shell must surface as `Exit { code: 127, .. }`
+    /// — the auth probe maps that to `AuthStatus::Unknown` instead of
+    /// `NotAuthenticated`. Using an unambiguously-nonexistent command name so
+    /// the shell hits its "command not found" path regardless of rc files.
+    #[tokio::test]
+    async fn exec_command_not_found_reports_exit_127() {
+        let outcome = tokio::task::spawn_blocking(|| {
+            execute_command_with_path_prefix("doctor-nonexistent-xyz-12345", &[])
+        })
+        .await
+        .unwrap();
+        match outcome {
+            ExecOutcome::Exit { code, .. } => assert_eq!(
+                code,
+                Some(127),
+                "expected exit 127 for command-not-found; got {code:?}",
+            ),
+            other => panic!("expected Exit(127); got {other:?}"),
+        }
+    }
+
+    /// PATH prefix lets the spawned shell find a command that's only in the
+    /// supplied dir — without it, the same command would exit 127. This is the
+    /// PATH-shadowing fix in miniature.
+    #[tokio::test]
+    async fn exec_command_with_path_prefix_finds_command_in_prefix_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = std::env::temp_dir().join(format!(
+            "doctor-pathprefix-{}-{}",
+            std::process::id(),
+            // Coarse uniqueness — enough for this test.
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        // Distinct, unguessable name so no real PATH entry could shadow it.
+        let script_name = "doctor-pathprefix-probe-abcdef";
+        let script = tmp.join(script_name);
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        let prefix = vec![tmp.clone()];
+        let outcome = tokio::task::spawn_blocking(move || {
+            execute_command_with_path_prefix(script_name, &prefix)
+        })
+        .await
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+        match outcome {
+            ExecOutcome::Ok => {}
+            other => {
+                panic!("expected Ok with the script reachable via path prefix; got {other:?}",)
+            }
+        }
     }
 
     /// Default `run_checks()` must not populate any of the version-freshness

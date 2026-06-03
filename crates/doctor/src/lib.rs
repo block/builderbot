@@ -22,7 +22,7 @@ use checks::{check_clonefile, check_gh, check_gh_auth, check_git, check_git_lfs}
 use freshness::{fetch_version_info, is_self_updating, load_cache, save_cache};
 use package_ids::{lookup_package_id, LatestSource};
 use resolve::resolve_binary;
-use types::ResolvedBinary;
+use types::{AgentVersionInfo, InstallSource, ResolvedBinary};
 
 /// Fallback check returned when a spawn_blocking task panics.
 fn empty_check(id: &str, label: &str) -> DoctorCheck {
@@ -43,6 +43,8 @@ fn empty_check(id: &str, label: &str) -> DoctorCheck {
         update_available: None,
         install_source: None,
         self_updating: None,
+        main: None,
+        bridge: None,
     }
 }
 
@@ -194,10 +196,61 @@ async fn collect_base_report(npm_registry: Option<&str>) -> DoctorReport {
     DoctorReport { checks }
 }
 
+/// Which binary behind a check a freshness probe targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ReadoutSlot {
+    /// The agent's own CLI (or, for agents without a separate bridge, the
+    /// single resolved binary). Maps to `DoctorCheck.path` / `DoctorCheck.main`.
+    Main,
+    /// The agent's ACP bridge. Maps to `DoctorCheck.bridge_path` /
+    /// `DoctorCheck.bridge`.
+    Bridge,
+    /// A non-agent check (git, gh, …) with no main/bridge split. Maps directly
+    /// to the flat version fields on `DoctorCheck`.
+    Flat,
+}
+
+/// Resolve the `(package_id, latest_source)` pair for a check + install source.
+/// `None`/`None` when the source is missing or the check has no matching entry.
+fn resolve_package(
+    check_id: &str,
+    source: Option<&InstallSource>,
+) -> (Option<String>, Option<LatestSource>) {
+    source
+        .cloned()
+        .and_then(|src| lookup_package_id(check_id, src))
+        .map(|(pkg, latest)| (Some(pkg.to_string()), Some(latest)))
+        .unwrap_or((None, None))
+}
+
+/// Fold a freshness [`freshness::VersionInfo`] into a per-binary readout,
+/// applying the self-updating suppression rule for `update_available`.
+fn apply_freshness(readout: &mut AgentVersionInfo, info: &freshness::VersionInfo) {
+    readout.installed_version = info.installed.clone();
+    readout.latest_version = info.latest.clone();
+    // Self-updating tools (curl/native installers) manage their own freshness:
+    // report installed/latest for display, but never raise an "update available"
+    // nag — the update isn't the user's to action.
+    let self_updating = is_self_updating(readout.install_source.as_ref());
+    readout.self_updating = Some(self_updating);
+    readout.update_available = if self_updating {
+        None
+    } else {
+        info.update_available
+    };
+}
+
 /// Post-hoc pass: for every check that has a usable binary path and a known
 /// package id, run the installed/latest version probes in parallel and update
 /// the corresponding fields on the report. The on-disk cache is read once at
 /// the start and written once at the end.
+///
+/// Agent checks front up to two independent binaries — the agent CLI (`main`)
+/// and its ACP bridge (`bridge`) — and each is probed and reported separately.
+/// The flat version fields are kept in sync for backward compatibility: they
+/// mirror the bridge readout when a bridge exists, otherwise the main readout
+/// (the same headline the pre-split pass produced). Non-agent checks keep
+/// writing straight to the flat fields.
 async fn populate_freshness(
     mut report: DoctorReport,
     offline: bool,
@@ -208,24 +261,45 @@ async fn populate_freshness(
 
     let mut targets: Vec<FreshnessTarget> = Vec::new();
     for check in &report.checks {
-        // Prefer the bridge path when present (matches the install_source the
-        // check carries — see check_single_ai_agent).
-        let path_str = check.bridge_path.as_deref().or(check.path.as_deref());
-        let Some(path_str) = path_str else { continue };
-
-        let (package_id, latest_source) = check
-            .install_source
-            .clone()
-            .and_then(|src| lookup_package_id(&check.id, src))
-            .map(|(pkg, latest)| (Some(pkg.to_string()), Some(latest)))
-            .unwrap_or((None, None));
-
-        targets.push(FreshnessTarget {
-            id: check.id.clone(),
-            path: PathBuf::from(path_str),
-            latest_source,
-            package_id,
-        });
+        let is_agent = check.main.is_some() || check.bridge.is_some();
+        if is_agent {
+            if let (Some(readout), Some(path)) = (&check.main, check.path.as_deref()) {
+                let (package_id, latest_source) =
+                    resolve_package(&check.id, readout.install_source.as_ref());
+                targets.push(FreshnessTarget {
+                    id: check.id.clone(),
+                    slot: ReadoutSlot::Main,
+                    path: PathBuf::from(path),
+                    latest_source,
+                    package_id,
+                });
+            }
+            if let (Some(readout), Some(path)) = (&check.bridge, check.bridge_path.as_deref()) {
+                let (package_id, latest_source) =
+                    resolve_package(&check.id, readout.install_source.as_ref());
+                targets.push(FreshnessTarget {
+                    id: check.id.clone(),
+                    slot: ReadoutSlot::Bridge,
+                    path: PathBuf::from(path),
+                    latest_source,
+                    package_id,
+                });
+            }
+        } else {
+            // Non-agent check: prefer the bridge path when present (matches the
+            // install_source the check carries — see check_single_ai_agent).
+            let path_str = check.bridge_path.as_deref().or(check.path.as_deref());
+            let Some(path_str) = path_str else { continue };
+            let (package_id, latest_source) =
+                resolve_package(&check.id, check.install_source.as_ref());
+            targets.push(FreshnessTarget {
+                id: check.id.clone(),
+                slot: ReadoutSlot::Flat,
+                path: PathBuf::from(path_str),
+                latest_source,
+                package_id,
+            });
+        }
     }
 
     let futures = targets.into_iter().map(|t| {
@@ -242,23 +316,50 @@ async fn populate_freshness(
                 cache,
             )
             .await;
-            (t.id, info)
+            ((t.id, t.slot), info)
         }
     });
 
     let results = futures::future::join_all(futures).await;
-    let mut by_id: HashMap<String, freshness::VersionInfo> = HashMap::new();
-    for (id, info) in results {
-        by_id.insert(id, info);
+    let mut by_target: HashMap<(String, ReadoutSlot), freshness::VersionInfo> = HashMap::new();
+    for (key, info) in results {
+        by_target.insert(key, info);
     }
 
     for check in &mut report.checks {
-        if let Some(info) = by_id.remove(&check.id) {
+        let is_agent = check.main.is_some() || check.bridge.is_some();
+        if is_agent {
+            if let (Some(readout), Some(info)) = (
+                check.main.as_mut(),
+                by_target.remove(&(check.id.clone(), ReadoutSlot::Main)),
+            ) {
+                apply_freshness(readout, &info);
+            }
+            if let (Some(readout), Some(info)) = (
+                check.bridge.as_mut(),
+                by_target.remove(&(check.id.clone(), ReadoutSlot::Bridge)),
+            ) {
+                apply_freshness(readout, &info);
+            }
+            // Mirror the headline readout (bridge if present, else main) into the
+            // flat fields for backward-compatible consumers.
+            let headline = check.bridge.as_ref().or(check.main.as_ref()).map(|r| {
+                (
+                    r.installed_version.clone(),
+                    r.latest_version.clone(),
+                    r.update_available,
+                    r.self_updating,
+                )
+            });
+            if let Some((installed, latest, update_available, self_updating)) = headline {
+                check.installed_version = installed;
+                check.latest_version = latest;
+                check.update_available = update_available;
+                check.self_updating = self_updating;
+            }
+        } else if let Some(info) = by_target.remove(&(check.id.clone(), ReadoutSlot::Flat)) {
             check.installed_version = info.installed;
             check.latest_version = info.latest;
-            // Self-updating tools (curl/native installers) manage their own
-            // freshness: report installed/latest for display, but never raise an
-            // "update available" nag — the update isn't the user's to action.
             let self_updating = is_self_updating(check.install_source.as_ref());
             check.self_updating = Some(self_updating);
             check.update_available = if self_updating {
@@ -278,6 +379,7 @@ async fn populate_freshness(
 
 struct FreshnessTarget {
     id: String,
+    slot: ReadoutSlot,
     path: PathBuf,
     latest_source: Option<LatestSource>,
     package_id: Option<String>,
@@ -527,6 +629,20 @@ mod tests {
                 check.id,
                 check.update_available,
             );
+            // The split main/bridge readouts may carry an install source on the
+            // cheap path, but never version fields — those are freshness-only.
+            for (slot, readout) in [("main", &check.main), ("bridge", &check.bridge)] {
+                if let Some(r) = readout {
+                    assert!(
+                        r.installed_version.is_none()
+                            && r.latest_version.is_none()
+                            && r.update_available.is_none()
+                            && r.self_updating.is_none(),
+                        "check {} {slot} readout unexpectedly populated version fields: {r:?}",
+                        check.id,
+                    );
+                }
+            }
         }
     }
 }

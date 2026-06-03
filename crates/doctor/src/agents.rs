@@ -5,7 +5,9 @@ use std::process::Command;
 use crate::checks::CLONEFILE_FIX_COMMAND;
 use crate::execute_command_blocking;
 use crate::resolve::format_command_output;
-use crate::types::{AuthStatus, CheckStatus, DoctorCheck, FixType, InstallSource, ResolvedBinary};
+use crate::types::{
+    AgentVersionInfo, AuthStatus, CheckStatus, DoctorCheck, FixType, InstallSource, ResolvedBinary,
+};
 
 /// Metadata for an individual AI agent check.
 pub struct AgentCheckInfo {
@@ -174,6 +176,17 @@ fn apply_install_source_override(
     }
 }
 
+/// Build a per-binary version readout from a resolved install source. Returns
+/// `Some` only when the binary was resolved (i.e. a source was detected); the
+/// version fields stay `None` until the freshness pass fills them in. A binary
+/// that wasn't found (`None`) yields `None` — no empty readout is fabricated.
+fn version_readout(source: Option<InstallSource>) -> Option<AgentVersionInfo> {
+    source.map(|src| AgentVersionInfo {
+        install_source: Some(src),
+        ..AgentVersionInfo::default()
+    })
+}
+
 /// Check whether a single AI agent is installed.
 ///
 /// `npm_registry`, when `Some`, routes any npm-backed install/bridge fix
@@ -234,6 +247,10 @@ pub fn check_single_ai_agent(
                         update_available: None,
                         install_source: bridge_install_source.clone(),
                         self_updating: None,
+                        // Goose has no separate ACP bridge — the single binary
+                        // is the agent CLI, reported under `main`.
+                        main: version_readout(bridge_install_source.clone()),
+                        bridge: None,
                     }
                 }
                 Ok(output) => {
@@ -260,6 +277,10 @@ pub fn check_single_ai_agent(
                         update_available: None,
                         install_source: bridge_install_source.clone(),
                         self_updating: None,
+                        // Goose has no separate ACP bridge — the single binary
+                        // is the agent CLI, reported under `main`.
+                        main: version_readout(bridge_install_source.clone()),
+                        bridge: None,
                     }
                 }
                 Err(e) => DoctorCheck {
@@ -281,6 +302,8 @@ pub fn check_single_ai_agent(
                     update_available: None,
                     install_source: bridge_install_source.clone(),
                     self_updating: None,
+                    main: version_readout(bridge_install_source.clone()),
+                    bridge: None,
                 },
             }
         } else {
@@ -291,6 +314,23 @@ pub fn check_single_ai_agent(
                 (main_p, resolved_path)
             } else {
                 (resolved_path, None)
+            };
+
+            // Surface the agent CLI and its ACP bridge as two independent
+            // readouts. When the agent has a separate `main_command`, the
+            // install-source override (a curl/native hint) applies to the main
+            // CLI; the bridge keeps its positively-detected source. When there
+            // is no separate bridge, the single resolved binary is the agent
+            // CLI itself, reported under `main` (bridge stays `None`).
+            let (main_readout, bridge_readout) = if info.main_command.is_some() {
+                let main_src = apply_install_source_override(
+                    resolved_main.and_then(|rb| rb.install_source.clone()),
+                    info.install_source_override.as_ref(),
+                );
+                let bridge_src = resolved_bridge.and_then(|rb| rb.install_source.clone());
+                (version_readout(main_src), version_readout(bridge_src))
+            } else {
+                (version_readout(bridge_install_source.clone()), None)
             };
 
             let (auth_status, auth_output) = match info.auth_status_command {
@@ -343,6 +383,8 @@ pub fn check_single_ai_agent(
                 update_available: None,
                 install_source: bridge_install_source,
                 self_updating: None,
+                main: main_readout,
+                bridge: bridge_readout,
             }
         }
     } else {
@@ -382,8 +424,11 @@ pub fn check_single_ai_agent(
                 installed_version: None,
                 latest_version: None,
                 update_available: None,
-                install_source: main_install_source,
+                install_source: main_install_source.clone(),
                 self_updating: None,
+                // Bridge is absent; only the agent CLI resolved.
+                main: version_readout(main_install_source),
+                bridge: None,
             };
         }
 
@@ -416,6 +461,8 @@ pub fn check_single_ai_agent(
             update_available: None,
             install_source: None,
             self_updating: None,
+            main: None,
+            bridge: None,
         }
     }
 }
@@ -446,6 +493,107 @@ pub fn lookup_fix_command(check_id: &str, fix_type: &FixType) -> Option<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    fn resolved(path: Option<&str>, source: Option<InstallSource>) -> ResolvedBinary {
+        ResolvedBinary {
+            path: path.map(PathBuf::from),
+            search_output: String::new(),
+            install_source: source,
+        }
+    }
+
+    fn agent(id: &str) -> &'static AgentCheckInfo {
+        AI_AGENT_CHECKS.iter().find(|i| i.id == id).unwrap()
+    }
+
+    /// An agent with a separate ACP bridge surfaces both binaries as independent
+    /// readouts, each carrying its own install source. Uses Pi (no auth
+    /// commands) so the check runs without shelling out.
+    #[test]
+    fn agent_check_populates_main_and_bridge_readouts() {
+        let bridge = resolved(Some("/n/bin/pi-acp"), Some(InstallSource::Npm));
+        let main = resolved(Some("/c/bin/pi"), Some(InstallSource::Cargo));
+        let check = check_single_ai_agent(
+            agent("ai-agent-pi"),
+            true,
+            std::slice::from_ref(&bridge),
+            Some(&main),
+            None,
+        );
+
+        let m = check.main.expect("main readout present");
+        assert_eq!(m.install_source, Some(InstallSource::Cargo));
+        let b = check.bridge.expect("bridge readout present");
+        assert_eq!(b.install_source, Some(InstallSource::Npm));
+        // Flat field mirrors the bridge (headline) readout for back-compat.
+        assert_eq!(check.install_source, Some(InstallSource::Npm));
+        // Version fields stay empty on the cheap (no-freshness) path.
+        assert!(m.installed_version.is_none());
+        assert!(b.installed_version.is_none());
+        assert!(m.self_updating.is_none());
+    }
+
+    /// When only the agent CLI resolves (no bridge), the main readout carries
+    /// the CLI's source — upgraded from `Unknown` via the per-agent override —
+    /// and the bridge readout is `None`. Claude's main-only path returns before
+    /// any auth probe, so this runs without shelling out.
+    #[test]
+    fn agent_check_main_only_applies_override_and_omits_bridge() {
+        let bridge_missing = resolved(None, None);
+        let main = resolved(Some("/h/.local/bin/claude"), Some(InstallSource::Unknown));
+        let check = check_single_ai_agent(
+            agent("ai-agent-claude"),
+            true,
+            std::slice::from_ref(&bridge_missing),
+            Some(&main),
+            None,
+        );
+
+        let m = check.main.expect("main readout present");
+        assert_eq!(
+            m.install_source,
+            Some(InstallSource::CurlPipe),
+            "Unknown main CLI upgraded to CurlPipe via override",
+        );
+        assert!(check.bridge.is_none(), "no bridge resolved");
+        assert_eq!(check.install_source, Some(InstallSource::CurlPipe));
+    }
+
+    /// An agent with no separate bridge reports its single binary under `main`,
+    /// leaving `bridge` as `None`. Copilot has an auth command but no
+    /// auth-status command, so it reports NotApplicable without shelling out.
+    #[test]
+    fn agent_without_bridge_reports_single_binary_as_main() {
+        let single = resolved(Some("/n/bin/copilot"), Some(InstallSource::Npm));
+        let check = check_single_ai_agent(
+            agent("ai-agent-copilot"),
+            true,
+            std::slice::from_ref(&single),
+            None,
+            None,
+        );
+
+        let m = check.main.expect("main readout present");
+        assert_eq!(m.install_source, Some(InstallSource::Npm));
+        assert!(check.bridge.is_none());
+        assert_eq!(check.install_source, Some(InstallSource::Npm));
+    }
+
+    /// A fully unresolved agent carries neither readout.
+    #[test]
+    fn unresolved_agent_has_no_readouts() {
+        let missing = resolved(None, None);
+        let check = check_single_ai_agent(
+            agent("ai-agent-pi"),
+            false,
+            std::slice::from_ref(&missing),
+            Some(&missing),
+            None,
+        );
+        assert!(check.main.is_none());
+        assert!(check.bridge.is_none());
+    }
 
     #[test]
     fn auth_fix_lookup_returns_agent_auth_command() {

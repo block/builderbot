@@ -47,6 +47,31 @@ pub enum InstallSource {
     Unknown,
 }
 
+/// Version + install-source readout for one binary behind an agent check.
+///
+/// An AI-agent check may front two distinct binaries — the agent's own CLI
+/// (`main`) and its ACP bridge (`bridge`) — each installed and versioned
+/// independently. This struct carries one binary's readout so the two can be
+/// surfaced side by side instead of collapsed into a single source/version.
+///
+/// All fields default to `None`; the cheap (no-freshness) path populates only
+/// `install_source`, and the freshness pass fills in the version fields.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentVersionInfo {
+    /// How this binary was installed (brew, npm, curl/native, …), if detected.
+    pub install_source: Option<InstallSource>,
+    /// Installed version string, if detected by the freshness pass.
+    pub installed_version: Option<String>,
+    /// Latest available version string, if known.
+    pub latest_version: Option<String>,
+    /// Whether a newer version is available. Suppressed (`None`) for
+    /// self-updating installs — see [`DoctorCheck::update_available`].
+    pub update_available: Option<bool>,
+    /// Whether this binary keeps itself up to date (curl/native installers).
+    pub self_updating: Option<bool>,
+}
+
 /// A single health-check result shown in the UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,6 +118,19 @@ pub struct DoctorCheck {
     /// `update_available` — the update is "managed by the tool", not actionable.
     /// Only populated by the freshness pass; `None` on the default cheap path.
     pub self_updating: Option<bool>,
+    /// Independent readout for the agent's own CLI (e.g. `claude`, `codex`).
+    ///
+    /// For AI-agent checks this carries the main CLI's install source and (when
+    /// freshness runs) its versions, separate from the ACP bridge. `None` for
+    /// non-agent checks and for agents with no resolvable main CLI.
+    ///
+    /// The flat fields above remain populated for backward compatibility: they
+    /// mirror the `bridge` readout when a bridge exists, otherwise `main`.
+    pub main: Option<AgentVersionInfo>,
+    /// Independent readout for the agent's ACP bridge (e.g. `claude-agent-acp`,
+    /// `codex-acp`). `None` for non-agent checks and for agents that have no
+    /// separate bridge binary (the single binary is reported under `main`).
+    pub bridge: Option<AgentVersionInfo>,
 }
 
 /// The full report returned to the frontend.

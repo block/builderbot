@@ -375,25 +375,43 @@
   // Lifecycle
   // =========================================================================
 
-  onMount(async () => {
+  onMount(() => {
     unregisterSearchTarget = registerSearchShortcutTarget({
       find: openSearch,
       next: nextMatch,
       previous: previousMatch,
     });
-
-    await loadSession();
-    if (session?.status === 'running') {
-      startPolling();
-    }
-    // Focus input on open
-    tick().then(() => inputEl?.focus());
   });
 
   onDestroy(() => {
     closed = true;
     stopPolling();
     unregisterSearchTarget?.();
+  });
+
+  // This modal is mounted once and reused across opens (the `open` prop toggles
+  // visibility), so the session must be (re)loaded reactively rather than in
+  // onMount — otherwise it would load once with whatever sessionId was set at
+  // mount time (often empty) and never refresh. Re-run whenever the modal is
+  // opened or the target session changes.
+  $effect(() => {
+    // Track open + sessionId only; loadSession()'s own state writes must not
+    // retrigger this effect.
+    const isOpen = open;
+    const id = sessionId;
+    if (!isOpen || !id) {
+      stopPolling();
+      return;
+    }
+    stopPolling();
+    loadSession().then(() => {
+      if (closed || !open || sessionId !== id) return;
+      if (session?.status === 'running') {
+        startPolling();
+      }
+      // Focus input on open
+      tick().then(() => inputEl?.focus());
+    });
   });
 
   function isComposerFocused(): boolean {

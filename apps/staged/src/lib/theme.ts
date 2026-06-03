@@ -364,7 +364,14 @@ export function createAdaptiveTheme(
       primary: primaryBg, // Editor islands - may be adjusted from syntax theme for contrast
       chrome: chromeColor, // Calculated for consistent contrast ratio
       deepest: deepestColor, // Darker than chrome (2x the luminance diff)
-      elevated: elevate(0.08), // Floating elements (dropdowns, tooltips)
+      // Floating surfaces (dialogs, popovers, dropdowns, cards) sit ON TOP of
+      // content and should read as lifted, not recessed. Dark themes lighten to
+      // achieve this. Light themes sit on a white base, where the full downward
+      // elevate(0.08) over-darkened them into a dirty gray (#ebebeb); halve it to
+      // a subtle off-white surface (~#f5f5f5) that reads as a distinct panel
+      // without going gray, with the ring/shadow the shadcn primitives apply
+      // carrying the rest of the lift.
+      elevated: isDark ? elevate(0.08) : adjust(primaryBg, -0.04),
       hover: elevate(0.06), // Hover state
     },
 

@@ -5,7 +5,7 @@ use std::process::Command;
 use crate::checks::CLONEFILE_FIX_COMMAND;
 use crate::execute_command_blocking;
 use crate::resolve::format_command_output;
-use crate::types::{AuthStatus, CheckStatus, DoctorCheck, FixType, ResolvedBinary};
+use crate::types::{AuthStatus, CheckStatus, DoctorCheck, FixType, InstallSource, ResolvedBinary};
 
 /// Metadata for an individual AI agent check.
 pub struct AgentCheckInfo {
@@ -29,6 +29,13 @@ pub struct AgentCheckInfo {
     pub auth_command: Option<&'static str>,
     /// Shell command that reports whether the user is currently authenticated.
     pub auth_status_command: Option<&'static str>,
+    /// Per-tool override declaring this agent's install source when generic path
+    /// and filesystem-fingerprint heuristics fall through to
+    /// [`InstallSource::Unknown`]. Lets a curl/native-only agent (Claude native,
+    /// Cursor, Amp) report its true source instead of `Unknown`. Applied only on
+    /// `Unknown`; a positively-detected source (Brew/Npm/…) and a missing binary
+    /// (`None`) are left untouched.
+    pub install_source_override: Option<InstallSource>,
 }
 
 /// All AI agents we check for individually.
@@ -44,6 +51,7 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         bridge_install_command: None,
         auth_command: None,
         auth_status_command: None,
+        install_source_override: None,
     },
     AgentCheckInfo {
         id: "ai-agent-claude",
@@ -56,6 +64,9 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         bridge_install_command: Some("npm install -g @agentclientprotocol/claude-agent-acp"),
         auth_command: Some("claude auth login"),
         auth_status_command: Some("claude auth status"),
+        // Main `claude` is a curl/native install; the bridge is npm and is
+        // detected positively, so this only takes effect on the main-only path.
+        install_source_override: Some(InstallSource::CurlPipe),
     },
     AgentCheckInfo {
         id: "ai-agent-codex",
@@ -68,6 +79,7 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         bridge_install_command: Some("npm install -g @zed-industries/codex-acp"),
         auth_command: Some("codex login"),
         auth_status_command: Some("codex login status"),
+        install_source_override: None,
     },
     AgentCheckInfo {
         id: "ai-agent-pi",
@@ -80,6 +92,7 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         bridge_install_command: None,
         auth_command: None,
         auth_status_command: None,
+        install_source_override: None,
     },
     AgentCheckInfo {
         id: "ai-agent-amp",
@@ -92,6 +105,8 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         bridge_install_command: Some("npm install -g amp-acp"),
         auth_command: Some("amp login"),
         auth_status_command: Some("amp usage"),
+        // Main `amp` curl installer; bridge `amp-acp` is npm (detected positively).
+        install_source_override: Some(InstallSource::CurlPipe),
     },
     AgentCheckInfo {
         id: "ai-agent-copilot",
@@ -104,6 +119,7 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         bridge_install_command: None,
         auth_command: Some("copilot login"),
         auth_status_command: None,
+        install_source_override: None,
     },
     AgentCheckInfo {
         id: "ai-agent-cursor",
@@ -116,6 +132,9 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         bridge_install_command: None,
         auth_command: Some("cursor-agent login"),
         auth_status_command: Some("cursor-agent status"),
+        // Cursor has only a curl/native installer and no ACP bridge, so the
+        // resolved binary is the curl install — the override's primary use case.
+        install_source_override: Some(InstallSource::CurlPipe),
     },
 ];
 
@@ -138,6 +157,21 @@ pub(crate) fn apply_npm_registry(command: &str, registry: Option<&str>) -> Strin
 /// preceded by other tokens.
 fn is_npm_command(command: &str) -> bool {
     command.starts_with("npm ") || command.contains("npm install") || command.contains("npm view")
+}
+
+/// Resolve the effective install source for an agent binary. Generic path and
+/// filesystem fingerprinting (in [`crate::resolve`]) win when they identify a
+/// source; only when they fall through to [`InstallSource::Unknown`] does the
+/// agent's declared `override_hint` take effect. A missing binary (`None`) is
+/// never fabricated into a source.
+fn apply_install_source_override(
+    detected: Option<InstallSource>,
+    override_hint: Option<&InstallSource>,
+) -> Option<InstallSource> {
+    match detected {
+        Some(InstallSource::Unknown) => override_hint.cloned().or(Some(InstallSource::Unknown)),
+        other => other,
+    }
 }
 
 /// Check whether a single AI agent is installed.
@@ -169,7 +203,10 @@ pub fn check_single_ai_agent(
     // Prefer the bridge's install_source — that's the binary the UI cares about
     // for "how did your acp adapter get installed". For goose (no separate
     // main_command) the bridge is the main binary itself, so this is correct.
-    let bridge_install_source = resolved_bridge.and_then(|rb| rb.install_source.clone());
+    let bridge_install_source = apply_install_source_override(
+        resolved_bridge.and_then(|rb| rb.install_source.clone()),
+        info.install_source_override.as_ref(),
+    );
 
     if let Some(ref path_str) = resolved_path {
         if info.id == "ai-agent-goose" {
@@ -312,9 +349,12 @@ pub fn check_single_ai_agent(
             let main_search = &resolved_main.as_ref().unwrap().search_output;
             // Bridge wasn't found, so fall back to the main binary's
             // install_source — the only resolved path we have to describe.
-            let main_install_source = resolved_main
-                .as_ref()
-                .and_then(|rm| rm.install_source.clone());
+            let main_install_source = apply_install_source_override(
+                resolved_main
+                    .as_ref()
+                    .and_then(|rm| rm.install_source.clone()),
+                info.install_source_override.as_ref(),
+            );
             return DoctorCheck {
                 id: info.id.to_string(),
                 label: info.label.to_string(),
@@ -416,6 +456,51 @@ mod tests {
     #[test]
     fn auth_fix_lookup_returns_none_for_agents_without_auth_command() {
         assert_eq!(lookup_fix_command("ai-agent-goose", &FixType::Auth), None);
+    }
+
+    #[test]
+    fn override_applies_only_to_unknown() {
+        // Unknown + declared override => override wins.
+        assert_eq!(
+            apply_install_source_override(
+                Some(InstallSource::Unknown),
+                Some(&InstallSource::CurlPipe),
+            ),
+            Some(InstallSource::CurlPipe),
+        );
+        // Unknown + no override => stays Unknown.
+        assert_eq!(
+            apply_install_source_override(Some(InstallSource::Unknown), None),
+            Some(InstallSource::Unknown),
+        );
+        // A positively-detected source is never overridden.
+        assert_eq!(
+            apply_install_source_override(Some(InstallSource::Npm), Some(&InstallSource::CurlPipe),),
+            Some(InstallSource::Npm),
+        );
+        // A missing binary is never fabricated into a source.
+        assert_eq!(
+            apply_install_source_override(None, Some(&InstallSource::CurlPipe)),
+            None,
+        );
+    }
+
+    #[test]
+    fn curl_native_agents_declare_curl_pipe_override() {
+        for id in ["ai-agent-claude", "ai-agent-amp", "ai-agent-cursor"] {
+            let info = AI_AGENT_CHECKS.iter().find(|i| i.id == id).unwrap();
+            assert_eq!(
+                info.install_source_override,
+                Some(InstallSource::CurlPipe),
+                "{id} should declare a CurlPipe override",
+            );
+        }
+        // Registry-installed agents declare no override.
+        let codex = AI_AGENT_CHECKS
+            .iter()
+            .find(|i| i.id == "ai-agent-codex")
+            .unwrap();
+        assert_eq!(codex.install_source_override, None);
     }
 
     #[test]

@@ -232,14 +232,106 @@ fn npm_global_bin_dir(lines: &mut Vec<String>) -> Option<PathBuf> {
     Some(bin)
 }
 
-/// Infer how a binary was installed from its path alone — no subprocess or
-/// network probes. Path-prefix heuristics cover Brew, Cargo, Mise, Asdf, Npm
-/// (mirroring the dirs in [`npm_search_dirs`]), and the System dirs; anything
-/// else (including `~/.local/bin` curl-pipe installs, which can't be
-/// fingerprinted reliably from the path) is reported as [`InstallSource::Unknown`].
+/// Infer how a binary was installed. First applies path-prefix heuristics (no
+/// subprocess or network probes) covering Brew, Cargo, Mise, Asdf, Npm
+/// (mirroring the dirs in [`npm_search_dirs`]), and the System dirs. When those
+/// fall through to [`InstallSource::Unknown`] for a binary in a user-local bin
+/// dir, a cheap filesystem fingerprint (see [`fingerprint_curl_pipe`]) is
+/// attempted to recognise curl/native installers (Claude native, Cursor, Amp),
+/// which land in `~/.local/bin`/`~/bin`. [`InstallSource::Unknown`] remains the
+/// honest fallback when no fingerprint matches.
 pub(crate) fn detect_install_source(path: &Path) -> InstallSource {
     let home = std::env::home_dir();
-    detect_install_source_with_home(path, home.as_deref())
+    let base = detect_install_source_with_home(path, home.as_deref());
+    if base == InstallSource::Unknown {
+        if let Some(home) = home.as_deref() {
+            if fingerprint_curl_pipe(path, home) {
+                return InstallSource::CurlPipe;
+            }
+        }
+    }
+    base
+}
+
+/// A known curl/native installer footprint for a binary that lands in a
+/// user-local bin dir. Pairs the binary name with marker paths (relative to
+/// `$HOME`) that the installer also creates; if the binary lives in a user-local
+/// bin dir and any marker exists, the install is fingerprinted as a curl-pipe
+/// install.
+struct CurlInstallerFootprint {
+    /// Binary file name as it appears in `~/.local/bin` or `~/bin`.
+    binary: &'static str,
+    /// Marker paths relative to `$HOME`; if any exists the fingerprint matches.
+    markers: &'static [&'static str],
+}
+
+/// Known footprints of curl/native installers whose binaries land in a
+/// user-local bin dir. Conservative on purpose — only well-known data dirs are
+/// listed so a bare `~/.local/bin/<x>` with no installer footprint stays
+/// [`InstallSource::Unknown`].
+const CURL_INSTALLER_FOOTPRINTS: &[CurlInstallerFootprint] = &[
+    // Claude native installer — claude.ai/install.sh.
+    CurlInstallerFootprint {
+        binary: "claude",
+        markers: &[".local/share/claude", ".claude/local", ".claude/bin"],
+    },
+    // Cursor CLI installer — cursor.com/install.
+    CurlInstallerFootprint {
+        binary: "cursor-agent",
+        markers: &[".local/share/cursor-agent/versions", ".cursor/bin"],
+    },
+    // Amp installer — ampcode.com/install.sh.
+    CurlInstallerFootprint {
+        binary: "amp",
+        markers: &[".local/share/amp", ".cache/amp"],
+    },
+];
+
+/// Cheap filesystem fingerprint for curl/native installs that path-prefix
+/// heuristics can't classify. Only considers binaries inside a user-local bin
+/// dir (`~/.local/bin`, `~/bin`) and uses two low-false-positive signals:
+///
+/// 1. A known installer footprint marker (see [`CURL_INSTALLER_FOOTPRINTS`])
+///    exists under `$HOME` and the binary name matches that installer.
+/// 2. The bin entry is a symlink into a *versioned* install dir under `$HOME`
+///    (the layout Cursor's and Claude's native installers use:
+///    `~/.local/bin/<tool>` → `…/versions/<ver>/<tool>`).
+///
+/// No subprocess or network access — only `read_link`/`exists`/`canonicalize`.
+fn fingerprint_curl_pipe(path: &Path, home: &Path) -> bool {
+    let in_user_local_bin =
+        path.starts_with(home.join(".local/bin")) || path.starts_with(home.join("bin"));
+    if !in_user_local_bin {
+        return false;
+    }
+
+    // Signal 1 — a known installer footprint marker exists under $HOME.
+    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+        for fp in CURL_INSTALLER_FOOTPRINTS {
+            if fp.binary == name && fp.markers.iter().any(|m| home.join(m).exists()) {
+                return true;
+            }
+        }
+    }
+
+    // Signal 2 — the bin entry is a symlink into a versioned install dir under
+    // $HOME.
+    if let Ok(target) = std::fs::read_link(path) {
+        let resolved = if target.is_absolute() {
+            target
+        } else if let Some(parent) = path.parent() {
+            parent.join(target)
+        } else {
+            target
+        };
+        let resolved = resolved.canonicalize().unwrap_or(resolved);
+        if resolved.starts_with(home) && resolved.components().any(|c| c.as_os_str() == "versions")
+        {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// Testable inner: same logic as [`detect_install_source`] but takes the home
@@ -520,6 +612,66 @@ mod tests {
             detect_install_source_with_home(Path::new("/tmp/weird/foo"), Some(home.as_path())),
             InstallSource::Unknown,
         );
+    }
+
+    #[test]
+    fn fingerprint_curl_pipe_matches_known_installer_marker() {
+        let home = std::env::temp_dir().join(format!("doctor-fp-marker-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        // Claude native installer: ~/.local/bin/claude + ~/.local/share/claude.
+        fs::create_dir_all(home.join(".local/bin")).unwrap();
+        fs::create_dir_all(home.join(".local/share/claude")).unwrap();
+        let bin = home.join(".local/bin/claude");
+        File::create(&bin).unwrap();
+
+        assert!(fingerprint_curl_pipe(&bin, &home));
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn fingerprint_curl_pipe_matches_versioned_symlink() {
+        #[cfg(unix)]
+        {
+            let home =
+                std::env::temp_dir().join(format!("doctor-fp-symlink-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&home);
+            // Cursor layout: ~/.local/bin/cursor-agent -> ~/.local/share/cursor-agent/versions/1.0.0/cursor-agent
+            let versioned = home.join(".local/share/cursor-agent/versions/1.0.0");
+            fs::create_dir_all(&versioned).unwrap();
+            let real = versioned.join("cursor-agent");
+            File::create(&real).unwrap();
+            fs::create_dir_all(home.join(".local/bin")).unwrap();
+            let link = home.join(".local/bin/cursor-agent");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+
+            assert!(fingerprint_curl_pipe(&link, &home));
+            let _ = fs::remove_dir_all(&home);
+        }
+    }
+
+    #[test]
+    fn fingerprint_curl_pipe_no_match_without_footprint() {
+        let home = std::env::temp_dir().join(format!("doctor-fp-none-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        // A bare ~/.local/bin binary with no installer footprint stays Unknown.
+        fs::create_dir_all(home.join(".local/bin")).unwrap();
+        let bin = home.join(".local/bin/mytool");
+        File::create(&bin).unwrap();
+
+        assert!(!fingerprint_curl_pipe(&bin, &home));
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn fingerprint_curl_pipe_ignores_binaries_outside_user_local_bin() {
+        let home = std::env::temp_dir().join(format!("doctor-fp-outside-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        // Marker exists, but the binary is elsewhere — must not fingerprint.
+        fs::create_dir_all(home.join(".local/share/claude")).unwrap();
+        let bin = PathBuf::from("/tmp/elsewhere/claude");
+
+        assert!(!fingerprint_curl_pipe(&bin, &home));
+        let _ = fs::remove_dir_all(&home);
     }
 
     #[test]

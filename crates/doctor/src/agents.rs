@@ -233,6 +233,7 @@ pub fn check_single_ai_agent(
                         latest_version: None,
                         update_available: None,
                         install_source: bridge_install_source.clone(),
+                        self_updating: None,
                     }
                 }
                 Ok(output) => {
@@ -258,6 +259,7 @@ pub fn check_single_ai_agent(
                         latest_version: None,
                         update_available: None,
                         install_source: bridge_install_source.clone(),
+                        self_updating: None,
                     }
                 }
                 Err(e) => DoctorCheck {
@@ -278,6 +280,7 @@ pub fn check_single_ai_agent(
                     latest_version: None,
                     update_available: None,
                     install_source: bridge_install_source.clone(),
+                    self_updating: None,
                 },
             }
         } else {
@@ -339,6 +342,7 @@ pub fn check_single_ai_agent(
                 latest_version: None,
                 update_available: None,
                 install_source: bridge_install_source,
+                self_updating: None,
             }
         }
     } else {
@@ -379,6 +383,7 @@ pub fn check_single_ai_agent(
                 latest_version: None,
                 update_available: None,
                 install_source: main_install_source,
+                self_updating: None,
             };
         }
 
@@ -410,6 +415,7 @@ pub fn check_single_ai_agent(
             latest_version: None,
             update_available: None,
             install_source: None,
+            self_updating: None,
         }
     }
 }

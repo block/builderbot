@@ -80,9 +80,19 @@ pub struct DoctorCheck {
     /// Latest available version string, if known.
     pub latest_version: Option<String>,
     /// Whether a newer version is available than the installed one.
+    ///
+    /// For self-updating tools (see `self_updating`) this is never `Some(true)`:
+    /// the tool manages its own freshness, so we don't raise an update nag even
+    /// when a newer version exists upstream.
     pub update_available: Option<bool>,
     /// How the binary was installed (brew, npm, cargo, etc.), if detected.
     pub install_source: Option<InstallSource>,
+    /// Whether this tool keeps itself up to date (curl/native installers such as
+    /// Claude native, Cursor, and Amp-curl). When `Some(true)`, the freshness
+    /// pass reports the installed/latest versions for display but suppresses
+    /// `update_available` — the update is "managed by the tool", not actionable.
+    /// Only populated by the freshness pass; `None` on the default cheap path.
+    pub self_updating: Option<bool>,
 }
 
 /// The full report returned to the frontend.

@@ -13,6 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::package_ids::LatestSource;
 use crate::types::InstallSource;
 
 /// One hour: long enough that repeated `run_checks_with_options` calls in the
@@ -42,11 +43,11 @@ pub(crate) struct FreshnessCache {
 }
 
 impl FreshnessCache {
-    fn cache_key(source: InstallSource, package_id: &str) -> String {
+    fn cache_key(source: LatestSource, package_id: &str) -> String {
         format!("{:?}:{}", source, package_id)
     }
 
-    fn get_fresh(&self, source: InstallSource, package_id: &str, now: i64) -> Option<String> {
+    fn get_fresh(&self, source: LatestSource, package_id: &str, now: i64) -> Option<String> {
         let key = Self::cache_key(source, package_id);
         let entry = self.entries.get(&key)?;
         if now.saturating_sub(entry.fetched_at) <= CACHE_TTL_SECONDS {
@@ -56,7 +57,7 @@ impl FreshnessCache {
         }
     }
 
-    fn insert(&mut self, source: InstallSource, package_id: &str, value: String, now: i64) {
+    fn insert(&mut self, source: LatestSource, package_id: &str, value: String, now: i64) {
         let key = Self::cache_key(source, package_id);
         self.entries.insert(
             key,
@@ -222,21 +223,27 @@ fn installed_version(binary_path: &Path, version_args: &[&str]) -> Option<String
     extract_version(&combined)
 }
 
+/// Whether a tool keeps itself up to date and therefore should never raise an
+/// "update available" nag. Curl/native installers (Claude native, Cursor,
+/// Amp-curl) self-update; those installs are fingerprinted as
+/// [`InstallSource::CurlPipe`] (directly or via a per-agent override). Registry
+/// installs (brew/npm/cargo) are user-managed and remain actionable, which is
+/// why a brew/npm install of the same agent is *not* treated as self-updating.
+pub(crate) fn is_self_updating(source: Option<&InstallSource>) -> bool {
+    matches!(source, Some(InstallSource::CurlPipe))
+}
+
 /// Dispatch a latest-version probe per source.
 fn latest_version(
-    source: InstallSource,
+    source: LatestSource,
     package_id: &str,
     npm_registry: Option<&str>,
 ) -> Option<String> {
     match source {
-        InstallSource::Brew => latest_brew(package_id),
-        InstallSource::Npm => latest_npm(package_id, npm_registry),
-        InstallSource::Cargo => latest_crates_io(package_id),
-        InstallSource::CurlPipe
-        | InstallSource::System
-        | InstallSource::Unknown
-        | InstallSource::Mise
-        | InstallSource::Asdf => None,
+        LatestSource::Brew => latest_brew(package_id),
+        LatestSource::Npm => latest_npm(package_id, npm_registry),
+        LatestSource::CratesIo => latest_crates_io(package_id),
+        LatestSource::GitHubReleases => latest_github_releases(package_id),
     }
 }
 
@@ -313,11 +320,60 @@ fn latest_crates_io(package_id: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Fetch the latest release tag for a `owner/repo` slug via the GitHub REST API.
+///
+/// Used for tools published only through GitHub releases (no brew/npm/crates
+/// presence), e.g. Cursor's curl install. Degrades gracefully to `None` on any
+/// error — no token, rate-limited, network failure, or unparseable payload —
+/// and never returns a hard error. A `GITHUB_TOKEN`/`GH_TOKEN` in the
+/// environment is used as a bearer credential to relax the unauthenticated
+/// rate limit, but is entirely optional.
+fn latest_github_releases(repo: &str) -> Option<String> {
+    let url = format!("https://api.github.com/repos/{repo}/releases/latest");
+    let client = reqwest::blocking::Client::builder()
+        // GitHub rejects requests without a User-Agent.
+        .user_agent("block-builderbot-doctor/0.1")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let mut req = client
+        .get(&url)
+        .header("Accept", "application/vnd.github+json");
+    if let Some(token) = github_token() {
+        req = req.bearer_auth(token);
+    }
+    let resp = req.send().ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let bytes = resp.bytes().ok()?;
+    parse_github_release_tag(&bytes)
+}
+
+/// Read GitHub's optional release-auth token from the environment. Empty values
+/// are treated as absent. Kept separate so the fetcher stays testable.
+fn github_token() -> Option<String> {
+    std::env::var("GITHUB_TOKEN")
+        .ok()
+        .or_else(|| std::env::var("GH_TOKEN").ok())
+        .filter(|s| !s.is_empty())
+}
+
+/// Pull `tag_name` out of a GitHub `releases/latest` payload, stripping a
+/// leading `v` so it lines up with the semver shapes the rest of the module
+/// produces. Crate-public so unit tests can drive it without a network call.
+pub(crate) fn parse_github_release_tag(bytes: &[u8]) -> Option<String> {
+    let root: Value = serde_json::from_slice(bytes).ok()?;
+    root.get("tag_name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim_start_matches('v').to_string())
+}
+
 /// Top-level: returns installed (always, when binary present), latest (only
 /// if `package_id` is `Some` and we're not offline), and `update_available`
 /// (only if both parse as semver triples).
 pub(crate) async fn fetch_version_info(
-    install_source: Option<InstallSource>,
+    latest_source: Option<LatestSource>,
     package_id: Option<&str>,
     binary_path: &Path,
     version_args: &[&str],
@@ -342,18 +398,16 @@ pub(crate) async fn fetch_version_info(
 
         let latest = if offline {
             None
-        } else if let (Some(source), Some(pkg)) = (install_source, pkg) {
+        } else if let (Some(source), Some(pkg)) = (latest_source, pkg) {
             let now = now_epoch_seconds();
             // Cache lookup first.
             let cached = {
                 let guard = cache.lock().ok();
-                guard
-                    .as_ref()
-                    .and_then(|c| c.get_fresh(source.clone(), &pkg, now))
+                guard.as_ref().and_then(|c| c.get_fresh(source, &pkg, now))
             };
             if let Some(v) = cached {
                 Some(v)
-            } else if let Some(v) = latest_version(source.clone(), &pkg, npm_registry.as_deref()) {
+            } else if let Some(v) = latest_version(source, &pkg, npm_registry.as_deref()) {
                 if let Ok(mut guard) = cache.lock() {
                     guard.insert(source, &pkg, v.clone(), now);
                 }
@@ -467,26 +521,62 @@ mod tests {
     fn cache_ttl_treats_old_entries_as_stale() {
         let mut cache = FreshnessCache::default();
         let now = 1_000_000;
-        cache.insert(InstallSource::Brew, "git", "2.50.0".to_string(), now);
+        cache.insert(LatestSource::Brew, "git", "2.50.0".to_string(), now);
 
         // Within TTL.
         assert_eq!(
-            cache.get_fresh(InstallSource::Brew, "git", now + 60),
+            cache.get_fresh(LatestSource::Brew, "git", now + 60),
             Some("2.50.0".to_string()),
         );
 
         // 2 hours later — stale.
         let two_hours_later = now + 2 * 60 * 60;
         assert_eq!(
-            cache.get_fresh(InstallSource::Brew, "git", two_hours_later),
+            cache.get_fresh(LatestSource::Brew, "git", two_hours_later),
             None,
         );
     }
 
     #[test]
     fn cache_key_uses_source_and_package_id() {
-        let k1 = FreshnessCache::cache_key(InstallSource::Brew, "git");
-        let k2 = FreshnessCache::cache_key(InstallSource::Npm, "git");
+        let k1 = FreshnessCache::cache_key(LatestSource::Brew, "git");
+        let k2 = FreshnessCache::cache_key(LatestSource::Npm, "git");
         assert_ne!(k1, k2, "different sources should map to different keys");
+    }
+
+    #[test]
+    fn github_release_tag_strips_leading_v() {
+        let json = br#"{"tag_name": "v1.2.3", "name": "1.2.3"}"#;
+        assert_eq!(
+            parse_github_release_tag(json).as_deref(),
+            Some("1.2.3"),
+            "leading v should be stripped",
+        );
+    }
+
+    #[test]
+    fn github_release_tag_without_v_prefix() {
+        let json = br#"{"tag_name": "2025.06.01"}"#;
+        assert_eq!(
+            parse_github_release_tag(json).as_deref(),
+            Some("2025.06.01")
+        );
+    }
+
+    #[test]
+    fn github_release_tag_missing_field_is_none() {
+        assert_eq!(
+            parse_github_release_tag(br#"{"name": "no tag here"}"#),
+            None
+        );
+        assert_eq!(parse_github_release_tag(b"not json"), None);
+    }
+
+    #[test]
+    fn self_updating_only_for_curl_pipe() {
+        assert!(is_self_updating(Some(&InstallSource::CurlPipe)));
+        assert!(!is_self_updating(Some(&InstallSource::Npm)));
+        assert!(!is_self_updating(Some(&InstallSource::Brew)));
+        assert!(!is_self_updating(None));
     }
 }

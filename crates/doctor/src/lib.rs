@@ -19,10 +19,10 @@ use std::sync::{Arc, Mutex};
 
 use agents::{check_single_ai_agent, lookup_fix_command, AI_AGENT_CHECKS};
 use checks::{check_clonefile, check_gh, check_gh_auth, check_git, check_git_lfs};
-use freshness::{fetch_version_info, load_cache, save_cache};
-use package_ids::lookup_package_id;
+use freshness::{fetch_version_info, is_self_updating, load_cache, save_cache};
+use package_ids::{lookup_package_id, LatestSource};
 use resolve::resolve_binary;
-use types::{InstallSource, ResolvedBinary};
+use types::ResolvedBinary;
 
 /// Fallback check returned when a spawn_blocking task panics.
 fn empty_check(id: &str, label: &str) -> DoctorCheck {
@@ -42,6 +42,7 @@ fn empty_check(id: &str, label: &str) -> DoctorCheck {
         latest_version: None,
         update_available: None,
         install_source: None,
+        self_updating: None,
     }
 }
 
@@ -212,16 +213,17 @@ async fn populate_freshness(
         let path_str = check.bridge_path.as_deref().or(check.path.as_deref());
         let Some(path_str) = path_str else { continue };
 
-        let package_id = check
+        let (package_id, latest_source) = check
             .install_source
             .clone()
             .and_then(|src| lookup_package_id(&check.id, src))
-            .map(|s| s.to_string());
+            .map(|(pkg, latest)| (Some(pkg.to_string()), Some(latest)))
+            .unwrap_or((None, None));
 
         targets.push(FreshnessTarget {
             id: check.id.clone(),
             path: PathBuf::from(path_str),
-            install_source: check.install_source.clone(),
+            latest_source,
             package_id,
         });
     }
@@ -231,7 +233,7 @@ async fn populate_freshness(
         let npm_registry = npm_registry.clone();
         async move {
             let info = fetch_version_info(
-                t.install_source,
+                t.latest_source,
                 t.package_id.as_deref(),
                 &t.path,
                 &["--version"],
@@ -254,7 +256,16 @@ async fn populate_freshness(
         if let Some(info) = by_id.remove(&check.id) {
             check.installed_version = info.installed;
             check.latest_version = info.latest;
-            check.update_available = info.update_available;
+            // Self-updating tools (curl/native installers) manage their own
+            // freshness: report installed/latest for display, but never raise an
+            // "update available" nag — the update isn't the user's to action.
+            let self_updating = is_self_updating(check.install_source.as_ref());
+            check.self_updating = Some(self_updating);
+            check.update_available = if self_updating {
+                None
+            } else {
+                info.update_available
+            };
         }
     }
 
@@ -268,7 +279,7 @@ async fn populate_freshness(
 struct FreshnessTarget {
     id: String,
     path: PathBuf,
-    install_source: Option<InstallSource>,
+    latest_source: Option<LatestSource>,
     package_id: Option<String>,
 }
 

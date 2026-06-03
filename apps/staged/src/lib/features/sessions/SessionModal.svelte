@@ -999,6 +999,7 @@
     bind:ref={modalElement}
     class={`sm:max-w-[700px] h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col border-2 ${dragOver ? 'border-[var(--ui-accent)] bg-[color-mix(in_srgb,var(--ui-accent)_5%,var(--bg-chrome))]' : 'border-transparent'} transition-colors`}
     showCloseButton={false}
+    onOpenAutoFocus={(e) => e.preventDefault()}
   >
     <!-- Header -->
     <header class="modal-header">

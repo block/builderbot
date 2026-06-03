@@ -196,6 +196,7 @@
   <Dialog.Content
     class="sm:max-w-[700px] h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col"
     showCloseButton={false}
+    onOpenAutoFocus={(e) => e.preventDefault()}
   >
     <Dialog.Header
       class="flex-row items-center justify-between gap-3 px-4 py-3 border-b border-[var(--border-subtle)] flex-shrink-0"

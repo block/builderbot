@@ -241,6 +241,13 @@ function findColorWithLuminance(baseColor: string, targetLum: number): string {
 const CONTRAST_VALUE = 0.035;
 const CONTRAST_OFFSET = 0.0135;
 
+// Light themes darken chrome away from a near-white base, which reads heavier
+// than the equivalent lightening does on a dark base. Scale the chrome
+// luminance difference down for light themes so the main app / project chrome
+// sits closer to the page background (a lighter gray) rather than a noticeable
+// mid-gray. Dark themes are unaffected (scale = 1).
+const LIGHT_CHROME_CONTRAST_SCALE = 0.6;
+
 /**
  * Calculate target luminance difference using logFloor algorithm.
  * This provides gentle scaling that works across all theme luminances,
@@ -270,8 +277,10 @@ interface ChromeColors {
 function calculateChromeColors(syntaxBg: string): ChromeColors {
   const bgLum = luminance(syntaxBg);
 
-  // Calculate target luminance difference for chrome
-  const lumDiff = calculateLumDiff(bgLum);
+  // Calculate target luminance difference for chrome. Light themes use a
+  // reduced step so the derived chrome reads as a lighter gray.
+  const isLight = bgLum >= 0.5;
+  const lumDiff = calculateLumDiff(bgLum) * (isLight ? LIGHT_CHROME_CONTRAST_SCALE : 1);
   const targetChromeLum = bgLum - lumDiff;
 
   // Deepest is 2x the chrome difference (darker still)

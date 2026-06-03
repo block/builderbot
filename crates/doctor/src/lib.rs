@@ -56,6 +56,12 @@ pub struct RunChecksOptions {
     /// If true (in combination with `check_freshness`), skip the remote
     /// registry lookups — only the local installed-version probe runs.
     pub offline: bool,
+    /// Optional npm registry override. When `Some`, every npm-backed
+    /// install/probe command (`npm install -g …`, `npm view …`) is routed
+    /// through this registry via `--registry=<url>`. The URL is always
+    /// caller-supplied; the crate bakes in no registry of its own. `None`
+    /// (the default) reproduces the original commands exactly.
+    pub npm_registry: Option<String>,
 }
 
 /// Run all health checks and return the report. Equivalent to
@@ -67,16 +73,17 @@ pub async fn run_checks() -> DoctorReport {
 /// Run all health checks with explicit options. Existing callers that want
 /// the cheap, no-network path should keep using [`run_checks`].
 pub async fn run_checks_with_options(opts: RunChecksOptions) -> DoctorReport {
-    let report = collect_base_report().await;
+    let npm_registry = opts.npm_registry.as_deref();
+    let report = collect_base_report(npm_registry).await;
 
     if opts.check_freshness {
-        populate_freshness(report, opts.offline).await
+        populate_freshness(report, opts.offline, npm_registry).await
     } else {
         report
     }
 }
 
-async fn collect_base_report() -> DoctorReport {
+async fn collect_base_report(npm_registry: Option<&str>) -> DoctorReport {
     let mut binary_names: Vec<&'static str> = vec!["git", "gh", "git-lfs"];
     for info in AI_AGENT_CHECKS {
         for cmd in info.commands {
@@ -140,10 +147,12 @@ async fn collect_base_report() -> DoctorReport {
     let c_git_lfs = tokio::task::spawn_blocking(move || check_git_lfs(&git_r2, &git_lfs_r));
     let c_clonefile = tokio::task::spawn_blocking(move || check_clonefile(&git_r3));
 
+    let npm_registry_owned = npm_registry.map(|s| s.to_string());
     let agent_handles: Vec<_> = AI_AGENT_CHECKS
         .iter()
         .map(|info| {
             let found = any_agent_found;
+            let registry = npm_registry_owned.clone();
             let cmds: Vec<ResolvedBinary> = info
                 .commands
                 .iter()
@@ -156,7 +165,7 @@ async fn collect_base_report() -> DoctorReport {
                 .collect();
             let main = info.main_command.and_then(|cmd| resolved.get(cmd).cloned());
             tokio::task::spawn_blocking(move || {
-                check_single_ai_agent(info, found, &cmds, main.as_ref())
+                check_single_ai_agent(info, found, &cmds, main.as_ref(), registry.as_deref())
             })
         })
         .collect();
@@ -188,8 +197,13 @@ async fn collect_base_report() -> DoctorReport {
 /// package id, run the installed/latest version probes in parallel and update
 /// the corresponding fields on the report. The on-disk cache is read once at
 /// the start and written once at the end.
-async fn populate_freshness(mut report: DoctorReport, offline: bool) -> DoctorReport {
+async fn populate_freshness(
+    mut report: DoctorReport,
+    offline: bool,
+    npm_registry: Option<&str>,
+) -> DoctorReport {
     let cache = Arc::new(Mutex::new(load_cache()));
+    let npm_registry = npm_registry.map(|s| s.to_string());
 
     let mut targets: Vec<FreshnessTarget> = Vec::new();
     for check in &report.checks {
@@ -214,6 +228,7 @@ async fn populate_freshness(mut report: DoctorReport, offline: bool) -> DoctorRe
 
     let futures = targets.into_iter().map(|t| {
         let cache = cache.clone();
+        let npm_registry = npm_registry.clone();
         async move {
             let info = fetch_version_info(
                 t.install_source,
@@ -221,6 +236,7 @@ async fn populate_freshness(mut report: DoctorReport, offline: bool) -> DoctorRe
                 &t.path,
                 &["--version"],
                 offline,
+                npm_registry.as_deref(),
                 cache,
             )
             .await;
@@ -264,6 +280,18 @@ pub async fn execute_fix(check_id: String, fix_type: FixType) -> Result<(), Stri
     execute_fix_streaming(check_id, fix_type, |_| {}).await
 }
 
+/// Like [`execute_fix`], but routes npm-backed fix commands through an optional
+/// caller-supplied registry (see [`RunChecksOptions::npm_registry`]). Callers
+/// that displayed a registry-overridden `fix_command` should pass the same
+/// `npm_registry` here so the executed command matches what was shown.
+pub async fn execute_fix_with_options(
+    check_id: String,
+    fix_type: FixType,
+    npm_registry: Option<&str>,
+) -> Result<(), String> {
+    execute_fix_streaming_with_options(check_id, fix_type, npm_registry, |_| {}).await
+}
+
 /// Run a fix command and stream its output line-by-line to `on_line`.
 ///
 /// `on_line` is invoked once per output line, with the trailing newline
@@ -282,8 +310,24 @@ pub async fn execute_fix_streaming<F>(
 where
     F: FnMut(&str) + Send + 'static,
 {
+    execute_fix_streaming_with_options(check_id, fix_type, None, on_line).await
+}
+
+/// Like [`execute_fix_streaming`], but routes npm-backed fix commands through an
+/// optional caller-supplied registry before shelling out (see
+/// [`RunChecksOptions::npm_registry`]). Non-npm commands are run verbatim.
+pub async fn execute_fix_streaming_with_options<F>(
+    check_id: String,
+    fix_type: FixType,
+    npm_registry: Option<&str>,
+    on_line: F,
+) -> Result<(), String>
+where
+    F: FnMut(&str) + Send + 'static,
+{
     let command = lookup_fix_command(&check_id, &fix_type)
         .ok_or_else(|| format!("Unknown check '{check_id}' or fix type '{fix_type:?}'"))?;
+    let command = agents::apply_npm_registry(&command, npm_registry);
 
     run_command_streaming(command, on_line).await
 }

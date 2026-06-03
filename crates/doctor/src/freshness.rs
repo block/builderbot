@@ -225,10 +225,14 @@ fn installed_version(binary_path: &Path, version_args: &[&str]) -> Option<String
 }
 
 /// Dispatch a latest-version probe per source.
-fn latest_version(source: InstallSource, package_id: &str) -> Option<String> {
+fn latest_version(
+    source: InstallSource,
+    package_id: &str,
+    npm_registry: Option<&str>,
+) -> Option<String> {
     match source {
         InstallSource::Brew => latest_brew(package_id),
-        InstallSource::Npm => latest_npm(package_id),
+        InstallSource::Npm => latest_npm(package_id, npm_registry),
         InstallSource::Cargo => latest_crates_io(package_id),
         InstallSource::CurlPipe
         | InstallSource::System
@@ -275,11 +279,13 @@ pub(crate) fn parse_brew_info_v2(bytes: &[u8], _package_id: &str) -> Option<Stri
     None
 }
 
-fn latest_npm(package_id: &str) -> Option<String> {
-    let output = Command::new("npm")
-        .args(["view", package_id, "version"])
-        .output()
-        .ok()?;
+fn latest_npm(package_id: &str, npm_registry: Option<&str>) -> Option<String> {
+    let mut cmd = Command::new("npm");
+    cmd.args(["view", package_id, "version"]);
+    if let Some(registry) = npm_registry {
+        cmd.args(["--registry", registry]);
+    }
+    let output = cmd.output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -318,11 +324,13 @@ pub(crate) async fn fetch_version_info(
     binary_path: &Path,
     version_args: &[&str],
     offline: bool,
+    npm_registry: Option<&str>,
     cache: Arc<Mutex<FreshnessCache>>,
 ) -> VersionInfo {
     let path = binary_path.to_path_buf();
     let args: Vec<String> = version_args.iter().map(|s| s.to_string()).collect();
     let pkg = package_id.map(|s| s.to_string());
+    let npm_registry = npm_registry.map(|s| s.to_string());
 
     let result = tokio::task::spawn_blocking(move || {
         let installed = if path.as_os_str().is_empty() {
@@ -347,7 +355,7 @@ pub(crate) async fn fetch_version_info(
             };
             if let Some(v) = cached {
                 Some(v)
-            } else if let Some(v) = latest_version(source.clone(), &pkg) {
+            } else if let Some(v) = latest_version(source.clone(), &pkg, npm_registry.as_deref()) {
                 if let Ok(mut guard) = cache.lock() {
                     guard.insert(source, &pkg, v.clone(), now);
                 }

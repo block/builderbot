@@ -119,12 +119,37 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
     },
 ];
 
+/// Append `--registry=<url>` to `command` when a registry override is supplied
+/// and the command is npm-backed. Non-npm commands (curl-pipe installers, auth
+/// commands, the git-clonefile fix, …) and the `None` registry case return the
+/// command unchanged.
+///
+/// The registry URL is always caller-supplied — the crate never bakes in a
+/// Block-specific (or any other) registry.
+pub(crate) fn apply_npm_registry(command: &str, registry: Option<&str>) -> String {
+    match registry {
+        Some(url) if is_npm_command(command) => format!("{command} --registry={url}"),
+        _ => command.to_string(),
+    }
+}
+
+/// Heuristic for whether `command` shells out to npm. Matches a leading `npm `
+/// invocation as well as the `npm install` / `npm view` forms that may be
+/// preceded by other tokens.
+fn is_npm_command(command: &str) -> bool {
+    command.starts_with("npm ") || command.contains("npm install") || command.contains("npm view")
+}
+
 /// Check whether a single AI agent is installed.
+///
+/// `npm_registry`, when `Some`, routes any npm-backed install/bridge fix
+/// command through that registry (see [`apply_npm_registry`]).
 pub fn check_single_ai_agent(
     info: &AgentCheckInfo,
     any_agent_found: bool,
     resolved_cmds: &[ResolvedBinary],
     resolved_main: Option<&ResolvedBinary>,
+    npm_registry: Option<&str>,
 ) -> DoctorCheck {
     let header = format!(
         "# Check: {} — verify {} agent is installed",
@@ -302,7 +327,9 @@ pub fn check_single_ai_agent(
                     .bridge_install_url
                     .or(info.install_url)
                     .map(|s| s.to_string()),
-                fix_command: info.bridge_install_command.map(|s| s.to_string()),
+                fix_command: info
+                    .bridge_install_command
+                    .map(|s| apply_npm_registry(s, npm_registry)),
                 fix_type: info.bridge_install_command.map(|_| FixType::Bridge),
                 path: Some(main_path.to_string_lossy().to_string()),
                 bridge_path: None,
@@ -331,7 +358,9 @@ pub fn check_single_ai_agent(
                 "Not installed — at least one AI agent is needed".to_string()
             },
             fix_url: info.install_url.map(|s| s.to_string()),
-            fix_command: info.install_command.map(|s| s.to_string()),
+            fix_command: info
+                .install_command
+                .map(|s| apply_npm_registry(s, npm_registry)),
             fix_type: info.install_command.map(|_| FixType::Command),
             path: None,
             bridge_path: None,
@@ -387,5 +416,42 @@ mod tests {
     #[test]
     fn auth_fix_lookup_returns_none_for_agents_without_auth_command() {
         assert_eq!(lookup_fix_command("ai-agent-goose", &FixType::Auth), None);
+    }
+
+    #[test]
+    fn apply_npm_registry_appends_to_npm_install() {
+        assert_eq!(
+            apply_npm_registry("npm install -g amp-acp", Some("https://artifactory/npm")),
+            "npm install -g amp-acp --registry=https://artifactory/npm",
+        );
+    }
+
+    #[test]
+    fn apply_npm_registry_appends_to_npm_view() {
+        assert_eq!(
+            apply_npm_registry("npm view amp-acp version", Some("https://artifactory/npm")),
+            "npm view amp-acp version --registry=https://artifactory/npm",
+        );
+    }
+
+    #[test]
+    fn apply_npm_registry_leaves_non_npm_commands_unchanged() {
+        let curl = "curl -fsSL https://cursor.com/install | bash";
+        assert_eq!(
+            apply_npm_registry(curl, Some("https://artifactory/npm")),
+            curl,
+        );
+        assert_eq!(
+            apply_npm_registry("claude auth login", Some("https://artifactory/npm")),
+            "claude auth login",
+        );
+    }
+
+    #[test]
+    fn apply_npm_registry_none_is_passthrough() {
+        assert_eq!(
+            apply_npm_registry("npm install -g amp-acp", None),
+            "npm install -g amp-acp",
+        );
     }
 }

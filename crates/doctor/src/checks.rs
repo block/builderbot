@@ -29,6 +29,14 @@ pub fn check_git(resolved: &ResolvedBinary) -> DoctorCheck {
                 path: None,
                 bridge_path: None,
                 raw_output: Some(format!("{header}\nnot found via resolve_binary\n{search}")),
+                auth_status: None,
+                installed_version: None,
+                latest_version: None,
+                update_available: None,
+                install_source: None,
+                self_updating: None,
+                main: None,
+                bridge: None,
             };
         }
     };
@@ -53,6 +61,14 @@ pub fn check_git(resolved: &ResolvedBinary) -> DoctorCheck {
                 path: Some(path_str),
                 bridge_path: None,
                 raw_output: Some(raw),
+                auth_status: None,
+                installed_version: None,
+                latest_version: None,
+                update_available: None,
+                install_source: resolved.install_source.clone(),
+                self_updating: None,
+                main: None,
+                bridge: None,
             }
         }
         Ok(output) => {
@@ -72,6 +88,14 @@ pub fn check_git(resolved: &ResolvedBinary) -> DoctorCheck {
                 path: Some(path_str),
                 bridge_path: None,
                 raw_output: Some(raw),
+                auth_status: None,
+                installed_version: None,
+                latest_version: None,
+                update_available: None,
+                install_source: resolved.install_source.clone(),
+                self_updating: None,
+                main: None,
+                bridge: None,
             }
         }
         Err(e) => DoctorCheck {
@@ -85,6 +109,14 @@ pub fn check_git(resolved: &ResolvedBinary) -> DoctorCheck {
             path: Some(path_str),
             bridge_path: None,
             raw_output: Some(format!("{header}\n$ git --version\nerror: {e}\n{search}")),
+            auth_status: None,
+            installed_version: None,
+            latest_version: None,
+            update_available: None,
+            install_source: resolved.install_source.clone(),
+            self_updating: None,
+            main: None,
+            bridge: None,
         },
     }
 }
@@ -110,6 +142,14 @@ pub fn check_gh(resolved: &ResolvedBinary) -> DoctorCheck {
                 path: None,
                 bridge_path: None,
                 raw_output: Some(format!("{header}\nnot found via resolve_binary\n{search}")),
+                auth_status: None,
+                installed_version: None,
+                latest_version: None,
+                update_available: None,
+                install_source: None,
+                self_updating: None,
+                main: None,
+                bridge: None,
             };
         }
     };
@@ -135,6 +175,14 @@ pub fn check_gh(resolved: &ResolvedBinary) -> DoctorCheck {
                 path: Some(path_str),
                 bridge_path: None,
                 raw_output: Some(raw),
+                auth_status: None,
+                installed_version: None,
+                latest_version: None,
+                update_available: None,
+                install_source: resolved.install_source.clone(),
+                self_updating: None,
+                main: None,
+                bridge: None,
             }
         }
         Ok(output) => {
@@ -154,6 +202,14 @@ pub fn check_gh(resolved: &ResolvedBinary) -> DoctorCheck {
                 path: Some(path_str),
                 bridge_path: None,
                 raw_output: Some(raw),
+                auth_status: None,
+                installed_version: None,
+                latest_version: None,
+                update_available: None,
+                install_source: resolved.install_source.clone(),
+                self_updating: None,
+                main: None,
+                bridge: None,
             }
         }
         Err(e) => DoctorCheck {
@@ -167,6 +223,14 @@ pub fn check_gh(resolved: &ResolvedBinary) -> DoctorCheck {
             path: Some(path_str),
             bridge_path: None,
             raw_output: Some(format!("{header}\n$ gh --version\nerror: {e}\n{search}")),
+            auth_status: None,
+            installed_version: None,
+            latest_version: None,
+            update_available: None,
+            install_source: resolved.install_source.clone(),
+            self_updating: None,
+            main: None,
+            bridge: None,
         },
     }
 }
@@ -191,6 +255,14 @@ pub fn check_gh_auth(gh: &ResolvedBinary) -> DoctorCheck {
                 path: None,
                 bridge_path: None,
                 raw_output: Some(format!("{header}\ngh not found via resolve_binary")),
+                auth_status: None,
+                installed_version: None,
+                latest_version: None,
+                update_available: None,
+                install_source: None,
+                self_updating: None,
+                main: None,
+                bridge: None,
             };
         }
     };
@@ -213,6 +285,14 @@ pub fn check_gh_auth(gh: &ResolvedBinary) -> DoctorCheck {
                     path: None,
                     bridge_path: None,
                     raw_output: Some(raw),
+                    auth_status: None,
+                    installed_version: None,
+                    latest_version: None,
+                    update_available: None,
+                    install_source: None,
+                    self_updating: None,
+                    main: None,
+                    bridge: None,
                 }
             } else {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -233,6 +313,14 @@ pub fn check_gh_auth(gh: &ResolvedBinary) -> DoctorCheck {
                     path: None,
                     bridge_path: None,
                     raw_output: Some(raw),
+                    auth_status: None,
+                    installed_version: None,
+                    latest_version: None,
+                    update_available: None,
+                    install_source: None,
+                    self_updating: None,
+                    main: None,
+                    bridge: None,
                 }
             }
         }
@@ -247,6 +335,14 @@ pub fn check_gh_auth(gh: &ResolvedBinary) -> DoctorCheck {
             path: None,
             bridge_path: None,
             raw_output: Some(format!("{header}\n$ gh auth status\nerror: {e}")),
+            auth_status: None,
+            installed_version: None,
+            latest_version: None,
+            update_available: None,
+            install_source: None,
+            self_updating: None,
+            main: None,
+            bridge: None,
         },
     }
 }
@@ -275,6 +371,14 @@ pub fn check_git_lfs(git: &ResolvedBinary, git_lfs: &ResolvedBinary) -> DoctorCh
                 raw_output: Some(format!(
                     "{header}\ngit not found via resolve_binary\n{search}"
                 )),
+                auth_status: None,
+                installed_version: None,
+                latest_version: None,
+                update_available: None,
+                install_source: None,
+                self_updating: None,
+                main: None,
+                bridge: None,
             };
         }
     };
@@ -302,6 +406,14 @@ pub fn check_git_lfs(git: &ResolvedBinary, git_lfs: &ResolvedBinary) -> DoctorCh
                 path,
                 bridge_path: None,
                 raw_output: Some(raw),
+                auth_status: None,
+                installed_version: None,
+                latest_version: None,
+                update_available: None,
+                install_source: git_lfs.install_source.clone(),
+                self_updating: None,
+                main: None,
+                bridge: None,
             }
         }
         Ok(output) => {
@@ -321,6 +433,14 @@ pub fn check_git_lfs(git: &ResolvedBinary, git_lfs: &ResolvedBinary) -> DoctorCh
                 path: None,
                 bridge_path: None,
                 raw_output: Some(raw),
+                auth_status: None,
+                installed_version: None,
+                latest_version: None,
+                update_available: None,
+                install_source: None,
+                self_updating: None,
+                main: None,
+                bridge: None,
             }
         }
         Err(e) => DoctorCheck {
@@ -334,6 +454,14 @@ pub fn check_git_lfs(git: &ResolvedBinary, git_lfs: &ResolvedBinary) -> DoctorCh
             path: None,
             bridge_path: None,
             raw_output: Some(format!("{header}\n$ git lfs version\nerror: {e}\n{search}")),
+            auth_status: None,
+            installed_version: None,
+            latest_version: None,
+            update_available: None,
+            install_source: None,
+            self_updating: None,
+            main: None,
+            bridge: None,
         },
     }
 }
@@ -359,6 +487,14 @@ pub fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
                 path: None,
                 bridge_path: None,
                 raw_output: Some(format!("{header}\ngit not found via resolve_binary")),
+                auth_status: None,
+                installed_version: None,
+                latest_version: None,
+                update_available: None,
+                install_source: None,
+                self_updating: None,
+                main: None,
+                bridge: None,
             };
         }
     };
@@ -387,6 +523,14 @@ pub fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
                     path: None,
                     bridge_path: None,
                     raw_output: Some(raw),
+                    auth_status: None,
+                    installed_version: None,
+                    latest_version: None,
+                    update_available: None,
+                    install_source: git.install_source.clone(),
+                    self_updating: None,
+                    main: None,
+                    bridge: None,
                 }
             } else {
                 DoctorCheck {
@@ -401,6 +545,14 @@ pub fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
                     path: None,
                     bridge_path: None,
                     raw_output: Some(raw),
+                    auth_status: None,
+                    installed_version: None,
+                    latest_version: None,
+                    update_available: None,
+                    install_source: git.install_source.clone(),
+                    self_updating: None,
+                    main: None,
+                    bridge: None,
                 }
             }
         }
@@ -421,6 +573,14 @@ pub fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
                 path: None,
                 bridge_path: None,
                 raw_output: Some(raw),
+                auth_status: None,
+                installed_version: None,
+                latest_version: None,
+                update_available: None,
+                install_source: git.install_source.clone(),
+                self_updating: None,
+                main: None,
+                bridge: None,
             }
         }
         Err(e) => DoctorCheck {
@@ -436,6 +596,14 @@ pub fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
             raw_output: Some(format!(
                 "{header}\n$ git config --global core.clonefile\nerror: {e}"
             )),
+            auth_status: None,
+            installed_version: None,
+            latest_version: None,
+            update_available: None,
+            install_source: git.install_source.clone(),
+            self_updating: None,
+            main: None,
+            bridge: None,
         },
     }
 }

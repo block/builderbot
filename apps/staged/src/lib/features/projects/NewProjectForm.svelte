@@ -203,7 +203,7 @@
         {#each [{ value: 'local', label: 'Local', description: 'Run agents on your machine', icon: Monitor }, { value: 'remote', label: 'Remote', description: 'Run agents in the cloud', icon: Cloud }] as option}
           <ToggleGroup.Item
             value={option.value}
-            class="flex h-auto w-full items-center justify-start gap-3 rounded-[10px] border-[1.5px] border-border px-4 py-3.5 text-left text-muted-foreground hover:border-ring hover:bg-transparent hover:text-foreground data-[state=on]:border-foreground data-[state=on]:bg-foreground data-[state=on]:text-background"
+            class="flex h-auto w-full items-center justify-start gap-3 rounded-[10px] border-[1.5px] border-border bg-background px-4 py-3.5 text-left text-muted-foreground hover:border-ring hover:bg-background hover:text-foreground data-[state=on]:border-foreground data-[state=on]:bg-foreground data-[state=on]:text-background"
           >
             <option.icon size={22} class="shrink-0" />
             <span class="flex min-w-0 flex-col gap-0.5">

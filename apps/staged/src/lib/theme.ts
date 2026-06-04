@@ -246,7 +246,7 @@ const CONTRAST_OFFSET = 0.0135;
 // luminance difference down for light themes so the main app / project chrome
 // sits closer to the page background (a lighter gray) rather than a noticeable
 // mid-gray. Dark themes are unaffected (scale = 1).
-const LIGHT_CHROME_CONTRAST_SCALE = 0.6;
+const LIGHT_CHROME_CONTRAST_SCALE = 0.3;
 
 /**
  * Calculate target luminance difference using logFloor algorithm.

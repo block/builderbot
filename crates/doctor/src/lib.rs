@@ -478,7 +478,7 @@ pub async fn execute_fix_streaming_with_options<F>(
     fix_type: FixType,
     command_override: Option<String>,
     npm_registry: Option<&str>,
-    on_line: F,
+    mut on_line: F,
 ) -> Result<(), String>
 where
     F: FnMut(&str) + Send + 'static,
@@ -489,6 +489,13 @@ where
             .ok_or_else(|| format!("Unknown check '{check_id}' or fix type '{fix_type:?}'"))?,
     };
     let command = agents::apply_npm_registry(&command, npm_registry);
+
+    // Echo the resolved command as a preamble line so downstream callers (e.g.
+    // goose-internal's `run_fix`, which `info!`s every callback line and emits
+    // it via the `agent-setup:output` Tauri event) record *what* ran, not just
+    // its output. Matches the `$ <command>` phrasing the auth probe already
+    // writes into `raw_output`.
+    on_line(&format!("$ {command}"));
 
     run_command_streaming(command, on_line).await
 }
@@ -890,6 +897,40 @@ mod tests {
         assert!(
             result.is_ok(),
             "override should execute `true` and exit 0; got {result:?}",
+        );
+    }
+
+    /// The streaming executor must emit a `$ <resolved-command>` preamble line
+    /// through the callback *before* any subprocess output, so downstream
+    /// callers record what ran. Exercises the `command_override` branch
+    /// (the codepath `UpdateMain`/`UpdateBridge` clicks take, since they have
+    /// no static recipe).
+    #[tokio::test]
+    async fn execute_fix_streaming_emits_command_preamble_first() {
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+
+        let result = execute_fix_streaming_with_options(
+            "ai-agent-claude".to_string(),
+            FixType::UpdateMain,
+            Some("echo hello".to_string()),
+            None,
+            move |line| {
+                lines_clone.lock().unwrap().push(line.to_string());
+            },
+        )
+        .await;
+
+        assert!(result.is_ok(), "override should execute; got {result:?}");
+        let captured = lines.lock().unwrap().clone();
+        assert_eq!(
+            captured.first().map(String::as_str),
+            Some("$ echo hello"),
+            "first callback line must be the command preamble; captured: {captured:?}",
+        );
+        assert!(
+            captured.iter().any(|l| l == "hello"),
+            "subprocess output line should follow the preamble; captured: {captured:?}",
         );
     }
 

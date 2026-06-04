@@ -195,9 +195,10 @@
       <div class="field-label">Location</div>
       <ToggleGroup.Root
         type="single"
+        orientation="vertical"
         bind:value={location}
         disabled={saving}
-        class="flex flex-col gap-2"
+        class="w-full gap-2"
       >
         {#each [{ value: 'local', label: 'Local', description: 'Run agents on your machine', icon: Monitor }, { value: 'remote', label: 'Remote', description: 'Run agents in the cloud', icon: Cloud }] as option}
           <ToggleGroup.Item

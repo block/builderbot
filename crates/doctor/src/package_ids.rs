@@ -114,9 +114,8 @@ pub(crate) const PACKAGE_IDS: &[(&str, &[PackageEntry])] = &[
     (
         "ai-agent-codex",
         &[
-            // Bridge ships via npm; main CLI via brew — distinct install
-            // sources so role disambiguation isn't strictly needed, but tag it
-            // anyway for clarity.
+            // Bridge ships via npm; main CLI via brew or npm. Role tags
+            // disambiguate the two npm packages (bridge vs main).
             (
                 InstallSource::Npm,
                 "@zed-industries/codex-acp",
@@ -124,6 +123,15 @@ pub(crate) const PACKAGE_IDS: &[(&str, &[PackageEntry])] = &[
                 Role::Bridge,
             ),
             (InstallSource::Brew, "codex", LatestSource::Brew, Role::Main),
+            // Main CLI when installed via npm. WARNING: the unscoped `codex`
+            // package on npm is an unrelated 2012 project; only the scoped
+            // `@openai/codex` is OpenAI's CLI.
+            (
+                InstallSource::Npm,
+                "@openai/codex",
+                LatestSource::Npm,
+                Role::Main,
+            ),
         ],
     ),
     (
@@ -146,17 +154,35 @@ pub(crate) const PACKAGE_IDS: &[(&str, &[PackageEntry])] = &[
                 LatestSource::Npm,
                 Role::Bridge,
             ),
-            (InstallSource::Brew, "amp", LatestSource::Brew, Role::Main),
+            // Sourcegraph Amp ships from the `ampcode/tap` tap as `ampcode`.
+            // WARNING: homebrew-core's `amp` formula is an unrelated GPL-3.0
+            // terminal text editor — do NOT use that package id here, or
+            // `brew upgrade amp` will silently swap in the text editor.
+            (
+                InstallSource::Brew,
+                "ampcode",
+                LatestSource::Brew,
+                Role::Main,
+            ),
         ],
     ),
     (
         "ai-agent-copilot",
-        &[(
-            InstallSource::Npm,
-            "@github/copilot",
-            LatestSource::Npm,
-            Role::Any,
-        )],
+        &[
+            (
+                InstallSource::Npm,
+                "@github/copilot",
+                LatestSource::Npm,
+                Role::Any,
+            ),
+            // Official Homebrew cask (`brew install --cask copilot-cli`).
+            (
+                InstallSource::Brew,
+                "copilot-cli",
+                LatestSource::Brew,
+                Role::Any,
+            ),
+        ],
     ),
     // ai-agent-cursor: curl-pipe installer with no registry presence; its
     // releases are published on GitHub. The repo slug is a best-effort default
@@ -164,12 +190,22 @@ pub(crate) const PACKAGE_IDS: &[(&str, &[PackageEntry])] = &[
     // self-updating, so this latest is report-only (no update nag).
     (
         "ai-agent-cursor",
-        &[(
-            InstallSource::CurlPipe,
-            "getcursor/cursor",
-            LatestSource::GitHubReleases,
-            Role::Any,
-        )],
+        &[
+            (
+                InstallSource::CurlPipe,
+                "getcursor/cursor",
+                LatestSource::GitHubReleases,
+                Role::Any,
+            ),
+            // Official Homebrew cask (`brew install --cask cursor-cli`) for
+            // the headless `cursor-agent` CLI.
+            (
+                InstallSource::Brew,
+                "cursor-cli",
+                LatestSource::Brew,
+                Role::Any,
+            ),
+        ],
     ),
 ];
 
@@ -277,5 +313,69 @@ mod tests {
     fn copilot_any_entry_matches_main_and_bridge_queries() {
         assert!(lookup_package_id("ai-agent-copilot", InstallSource::Npm, Role::Main).is_some());
         assert!(lookup_package_id("ai-agent-copilot", InstallSource::Npm, Role::Bridge).is_some());
+    }
+
+    /// Sourcegraph Amp's brew formula is `ampcode/tap/ampcode`. Homebrew-core's
+    /// `amp` is an unrelated GPL-3.0 terminal text editor — if Brew/Main ever
+    /// resolves to `"amp"`, `brew upgrade amp` would silently swap in that
+    /// editor.
+    #[test]
+    fn amp_brew_resolves_to_ampcode_not_text_editor() {
+        assert_eq!(
+            lookup_package_id("ai-agent-amp", InstallSource::Brew, Role::Main),
+            Some(("ampcode", LatestSource::Brew)),
+        );
+    }
+
+    #[test]
+    fn cursor_brew_resolves_to_cursor_cli_cask() {
+        assert_eq!(
+            lookup_package_id("ai-agent-cursor", InstallSource::Brew, Role::Any),
+            Some(("cursor-cli", LatestSource::Brew)),
+        );
+    }
+
+    /// Guard that adding the brew entry didn't displace the curl-pipe lookup.
+    #[test]
+    fn cursor_curl_pipe_still_resolves() {
+        let (pkg, latest) =
+            lookup_package_id("ai-agent-cursor", InstallSource::CurlPipe, Role::Any)
+                .expect("cursor curl-pipe entry");
+        assert_eq!(pkg, "getcursor/cursor");
+        assert_eq!(latest, LatestSource::GitHubReleases);
+    }
+
+    #[test]
+    fn copilot_brew_resolves_to_copilot_cli_cask() {
+        assert_eq!(
+            lookup_package_id("ai-agent-copilot", InstallSource::Brew, Role::Any),
+            Some(("copilot-cli", LatestSource::Brew)),
+        );
+    }
+
+    #[test]
+    fn copilot_npm_still_resolves() {
+        assert_eq!(
+            lookup_package_id("ai-agent-copilot", InstallSource::Npm, Role::Any),
+            Some(("@github/copilot", LatestSource::Npm)),
+        );
+    }
+
+    #[test]
+    fn codex_npm_main_resolves_to_openai_codex() {
+        assert_eq!(
+            lookup_package_id("ai-agent-codex", InstallSource::Npm, Role::Main),
+            Some(("@openai/codex", LatestSource::Npm)),
+        );
+    }
+
+    /// Guard that adding the Main npm entry didn't shadow the existing Bridge
+    /// entry — the role-tagged lookup must still pick the bridge package.
+    #[test]
+    fn codex_npm_bridge_unchanged() {
+        assert_eq!(
+            lookup_package_id("ai-agent-codex", InstallSource::Npm, Role::Bridge),
+            Some(("@zed-industries/codex-acp", LatestSource::Npm)),
+        );
     }
 }

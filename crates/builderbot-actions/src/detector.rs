@@ -32,7 +32,6 @@ pub struct SuggestedAction {
     pub name: String,
     pub command: String,
     pub action_type: ActionType,
-    pub auto_commit: bool,
     pub source: String, // e.g., "justfile", "Makefile", "package.json"
 }
 
@@ -86,7 +85,6 @@ The response must be a JSON array of action objects. Each action object must hav
 - name: string (concise action name, e.g., "Test", "Lint", "Format")
 - command: string (exact shell command to run, e.g., "npm test", "just build")
 - actionType: string (one of: "prerun", "run", "build", "format", "check", "test", "cleanUp")
-- autoCommit: boolean (true if action modifies files and should auto-commit)
 - source: string (which file this was detected from, e.g., "package.json", "justfile", "subdir/justfile")
 
 Action type guidelines:
@@ -129,49 +127,42 @@ Return ONLY a JSON array with detected actions. Example (ordered by importance):
     "name": "Install Dependencies",
     "command": "npm install",
     "actionType": "prerun",
-    "autoCommit": false,
     "source": "package.json"
   },
   {
     "name": "Install Lefthook",
     "command": "lefthook install",
     "actionType": "prerun",
-    "autoCommit": false,
     "source": "lefthook.yml"
   },
   {
     "name": "Dev",
     "command": "npm run dev",
     "actionType": "run",
-    "autoCommit": false,
     "source": "package.json"
   },
   {
     "name": "Test",
     "command": "npm test",
     "actionType": "test",
-    "autoCommit": false,
     "source": "package.json"
   },
   {
     "name": "Build",
     "command": "npm run build",
     "actionType": "build",
-    "autoCommit": false,
     "source": "package.json"
   },
   {
     "name": "Format",
     "command": "prettier --write .",
     "actionType": "format",
-    "autoCommit": true,
     "source": "package.json"
   },
   {
     "name": "Storybook",
     "command": "npm run storybook",
     "actionType": "run",
-    "autoCommit": false,
     "source": "package.json"
   }
 ]"#;
@@ -345,7 +336,7 @@ mod tests {
     fn test_extract_json_array() {
         let text = r#"Here are some actions:
 [
-  {"name": "Test", "command": "npm test", "actionType": "check", "autoCommit": false, "source": "package.json"}
+  {"name": "Test", "command": "npm test", "actionType": "check", "source": "package.json"}
 ]
 That's all!"#;
 
@@ -355,7 +346,7 @@ That's all!"#;
 
     #[test]
     fn test_extract_json_array_clean() {
-        let text = r#"[{"name": "Test", "command": "npm test", "actionType": "check", "autoCommit": false, "source": "package.json"}]"#;
+        let text = r#"[{"name": "Test", "command": "npm test", "actionType": "check", "source": "package.json"}]"#;
 
         let result = extract_json_array(text);
         assert!(result.is_ok());

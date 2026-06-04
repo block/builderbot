@@ -2450,8 +2450,7 @@ pub(crate) async fn run_prerun_actions_for_branch(
                 suggestion.command,
                 suggestion.action_type,
                 next_sort_order,
-            )
-            .with_auto_commit(suggestion.auto_commit);
+            );
             store
                 .create_repo_action(&action)
                 .map_err(|e| format!("Failed to create detected action: {e}"))?;
@@ -2516,7 +2515,6 @@ pub(crate) async fn run_prerun_actions_for_branch(
         let metadata = ActionMetadata {
             action_id: action.id.clone(),
             action_name: action.name.clone(),
-            auto_commit: action.auto_commit,
         };
 
         // execute_and_wait runs the action and waits for it to finish,

@@ -3,17 +3,29 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::command::{
+    format_duration, run_command_with_timeout, CommandError, CommandTimeout, DEFAULT_PROBE_TIMEOUT,
+};
+
 use super::types::{InstallSource, ResolvedBinary};
 
 /// Resolve a binary by trying login shell path lookup, common install paths,
 /// then npm global install dirs.
 pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
+    resolve_binary_with_diagnostics(cmd).0
+}
+
+pub(crate) fn resolve_binary_with_diagnostics(cmd: &str) -> (ResolvedBinary, Vec<CommandTimeout>) {
     let mut lines = vec![format!("resolve '{cmd}':")];
+    let mut timeouts = Vec::new();
 
     // Strategy 1: Login shell path lookup (primary)
     lines.push("  strategy 1 — login shell path lookup:".to_string());
     for (shell, lookup_cmd) in shell_lookup_commands(cmd) {
-        match Command::new(shell).args(["-l", "-c", &lookup_cmd]).output() {
+        let display_command = format!("{shell} -l -c '{lookup_cmd}'");
+        let mut command = Command::new(shell);
+        command.args(["-l", "-c", &lookup_cmd]);
+        match run_command_with_timeout(command, &display_command, DEFAULT_PROBE_TIMEOUT) {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 if !output.status.success() {
@@ -31,12 +43,7 @@ pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
                         "    {shell} -l -c '{lookup_cmd}' => {} (resolved)",
                         path.display()
                     ));
-                    let install_source = Some(detect_install_source(path));
-                    return ResolvedBinary {
-                        path: Some(path.clone()),
-                        search_output: lines.join("\n"),
-                        install_source,
-                    };
+                    return resolved_binary(path.clone(), &lines, timeouts);
                 }
 
                 if let Some(path) = candidate_paths.first() {
@@ -52,6 +59,17 @@ pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
                         summarize_output(stdout.as_ref())
                     ));
                 }
+            }
+            Err(CommandError::Timeout { command, timeout }) => {
+                lines.push(format!(
+                    "    {display_command} => timed out after {}",
+                    format_duration(timeout),
+                ));
+                timeouts.push(CommandTimeout::new(
+                    format!("{cmd} binary resolution"),
+                    command,
+                    timeout,
+                ));
             }
             Err(e) => {
                 lines.push(format!("    {shell} -l -c '{lookup_cmd}' => error: {e}"));
@@ -70,12 +88,7 @@ pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
         let path = PathBuf::from(dir).join(cmd);
         if is_executable_file(&path) {
             lines.push(format!("    {} => found (resolved)", path.display()));
-            let install_source = Some(detect_install_source(&path));
-            return ResolvedBinary {
-                path: Some(path),
-                search_output: lines.join("\n"),
-                install_source,
-            };
+            return resolved_binary(path, &lines, timeouts);
         }
         lines.push(format!("    {} => not found", path.display()));
     }
@@ -94,12 +107,7 @@ pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
             let path = dir.join(cmd);
             if path.exists() {
                 lines.push(format!("    {} => found (resolved)", path.display()));
-                let install_source = Some(detect_install_source(&path));
-                return ResolvedBinary {
-                    path: Some(path),
-                    search_output: lines.join("\n"),
-                    install_source,
-                };
+                return resolved_binary(path, &lines, timeouts);
             }
             lines.push(format!("    {} => not found", path.display()));
         }
@@ -111,26 +119,40 @@ pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
     // but costs one subprocess — only invoked when the static probes above
     // didn't find the binary). `npm prefix -g` is the version-stable
     // equivalent of the older `npm bin -g`; the bin dir is `<prefix>/bin`.
-    if let Some(npm_bin_dir) = npm_global_bin_dir(&mut lines) {
+    if let Some(npm_bin_dir) = npm_global_bin_dir(&mut lines, &mut timeouts) {
         let path = npm_bin_dir.join(cmd);
         if path.exists() {
             lines.push(format!("    {} => found (resolved)", path.display()));
-            let install_source = Some(detect_install_source(&path));
-            return ResolvedBinary {
-                path: Some(path),
-                search_output: lines.join("\n"),
-                install_source,
-            };
+            return resolved_binary(path, &lines, timeouts);
         }
         lines.push(format!("    {} => not found", path.display()));
     }
 
     lines.push("  not found in any location".to_string());
-    ResolvedBinary {
-        path: None,
-        search_output: lines.join("\n"),
-        install_source: None,
-    }
+    (
+        ResolvedBinary {
+            path: None,
+            search_output: lines.join("\n"),
+            install_source: None,
+        },
+        timeouts,
+    )
+}
+
+fn resolved_binary(
+    path: PathBuf,
+    lines: &[String],
+    timeouts: Vec<CommandTimeout>,
+) -> (ResolvedBinary, Vec<CommandTimeout>) {
+    let install_source = Some(detect_install_source(&path));
+    (
+        ResolvedBinary {
+            path: Some(path),
+            search_output: lines.join("\n"),
+            install_source,
+        },
+        timeouts,
+    )
 }
 
 fn shell_lookup_commands(cmd: &str) -> [(&'static str, String); 2] {
@@ -216,8 +238,27 @@ fn read_subdirs(parent: &Path) -> Vec<PathBuf> {
     }
 }
 
-fn npm_global_bin_dir(lines: &mut Vec<String>) -> Option<PathBuf> {
-    let output = Command::new("npm").args(["prefix", "-g"]).output().ok()?;
+fn npm_global_bin_dir(
+    lines: &mut Vec<String>,
+    timeouts: &mut Vec<CommandTimeout>,
+) -> Option<PathBuf> {
+    let mut command = Command::new("npm");
+    command.args(["prefix", "-g"]);
+    let output = match run_command_with_timeout(command, "npm prefix -g", DEFAULT_PROBE_TIMEOUT) {
+        Ok(output) => output,
+        Err(CommandError::Timeout { command, timeout }) => {
+            lines.push(format!(
+                "    npm prefix -g => timed out after {}",
+                format_duration(timeout),
+            ));
+            timeouts.push(CommandTimeout::new("npm global prefix", command, timeout));
+            return None;
+        }
+        Err(e) => {
+            lines.push(format!("    npm prefix -g => error: {e}"));
+            return None;
+        }
+    };
     if !output.status.success() {
         lines.push("    npm prefix -g => failed".to_string());
         return None;

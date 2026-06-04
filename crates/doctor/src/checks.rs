@@ -2,11 +2,67 @@
 
 use std::process::Command;
 
+use crate::command::{
+    run_command_with_timeout, CommandError, CommandTimeout, DEFAULT_PROBE_TIMEOUT,
+};
 use crate::resolve::format_command_output;
-use crate::types::{CheckStatus, DoctorCheck, FixType, ResolvedBinary};
+use crate::types::{CheckStatus, DoctorCheck, FixType, InstallSource, ResolvedBinary};
 
 /// Fix command for enabling copy-on-write git clones.
 pub(crate) const CLONEFILE_FIX_COMMAND: &str = "git config --global core.clonefile true";
+
+struct TimeoutCheck<'a> {
+    id: String,
+    label: String,
+    status: CheckStatus,
+    header: &'a str,
+    command: String,
+    timeout: std::time::Duration,
+    path: Option<String>,
+    install_source: Option<InstallSource>,
+    raw_suffix: Option<&'a str>,
+}
+
+fn command_timeout_check(input: TimeoutCheck<'_>) -> DoctorCheck {
+    let TimeoutCheck {
+        id,
+        label,
+        status,
+        header,
+        command,
+        timeout,
+        path,
+        install_source,
+        raw_suffix,
+    } = input;
+    let timeout = CommandTimeout::new(label.clone(), command, timeout);
+    let mut raw = format!("{header}\n{}", timeout.raw_output());
+    if let Some(suffix) = raw_suffix {
+        raw.push('\n');
+        raw.push_str(suffix);
+    }
+
+    DoctorCheck {
+        id,
+        label,
+        status,
+        message: timeout.message(),
+        fix_url: None,
+        fix_command: None,
+        fix_type: None,
+        path,
+        bridge_path: None,
+        raw_output: Some(raw),
+        auth_status: None,
+        installed_version: None,
+        latest_version: None,
+        update_available: None,
+        install_source,
+        self_updating: None,
+        main: None,
+        bridge: None,
+    }
+}
 
 /// Check that `git` is installed and reachable.
 pub fn check_git(resolved: &ResolvedBinary) -> DoctorCheck {
@@ -42,7 +98,9 @@ pub fn check_git(resolved: &ResolvedBinary) -> DoctorCheck {
     };
     let path_str = git_path.to_string_lossy().to_string();
 
-    match Command::new(git_path).arg("--version").output() {
+    let mut command = Command::new(git_path);
+    command.arg("--version");
+    match run_command_with_timeout(command, "git --version", DEFAULT_PROBE_TIMEOUT) {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let raw = format!(
@@ -98,6 +156,17 @@ pub fn check_git(resolved: &ResolvedBinary) -> DoctorCheck {
                 bridge: None,
             }
         }
+        Err(CommandError::Timeout { command, timeout }) => command_timeout_check(TimeoutCheck {
+            id,
+            label,
+            status: CheckStatus::Fail,
+            header,
+            command,
+            timeout,
+            path: Some(path_str),
+            install_source: resolved.install_source.clone(),
+            raw_suffix: Some(search),
+        }),
         Err(e) => DoctorCheck {
             id,
             label,
@@ -155,7 +224,9 @@ pub fn check_gh(resolved: &ResolvedBinary) -> DoctorCheck {
     };
     let path_str = gh_path.to_string_lossy().to_string();
 
-    match Command::new(gh_path).arg("--version").output() {
+    let mut command = Command::new(gh_path);
+    command.arg("--version");
+    match run_command_with_timeout(command, "gh --version", DEFAULT_PROBE_TIMEOUT) {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout);
             let first_line = version.lines().next().unwrap_or("gh").trim().to_string();
@@ -212,6 +283,17 @@ pub fn check_gh(resolved: &ResolvedBinary) -> DoctorCheck {
                 bridge: None,
             }
         }
+        Err(CommandError::Timeout { command, timeout }) => command_timeout_check(TimeoutCheck {
+            id,
+            label,
+            status: CheckStatus::Fail,
+            header,
+            command,
+            timeout,
+            path: Some(path_str),
+            install_source: resolved.install_source.clone(),
+            raw_suffix: Some(search),
+        }),
         Err(e) => DoctorCheck {
             id,
             label,
@@ -267,7 +349,9 @@ pub fn check_gh_auth(gh: &ResolvedBinary) -> DoctorCheck {
         }
     };
 
-    match Command::new(gh_path).args(["auth", "status"]).output() {
+    let mut command = Command::new(gh_path);
+    command.args(["auth", "status"]);
+    match run_command_with_timeout(command, "gh auth status", DEFAULT_PROBE_TIMEOUT) {
         Ok(output) => {
             let raw = format!(
                 "{header}\n{}",
@@ -324,6 +408,17 @@ pub fn check_gh_auth(gh: &ResolvedBinary) -> DoctorCheck {
                 }
             }
         }
+        Err(CommandError::Timeout { command, timeout }) => command_timeout_check(TimeoutCheck {
+            id,
+            label,
+            status: CheckStatus::Fail,
+            header,
+            command,
+            timeout,
+            path: None,
+            install_source: None,
+            raw_suffix: None,
+        }),
         Err(e) => DoctorCheck {
             id,
             label,
@@ -383,7 +478,9 @@ pub fn check_git_lfs(git: &ResolvedBinary, git_lfs: &ResolvedBinary) -> DoctorCh
         }
     };
 
-    match Command::new(git_path).args(["lfs", "version"]).output() {
+    let mut command = Command::new(git_path);
+    command.args(["lfs", "version"]);
+    match run_command_with_timeout(command, "git lfs version", DEFAULT_PROBE_TIMEOUT) {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let path = git_lfs
@@ -443,6 +540,20 @@ pub fn check_git_lfs(git: &ResolvedBinary, git_lfs: &ResolvedBinary) -> DoctorCh
                 bridge: None,
             }
         }
+        Err(CommandError::Timeout { command, timeout }) => command_timeout_check(TimeoutCheck {
+            id,
+            label,
+            status: CheckStatus::Warn,
+            header,
+            command,
+            timeout,
+            path: git_lfs
+                .path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string()),
+            install_source: git_lfs.install_source.clone(),
+            raw_suffix: Some(search),
+        }),
         Err(e) => DoctorCheck {
             id,
             label,
@@ -499,10 +610,13 @@ pub fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
         }
     };
 
-    match Command::new(git_path)
-        .args(["config", "--global", "core.clonefile"])
-        .output()
-    {
+    let mut command = Command::new(git_path);
+    command.args(["config", "--global", "core.clonefile"]);
+    match run_command_with_timeout(
+        command,
+        "git config --global core.clonefile",
+        DEFAULT_PROBE_TIMEOUT,
+    ) {
         Ok(output) if output.status.success() => {
             let raw = format!(
                 "{header}\n{}",
@@ -583,6 +697,17 @@ pub fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
                 bridge: None,
             }
         }
+        Err(CommandError::Timeout { command, timeout }) => command_timeout_check(TimeoutCheck {
+            id,
+            label,
+            status: CheckStatus::Warn,
+            header,
+            command,
+            timeout,
+            path: None,
+            install_source: git.install_source.clone(),
+            raw_suffix: None,
+        }),
         Err(e) => DoctorCheck {
             id,
             label,

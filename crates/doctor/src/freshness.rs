@@ -13,6 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::command::{
+    run_command_with_timeout, CommandError, CommandTimeout, FRESHNESS_PROBE_TIMEOUT,
+};
 use crate::package_ids::LatestSource;
 use crate::types::InstallSource;
 
@@ -27,6 +30,13 @@ pub(crate) struct VersionInfo {
     pub installed: Option<String>,
     pub latest: Option<String>,
     pub update_available: Option<bool>,
+    pub command_timeouts: Vec<CommandTimeout>,
+}
+
+#[derive(Debug, Default)]
+struct ProbeResult {
+    value: Option<String>,
+    timeouts: Vec<CommandTimeout>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -296,14 +306,31 @@ fn installed_version_from_package_json(
 
 /// Run `<binary> <args>` and parse the first semver-shaped token out of the
 /// combined stdout/stderr. Errors and missing tokens both yield `None`.
-fn installed_version(binary_path: &Path, version_args: &[&str]) -> Option<String> {
-    let output = Command::new(binary_path).args(version_args).output().ok()?;
+fn installed_version(binary_path: &Path, version_args: &[&str]) -> ProbeResult {
+    let mut command = Command::new(binary_path);
+    command.args(version_args);
+    let display_command = format!("{} {}", binary_path.display(), version_args.join(" "))
+        .trim()
+        .to_string();
+    let output = match run_command_with_timeout(command, display_command, FRESHNESS_PROBE_TIMEOUT) {
+        Ok(output) => output,
+        Err(CommandError::Timeout { command, timeout }) => {
+            return ProbeResult {
+                value: None,
+                timeouts: vec![CommandTimeout::new("installed version", command, timeout)],
+            };
+        }
+        Err(_) => return ProbeResult::default(),
+    };
     let combined = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-    extract_version(&combined)
+    ProbeResult {
+        value: extract_version(&combined),
+        timeouts: Vec::new(),
+    }
 }
 
 /// Whether a tool keeps itself up to date and therefore should never raise an
@@ -321,24 +348,42 @@ fn latest_version(
     source: LatestSource,
     package_id: &str,
     npm_registry: Option<&str>,
-) -> Option<String> {
+) -> ProbeResult {
     match source {
         LatestSource::Brew => latest_brew(package_id),
         LatestSource::Npm => latest_npm(package_id, npm_registry),
-        LatestSource::CratesIo => latest_crates_io(package_id),
-        LatestSource::GitHubReleases => latest_github_releases(package_id),
+        LatestSource::CratesIo => ProbeResult {
+            value: latest_crates_io(package_id),
+            timeouts: Vec::new(),
+        },
+        LatestSource::GitHubReleases => ProbeResult {
+            value: latest_github_releases(package_id),
+            timeouts: Vec::new(),
+        },
     }
 }
 
-fn latest_brew(package_id: &str) -> Option<String> {
-    let output = Command::new("brew")
-        .args(["info", "--json=v2", package_id])
-        .output()
-        .ok()?;
+fn latest_brew(package_id: &str) -> ProbeResult {
+    let mut command = Command::new("brew");
+    command.args(["info", "--json=v2", package_id]);
+    let display_command = format!("brew info --json=v2 {package_id}");
+    let output = match run_command_with_timeout(command, display_command, FRESHNESS_PROBE_TIMEOUT) {
+        Ok(output) => output,
+        Err(CommandError::Timeout { command, timeout }) => {
+            return ProbeResult {
+                value: None,
+                timeouts: vec![CommandTimeout::new("brew latest version", command, timeout)],
+            };
+        }
+        Err(_) => return ProbeResult::default(),
+    };
     if !output.status.success() {
-        return None;
+        return ProbeResult::default();
     }
-    parse_brew_info_v2(&output.stdout, package_id)
+    ProbeResult {
+        value: parse_brew_info_v2(&output.stdout, package_id),
+        timeouts: Vec::new(),
+    }
 }
 
 /// Pull `formulae[0].versions.stable` or `casks[0].version` out of a
@@ -367,21 +412,38 @@ pub(crate) fn parse_brew_info_v2(bytes: &[u8], _package_id: &str) -> Option<Stri
     None
 }
 
-fn latest_npm(package_id: &str, npm_registry: Option<&str>) -> Option<String> {
+fn latest_npm(package_id: &str, npm_registry: Option<&str>) -> ProbeResult {
     let mut cmd = Command::new("npm");
     cmd.args(["view", package_id, "version"]);
     if let Some(registry) = npm_registry {
         cmd.args(["--registry", registry]);
     }
-    let output = cmd.output().ok()?;
+    let display_command = if let Some(registry) = npm_registry {
+        format!("npm view {package_id} version --registry {registry}")
+    } else {
+        format!("npm view {package_id} version")
+    };
+    let output = match run_command_with_timeout(cmd, display_command, FRESHNESS_PROBE_TIMEOUT) {
+        Ok(output) => output,
+        Err(CommandError::Timeout { command, timeout }) => {
+            return ProbeResult {
+                value: None,
+                timeouts: vec![CommandTimeout::new("npm latest version", command, timeout)],
+            };
+        }
+        Err(_) => return ProbeResult::default(),
+    };
     if !output.status.success() {
-        return None;
+        return ProbeResult::default();
     }
     let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if raw.is_empty() {
-        None
+        ProbeResult::default()
     } else {
-        Some(raw)
+        ProbeResult {
+            value: Some(raw),
+            timeouts: Vec::new(),
+        }
     }
 }
 
@@ -470,14 +532,19 @@ pub(crate) async fn fetch_version_info(
     let npm_registry = npm_registry.map(|s| s.to_string());
 
     let result = tokio::task::spawn_blocking(move || {
+        let mut command_timeouts = Vec::new();
         let installed = if path.as_os_str().is_empty() {
             None
         } else {
             match &probe {
-                OwnedProbe::Cli(args) => installed_version(
-                    &path,
-                    &args.iter().map(|s| s.as_str()).collect::<Vec<&str>>(),
-                ),
+                OwnedProbe::Cli(args) => {
+                    let result = installed_version(
+                        &path,
+                        &args.iter().map(|s| s.as_str()).collect::<Vec<&str>>(),
+                    );
+                    command_timeouts.extend(result.timeouts);
+                    result.value
+                }
                 OwnedProbe::NpmPackageJson { package_id } => {
                     installed_version_from_package_json(&path, package_id.as_deref())
                 }
@@ -495,13 +562,17 @@ pub(crate) async fn fetch_version_info(
             };
             if let Some(v) = cached {
                 Some(v)
-            } else if let Some(v) = latest_version(source, &pkg, npm_registry.as_deref()) {
-                if let Ok(mut guard) = cache.lock() {
-                    guard.insert(source, &pkg, v.clone(), now);
-                }
-                Some(v)
             } else {
-                None
+                let result = latest_version(source, &pkg, npm_registry.as_deref());
+                command_timeouts.extend(result.timeouts);
+                if let Some(v) = result.value {
+                    if let Ok(mut guard) = cache.lock() {
+                        guard.insert(source, &pkg, v.clone(), now);
+                    }
+                    Some(v)
+                } else {
+                    None
+                }
             }
         } else {
             None
@@ -512,6 +583,7 @@ pub(crate) async fn fetch_version_info(
             installed,
             latest,
             update_available,
+            command_timeouts,
         }
     })
     .await;

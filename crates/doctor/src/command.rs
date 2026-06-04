@@ -207,53 +207,12 @@ fn kill_child_process_group(_child: &Child) -> bool {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
-    fn read_pid_file_with_retries(path: &std::path::Path) -> i32 {
-        for _ in 0..20 {
-            if let Ok(raw) = std::fs::read_to_string(path) {
-                if let Ok(pid) = raw.trim().parse::<i32>() {
-                    return pid;
-                }
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        panic!("pid file was not written: {}", path.display());
-    }
-
-    #[test]
-    fn command_runner_captures_success_output() {
-        let mut command = Command::new("sh");
-        command.arg("-c").arg("printf stdout; printf stderr >&2");
-
-        let output =
-            run_command_with_timeout(command, "sh -c output", Duration::from_secs(2)).unwrap();
-
-        assert!(output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "stdout");
-        assert_eq!(String::from_utf8_lossy(&output.stderr), "stderr");
-    }
-
-    #[test]
-    fn command_runner_times_out() {
-        let mut command = Command::new("sh");
-        command.arg("-c").arg("sleep 5");
-
-        let err = run_command_with_timeout(command, "sh -c sleep", Duration::from_millis(250))
-            .unwrap_err();
-
-        match err {
-            CommandError::Timeout { command, timeout } => {
-                assert_eq!(command, "sh -c sleep");
-                assert_eq!(timeout, Duration::from_millis(250));
-            }
-            other => panic!("expected timeout, got {other:?}"),
-        }
-    }
-
     #[test]
     fn command_runner_captures_large_output() {
         let mut command = Command::new("sh");
-        command.arg("-c").arg("yes | head -c 200000");
+        command
+            .arg("-c")
+            .arg("yes | head -c 200000; printf stderr >&2");
 
         let output =
             run_command_with_timeout(command, "sh -c large output", Duration::from_secs(2))
@@ -261,59 +220,34 @@ mod tests {
 
         assert!(output.status.success());
         assert_eq!(output.stdout.len(), 200_000);
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "stderr");
     }
 
     #[cfg(unix)]
     #[test]
     fn command_runner_returns_when_escaped_descendant_keeps_pipes_open() {
-        use nix::sys::signal;
-        use nix::unistd::Pid;
-
-        let perl = match std::process::Command::new("sh")
-            .arg("-c")
-            .arg("command -v perl")
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                String::from_utf8_lossy(&output.stdout).trim().to_string()
-            }
-            _ => return,
-        };
-
-        let dir = std::env::temp_dir().join(format!(
-            "doctor-command-escaped-timeout-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let pid_file = dir.join("escaped.pid");
-        let script = format!(
-            "\"{perl}\" -MPOSIX=setsid -e 'setsid(); open(my $fh, q(>), $ARGV[0]) or die $!; print $fh qq($$\\n); close($fh); sleep 5' {} & wait",
-            pid_file.display()
-        );
-
         let mut command = Command::new("sh");
-        command.arg("-c").arg(script);
+        command
+            .arg("-c")
+            .arg("perl -MPOSIX=setsid -e 'setsid(); sleep 2' & wait");
+        let timeout = Duration::from_millis(250);
         let started = std::time::Instant::now();
-        let err = run_command_with_timeout(
-            command,
-            "sh -c escaped descendant",
-            Duration::from_millis(250),
-        )
-        .unwrap_err();
-        let elapsed = started.elapsed();
+        let err =
+            run_command_with_timeout(command, "sh -c escaped descendant", timeout).unwrap_err();
 
-        let pid = read_pid_file_with_retries(&pid_file);
-        let _ = signal::kill(Pid::from_raw(pid), signal::Signal::SIGKILL);
-        let _ = std::fs::remove_dir_all(&dir);
-
-        assert!(matches!(err, CommandError::Timeout { .. }));
+        match err {
+            CommandError::Timeout {
+                command,
+                timeout: actual,
+            } => {
+                assert_eq!(command, "sh -c escaped descendant");
+                assert_eq!(actual, timeout);
+            }
+            other => panic!("expected timeout, got {other:?}"),
+        }
         assert!(
-            elapsed < Duration::from_secs(2),
-            "timeout path waited {elapsed:?} for escaped descendant pipe EOF"
+            started.elapsed() < Duration::from_secs(1),
+            "timeout path waited for escaped descendant pipe EOF"
         );
     }
 }

@@ -856,18 +856,20 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    fn timeout(label: &str, command: &str) -> CommandTimeout {
+        CommandTimeout::new(label, command, Duration::from_secs(15))
+    }
+
     #[test]
     fn timeout_diagnostic_ids_are_collision_safe() {
-        let timeout = Duration::from_secs(10);
         let checks = timeout_diagnostic_checks(vec![
-            CommandTimeout::new("A B", "c", timeout),
-            CommandTimeout::new("A", "B C", timeout),
-            CommandTimeout::new("A B", "c", timeout),
+            timeout("A B", "c"),
+            timeout("A", "B C"),
+            timeout("A B", "c"),
         ]);
 
         assert_eq!(checks.len(), 2, "exact duplicate timeout should be deduped");
         assert_eq!(checks[0].id, "subprocess-timeout-a-b-c");
-        assert_ne!(checks[0].id, checks[1].id);
         assert!(
             checks[1].id.starts_with("subprocess-timeout-a-b-c-"),
             "slug collision should get deterministic suffix: {:?}",
@@ -877,22 +879,15 @@ mod tests {
 
     #[test]
     fn apply_freshness_timeouts_appends_one_combined_block() {
-        let mut check = empty_check("ai-agent-test", "Test Agent");
-        check.status = CheckStatus::Pass;
-        check.message = "Installed".to_string();
-        check.raw_output = Some("base raw".to_string());
-
-        let timeouts = vec![
-            CommandTimeout::new(
-                "installed version",
-                "agent --version",
-                Duration::from_secs(15),
-            ),
-            CommandTimeout::new(
-                "npm latest version",
-                "npm view agent-acp version",
-                Duration::from_secs(15),
-            ),
+        let mut check = DoctorCheck {
+            status: CheckStatus::Pass,
+            message: "Installed".into(),
+            raw_output: Some("base raw".into()),
+            ..empty_check("ai-agent-test", "Test Agent")
+        };
+        let timeouts = [
+            timeout("installed version", "agent --version"),
+            timeout("npm latest version", "npm view agent-acp version"),
         ];
 
         apply_freshness_timeouts(&mut check, &timeouts);

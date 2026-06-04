@@ -896,6 +896,18 @@ mod tests {
         );
     }
 
+    /// End-to-end lock for the brew-cask Claude path: the package_id
+    /// `claude-code` (registered in `package_ids::PACKAGE_IDS` under
+    /// Brew × Role::Main) must flow through `derive_update_command` as
+    /// `brew upgrade claude-code`.
+    #[test]
+    fn derive_update_command_brew_claude_code() {
+        assert_eq!(
+            derive_update_command(Some(&InstallSource::Brew), Some("claude-code")).as_deref(),
+            Some("brew upgrade claude-code"),
+        );
+    }
+
     #[test]
     fn derive_update_command_cargo_emits_install_force() {
         assert_eq!(

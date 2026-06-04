@@ -105,6 +105,15 @@ pub(crate) const PACKAGE_IDS: &[(&str, &[PackageEntry])] = &[
                 LatestSource::Npm,
                 Role::Bridge,
             ),
+            // Main CLI when installed via the official Homebrew cask
+            // (`brew install --cask claude-code`). The cask name is
+            // `claude-code` — queryable via `brew info --json=v2 claude-code`.
+            (
+                InstallSource::Brew,
+                "claude-code",
+                LatestSource::Brew,
+                Role::Main,
+            ),
         ],
         // TODO: the main `claude` native (CurlPipe) install has no registry
         // entry — its latest is published via the native installer's channel
@@ -269,6 +278,32 @@ mod tests {
         // The Main entry appears first in the table; Any should hit it.
         let (pkg, _) = lookup_package_id("ai-agent-claude", InstallSource::Npm, Role::Any).unwrap();
         assert_eq!(pkg, "@anthropic-ai/claude-code");
+    }
+
+    /// Brew-cask installs of Claude (`/opt/homebrew/bin/claude` -> Caskroom)
+    /// resolve to `claude-code` on brew so `populate_freshness` can fetch a
+    /// real latest and `derive_update_command` can emit `brew upgrade
+    /// claude-code`.
+    #[test]
+    fn claude_main_brew_resolves_to_cask_package() {
+        assert_eq!(
+            lookup_package_id("ai-agent-claude", InstallSource::Brew, Role::Main),
+            Some(("claude-code", LatestSource::Brew)),
+        );
+    }
+
+    /// Guard against an accidental table reshuffle: the existing npm-main and
+    /// npm-bridge entries must keep their ids after the brew addition.
+    #[test]
+    fn claude_npm_entries_unchanged_after_brew_addition() {
+        assert_eq!(
+            lookup_package_id("ai-agent-claude", InstallSource::Npm, Role::Main),
+            Some(("@anthropic-ai/claude-code", LatestSource::Npm)),
+        );
+        assert_eq!(
+            lookup_package_id("ai-agent-claude", InstallSource::Npm, Role::Bridge),
+            Some(("@agentclientprotocol/claude-agent-acp", LatestSource::Npm)),
+        );
     }
 
     /// `Role::Any` entries match any query role — confirms copilot's single

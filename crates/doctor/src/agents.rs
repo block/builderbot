@@ -7,6 +7,7 @@ use crate::command::{
     run_command_with_timeout, CommandError, CommandTimeout, DEFAULT_PROBE_TIMEOUT,
 };
 use crate::resolve::format_command_output;
+use crate::timeout_check::{command_timeout_check, TimeoutCheck};
 use crate::types::{
     AgentVersionInfo, AuthStatus, CheckStatus, DoctorCheck, FixType, InstallSource, ResolvedBinary,
 };
@@ -367,29 +368,20 @@ pub fn check_single_ai_agent(
                         bridge: None,
                     }
                 }
-                Err(CommandError::Timeout { command, timeout }) => {
-                    let timeout = CommandTimeout::new(info.label, command, timeout);
-                    DoctorCheck {
-                        id: info.id.to_string(),
-                        label: info.label.to_string(),
-                        status: CheckStatus::Fail,
-                        message: timeout.message(),
-                        fix_url: None,
-                        fix_command: None,
-                        fix_type: None,
-                        path: resolved_path,
-                        bridge_path: None,
-                        raw_output: Some(format!("{header}\n{}\n{search}", timeout.raw_output())),
-                        auth_status: None,
-                        installed_version: None,
-                        latest_version: None,
-                        update_available: None,
-                        install_source: bridge_install_source.clone(),
-                        self_updating: None,
-                        main: version_readout(bridge_install_source.clone()),
-                        bridge: None,
-                    }
-                }
+                Err(CommandError::Timeout { command, timeout }) => command_timeout_check(
+                    TimeoutCheck::new(
+                        info.id,
+                        info.label,
+                        CheckStatus::Fail,
+                        &header,
+                        command,
+                        timeout,
+                    )
+                    .path(resolved_path)
+                    .install_source(bridge_install_source.clone())
+                    .main(version_readout(bridge_install_source.clone()))
+                    .raw_suffix(Some(&search)),
+                ),
                 Err(e) => DoctorCheck {
                     id: info.id.to_string(),
                     label: info.label.to_string(),

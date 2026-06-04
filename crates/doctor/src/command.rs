@@ -2,11 +2,15 @@
 //!
 //! The doctor crate runs many small local probes. None of them should be able
 //! to pin a blocking worker forever, so probe call sites route through this
-//! module instead of `Command::output()`.
+//! module instead of `Command::output()`. On timeout or wait failure, the
+//! runner kills and reaps the direct child; on Unix it first targets the
+//! child's process group. Descendants that deliberately detach from that group
+//! can survive best-effort cleanup and keep pipe reader threads alive until
+//! their inherited stdout/stderr handles close, but the caller still returns.
 
 use std::fmt;
 use std::io::Read;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -139,28 +143,14 @@ pub(crate) fn run_command_with_timeout(
     let status = match child.wait_timeout(timeout) {
         Ok(Some(status)) => status,
         Ok(None) => {
-            kill_child_process_group(&mut child);
-            let _ = child.wait();
-            if let Some(handle) = stdout_thread {
-                let _ = join_reader(handle);
-            }
-            if let Some(handle) = stderr_thread {
-                let _ = join_reader(handle);
-            }
+            clean_up_after_incomplete_wait(&mut child);
             return Err(CommandError::Timeout {
                 command: display_command,
                 timeout,
             });
         }
         Err(source) => {
-            kill_child_process_group(&mut child);
-            let _ = child.wait();
-            if let Some(handle) = stdout_thread {
-                let _ = join_reader(handle);
-            }
-            if let Some(handle) = stderr_thread {
-                let _ = join_reader(handle);
-            }
+            clean_up_after_incomplete_wait(&mut child);
             return Err(CommandError::Wait {
                 command: display_command,
                 source,
@@ -182,21 +172,78 @@ fn join_reader(handle: JoinHandle<Vec<u8>>) -> Vec<u8> {
     handle.join().unwrap_or_default()
 }
 
-fn kill_child_process_group(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    if let Ok(pid) = i32::try_from(child.id()) {
-        let _ = nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(-pid),
-            nix::sys::signal::Signal::SIGKILL,
-        );
+fn clean_up_after_incomplete_wait(child: &mut Child) {
+    kill_child_process_group_or_child(child);
+    let _ = child.wait();
+}
+
+fn kill_child_process_group_or_child(child: &mut Child) {
+    if kill_child_process_group(child) {
+        return;
     }
 
     let _ = child.kill();
 }
 
+#[cfg(unix)]
+fn kill_child_process_group(child: &Child) -> bool {
+    let Ok(pid) = i32::try_from(child.id()) else {
+        return false;
+    };
+
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(-pid),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .is_ok()
+}
+
+#[cfg(not(unix))]
+fn kill_child_process_group(_child: &Child) -> bool {
+    false
+}
+
+#[cfg(test)]
+fn process_exists(pid: i32) -> bool {
+    #[cfg(unix)]
+    {
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn read_pid_file_with_retries(path: &std::path::Path) -> i32 {
+        for _ in 0..20 {
+            if let Ok(raw) = std::fs::read_to_string(path) {
+                if let Ok(pid) = raw.trim().parse::<i32>() {
+                    return pid;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("pid file was not written: {}", path.display());
+    }
+
+    #[cfg(unix)]
+    fn wait_until_process_exits(pid: i32) -> bool {
+        (0..20).any(|_| {
+            let gone = !process_exists(pid);
+            if !gone {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            gone
+        })
+    }
 
     #[test]
     fn command_runner_captures_success_output() {
@@ -216,24 +263,34 @@ mod tests {
         let mut command = Command::new("sh");
         command.arg("-c").arg("sleep 5");
 
-        let err = run_command_with_timeout(command, "sh -c sleep", Duration::from_millis(100))
+        let err = run_command_with_timeout(command, "sh -c sleep", Duration::from_millis(250))
             .unwrap_err();
 
         match err {
             CommandError::Timeout { command, timeout } => {
                 assert_eq!(command, "sh -c sleep");
-                assert_eq!(timeout, Duration::from_millis(100));
+                assert_eq!(timeout, Duration::from_millis(250));
             }
             other => panic!("expected timeout, got {other:?}"),
         }
     }
 
+    #[test]
+    fn command_runner_captures_large_output() {
+        let mut command = Command::new("sh");
+        command.arg("-c").arg("yes | head -c 200000");
+
+        let output =
+            run_command_with_timeout(command, "sh -c large output", Duration::from_secs(2))
+                .unwrap();
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 200_000);
+    }
+
     #[cfg(unix)]
     #[test]
     fn command_runner_kills_process_group_descendant() {
-        use nix::sys::signal;
-        use nix::unistd::Pid;
-
         let dir = std::env::temp_dir().join(format!(
             "doctor-command-timeout-{}-{}",
             std::process::id(),
@@ -243,8 +300,13 @@ mod tests {
                 .as_nanos(),
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        let shell_pid_file = dir.join("shell.pid");
         let pid_file = dir.join("child.pid");
-        let script = format!("sleep 30 & echo $! > {}; wait", pid_file.display());
+        let script = format!(
+            "echo $$ > {}; sleep 30 & echo $! > {}; wait",
+            shell_pid_file.display(),
+            pid_file.display()
+        );
 
         let mut command = Command::new("sh");
         command.arg("-c").arg(script);
@@ -252,21 +314,70 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, CommandError::Timeout { .. }));
 
-        let pid = std::fs::read_to_string(&pid_file)
-            .expect("descendant pid should be written before timeout")
-            .trim()
-            .parse::<i32>()
-            .unwrap();
-
-        let exited = (0..20).any(|_| {
-            let gone = signal::kill(Pid::from_raw(pid), None).is_err();
-            if !gone {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            gone
-        });
+        let shell_pid = read_pid_file_with_retries(&shell_pid_file);
+        let pid = read_pid_file_with_retries(&pid_file);
+        let shell_exited = wait_until_process_exits(shell_pid);
+        let exited = wait_until_process_exits(pid);
 
         let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            shell_exited,
+            "direct shell process {shell_pid} survived timeout cleanup"
+        );
         assert!(exited, "descendant process {pid} survived timeout cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_runner_returns_when_escaped_descendant_keeps_pipes_open() {
+        use nix::sys::signal;
+        use nix::unistd::Pid;
+
+        let perl = match std::process::Command::new("sh")
+            .arg("-c")
+            .arg("command -v perl")
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            }
+            _ => return,
+        };
+
+        let dir = std::env::temp_dir().join(format!(
+            "doctor-command-escaped-timeout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pid_file = dir.join("escaped.pid");
+        let script = format!(
+            "\"{perl}\" -MPOSIX=setsid -e 'setsid(); open(my $fh, q(>), $ARGV[0]) or die $!; print $fh qq($$\\n); close($fh); sleep 5' {} & wait",
+            pid_file.display()
+        );
+
+        let mut command = Command::new("sh");
+        command.arg("-c").arg(script);
+        let started = std::time::Instant::now();
+        let err = run_command_with_timeout(
+            command,
+            "sh -c escaped descendant",
+            Duration::from_millis(250),
+        )
+        .unwrap_err();
+        let elapsed = started.elapsed();
+
+        let pid = read_pid_file_with_retries(&pid_file);
+        let _ = signal::kill(Pid::from_raw(pid), signal::Signal::SIGKILL);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(matches!(err, CommandError::Timeout { .. }));
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "timeout path waited {elapsed:?} for escaped descendant pipe EOF"
+        );
     }
 }

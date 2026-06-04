@@ -198,7 +198,7 @@
         orientation="vertical"
         bind:value={location}
         disabled={saving}
-        class="w-full gap-2"
+        class="w-full gap-0"
       >
         {#each [{ value: 'local', label: 'Local', description: 'Run agents on your machine', icon: Monitor }, { value: 'remote', label: 'Remote', description: 'Run agents in the cloud', icon: Cloud }] as option}
           <ToggleGroup.Item

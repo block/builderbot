@@ -47,15 +47,6 @@
   let isSearching = $state(false);
   let directFetchRepo = $state<GitHubRepo | null>(null);
   let dropdownOpen = $state(false);
-  let dropdownStyle = $state('');
-
-  function updateDropdownPosition() {
-    if (!inputEl) return;
-    const rect = inputEl.closest('.search-input')!.getBoundingClientRect();
-    const top = rect.bottom + 4;
-    const maxH = Math.max(120, window.innerHeight - top - 12);
-    dropdownStyle = `position:fixed;top:${top}px;left:${rect.left}px;width:${rect.width}px;max-height:${maxH}px`;
-  }
 
   function isOwnerRepoFormat(input: string): boolean {
     const trimmed = input.trim();
@@ -215,7 +206,6 @@
   }
 
   function handleFocus() {
-    updateDropdownPosition();
     dropdownOpen = true;
   }
 
@@ -270,10 +260,7 @@
   }
 </script>
 
-<svelte:window
-  onclick={handleClickOutside}
-  onresize={() => dropdownOpen && updateDropdownPosition()}
-/>
+<svelte:window onclick={handleClickOutside} />
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
@@ -301,7 +288,7 @@
   </div>
 
   {#if dropdownOpen}
-    <div class="repo-dropdown" style={dropdownStyle}>
+    <div class="repo-dropdown">
       {#if filteredRecentRepos.length > 0}
         {#each filteredRecentRepos as recent, i}
           {@const hue = recentHue(recent)}
@@ -399,6 +386,10 @@
 </div>
 
 <style>
+  .repo-search-wrapper {
+    position: relative;
+  }
+
   .search-input {
     display: flex;
     align-items: center;
@@ -426,6 +417,10 @@
   }
 
   .repo-dropdown {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
     max-height: 280px;
     overflow-y: auto;
     display: flex;

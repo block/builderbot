@@ -334,9 +334,34 @@ fn fingerprint_curl_pipe(path: &Path, home: &Path) -> bool {
     false
 }
 
+/// Whether the canonicalized binary path lives inside a `node_modules/`
+/// directory — a clean positive signal for `npm install -g`, regardless of
+/// which node distribution (brew-shipped, nvm, fnm, asdf, mise) hosts the npm
+/// prefix. Brew formulae and cargo installs never place binaries inside
+/// `node_modules/`, so this dominates the path-prefix heuristics below.
+///
+/// The npm global bin entry is a symlink (e.g. `/opt/homebrew/bin/claude` →
+/// `../lib/node_modules/@anthropic-ai/claude-code/...`), so the check resolves
+/// the symlink via [`fs::canonicalize`] before inspecting components. If
+/// canonicalize fails (broken symlink, permissions), fall back to the path
+/// as-is — better to attempt the check than skip it. No subprocess or network.
+fn looks_like_npm_global(path: &Path) -> bool {
+    let resolved = std::fs::canonicalize(path);
+    let target = resolved.as_deref().unwrap_or(path);
+    target.components().any(|c| c.as_os_str() == "node_modules")
+}
+
 /// Testable inner: same logic as [`detect_install_source`] but takes the home
 /// directory as a parameter so unit tests can inject a fixed value.
 fn detect_install_source_with_home(path: &Path, home: Option<&Path>) -> InstallSource {
+    // npm global install (any node distribution). Checked first: the bin entry
+    // is a symlink into `node_modules/`, which may live under a brew prefix
+    // (`npm config get prefix = /opt/homebrew`), so this must win over the
+    // `/opt/homebrew/` Brew path-prefix check below.
+    if looks_like_npm_global(path) {
+        return InstallSource::Npm;
+    }
+
     // Homebrew-managed nvm — checked before the generic `/opt/homebrew/`
     // Brew prefix, since this path is a strict subset of it.
     if path.starts_with("/opt/homebrew/opt/nvm/versions/node") {
@@ -612,6 +637,95 @@ mod tests {
             detect_install_source_with_home(Path::new("/tmp/weird/foo"), Some(home.as_path())),
             InstallSource::Unknown,
         );
+    }
+
+    #[test]
+    fn npm_global_under_brew_prefix_classifies_as_npm() {
+        // `npm config get prefix = /opt/homebrew` lands the package under
+        // `<prefix>/lib/node_modules/...` with a bin symlink at `<prefix>/bin`.
+        // The brew path-prefix check must not win — node_modules in the
+        // canonicalized target is the authoritative npm signal.
+        let root = std::env::temp_dir().join(format!("doctor-npm-brew-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let pkg = root.join("lib/node_modules/@anthropic-ai/claude-code/bin");
+        fs::create_dir_all(&pkg).unwrap();
+        let real = pkg.join("claude.exe");
+        File::create(&real).unwrap();
+        fs::create_dir_all(root.join("bin")).unwrap();
+        let link = root.join("bin/claude");
+        std::os::unix::fs::symlink(
+            "../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+            &link,
+        )
+        .unwrap();
+
+        assert!(looks_like_npm_global(&link));
+        assert_eq!(
+            detect_install_source_with_home(&link, None),
+            InstallSource::Npm,
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn genuine_brew_cellar_not_misclassified_as_npm() {
+        // A real Cellar binary (no node_modules in its canonicalized path) must
+        // stay Brew — `looks_like_npm_global` returns false for it.
+        let root = std::env::temp_dir().join(format!("doctor-brew-cellar-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let cellar = root.join("Cellar/git/2.44.0/bin");
+        fs::create_dir_all(&cellar).unwrap();
+        let bin = cellar.join("git");
+        File::create(&bin).unwrap();
+
+        assert!(!looks_like_npm_global(&bin));
+        // The real `/opt/homebrew` prefix check is exercised by
+        // `detect_install_source_classifies_brew`; here we only assert the new
+        // npm layer leaves non-npm paths to fall through.
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn npm_global_under_nvm_classifies_as_npm() {
+        // The nvm layout: ~/.local/bin/<name> → ~/.nvm/versions/node/<v>/lib/
+        // node_modules/<pkg>/... Path-prefix already handled ~/.nvm directly;
+        // the node_modules layer must keep classifying the symlinked bin too.
+        let home = std::env::temp_dir().join(format!("doctor-npm-nvm-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        let pkg = home.join(".nvm/versions/node/v20.10.0/lib/node_modules/@scope/tool/bin");
+        fs::create_dir_all(&pkg).unwrap();
+        let real = pkg.join("tool.js");
+        File::create(&real).unwrap();
+        fs::create_dir_all(home.join(".local/bin")).unwrap();
+        let link = home.join(".local/bin/tool");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        assert!(looks_like_npm_global(&link));
+        assert_eq!(
+            detect_install_source_with_home(&link, Some(home.as_path())),
+            InstallSource::Npm,
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn non_node_modules_path_falls_through_to_existing_detection() {
+        // A plain binary (no symlink, no node_modules) is not npm; the new layer
+        // returns false and existing path-prefix detection decides.
+        let root = std::env::temp_dir().join(format!("doctor-no-npm-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("usr/local/bin");
+        fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("foo");
+        File::create(&bin).unwrap();
+
+        assert!(!looks_like_npm_global(&bin));
+        // System dirs still classify correctly through the unchanged fall-through.
+        assert_eq!(
+            detect_install_source_with_home(Path::new("/usr/bin/foo"), None),
+            InstallSource::System,
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

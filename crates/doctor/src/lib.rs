@@ -11,20 +11,20 @@ pub(crate) mod package_ids;
 pub mod resolve;
 pub mod types;
 
-pub use types::{CheckStatus, DoctorCheck, DoctorReport, FixType};
+pub use types::{AgentVersionInfo, CheckStatus, DoctorCheck, DoctorReport, FixType};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use agents::{check_single_ai_agent, lookup_fix_command, AI_AGENT_CHECKS};
+use agents::{check_single_ai_agent, derive_update_command, lookup_fix_command, AI_AGENT_CHECKS};
 use checks::{check_clonefile, check_gh, check_gh_auth, check_git, check_git_lfs};
 use freshness::{
     fetch_version_info, is_self_updating, load_cache, save_cache, select_installed_probe,
 };
 use package_ids::{lookup_package_id, LatestSource, Role};
 use resolve::resolve_binary;
-use types::{AgentVersionInfo, InstallSource, ResolvedBinary};
+use types::{InstallSource, ResolvedBinary};
 
 /// Fallback check returned when a spawn_blocking task panics.
 fn empty_check(id: &str, label: &str) -> DoctorCheck {
@@ -227,8 +227,17 @@ fn resolve_package(
 }
 
 /// Fold a freshness [`freshness::VersionInfo`] into a per-binary readout,
-/// applying the self-updating suppression rule for `update_available`.
-fn apply_freshness(readout: &mut AgentVersionInfo, info: &freshness::VersionInfo) {
+/// applying the self-updating suppression rule for `update_available`. When an
+/// update is actionable (and the slot is `Main`/`Bridge`), derive the
+/// source-aware `update_command` + `update_fix_type` from the readout's install
+/// source and the supplied package id. The flat (non-agent) slot never gets an
+/// update command — non-agent updates are out of scope.
+fn apply_freshness(
+    readout: &mut AgentVersionInfo,
+    info: &freshness::VersionInfo,
+    slot: ReadoutSlot,
+    package_id: Option<&str>,
+) {
     readout.installed_version = info.installed.clone();
     readout.latest_version = info.latest.clone();
     // Self-updating tools (curl/native installers) manage their own freshness:
@@ -241,6 +250,19 @@ fn apply_freshness(readout: &mut AgentVersionInfo, info: &freshness::VersionInfo
     } else {
         info.update_available
     };
+
+    let actionable = readout.update_available == Some(true) && !self_updating;
+    let slot_fix_type = match slot {
+        ReadoutSlot::Main => Some(FixType::UpdateMain),
+        ReadoutSlot::Bridge => Some(FixType::UpdateBridge),
+        ReadoutSlot::Flat => None,
+    };
+    if let (true, Some(fix_type)) = (actionable, slot_fix_type) {
+        if let Some(cmd) = derive_update_command(readout.install_source.as_ref(), package_id) {
+            readout.update_command = Some(cmd);
+            readout.update_fix_type = Some(fix_type);
+        }
+    }
 }
 
 /// Post-hoc pass: for every check that has a usable binary path and a known
@@ -325,30 +347,31 @@ async fn populate_freshness(
                 cache,
             )
             .await;
-            ((t.id, t.slot), info)
+            ((t.id, t.slot), (info, t.package_id))
         }
     });
 
     let results = futures::future::join_all(futures).await;
-    let mut by_target: HashMap<(String, ReadoutSlot), freshness::VersionInfo> = HashMap::new();
-    for (key, info) in results {
-        by_target.insert(key, info);
+    let mut by_target: HashMap<(String, ReadoutSlot), (freshness::VersionInfo, Option<String>)> =
+        HashMap::new();
+    for (key, payload) in results {
+        by_target.insert(key, payload);
     }
 
     for check in &mut report.checks {
         let is_agent = check.main.is_some() || check.bridge.is_some();
         if is_agent {
-            if let (Some(readout), Some(info)) = (
+            if let (Some(readout), Some((info, pkg))) = (
                 check.main.as_mut(),
                 by_target.remove(&(check.id.clone(), ReadoutSlot::Main)),
             ) {
-                apply_freshness(readout, &info);
+                apply_freshness(readout, &info, ReadoutSlot::Main, pkg.as_deref());
             }
-            if let (Some(readout), Some(info)) = (
+            if let (Some(readout), Some((info, pkg))) = (
                 check.bridge.as_mut(),
                 by_target.remove(&(check.id.clone(), ReadoutSlot::Bridge)),
             ) {
-                apply_freshness(readout, &info);
+                apply_freshness(readout, &info, ReadoutSlot::Bridge, pkg.as_deref());
             }
             // Mirror the headline readout (bridge if present, else main) into the
             // flat fields for backward-compatible consumers.
@@ -366,7 +389,8 @@ async fn populate_freshness(
                 check.update_available = update_available;
                 check.self_updating = self_updating;
             }
-        } else if let Some(info) = by_target.remove(&(check.id.clone(), ReadoutSlot::Flat)) {
+        } else if let Some((info, _pkg)) = by_target.remove(&(check.id.clone(), ReadoutSlot::Flat))
+        {
             check.installed_version = info.installed;
             check.latest_version = info.latest;
             let self_updating = is_self_updating(check.install_source.as_ref());
@@ -404,15 +428,24 @@ pub async fn execute_fix(check_id: String, fix_type: FixType) -> Result<(), Stri
 }
 
 /// Like [`execute_fix`], but routes npm-backed fix commands through an optional
-/// caller-supplied registry (see [`RunChecksOptions::npm_registry`]). Callers
-/// that displayed a registry-overridden `fix_command` should pass the same
-/// `npm_registry` here so the executed command matches what was shown.
+/// caller-supplied registry (see [`RunChecksOptions::npm_registry`]) and
+/// optionally accepts a `command_override` — the exact shell command to run,
+/// bypassing the static [`lookup_fix_command`] lookup. The override is the only
+/// way to dispatch the per-readout `FixType::UpdateMain` / `UpdateBridge`
+/// commands, which aren't in the static table.
+///
+/// When `command_override` is `Some`, `fix_type` is informational only; the
+/// override is always used. When `None`, the command is looked up exactly as
+/// before. `apply_npm_registry` runs over the final command string regardless
+/// of where it came from.
 pub async fn execute_fix_with_options(
     check_id: String,
     fix_type: FixType,
+    command_override: Option<String>,
     npm_registry: Option<&str>,
 ) -> Result<(), String> {
-    execute_fix_streaming_with_options(check_id, fix_type, npm_registry, |_| {}).await
+    execute_fix_streaming_with_options(check_id, fix_type, command_override, npm_registry, |_| {})
+        .await
 }
 
 /// Run a fix command and stream its output line-by-line to `on_line`.
@@ -433,23 +466,28 @@ pub async fn execute_fix_streaming<F>(
 where
     F: FnMut(&str) + Send + 'static,
 {
-    execute_fix_streaming_with_options(check_id, fix_type, None, on_line).await
+    execute_fix_streaming_with_options(check_id, fix_type, None, None, on_line).await
 }
 
-/// Like [`execute_fix_streaming`], but routes npm-backed fix commands through an
-/// optional caller-supplied registry before shelling out (see
-/// [`RunChecksOptions::npm_registry`]). Non-npm commands are run verbatim.
+/// Like [`execute_fix_streaming`], but accepts a `command_override` to run an
+/// exact shell command (skipping [`lookup_fix_command`]) and routes npm-backed
+/// commands through an optional caller-supplied registry. See
+/// [`execute_fix_with_options`] for the semantics of `command_override`.
 pub async fn execute_fix_streaming_with_options<F>(
     check_id: String,
     fix_type: FixType,
+    command_override: Option<String>,
     npm_registry: Option<&str>,
     on_line: F,
 ) -> Result<(), String>
 where
     F: FnMut(&str) + Send + 'static,
 {
-    let command = lookup_fix_command(&check_id, &fix_type)
-        .ok_or_else(|| format!("Unknown check '{check_id}' or fix type '{fix_type:?}'"))?;
+    let command = match command_override {
+        Some(cmd) => cmd,
+        None => lookup_fix_command(&check_id, &fix_type)
+            .ok_or_else(|| format!("Unknown check '{check_id}' or fix type '{fix_type:?}'"))?,
+    };
     let command = agents::apply_npm_registry(&command, npm_registry);
 
     run_command_streaming(command, on_line).await
@@ -744,6 +782,129 @@ mod tests {
                 panic!("expected Ok with the script reachable via path prefix; got {other:?}",)
             }
         }
+    }
+
+    /// `apply_freshness` derives a source-aware update command for a Main slot
+    /// when the npm-installed agent has an actionable update.
+    #[tokio::test]
+    async fn apply_freshness_npm_main_emits_update_main_command() {
+        let mut readout = AgentVersionInfo {
+            install_source: Some(InstallSource::Npm),
+            ..AgentVersionInfo::default()
+        };
+        let info = freshness::VersionInfo {
+            installed: Some("0.1.0".into()),
+            latest: Some("0.2.0".into()),
+            update_available: Some(true),
+        };
+        apply_freshness(
+            &mut readout,
+            &info,
+            ReadoutSlot::Main,
+            Some("@anthropic-ai/claude-code"),
+        );
+        assert_eq!(
+            readout.update_command.as_deref(),
+            Some("npm install -g @anthropic-ai/claude-code@latest"),
+        );
+        assert_eq!(readout.update_fix_type, Some(FixType::UpdateMain));
+    }
+
+    /// Bridge slot with a brew install upgrades via `brew upgrade <pkg>` and
+    /// is tagged `UpdateBridge`.
+    #[tokio::test]
+    async fn apply_freshness_brew_bridge_emits_update_bridge_command() {
+        let mut readout = AgentVersionInfo {
+            install_source: Some(InstallSource::Brew),
+            ..AgentVersionInfo::default()
+        };
+        let info = freshness::VersionInfo {
+            installed: Some("0.1.0".into()),
+            latest: Some("0.2.0".into()),
+            update_available: Some(true),
+        };
+        apply_freshness(&mut readout, &info, ReadoutSlot::Bridge, Some("amp"));
+        assert_eq!(readout.update_command.as_deref(), Some("brew upgrade amp"),);
+        assert_eq!(readout.update_fix_type, Some(FixType::UpdateBridge));
+    }
+
+    /// Self-updating (CurlPipe) readouts never get an update command, even when
+    /// upstream reports a newer version — `is_self_updating` suppresses both
+    /// `update_available` and the derived update command.
+    #[tokio::test]
+    async fn apply_freshness_curl_pipe_never_emits_update_command() {
+        let mut readout = AgentVersionInfo {
+            install_source: Some(InstallSource::CurlPipe),
+            ..AgentVersionInfo::default()
+        };
+        let info = freshness::VersionInfo {
+            installed: Some("1.0.0".into()),
+            latest: Some("2.0.0".into()),
+            update_available: Some(true),
+        };
+        apply_freshness(
+            &mut readout,
+            &info,
+            ReadoutSlot::Main,
+            Some("getcursor/cursor"),
+        );
+        assert!(readout.update_command.is_none());
+        assert!(readout.update_fix_type.is_none());
+        assert_eq!(readout.self_updating, Some(true));
+        assert!(
+            readout.update_available.is_none(),
+            "self-updating readout suppresses update_available too",
+        );
+    }
+
+    /// No update available -> no update command, even on a registry source.
+    #[tokio::test]
+    async fn apply_freshness_no_update_available_emits_no_command() {
+        let mut readout = AgentVersionInfo {
+            install_source: Some(InstallSource::Npm),
+            ..AgentVersionInfo::default()
+        };
+        let info = freshness::VersionInfo {
+            installed: Some("0.2.0".into()),
+            latest: Some("0.2.0".into()),
+            update_available: Some(false),
+        };
+        apply_freshness(&mut readout, &info, ReadoutSlot::Main, Some("amp-acp"));
+        assert!(readout.update_command.is_none());
+        assert!(readout.update_fix_type.is_none());
+    }
+
+    /// `command_override` makes the executor run the exact string supplied,
+    /// bypassing `lookup_fix_command`. We test by overriding for the
+    /// `UpdateMain` variant — which has no static lookup — so a successful
+    /// run can only be the override path.
+    #[tokio::test]
+    async fn execute_fix_with_options_runs_command_override() {
+        let result = execute_fix_with_options(
+            "ai-agent-claude".to_string(),
+            FixType::UpdateMain,
+            Some("true".to_string()),
+            None,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "override should execute `true` and exit 0; got {result:?}",
+        );
+    }
+
+    /// Without a `command_override`, `UpdateMain` has no static recipe and
+    /// must surface as the standard "Unknown check / fix type" error.
+    #[tokio::test]
+    async fn execute_fix_with_options_update_without_override_errors() {
+        let result = execute_fix_with_options(
+            "ai-agent-claude".to_string(),
+            FixType::UpdateMain,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_err());
     }
 
     /// Default `run_checks()` must not populate any of the version-freshness

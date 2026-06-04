@@ -14,7 +14,7 @@ pub enum CheckStatus {
 
 /// The type of fix available for a check.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "camelCase")]
 pub enum FixType {
     /// A shell command to install or configure the dependency.
     Command,
@@ -22,6 +22,15 @@ pub enum FixType {
     Bridge,
     /// A shell command that triggers an authentication flow.
     Auth,
+    /// A shell command to update the agent's main CLI. Source-aware: derived
+    /// from the readout's `(install_source, package_id)` so an npm-installed
+    /// agent is updated via `npm install -g …@latest`, not the install-time
+    /// curl-pipe recipe. The command is not in the static AI_AGENT_CHECKS
+    /// table; the executor receives it via `command_override`.
+    UpdateMain,
+    /// A shell command to update the agent's ACP bridge. Same shape as
+    /// `UpdateMain` — derived per-readout, passed via `command_override`.
+    UpdateBridge,
 }
 
 /// Authentication state for a check that probes credentials.
@@ -76,6 +85,15 @@ pub struct AgentVersionInfo {
     pub update_available: Option<bool>,
     /// Whether this binary keeps itself up to date (curl/native installers).
     pub self_updating: Option<bool>,
+    /// Source-aware update command for this readout, derived from
+    /// `(install_source, package_id)`. `Some` only when an update is both
+    /// computable (the install source has a known update recipe and a
+    /// registered package id) and actionable (`update_available == Some(true)`
+    /// and the binary is not self-updating). Pairs with `update_fix_type`.
+    pub update_command: Option<String>,
+    /// `FixType::UpdateMain` or `FixType::UpdateBridge` matching this readout's
+    /// slot. Always paired with `update_command`: both `Some` or both `None`.
+    pub update_fix_type: Option<FixType>,
 }
 
 /// A single health-check result shown in the UI.

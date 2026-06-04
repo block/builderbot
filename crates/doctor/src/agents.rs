@@ -141,6 +141,32 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
     },
 ];
 
+/// Derive a source-aware update command from a readout's install source and
+/// package id. Returns `None` for self-updating sources (`CurlPipe`), sources
+/// with no canonical update recipe (`Mise`/`Asdf`/`Unknown`/`System`), or when
+/// the package id is unknown.
+///
+/// The caller is responsible for gating on `update_available == Some(true)` —
+/// this function only knows how to update, not whether to. `apply_npm_registry`
+/// runs over the final command string downstream, so npm commands automatically
+/// pick up a registry override when one is configured.
+pub fn derive_update_command(
+    install_source: Option<&InstallSource>,
+    package_id: Option<&str>,
+) -> Option<String> {
+    let pkg = package_id?;
+    match install_source? {
+        InstallSource::Npm => Some(format!("npm install -g {pkg}@latest")),
+        InstallSource::Brew => Some(format!("brew upgrade {pkg}")),
+        InstallSource::Cargo => Some(format!("cargo install --force {pkg}")),
+        InstallSource::CurlPipe
+        | InstallSource::Mise
+        | InstallSource::Asdf
+        | InstallSource::Unknown
+        | InstallSource::System => None,
+    }
+}
+
 /// Append `--registry=<url>` to `command` when a registry override is supplied
 /// and the command is npm-backed. Non-npm commands (curl-pipe installers, auth
 /// commands, the git-clonefile fix, …) and the `None` registry case return the
@@ -576,6 +602,10 @@ pub fn lookup_fix_command(check_id: &str, fix_type: &FixType) -> Option<String> 
                 FixType::Command => info.install_command.map(|s| s.to_string()),
                 FixType::Bridge => info.bridge_install_command.map(|s| s.to_string()),
                 FixType::Auth => info.auth_command.map(|s| s.to_string()),
+                // Update commands are derived per-readout from
+                // `(install_source, package_id)` and supplied to the executor
+                // via `command_override`; there is no static fallback.
+                FixType::UpdateMain | FixType::UpdateBridge => None,
             };
         }
     }
@@ -846,6 +876,66 @@ mod tests {
         assert_eq!(
             apply_npm_registry("npm install -g amp-acp", None),
             "npm install -g amp-acp",
+        );
+    }
+
+    #[test]
+    fn derive_update_command_npm_emits_at_latest() {
+        assert_eq!(
+            derive_update_command(Some(&InstallSource::Npm), Some("@anthropic-ai/claude-code"),)
+                .as_deref(),
+            Some("npm install -g @anthropic-ai/claude-code@latest"),
+        );
+    }
+
+    #[test]
+    fn derive_update_command_brew_emits_upgrade() {
+        assert_eq!(
+            derive_update_command(Some(&InstallSource::Brew), Some("codex")).as_deref(),
+            Some("brew upgrade codex"),
+        );
+    }
+
+    #[test]
+    fn derive_update_command_cargo_emits_install_force() {
+        assert_eq!(
+            derive_update_command(Some(&InstallSource::Cargo), Some("some-crate")).as_deref(),
+            Some("cargo install --force some-crate"),
+        );
+    }
+
+    #[test]
+    fn derive_update_command_self_updating_and_opaque_sources_return_none() {
+        for src in [
+            InstallSource::CurlPipe,
+            InstallSource::Mise,
+            InstallSource::Asdf,
+            InstallSource::Unknown,
+            InstallSource::System,
+        ] {
+            assert_eq!(
+                derive_update_command(Some(&src), Some("pkg")),
+                None,
+                "expected None for {src:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn derive_update_command_returns_none_without_package_id() {
+        assert_eq!(derive_update_command(Some(&InstallSource::Npm), None), None,);
+    }
+
+    #[test]
+    fn update_fix_lookup_returns_none_for_update_variants() {
+        // Update commands are derived per-readout, not statically registered.
+        assert_eq!(
+            lookup_fix_command("ai-agent-claude", &FixType::UpdateMain),
+            None,
+        );
+        assert_eq!(
+            lookup_fix_command("ai-agent-claude", &FixType::UpdateBridge),
+            None,
         );
     }
 }

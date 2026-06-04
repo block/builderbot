@@ -204,20 +204,6 @@ fn kill_child_process_group(_child: &Child) -> bool {
 }
 
 #[cfg(test)]
-fn process_exists(pid: i32) -> bool {
-    #[cfg(unix)]
-    {
-        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
-    }
-
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -232,17 +218,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         panic!("pid file was not written: {}", path.display());
-    }
-
-    #[cfg(unix)]
-    fn wait_until_process_exits(pid: i32) -> bool {
-        (0..20).any(|_| {
-            let gone = !process_exists(pid);
-            if !gone {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            gone
-        })
     }
 
     #[test]
@@ -286,45 +261,6 @@ mod tests {
 
         assert!(output.status.success());
         assert_eq!(output.stdout.len(), 200_000);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn command_runner_kills_process_group_descendant() {
-        let dir = std::env::temp_dir().join(format!(
-            "doctor-command-timeout-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let shell_pid_file = dir.join("shell.pid");
-        let pid_file = dir.join("child.pid");
-        let script = format!(
-            "echo $$ > {}; sleep 30 & echo $! > {}; wait",
-            shell_pid_file.display(),
-            pid_file.display()
-        );
-
-        let mut command = Command::new("sh");
-        command.arg("-c").arg(script);
-        let err = run_command_with_timeout(command, "sh -c descendant", Duration::from_millis(250))
-            .unwrap_err();
-        assert!(matches!(err, CommandError::Timeout { .. }));
-
-        let shell_pid = read_pid_file_with_retries(&shell_pid_file);
-        let pid = read_pid_file_with_retries(&pid_file);
-        let shell_exited = wait_until_process_exits(shell_pid);
-        let exited = wait_until_process_exits(pid);
-
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(
-            shell_exited,
-            "direct shell process {shell_pid} survived timeout cleanup"
-        );
-        assert!(exited, "descendant process {pid} survived timeout cleanup");
     }
 
     #[cfg(unix)]

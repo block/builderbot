@@ -398,7 +398,7 @@
     padding: 10px 14px;
     border: 1.5px solid var(--border-muted);
     border-radius: 10px;
-    background: transparent;
+    background: var(--bg-primary);
     transition: border-color 0.15s ease;
   }
 

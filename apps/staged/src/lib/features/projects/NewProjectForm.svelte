@@ -185,7 +185,7 @@
       autocapitalize="off"
       spellcheck={false}
       oninput={handleNameInput}
-      class="min-h-[42px] rounded-[10px] px-3.5 py-2.5 text-base"
+      class="min-h-[42px] rounded-[10px] bg-background px-3.5 py-2.5 text-base"
       bind:ref={nameInputRef}
     />
   </div>

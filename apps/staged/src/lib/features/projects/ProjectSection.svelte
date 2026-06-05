@@ -30,7 +30,11 @@
     HashtagItem,
   } from '../../types';
   import { projectDisplayName } from '../../shared/utils';
-  import { goHome, msSinceProjectSwitch } from '../layout/navigation.svelte';
+  import {
+    goHome,
+    msSinceProjectSwitch,
+    currentProjectSwitchToken,
+  } from '../layout/navigation.svelte';
   import * as commands from '../../api/commands';
   import HashtagInput from '../sessions/HashtagInput.svelte';
   import { buildProjectHashtagItems } from '../sessions/hashtagItems';
@@ -202,7 +206,17 @@
   });
 
   onDestroy(() => {
+    // Stamp when the outgoing section tears down relative to the switch. Pairing
+    // this with the new section's mount log brackets the keyed-block swap: if
+    // teardown starts late, the gap is upstream (flush is blocked); if it starts
+    // early but mount is late, the gap is in the swap itself.
+    const startedAt = performance.now();
     liveSessionHintPoller.destroy();
+    console.info(
+      `[perf][project-switch] ProjectSection destroyed for '${project.id}' in ` +
+        `${(performance.now() - startedAt).toFixed(1)}ms (+${msSinceProjectSwitch().toFixed(1)}ms since switch, ` +
+        `token ${currentProjectSwitchToken()})`
+    );
   });
 
   // Hashtag reference items
@@ -479,7 +493,8 @@
   onMount(() => {
     console.info(
       `[perf][project-switch] ProjectSection mounted for '${project.id}' ` +
-        `(${branches.length} branch(es)) at +${msSinceProjectSwitch().toFixed(1)}ms since switch`
+        `(${branches.length} branch(es)) at +${msSinceProjectSwitch().toFixed(1)}ms since switch ` +
+        `(token ${currentProjectSwitchToken()})`
     );
     loadProjectNotes();
 

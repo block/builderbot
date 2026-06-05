@@ -333,6 +333,23 @@ mark.search-match-current {
 /*---break---
  */
 
+/* ── Top-layer z-index scale. A non-inline @theme block so the tokens are
+ *    emitted as real :root custom properties — both Tailwind's `z-overlay` /
+ *    `z-floating` utilities and raw `var(--z-index-*)` references (e.g.
+ *    HashtagInput's fixed-positioned dropdown) resolve to the same source.
+ *    `overlay` sits above the legacy full-screen overlay max (9999, e.g.
+ *    .diff-modal-backdrop) so design-system dialogs own the top layer;
+ *    `floating` sits one above `overlay` so portaled primitives (dropdown,
+ *    select, popover, tooltip, context-menu, hashtag dropdown) paint above
+ *    dialog content even when opened from inside a dialog. ── */
+@theme {
+  --z-index-overlay: 10000;
+  --z-index-floating: 10001;
+}
+
+/*---break---
+ */
+
 @layer base {
   * {
     @apply border-border outline-ring/50;

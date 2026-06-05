@@ -363,6 +363,13 @@ export function createAdaptiveTheme(
   const accentPurple = fallbackPurple;
   const accentCyan = fallbackCyan; // Used for image timeline items
 
+  // Dedicated app accent (the generic UI highlight: primary buttons, focus
+  // rings, active chips, indicators). Kept separate from the git palette so
+  // recoloring the UI accent doesn't drag "added"/commit affordances with it.
+  // Blue in both modes (mirrors fallbackBlue, which is mode-consistent —
+  // unlike accentBlue=gitColors.modified, which is gold in dark mode).
+  const accentPrimary = fallbackBlue;
+
   // Border that's visible but not harsh
   const borderBase = mix(primaryBg, syntaxFg, isDark ? 0.15 : 0.12);
 
@@ -439,8 +446,8 @@ export function createAdaptiveTheme(
     },
 
     ui: {
-      accent: accentGreen,
-      accentHover: isDark ? adjust(accentGreen, -0.15) : adjust(accentGreen, 0.15),
+      accent: accentPrimary,
+      accentHover: isDark ? adjust(accentPrimary, -0.15) : adjust(accentPrimary, 0.15),
       danger: accentRed,
       dangerBg: overlay(accentRed, isDark ? 0.1 : 0.08),
       warning: accentOrange,

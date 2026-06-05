@@ -431,6 +431,8 @@
     if (beforePane && beforeLines.length > 0) {
       const lineHeight = measureLineHeight(beforePane);
       const contentWidth = measureContentWidth(beforePane);
+      beforeLineHeight = lineHeight || 20;
+      beforeViewportHeight = beforePane.clientHeight;
       scrollController.setDimensions('before', {
         viewportHeight: beforePane.clientHeight,
         contentHeight: beforeLines.length * lineHeight,
@@ -445,6 +447,8 @@
     if (afterPane && afterLines.length > 0) {
       const lineHeight = measureLineHeight(afterPane);
       const contentWidth = measureContentWidth(afterPane);
+      afterLineHeight = lineHeight || 20;
+      afterViewportHeight = afterPane.clientHeight;
       scrollController.setDimensions('after', {
         viewportHeight: afterPane.clientHeight,
         contentHeight: afterLines.length * lineHeight,
@@ -473,14 +477,74 @@
   let beforeContentHeight = $state(0);
   let afterContentHeight = $state(0);
 
+  // Reactive line/viewport metrics that drive the rendered window (Phase 2
+  // virtualization). Kept in sync wherever dimensions are measured below so the
+  // window deriveds recompute on resize and font changes, not just on scroll.
+  let beforeLineHeight = $state(20);
+  let afterLineHeight = $state(20);
+  let beforeViewportHeight = $state(0);
+  let afterViewportHeight = $state(0);
+
   // Content width needs to be measured after DOM renders, using state + effect
   let beforeContentWidth = $state(0);
   let afterContentWidth = $state(0);
+
+  // ==========================================================================
+  // Rendered window (Phase 2 virtualization)
+  // ==========================================================================
+
+  /**
+   * Rows rendered above/below the viewport. Generous enough to cover the
+   * comment editor's vertical extent (it can render above a multi-line range),
+   * so anchor lookups near a viewport edge still resolve to a mounted row.
+   */
+  const OVERSCAN = 40;
+
+  /**
+   * Compute the absolute index range [start, end) to render for a pane given
+   * its scroll offset and metrics. Returns absolute indices so every existing
+   * `i`-consumer (highlighting, boundaries, class lookups) stays unchanged.
+   */
+  function computeWindow(
+    total: number,
+    lineHeight: number,
+    scrollY: number,
+    viewportHeight: number
+  ): { start: number; indices: number[] } {
+    const lh = lineHeight || 20;
+    const firstVisible = Math.max(0, Math.floor(scrollY / lh));
+    const visibleCount = Math.ceil((viewportHeight || 0) / lh);
+    const start = Math.max(0, firstVisible - OVERSCAN);
+    const end = Math.min(total, firstVisible + visibleCount + OVERSCAN);
+    const indices: number[] = [];
+    for (let i = start; i < end; i++) indices.push(i);
+    return { start, indices };
+  }
+
+  let beforeWindow = $derived(
+    computeWindow(
+      beforeLines.length,
+      beforeLineHeight,
+      scrollController.beforeScrollY,
+      beforeViewportHeight
+    )
+  );
+
+  let afterWindow = $derived(
+    computeWindow(
+      afterLines.length,
+      afterLineHeight,
+      scrollController.afterScrollY,
+      afterViewportHeight
+    )
+  );
 
   function updateContentWidths() {
     requestAnimationFrame(() => {
       if (beforePane) {
         const lh = measureLineHeight(beforePane) || 20;
+        beforeLineHeight = lh;
+        beforeViewportHeight = beforePane.clientHeight;
         beforeContentHeight = beforeLines.length * lh;
         beforeContentWidth = measureContentWidth(beforePane);
         scrollController.setDimensions('before', {
@@ -493,6 +557,8 @@
       }
       if (afterPane) {
         const lh = measureLineHeight(afterPane) || 20;
+        afterLineHeight = lh;
+        afterViewportHeight = afterPane.clientHeight;
         afterContentHeight = afterLines.length * lh;
         afterContentWidth = measureContentWidth(afterPane);
         scrollController.setDimensions('after', {
@@ -1956,7 +2022,11 @@
                   class="lines-wrapper"
                   style="transform: translate(-{scrollController.beforeScrollX}px, -{scrollController.beforeScrollY}px)"
                 >
-                  {#each beforeLines as line, i}
+                  <div
+                    class="line-spacer"
+                    style="height: {beforeWindow.start * beforeLineHeight}px"
+                  ></div>
+                  {#each beforeWindow.indices as i (i)}
                     {@const boundary = showRangeMarkers
                       ? getLineBoundary(activeAlignments, 'before', i)
                       : { isStart: false, isEnd: false }}
@@ -2049,7 +2119,11 @@
                 class="lines-wrapper"
                 style="transform: translate(-{scrollController.beforeScrollX}px, -{scrollController.beforeScrollY}px)"
               >
-                {#each beforeLines as line, i}
+                <div
+                  class="line-spacer"
+                  style="height: {beforeWindow.start * beforeLineHeight}px"
+                ></div>
+                {#each beforeWindow.indices as i (i)}
                   <div class="line" data-line-index={i}>
                     <span class="line-content">
                       {#each getHighlightedTokens(i, 'before') as segment}
@@ -2132,7 +2206,11 @@
                   class="lines-wrapper"
                   style="transform: translate(-{scrollController.afterScrollX}px, -{scrollController.afterScrollY}px)"
                 >
-                  {#each afterLines as line, i}
+                  <div
+                    class="line-spacer"
+                    style="height: {afterWindow.start * afterLineHeight}px"
+                  ></div>
+                  {#each afterWindow.indices as i (i)}
                     {@const boundary = showRangeMarkers
                       ? getLineBoundary(activeAlignments, 'after', i)
                       : { isStart: false, isEnd: false }}
@@ -2231,7 +2309,11 @@
                 class="lines-wrapper"
                 style="transform: translate(-{scrollController.afterScrollX}px, -{scrollController.afterScrollY}px)"
               >
-                {#each afterLines as line, i}
+                <div
+                  class="line-spacer"
+                  style="height: {afterWindow.start * afterLineHeight}px"
+                ></div>
+                {#each afterWindow.indices as i (i)}
                   {@const isSelected = isLineSelected('after', i)}
                   <!-- svelte-ignore a11y_no_static_element_interactions -->
                   <div
@@ -2771,6 +2853,11 @@
     display: flex;
     min-height: calc(var(--size-md) * 1.5);
     position: relative;
+  }
+
+  /* Top spacer reserving the height of unrendered rows above the window. */
+  .line-spacer {
+    flex-shrink: 0;
   }
 
   .line-content {

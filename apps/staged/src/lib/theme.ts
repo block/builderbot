@@ -366,9 +366,11 @@ export function createAdaptiveTheme(
   // Dedicated app accent (the generic UI highlight: primary buttons, focus
   // rings, active chips, indicators). Kept separate from the git palette so
   // recoloring the UI accent doesn't drag "added"/commit affordances with it.
-  // Blue in both modes (mirrors fallbackBlue, which is mode-consistent —
-  // unlike accentBlue=gitColors.modified, which is gold in dark mode).
-  const accentPrimary = fallbackBlue;
+  // Blue in both modes. The light value is a bright #2188ff rather than the
+  // heavier #0969da fallbackBlue, so it reads at roughly the same luminance/
+  // energy as the old #28a745 green accent it replaces (#0969da looked too
+  // dark by comparison). Dark stays #58a6ff, already close to the old #3fb950.
+  const accentPrimary = isDark ? '#58a6ff' : '#2188ff';
 
   // Border that's visible but not harsh
   const borderBase = mix(primaryBg, syntaxFg, isDark ? 0.15 : 0.12);

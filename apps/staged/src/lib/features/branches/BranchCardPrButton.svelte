@@ -657,83 +657,89 @@
   }
 </script>
 
+{#snippet prButton(props: Record<string, unknown>)}
+  <span {...props} class="inline-flex">
+    <Button
+      variant="outline"
+      size="sm"
+      class={[
+        'gap-1.5 whitespace-nowrap text-xs font-medium [&_svg]:!size-3.5',
+        prState === 'creating' && 'border-[var(--border-muted)]',
+        (prState === 'error' || pushState === 'error') &&
+          'border-destructive text-destructive hover:bg-[var(--ui-danger-bg)] hover:text-destructive',
+        pushState === 'pushing' && 'cursor-default border-[var(--border-muted)]',
+        prState === 'created' && prStatusState === 'MERGED' && '[&_svg]:text-[var(--status-added)]',
+      ]}
+      onclick={handlePrButtonClick}
+      disabled={showPushErrorDialog || showForcePushDialog || showPrErrorDialog}
+    >
+      {#if pushState === 'pushing'}
+        <Spinner size={13} />
+      {:else if pushState === 'error'}
+        <AlertCircle size={13} />
+      {:else if prState === 'creating'}
+        <Spinner size={13} />
+      {:else if prState === 'error'}
+        <AlertCircle size={13} />
+      {:else if prState === 'created' && prStatusState === 'MERGED'}
+        <GitMerge size={13} />
+      {:else if prState === 'created' && hasUnpushed}
+        <GitPullRequestDraft size={13} />
+      {:else if prState === 'created'}
+        <GitPullRequestArrow size={13} />
+      {:else}
+        <GitPullRequestCreateArrow size={13} />
+      {/if}
+      <span>
+        {#if pushState === 'pushing'}
+          Pushing…
+        {:else if pushState === 'error'}
+          Push failed
+        {:else if prState === 'created' && hasUnpushed}
+          {pushAction === 'forcePush' || optionHeld ? 'Force push' : 'Push changes'}
+        {:else if prState === 'created'}
+          {#if prStatusText}
+            {prStatusText}
+          {:else}
+            View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+          {/if}
+        {:else if prState === 'creating'}
+          Creating PR…
+        {:else if prState === 'error'}
+          PR failed
+        {:else}
+          {optionHeld ? 'Create draft PR' : 'Create PR'}
+        {/if}
+      </span>
+      {#if prStatusStale}
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            {#snippet child({ props: staleProps })}
+              <span class="pr-status-stale" {...staleProps}>!</span>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content>PR status may be outdated</Tooltip.Content>
+        </Tooltip.Root>
+      {:else if prStatusIndicator}
+        <span class="pr-status-indicator {prStatusIndicator}"></span>
+      {/if}
+    </Button>
+  </span>
+{/snippet}
+
 {#if hasCodeChanges || branch.prNumber}
-  <Tooltip.Root>
-    <Tooltip.Trigger>
-      {#snippet child({ props })}
-        <span {...props} class="inline-flex">
-          <Button
-            variant="outline"
-            size="sm"
-            class={[
-              'gap-1.5 whitespace-nowrap text-xs font-medium [&_svg]:!size-3.5',
-              prState === 'creating' && 'border-[var(--border-muted)]',
-              (prState === 'error' || pushState === 'error') &&
-                'border-destructive text-destructive hover:bg-[var(--ui-danger-bg)] hover:text-destructive',
-              pushState === 'pushing' && 'cursor-default border-[var(--border-muted)]',
-              prState === 'created' &&
-                prStatusState === 'MERGED' &&
-                '[&_svg]:text-[var(--status-added)]',
-            ]}
-            onclick={handlePrButtonClick}
-            disabled={showPushErrorDialog || showForcePushDialog || showPrErrorDialog}
-          >
-            {#if pushState === 'pushing'}
-              <Spinner size={13} />
-            {:else if pushState === 'error'}
-              <AlertCircle size={13} />
-            {:else if prState === 'creating'}
-              <Spinner size={13} />
-            {:else if prState === 'error'}
-              <AlertCircle size={13} />
-            {:else if prState === 'created' && prStatusState === 'MERGED'}
-              <GitMerge size={13} />
-            {:else if prState === 'created' && hasUnpushed}
-              <GitPullRequestDraft size={13} />
-            {:else if prState === 'created'}
-              <GitPullRequestArrow size={13} />
-            {:else}
-              <GitPullRequestCreateArrow size={13} />
-            {/if}
-            <span>
-              {#if pushState === 'pushing'}
-                Pushing…
-              {:else if pushState === 'error'}
-                Push failed
-              {:else if prState === 'created' && hasUnpushed}
-                {pushAction === 'forcePush' || optionHeld ? 'Force push' : 'Push changes'}
-              {:else if prState === 'created'}
-                {#if prStatusText}
-                  {prStatusText}
-                {:else}
-                  View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
-                {/if}
-              {:else if prState === 'creating'}
-                Creating PR…
-              {:else if prState === 'error'}
-                PR failed
-              {:else}
-                {optionHeld ? 'Create draft PR' : 'Create PR'}
-              {/if}
-            </span>
-            {#if prStatusStale}
-              <Tooltip.Root>
-                <Tooltip.Trigger>
-                  {#snippet child({ props })}
-                    <span class="pr-status-stale" {...props}>!</span>
-                  {/snippet}
-                </Tooltip.Trigger>
-                <Tooltip.Content>PR status may be outdated</Tooltip.Content>
-              </Tooltip.Root>
-            {:else if prStatusIndicator}
-              <span class="pr-status-indicator {prStatusIndicator}"></span>
-            {/if}
-          </Button>
-        </span>
-      {/snippet}
-    </Tooltip.Trigger>
-    <Tooltip.Content>{prButtonTitle}</Tooltip.Content>
-  </Tooltip.Root>
+  {#if branch.prNumber}
+    <Tooltip.Root>
+      <Tooltip.Trigger>
+        {#snippet child({ props })}
+          {@render prButton(props)}
+        {/snippet}
+      </Tooltip.Trigger>
+      <Tooltip.Content>{prButtonTitle}</Tooltip.Content>
+    </Tooltip.Root>
+  {:else}
+    {@render prButton({})}
+  {/if}
 {/if}
 
 <AlertDialog.Root bind:open={showPrErrorDialog}>

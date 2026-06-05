@@ -27,6 +27,7 @@
   import ImageLucide from '@lucide/svelte/icons/image';
   import { HASHTAG_TOKEN_RE, hashtagTypeIconSvg, escapeHtml } from './hashtagItems';
   import { focusAtEndSync } from '../../shared/focusAtEnd';
+  import { portal } from '../../shared/portal';
   import RepoLabel from '../../shared/RepoLabel.svelte';
 
   type DropdownIconComponent = typeof FileText;
@@ -539,12 +540,18 @@
 
     <!-- Dropdown -->
     {#if showDropdown && filteredItems.length > 0}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <!-- Portaled to <body> so position:fixed escapes the dialog's transformed
+           containing block; pointerdown is stopped so selecting an item doesn't
+           trip bits-ui's dismiss-on-interact-outside and close the dialog. -->
       <div
         class="hashtag-dropdown"
         class:above={dropdownPosition === 'above'}
         class:below={dropdownPosition === 'below'}
         style={dropdownStyle}
         bind:this={dropdownEl}
+        use:portal
+        onpointerdown={(e) => e.stopPropagation()}
       >
         {#each filteredSections as section (section.key)}
           <div class="hashtag-dropdown-section">
@@ -584,11 +591,14 @@
         {/each}
       </div>
     {:else if showDropdown && filterText.length > 0}
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
         class="hashtag-dropdown"
         class:above={dropdownPosition === 'above'}
         class:below={dropdownPosition === 'below'}
         style={dropdownStyle}
+        use:portal
+        onpointerdown={(e) => e.stopPropagation()}
       >
         <div class="hashtag-dropdown-empty">No matching items</div>
       </div>

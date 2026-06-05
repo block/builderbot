@@ -224,6 +224,7 @@ mark.search-match-current {
 }
 
 .hashtag-badge svg {
+  display: inline-block; /* override Tailwind preflight's `svg { display: block }` */
   width: 12px;
   height: 12px;
   vertical-align: middle;

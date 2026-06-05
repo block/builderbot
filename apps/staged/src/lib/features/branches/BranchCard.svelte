@@ -1485,26 +1485,18 @@
                   }}
                 />
                 {#if hasCodeChanges}
-                  <Tooltip.Root>
-                    <Tooltip.Trigger>
-                      {#snippet child({ props })}
-                        <Button
-                          {...props}
-                          variant="outline"
-                          size="sm"
-                          onclick={() => {
-                            reviewDiffTarget = null;
-                            showBranchDiff = true;
-                          }}
-                          class="text-xs"
-                        >
-                          <FileDiff size={13} />
-                          <span>Diff</span>
-                        </Button>
-                      {/snippet}
-                    </Tooltip.Trigger>
-                    <Tooltip.Content>View diff</Tooltip.Content>
-                  </Tooltip.Root>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onclick={() => {
+                      reviewDiffTarget = null;
+                      showBranchDiff = true;
+                    }}
+                    class="text-xs"
+                  >
+                    <FileDiff size={13} />
+                    <span>Diff</span>
+                  </Button>
                 {/if}
               </div>
             {/if}

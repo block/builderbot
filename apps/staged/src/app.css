@@ -273,6 +273,21 @@ mark.search-match-current {
 
 @theme inline {
   --font-sans: 'Inter Variable', sans-serif;
+
+  /* ── Text scale bridge: re-anchor Tailwind's rem-based `text-*` utilities to
+   *    the Staged px scale. The app sets the root font-size to 13px (--size-md),
+   *    so Tailwind's unitless defaults (text-sm = 0.875rem ≈ 11.4px,
+   *    text-xs = 0.75rem ≈ 9.75px) render smaller than the pre-shadcn UI, which
+   *    sized text off --size-* tokens (e.g. FormButton's var(--size-sm) ≈ 12px).
+   *    Map each `text-*` utility to its --size-* analogue so every migrated
+   *    `text-*` tracks the old scale in one place. Line-heights keep Tailwind's
+   *    paired defaults. ── */
+  --text-xs: var(--size-xs);
+  --text-sm: var(--size-sm);
+  --text-base: var(--size-md);
+  --text-lg: var(--size-lg);
+  --text-xl: var(--size-xl);
+
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);

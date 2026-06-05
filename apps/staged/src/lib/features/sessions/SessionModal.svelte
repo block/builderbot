@@ -170,13 +170,22 @@
   let loadSeq = 0;
   function slog(msg: string, extra?: Record<string, unknown>) {
     const t = performance.now().toFixed(1);
-    // eslint-disable-next-line no-console
-    console.debug(`[SessionModal +${t}ms] ${msg}`, {
+    // Read reactive state via untrack so this diagnostic snapshot never
+    // registers dependencies on the calling effect. Otherwise calling slog()
+    // from within the load effect (directly or through loadSession()'s
+    // synchronous prologue) would subscribe the effect to session/loading,
+    // which loadSession() then mutates — re-triggering the effect in a tight
+    // infinite loop that hammers the backend every reactive flush.
+    const snapshot = untrack(() => ({
       sessionId,
       loadedId: session?.id ?? null,
       closed,
       open,
       loading,
+    }));
+    // eslint-disable-next-line no-console
+    console.debug(`[SessionModal +${t}ms] ${msg}`, {
+      ...snapshot,
       ...extra,
     });
   }

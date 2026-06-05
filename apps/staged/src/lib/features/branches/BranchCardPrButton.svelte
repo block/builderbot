@@ -666,7 +666,7 @@
             variant="outline"
             size="sm"
             class={[
-              'gap-1.5 whitespace-nowrap text-xs font-medium text-muted-foreground [&_svg]:!size-3.5',
+              'gap-1.5 whitespace-nowrap text-xs font-medium [&_svg]:!size-3.5',
               prState === 'creating' && 'border-[var(--border-muted)]',
               (prState === 'error' || pushState === 'error') &&
                 'border-destructive text-destructive hover:bg-[var(--ui-danger-bg)] hover:text-destructive',

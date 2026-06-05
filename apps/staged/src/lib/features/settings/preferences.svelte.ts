@@ -19,7 +19,7 @@ import {
   type ThemePreviewColors,
 } from '../diff/highlighter';
 import { initPersistentStore, getStoreValue, setStoreValue } from '../../shared/persistentStore';
-import { createAdaptiveTheme, themeToVarMap } from '../../theme';
+import { createAdaptiveTheme, themeToVarMap, type ThemeGitColors } from '../../theme';
 
 // Re-export for convenience
 export { isLightTheme, loadAllThemePreviewColors, type ThemePreviewColors };
@@ -34,15 +34,56 @@ const SIZE_MAX = 24;
 const SIZE_DEFAULT = 13;
 
 const SIZE_STORE_KEY = 'size-base';
+/** Legacy key: a single theme used to drive both chrome and diff. Migrated to `diff-theme`. */
 const SYNTAX_THEME_STORE_KEY = 'syntax-theme';
+/** The user-selectable theme that themes the diff viewer only. */
+const DIFF_THEME_STORE_KEY = 'diff-theme';
+/** The app chrome appearance: light / dark / system. */
+const APP_MODE_STORE_KEY = 'app-mode';
 const RECENT_AGENTS_STORE_KEY = 'recent-agents';
 const AUTO_REVIEW_STORE_KEY = 'auto-start-code-reviews';
 /** Maximum number of recent agents to remember. */
 const RECENT_AGENTS_MAX = 10;
 
-const DEFAULT_SYNTAX_THEME: SyntaxThemeName = 'laserwave';
+const DEFAULT_DIFF_THEME: SyntaxThemeName = 'laserwave';
+
+/** App chrome appearance mode. `system` follows `prefers-color-scheme`. */
+export type AppMode = 'light' | 'dark' | 'system';
+const DEFAULT_APP_MODE: AppMode = 'system';
 
 export type AutoReviewMode = 'never' | 'after-changes';
+
+// =============================================================================
+// Fixed chrome base colors
+// =============================================================================
+
+/**
+ * Base colors fed into createAdaptiveTheme() for the app chrome. The chrome no
+ * longer derives from the user's chosen diff/syntax theme — it has exactly one
+ * fixed light and one fixed dark identity, selected by the resolved app mode.
+ */
+interface ModeBaseColors {
+  bg: string;
+  fg: string;
+  comment: string;
+  gitColors: ThemeGitColors;
+}
+
+/** Dark chrome — sourced from the previous laserwave-derived app.css :root defaults. */
+const DARK_BASE: ModeBaseColors = {
+  bg: '#27212e',
+  fg: '#ffffff',
+  comment: '#91889b',
+  gitColors: { added: '#3fb950', deleted: '#f85149', modified: '#d29922' },
+};
+
+/** Light chrome — derived from a clean, legible light palette (github-light). */
+const LIGHT_BASE: ModeBaseColors = {
+  bg: '#ffffff',
+  fg: '#24292e',
+  comment: '#6e7781',
+  gitColors: { added: '#28a745', deleted: '#d73a49', modified: '#2188ff' },
+};
 
 // =============================================================================
 // Reactive State
@@ -63,8 +104,18 @@ export interface ThemeEntry {
 export const preferences = $state({
   /** Current UI size base (px) */
   sizeBase: SIZE_DEFAULT,
-  /** Current syntax theme name */
-  syntaxTheme: DEFAULT_SYNTAX_THEME as string,
+  /** App chrome appearance mode (light / dark / system). */
+  mode: DEFAULT_APP_MODE as AppMode,
+  /** Current diff-viewer theme name (Shiki theme, scoped to the diff only). */
+  diffTheme: DEFAULT_DIFF_THEME as string,
+  /**
+   * CSS custom properties scoped to the diff-viewer container, derived from the
+   * selected diff theme. Applied onto the diff wrapper element so the diff area
+   * reflects the chosen theme while the surrounding chrome stays on `mode`.
+   */
+  diffThemeVars: {} as Record<string, string>,
+  /** Bumped whenever the diff theme changes, to trigger diff re-highlighting. */
+  diffThemeVersion: 0,
   /**
    * Ordered list of recently used AI agent IDs, most-recent first.
    * Used to pick the best available agent for a given context (local vs remote).
@@ -84,20 +135,62 @@ function applySize() {
   document.documentElement.style.setProperty('--size-base', `${preferences.sizeBase}px`);
 }
 
-function applyAdaptiveTheme() {
-  const themeInfo = getTheme();
-  if (themeInfo) {
-    const adaptiveTheme = createAdaptiveTheme(themeInfo.bg, themeInfo.fg, themeInfo.comment, {
-      added: themeInfo.added,
-      deleted: themeInfo.deleted,
-      modified: themeInfo.modified,
-    });
-    const varMap = themeToVarMap(adaptiveTheme);
-    const style = document.documentElement.style;
-    for (const [prop, value] of Object.entries(varMap)) {
-      style.setProperty(prop, value);
-    }
+/** Resolve `system` to the OS preference; pass `light`/`dark` through. */
+function resolveMode(mode: AppMode): 'light' | 'dark' {
+  if (mode === 'system') {
+    return typeof window !== 'undefined' &&
+      window.matchMedia('(prefers-color-scheme: dark)').matches
+      ? 'dark'
+      : 'light';
   }
+  return mode;
+}
+
+/**
+ * Apply the app chrome theme onto the document root from the fixed base colors
+ * selected by the resolved app mode. This drives every chrome CSS variable
+ * (including `--theme-is-dark`, which the `darkMode` store observes) and is
+ * independent of the user's diff theme.
+ */
+function applyChromeTheme() {
+  const base = resolveMode(preferences.mode) === 'dark' ? DARK_BASE : LIGHT_BASE;
+  const adaptiveTheme = createAdaptiveTheme(base.bg, base.fg, base.comment, base.gitColors);
+  const varMap = themeToVarMap(adaptiveTheme);
+  const style = document.documentElement.style;
+  for (const [prop, value] of Object.entries(varMap)) {
+    style.setProperty(prop, value);
+  }
+}
+
+/**
+ * Recompute the diff-viewer-scoped CSS variables from the active diff theme.
+ * A second createAdaptiveTheme() run lets the diff area re-theme fully (bg,
+ * text, tints) without touching the chrome — the resulting var map is applied
+ * to the diff wrapper element by DiffModal. Also bumps the version so the diff
+ * re-highlights against the new Shiki theme.
+ */
+function applyDiffTheme() {
+  const themeInfo = getTheme();
+  if (!themeInfo) return;
+  const adaptiveTheme = createAdaptiveTheme(themeInfo.bg, themeInfo.fg, themeInfo.comment, {
+    added: themeInfo.added,
+    deleted: themeInfo.deleted,
+    modified: themeInfo.modified,
+  });
+  preferences.diffThemeVars = themeToVarMap(adaptiveTheme);
+  preferences.diffThemeVersion += 1;
+}
+
+let systemModeListenerAttached = false;
+/** Re-apply chrome when the OS appearance changes, while in `system` mode. */
+function ensureSystemModeListener() {
+  if (systemModeListenerAttached || typeof window === 'undefined') return;
+  systemModeListenerAttached = true;
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (preferences.mode === 'system') {
+      applyChromeTheme();
+    }
+  });
 }
 
 async function loadSqAvailabilityForDefault(): Promise<boolean> {
@@ -124,13 +217,24 @@ export async function initPreferences(): Promise<void> {
   }
   applySize();
 
-  // Load syntax theme
-  const savedTheme = await getStoreValue<string>(SYNTAX_THEME_STORE_KEY);
-  if (savedTheme && SYNTAX_THEMES.includes(savedTheme as SyntaxThemeName)) {
-    preferences.syntaxTheme = savedTheme;
+  // Load app chrome mode and apply the fixed light/dark chrome theme.
+  const savedMode = await getStoreValue<AppMode>(APP_MODE_STORE_KEY);
+  if (savedMode === 'light' || savedMode === 'dark' || savedMode === 'system') {
+    preferences.mode = savedMode;
   }
-  await setSyntaxTheme(preferences.syntaxTheme as SyntaxThemeName);
-  applyAdaptiveTheme();
+  ensureSystemModeListener();
+  applyChromeTheme();
+
+  // Load diff theme (migrating from the legacy combined `syntax-theme` key).
+  let savedDiffTheme = await getStoreValue<string>(DIFF_THEME_STORE_KEY);
+  if (!savedDiffTheme) {
+    savedDiffTheme = await getStoreValue<string>(SYNTAX_THEME_STORE_KEY);
+  }
+  if (savedDiffTheme && SYNTAX_THEMES.includes(savedDiffTheme as SyntaxThemeName)) {
+    preferences.diffTheme = savedDiffTheme;
+  }
+  await setSyntaxTheme(preferences.diffTheme as SyntaxThemeName);
+  applyDiffTheme();
 
   // Load recent agents list (with migration from legacy single-agent key)
   const savedRecent = await getStoreValue<string[]>(RECENT_AGENTS_STORE_KEY);
@@ -161,20 +265,34 @@ export async function initPreferences(): Promise<void> {
 // =============================================================================
 
 /**
- * Get all available syntax themes, sorted alphabetically.
+ * Get all available syntax themes (for the diff theme picker), sorted alphabetically.
  */
 export function getAvailableSyntaxThemes(): ThemeEntry[] {
   return SYNTAX_THEMES.map((name) => ({ name, isCustom: false }));
 }
 
 /**
- * Select a syntax theme by name.
+ * Set the app chrome appearance mode (light / dark / system).
+ *
+ * Only re-themes the chrome — the diff theme is untouched.
  */
-export async function selectSyntaxTheme(name: string): Promise<void> {
+export function setMode(mode: AppMode): void {
+  preferences.mode = mode;
+  setStoreValue(APP_MODE_STORE_KEY, mode);
+  applyChromeTheme();
+}
+
+/**
+ * Select a diff-viewer theme by name.
+ *
+ * Re-highlights the diff via the highlighter singleton and updates the
+ * diff-scoped CSS variables. Deliberately does NOT touch the app chrome.
+ */
+export async function selectDiffTheme(name: string): Promise<void> {
   await setSyntaxTheme(name as SyntaxThemeName);
-  preferences.syntaxTheme = name;
-  await setStoreValue(SYNTAX_THEME_STORE_KEY, name);
-  applyAdaptiveTheme();
+  preferences.diffTheme = name;
+  await setStoreValue(DIFF_THEME_STORE_KEY, name);
+  applyDiffTheme();
 }
 
 // =============================================================================

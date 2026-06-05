@@ -6,15 +6,15 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import {
-    GitPullRequestCreateArrow,
-    GitPullRequestArrow,
-    GitPullRequestDraft,
-    GitMerge,
-    AlertCircle,
-  } from 'lucide-svelte';
+  import GitPullRequestCreateArrow from '@lucide/svelte/icons/git-pull-request-create-arrow';
+  import GitPullRequestArrow from '@lucide/svelte/icons/git-pull-request-arrow';
+  import GitPullRequestDraft from '@lucide/svelte/icons/git-pull-request-draft';
+  import GitMerge from '@lucide/svelte/icons/git-merge';
+  import AlertCircle from '@lucide/svelte/icons/alert-circle';
   import Spinner from '../../shared/Spinner.svelte';
-  import ConfirmDialog from '../../shared/ConfirmDialog.svelte';
+  import * as AlertDialog from '$lib/components/ui/alert-dialog';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
   import { minuteNow, secondNow } from '../../shared/relativeTime.svelte';
   import { listenToEvent } from '../../transport';
   import type {
@@ -658,172 +658,135 @@
 </script>
 
 {#if hasCodeChanges || branch.prNumber}
-  <button
-    class="pr-btn"
-    class:creating={prState === 'creating'}
-    class:error={prState === 'error' || pushState === 'error'}
-    class:created={prState === 'created' && pushState !== 'error'}
-    class:pushing={pushState === 'pushing'}
-    class:merged={prState === 'created' && prStatusState === 'MERGED'}
-    onclick={handlePrButtonClick}
-    disabled={showPushErrorDialog || showForcePushDialog || showPrErrorDialog}
-    title={prButtonTitle}
-  >
-    {#if pushState === 'pushing'}
-      <Spinner size={13} />
-    {:else if pushState === 'error'}
-      <AlertCircle size={13} />
-    {:else if prState === 'creating'}
-      <Spinner size={13} />
-    {:else if prState === 'error'}
-      <AlertCircle size={13} />
-    {:else if prState === 'created' && prStatusState === 'MERGED'}
-      <GitMerge size={13} />
-    {:else if prState === 'created' && hasUnpushed}
-      <GitPullRequestDraft size={13} />
-    {:else if prState === 'created'}
-      <GitPullRequestArrow size={13} />
-    {:else}
-      <GitPullRequestCreateArrow size={13} />
-    {/if}
-    <span>
-      {#if pushState === 'pushing'}
-        Pushing…
-      {:else if pushState === 'error'}
-        Push failed
-      {:else if prState === 'created' && hasUnpushed}
-        {pushAction === 'forcePush' || optionHeld ? 'Force push' : 'Push changes'}
-      {:else if prState === 'created'}
-        {#if prStatusText}
-          {prStatusText}
-        {:else}
-          View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
-        {/if}
-      {:else if prState === 'creating'}
-        Creating PR…
-      {:else if prState === 'error'}
-        PR failed
-      {:else}
-        {optionHeld ? 'Create draft PR' : 'Create PR'}
-      {/if}
-    </span>
-    {#if prStatusStale}
-      <span class="pr-status-stale" title="PR status may be outdated">!</span>
-    {:else if prStatusIndicator}
-      <span class="pr-status-indicator {prStatusIndicator}"></span>
-    {/if}
-  </button>
+  <Tooltip.Root>
+    <Tooltip.Trigger>
+      {#snippet child({ props })}
+        <span {...props} class="inline-flex">
+          <Button
+            variant="outline"
+            size="sm"
+            class={[
+              'gap-1.5 whitespace-nowrap text-xs font-medium [&_svg]:!size-3.5',
+              prState === 'creating' && 'border-[var(--border-muted)]',
+              (prState === 'error' || pushState === 'error') &&
+                'border-destructive text-destructive hover:bg-[var(--ui-danger-bg)] hover:text-destructive',
+              pushState === 'pushing' && 'cursor-default border-[var(--border-muted)]',
+              prState === 'created' &&
+                prStatusState === 'MERGED' &&
+                '[&_svg]:text-[var(--status-added)]',
+            ]}
+            onclick={handlePrButtonClick}
+            disabled={showPushErrorDialog || showForcePushDialog || showPrErrorDialog}
+          >
+            {#if pushState === 'pushing'}
+              <Spinner size={13} />
+            {:else if pushState === 'error'}
+              <AlertCircle size={13} />
+            {:else if prState === 'creating'}
+              <Spinner size={13} />
+            {:else if prState === 'error'}
+              <AlertCircle size={13} />
+            {:else if prState === 'created' && prStatusState === 'MERGED'}
+              <GitMerge size={13} />
+            {:else if prState === 'created' && hasUnpushed}
+              <GitPullRequestDraft size={13} />
+            {:else if prState === 'created'}
+              <GitPullRequestArrow size={13} />
+            {:else}
+              <GitPullRequestCreateArrow size={13} />
+            {/if}
+            <span>
+              {#if pushState === 'pushing'}
+                Pushing…
+              {:else if pushState === 'error'}
+                Push failed
+              {:else if prState === 'created' && hasUnpushed}
+                {pushAction === 'forcePush' || optionHeld ? 'Force push' : 'Push changes'}
+              {:else if prState === 'created'}
+                {#if prStatusText}
+                  {prStatusText}
+                {:else}
+                  View PR{#if branch.prNumber}&nbsp;#{branch.prNumber}{/if}
+                {/if}
+              {:else if prState === 'creating'}
+                Creating PR…
+              {:else if prState === 'error'}
+                PR failed
+              {:else}
+                {optionHeld ? 'Create draft PR' : 'Create PR'}
+              {/if}
+            </span>
+            {#if prStatusStale}
+              <Tooltip.Root>
+                <Tooltip.Trigger>
+                  {#snippet child({ props })}
+                    <span class="pr-status-stale" {...props}>!</span>
+                  {/snippet}
+                </Tooltip.Trigger>
+                <Tooltip.Content>PR status may be outdated</Tooltip.Content>
+              </Tooltip.Root>
+            {:else if prStatusIndicator}
+              <span class="pr-status-indicator {prStatusIndicator}"></span>
+            {/if}
+          </Button>
+        </span>
+      {/snippet}
+    </Tooltip.Trigger>
+    <Tooltip.Content>{prButtonTitle}</Tooltip.Content>
+  </Tooltip.Root>
 {/if}
 
-{#if showPrErrorDialog}
-  <ConfirmDialog
-    title="PR Creation Failed"
-    message={prError ?? 'An unknown error occurred while creating the PR.'}
-    confirmLabel="Retry"
-    onConfirm={handlePrErrorRetry}
-    onCancel={handlePrErrorClose}
-  />
-{/if}
+<AlertDialog.Root bind:open={showPrErrorDialog}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>PR Creation Failed</AlertDialog.Title>
+      <AlertDialog.Description class="max-h-[42vh] overflow-auto whitespace-pre-line">
+        {prError ?? 'An unknown error occurred while creating the PR.'}
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel onclick={handlePrErrorClose}>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action variant="outline" onclick={handlePrErrorRetry}>Retry</AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
 
-{#if showPushErrorDialog}
-  <ConfirmDialog
-    title="Push Failed"
-    message={pushError ?? 'An unknown error occurred while pushing.'}
-    confirmLabel="Retry"
-    onConfirm={handlePushErrorRetry}
-    onCancel={handlePushErrorClose}
-  />
-{/if}
+<AlertDialog.Root bind:open={showPushErrorDialog}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Push Failed</AlertDialog.Title>
+      <AlertDialog.Description class="max-h-[42vh] overflow-auto whitespace-pre-line">
+        {pushError ?? 'An unknown error occurred while pushing.'}
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel onclick={handlePushErrorClose}>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action variant="outline" onclick={handlePushErrorRetry}>
+        Retry
+      </AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
 
-{#if showForcePushDialog}
-  <ConfirmDialog
-    title="Push Rejected"
-    message="The remote branch has commits that would be lost. Do you want to force push? This will overwrite the remote branch with your local version."
-    confirmLabel="Force Push"
-    danger
-    onConfirm={handleForcePushConfirm}
-    onCancel={handleForcePushCancel}
-  />
-{/if}
+<AlertDialog.Root bind:open={showForcePushDialog}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Push Rejected</AlertDialog.Title>
+      <AlertDialog.Description>
+        The remote branch has commits that would be lost. Do you want to force push? This will
+        overwrite the remote branch with your local version.
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel onclick={handleForcePushCancel}>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action variant="destructive" onclick={handleForcePushConfirm}>
+        Force Push
+      </AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
 
 <style>
-  /* PR button */
-  .pr-btn {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    padding: 4px 10px;
-    background: none;
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    color: var(--text-muted);
-    font-size: var(--size-xs);
-    font-weight: 500;
-    cursor: pointer;
-    transition:
-      color 0.15s,
-      border-color 0.15s,
-      background-color 0.15s;
-    white-space: nowrap;
-  }
-
-  .pr-btn:hover:not(:disabled) {
-    color: var(--text-primary);
-    border-color: var(--border-muted);
-    background: var(--bg-hover);
-  }
-
-  .pr-btn:disabled {
-    cursor: default;
-  }
-
-  .pr-btn.creating {
-    color: var(--text-muted);
-    border-color: var(--border-muted);
-  }
-
-  .pr-btn.error {
-    color: var(--ui-danger);
-    border-color: var(--ui-danger);
-  }
-
-  .pr-btn.error:hover {
-    background: var(--ui-danger-bg);
-  }
-
-  .pr-btn.created {
-    color: var(--text-muted);
-    border-color: var(--border-subtle);
-  }
-
-  .pr-btn.created:hover {
-    color: var(--text-primary);
-    border-color: var(--border-muted);
-    background: var(--bg-hover);
-  }
-
-  .pr-btn.created :global(svg) {
-    color: var(--text-muted);
-  }
-
-  .pr-btn.created:hover :global(svg) {
-    color: var(--text-primary);
-  }
-
-  .pr-btn.pushing {
-    color: var(--text-muted);
-    border-color: var(--border-muted);
-    cursor: default;
-  }
-
-  .pr-btn.merged :global(svg) {
-    color: var(--status-added);
-  }
-
-  .pr-btn :global(svg) {
-    flex-shrink: 0;
-  }
-
   /* PR status indicator circle */
   .pr-status-indicator {
     width: 6px;

@@ -10,6 +10,8 @@
     githubRepo="block/mark" subpath="ui" → "block/mark/" muted + "ui" primary
 -->
 <script lang="ts">
+  import * as Tooltip from '$lib/components/ui/tooltip';
+
   interface Props {
     githubRepo: string;
     subpath?: string | null;
@@ -36,11 +38,18 @@
   let fullLabel = $derived(subpath ? `${githubRepo}/${subpath}` : githubRepo);
 </script>
 
-<span class="repo-label" title={fullLabel}
-  >{#if prefix}<span class="repo-label-prefix">{prefix}</span>{/if}<span class="repo-label-emphasis"
-    >{emphasis}</span
-  ></span
->
+<Tooltip.Root>
+  <Tooltip.Trigger>
+    {#snippet child({ props })}
+      <span class="repo-label" {...props}
+        >{#if prefix}<span class="repo-label-prefix">{prefix}</span>{/if}<span
+          class="repo-label-emphasis">{emphasis}</span
+        ></span
+      >
+    {/snippet}
+  </Tooltip.Trigger>
+  <Tooltip.Content>{fullLabel}</Tooltip.Content>
+</Tooltip.Root>
 
 <style>
   .repo-label {

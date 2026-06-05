@@ -1,6 +1,14 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { Keyboard, Pencil, RotateCcw, Save, X } from 'lucide-svelte';
+  import AlertCircle from '@lucide/svelte/icons/alert-circle';
+  import Keyboard from '@lucide/svelte/icons/keyboard';
+  import Pencil from '@lucide/svelte/icons/pencil';
+  import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
+  import Save from '@lucide/svelte/icons/save';
+  import X from '@lucide/svelte/icons/x';
+  import { Button } from '$lib/components/ui/button';
+  import { Badge } from '$lib/components/ui/badge';
+  import * as Alert from '$lib/components/ui/alert';
   import {
     formatShortcutKeys,
     getAllShortcuts,
@@ -253,14 +261,15 @@
       <p>Customize global shortcuts for settings, search, and text size controls.</p>
     </div>
 
-    <button
-      class="reset-all-btn"
+    <Button
+      variant="outline"
+      size="sm"
       disabled={busy || !hasAnyCustomBindings(shortcutGroups)}
       onclick={handleResetAll}
     >
       <RotateCcw size={14} />
       Reset all
-    </button>
+    </Button>
   </div>
 
   <div class="panel-body">
@@ -270,7 +279,10 @@
       <div class="empty-state">No keyboard shortcuts are currently registered.</div>
     {:else}
       {#if error}
-        <div class="error-banner">{error}</div>
+        <Alert.Root variant="destructive">
+          <AlertCircle />
+          <Alert.Description>{error}</Alert.Description>
+        </Alert.Root>
       {/if}
 
       <div class="capture-hint">
@@ -279,7 +291,10 @@
       </div>
 
       {#if captureError}
-        <div class="error-banner">{captureError}</div>
+        <Alert.Root variant="destructive">
+          <AlertCircle />
+          <Alert.Description>{captureError}</Alert.Description>
+        </Alert.Root>
       {/if}
 
       {#each shortcutGroups as group (group.id)}
@@ -294,7 +309,7 @@
                 <div class="shortcut-label-row">
                   <span class="shortcut-description">{shortcut.description}</span>
                   {#if customized}
-                    <span class="custom-badge">Custom</span>
+                    <Badge variant="outline">Custom</Badge>
                   {/if}
                 </div>
 
@@ -333,35 +348,38 @@
 
               <div class="shortcut-actions">
                 {#if editing}
-                  <button
-                    class="action-btn primary"
+                  <Button
+                    variant="outline"
+                    size="xs"
                     onclick={confirmBinding}
                     disabled={busy || !capturedBinding || !!conflictId}
                   >
                     <Save size={12} />
                     Save
-                  </button>
-                  <button class="action-btn" onclick={cancelEditing} disabled={busy}>
+                  </Button>
+                  <Button variant="ghost" size="xs" onclick={cancelEditing} disabled={busy}>
                     <X size={12} />
                     Cancel
-                  </button>
+                  </Button>
                 {:else}
-                  <button
-                    class="action-btn"
+                  <Button
+                    variant="ghost"
+                    size="xs"
                     onclick={() => startEditing(shortcut.id)}
                     disabled={busy}
                   >
                     <Pencil size={12} />
                     Edit
-                  </button>
-                  <button
-                    class="action-btn"
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="xs"
                     onclick={() => handleResetShortcut(shortcut.id)}
                     disabled={busy || !customized}
                   >
                     <RotateCcw size={12} />
                     Reset
-                  </button>
+                  </Button>
                 {/if}
               </div>
             </div>
@@ -495,53 +513,11 @@
     color: var(--text-primary);
   }
 
-  .custom-badge {
-    font-size: calc(var(--size-xs) - 1px);
-    color: var(--text-muted);
-    border: 1px solid var(--border-subtle);
-    border-radius: 999px;
-    padding: 2px 7px;
-    background: color-mix(in srgb, var(--bg-hover) 50%, transparent);
-  }
-
   .shortcut-actions {
     display: flex;
     align-items: center;
     gap: 6px;
     flex-shrink: 0;
-  }
-
-  .action-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    border: 1px solid var(--border-muted);
-    border-radius: 7px;
-    background: transparent;
-    color: var(--text-muted);
-    font-size: calc(var(--size-xs) - 1px);
-    padding: 6px 8px;
-    cursor: pointer;
-    transition:
-      color 0.1s,
-      border-color 0.1s,
-      background-color 0.1s;
-  }
-
-  .action-btn:hover:not(:disabled) {
-    color: var(--text-primary);
-    border-color: var(--border-emphasis);
-    background: color-mix(in srgb, var(--bg-hover) 45%, transparent);
-  }
-
-  .action-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .action-btn.primary {
-    border-color: color-mix(in srgb, var(--ui-accent) 65%, var(--border-muted));
-    color: var(--ui-accent);
   }
 
   .key-list {
@@ -592,44 +568,6 @@
     margin: -2px 2px 0;
     font-size: var(--size-xs);
     color: var(--ui-danger);
-  }
-
-  .error-banner {
-    border: 1px solid color-mix(in srgb, var(--ui-danger) 45%, transparent);
-    border-radius: 8px;
-    padding: 8px 10px;
-    color: var(--ui-danger);
-    font-size: var(--size-xs);
-    background: color-mix(in srgb, var(--ui-danger) 12%, transparent);
-  }
-
-  .reset-all-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 12px;
-    border: 1px solid var(--border-muted);
-    border-radius: 8px;
-    background: transparent;
-    color: var(--text-muted);
-    font-size: var(--size-sm);
-    cursor: pointer;
-    flex-shrink: 0;
-    transition:
-      color 0.1s,
-      border-color 0.1s,
-      background-color 0.1s;
-  }
-
-  .reset-all-btn:hover:not(:disabled) {
-    color: var(--text-primary);
-    border-color: var(--border-emphasis);
-    background: color-mix(in srgb, var(--bg-hover) 45%, transparent);
-  }
-
-  .reset-all-btn:disabled {
-    opacity: 0.55;
-    cursor: not-allowed;
   }
 
   @media (max-width: 920px) {

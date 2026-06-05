@@ -2,17 +2,17 @@
   import { onDestroy, onMount } from 'svelte';
   import { quintIn } from 'svelte/easing';
   import { fade } from 'svelte/transition';
-  import {
-    House,
-    Plus,
-    Cloud,
-    GitPullRequest,
-    GitPullRequestClosed,
-    GitPullRequestDraft,
-    GitBranch,
-    Sprout,
-    FolderGit2,
-  } from 'lucide-svelte';
+  import House from '@lucide/svelte/icons/house';
+  import Plus from '@lucide/svelte/icons/plus';
+  import Cloud from '@lucide/svelte/icons/cloud';
+  import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
+  import GitPullRequestClosed from '@lucide/svelte/icons/git-pull-request-closed';
+  import GitPullRequestDraft from '@lucide/svelte/icons/git-pull-request-draft';
+  import GitBranch from '@lucide/svelte/icons/git-branch';
+  import Sprout from '@lucide/svelte/icons/sprout';
+  import FolderGit2 from '@lucide/svelte/icons/folder-git-2';
+  import Mail from '@lucide/svelte/icons/mail';
+  import Trash2 from '@lucide/svelte/icons/trash-2';
   import type { Project, ProjectRepo, Branch, WorkspaceStatus, RepoHomeItem } from '../../types';
   import { goHome, navigation, selectProject, showAllRepos } from '../layout/navigation.svelte';
   import {
@@ -38,10 +38,12 @@
     SIDEBAR_MIN_WIDTH,
   } from './projectsSidebarState.svelte';
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
-  import ProjectContextMenu from './ProjectContextMenu.svelte';
   import SidebarPinnedRepo from './SidebarPinnedRepo.svelte';
   import * as commands from '../../api/commands';
+  import * as ContextMenu from '$lib/components/ui/context-menu';
   import { reposUiEnabled } from '../../featureFlags';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
 
   const devBranch = import.meta.env.VITE_DEV_BRANCH as string | undefined;
 
@@ -71,7 +73,6 @@
     onRemoveProject,
   }: Props = $props();
 
-  let projectMenu = $state<{ project: Project; x: number; y: number } | null>(null);
   let lastNavigationKey = `${navigation.activeView}:${navigation.selectedProjectId ?? ''}`;
 
   // ── Pinned repos ──
@@ -138,7 +139,6 @@
   }
 
   function openProject(projectId: string) {
-    closeProjectMenu();
     const status = getProjectStatus(
       projectId,
       deletingProjectNames,
@@ -149,24 +149,11 @@
   }
 
   function openAllProjects() {
-    closeProjectMenu();
     goHome();
   }
 
   function openNewProject() {
-    closeProjectMenu();
     window.dispatchEvent(new CustomEvent('staged:new-project'));
-  }
-
-  function closeProjectMenu() {
-    projectMenu = null;
-  }
-
-  function openProjectMenu(event: MouseEvent, project: Project, deleting: boolean) {
-    if (deleting || !onMarkProjectUnread || !onRemoveProject) return;
-    event.preventDefault();
-    event.stopPropagation();
-    projectMenu = { project, x: event.clientX, y: event.clientY };
   }
 
   function scrollIfActive(node: HTMLElement, active: boolean) {
@@ -312,7 +299,6 @@
   $effect(() => {
     const nextNavigationKey = `${navigation.activeView}:${navigation.selectedProjectId ?? ''}`;
     if (nextNavigationKey !== lastNavigationKey) {
-      closeProjectMenu();
       lastNavigationKey = nextNavigationKey;
     }
   });
@@ -340,17 +326,24 @@
       {:else}
         <div class="projects-list">
           {#if reposUiEnabled && pinnedRepos.length > 0}
-            <button
-              class="project-row all-repos-row"
-              class:active={navigation.showReposList}
-              onclick={showAllRepos}
-              title="View all repos"
-            >
-              <div class="row-main">
-                <FolderGit2 size={14} />
-                <span class="project-name">All Repos</span>
-              </div>
-            </button>
+            <Tooltip.Root>
+              <Tooltip.Trigger>
+                {#snippet child({ props })}
+                  <button
+                    {...props}
+                    class="project-row all-repos-row"
+                    class:active={navigation.showReposList}
+                    onclick={showAllRepos}
+                  >
+                    <div class="row-main">
+                      <FolderGit2 size={14} />
+                      <span class="project-name">All Repos</span>
+                    </div>
+                  </button>
+                {/snippet}
+              </Tooltip.Trigger>
+              <Tooltip.Content>View all repos</Tooltip.Content>
+            </Tooltip.Root>
 
             <div class="pinned-repos-list" role="list" aria-label="Pinned repos">
               {#each pinnedRepos as repo, index (repo.githubRepo + '\t' + repo.subpath)}
@@ -369,17 +362,25 @@
           {/if}
 
           {#if showAllProjectsRow}
-            <button
-              class="project-row all-projects-row"
-              class:active={navigation.selectedProjectId === null && !navigation.showReposList}
-              onclick={openAllProjects}
-              title="Show all projects"
-            >
-              <div class="row-main">
-                <House size={14} />
-                <span class="project-name">All Projects</span>
-              </div>
-            </button>
+            <Tooltip.Root>
+              <Tooltip.Trigger>
+                {#snippet child({ props })}
+                  <button
+                    {...props}
+                    class="project-row all-projects-row"
+                    class:active={navigation.selectedProjectId === null &&
+                      !navigation.showReposList}
+                    onclick={openAllProjects}
+                  >
+                    <div class="row-main">
+                      <House size={14} />
+                      <span class="project-name">All Projects</span>
+                    </div>
+                  </button>
+                {/snippet}
+              </Tooltip.Trigger>
+              <Tooltip.Content>Show all projects</Tooltip.Content>
+            </Tooltip.Root>
           {/if}
 
           {#if projects.length === 0}
@@ -402,108 +403,148 @@
                 .filter((b): b is NonNullable<typeof b> => Boolean(b))
                 .sort((a, b) => a.shortName.localeCompare(b.shortName))}
               {@const activity = projectActivity(sessionTypes, status.runActionPhase)}
-              <button
-                class="project-row"
-                use:scrollIfActive={navigation.selectedProjectId === project.id}
-                class:active={navigation.selectedProjectId === project.id}
-                class:deleting={status.kind === 'deleting'}
-                onclick={() => openProject(project.id)}
-                oncontextmenu={(event: MouseEvent) =>
-                  openProjectMenu(event, project, status.kind === 'deleting')}
-                disabled={status.kind === 'deleting'}
-                title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
-              >
-                <div class="row-main">
-                  {#if project.location === 'remote'}
-                    <Cloud size={14} class={cloudStatusClass(workspaceStatus)} />
-                  {:else if prStatus === 'merged'}
-                    <GitPullRequest size={14} class="pr-status-merged" />
-                  {:else if prStatus === 'checks_failing'}
-                    <GitPullRequest size={14} class="pr-status-checks-failing" />
-                  {:else if prStatus === 'open'}
-                    <GitPullRequest size={14} />
-                  {:else if prStatus === 'closed'}
-                    <GitPullRequestClosed size={14} />
-                  {:else if prStatus === 'conflict'}
-                    <GitPullRequestClosed size={14} class="pr-status-conflict" />
-                  {:else if projectHasCodeChanges(projectBranches.get(project.id) || [])}
-                    <GitPullRequestDraft size={14} class="pr-status-draft" />
-                  {:else}
-                    <Sprout size={14} class="pr-status-clean" />
-                  {/if}
-                  <div class="row-text">
-                    <span class="project-name">{projectDisplayName(project)}</span>
-                    <div class="row-meta">
-                      {#if badges.length > 0}
-                        <span class="badge-row">
-                          {#each badges as badge}
-                            <RepoBadge shortName={badge.shortName} hue={badge.hue} small />
-                          {/each}
-                        </span>
-                        {#if activity}
-                          <span class="activity-separator">&middot;</span>
-                          <span class="activity-text">{activity}</span>
-                        {/if}
+              <ContextMenu.Root>
+                <ContextMenu.Trigger
+                  class="contents"
+                  disabled={status.kind === 'deleting' || !onMarkProjectUnread || !onRemoveProject}
+                >
+                  <button
+                    class="project-row"
+                    use:scrollIfActive={navigation.selectedProjectId === project.id}
+                    class:active={navigation.selectedProjectId === project.id}
+                    class:deleting={status.kind === 'deleting'}
+                    onclick={() => openProject(project.id)}
+                    disabled={status.kind === 'deleting'}
+                    title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
+                  >
+                    <div class="row-main">
+                      {#if project.location === 'remote'}
+                        <Cloud size={14} class={cloudStatusClass(workspaceStatus)} />
+                      {:else if prStatus === 'merged'}
+                        <GitPullRequest size={14} class="pr-status-merged" />
+                      {:else if prStatus === 'checks_failing'}
+                        <GitPullRequest size={14} class="pr-status-checks-failing" />
+                      {:else if prStatus === 'open'}
+                        <GitPullRequest size={14} />
+                      {:else if prStatus === 'closed'}
+                        <GitPullRequestClosed size={14} />
+                      {:else if prStatus === 'conflict'}
+                        <GitPullRequestClosed size={14} class="pr-status-conflict" />
+                      {:else if projectHasCodeChanges(projectBranches.get(project.id) || [])}
+                        <GitPullRequestDraft size={14} class="pr-status-draft" />
                       {:else}
-                        <span class="repo-count"
-                          >{projectSubtitle(repoCount, sessionTypes, status.runActionPhase)}</span
+                        <Sprout size={14} class="pr-status-clean" />
+                      {/if}
+                      <div class="row-text">
+                        <span class="project-name">{projectDisplayName(project)}</span>
+                        <div class="row-meta">
+                          {#if badges.length > 0}
+                            <span class="badge-row">
+                              {#each badges as badge}
+                                <RepoBadge shortName={badge.shortName} hue={badge.hue} small />
+                              {/each}
+                            </span>
+                            {#if activity}
+                              <span class="activity-separator">&middot;</span>
+                              <span class="activity-text">{activity}</span>
+                            {/if}
+                          {:else}
+                            <span class="repo-count"
+                              >{projectSubtitle(
+                                repoCount,
+                                sessionTypes,
+                                status.runActionPhase
+                              )}</span
+                            >
+                          {/if}
+                        </div>
+                      </div>
+                    </div>
+                    <div class="row-status">
+                      {#if status.runActionPhase === 'running' && status.kind === 'running'}
+                        <span
+                          class="status-running"
+                          in:fade={{ duration: 300, delay: 150 }}
+                          out:fade={{ duration: 150 }}
+                        >
+                          <SineWave size={12} />
+                          <Spinner size={12} />
+                        </span>
+                      {:else if status.runActionPhase === 'running'}
+                        <span
+                          class="status-running"
+                          in:fade={{ duration: 300, delay: 150 }}
+                          out:fade={{ duration: 150 }}
+                        >
+                          <SineWave size={12} />
+                        </span>
+                      {:else if status.kind === 'runAction' || status.kind === 'running'}
+                        <span
+                          class="status-running"
+                          in:fade={{ duration: 300, delay: 150 }}
+                          out:fade={{ duration: 150 }}
+                        >
+                          <Spinner size={12} />
+                        </span>
+                      {:else if status.kind === 'unread'}
+                        <span
+                          class="status-unread-dot"
+                          aria-label="Unread updates"
+                          in:fade={{ duration: 300, delay: 150 }}
+                          out:fade={{ duration: 150 }}
+                        ></span>
+                      {:else if status.kind === 'deleting'}
+                        <span
+                          class="status-deleting"
+                          in:fade={{ duration: 300, delay: 150 }}
+                          out:fade={{ duration: 150 }}>Deleting…</span
                         >
                       {/if}
                     </div>
-                  </div>
-                </div>
-                <div class="row-status">
-                  {#if status.runActionPhase === 'running' && status.kind === 'running'}
-                    <span
-                      class="status-running"
-                      in:fade={{ duration: 300, delay: 150 }}
-                      out:fade={{ duration: 150 }}
+                  </button>
+                </ContextMenu.Trigger>
+                {#if onMarkProjectUnread && onRemoveProject}
+                  <ContextMenu.Content class="min-w-[172px]">
+                    <ContextMenu.Item
+                      disabled={status.kind === 'deleting'}
+                      onSelect={() => onMarkProjectUnread!(project)}
                     >
-                      <SineWave size={12} />
-                      <Spinner size={12} />
-                    </span>
-                  {:else if status.runActionPhase === 'running'}
-                    <span
-                      class="status-running"
-                      in:fade={{ duration: 300, delay: 150 }}
-                      out:fade={{ duration: 150 }}
+                      <Mail size={14} /> Mark as Unread
+                    </ContextMenu.Item>
+                    <ContextMenu.Item
+                      variant="destructive"
+                      disabled={status.kind === 'deleting'}
+                      onSelect={() => onRemoveProject!(project)}
                     >
-                      <SineWave size={12} />
-                    </span>
-                  {:else if status.kind === 'runAction' || status.kind === 'running'}
-                    <span
-                      class="status-running"
-                      in:fade={{ duration: 300, delay: 150 }}
-                      out:fade={{ duration: 150 }}
-                    >
-                      <Spinner size={12} />
-                    </span>
-                  {:else if status.kind === 'unread'}
-                    <span
-                      class="status-unread-dot"
-                      aria-label="Unread updates"
-                      in:fade={{ duration: 300, delay: 150 }}
-                      out:fade={{ duration: 150 }}
-                    ></span>
-                  {:else if status.kind === 'deleting'}
-                    <span
-                      class="status-deleting"
-                      in:fade={{ duration: 300, delay: 150 }}
-                      out:fade={{ duration: 150 }}>Deleting…</span
-                    >
-                  {/if}
-                </div>
-              </button>
+                      <Trash2 size={14} /> Remove Project
+                    </ContextMenu.Item>
+                  </ContextMenu.Content>
+                {/if}
+              </ContextMenu.Root>
             {/each}
           {/if}
-          <button
-            class="new-project-button list-new-project-button"
-            onclick={openNewProject}
-            title={viewport.showShortcutHints ? 'New project (⌘N)' : 'New project'}
-          >
-            <span class="plus-icon"><Plus size={12} /></span>
-            New project
-          </button>
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="ghost"
+                  class="group h-auto w-full justify-start gap-2.5 px-2.5 py-2 font-medium text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground"
+                  onclick={openNewProject}
+                >
+                  <span
+                    class="flex size-4 shrink-0 items-center justify-center rounded-full bg-[var(--border-muted)] transition-colors group-hover:bg-[var(--border-emphasis)]"
+                  >
+                    <Plus size={12} />
+                  </span>
+                  New project
+                </Button>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>
+              {viewport.showShortcutHints ? 'New project (⌘N)' : 'New project'}
+            </Tooltip.Content>
+          </Tooltip.Root>
         </div>
       {/if}
     </div>
@@ -517,17 +558,6 @@
       onkeydown={handleResizeHandleKeydown}
     ></button>
   </aside>
-{/if}
-
-{#if projectMenu && onMarkProjectUnread && onRemoveProject}
-  {@const menuProject = projectMenu.project}
-  <ProjectContextMenu
-    x={projectMenu.x}
-    y={projectMenu.y}
-    onMarkAsUnread={() => onMarkProjectUnread(menuProject)}
-    onRemoveProject={() => onRemoveProject(menuProject)}
-    onClose={closeProjectMenu}
-  />
 {/if}
 
 <style>
@@ -586,44 +616,6 @@
     min-width: 0;
   }
 
-  .plus-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 16px;
-    height: 16px;
-    border: none;
-    border-radius: 50%;
-    background-color: var(--border-muted);
-    flex-shrink: 0;
-  }
-
-  .new-project-button {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    width: 100%;
-    border: none;
-    border-radius: 8px;
-    background-color: transparent;
-    color: var(--text-primary);
-    padding: 8px 10px;
-    font-size: var(--size-sm);
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .new-project-button:hover {
-    color: var(--text-primary);
-    background-color: var(--ui-selection);
-  }
-
-  .new-project-button:hover .plus-icon {
-    background-color: var(--border-emphasis);
-  }
-
-  .new-project-button:focus-visible,
   .project-row:focus-visible {
     outline: 2px solid var(--ui-accent);
     outline-offset: -1px;

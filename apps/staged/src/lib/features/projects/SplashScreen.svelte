@@ -7,12 +7,13 @@
   the form slides in below the headline.
 -->
 <script lang="ts">
-  import { X } from 'lucide-svelte';
+  import X from '@lucide/svelte/icons/x';
   import type { Project } from '../../types';
   import GitTreeAnimation from '../../shared/GitTreeAnimation.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
   import NewProjectForm from './NewProjectForm.svelte';
   import { viewport } from '../../shared/viewport.svelte';
+  import { Button } from '$lib/components/ui/button';
 
   interface Props {
     onCreated: (project: Project) => void;
@@ -111,7 +112,13 @@
 
   {#if !showForm}
     <div class="splash-actions">
-      <button class="splash-pill" onclick={openForm}> Create your first project </button>
+      <Button
+        variant="outline"
+        class="h-auto rounded-full border-transparent bg-[var(--bg-elevated)] px-9 py-3 text-sm font-medium text-foreground shadow-none transition-all hover:-translate-y-px hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground active:translate-y-0"
+        onclick={openForm}
+      >
+        Create your first project
+      </Button>
       {#if viewport.showShortcutHints}
         <span class="splash-hint">or press <kbd>⌘ N</kbd> anytime</span>
       {/if}
@@ -121,9 +128,14 @@
     </div>
   {:else}
     <div class="splash-close">
-      <button class="close-circle" onclick={closeForm}>
+      <Button
+        variant="outline"
+        size="icon"
+        class="size-9 rounded-full border-[var(--border-muted)] bg-transparent text-muted-foreground shadow-none hover:border-[var(--border-emphasis)] hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-[18px]"
+        onclick={closeForm}
+      >
         <X size={18} />
-      </button>
+      </Button>
     </div>
   {/if}
 </div>
@@ -312,31 +324,6 @@
     z-index: 1;
   }
 
-  .splash-pill {
-    padding: 12px 36px;
-    border-radius: 999px;
-    border: 1px solid transparent;
-    background: var(--bg-elevated);
-    color: var(--text-primary);
-    font-size: var(--size-sm);
-    font-weight: 500;
-    cursor: pointer;
-    transition:
-      background-color 0.2s ease,
-      border-color 0.2s ease,
-      transform 0.15s ease;
-  }
-
-  .splash-pill:hover {
-    background: var(--bg-hover);
-    border-color: var(--border-muted);
-    transform: translateY(-1px);
-  }
-
-  .splash-pill:active {
-    transform: translateY(0);
-  }
-
   .splash-hint {
     color: var(--text-faint);
     font-size: var(--size-xs);
@@ -370,29 +357,6 @@
     z-index: 1;
   }
 
-  .close-circle {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 36px;
-    height: 36px;
-    border-radius: 50%;
-    border: 1px solid var(--border-muted);
-    background: transparent;
-    color: var(--text-muted);
-    cursor: pointer;
-    transition:
-      border-color 0.15s ease,
-      color 0.15s ease,
-      background-color 0.15s ease;
-  }
-
-  .close-circle:hover {
-    border-color: var(--border-emphasis);
-    color: var(--text-primary);
-    background-color: var(--bg-hover);
-  }
-
   @media (max-width: 640px) {
     .splash {
       padding: 24px 16px 0;
@@ -417,13 +381,13 @@
       padding-bottom: 20px;
     }
 
-    .splash-pill {
+    .splash-actions :global(button) {
       min-height: 44px;
       max-width: calc(100vw - 32px);
       padding: 12px 20px;
     }
 
-    .close-circle {
+    .splash-close :global(button) {
       width: 44px;
       height: 44px;
     }

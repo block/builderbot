@@ -5,9 +5,14 @@
   Displays match counter and navigation buttons.
 -->
 <script lang="ts">
-  import { ChevronUp, ChevronDown, X } from 'lucide-svelte';
+  import ChevronUp from '@lucide/svelte/icons/chevron-up';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import X from '@lucide/svelte/icons/x';
   import { tick } from 'svelte';
   import { viewport } from './viewport.svelte';
+  import { Input } from '$lib/components/ui/input';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
 
   interface Props {
     visible: boolean;
@@ -22,7 +27,7 @@
   let { visible, matchCount, currentIndex, onSearch, onNext, onPrevious, onClose }: Props =
     $props();
 
-  let inputEl = $state<HTMLInputElement>();
+  let inputEl = $state<HTMLInputElement | null>(null);
   let query = $state('');
 
   // Auto-focus input when search becomes visible
@@ -61,40 +66,73 @@
 
 {#if visible}
   <div class="search-bar">
-    <input
-      bind:this={inputEl}
+    <Input
+      bind:ref={inputEl}
       bind:value={query}
       type="text"
-      class="search-input"
       placeholder="Search..."
       onkeydown={handleKeydown}
+      class="border-0 bg-transparent shadow-none px-0 py-0 h-auto min-h-0 focus-visible:ring-0 focus-visible:border-0 md:text-base w-[200px]"
     />
     {#if counterText}
       <span class="match-counter">{counterText}</span>
     {/if}
-    <button
-      class="search-btn"
-      onclick={onPrevious}
-      disabled={matchCount === 0}
-      title={viewport.showShortcutHints ? 'Previous match (Shift+Enter)' : 'Previous match'}
-    >
-      <ChevronUp size={14} />
-    </button>
-    <button
-      class="search-btn"
-      onclick={onNext}
-      disabled={matchCount === 0}
-      title={viewport.showShortcutHints ? 'Next match (Enter)' : 'Next match'}
-    >
-      <ChevronDown size={14} />
-    </button>
-    <button
-      class="search-btn close-search"
-      onclick={onClose}
-      title={viewport.showShortcutHints ? 'Close search (Esc)' : 'Close search'}
-    >
-      <X size={14} />
-    </button>
+    <Tooltip.Root>
+      <Tooltip.Trigger>
+        {#snippet child({ props })}
+          <Button
+            {...props}
+            variant="ghost"
+            size="icon-xs"
+            class="[&_svg]:size-3.5"
+            onclick={onPrevious}
+            disabled={matchCount === 0}
+          >
+            <ChevronUp size={14} />
+          </Button>
+        {/snippet}
+      </Tooltip.Trigger>
+      <Tooltip.Content>
+        {viewport.showShortcutHints ? 'Previous match (Shift+Enter)' : 'Previous match'}
+      </Tooltip.Content>
+    </Tooltip.Root>
+    <Tooltip.Root>
+      <Tooltip.Trigger>
+        {#snippet child({ props })}
+          <Button
+            {...props}
+            variant="ghost"
+            size="icon-xs"
+            class="[&_svg]:size-3.5"
+            onclick={onNext}
+            disabled={matchCount === 0}
+          >
+            <ChevronDown size={14} />
+          </Button>
+        {/snippet}
+      </Tooltip.Trigger>
+      <Tooltip.Content>
+        {viewport.showShortcutHints ? 'Next match (Enter)' : 'Next match'}
+      </Tooltip.Content>
+    </Tooltip.Root>
+    <Tooltip.Root>
+      <Tooltip.Trigger>
+        {#snippet child({ props })}
+          <Button
+            {...props}
+            variant="ghost"
+            size="icon-xs"
+            class="ml-1 [&_svg]:size-3.5"
+            onclick={onClose}
+          >
+            <X size={14} />
+          </Button>
+        {/snippet}
+      </Tooltip.Trigger>
+      <Tooltip.Content>
+        {viewport.showShortcutHints ? 'Close search (Esc)' : 'Close search'}
+      </Tooltip.Content>
+    </Tooltip.Root>
   </div>
 {/if}
 
@@ -114,54 +152,11 @@
     z-index: 10;
   }
 
-  .search-input {
-    background: transparent;
-    border: none;
-    outline: none;
-    font-size: var(--size-md);
-    color: var(--text-primary);
-    width: 200px;
-    font-family: inherit;
-  }
-
-  .search-input::placeholder {
-    color: var(--text-faint);
-  }
-
   .match-counter {
     font-size: var(--size-xs);
     color: var(--text-muted);
     white-space: nowrap;
     min-width: 60px;
     text-align: center;
-  }
-
-  .search-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 4px;
-    background: none;
-    border: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    border-radius: 4px;
-    transition:
-      background-color 0.1s,
-      color 0.1s;
-  }
-
-  .search-btn:hover:not(:disabled) {
-    background: var(--bg-hover);
-    color: var(--text-primary);
-  }
-
-  .search-btn:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-  }
-
-  .close-search {
-    margin-left: 4px;
   }
 </style>

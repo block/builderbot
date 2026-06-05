@@ -8,9 +8,11 @@
   - Selecting a branch uses its name directly
 -->
 <script lang="ts">
-  import { GitPullRequest, GitBranch } from 'lucide-svelte';
+  import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
+  import GitBranch from '@lucide/svelte/icons/git-branch';
   import type { PullRequest, BranchRef } from '../../types';
   import * as commands from '../../api/commands';
+  import { Input } from '$lib/components/ui/input';
 
   interface PickerItem {
     kind: 'pr' | 'branch';
@@ -62,7 +64,7 @@
   let loading = $state(false);
   let showDropdown = $state(false);
   let highlightedIndex = $state(-1);
-  let inputEl: HTMLInputElement | undefined = $state();
+  let inputEl: HTMLInputElement | null = $state(null);
   /** Generation counter to discard stale async responses when repo changes rapidly. */
   let fetchGeneration = 0;
   /** Repo slug whose data is already loaded — prevents redundant re-fetch after fork switch. */
@@ -384,9 +386,9 @@
 
 <div class="branch-picker-wrapper">
   <div class="input-container">
-    <input
-      bind:this={inputEl}
-      class="branch-input"
+    <Input
+      bind:ref={inputEl}
+      class="min-h-[42px] rounded-[10px] bg-background px-3.5 py-2.5 text-base"
       type="text"
       bind:value
       oninput={handleInput}
@@ -455,33 +457,6 @@
     position: relative;
     display: flex;
     align-items: center;
-  }
-
-  .branch-input {
-    width: 100%;
-    min-height: 42px;
-    border: 1.5px solid var(--border-muted);
-    background: transparent;
-    color: var(--text-primary);
-    border-radius: 10px;
-    padding: 10px 14px;
-    font-size: var(--size-md);
-    font-family: inherit;
-    outline: none;
-    transition: border-color 0.15s ease;
-    box-sizing: border-box;
-  }
-
-  .branch-input:focus {
-    border-color: var(--ui-accent);
-  }
-
-  .branch-input::placeholder {
-    color: var(--text-faint);
-  }
-
-  .branch-input:disabled {
-    opacity: 0.6;
   }
 
   .suggestions-dropdown {

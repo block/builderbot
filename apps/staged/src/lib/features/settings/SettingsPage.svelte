@@ -1,11 +1,17 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { ArrowLeft, FolderGit2, Keyboard, Settings2, Stethoscope } from 'lucide-svelte';
+  import ArrowLeft from '@lucide/svelte/icons/arrow-left';
+  import FolderGit2 from '@lucide/svelte/icons/folder-git-2';
+  import Keyboard from '@lucide/svelte/icons/keyboard';
+  import Settings2 from '@lucide/svelte/icons/settings-2';
+  import Stethoscope from '@lucide/svelte/icons/stethoscope';
   import { closeSettings, navigation } from '../layout/navigation.svelte';
   import ActionsSettingsPanel from './ActionsSettingsPanel.svelte';
   import DoctorSettingsPanel from './DoctorSettingsPanel.svelte';
   import GeneralSettingsPanel from './GeneralSettingsPanel.svelte';
   import KeyboardSettingsPanel from './KeyboardSettingsPanel.svelte';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
   import { isTauri } from '../../transport';
 
   let appVersion = $state(__APP_VERSION__);
@@ -28,10 +34,17 @@
 
 <div class="settings-page">
   <header class="settings-header">
-    <button class="back-btn" onclick={handleBack} title="Back to workspace">
-      <ArrowLeft size={14} />
-      Back
-    </button>
+    <Tooltip.Root>
+      <Tooltip.Trigger>
+        {#snippet child({ props })}
+          <Button {...props} variant="ghost" size="sm" onclick={handleBack}>
+            <ArrowLeft size={14} />
+            Back
+          </Button>
+        {/snippet}
+      </Tooltip.Trigger>
+      <Tooltip.Content>Back to workspace</Tooltip.Content>
+    </Tooltip.Root>
     <div class="header-text">
       <h1>Settings</h1>
       <p class="header-meta">v{appVersion}</p>
@@ -126,30 +139,6 @@
     padding: 14px 16px;
     border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 60%, transparent);
     background: color-mix(in srgb, var(--bg-chrome) 82%, transparent);
-  }
-
-  .back-btn {
-    border: 1px solid transparent;
-    border-radius: 8px;
-    background: transparent;
-    color: var(--text-muted);
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 9px;
-    cursor: pointer;
-    flex-shrink: 0;
-    font-size: var(--size-sm);
-    transition:
-      color 0.12s ease,
-      background-color 0.12s ease,
-      border-color 0.12s ease;
-  }
-
-  .back-btn:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover);
-    border-color: color-mix(in srgb, var(--border-subtle) 60%, transparent);
   }
 
   .header-text {

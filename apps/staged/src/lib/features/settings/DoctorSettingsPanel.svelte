@@ -1,10 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { RefreshCw, Stethoscope, ClipboardCopy, Check } from 'lucide-svelte';
+  import RefreshCw from '@lucide/svelte/icons/refresh-cw';
+  import Stethoscope from '@lucide/svelte/icons/stethoscope';
+  import ClipboardCopy from '@lucide/svelte/icons/clipboard-copy';
+  import Check from '@lucide/svelte/icons/check';
   import Spinner from '../../shared/Spinner.svelte';
   import DoctorCheckRow from '../doctor/DoctorCheckRow.svelte';
   import { doctorState, runChecks, formatDebugReport } from '../doctor/doctor.svelte';
   import { refreshProviders } from '../agents/agent.svelte';
+  import { Button } from '$lib/components/ui/button';
 
   let mounted = true;
 
@@ -58,7 +62,7 @@
 
     <div class="header-actions">
       {#if doctorState.report && !doctorState.loading}
-        <button class="refresh-btn" onclick={copyDebugInfo}>
+        <Button variant="outline" size="sm" onclick={copyDebugInfo}>
           {#if copied}
             <Check size={14} />
             Copied
@@ -66,14 +70,14 @@
             <ClipboardCopy size={14} />
             Copy details
           {/if}
-        </button>
+        </Button>
       {/if}
 
       {#if !doctorState.loading}
-        <button class="refresh-btn" onclick={runChecksAndRefresh}>
+        <Button variant="outline" size="sm" onclick={runChecksAndRefresh}>
           <RefreshCw size={14} />
           Re-run
-        </button>
+        </Button>
       {/if}
     </div>
   </div>
@@ -203,35 +207,6 @@
     align-items: center;
     gap: 8px;
     flex-shrink: 0;
-  }
-
-  .refresh-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 12px;
-    border: 1px solid var(--border-muted);
-    border-radius: 8px;
-    background: transparent;
-    color: var(--text-muted);
-    font-size: var(--size-sm);
-    cursor: pointer;
-    flex-shrink: 0;
-    transition:
-      color 0.1s,
-      border-color 0.1s,
-      background-color 0.1s;
-  }
-
-  .refresh-btn:hover:not(:disabled) {
-    color: var(--text-primary);
-    border-color: var(--border-emphasis);
-    background: color-mix(in srgb, var(--bg-hover) 45%, transparent);
-  }
-
-  .refresh-btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
   }
 
   @media (max-width: 920px) {

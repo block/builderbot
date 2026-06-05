@@ -7,8 +7,14 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy, untrack } from 'svelte';
-  import { Bot, Check, X, Circle, Minus } from 'lucide-svelte';
+  import Bot from '@lucide/svelte/icons/bot';
+  import Check from '@lucide/svelte/icons/check';
+  import X from '@lucide/svelte/icons/x';
+  import Circle from '@lucide/svelte/icons/circle';
+  import Minus from '@lucide/svelte/icons/minus';
   import Spinner from '../../shared/Spinner.svelte';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
   import { listenToEvent, type UnlistenFn } from '../../transport';
   import type { PipelineExecution, PipelineStepStatus, PipelineStepPayload } from '../../types';
   import { formatPipelineStepDuration } from './pipelineDuration';
@@ -112,36 +118,44 @@
 <div class="pipeline-steps">
   {#each steps as step, idx}
     <div class="step" class:expanded={expandedSteps.has(idx)}>
-      <button
-        type="button"
-        class="step-header"
-        onclick={() => toggleStep(idx)}
-        title={step.stepType === 'ai_handoff' ? 'AI session starts here' : undefined}
-      >
-        <span class="step-icon">
-          {#if showsAiHandoffIcon(step)}
-            <Bot size={14} class="icon-ai-handoff" />
-          {:else if step.status === 'pending'}
-            <Circle size={14} class="icon-pending" />
-          {:else if step.status === 'running'}
-            <Spinner size={14} />
-          {:else if step.status === 'succeeded'}
-            <Check size={14} class="icon-succeeded" />
-          {:else if step.status === 'failed'}
-            <X size={14} class="icon-failed" />
-          {:else if step.status === 'skipped'}
-            <Minus size={14} class="icon-skipped" />
-          {/if}
-        </span>
-        <span class="step-label">{step.label}</span>
-        {#if step.stepType === 'ai_handoff'}
-          <span class="step-kind">AI</span>
-        {:else}
-          <span class="step-duration">
-            {formatPipelineStepDuration(step.startedAt, step.completedAt, now)}
-          </span>
-        {/if}
-      </button>
+      <Tooltip.Root disabled={step.stepType !== 'ai_handoff'}>
+        <Tooltip.Trigger>
+          {#snippet child({ props })}
+            <Button
+              {...props}
+              variant="ghost"
+              type="button"
+              class="flex h-auto w-full items-center justify-start gap-2 rounded px-0 py-1 text-[13px] font-normal text-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-foreground"
+              onclick={() => toggleStep(idx)}
+            >
+              <span class="step-icon">
+                {#if showsAiHandoffIcon(step)}
+                  <Bot size={14} class="icon-ai-handoff" />
+                {:else if step.status === 'pending'}
+                  <Circle size={14} class="icon-pending" />
+                {:else if step.status === 'running'}
+                  <Spinner size={14} />
+                {:else if step.status === 'succeeded'}
+                  <Check size={14} class="icon-succeeded" />
+                {:else if step.status === 'failed'}
+                  <X size={14} class="icon-failed" />
+                {:else if step.status === 'skipped'}
+                  <Minus size={14} class="icon-skipped" />
+                {/if}
+              </span>
+              <span class="step-label">{step.label}</span>
+              {#if step.stepType === 'ai_handoff'}
+                <span class="step-kind">AI</span>
+              {:else}
+                <span class="step-duration">
+                  {formatPipelineStepDuration(step.startedAt, step.completedAt, now)}
+                </span>
+              {/if}
+            </Button>
+          {/snippet}
+        </Tooltip.Trigger>
+        <Tooltip.Content>AI session starts here</Tooltip.Content>
+      </Tooltip.Root>
       {#if expandedSteps.has(idx) && (step.output || step.error)}
         <div class="step-output">
           <pre>{step.output ?? ''}{#if step.error}
@@ -160,25 +174,6 @@
 
   .step {
     margin-bottom: 2px;
-  }
-
-  .step-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 4px 0;
-    border: none;
-    background: none;
-    color: var(--text-primary);
-    cursor: pointer;
-    font-size: 13px;
-    text-align: left;
-  }
-
-  .step-header:hover {
-    background: var(--bg-hover);
-    border-radius: 4px;
   }
 
   .step-icon {

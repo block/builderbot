@@ -13,7 +13,11 @@
     onImageIdsChange — callback when the list changes
 -->
 <script lang="ts">
-  import { X, ImagePlus, Plus } from 'lucide-svelte';
+  import X from '@lucide/svelte/icons/x';
+  import ImagePlus from '@lucide/svelte/icons/image-plus';
+  import Plus from '@lucide/svelte/icons/plus';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
   import { createImageFromData, getImageData, deleteImage } from '../../commands';
   import type { Image } from '../../types';
 
@@ -129,30 +133,61 @@
 {#if imageIds.length > 0}
   <div class="attached-images">
     {#each imageIds as imageId}
-      <div class="image-thumb">
+      <div class="group/thumb image-thumb">
         {#if previews.get(imageId)}
           <img src={previews.get(imageId)} alt="attached" />
         {:else}
           <div class="image-placeholder"><ImagePlus size={16} /></div>
         {/if}
         {#if !disabled}
-          <button class="remove-btn" onclick={() => removeImage(imageId)} title="Remove image">
-            <X size={10} />
-          </button>
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="ghost"
+                  size="icon"
+                  class="absolute top-0.5 right-0.5 size-4 rounded-full bg-[var(--bg-deepest)] text-muted-foreground opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-chrome)] hover:text-foreground group-hover/thumb:opacity-100 [&_svg]:!size-2.5"
+                  onclick={() => removeImage(imageId)}
+                >
+                  <X size={10} />
+                </Button>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>Remove image</Tooltip.Content>
+          </Tooltip.Root>
         {/if}
       </div>
     {/each}
     {#if !disabled}
-      <button class="add-more-btn" onclick={openFilePicker} title="Add image">
-        <Plus size={16} />
-      </button>
+      <Tooltip.Root>
+        <Tooltip.Trigger>
+          {#snippet child({ props })}
+            <Button
+              {...props}
+              variant="outline"
+              size="icon"
+              class="size-12 shrink-0 rounded-md border border-dashed border-[var(--border-muted)] bg-transparent text-[var(--text-faint)] shadow-none hover:border-[var(--border-emphasis)] hover:bg-transparent hover:text-muted-foreground [&_svg]:!size-4"
+              onclick={openFilePicker}
+            >
+              <Plus size={16} />
+            </Button>
+          {/snippet}
+        </Tooltip.Trigger>
+        <Tooltip.Content>Add image</Tooltip.Content>
+      </Tooltip.Root>
     {/if}
   </div>
 {:else if !disabled}
-  <button class="attach-btn" onclick={openFilePicker} type="button">
+  <Button
+    variant="outline"
+    type="button"
+    class="h-auto gap-1.5 rounded-md border border-dashed border-[var(--border-muted)] bg-transparent px-2.5 py-1.5 text-xs text-[var(--text-faint)] shadow-none hover:border-[var(--border-emphasis)] hover:bg-transparent hover:text-muted-foreground"
+    onclick={openFilePicker}
+  >
     <ImagePlus size={14} />
     <span>Attach images</span>
-  </button>
+  </Button>
 {/if}
 
 <style>
@@ -191,77 +226,5 @@
     width: 100%;
     height: 100%;
     color: var(--text-faint);
-  }
-
-  .remove-btn {
-    position: absolute;
-    top: 2px;
-    right: 2px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 16px;
-    height: 16px;
-    padding: 0;
-    border: none;
-    border-radius: 50%;
-    background: var(--bg-deepest);
-    color: var(--text-muted);
-    cursor: pointer;
-    opacity: 0;
-    transition:
-      opacity 0.1s,
-      color 0.1s;
-  }
-
-  .image-thumb:hover .remove-btn {
-    opacity: 1;
-  }
-
-  .remove-btn:hover {
-    color: var(--text-primary);
-    background: var(--bg-chrome);
-  }
-
-  .add-more-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 48px;
-    height: 48px;
-    border-radius: 6px;
-    border: 1px dashed var(--border-muted);
-    background: none;
-    color: var(--text-faint);
-    cursor: pointer;
-    transition:
-      color 0.1s,
-      border-color 0.1s;
-  }
-
-  .add-more-btn:hover {
-    color: var(--text-muted);
-    border-color: var(--border-emphasis);
-  }
-
-  .attach-btn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 10px;
-    border-radius: 6px;
-    border: 1px dashed var(--border-muted);
-    background: none;
-    color: var(--text-faint);
-    font-size: var(--size-xs);
-    cursor: pointer;
-    transition:
-      color 0.1s,
-      border-color 0.1s;
-  }
-
-  .attach-btn:hover {
-    color: var(--text-muted);
-    border-color: var(--border-emphasis);
   }
 </style>

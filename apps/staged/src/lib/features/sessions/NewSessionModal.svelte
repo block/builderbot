@@ -15,7 +15,12 @@
     onSubmit      — called with { prompt, mode, imageIds } when submit is pressed
 -->
 <script lang="ts">
-  import { X, GitCommitVertical, FileText, FileSearch, Send, ChevronDown } from 'lucide-svelte';
+  import X from '@lucide/svelte/icons/x';
+  import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
+  import FileText from '@lucide/svelte/icons/file-text';
+  import FileSearch from '@lucide/svelte/icons/file-search';
+  import Send from '@lucide/svelte/icons/send';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import { tick, untrack } from 'svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
@@ -24,7 +29,9 @@
   import ImageAttachment from './ImageAttachment.svelte';
   import HashtagInput from './HashtagInput.svelte';
   import { buildBranchHashtagItems } from './hashtagItems';
-  import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
+  import * as Dialog from '$lib/components/ui/dialog';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
   import { subscribeDragDrop } from '../branches/dragDrop';
   import {
     isImageFile,
@@ -35,6 +42,7 @@
   import { viewport } from '../../shared/viewport.svelte';
 
   interface Props {
+    open: boolean;
     branch: Branch;
     mode: BranchSessionType;
     repoLabel?: ProjectRepo | null;
@@ -56,6 +64,7 @@
   }
 
   let {
+    open,
     branch,
     mode,
     repoLabel = null,
@@ -76,7 +85,6 @@
   let starting = $state(false);
   let initialized = false;
   let textareaEl: HTMLElement | null = $state(null);
-  const backdropDismiss = createBackdropDismissHandlers({ onDismiss: handleClose });
 
   let isCommit = $derived(currentMode === 'commit');
   let isReview = $derived(currentMode === 'review');
@@ -255,7 +263,7 @@
 
   // Drag-and-drop state
   let dragOver = $state(false);
-  let modalElement: HTMLDivElement | undefined = $state();
+  let modalElement: HTMLElement | null = $state(null);
 
   // Seed prompt and mode from props once; caller preserves draft across open/close.
   $effect(() => {
@@ -316,12 +324,6 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      handleClose();
-      return;
-    }
-
     // Cmd+Enter to submit
     if (e.key === 'Enter' && e.metaKey && (prompt.trim() || isReview) && !starting) {
       e.preventDefault();
@@ -384,24 +386,13 @@
 
 <svelte:window onkeydown={handleKeydown} onclick={handleDocumentClick} />
 
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<div
-  class="modal-backdrop"
-  role="dialog"
-  aria-modal="true"
-  tabindex="-1"
-  onpointerdown={backdropDismiss.handlePointerDown}
-  onclick={backdropDismiss.handleClick}
-  onkeydown={(e) => e.key === 'Escape' && handleClose()}
->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    bind:this={modalElement}
-    class="modal"
-    class:drag-over={dragOver}
-    role="presentation"
-    onclick={(e) => e.stopPropagation()}
+<Dialog.Root {open} onOpenChange={(v) => !v && handleClose()}>
+  <Dialog.Content
+    bind:ref={modalElement}
+    class={`sm:max-w-[580px] max-h-[calc(100vh-16vh)] p-0 gap-0 overflow-hidden flex flex-col border-2 ${dragOver ? 'border-[var(--ui-accent)] bg-[color-mix(in_srgb,var(--ui-accent)_5%,var(--bg-chrome))]' : 'border-transparent'} transition-colors`}
+    showCloseButton={false}
   >
+    <Dialog.Title class="sr-only">New {currentModeInfo.label} session</Dialog.Title>
     <header class="modal-header">
       <div class="mode-switcher" bind:this={modeMenuEl}>
         <button
@@ -433,13 +424,22 @@
           </div>
         {/if}
       </div>
-      <button
-        class="close-btn"
-        onclick={handleClose}
-        title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
-      >
-        <X size={18} />
-      </button>
+      <Tooltip.Root>
+        <Tooltip.Trigger>
+          {#snippet child({ props })}
+            <Button
+              {...props}
+              variant="ghost"
+              size="icon"
+              class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[640px]:size-10 [&_svg]:!size-[18px]"
+              onclick={handleClose}
+            >
+              <X size={18} />
+            </Button>
+          {/snippet}
+        </Tooltip.Trigger>
+        <Tooltip.Content>{viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}</Tooltip.Content>
+      </Tooltip.Root>
     </header>
 
     <form class="modal-body" onsubmit={handleSubmit}>
@@ -481,12 +481,19 @@
       <div class="form-actions">
         <AgentSelector disabled={starting} {remote} dropUp />
         <div class="form-actions-right">
-          <button type="button" class="cancel-btn" onclick={handleClose} disabled={starting}>
+          <Button
+            type="button"
+            variant="outline"
+            class="gap-1.5 px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground max-[640px]:h-11 max-[640px]:flex-1 max-[640px]:justify-center"
+            onclick={handleClose}
+            disabled={starting}
+          >
             Cancel
-          </button>
-          <button
+          </Button>
+          <Button
             type="submit"
-            class="submit-btn"
+            variant="outline"
+            class="gap-1.5 px-4 py-2 text-sm font-medium max-[640px]:h-11 max-[640px]:flex-1 max-[640px]:justify-center"
             disabled={starting || (!isReview && !prompt.trim())}
           >
             {#if starting}
@@ -496,47 +503,14 @@
               <Send size={14} />
               {willQueue ? 'Queue' : 'Start'}
             {/if}
-          </button>
+          </Button>
         </div>
       </div>
     </form>
-  </div>
-</div>
+  </Dialog.Content>
+</Dialog.Root>
 
 <style>
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: var(--shadow-overlay);
-    display: flex;
-    align-items: flex-start;
-    justify-content: center;
-    padding-top: 12vh;
-    z-index: 1000;
-  }
-
-  .modal {
-    display: flex;
-    flex-direction: column;
-    width: 580px;
-    max-width: 90vw;
-    max-height: calc(100vh - 12vh - 4vh);
-    background: var(--bg-chrome);
-    border: 2px solid transparent;
-    border-radius: 12px;
-    overflow: hidden;
-    box-shadow: var(--shadow-elevated);
-    transition:
-      border-color 0.15s,
-      background-color 0.15s;
-  }
-
-  /* Drag-and-drop highlight */
-  .modal.drag-over {
-    border-color: var(--ui-accent);
-    background-color: color-mix(in srgb, var(--ui-accent) 5%, var(--bg-chrome));
-  }
-
   /* Header */
   .modal-header {
     display: flex;
@@ -642,26 +616,6 @@
     flex-shrink: 0;
   }
 
-  .close-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 6px;
-    background: none;
-    border: none;
-    border-radius: 6px;
-    color: var(--text-muted);
-    cursor: pointer;
-    transition:
-      color 0.1s,
-      background-color 0.1s;
-  }
-
-  .close-btn:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover);
-  }
-
   /* Body */
   .modal-body {
     padding: 18px;
@@ -744,75 +698,13 @@
     gap: 8px;
   }
 
-  .cancel-btn,
-  .submit-btn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 8px 16px;
-    border-radius: 6px;
-    font-size: var(--size-sm);
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-
-  .cancel-btn {
-    background: transparent;
-    border: 1px solid var(--border-muted);
-    color: var(--text-muted);
-  }
-
-  .cancel-btn:hover:not(:disabled) {
-    border-color: var(--border-emphasis);
-    color: var(--text-primary);
-  }
-
-  .submit-btn {
-    background: var(--ui-accent);
-    border: none;
-    color: var(--bg-deepest);
-  }
-
-  .submit-btn:hover:not(:disabled) {
-    background: var(--ui-accent-hover);
-  }
-
-  .submit-btn:disabled,
-  .cancel-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
   @media (max-width: 640px) {
-    .modal-backdrop {
-      align-items: stretch;
-      padding-top: 0;
-    }
-
-    .modal {
-      width: 100vw;
-      max-width: none;
-      height: 100vh;
-      height: 100dvh;
-      max-height: none;
-      border-radius: 0;
-      box-shadow: none;
-    }
-
     .modal-header {
       padding: 12px 16px;
     }
 
-    .mode-switcher-btn,
-    .close-btn {
+    .mode-switcher-btn {
       min-height: 40px;
-    }
-
-    .close-btn {
-      width: 40px;
-      padding: 0;
-      justify-content: center;
     }
 
     .modal-body {
@@ -836,13 +728,6 @@
 
     .form-actions-right {
       width: 100%;
-    }
-
-    .cancel-btn,
-    .submit-btn {
-      flex: 1;
-      justify-content: center;
-      min-height: 44px;
     }
   }
 </style>

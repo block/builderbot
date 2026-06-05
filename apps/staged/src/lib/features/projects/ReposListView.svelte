@@ -6,7 +6,11 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { ArrowLeft, Pin, PinOff, Search, Download } from 'lucide-svelte';
+  import ArrowLeft from '@lucide/svelte/icons/arrow-left';
+  import Pin from '@lucide/svelte/icons/pin';
+  import PinOff from '@lucide/svelte/icons/pin-off';
+  import Search from '@lucide/svelte/icons/search';
+  import Download from '@lucide/svelte/icons/download';
   import type { RepoHomeItem } from '../../types';
   import * as commands from '../../api/commands';
   import { goHome } from '../layout/navigation.svelte';
@@ -18,9 +22,12 @@
     badgeBorder,
     badgeBorderHover,
   } from '../../shared/badgeColors';
-  import { alerts } from '../../shared/alerts.svelte';
+  import { toast } from 'svelte-sonner';
   import Spinner from '../../shared/Spinner.svelte';
   import ProjectsSidebar from './ProjectsSidebar.svelte';
+  import { Input } from '$lib/components/ui/input';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
 
   let repos = $state<RepoHomeItem[]>([]);
   let loading = $state(true);
@@ -55,7 +62,7 @@
     } catch (e) {
       console.error('[ReposListView] Failed to load repos:', e);
       const message = e instanceof Error ? e.message : String(e);
-      alerts.show({ tone: 'error', title: 'Failed to load repos', message });
+      toast.error('Failed to load repos', { description: message });
     } finally {
       loading = false;
     }
@@ -78,7 +85,7 @@
     } catch (e) {
       console.error('[ReposListView] Failed to toggle pin:', e);
       const message = e instanceof Error ? e.message : String(e);
-      alerts.show({ tone: 'error', title: 'Failed to update pin', message });
+      toast.error('Failed to update pin', { description: message });
     } finally {
       const next = new Set(togglingPin);
       next.delete(key);
@@ -98,7 +105,7 @@
     } catch (e) {
       console.error('[ReposListView] Failed to clone repo:', e);
       const message = e instanceof Error ? e.message : String(e);
-      alerts.show({ tone: 'error', title: 'Failed to clone repo', message });
+      toast.error('Failed to clone repo', { description: message });
     } finally {
       const next = new Set(cloningRepos);
       next.delete(key);
@@ -119,21 +126,34 @@
   <div class="main-panel">
     <div class="content">
       <div class="header-row">
-        <button class="back-btn" onclick={goHome} title="Back to home">
-          <ArrowLeft size={16} />
-        </button>
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            {#snippet child({ props })}
+              <Button
+                {...props}
+                variant="ghost"
+                size="icon"
+                class="size-8 rounded-lg text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
+                onclick={goHome}
+              >
+                <ArrowLeft size={16} />
+              </Button>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content>Back to home</Tooltip.Content>
+        </Tooltip.Root>
         <h1>Repos</h1>
       </div>
 
       <div class="search-row">
         <div class="search-input-wrapper">
           <Search size={14} />
-          <input
-            bind:this={searchInputEl}
+          <Input
+            bind:ref={searchInputEl}
             type="text"
             placeholder="Filter repos..."
             bind:value={searchQuery}
-            class="search-input"
+            class="border-0 bg-transparent shadow-none px-0 py-0 h-auto min-h-0 focus-visible:ring-0 focus-visible:border-0 text-sm"
           />
         </div>
       </div>
@@ -154,47 +174,76 @@
             {@const borderHover = badgeBorderHover(repo.hue, darkMode.value)}
             {@const key = repoKey(repo)}
             <div class="repo-card-wrapper">
-              <div
-                class="repo-card"
-                style="--accent: {accent}; --card-bg: {bg}; --card-bg-hover: {bgHover}; --card-border: {border}; --card-border-hover: {borderHover};"
-                title={subtitle(repo)}
-              >
-                <button
-                  class="pin-toggle"
-                  class:pinned={repo.pinned}
-                  title={repo.pinned ? 'Unpin repo' : 'Pin repo'}
-                  onclick={(e) => togglePin(repo, e)}
-                  disabled={togglingPin.has(key)}
-                >
-                  {#if togglingPin.has(key)}
-                    <Spinner size={14} />
-                  {:else if repo.pinned}
-                    <Pin size={14} />
-                  {:else}
-                    <PinOff size={14} />
-                  {/if}
-                </button>
-
-                <span class="card-title">{repo.shortName}</span>
-                <span class="card-subtitle">{subtitle(repo)}</span>
-
-                {#if !repo.hasLocalClone}
-                  <div class="card-footer">
-                    <button
-                      class="download-btn"
-                      title="Clone repo locally"
-                      onclick={(e) => handleCloneRepo(repo, e)}
-                      disabled={cloningRepos.has(key)}
+              <Tooltip.Root>
+                <Tooltip.Trigger>
+                  {#snippet child({ props })}
+                    <div
+                      {...props}
+                      class="repo-card"
+                      style="--accent: {accent}; --card-bg: {bg}; --card-bg-hover: {bgHover}; --card-border: {border}; --card-border-hover: {borderHover};"
                     >
-                      {#if cloningRepos.has(key)}
-                        <Spinner size={14} />
-                      {:else}
-                        <Download size={14} />
+                      <Tooltip.Root>
+                        <Tooltip.Trigger>
+                          {#snippet child({ props: pinProps })}
+                            <Button
+                              {...pinProps}
+                              variant="ghost"
+                              size="icon-sm"
+                              class={[
+                                'absolute top-2 right-2 z-[2] size-7 rounded-md bg-transparent hover:bg-[var(--bg-hover)] [&_svg]:!size-3.5',
+                                repo.pinned
+                                  ? 'text-[var(--accent)] hover:text-[var(--accent)]'
+                                  : 'text-[var(--text-faint)] hover:text-foreground',
+                              ]}
+                              onclick={(e) => togglePin(repo, e)}
+                              disabled={togglingPin.has(key)}
+                            >
+                              {#if togglingPin.has(key)}
+                                <Spinner size={14} />
+                              {:else if repo.pinned}
+                                <Pin size={14} />
+                              {:else}
+                                <PinOff size={14} />
+                              {/if}
+                            </Button>
+                          {/snippet}
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>{repo.pinned ? 'Unpin repo' : 'Pin repo'}</Tooltip.Content>
+                      </Tooltip.Root>
+
+                      <span class="card-title">{repo.shortName}</span>
+                      <span class="card-subtitle">{subtitle(repo)}</span>
+
+                      {#if !repo.hasLocalClone}
+                        <div class="card-footer">
+                          <Tooltip.Root>
+                            <Tooltip.Trigger>
+                              {#snippet child({ props: cloneProps })}
+                                <Button
+                                  {...cloneProps}
+                                  variant="outline"
+                                  size="icon-sm"
+                                  class="size-7 rounded-md border-[var(--card-border)] bg-transparent text-[var(--accent)] shadow-none hover:border-[var(--card-border-hover)] hover:bg-[var(--card-bg-hover)] hover:text-[var(--accent)] [&_svg]:!size-3.5"
+                                  onclick={(e) => handleCloneRepo(repo, e)}
+                                  disabled={cloningRepos.has(key)}
+                                >
+                                  {#if cloningRepos.has(key)}
+                                    <Spinner size={14} />
+                                  {:else}
+                                    <Download size={14} />
+                                  {/if}
+                                </Button>
+                              {/snippet}
+                            </Tooltip.Trigger>
+                            <Tooltip.Content>Clone repo locally</Tooltip.Content>
+                          </Tooltip.Root>
+                        </div>
                       {/if}
-                    </button>
-                  </div>
-                {/if}
-              </div>
+                    </div>
+                  {/snippet}
+                </Tooltip.Trigger>
+                <Tooltip.Content>{subtitle(repo)}</Tooltip.Content>
+              </Tooltip.Root>
               {#if repo.pinned}
                 <div class="card-label">Pinned</div>
               {/if}
@@ -251,26 +300,6 @@
     color: var(--text-primary);
   }
 
-  .back-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 32px;
-    height: 32px;
-    padding: 0;
-    border: none;
-    border-radius: 8px;
-    background: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .back-btn:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover);
-  }
-
   .search-row {
     margin-bottom: 16px;
   }
@@ -289,20 +318,6 @@
 
   .search-input-wrapper:focus-within {
     border-color: var(--border-emphasis);
-  }
-
-  .search-input {
-    flex: 1;
-    border: none;
-    background: none;
-    outline: none;
-    color: var(--text-primary);
-    font-size: var(--size-sm);
-    font-family: inherit;
-  }
-
-  .search-input::placeholder {
-    color: var(--text-faint);
   }
 
   .state {
@@ -349,44 +364,6 @@
     box-sizing: border-box;
   }
 
-  .pin-toggle {
-    position: absolute;
-    top: 8px;
-    right: 8px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    border: none;
-    border-radius: 6px;
-    background: transparent;
-    color: var(--text-faint);
-    cursor: pointer;
-    transition: all 0.15s ease;
-    z-index: 2;
-  }
-
-  .pin-toggle:hover:not(:disabled) {
-    background: var(--bg-hover);
-    color: var(--text-primary);
-  }
-
-  .pin-toggle.pinned {
-    color: var(--accent);
-  }
-
-  .pin-toggle.pinned:hover:not(:disabled) {
-    color: var(--accent);
-    background: var(--bg-hover);
-  }
-
-  .pin-toggle:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
   .card-title {
     font-size: var(--size-md);
     font-weight: 700;
@@ -412,30 +389,6 @@
     display: flex;
     align-items: center;
     min-height: 20px;
-  }
-
-  .download-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    border: 1px solid var(--card-border);
-    border-radius: 6px;
-    background: transparent;
-    color: var(--accent);
-    cursor: pointer;
-    transition: all 0.15s ease;
-  }
-
-  .download-btn:hover:not(:disabled) {
-    background: var(--card-bg-hover);
-    border-color: var(--card-border-hover);
-  }
-
-  .download-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
   }
 
   @media (max-width: 900px) {

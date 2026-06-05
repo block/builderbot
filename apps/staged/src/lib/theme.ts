@@ -241,6 +241,13 @@ function findColorWithLuminance(baseColor: string, targetLum: number): string {
 const CONTRAST_VALUE = 0.035;
 const CONTRAST_OFFSET = 0.0135;
 
+// Light themes darken chrome away from a near-white base, which reads heavier
+// than the equivalent lightening does on a dark base. Scale the chrome
+// luminance difference down for light themes so the main app / project chrome
+// sits closer to the page background (a lighter gray) rather than a noticeable
+// mid-gray. Dark themes are unaffected (scale = 1).
+const LIGHT_CHROME_CONTRAST_SCALE = 0.85;
+
 /**
  * Calculate target luminance difference using logFloor algorithm.
  * This provides gentle scaling that works across all theme luminances,
@@ -270,8 +277,10 @@ interface ChromeColors {
 function calculateChromeColors(syntaxBg: string): ChromeColors {
   const bgLum = luminance(syntaxBg);
 
-  // Calculate target luminance difference for chrome
-  const lumDiff = calculateLumDiff(bgLum);
+  // Calculate target luminance difference for chrome. Light themes use a
+  // reduced step so the derived chrome reads as a lighter gray.
+  const isLight = bgLum >= 0.5;
+  const lumDiff = calculateLumDiff(bgLum) * (isLight ? LIGHT_CHROME_CONTRAST_SCALE : 1);
   const targetChromeLum = bgLum - lumDiff;
 
   // Deepest is 2x the chrome difference (darker still)
@@ -354,6 +363,15 @@ export function createAdaptiveTheme(
   const accentPurple = fallbackPurple;
   const accentCyan = fallbackCyan; // Used for image timeline items
 
+  // Dedicated app accent (the generic UI highlight: primary buttons, focus
+  // rings, active chips, indicators). Kept separate from the git palette so
+  // recoloring the UI accent doesn't drag "added"/commit affordances with it.
+  // Blue in both modes. The light value is a bright #2188ff rather than the
+  // heavier #0969da fallbackBlue, so it reads at roughly the same luminance/
+  // energy as the old #28a745 green accent it replaces (#0969da looked too
+  // dark by comparison). Dark stays #58a6ff, already close to the old #3fb950.
+  const accentPrimary = isDark ? '#58a6ff' : '#2188ff';
+
   // Border that's visible but not harsh
   const borderBase = mix(primaryBg, syntaxFg, isDark ? 0.15 : 0.12);
 
@@ -364,7 +382,14 @@ export function createAdaptiveTheme(
       primary: primaryBg, // Editor islands - may be adjusted from syntax theme for contrast
       chrome: chromeColor, // Calculated for consistent contrast ratio
       deepest: deepestColor, // Darker than chrome (2x the luminance diff)
-      elevated: elevate(0.08), // Floating elements (dropdowns, tooltips)
+      // Floating surfaces (dialogs, popovers, dropdowns, cards) sit ON TOP of
+      // content and should read as lifted, not recessed. Dark themes lighten to
+      // achieve this. Light themes sit on a white base, where the full downward
+      // elevate(0.08) over-darkened them into a dirty gray (#ebebeb); halve it to
+      // a subtle off-white surface (~#f5f5f5) that reads as a distinct panel
+      // without going gray, with the ring/shadow the shadcn primitives apply
+      // carrying the rest of the lift.
+      elevated: isDark ? elevate(0.08) : adjust(primaryBg, -0.04),
       hover: elevate(0.06), // Hover state
     },
 
@@ -423,8 +448,8 @@ export function createAdaptiveTheme(
     },
 
     ui: {
-      accent: accentGreen,
-      accentHover: isDark ? adjust(accentGreen, -0.15) : adjust(accentGreen, 0.15),
+      accent: accentPrimary,
+      accentHover: isDark ? adjust(accentPrimary, -0.15) : adjust(accentPrimary, 0.15),
       danger: accentRed,
       dangerBg: overlay(accentRed, isDark ? 0.1 : 0.08),
       warning: accentOrange,

@@ -8,21 +8,19 @@
   import { onMount, onDestroy } from 'svelte';
   import { listenToEvent } from '../../transport';
   import { untrack } from 'svelte';
-  import {
-    ChevronLeft,
-    Trash2,
-    Plus,
-    Send,
-    FileText,
-    CircleCheck,
-    CirclePause,
-    Pause,
-    AlertCircle,
-    Cloud,
-    Paperclip,
-    X,
-    ImagePlus,
-  } from 'lucide-svelte';
+  import ChevronLeft from '@lucide/svelte/icons/chevron-left';
+  import Trash2 from '@lucide/svelte/icons/trash-2';
+  import Plus from '@lucide/svelte/icons/plus';
+  import Send from '@lucide/svelte/icons/send';
+  import FileText from '@lucide/svelte/icons/file-text';
+  import CircleCheck from '@lucide/svelte/icons/circle-check';
+  import CirclePause from '@lucide/svelte/icons/circle-pause';
+  import Pause from '@lucide/svelte/icons/pause';
+  import AlertCircle from '@lucide/svelte/icons/alert-circle';
+  import Cloud from '@lucide/svelte/icons/cloud';
+  import Paperclip from '@lucide/svelte/icons/paperclip';
+  import X from '@lucide/svelte/icons/x';
+  import ImagePlus from '@lucide/svelte/icons/image-plus';
   import type {
     Project,
     ProjectRepo,
@@ -46,7 +44,6 @@
   import SuggestedRepos from './SuggestedRepos.svelte';
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
   import TimelineRow from '../timeline/TimelineRow.svelte';
-  import TimelineContextMenu from '../timeline/TimelineContextMenu.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
   import SessionModal from '../sessions/SessionModal.svelte';
   import AgentSelector from '../agents/AgentSelector.svelte';
@@ -63,6 +60,8 @@
   import { focusAtEnd } from '../../shared/focusAtEnd';
   import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
   import { createLiveSessionHints } from '../timeline/liveSessionHints';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
   import type { LinkedNoteContext } from '../sessions/noteFreshness';
 
   interface Props {
@@ -451,7 +450,6 @@
     noteUpdatedAt?: number;
   } | null>(null);
   let openSessionId = $state<string | null>(null);
-  let projectContextMenuRef: TimelineContextMenu | undefined = $state();
 
   function linkedNoteContext(note: ProjectNote | undefined): LinkedNoteContext | null {
     if (!note) return null;
@@ -522,12 +520,30 @@
 <div class="project-section">
   <div class="project-header" class:deleting>
     <div class="project-info">
-      <button class="back-button" onclick={goHome} title="Back to projects">
-        <ChevronLeft size={16} />
-      </button>
-      <span class="project-name" title={projectDisplayName(project)}
-        >{projectDisplayName(project)}</span
-      >
+      <Tooltip.Root>
+        <Tooltip.Trigger>
+          {#snippet child({ props })}
+            <Button
+              {...props}
+              variant="ghost"
+              size="icon"
+              class="size-6 shrink-0 text-muted-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:size-10 [&_svg]:!size-4"
+              onclick={goHome}
+            >
+              <ChevronLeft size={16} />
+            </Button>
+          {/snippet}
+        </Tooltip.Trigger>
+        <Tooltip.Content>Back to projects</Tooltip.Content>
+      </Tooltip.Root>
+      <Tooltip.Root>
+        <Tooltip.Trigger>
+          {#snippet child({ props })}
+            <span {...props} class="project-name">{projectDisplayName(project)}</span>
+          {/snippet}
+        </Tooltip.Trigger>
+        <Tooltip.Content>{projectDisplayName(project)}</Tooltip.Content>
+      </Tooltip.Root>
       {#if deleting}
         <div class="deleting-status" role="status" aria-live="polite">
           <Spinner size={12} />
@@ -541,63 +557,110 @@
         </div>
       {/if}
       {#if projectWorkspaceStatus}
-        <div
-          class="workspace-status-badge"
-          class:starting={projectWorkspaceStatus === 'starting'}
-          class:running={projectWorkspaceStatus === 'running'}
-          class:stopped={projectWorkspaceStatus === 'stopped'}
-          class:suspended={projectWorkspaceStatus === 'suspended'}
-          class:error={projectWorkspaceStatus === 'error'}
-          title={projectWorkspaceStatus === 'running' && projectWorkstationName
-            ? projectWorkstationName
-            : undefined}
-        >
-          {#if projectWorkspaceStatus === 'starting'}
-            <Spinner size={12} />
-          {:else if projectWorkspaceStatus === 'running'}
-            <Cloud size={12} />
-          {:else if projectWorkspaceStatus === 'stopped'}
-            <CirclePause size={12} />
-          {:else if projectWorkspaceStatus === 'suspended'}
-            <Pause size={12} />
-          {:else if projectWorkspaceStatus === 'error'}
-            <AlertCircle size={12} />
-          {/if}
-          <span>{statusLabel(projectWorkspaceStatus)}</span>
-          {#if projectWorkspaceStatus === 'suspended' && projectWorkstationName}
-            <button
-              class="resume-button"
-              onclick={() => onResumeWorkspace?.(projectWorkstationName!)}
-              title="Resume suspended workspace"
-            >
-              Resume
-            </button>
-          {/if}
-        </div>
+        <Tooltip.Root disabled={!(projectWorkspaceStatus === 'running' && projectWorkstationName)}>
+          <Tooltip.Trigger>
+            {#snippet child({ props })}
+              <div
+                {...props}
+                class="workspace-status-badge"
+                class:starting={projectWorkspaceStatus === 'starting'}
+                class:running={projectWorkspaceStatus === 'running'}
+                class:stopped={projectWorkspaceStatus === 'stopped'}
+                class:suspended={projectWorkspaceStatus === 'suspended'}
+                class:error={projectWorkspaceStatus === 'error'}
+              >
+                {#if projectWorkspaceStatus === 'starting'}
+                  <Spinner size={12} />
+                {:else if projectWorkspaceStatus === 'running'}
+                  <Cloud size={12} />
+                {:else if projectWorkspaceStatus === 'stopped'}
+                  <CirclePause size={12} />
+                {:else if projectWorkspaceStatus === 'suspended'}
+                  <Pause size={12} />
+                {:else if projectWorkspaceStatus === 'error'}
+                  <AlertCircle size={12} />
+                {/if}
+                <span>{statusLabel(projectWorkspaceStatus)}</span>
+                {#if projectWorkspaceStatus === 'suspended' && projectWorkstationName}
+                  <Tooltip.Root>
+                    <Tooltip.Trigger>
+                      {#snippet child({ props: resumeProps })}
+                        <Button
+                          {...resumeProps}
+                          variant="ghost"
+                          class="ml-1 h-auto rounded-none border-l border-[var(--border-muted)] bg-transparent px-1 py-0 text-[length:calc(var(--size-xs)-1px)] font-semibold text-[var(--ui-info)] shadow-none focus-visible:ring-0 hover:bg-transparent hover:text-[var(--ui-info)] hover:underline"
+                          onclick={() => onResumeWorkspace?.(projectWorkstationName!)}
+                        >
+                          Resume
+                        </Button>
+                      {/snippet}
+                    </Tooltip.Trigger>
+                    <Tooltip.Content>Resume suspended workspace</Tooltip.Content>
+                  </Tooltip.Root>
+                {/if}
+              </div>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content>{projectWorkstationName ?? ''}</Tooltip.Content>
+        </Tooltip.Root>
       {/if}
     </div>
     {#if !deleting}
       <div class="header-actions">
-        <button
-          class="header-action-button"
-          onclick={() => {
-            addRepoModalOpen = true;
-          }}
-          disabled={addRepoDisabled}
-          title={addRepoTitle}
-        >
-          <span class="action-icon"><Plus size={12} /></span>
-          Add Repo
-        </button>
-        <button
-          class="header-action-button danger"
-          class:safe-delete={safeToDelete}
-          onclick={() => onDeleteProject?.()}
-          title="Remove project"
-        >
-          <span class="trash-icon"><Trash2 size={14} /></span>
-          Remove Project
-        </button>
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            {#snippet child({ props })}
+              <span {...props} class="inline-flex">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  class="group gap-2 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:h-10 max-md:justify-center max-md:p-2"
+                  onclick={() => {
+                    addRepoModalOpen = true;
+                  }}
+                  disabled={addRepoDisabled}
+                >
+                  <span
+                    class="flex size-4 shrink-0 items-center justify-center rounded-full bg-[var(--border-muted)] transition-colors group-hover:not-disabled:bg-[var(--border-emphasis)]"
+                  >
+                    <Plus size={12} />
+                  </span>
+                  Add Repo
+                </Button>
+              </span>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content>{addRepoTitle}</Tooltip.Content>
+        </Tooltip.Root>
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            {#snippet child({ props })}
+              <Button
+                {...props}
+                variant="ghost"
+                size="sm"
+                class={[
+                  'group gap-2 text-foreground hover:bg-[var(--ui-selection)] hover:text-destructive max-md:h-10 max-md:justify-center max-md:p-2',
+                  safeToDelete && 'border border-destructive text-destructive',
+                ]}
+                onclick={() => onDeleteProject?.()}
+              >
+                <span
+                  class={[
+                    'flex shrink-0 items-center transition-colors',
+                    safeToDelete
+                      ? 'text-destructive'
+                      : 'text-muted-foreground group-hover:text-destructive',
+                  ]}
+                >
+                  <Trash2 size={14} />
+                </span>
+                Remove Project
+              </Button>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content>Remove project</Tooltip.Content>
+        </Tooltip.Root>
       </div>
     {/if}
   </div>
@@ -623,9 +686,25 @@
     >
       <div class="prompt-input-row">
         {#if imageIds.length === 0}
-          <button class="attach-btn" onclick={openImagePicker} title="Attach image">
-            <Paperclip size={14} />
-          </button>
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="ghost"
+                  size="icon-sm"
+                  class={[
+                    'size-7 shrink-0 bg-transparent text-[var(--text-faint)] hover:bg-[var(--ui-selection)] hover:text-foreground [&_svg]:!size-3.5',
+                    promptExpanded ? 'max-md:size-10' : 'max-md:size-8',
+                  ]}
+                  onclick={openImagePicker}
+                >
+                  <Paperclip size={14} />
+                </Button>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>Attach image</Tooltip.Content>
+          </Tooltip.Root>
         {/if}
         <HashtagInput
           class="prompt-input"
@@ -640,37 +719,74 @@
         />
         <div class="prompt-actions">
           <AgentSelector />
-          <button
-            class="send-button"
-            onclick={handleSubmitPrompt}
-            disabled={!canSubmitPrompt}
-            title={sendButtonTitle}
-          >
-            <Send size={14} />
-          </button>
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <span {...props} class="inline-flex">
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    class={[
+                      'size-8 shrink-0 rounded-lg shadow-none [&_svg]:!size-3.5',
+                      promptExpanded
+                        ? 'max-md:size-10 max-md:rounded-lg'
+                        : 'max-md:size-8 max-md:rounded-md',
+                    ]}
+                    onclick={handleSubmitPrompt}
+                    disabled={!canSubmitPrompt}
+                  >
+                    <Send size={14} />
+                  </Button>
+                </span>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>{sendButtonTitle}</Tooltip.Content>
+          </Tooltip.Root>
         </div>
       </div>
       {#if imageIds.length > 0}
         <div class="reply-images">
           {#each imageIds as imageId}
-            <div class="reply-image-thumb">
+            <div class="reply-image-thumb group/thumb">
               {#if imagePreviews.get(imageId)}
                 <img src={imagePreviews.get(imageId)} alt="attached" />
               {:else}
                 <div class="reply-image-placeholder"><ImagePlus size={16} /></div>
               {/if}
-              <button
-                class="reply-image-remove"
-                onclick={() => removeImage(imageId)}
-                title="Remove image"
-              >
-                <X size={10} />
-              </button>
+              <Tooltip.Root>
+                <Tooltip.Trigger>
+                  {#snippet child({ props })}
+                    <Button
+                      {...props}
+                      variant="ghost"
+                      size="icon"
+                      class="absolute top-0.5 right-0.5 size-4 rounded-full bg-[var(--bg-deepest)] text-muted-foreground opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-chrome)] hover:text-foreground group-hover/thumb:opacity-100 [&_svg]:!size-2.5"
+                      onclick={() => removeImage(imageId)}
+                    >
+                      <X size={10} />
+                    </Button>
+                  {/snippet}
+                </Tooltip.Trigger>
+                <Tooltip.Content>Remove image</Tooltip.Content>
+              </Tooltip.Root>
             </div>
           {/each}
-          <button class="reply-image-add" onclick={openImagePicker} title="Add image">
-            <Plus size={16} />
-          </button>
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="outline"
+                  size="icon"
+                  class="size-12 shrink-0 rounded-md border border-dashed border-[var(--border-muted)] bg-transparent text-[var(--text-faint)] shadow-none hover:border-[var(--border-emphasis)] hover:bg-transparent hover:text-muted-foreground [&_svg]:!size-4"
+                  onclick={openImagePicker}
+                >
+                  <Plus size={16} />
+                </Button>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>Add image</Tooltip.Content>
+          </Tooltip.Root>
         </div>
       {/if}
     </div>
@@ -721,7 +837,10 @@
             }}
             onDeleteClick={() => handleDeleteNote(note.id)}
             hashtagRef={noteType === 'note' ? `#project-note:${note.id}` : undefined}
-            onContextMenu={(e) => projectContextMenuRef?.open(e)}
+            onNewSessionReferring={(ref) => {
+              promptText = buildReferringPrompt(promptText, ref);
+              focusAtEnd(promptTextarea);
+            }}
           />
         {/each}
       </div>
@@ -747,61 +866,49 @@
   <SuggestedRepos {project} {reposById} {onRepoSelected} />
 </div>
 
-{#if openNote}
-  <NoteModal
-    title={openNote.title}
-    content={openNote.content}
-    sessionId={openNote.sessionId}
-    noteUpdatedAt={openNote.noteUpdatedAt}
-    onClose={() => (openNote = null)}
-    onOpenSession={(sid) => {
-      openNote = null;
-      openSessionId = sid;
-    }}
-  />
-{/if}
+<NoteModal
+  open={openNote !== null}
+  title={openNote?.title ?? ''}
+  content={openNote?.content ?? ''}
+  sessionId={openNote?.sessionId}
+  noteUpdatedAt={openNote?.noteUpdatedAt}
+  onClose={() => (openNote = null)}
+  onOpenSession={(sid) => {
+    openNote = null;
+    openSessionId = sid;
+  }}
+/>
 
-{#if openSessionId}
-  {@const noteForSession = linkedNoteContext(
-    projectNotes.find((n) => n.sessionId === openSessionId)
-  )}
-  <SessionModal
-    sessionId={openSessionId}
-    repoDir={projectDisplayRootCandidates}
-    projectId={project.id}
-    noteInfo={noteForSession}
-    onOpenNote={(note) => {
-      const sid = openSessionId;
-      openSessionId = null;
-      openNote = {
-        title: note.title,
-        content: note.content,
-        sessionId: sid ?? undefined,
-        noteUpdatedAt: note.updatedAt,
-      };
-    }}
-    onClose={() => {
-      openSessionId = null;
-      loadProjectNotes();
-    }}
-  />
-{/if}
+<SessionModal
+  open={openSessionId !== null}
+  sessionId={openSessionId ?? ''}
+  repoDir={projectDisplayRootCandidates}
+  projectId={project.id}
+  noteInfo={openSessionId
+    ? linkedNoteContext(projectNotes.find((n) => n.sessionId === openSessionId))
+    : null}
+  onOpenNote={(note) => {
+    const sid = openSessionId;
+    openSessionId = null;
+    openNote = {
+      title: note.title,
+      content: note.content,
+      sessionId: sid ?? undefined,
+      noteUpdatedAt: note.updatedAt,
+    };
+  }}
+  onClose={() => {
+    openSessionId = null;
+    loadProjectNotes();
+  }}
+/>
 
-{#if addRepoModalOpen}
-  <AddRepoModal
-    {excludeRepos}
-    onAdded={handleRepoSelected}
-    onClose={() => {
-      addRepoModalOpen = false;
-    }}
-  />
-{/if}
-
-<TimelineContextMenu
-  bind:this={projectContextMenuRef}
-  onNewSessionReferring={(ref) => {
-    promptText = buildReferringPrompt(promptText, ref);
-    focusAtEnd(promptTextarea);
+<AddRepoModal
+  open={addRepoModalOpen}
+  {excludeRepos}
+  onAdded={handleRepoSelected}
+  onClose={() => {
+    addRepoModalOpen = false;
   }}
 />
 
@@ -831,27 +938,6 @@
     flex: 1;
   }
 
-  .back-button {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 24px;
-    height: 24px;
-    padding: 0;
-    border: none;
-    border-radius: 6px;
-    background-color: transparent;
-    color: var(--text-muted);
-    cursor: pointer;
-    transition: all 0.15s ease;
-    flex-shrink: 0;
-  }
-
-  .back-button:hover {
-    color: var(--text-primary);
-    background-color: var(--ui-selection);
-  }
-
   .project-name {
     font-size: var(--size-xl);
     font-weight: 600;
@@ -867,80 +953,6 @@
     display: flex;
     align-items: center;
     gap: 4px;
-  }
-
-  .header-action-button {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 6px 10px;
-    background-color: transparent;
-    border: none;
-    border-radius: 8px;
-    color: var(--text-primary);
-    font-size: var(--size-sm);
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-    white-space: nowrap;
-  }
-
-  .header-action-button:hover {
-    color: var(--text-primary);
-    background-color: var(--ui-selection);
-  }
-
-  .header-action-button:hover .action-icon {
-    background-color: var(--border-emphasis);
-  }
-
-  .header-action-button:disabled {
-    cursor: not-allowed;
-    opacity: 0.5;
-  }
-
-  .header-action-button:disabled:hover {
-    color: var(--text-muted);
-    background-color: transparent;
-  }
-
-  .header-action-button:disabled:hover .action-icon {
-    background-color: var(--border-muted);
-  }
-
-  .action-icon {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    background-color: var(--border-muted);
-    flex-shrink: 0;
-  }
-
-  .trash-icon {
-    display: flex;
-    align-items: center;
-    color: var(--text-muted);
-    transition: color 0.15s ease;
-  }
-
-  .header-action-button.danger:hover {
-    color: var(--ui-danger);
-  }
-
-  .header-action-button.danger:hover .trash-icon {
-    color: var(--ui-danger);
-  }
-
-  .header-action-button.safe-delete {
-    color: var(--ui-danger);
-    border: 1px solid var(--ui-danger);
-  }
-
-  .header-action-button.safe-delete .trash-icon {
-    color: var(--ui-danger);
   }
 
   .detecting-status {
@@ -1011,21 +1023,6 @@
     color: var(--text-muted);
   }
 
-  .resume-button {
-    all: unset;
-    cursor: pointer;
-    margin-left: 4px;
-    padding: 0 4px;
-    font-size: calc(var(--size-xs) - 1px);
-    font-weight: 600;
-    color: var(--ui-info);
-    border-left: 1px solid var(--border-muted);
-  }
-
-  .resume-button:hover {
-    text-decoration: underline;
-  }
-
   .workspace-status-badge.error {
     border-color: var(--ui-danger);
     color: var(--ui-danger);
@@ -1067,29 +1064,6 @@
   .prompt-input-wrapper.drag-over {
     border-color: var(--ui-accent);
     background-color: color-mix(in srgb, var(--ui-accent) 6%, var(--bg-primary));
-  }
-
-  .attach-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    border: none;
-    border-radius: 6px;
-    background: none;
-    color: var(--text-faint);
-    cursor: pointer;
-    flex-shrink: 0;
-    transition:
-      color 0.15s ease,
-      background-color 0.15s ease;
-  }
-
-  .attach-btn:hover {
-    color: var(--text-primary);
-    background-color: var(--ui-selection);
   }
 
   .prompt-input-row :global(.prompt-input) {
@@ -1139,30 +1113,6 @@
     gap: 4px;
   }
 
-  .send-button {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 32px;
-    height: 32px;
-    border: none;
-    border-radius: 8px;
-    background-color: var(--ui-accent);
-    color: var(--bg-deepest);
-    cursor: pointer;
-    flex-shrink: 0;
-    transition: all 0.15s ease;
-  }
-
-  .send-button:hover:not(:disabled) {
-    background-color: var(--ui-accent-hover);
-  }
-
-  .send-button:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-  }
-
   /* ── Reply image previews ─────────────────────────────────────────── */
 
   .reply-images {
@@ -1197,57 +1147,6 @@
     width: 100%;
     height: 100%;
     color: var(--text-faint);
-  }
-
-  .reply-image-remove {
-    position: absolute;
-    top: 2px;
-    right: 2px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 16px;
-    height: 16px;
-    padding: 0;
-    border: none;
-    border-radius: 50%;
-    background: var(--bg-deepest);
-    color: var(--text-muted);
-    cursor: pointer;
-    opacity: 0;
-    transition:
-      opacity 0.1s,
-      color 0.1s;
-  }
-
-  .reply-image-thumb:hover .reply-image-remove {
-    opacity: 1;
-  }
-
-  .reply-image-remove:hover {
-    color: var(--text-primary);
-    background: var(--bg-chrome);
-  }
-
-  .reply-image-add {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 48px;
-    height: 48px;
-    border-radius: 6px;
-    border: 1px dashed var(--border-muted);
-    background: none;
-    color: var(--text-faint);
-    cursor: pointer;
-    transition:
-      color 0.1s,
-      border-color 0.1s;
-  }
-
-  .reply-image-add:hover {
-    color: var(--text-muted);
-    border-color: var(--border-emphasis);
   }
 
   /* ── Project notes ───────────────────────────────────────────────────── */
@@ -1310,22 +1209,11 @@
       font-size: var(--size-lg);
     }
 
-    .back-button {
-      width: 40px;
-      height: 40px;
-    }
-
     .header-actions {
       display: grid;
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
       gap: 6px;
       width: 100%;
-    }
-
-    .header-action-button {
-      min-height: 40px;
-      justify-content: center;
-      padding: 8px;
     }
 
     .detecting-status,
@@ -1339,11 +1227,6 @@
       flex-wrap: nowrap;
       gap: 4px;
       padding: 4px 6px;
-    }
-
-    .attach-btn {
-      width: 32px;
-      height: 32px;
     }
 
     .prompt-input-row :global(.hashtag-input-wrapper) {
@@ -1383,21 +1266,10 @@
       display: none;
     }
 
-    .send-button {
-      width: 32px;
-      height: 32px;
-      border-radius: 6px;
-    }
-
     .prompt-input-wrapper.expanded .prompt-input-row {
       align-items: stretch;
       flex-wrap: wrap;
       padding: 6px;
-    }
-
-    .prompt-input-wrapper.expanded .attach-btn {
-      width: 40px;
-      height: 40px;
     }
 
     .prompt-input-wrapper.expanded .prompt-input-row :global(.hashtag-input-wrapper) {
@@ -1434,12 +1306,6 @@
       min-width: 0;
       overflow: hidden;
       text-overflow: ellipsis;
-    }
-
-    .prompt-input-wrapper.expanded .send-button {
-      width: 40px;
-      height: 40px;
-      border-radius: 8px;
     }
   }
 </style>

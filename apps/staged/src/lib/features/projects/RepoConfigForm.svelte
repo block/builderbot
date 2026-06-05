@@ -12,7 +12,10 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { slide, fade } from 'svelte/transition';
-  import { GitBranch, X, Plus, Command } from 'lucide-svelte';
+  import GitBranch from '@lucide/svelte/icons/git-branch';
+  import X from '@lucide/svelte/icons/x';
+  import Plus from '@lucide/svelte/icons/plus';
+  import Command from '@lucide/svelte/icons/command';
   import type { RecentRepo, PullRequest } from '../../types';
   import * as commands from '../../api/commands';
   import RepoLabel from '../../shared/RepoLabel.svelte';
@@ -26,6 +29,9 @@
   import BranchPicker, { type BranchSelection } from './BranchPicker.svelte';
   import type { RepoSelection } from '../../shared/githubUrl';
   import { viewport } from '../../shared/viewport.svelte';
+  import { Label } from '$lib/components/ui/label';
+  import { Input } from '$lib/components/ui/input';
+  import { Button } from '$lib/components/ui/button';
 
   interface Props {
     // Bindable state
@@ -238,8 +244,9 @@
     <div class="pr-loading-overlay" transition:fade={{ duration: 100 }}>
       <Spinner size={20} />
       <span class="pr-loading-text">Loading PR&hellip;</span>
-      <button
-        class="pr-loading-cancel"
+      <Button
+        variant="outline"
+        size="xs"
         onclick={() => {
           resolvingPr = false;
           pendingPrNumber = null;
@@ -255,7 +262,7 @@
         }}
       >
         Cancel
-      </button>
+      </Button>
     </div>
   {/if}
 
@@ -263,20 +270,22 @@
      them while the loading overlay is visible. -->
   <div class="repo-fields" class:resolving-hidden={resolvingPr}>
     <div class="form-group">
-      <label for="project-repo-select"
-        >Repository
+      <Label for="project-repo-select" class="text-muted-foreground text-xs">
+        Repository
         {#if repoRequired && !selectedRepo}
           <span class="field-badge required">Required</span>
-        {/if}</label
-      >
+        {/if}
+      </Label>
       {#if selectedRepo}
         <div class="repo-info" class:disabled>
           <GitBranch size={14} class="repo-info-icon" />
           <div class="repo-details">
             <span class="repo-name">{displayRepo ?? selectedRepo}</span>
           </div>
-          <button
-            class="clear-button"
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            class="size-7 text-[var(--bg-chrome)] hover:bg-black/10 hover:text-[var(--bg-deepest)] [&_svg]:!size-3.5"
             onclick={() => {
               if (branchPickerTimer) clearTimeout(branchPickerTimer);
               showBranchPicker = false;
@@ -291,7 +300,7 @@
             }}
           >
             <X size={14} />
-          </button>
+          </Button>
         </div>
       {:else}
         <RepoSearchInput onSelect={handleRepoSelected} {disabled} {excludeRepos} {autofocus} />
@@ -340,22 +349,22 @@
 
     {#if selectedRepo}
       <div class="form-group" transition:slide={{ duration: SLIDE_DURATION }}>
-        <label for="project-subpath"
-          >Subpath
+        <Label for="project-subpath" class="text-muted-foreground text-xs">
+          Subpath
           <span class="field-badge {isMonorepo ? 'recommended' : 'optional'}"
             >{isMonorepo ? 'Recommended' : 'Optional'}</span
-          ></label
-        >
+          >
+        </Label>
         <SubpathInput bind:value={subpath} repo={selectedRepo} {disabled} bind:api={subpathApi} />
       </div>
 
       <div class="form-group" transition:slide={{ duration: SLIDE_DURATION }}>
-        <label for="project-branch"
-          >PR or Branch
+        <Label for="project-branch" class="text-muted-foreground text-xs">
+          PR or Branch
           <span class="field-badge {isNewBranch ? 'new-branch' : 'optional'}"
             >{isNewBranch ? 'New branch' : 'Optional'}</span
-          ></label
-        >
+          >
+        </Label>
         {#if showBranchPicker}
           <BranchPicker
             bind:value={branchName}
@@ -380,12 +389,12 @@
             }}
           />
         {:else}
-          <input
-            class="branch-picker-placeholder"
+          <Input
             type="text"
             placeholder="Search PRs or branches…"
             readonly
-            tabindex="-1"
+            tabindex={-1}
+            class="min-h-[42px] rounded-[10px] bg-background px-3.5 py-2.5 text-base"
           />
         {/if}
       </div>
@@ -425,22 +434,6 @@
     color: var(--text-muted);
   }
 
-  .pr-loading-cancel {
-    font-size: var(--size-xs);
-    color: var(--text-faint);
-    background: none;
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    padding: 4px 10px;
-    cursor: pointer;
-    transition: color 0.1s;
-  }
-
-  .pr-loading-cancel:hover {
-    color: var(--text-primary);
-    border-color: var(--border-default);
-  }
-
   .repo-fields {
     display: flex;
     flex-direction: column;
@@ -456,11 +449,6 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-  }
-
-  label {
-    font-size: var(--size-xs);
-    color: var(--text-muted);
   }
 
   .field-badge {
@@ -528,28 +516,6 @@
     white-space: nowrap;
   }
 
-  .clear-button {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    border: none;
-    border-radius: 6px;
-    background: transparent;
-    color: var(--bg-chrome);
-    cursor: pointer;
-    transition:
-      background-color 0.15s ease,
-      color 0.15s ease;
-  }
-
-  .clear-button:hover {
-    color: var(--bg-deepest);
-    background: rgba(0, 0, 0, 0.1);
-  }
-
   .recent-repos {
     display: flex;
     flex-direction: column;
@@ -613,23 +579,5 @@
     font-size: 10px;
     flex-shrink: 0;
     line-height: 1;
-  }
-
-  .branch-picker-placeholder {
-    width: 100%;
-    min-height: 42px;
-    border: 1.5px solid var(--border-muted);
-    border-radius: 10px;
-    background: transparent;
-    color: var(--text-primary);
-    padding: 10px 14px;
-    font-size: var(--size-md);
-    font-family: inherit;
-    outline: none;
-    box-sizing: border-box;
-  }
-
-  .branch-picker-placeholder::placeholder {
-    color: var(--text-faint);
   }
 </style>

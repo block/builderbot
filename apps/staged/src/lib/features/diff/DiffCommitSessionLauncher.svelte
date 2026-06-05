@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { listenToEvent } from '../../transport';
-  import { Send } from 'lucide-svelte';
+  import Send from '@lucide/svelte/icons/send';
   import Spinner from '../../shared/Spinner.svelte';
-  import { alerts } from '../../shared/alerts.svelte';
+  import { Button } from '$lib/components/ui/button';
+  import { toast } from 'svelte-sonner';
   import * as commands from '../../api/commands';
   import { getCommitPrefillFromReviewComments } from '../branches/commitSessionPrefill';
   import type { SessionStatusPayload, HashtagItem } from '../../types';
@@ -190,14 +191,13 @@
 
       onStarted();
     } catch (e) {
-      alerts.show({
-        tone: 'error',
-        title: hasRunningSession
-          ? 'Unable to queue commit session'
-          : 'Unable to start commit session',
-        message: e instanceof Error ? e.message : String(e),
-        durationMs: 0,
-      });
+      toast.error(
+        hasRunningSession ? 'Unable to queue commit session' : 'Unable to start commit session',
+        {
+          description: e instanceof Error ? e.message : String(e),
+          duration: Infinity,
+        }
+      );
     } finally {
       starting = false;
     }
@@ -216,9 +216,10 @@
     items={hashtagItems}
   />
   <div class="composer-footer">
-    <button
-      class="composer-submit"
+    <Button
       type="button"
+      variant="outline"
+      class="w-full gap-1.5"
       onclick={handleSubmit}
       disabled={starting || !draftPrompt.trim()}
     >
@@ -232,7 +233,7 @@
           <span class="shortcut-badge">⌘↵</span>
         {/if}
       {/if}
-    </button>
+    </Button>
   </div>
 </div>
 
@@ -274,35 +275,9 @@
     gap: 8px;
   }
 
-  .composer-submit {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    padding: 8px 16px;
-    border-radius: 6px;
-    font-size: var(--size-sm);
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s;
-    background: var(--ui-accent);
-    border: none;
-    color: var(--bg-deepest);
-    width: 100%;
-  }
-
   .shortcut-badge {
     margin-left: auto;
     font-size: var(--size-xs);
     opacity: 0.6;
-  }
-
-  .composer-submit:hover:not(:disabled) {
-    background: var(--ui-accent-hover);
-  }
-
-  .composer-submit:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
   }
 </style>

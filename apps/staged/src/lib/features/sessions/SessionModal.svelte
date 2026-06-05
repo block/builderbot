@@ -24,25 +24,23 @@
     onClose   — callback to close this modal
 -->
 <script lang="ts">
-  import { onMount, onDestroy, tick, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { slide } from 'svelte/transition';
-  import {
-    X,
-    AlertCircle,
-    Info,
-    CircleStop,
-    Send,
-    Copy,
-    Check,
-    ChevronRight,
-    ChevronDown,
-    Zap,
-    GitBranch,
-    FileText,
-    Paperclip,
-    ImagePlus,
-    Plus,
-  } from 'lucide-svelte';
+  import X from '@lucide/svelte/icons/x';
+  import AlertCircle from '@lucide/svelte/icons/alert-circle';
+  import Info from '@lucide/svelte/icons/info';
+  import CircleStop from '@lucide/svelte/icons/circle-stop';
+  import Send from '@lucide/svelte/icons/send';
+  import Copy from '@lucide/svelte/icons/copy';
+  import Check from '@lucide/svelte/icons/check';
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import Zap from '@lucide/svelte/icons/zap';
+  import GitBranch from '@lucide/svelte/icons/git-branch';
+  import FileText from '@lucide/svelte/icons/file-text';
+  import Paperclip from '@lucide/svelte/icons/paperclip';
+  import ImagePlus from '@lucide/svelte/icons/image-plus';
+  import Plus from '@lucide/svelte/icons/plus';
   import Spinner from '../../shared/Spinner.svelte';
   import { marked } from 'marked';
   import { sanitize } from '../../shared/sanitize';
@@ -65,7 +63,10 @@
     buildBranchHashtagItems,
     renderHashtagTokens as renderHashtagTokensShared,
   } from './hashtagItems';
-  import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
+  import * as Dialog from '$lib/components/ui/dialog';
+  import * as Alert from '$lib/components/ui/alert';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
   import { subscribeDragDrop } from '../branches/dragDrop';
   import {
     isImageFile,
@@ -101,6 +102,7 @@
   marked.setOptions({ breaks: true, gfm: true });
 
   interface Props {
+    open: boolean;
     sessionId: string;
     onClose: () => void;
     /** Display roots — tool call paths within them are shown as relative. */
@@ -117,6 +119,7 @@
   }
 
   let {
+    open,
     sessionId,
     onClose,
     repoDir,
@@ -141,7 +144,6 @@
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let pollInFlight = false;
   let closed = false;
-  let dismissing = $state(false);
 
   let inputText = $state('');
   let messageQueue = $state<string[]>([]);
@@ -207,7 +209,7 @@
 
   // Drag-and-drop state
   let dragOver = $state(false);
-  let modalElement: HTMLDivElement | undefined = $state();
+  let modalElement: HTMLElement | null = $state(null);
 
   // Shared image data cache for both reply previews and message history images.
   // Maps image ID → data URL. Loaded lazily when needed.
@@ -373,25 +375,55 @@
   // Lifecycle
   // =========================================================================
 
-  onMount(async () => {
-    unregisterSearchTarget = registerSearchShortcutTarget({
+  // Register the global search-shortcut target only while the modal is open.
+  // This component is mounted persistently for every branch card (the `open`
+  // prop toggles visibility), and runSearchShortcut() always dispatches to the
+  // last-registered target. Registering in onMount would let a closed,
+  // off-screen modal capture Cmd/Ctrl+F and search next/previous, so gate
+  // registration on `open` instead.
+  $effect(() => {
+    if (!open) return;
+    const unregister = registerSearchShortcutTarget({
       find: openSearch,
       next: nextMatch,
       previous: previousMatch,
     });
-
-    await loadSession();
-    if (session?.status === 'running') {
-      startPolling();
-    }
-    // Focus input on open
-    tick().then(() => inputEl?.focus());
+    unregisterSearchTarget = unregister;
+    return () => {
+      unregister();
+      unregisterSearchTarget = null;
+    };
   });
 
   onDestroy(() => {
     closed = true;
     stopPolling();
     unregisterSearchTarget?.();
+  });
+
+  // This modal is mounted once and reused across opens (the `open` prop toggles
+  // visibility), so the session must be (re)loaded reactively rather than in
+  // onMount — otherwise it would load once with whatever sessionId was set at
+  // mount time (often empty) and never refresh. Re-run whenever the modal is
+  // opened or the target session changes.
+  $effect(() => {
+    // Track open + sessionId only; loadSession()'s own state writes must not
+    // retrigger this effect.
+    const isOpen = open;
+    const id = sessionId;
+    if (!isOpen || !id) {
+      stopPolling();
+      return;
+    }
+    stopPolling();
+    loadSession().then(() => {
+      if (closed || !open || sessionId !== id) return;
+      if (session?.status === 'running') {
+        startPolling();
+      }
+      // Focus input on open
+      tick().then(() => inputEl?.focus());
+    });
   });
 
   function isComposerFocused(): boolean {
@@ -760,7 +792,6 @@
 
   /** Track which XML blocks are expanded */
   let expandedXmlBlocks = $state<Set<string>>(new Set());
-  const backdropDismiss = createBackdropDismissHandlers({ onDismiss: requestClose });
 
   function toggleXmlBlock(key: string) {
     const next = new Set(expandedXmlBlocks);
@@ -770,19 +801,6 @@
       next.add(key);
     }
     expandedXmlBlocks = next;
-  }
-
-  function handleKeydown(e: KeyboardEvent) {
-    // Handle Escape key
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      if (searchVisible) {
-        closeSearch();
-      } else {
-        requestClose();
-      }
-      return;
-    }
   }
 
   function openSearch() {
@@ -871,12 +889,13 @@
   function requestClose() {
     if (closed) return;
     closed = true;
-    dismissing = true;
     stopPolling();
-    requestAnimationFrame(() => {
-      onClose();
-    });
+    onClose();
   }
+
+  $effect(() => {
+    if (open) closed = false;
+  });
 
   /** Group consecutive tool_call / tool_result messages into pairs */
   type ToolPair = {
@@ -985,33 +1004,23 @@
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} onpaste={handleImagePaste} />
+<svelte:window onpaste={handleImagePaste} />
 
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<div
-  class="modal-backdrop"
-  class:dismissing
-  role="dialog"
-  aria-modal="true"
-  tabindex="-1"
-  onpointerdown={backdropDismiss.handlePointerDown}
-  onclick={backdropDismiss.handleClick}
-  onkeydown={(e) => e.key === 'Escape' && requestClose()}
->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div
-    bind:this={modalElement}
-    class="modal"
-    class:drag-over={dragOver}
-    role="presentation"
-    onclick={(e) => e.stopPropagation()}
+<Dialog.Root {open} onOpenChange={(v) => !v && requestClose()}>
+  <Dialog.Content
+    bind:ref={modalElement}
+    class={`sm:max-w-[700px] h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col border-2 ${dragOver ? 'border-[var(--ui-accent)] bg-[color-mix(in_srgb,var(--ui-accent)_5%,var(--bg-chrome))]' : 'border-transparent'} transition-colors`}
+    showCloseButton={false}
+    onOpenAutoFocus={(e) => e.preventDefault()}
   >
     <!-- Header -->
     <header class="modal-header">
       <div class="header-content">
-        <span class="header-title">
+        <Dialog.Title
+          class="text-[var(--size-sm)] font-semibold text-foreground overflow-hidden text-ellipsis whitespace-nowrap"
+        >
           {session?.prompt ? stripXmlTags(session.prompt) || 'Session' : 'Session'}
-        </span>
+        </Dialog.Title>
       </div>
       <InContentSearch
         visible={searchVisible}
@@ -1024,22 +1033,47 @@
       />
       <div class="header-actions">
         {#if noteInfo?.content.trim() && onOpenNote}
-          <button class="header-btn" onclick={() => onOpenNote?.(noteInfo!)} title="Open note">
-            View note
-          </button>
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="outline"
+                  size="sm"
+                  class="h-7 shrink-0 px-2.5 text-xs text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[700px]:h-10"
+                  onclick={() => onOpenNote?.(noteInfo!)}
+                >
+                  View note
+                </Button>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>Open note</Tooltip.Content>
+          </Tooltip.Root>
         {/if}
-        <button
-          class="close-btn"
-          onclick={requestClose}
-          title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
-        >
-          <X size={16} />
-        </button>
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            {#snippet child({ props })}
+              <Button
+                {...props}
+                variant="ghost"
+                size="icon"
+                class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[700px]:size-10 [&_svg]:!size-4"
+                onclick={requestClose}
+              >
+                <X size={16} />
+              </Button>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content>
+            {viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
+          </Tooltip.Content>
+        </Tooltip.Root>
       </div>
     </header>
 
     <!-- Messages area -->
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="modal-content"
       bind:this={messagesEl}
@@ -1092,7 +1126,8 @@
                         {@const blockKey = `${group.message.id}-${segIdx}`}
                         {@const isOpen = expandedXmlBlocks.has(blockKey)}
                         <div class="context-card">
-                          <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                          <!-- svelte-ignore a11y_click_events_have_key_events -->
+                          <!-- svelte-ignore a11y_no_static_element_interactions -->
                           <div class="context-card-header" onclick={() => toggleXmlBlock(blockKey)}>
                             <span class="context-chevron">
                               {#if isOpen}
@@ -1117,7 +1152,7 @@
                 <!-- User prompt bubble -->
                 {#if userText.trim() || (group.message.imageIds && group.message.imageIds.length > 0)}
                   <div class="message-row human-message">
-                    <div class="human-bubble">
+                    <div class="group/bubble human-bubble">
                       {#if userText.trim()}
                         <span class="human-text"
                           >{@html renderHashtagTokens(userText.trim(), hashtagItems)}</span
@@ -1140,37 +1175,55 @@
                           {/each}
                         </div>
                       {/if}
-                      <button
-                        class="copy-btn inline-copy"
-                        onclick={() => copyContent(group.message.content, group.message.id)}
-                        title="Copy message"
-                      >
-                        {#if copiedId === group.message.id}
-                          <Check size={12} />
-                        {:else}
-                          <Copy size={12} />
-                        {/if}
-                      </button>
+                      <Tooltip.Root>
+                        <Tooltip.Trigger>
+                          {#snippet child({ props })}
+                            <Button
+                              {...props}
+                              variant="ghost"
+                              size="icon"
+                              class="absolute top-1.5 right-1.5 size-auto rounded p-[3px] text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/bubble:opacity-100 [&_svg]:!size-3"
+                              onclick={() => copyContent(group.message.content, group.message.id)}
+                            >
+                              {#if copiedId === group.message.id}
+                                <Check size={12} />
+                              {:else}
+                                <Copy size={12} />
+                              {/if}
+                            </Button>
+                          {/snippet}
+                        </Tooltip.Trigger>
+                        <Tooltip.Content>Copy message</Tooltip.Content>
+                      </Tooltip.Root>
                     </div>
                   </div>
                 {/if}
               {:else if group.type === 'assistant'}
                 <div class="message-row assistant-message">
-                  <div class="assistant-content">
+                  <div class="group/assistant assistant-content">
                     <div class="markdown-content">
                       {@html renderMarkdown(group.message.content)}
                     </div>
-                    <button
-                      class="copy-btn"
-                      onclick={() => copyContent(group.message.content, group.message.id)}
-                      title="Copy message"
-                    >
-                      {#if copiedId === group.message.id}
-                        <Check size={12} />
-                      {:else}
-                        <Copy size={12} />
-                      {/if}
-                    </button>
+                    <Tooltip.Root>
+                      <Tooltip.Trigger>
+                        {#snippet child({ props })}
+                          <Button
+                            {...props}
+                            variant="ghost"
+                            size="icon"
+                            class="absolute top-0 right-0 size-auto rounded p-[3px] text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/assistant:opacity-100 [&_svg]:!size-3"
+                            onclick={() => copyContent(group.message.content, group.message.id)}
+                          >
+                            {#if copiedId === group.message.id}
+                              <Check size={12} />
+                            {:else}
+                              <Copy size={12} />
+                            {/if}
+                          </Button>
+                        {/snippet}
+                      </Tooltip.Trigger>
+                      <Tooltip.Content>Copy message</Tooltip.Content>
+                    </Tooltip.Root>
                   </div>
                 </div>
               {:else}
@@ -1181,7 +1234,8 @@
                       {@const item = vg.items[0]}
                       {@const isExpanded = expandedTools.has(item.pair.call.id)}
                       <div class="tool-card">
-                        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                        <!-- svelte-ignore a11y_click_events_have_key_events -->
+                        <!-- svelte-ignore a11y_no_static_element_interactions -->
                         <div
                           class="tool-header"
                           class:tool-header-expandable={!!item.pair.result}
@@ -1219,7 +1273,8 @@
                       {@const verbGroupKey = `${vg.items[0].pair.call.id}-${vg.verb}`}
                       {@const isGroupExpanded = expandedVerbGroups.has(verbGroupKey)}
                       <div class="tool-card">
-                        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                        <!-- svelte-ignore a11y_click_events_have_key_events -->
+                        <!-- svelte-ignore a11y_no_static_element_interactions -->
                         <div
                           class="tool-header tool-header-expandable"
                           onclick={() => toggleVerbGroup(verbGroupKey)}
@@ -1236,7 +1291,8 @@
                           {#each vg.items as item}
                             {@const isExpanded = expandedTools.has(item.pair.call.id)}
                             <div class="tool-card tool-card-nested">
-                              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                              <!-- svelte-ignore a11y_click_events_have_key_events -->
+                              <!-- svelte-ignore a11y_no_static_element_interactions -->
                               <div
                                 class="tool-header"
                                 class:tool-header-expandable={!!item.pair.result}
@@ -1289,8 +1345,10 @@
 
           {#if noteFollowupLabel}
             <div class="note-followup-row" in:messageSlide>
-              <button
-                class="note-followup-btn"
+              <Button
+                variant="outline"
+                size="sm"
+                class="h-auto gap-1.5 rounded-md border-[var(--border-muted)] bg-[var(--note-bg)] px-3 py-1.5 text-xs font-medium text-[var(--note-color)] shadow-none hover:border-[var(--note-color)] hover:bg-[var(--note-bg-emphasis)] hover:text-[var(--note-color)] disabled:opacity-65"
                 onclick={handleNoteFollowupClick}
                 disabled={sending}
               >
@@ -1300,41 +1358,41 @@
                   <FileText size={13} />
                 {/if}
                 <span>{noteFollowupLabel}</span>
-              </button>
+              </Button>
             </div>
           {/if}
         </div>
       {/if}
 
       {#if session?.status === 'error' && session.errorMessage}
-        <div class="error-banner">
-          <AlertCircle size={14} />
-          <span>{session.errorMessage}</span>
-        </div>
+        <Alert.Root variant="destructive" class="mt-3">
+          <AlertCircle />
+          <Alert.Description>{session.errorMessage}</Alert.Description>
+        </Alert.Root>
       {:else if session && session.status !== 'running' && session.status !== 'queued'}
         {#if isResumableReason(session.completionReason)}
-          <div
-            class="session-end-banner"
-            class:warning={session.completionReason === 'crashed' ||
-              session.completionReason === 'app_quit'}
-            class:neutral={session.completionReason === 'interrupted'}
-          >
-            <Info size={14} />
-            <span>
+          {@const isWarning =
+            session.completionReason === 'crashed' || session.completionReason === 'app_quit'}
+          <Alert.Root class="mt-3">
+            <Info class={isWarning ? 'text-[var(--ui-warning)]' : 'text-[var(--text-muted)]'} />
+            <Alert.Description>
               {session.completionReason === 'crashed'
                 ? 'This session ended unexpectedly.'
                 : session.completionReason === 'app_quit'
                   ? 'This session was interrupted when Staged closed.'
                   : 'You stopped this session.'}
-            </span>
-            <button
-              class="resume-btn"
-              onclick={() => sendMessage('Continue where you left off.')}
-              disabled={sending}
-            >
-              Resume
-            </button>
-          </div>
+            </Alert.Description>
+            <Alert.Action>
+              <Button
+                variant="outline"
+                size="xs"
+                onclick={() => sendMessage('Continue where you left off.')}
+                disabled={sending}
+              >
+                Resume
+              </Button>
+            </Alert.Action>
+          </Alert.Root>
         {/if}
       {/if}
     </div>
@@ -1343,18 +1401,28 @@
     <div class="input-wrapper">
       {#if isPipelinePrelude}
         <div class="input-area pipeline-stop-area">
-          <button
-            class="action-btn stop-btn pipeline-stop-btn"
-            onclick={handleCancel}
-            disabled={cancelling}
-            title="Stop workflow"
-          >
-            {#if cancelling}
-              <Spinner size={16} />
-            {:else}
-              <CircleStop size={16} />
-            {/if}
-          </button>
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <span {...props} class="inline-flex">
+                  <Button
+                    variant="destructive"
+                    size="icon"
+                    class="size-9 shrink-0 rounded-[10px] [&_svg]:!size-4"
+                    onclick={handleCancel}
+                    disabled={cancelling}
+                  >
+                    {#if cancelling}
+                      <Spinner size={16} />
+                    {:else}
+                      <CircleStop size={16} />
+                    {/if}
+                  </Button>
+                </span>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>Stop workflow</Tooltip.Content>
+          </Tooltip.Root>
         </div>
       {:else}
         {#if hasQueuedMessages}
@@ -1363,15 +1431,24 @@
               <div class="queue-item">
                 <span class="queue-item-label">Queued</span>
                 <span class="queue-item-text">{msg}</span>
-                <button
-                  class="queue-item-remove"
-                  onclick={() => {
-                    messageQueue = messageQueue.filter((_, idx) => idx !== i);
-                  }}
-                  title="Remove from queue"
-                >
-                  <X size={10} />
-                </button>
+                <Tooltip.Root>
+                  <Tooltip.Trigger>
+                    {#snippet child({ props })}
+                      <Button
+                        {...props}
+                        variant="ghost"
+                        size="icon"
+                        class="size-[18px] shrink-0 rounded text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-destructive [&_svg]:!size-2.5"
+                        onclick={() => {
+                          messageQueue = messageQueue.filter((_, idx) => idx !== i);
+                        }}
+                      >
+                        <X size={10} />
+                      </Button>
+                    {/snippet}
+                  </Tooltip.Trigger>
+                  <Tooltip.Content>Remove from queue</Tooltip.Content>
+                </Tooltip.Root>
               </div>
             {/each}
           </div>
@@ -1379,27 +1456,49 @@
         {#if canAttachImages && replyImageIds.length > 0}
           <div class="reply-images">
             {#each replyImageIds as imageId}
-              <div class="reply-image-thumb">
+              <div class="group/thumb reply-image-thumb">
                 {#if imagePreviews.get(imageId)}
                   <img src={imagePreviews.get(imageId)} alt="attached" />
                 {:else}
                   <div class="reply-image-placeholder"><ImagePlus size={16} /></div>
                 {/if}
                 {#if !isLive}
-                  <button
-                    class="reply-image-remove"
-                    onclick={() => removeReplyImage(imageId)}
-                    title="Remove image"
-                  >
-                    <X size={10} />
-                  </button>
+                  <Tooltip.Root>
+                    <Tooltip.Trigger>
+                      {#snippet child({ props })}
+                        <Button
+                          {...props}
+                          variant="ghost"
+                          size="icon"
+                          class="absolute top-0.5 right-0.5 size-4 rounded-full bg-[var(--bg-deepest)] text-muted-foreground opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-chrome)] hover:text-foreground group-hover/thumb:opacity-100 [&_svg]:!size-2.5"
+                          onclick={() => removeReplyImage(imageId)}
+                        >
+                          <X size={10} />
+                        </Button>
+                      {/snippet}
+                    </Tooltip.Trigger>
+                    <Tooltip.Content>Remove image</Tooltip.Content>
+                  </Tooltip.Root>
                 {/if}
               </div>
             {/each}
             {#if !isLive}
-              <button class="reply-image-add" onclick={openImagePicker} title="Add image">
-                <Plus size={16} />
-              </button>
+              <Tooltip.Root>
+                <Tooltip.Trigger>
+                  {#snippet child({ props })}
+                    <Button
+                      {...props}
+                      variant="outline"
+                      size="icon"
+                      class="size-12 shrink-0 rounded-md border border-dashed border-[var(--border-muted)] bg-transparent text-[var(--text-faint)] shadow-none hover:border-[var(--border-emphasis)] hover:bg-transparent hover:text-muted-foreground [&_svg]:!size-4"
+                      onclick={openImagePicker}
+                    >
+                      <Plus size={16} />
+                    </Button>
+                  {/snippet}
+                </Tooltip.Trigger>
+                <Tooltip.Content>Add image</Tooltip.Content>
+              </Tooltip.Root>
             {/if}
           </div>
         {/if}
@@ -1414,14 +1513,24 @@
               onchange={handleImageFileSelect}
             />
             {#if replyImageIds.length === 0}
-              <button
-                class="attach-btn"
-                onclick={openImagePicker}
-                disabled={isLive}
-                title="Attach image"
-              >
-                <Paperclip size={16} />
-              </button>
+              <Tooltip.Root>
+                <Tooltip.Trigger>
+                  {#snippet child({ props })}
+                    <span {...props} class="inline-flex">
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        class="size-9 shrink-0 rounded-[10px] text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
+                        onclick={openImagePicker}
+                        disabled={isLive}
+                      >
+                        <Paperclip size={16} />
+                      </Button>
+                    </span>
+                  {/snippet}
+                </Tooltip.Trigger>
+                <Tooltip.Content>Attach image</Tooltip.Content>
+              </Tooltip.Root>
             {/if}
           {/if}
           <HashtagInput
@@ -1435,79 +1544,62 @@
             items={hashtagItems}
           />
           {#if isLive}
-            <button
-              class="action-btn stop-btn"
-              onclick={handleCancel}
-              disabled={cancelling}
-              title="Stop session"
-            >
-              {#if cancelling}
-                <Spinner size={16} />
-              {:else}
-                <CircleStop size={16} />
-              {/if}
-            </button>
+            <Tooltip.Root>
+              <Tooltip.Trigger>
+                {#snippet child({ props })}
+                  <span {...props} class="inline-flex">
+                    <Button
+                      variant="destructive"
+                      size="icon"
+                      class="size-9 shrink-0 rounded-[10px] [&_svg]:!size-4"
+                      onclick={handleCancel}
+                      disabled={cancelling}
+                    >
+                      {#if cancelling}
+                        <Spinner size={16} />
+                      {:else}
+                        <CircleStop size={16} />
+                      {/if}
+                    </Button>
+                  </span>
+                {/snippet}
+              </Tooltip.Trigger>
+              <Tooltip.Content>Stop session</Tooltip.Content>
+            </Tooltip.Root>
           {:else}
-            <button
-              class="action-btn send-btn"
-              class:sending
-              onclick={handleSend}
-              disabled={sending || !inputText.trim()}
-              title="Send message"
-            >
-              {#if sending}
-                <Spinner size={16} />
-              {:else}
-                <Send size={16} />
-              {/if}
-            </button>
+            <Tooltip.Root>
+              <Tooltip.Trigger>
+                {#snippet child({ props })}
+                  <span {...props} class="inline-flex">
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      class="size-9 shrink-0 rounded-[10px] shadow-none disabled:opacity-30 [&_svg]:!size-4"
+                      onclick={handleSend}
+                      disabled={sending || !inputText.trim()}
+                    >
+                      {#if sending}
+                        <Spinner size={16} />
+                      {:else}
+                        <Send size={16} />
+                      {/if}
+                    </Button>
+                  </span>
+                {/snippet}
+              </Tooltip.Trigger>
+              <Tooltip.Content>Send message</Tooltip.Content>
+            </Tooltip.Root>
           {/if}
         </div>
       {/if}
     </div>
-  </div>
-</div>
+  </Dialog.Content>
+</Dialog.Root>
 
 <style>
   /* ======================================================================= */
   /* Modal shell                                                             */
   /* ======================================================================= */
-
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: var(--shadow-overlay);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-  }
-
-  .modal-backdrop.dismissing {
-    opacity: 0;
-    pointer-events: none;
-  }
-
-  .modal {
-    display: flex;
-    flex-direction: column;
-    width: 700px;
-    height: 80vh;
-    max-height: 900px;
-    background: var(--bg-chrome);
-    border: 2px solid transparent;
-    border-radius: 12px;
-    overflow: hidden;
-    box-shadow: var(--shadow-elevated);
-    transition:
-      border-color 0.15s,
-      background-color 0.15s;
-  }
-
-  .modal.drag-over {
-    border-color: var(--ui-accent);
-    background-color: color-mix(in srgb, var(--ui-accent) 5%, var(--bg-chrome));
-  }
 
   /* ----- Header ---------------------------------------------------------- */
 
@@ -1529,64 +1621,11 @@
     flex: 1;
   }
 
-  .header-title {
-    font-size: var(--size-sm);
-    font-weight: 600;
-    color: var(--text-primary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
   .header-actions {
     display: flex;
     align-items: center;
     gap: 4px;
     flex-shrink: 0;
-  }
-
-  .header-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 4px 10px;
-    background: none;
-    border: 1px solid var(--border-muted);
-    border-radius: 6px;
-    color: var(--text-muted);
-    cursor: pointer;
-    flex-shrink: 0;
-    font-size: 12px;
-    transition:
-      color 0.1s,
-      background-color 0.1s,
-      border-color 0.1s;
-  }
-
-  .header-btn:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover);
-    border-color: var(--text-muted);
-  }
-
-  .close-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 4px;
-    background: none;
-    border: none;
-    border-radius: 6px;
-    color: var(--text-muted);
-    cursor: pointer;
-    transition:
-      color 0.1s,
-      background-color 0.1s;
-  }
-
-  .close-btn:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover);
   }
 
   /* ----- Content area (scrollable) --------------------------------------- */
@@ -1597,6 +1636,9 @@
     overflow-y: auto;
     padding: 16px;
     min-height: 0;
+    /* Blend the messages-area surface halfway toward the composer's
+       --bg-chrome so it reads as distinct from the input field below. */
+    background: color-mix(in srgb, var(--bg-primary) 50%, var(--bg-chrome) 50%);
   }
 
   /* Custom scrollbar */
@@ -1670,18 +1712,6 @@
   .human-text {
     display: block;
     white-space: pre-wrap;
-  }
-
-  .human-bubble .inline-copy {
-    position: absolute;
-    top: 6px;
-    right: 6px;
-    opacity: 0;
-    transition: opacity 0.15s;
-  }
-
-  .human-bubble:hover .inline-copy {
-    opacity: 1;
   }
 
   /* Images attached to user messages */
@@ -1809,39 +1839,6 @@
     flex: 1;
     min-width: 0;
     padding-right: 28px;
-  }
-
-  .assistant-content > .copy-btn {
-    position: absolute;
-    top: 0;
-    right: 0;
-    opacity: 0;
-    transition: opacity 0.15s;
-  }
-
-  .assistant-content:hover > .copy-btn {
-    opacity: 1;
-  }
-
-  /* Copy button base */
-  .copy-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 3px;
-    background: none;
-    border: none;
-    border-radius: 4px;
-    color: var(--text-faint);
-    cursor: pointer;
-    transition:
-      color 0.1s,
-      background-color 0.1s;
-  }
-
-  .copy-btn:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover);
   }
 
   /* ----- Tool calls ------------------------------------------------------ */
@@ -1985,95 +1982,6 @@
     padding: 4px 0;
   }
 
-  .note-followup-btn {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    min-height: 30px;
-    padding: 6px 12px;
-    border: 1px solid var(--border-muted);
-    border-radius: 6px;
-    background: var(--note-bg);
-    color: var(--note-color);
-    font-size: var(--size-xs);
-    font-weight: 500;
-    cursor: pointer;
-    transition:
-      background-color 0.1s,
-      border-color 0.1s,
-      color 0.1s;
-  }
-
-  .note-followup-btn:hover:not(:disabled) {
-    border-color: var(--note-color);
-    background: var(--note-bg-emphasis);
-  }
-
-  .note-followup-btn:disabled {
-    cursor: default;
-    opacity: 0.65;
-  }
-
-  /* Error banner */
-  .error-banner {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 12px;
-    padding: 8px 12px;
-    background: var(--ui-danger-bg, rgba(248, 81, 73, 0.1));
-    color: var(--ui-danger);
-    border-radius: 8px;
-    font-size: var(--size-xs);
-    line-height: 1.4;
-  }
-
-  /* Session end banners — softer than error for non-error conditions */
-  .session-end-banner {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 12px;
-    padding: 8px 12px;
-    border-radius: 8px;
-    font-size: var(--size-xs);
-    line-height: 1.4;
-  }
-
-  .session-end-banner.warning {
-    background: var(--ui-warning-bg);
-    color: var(--ui-warning);
-  }
-
-  .resume-btn {
-    margin-left: auto;
-    padding: 4px 12px;
-    border: 1px solid currentColor;
-    border-radius: 6px;
-    background: transparent;
-    color: inherit;
-    font-size: var(--size-xs);
-    font-weight: 500;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 0.15s;
-  }
-
-  .resume-btn:hover {
-    background: color-mix(in srgb, currentColor 10%, transparent);
-  }
-
-  .resume-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .session-end-banner.neutral {
-    background: rgba(127, 127, 127, 0.1);
-    color: var(--text-muted);
-  }
-
   /* ----- Input wrapper + queue popover ----------------------------------- */
 
   .input-wrapper {
@@ -2124,29 +2032,6 @@
     white-space: nowrap;
   }
 
-  .queue-item-remove {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 18px;
-    height: 18px;
-    padding: 0;
-    background: none;
-    border: none;
-    border-radius: 4px;
-    color: var(--text-faint);
-    cursor: pointer;
-    flex-shrink: 0;
-    transition:
-      color 0.1s,
-      background-color 0.1s;
-  }
-
-  .queue-item-remove:hover {
-    color: var(--ui-danger);
-    background: var(--bg-hover);
-  }
-
   /* ----- Reply image previews -------------------------------------------- */
 
   .file-input-hidden {
@@ -2192,57 +2077,6 @@
     color: var(--text-faint);
   }
 
-  .reply-image-remove {
-    position: absolute;
-    top: 2px;
-    right: 2px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 16px;
-    height: 16px;
-    padding: 0;
-    border: none;
-    border-radius: 50%;
-    background: var(--bg-deepest);
-    color: var(--text-muted);
-    cursor: pointer;
-    opacity: 0;
-    transition:
-      opacity 0.1s,
-      color 0.1s;
-  }
-
-  .reply-image-thumb:hover .reply-image-remove {
-    opacity: 1;
-  }
-
-  .reply-image-remove:hover {
-    color: var(--text-primary);
-    background: var(--bg-chrome);
-  }
-
-  .reply-image-add {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 48px;
-    height: 48px;
-    border-radius: 6px;
-    border: 1px dashed var(--border-muted);
-    background: none;
-    color: var(--text-faint);
-    cursor: pointer;
-    transition:
-      color 0.1s,
-      border-color 0.1s;
-  }
-
-  .reply-image-add:hover {
-    color: var(--text-muted);
-    border-color: var(--border-emphasis);
-  }
-
   /* ----- Input area ------------------------------------------------------ */
 
   .input-area {
@@ -2257,39 +2091,6 @@
 
   .pipeline-stop-area {
     justify-content: flex-end;
-  }
-
-  .stop-btn.pipeline-stop-btn {
-    background: var(--ui-danger);
-    color: var(--bg-deepest);
-  }
-
-  .attach-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 36px;
-    height: 36px;
-    padding: 0;
-    border: none;
-    border-radius: 10px;
-    background: none;
-    color: var(--text-muted);
-    cursor: pointer;
-    flex-shrink: 0;
-    transition:
-      color 0.1s,
-      background-color 0.1s;
-  }
-
-  .attach-btn:hover:not(:disabled) {
-    color: var(--text-primary);
-    background: var(--bg-hover);
-  }
-
-  .attach-btn:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
   }
 
   .input-area :global(.message-input) {
@@ -2315,56 +2116,6 @@
 
   .input-area :global(.hashtag-input-wrapper) {
     flex: 1;
-  }
-
-  .action-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 36px;
-    height: 36px;
-    padding: 0;
-    border: none;
-    border-radius: 10px;
-    cursor: pointer;
-    flex-shrink: 0;
-    transition:
-      background-color 0.15s,
-      opacity 0.15s;
-  }
-
-  .send-btn {
-    background: var(--ui-accent);
-    color: var(--bg-deepest);
-  }
-
-  .send-btn:hover:not(:disabled) {
-    background: var(--ui-accent-hover);
-  }
-
-  .send-btn:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-  }
-
-  .send-btn.sending {
-    opacity: 1;
-    cursor: default;
-  }
-
-  .stop-btn {
-    background: var(--ui-danger-bg, rgba(248, 81, 73, 0.15));
-    color: var(--ui-danger);
-  }
-
-  .stop-btn:hover:not(:disabled) {
-    background: var(--ui-danger);
-    color: white;
-  }
-
-  .stop-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
   }
 
   /* ======================================================================= */
@@ -2470,27 +2221,8 @@
   }
 
   @media (max-width: 700px) {
-    .modal {
-      width: 100vw;
-      height: 100vh;
-      height: 100dvh;
-      max-height: none;
-      border-radius: 0;
-      box-shadow: none;
-    }
-
     .modal-header {
       padding: 12px;
-    }
-
-    .header-btn,
-    .close-btn {
-      min-height: 40px;
-    }
-
-    .close-btn {
-      width: 40px;
-      padding: 0;
     }
 
     .modal-content {

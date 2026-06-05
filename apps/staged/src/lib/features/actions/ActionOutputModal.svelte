@@ -20,20 +20,20 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
-  import {
-    X,
-    AlertCircle,
-    CircleStop,
-    CheckCircle,
-    XCircle,
-    Check,
-    StickyNote,
-    RotateCw,
-  } from 'lucide-svelte';
+  import X from '@lucide/svelte/icons/x';
+  import AlertCircle from '@lucide/svelte/icons/alert-circle';
+  import CircleStop from '@lucide/svelte/icons/circle-stop';
+  import CheckCircle from '@lucide/svelte/icons/check-circle';
+  import XCircle from '@lucide/svelte/icons/x-circle';
+  import Check from '@lucide/svelte/icons/check';
+  import StickyNote from '@lucide/svelte/icons/sticky-note';
+  import RotateCw from '@lucide/svelte/icons/rotate-cw';
   import Spinner from '../../shared/Spinner.svelte';
   import Convert from 'ansi-to-html';
   import { sanitize } from '../../shared/sanitize';
-  import { createBackdropDismissHandlers } from '../../shared/backdropDismiss';
+  import * as Dialog from '$lib/components/ui/dialog';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
   import { createNote, invalidateBranchTimeline } from '../../commands';
   import type { ActionStatusEvent, ActionOutputEvent, OutputChunk, ActionStatus } from './actions';
   import {
@@ -47,6 +47,7 @@
   import { viewport } from '../../shared/viewport.svelte';
 
   interface Props {
+    open: boolean;
     executionId: string;
     branchId: string;
     actionName: string;
@@ -58,6 +59,7 @@
   }
 
   let {
+    open,
     executionId,
     branchId,
     actionName,
@@ -84,7 +86,6 @@
   let unlistenOutput: (() => void) | null = null;
   let unlistenStatus: (() => void) | null = null;
   let shouldAutoScroll = $state(true);
-  const backdropDismiss = createBackdropDismissHandlers({ onDismiss: () => onClose() });
 
   // rAF batching for incoming output chunks
   let pendingChunks: OutputChunk[] = [];
@@ -186,6 +187,15 @@
 
   // React to executionId changes (e.g. when "Run again" switches to a new execution)
   $effect(() => {
+    // Bail out unless the modal is actually open with a real execution. The
+    // modal is mounted persistently (open is a prop), so without this guard
+    // every closed instance would still fetch getActionOutputBuffer('') and
+    // install output/status listeners — wasteful on pages with many cards,
+    // and it surfaces a spurious "not found" load error.
+    if (!open || !executionId) {
+      cleanup();
+      return;
+    }
     void executionId; // subscribe to executionId changes
     // Reset state for the new execution
     status = 'running';
@@ -390,22 +400,18 @@
   }
 </script>
 
-<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-<div
-  class="modal-backdrop"
-  role="dialog"
-  aria-modal="true"
-  tabindex="-1"
-  onpointerdown={backdropDismiss.handlePointerDown}
-  onclick={backdropDismiss.handleClick}
-  onkeydown={(e) => e.key === 'Escape' && onClose()}
->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="modal" role="presentation" onclick={(e) => e.stopPropagation()}>
+<Dialog.Root {open} onOpenChange={(v) => !v && onClose()}>
+  <Dialog.Content
+    class="sm:max-w-[1000px] w-[90vw] h-[80vh] max-h-[800px] bg-background p-0 gap-0 overflow-hidden flex flex-col border border-[var(--border-primary)]"
+    showCloseButton={false}
+  >
     <!-- Header -->
     <header class="modal-header">
       <div class="header-content">
-        <span class="header-title">{actionName}</span>
+        <Dialog.Title
+          class="text-[var(--size-sm)] font-semibold text-foreground overflow-hidden text-ellipsis whitespace-nowrap"
+          >{actionName}</Dialog.Title
+        >
         {#if status}
           {@const StatusIcon = getStatusIcon(status)}
           {@const isCurrentlyStopping = isStopping || isStoppingDerived}
@@ -422,65 +428,122 @@
         {/if}
       </div>
       <div class="header-actions">
-        <button
-          class="save-note-btn"
-          class:saved={saveState === 'saved'}
-          class:save-error={saveState === 'error'}
-          onmousedown={handleSaveMouseDown}
-          onclick={handleSaveAsNote}
-          disabled={saveState === 'saved' || saveState === 'error'}
-          title={saveState === 'error'
-            ? (saveError ?? 'Failed to save note')
-            : selectedText
-              ? 'Save selected text as a note'
-              : 'Save full log as a note'}
-        >
-          {#if saveState === 'saved'}
-            <span class="save-note-label">
-              <Check size={14} />
-              <span>Saved</span>
-            </span>
-          {:else if saveState === 'error'}
-            <span class="save-note-label">
-              <AlertCircle size={14} />
-              <span>Failed</span>
-            </span>
-          {:else}
-            <span class="save-note-label">
-              <StickyNote size={14} />
-              <span>{selectedText ? 'Save selection' : 'Save log'}</span>
-            </span>
-          {/if}
-        </button>
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            {#snippet child({ props })}
+              <span {...props} class="inline-flex">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class={[
+                    'gap-1.5 border-[var(--border-muted)] bg-[var(--bg-secondary)] px-3 text-[13px] font-medium text-foreground shadow-none hover:border-[var(--border-focus)] hover:bg-[var(--bg-hover)] max-[640px]:h-10 max-[640px]:px-2.5',
+                    saveState === 'saved' &&
+                      'cursor-default border-[var(--commit-bg-emphasis)] bg-[var(--commit-bg)] text-[var(--status-added)] hover:border-[var(--commit-bg-emphasis)] hover:bg-[var(--commit-bg)] hover:text-[var(--status-added)]',
+                    saveState === 'error' &&
+                      'cursor-default border-[var(--ui-danger-bg)] bg-[var(--ui-danger-bg)] text-[var(--ui-danger)] hover:border-[var(--ui-danger-bg)] hover:bg-[var(--ui-danger-bg)] hover:text-[var(--ui-danger)]',
+                  ]}
+                  onmousedown={handleSaveMouseDown}
+                  onclick={handleSaveAsNote}
+                  disabled={saveState === 'saved' || saveState === 'error'}
+                >
+                  {#if saveState === 'saved'}
+                    <Check size={14} />
+                    <span>Saved</span>
+                  {:else if saveState === 'error'}
+                    <AlertCircle size={14} />
+                    <span>Failed</span>
+                  {:else}
+                    <StickyNote size={14} />
+                    <span>{selectedText ? 'Save selection' : 'Save log'}</span>
+                  {/if}
+                </Button>
+              </span>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content>
+            {saveState === 'error'
+              ? (saveError ?? 'Failed to save note')
+              : selectedText
+                ? 'Save selected text as a note'
+                : 'Save full log as a note'}
+          </Tooltip.Content>
+        </Tooltip.Root>
         {#if isRunning}
           {@const isCurrentlyStopping = isStopping || isStoppingDerived}
-          <button
-            class="stop-btn"
-            onclick={handleStop}
-            disabled={isCurrentlyStopping}
-            title="Stop action"
-          >
-            <CircleStop size={14} />
-            <span>{isCurrentlyStopping ? 'Stopping…' : 'Stop'}</span>
-          </button>
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <span {...props} class="inline-flex">
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    class="gap-1.5 px-3 text-[13px] font-medium max-[640px]:h-10 max-[640px]:px-2.5"
+                    onclick={handleStop}
+                    disabled={isCurrentlyStopping}
+                  >
+                    <CircleStop size={14} />
+                    <span>{isCurrentlyStopping ? 'Stopping…' : 'Stop'}</span>
+                  </Button>
+                </span>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>Stop action</Tooltip.Content>
+          </Tooltip.Root>
         {:else if onRunAgain}
-          <button class="run-again-btn" onclick={onRunAgain} title="Run again">
-            <RotateCw size={14} />
-            <span>Run again</span>
-          </button>
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="outline"
+                  size="sm"
+                  class="gap-1.5 border-[var(--border-muted)] bg-[var(--bg-secondary)] px-3 text-[13px] font-medium hover:border-[var(--border-focus)] hover:bg-[var(--bg-hover)] max-[640px]:h-10 max-[640px]:px-2.5"
+                  onclick={onRunAgain}
+                >
+                  <RotateCw size={14} />
+                  <span>Run again</span>
+                </Button>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>Run again</Tooltip.Content>
+          </Tooltip.Root>
         {/if}
         {#if status === 'failed' && onRemove}
-          <button class="remove-btn" onclick={handleRemove} title="Remove this failed run">
-            <span>Remove</span>
-          </button>
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="destructive"
+                  size="sm"
+                  class="gap-1.5 px-3 text-[13px] font-medium max-[640px]:h-10 max-[640px]:px-2.5"
+                  onclick={handleRemove}
+                >
+                  <span>Remove</span>
+                </Button>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>Remove this failed run</Tooltip.Content>
+          </Tooltip.Root>
         {/if}
-        <button
-          class="close-btn"
-          onclick={onClose}
-          title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
-        >
-          <X size={16} />
-        </button>
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            {#snippet child({ props })}
+              <Button
+                {...props}
+                variant="ghost"
+                size="icon-sm"
+                class="size-8 shrink-0 rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-foreground max-[640px]:size-10 [&_svg]:!size-4"
+                onclick={onClose}
+              >
+                <X size={16} />
+              </Button>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content>
+            {viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
+          </Tooltip.Content>
+        </Tooltip.Root>
       </div>
     </header>
 
@@ -510,34 +573,10 @@
         </div>
       {/if}
     </div>
-  </div>
-</div>
+  </Dialog.Content>
+</Dialog.Root>
 
 <style>
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background-color: rgba(0, 0, 0, 0.6);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 100;
-    backdrop-filter: blur(2px);
-  }
-
-  .modal {
-    background: var(--bg-primary);
-    border-radius: 12px;
-    width: 90vw;
-    max-width: 1000px;
-    height: 80vh;
-    max-height: 800px;
-    display: flex;
-    flex-direction: column;
-    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-    border: 1px solid var(--border-primary);
-  }
-
   .modal-header {
     display: flex;
     align-items: center;
@@ -555,15 +594,6 @@
     gap: 12px;
     flex: 1;
     min-width: 0;
-  }
-
-  .header-title {
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--text-primary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
 
   .status-badge {
@@ -605,90 +635,6 @@
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-
-  .stop-btn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 12px;
-    background: rgba(239, 68, 68, 0.1);
-    color: #ef4444;
-    border: 1px solid rgba(239, 68, 68, 0.2);
-    border-radius: 6px;
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-
-  .stop-btn:hover:not(:disabled) {
-    background: rgba(239, 68, 68, 0.15);
-    border-color: rgba(239, 68, 68, 0.3);
-  }
-
-  .stop-btn:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-
-  .run-again-btn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 12px;
-    background: rgba(59, 130, 246, 0.1);
-    color: #3b82f6;
-    border: 1px solid rgba(59, 130, 246, 0.2);
-    border-radius: 6px;
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-
-  .run-again-btn:hover {
-    background: rgba(59, 130, 246, 0.15);
-    border-color: rgba(59, 130, 246, 0.3);
-  }
-
-  .remove-btn {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 6px 12px;
-    background: var(--bg-secondary);
-    color: var(--text-primary);
-    border: 1px solid var(--border-muted);
-    border-radius: 6px;
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-
-  .remove-btn:hover {
-    background: var(--bg-hover);
-    border-color: var(--border-focus);
-  }
-
-  .close-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 32px;
-    height: 32px;
-    background: transparent;
-    color: var(--text-secondary);
-    border: none;
-    border-radius: 6px;
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-
-  .close-btn:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
   }
 
   .modal-content {
@@ -735,58 +681,7 @@
     color: #9ca3af;
   }
 
-  .save-note-btn {
-    display: flex;
-    align-items: center;
-    padding: 6px 12px;
-    background: var(--bg-secondary);
-    color: var(--text-primary);
-    border: 1px solid var(--border-muted);
-    border-radius: 6px;
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    overflow: hidden;
-  }
-
-  .save-note-btn:hover:not(:disabled) {
-    background: var(--bg-hover);
-    border-color: var(--border-focus);
-  }
-
-  .save-note-btn.saved {
-    background: var(--commit-bg);
-    color: var(--status-added);
-    border-color: var(--commit-bg-emphasis);
-    cursor: default;
-  }
-
-  .save-note-btn.save-error {
-    background: var(--ui-danger-bg);
-    color: var(--ui-danger);
-    border-color: var(--ui-danger-bg);
-    cursor: default;
-  }
-
-  .save-note-label {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    white-space: nowrap;
-  }
-
   @media (max-width: 640px) {
-    .modal {
-      width: 100vw;
-      max-width: none;
-      height: 100vh;
-      height: 100dvh;
-      max-height: none;
-      border-radius: 0;
-      box-shadow: none;
-    }
-
     .modal-header {
       border-radius: 0;
       padding: 12px;
@@ -794,19 +689,6 @@
 
     .header-actions {
       gap: 4px;
-    }
-
-    .close-btn {
-      width: 40px;
-      height: 40px;
-    }
-
-    .stop-btn,
-    .run-again-btn,
-    .remove-btn,
-    .save-note-btn {
-      min-height: 40px;
-      padding: 6px 10px;
     }
 
     .modal-content {

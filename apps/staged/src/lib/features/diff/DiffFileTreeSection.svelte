@@ -1,16 +1,15 @@
 <script lang="ts">
-  import {
-    AlertTriangle,
-    Check,
-    RotateCcw,
-    ChevronRight,
-    ChevronDown,
-    Folder,
-    MessageSquare,
-    MoveRight,
-    Plus,
-    X,
-  } from 'lucide-svelte';
+  import AlertTriangle from '@lucide/svelte/icons/alert-triangle';
+  import Check from '@lucide/svelte/icons/check';
+  import RotateCcw from '@lucide/svelte/icons/rotate-ccw';
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import ChevronDown from '@lucide/svelte/icons/chevron-down';
+  import Folder from '@lucide/svelte/icons/folder';
+  import MessageSquare from '@lucide/svelte/icons/message-square';
+  import MoveRight from '@lucide/svelte/icons/move-right';
+  import Plus from '@lucide/svelte/icons/plus';
+  import X from '@lucide/svelte/icons/x';
+  import * as Tooltip from '$lib/components/ui/tooltip';
   import { FileSearchResults } from '@builderbot/diff-viewer/components';
   import { getMatchSnippet, getTextLines, type SearchMatch } from '@builderbot/diff-viewer/utils';
   import {
@@ -162,29 +161,38 @@
       </span>
     </span>
   {:else}
-    <span
-      class="status-icon"
-      class:status-icon-added={file.status === 'added'}
-      class:status-icon-deleted={file.status === 'deleted'}
-      class:status-icon-renamed={file.status === 'renamed' && !hasLineChanges(file)}
-      class:status-icon-renamed-modified={file.status === 'renamed' && hasLineChanges(file)}
-      onclick={(e) => onToggleReviewed(e, file)}
-      onkeydown={(e) => e.key === 'Enter' && onToggleReviewed(e, file)}
-      role="button"
-      tabindex="0"
-      title={showReviewedSection ? 'Mark as needs review' : 'Mark as reviewed'}
-    >
-      <span class="icon-default">
-        {@render fileStatusVisual(file)}
-      </span>
-      <span class="icon-hover" class:icon-hover-unreview={showReviewedSection}>
-        {#if showReviewedSection}
-          <RotateCcw size={16} />
-        {:else}
-          <Check size={16} />
-        {/if}
-      </span>
-    </span>
+    <Tooltip.Root>
+      <Tooltip.Trigger>
+        {#snippet child({ props })}
+          <span
+            {...props}
+            class="status-icon"
+            class:status-icon-added={file.status === 'added'}
+            class:status-icon-deleted={file.status === 'deleted'}
+            class:status-icon-renamed={file.status === 'renamed' && !hasLineChanges(file)}
+            class:status-icon-renamed-modified={file.status === 'renamed' && hasLineChanges(file)}
+            onclick={(e) => onToggleReviewed(e, file)}
+            onkeydown={(e) => e.key === 'Enter' && onToggleReviewed(e, file)}
+            role="button"
+            tabindex="0"
+          >
+            <span class="icon-default">
+              {@render fileStatusVisual(file)}
+            </span>
+            <span class="icon-hover" class:icon-hover-unreview={showReviewedSection}>
+              {#if showReviewedSection}
+                <RotateCcw size={16} />
+              {:else}
+                <Check size={16} />
+              {/if}
+            </span>
+          </span>
+        {/snippet}
+      </Tooltip.Trigger>
+      <Tooltip.Content>
+        {showReviewedSection ? 'Mark as needs review' : 'Mark as reviewed'}
+      </Tooltip.Content>
+    </Tooltip.Root>
   {/if}
 {/snippet}
 
@@ -204,31 +212,40 @@
   {@const total = fileChangeTotal(file)}
   {@const added = lineCount(file.addedLines)}
   {@const deleted = lineCount(file.deletedLines)}
-  <span
-    class="change-indicator"
-    class:change-indicator-visible={total !== null}
-    title={total !== null && total > 0 ? changeIndicatorTitle(added, deleted) : undefined}
-    aria-hidden="true"
-  >
-    {#if total !== null && total > 0}
-      <span class="change-indicator-fill" style:height={`${changeIndicatorHeight(total)}px`}>
-        {#if added > 0}
-          <span
-            class="change-segment change-segment-added"
-            style:height={`${(added / total) * 100}%`}
-          ></span>
-        {/if}
-        {#if deleted > 0}
-          <span
-            class="change-segment change-segment-deleted"
-            style:height={`${(deleted / total) * 100}%`}
-          ></span>
-        {/if}
-      </span>
-    {:else}
-      <span class="change-indicator-empty"></span>
-    {/if}
-  </span>
+  <Tooltip.Root disabled={!(total !== null && total > 0)}>
+    <Tooltip.Trigger>
+      {#snippet child({ props })}
+        <span
+          {...props}
+          class="change-indicator"
+          class:change-indicator-visible={total !== null}
+          aria-hidden="true"
+        >
+          {#if total !== null && total > 0}
+            <span class="change-indicator-fill" style:height={`${changeIndicatorHeight(total)}px`}>
+              {#if added > 0}
+                <span
+                  class="change-segment change-segment-added"
+                  style:height={`${(added / total) * 100}%`}
+                ></span>
+              {/if}
+              {#if deleted > 0}
+                <span
+                  class="change-segment change-segment-deleted"
+                  style:height={`${(deleted / total) * 100}%`}
+                ></span>
+              {/if}
+            </span>
+          {:else}
+            <span class="change-indicator-empty"></span>
+          {/if}
+        </span>
+      {/snippet}
+    </Tooltip.Trigger>
+    <Tooltip.Content>
+      {total !== null && total > 0 ? changeIndicatorTitle(added, deleted) : ''}
+    </Tooltip.Content>
+  </Tooltip.Root>
 {/snippet}
 
 {#snippet treeNodes(nodes: TreeNode[], depth: number, showReviewedSection: boolean)}
@@ -311,12 +328,18 @@
           {#if searchState?.state.isOpen && searchState.state.fileResults.has(node.file.path)}
             {@const resultCount =
               searchState.state.fileResults.get(node.file.path)?.matches.length ?? 0}
-            <span
-              class="search-result-count"
-              title="{resultCount} search result{resultCount !== 1 ? 's' : ''}"
-            >
-              {resultCount}
-            </span>
+            <Tooltip.Root>
+              <Tooltip.Trigger>
+                {#snippet child({ props })}
+                  <span {...props} class="search-result-count">
+                    {resultCount}
+                  </span>
+                {/snippet}
+              </Tooltip.Trigger>
+              <Tooltip.Content>
+                {resultCount} search result{resultCount !== 1 ? 's' : ''}
+              </Tooltip.Content>
+            </Tooltip.Root>
           {/if}
         </button>
 

@@ -5,21 +5,24 @@
   Hover reveals session and delete actions on the right.
 -->
 <script lang="ts">
-  import {
-    GitCommitVertical,
-    FileDiff,
-    FileText,
-    FileSearch,
-    Image as ImageLucide,
-    MessageSquare,
-    Trash2,
-    AlertTriangle,
-    Clock,
-    GitBranch,
-    GitMerge,
-    ChevronsDown,
-  } from 'lucide-svelte';
+  import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
+  import FileDiff from '@lucide/svelte/icons/file-diff';
+  import FileText from '@lucide/svelte/icons/file-text';
+  import FileSearch from '@lucide/svelte/icons/file-search';
+  import ImageLucide from '@lucide/svelte/icons/image';
+  import MessageSquare from '@lucide/svelte/icons/message-square';
+  import MessageSquarePlus from '@lucide/svelte/icons/message-square-plus';
+  import Trash2 from '@lucide/svelte/icons/trash-2';
+  import AlertTriangle from '@lucide/svelte/icons/alert-triangle';
+  import Clock from '@lucide/svelte/icons/clock';
+  import GitBranch from '@lucide/svelte/icons/git-branch';
+  import GitMerge from '@lucide/svelte/icons/git-merge';
+  import ChevronsDown from '@lucide/svelte/icons/chevrons-down';
+  import Copy from '@lucide/svelte/icons/copy';
   import Spinner from '../../shared/Spinner.svelte';
+  import * as ContextMenu from '$lib/components/ui/context-menu';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
 
   export type TimelineItemType =
     | 'commit'
@@ -48,14 +51,6 @@
   export type TimelineBadge = {
     icon: 'comment' | 'warning';
     count: number;
-  };
-
-  /** Data passed to the parent when the user right-clicks a row with context menu actions. */
-  export type ContextMenuEvent = {
-    x: number;
-    y: number;
-    commitSha?: string;
-    hashtagRef?: string;
   };
 
   interface Props {
@@ -99,8 +94,8 @@
     commitSha?: string;
     /** Hashtag reference token (e.g. "#commit:abc123") for "New session referring to this". */
     hashtagRef?: string;
-    /** Callback when the user right-clicks and this row has context menu actions. */
-    onContextMenu?: (event: ContextMenuEvent) => void;
+    /** Callback invoked when the user picks "New session referring to this" from the context menu. */
+    onNewSessionReferring?: (hashtagRef: string) => void;
   }
 
   let {
@@ -139,7 +134,7 @@
     showConnector = true,
     commitSha,
     hashtagRef,
-    onContextMenu,
+    onNewSessionReferring,
   }: Props = $props();
 
   let isNote = $derived(
@@ -254,230 +249,419 @@
   }
 
   // ── Context menu ────────────────────────────────────────────────────
-  let hasContextMenu = $derived(!!commitSha || !!hashtagRef);
-
-  function handleContextMenu(e: MouseEvent) {
-    if (!hasContextMenu || !onContextMenu) return;
-    e.preventDefault();
-    e.stopPropagation();
-    onContextMenu({ x: e.clientX, y: e.clientY, commitSha, hashtagRef });
-  }
+  let hasContextMenu = $derived(!!commitSha || (!!hashtagRef && !!onNewSessionReferring));
 </script>
 
-<!-- svelte-ignore a11y_click_events_have_key_events -->
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div
-  class="timeline-row"
-  class:pending={isPending}
-  class:failed={isFailed}
-  class:clickable={isClickable}
-  class:git-state={isGitState}
-  class:compact={type === 'load-error'}
-  onclick={handleRowClick}
-  oncontextmenu={handleContextMenu}
->
-  <div class="timeline-marker">
-    <div
-      class="timeline-icon"
-      class:commit-icon={type === 'commit' || type === 'pending-commit' || type === 'queued-commit'}
-      class:note-icon={type === 'note' || type === 'generating-note' || type === 'queued-note'}
-      class:review-icon={type === 'review' ||
-        type === 'generating-review' ||
-        type === 'queued-review'}
-      class:image-icon={isImage}
-      class:branch-icon={isGitState}
-      class:warning-icon={type === 'git-warning' || type === 'git-merge-warning'}
-      class:failed-icon={isFailed}
-    >
-      {#if isQueued}
-        <Clock size={12} />
-      {:else if isPending}
-        <Spinner size={12} />
-      {:else if isFailed}
-        <AlertTriangle size={12} />
-      {:else if type === 'git-warning'}
-        <AlertTriangle size={12} />
-      {:else if type === 'git-merge' || type === 'git-merge-warning'}
-        <GitMerge size={12} />
-      {:else if type === 'git-pull'}
-        <ChevronsDown size={12} />
-      {:else if type === 'git-push'}
-        <ChevronsDown size={12} />
-      {:else if type === 'git-diff'}
-        <FileDiff size={12} />
-      {:else if type === 'commit'}
-        <GitCommitVertical size={12} />
-      {:else if isNote}
-        <FileText size={12} />
-      {:else if isReview}
-        <FileSearch size={12} />
-      {:else if isImage}
-        <ImageLucide size={12} />
-      {:else if isGitState}
-        <GitBranch size={12} />
+{#snippet rowBody()}
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="timeline-row"
+    class:pending={isPending}
+    class:failed={isFailed}
+    class:clickable={isClickable}
+    class:git-state={isGitState}
+    class:compact={type === 'load-error'}
+    onclick={handleRowClick}
+  >
+    <div class="timeline-marker">
+      <div
+        class="timeline-icon"
+        class:commit-icon={type === 'commit' ||
+          type === 'pending-commit' ||
+          type === 'queued-commit'}
+        class:note-icon={type === 'note' || type === 'generating-note' || type === 'queued-note'}
+        class:review-icon={type === 'review' ||
+          type === 'generating-review' ||
+          type === 'queued-review'}
+        class:image-icon={isImage}
+        class:branch-icon={isGitState}
+        class:warning-icon={type === 'git-warning' || type === 'git-merge-warning'}
+        class:failed-icon={isFailed}
+      >
+        {#if isQueued}
+          <Clock size={12} />
+        {:else if isPending}
+          <Spinner size={12} />
+        {:else if isFailed}
+          <AlertTriangle size={12} />
+        {:else if type === 'git-warning'}
+          <AlertTriangle size={12} />
+        {:else if type === 'git-merge' || type === 'git-merge-warning'}
+          <GitMerge size={12} />
+        {:else if type === 'git-pull'}
+          <ChevronsDown size={12} />
+        {:else if type === 'git-push'}
+          <ChevronsDown size={12} />
+        {:else if type === 'git-diff'}
+          <FileDiff size={12} />
+        {:else if type === 'commit'}
+          <GitCommitVertical size={12} />
+        {:else if isNote}
+          <FileText size={12} />
+        {:else if isReview}
+          <FileSearch size={12} />
+        {:else if isImage}
+          <ImageLucide size={12} />
+        {:else if isGitState}
+          <GitBranch size={12} />
+        {/if}
+      </div>
+      {#if showConnector && !isLast}
+        <div class="timeline-line"></div>
       {/if}
     </div>
-    {#if showConnector && !isLast}
-      <div class="timeline-line"></div>
-    {/if}
+    <div class="timeline-content">
+      <div class="timeline-info">
+        {#if titleHtml}
+          <span
+            class="timeline-title"
+            class:skeleton-title={isPending}
+            class:failed-title={isFailed}>{@html titleHtml}</span
+          >
+        {:else}
+          <span
+            class="timeline-title"
+            class:skeleton-title={isPending}
+            class:failed-title={isFailed}>{title}</span
+          >
+        {/if}
+        {#if meta || secondaryMeta || tertiaryMeta || (badges && badges.length > 0)}
+          <div class="timeline-meta">
+            {#if meta}
+              <Tooltip.Root>
+                <Tooltip.Trigger>
+                  {#snippet child({ props })}
+                    <span class="meta-item" {...props}>{meta}</span>
+                  {/snippet}
+                </Tooltip.Trigger>
+                <Tooltip.Content>{meta}</Tooltip.Content>
+              </Tooltip.Root>
+            {/if}
+            {#if secondaryMeta}
+              <Tooltip.Root>
+                <Tooltip.Trigger>
+                  {#snippet child({ props })}
+                    <span class="meta-item meta-sha" class:failed-meta={isFailed} {...props}
+                      >{secondaryMeta}</span
+                    >
+                  {/snippet}
+                </Tooltip.Trigger>
+                <Tooltip.Content>{secondaryMeta}</Tooltip.Content>
+              </Tooltip.Root>
+            {/if}
+            {#if tertiaryMeta}
+              <Tooltip.Root>
+                <Tooltip.Trigger>
+                  {#snippet child({ props })}
+                    <span class="meta-item" {...props}>{tertiaryMeta}</span>
+                  {/snippet}
+                </Tooltip.Trigger>
+                <Tooltip.Content>{tertiaryMeta}</Tooltip.Content>
+              </Tooltip.Root>
+            {/if}
+            {#if badges}
+              {#each badges as badge}
+                <span class="meta-badge">
+                  {#if badge.icon === 'warning'}
+                    <AlertTriangle size={10} />
+                  {:else}
+                    <MessageSquare size={10} />
+                  {/if}
+                  <span>{badge.count}</span>
+                </span>
+              {/each}
+            {/if}
+          </div>
+        {/if}
+      </div>
+      <div
+        class="timeline-actions"
+        class:always-visible={!!onRetryClick ||
+          !!onStartClick ||
+          !!onResumeClick ||
+          !!onPullClick ||
+          !!pullDisabledReason ||
+          !!onPushClick ||
+          !!pushDisabledReason ||
+          !!onRebaseClick ||
+          !!rebaseDisabledReason ||
+          !!onForcePushClick ||
+          !!forcePushDisabledReason ||
+          !!onViewDiffClick ||
+          !!onCommitChangesClick ||
+          !!commitChangesDisabledReason ||
+          !!onDiscardChangesClick ||
+          !!discardChangesDisabledReason}
+      >
+        {#if onStartClick}
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="outline"
+                  size="xs"
+                  onclick={handleStartClick}
+                  class="h-[22px] rounded border-[var(--border-muted)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+                >
+                  Start
+                </Button>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>Start</Tooltip.Content>
+          </Tooltip.Root>
+        {/if}
+        {#if onRetryClick}
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="ghost"
+                  size="xs"
+                  onclick={handleRetryClick}
+                  class="h-[22px] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+                >
+                  Retry
+                </Button>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>Retry</Tooltip.Content>
+          </Tooltip.Root>
+        {/if}
+        {#if onResumeClick}
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="outline"
+                  size="xs"
+                  onclick={handleResumeClick}
+                  class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+                >
+                  Resume
+                </Button>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>Resume session</Tooltip.Content>
+          </Tooltip.Root>
+        {/if}
+        {#if onPullClick || pullDisabledReason}
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <span {...props} class="inline-flex">
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    onclick={handlePullClick}
+                    disabled={!!pullDisabledReason}
+                    class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+                  >
+                    Pull
+                  </Button>
+                </span>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>{pullDisabledReason ?? 'Pull'}</Tooltip.Content>
+          </Tooltip.Root>
+        {/if}
+        {#if onPushClick || pushDisabledReason}
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <span {...props} class="inline-flex">
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    onclick={handlePushClick}
+                    disabled={!!pushDisabledReason}
+                    class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+                  >
+                    {pushing ? 'Pushing\u2026' : 'Push'}
+                  </Button>
+                </span>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>
+              {pushDisabledReason ?? (pushing ? 'View push session' : 'Push')}
+            </Tooltip.Content>
+          </Tooltip.Root>
+        {/if}
+        {#if onForcePushClick || forcePushDisabledReason}
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <span {...props} class="inline-flex">
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    onclick={handleForcePushClick}
+                    disabled={!!forcePushDisabledReason}
+                    class={[
+                      'h-[22px] rounded-md bg-transparent shadow-none',
+                      forcePushing
+                        ? 'border-[var(--border-subtle)] text-[var(--text-muted)] hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground'
+                        : 'border-[var(--ui-danger-bg)] font-medium text-[var(--ui-danger)] hover:border-[var(--ui-danger)] hover:bg-[var(--ui-danger-bg)] hover:text-[var(--ui-danger)]',
+                    ]}
+                  >
+                    {forcePushing ? 'Pushing\u2026' : 'Force Push'}
+                  </Button>
+                </span>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>
+              {forcePushDisabledReason ??
+                (forcePushing ? 'View push session' : 'Force push local branch to origin')}
+            </Tooltip.Content>
+          </Tooltip.Root>
+        {/if}
+        {#if onRebaseClick || rebaseDisabledReason}
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <span {...props} class="inline-flex">
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    onclick={handleRebaseClick}
+                    disabled={!!rebaseDisabledReason}
+                    class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+                  >
+                    Rebase
+                  </Button>
+                </span>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>{rebaseDisabledReason ?? 'Rebase'}</Tooltip.Content>
+          </Tooltip.Root>
+        {/if}
+        {#if onViewDiffClick}
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="outline"
+                  size="xs"
+                  onclick={handleViewDiffClick}
+                  class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+                >
+                  Diff
+                </Button>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>View diff</Tooltip.Content>
+          </Tooltip.Root>
+        {/if}
+        {#if onCommitChangesClick || commitChangesDisabledReason}
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <span {...props} class="inline-flex">
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    onclick={handleCommitChangesClick}
+                    disabled={!!commitChangesDisabledReason}
+                    class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+                  >
+                    Commit
+                  </Button>
+                </span>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>{commitChangesDisabledReason ?? 'Commit changes'}</Tooltip.Content>
+          </Tooltip.Root>
+        {/if}
+        {#if onDiscardChangesClick || discardChangesDisabledReason}
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <span {...props} class="inline-flex">
+                  <Button
+                    variant="outline"
+                    size="xs"
+                    onclick={handleDiscardChangesClick}
+                    disabled={!!discardChangesDisabledReason}
+                    class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+                  >
+                    Discard
+                  </Button>
+                </span>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>{discardChangesDisabledReason ?? 'Discard changes'}</Tooltip.Content>
+          </Tooltip.Root>
+        {/if}
+        {#if hasSession && !onStartClick && !isQueued}
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <Button
+                  {...props}
+                  variant="ghost"
+                  size="icon-xs"
+                  onclick={handleSessionClick}
+                  class="size-[22px] text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-[var(--ui-accent)] [&_svg]:!size-3"
+                >
+                  <MessageSquare size={12} />
+                </Button>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>View session</Tooltip.Content>
+          </Tooltip.Root>
+        {/if}
+        {#if onDeleteClick || deleteDisabledReason}
+          <Tooltip.Root>
+            <Tooltip.Trigger>
+              {#snippet child({ props })}
+                <span {...props} class="inline-flex">
+                  <Button
+                    variant="ghost"
+                    size="icon-xs"
+                    onclick={handleDeleteClick}
+                    disabled={!!deleteDisabledReason}
+                    class="size-[22px] text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-destructive [&_svg]:!size-3"
+                  >
+                    <Trash2 size={12} />
+                  </Button>
+                </span>
+              {/snippet}
+            </Tooltip.Trigger>
+            <Tooltip.Content>{deleteDisabledReason ?? 'Delete'}</Tooltip.Content>
+          </Tooltip.Root>
+        {/if}
+      </div>
+    </div>
   </div>
-  <div class="timeline-content">
-    <div class="timeline-info">
-      {#if titleHtml}
-        <span class="timeline-title" class:skeleton-title={isPending} class:failed-title={isFailed}
-          >{@html titleHtml}</span
+{/snippet}
+
+{#if hasContextMenu}
+  <ContextMenu.Root>
+    <ContextMenu.Trigger class="contents">
+      {@render rowBody()}
+    </ContextMenu.Trigger>
+    <ContextMenu.Content class="min-w-[140px]">
+      {#if commitSha}
+        <ContextMenu.Item
+          onSelect={() => navigator.clipboard.writeText(commitSha!).catch(() => {})}
         >
-      {:else}
-        <span class="timeline-title" class:skeleton-title={isPending} class:failed-title={isFailed}
-          >{title}</span
-        >
+          <Copy size={14} /> Copy SHA
+        </ContextMenu.Item>
       {/if}
-      {#if meta || secondaryMeta || tertiaryMeta || (badges && badges.length > 0)}
-        <div class="timeline-meta">
-          {#if meta}
-            <span class="meta-item" title={meta}>{meta}</span>
-          {/if}
-          {#if secondaryMeta}
-            <span class="meta-item meta-sha" class:failed-meta={isFailed} title={secondaryMeta}
-              >{secondaryMeta}</span
-            >
-          {/if}
-          {#if tertiaryMeta}
-            <span class="meta-item" title={tertiaryMeta}>{tertiaryMeta}</span>
-          {/if}
-          {#if badges}
-            {#each badges as badge}
-              <span class="meta-badge">
-                {#if badge.icon === 'warning'}
-                  <AlertTriangle size={10} />
-                {:else}
-                  <MessageSquare size={10} />
-                {/if}
-                <span>{badge.count}</span>
-              </span>
-            {/each}
-          {/if}
-        </div>
+      {#if hashtagRef && onNewSessionReferring}
+        <ContextMenu.Item onSelect={() => onNewSessionReferring!(hashtagRef!)}>
+          <MessageSquarePlus size={14} /> New session referring to this
+        </ContextMenu.Item>
       {/if}
-    </div>
-    <div
-      class="timeline-actions"
-      class:always-visible={!!onRetryClick ||
-        !!onStartClick ||
-        !!onResumeClick ||
-        !!onPullClick ||
-        !!pullDisabledReason ||
-        !!onPushClick ||
-        !!pushDisabledReason ||
-        !!onRebaseClick ||
-        !!rebaseDisabledReason ||
-        !!onForcePushClick ||
-        !!forcePushDisabledReason ||
-        !!onViewDiffClick ||
-        !!onCommitChangesClick ||
-        !!commitChangesDisabledReason ||
-        !!onDiscardChangesClick ||
-        !!discardChangesDisabledReason}
-    >
-      {#if onStartClick}
-        <button class="action-btn start-btn" onclick={handleStartClick} title="Start">
-          Start
-        </button>
-      {/if}
-      {#if onRetryClick}
-        <button class="action-btn retry-btn" onclick={handleRetryClick} title="Retry">
-          Retry
-        </button>
-      {/if}
-      {#if onResumeClick}
-        <button class="action-btn resume-btn" onclick={handleResumeClick} title="Resume session">
-          Resume
-        </button>
-      {/if}
-      {#if onPullClick || pullDisabledReason}
-        <button
-          class="action-btn resume-btn"
-          onclick={handlePullClick}
-          disabled={!!pullDisabledReason}
-          title={pullDisabledReason ?? 'Pull'}
-        >
-          Pull
-        </button>
-      {/if}
-      {#if onPushClick || pushDisabledReason}
-        <button
-          class="action-btn resume-btn"
-          onclick={handlePushClick}
-          disabled={!!pushDisabledReason}
-          title={pushDisabledReason ?? (pushing ? 'View push session' : 'Push')}
-        >
-          {pushing ? 'Pushing\u2026' : 'Push'}
-        </button>
-      {/if}
-      {#if onForcePushClick || forcePushDisabledReason}
-        <button
-          class="action-btn {forcePushing ? 'resume-btn' : 'danger-btn'}"
-          onclick={handleForcePushClick}
-          disabled={!!forcePushDisabledReason}
-          title={forcePushDisabledReason ??
-            (forcePushing ? 'View push session' : 'Force push local branch to origin')}
-        >
-          {forcePushing ? 'Pushing\u2026' : 'Force Push'}
-        </button>
-      {/if}
-      {#if onRebaseClick || rebaseDisabledReason}
-        <button
-          class="action-btn resume-btn"
-          onclick={handleRebaseClick}
-          disabled={!!rebaseDisabledReason}
-          title={rebaseDisabledReason ?? 'Rebase'}
-        >
-          Rebase
-        </button>
-      {/if}
-      {#if onViewDiffClick}
-        <button class="action-btn resume-btn" onclick={handleViewDiffClick} title="View diff">
-          Diff
-        </button>
-      {/if}
-      {#if onCommitChangesClick || commitChangesDisabledReason}
-        <button
-          class="action-btn resume-btn"
-          onclick={handleCommitChangesClick}
-          disabled={!!commitChangesDisabledReason}
-          title={commitChangesDisabledReason ?? 'Commit changes'}
-        >
-          Commit
-        </button>
-      {/if}
-      {#if onDiscardChangesClick || discardChangesDisabledReason}
-        <button
-          class="action-btn resume-btn"
-          onclick={handleDiscardChangesClick}
-          disabled={!!discardChangesDisabledReason}
-          title={discardChangesDisabledReason ?? 'Discard changes'}
-        >
-          Discard
-        </button>
-      {/if}
-      {#if hasSession && !onStartClick && !isQueued}
-        <button class="action-btn session-btn" onclick={handleSessionClick} title="View session">
-          <MessageSquare size={12} />
-        </button>
-      {/if}
-      {#if onDeleteClick || deleteDisabledReason}
-        <button
-          class="action-btn delete-btn"
-          onclick={handleDeleteClick}
-          disabled={!!deleteDisabledReason}
-          title={deleteDisabledReason ?? 'Delete'}
-        >
-          <Trash2 size={12} />
-        </button>
-      {/if}
-    </div>
-  </div>
-</div>
+    </ContextMenu.Content>
+  </ContextMenu.Root>
+{:else}
+  {@render rowBody()}
+{/if}
 
 <style>
   .timeline-row {
@@ -740,90 +924,6 @@
   .timeline-row:hover .timeline-actions,
   .timeline-actions.always-visible {
     opacity: 1;
-  }
-
-  .action-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 22px;
-    height: 22px;
-    padding: 0;
-    background: none;
-    border: none;
-    border-radius: 4px;
-    color: var(--text-faint);
-    cursor: pointer;
-    transition:
-      color 0.1s,
-      background-color 0.1s;
-  }
-
-  .session-btn:hover {
-    color: var(--ui-accent);
-    background: var(--bg-hover);
-  }
-
-  .delete-btn:not(:disabled):hover {
-    color: var(--ui-danger);
-    background: var(--bg-hover);
-  }
-
-  .delete-btn:disabled,
-  .action-btn:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-  }
-
-  .retry-btn,
-  .start-btn,
-  .resume-btn {
-    width: auto;
-    padding: 0 8px;
-    font-size: var(--size-xs);
-    color: var(--text-muted);
-  }
-
-  .resume-btn {
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    font-weight: 500;
-    transition:
-      color 0.15s,
-      border-color 0.15s,
-      background-color 0.15s;
-  }
-
-  .resume-btn:hover {
-    border-color: var(--border-muted);
-    color: var(--text-primary);
-    background: var(--bg-hover);
-  }
-
-  .danger-btn {
-    width: auto;
-    padding: 0 8px;
-    font-size: var(--size-xs);
-    font-weight: 500;
-    border: 1px solid var(--ui-danger-bg, var(--ui-danger));
-    border-radius: 6px;
-    color: var(--ui-danger);
-  }
-
-  .danger-btn:not(:disabled):hover {
-    background: var(--ui-danger-bg, rgba(255, 59, 48, 0.1));
-    border-color: var(--ui-danger);
-  }
-
-  .start-btn {
-    border: 1px solid var(--border-muted);
-    border-radius: 4px;
-  }
-
-  .retry-btn:hover,
-  .start-btn:hover {
-    color: var(--text-primary);
-    background: var(--bg-hover);
   }
 
   @keyframes pulse {

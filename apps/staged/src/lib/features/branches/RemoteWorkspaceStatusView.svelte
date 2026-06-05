@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { AlertCircle, CirclePause } from 'lucide-svelte';
+  import AlertCircle from '@lucide/svelte/icons/alert-circle';
+  import CirclePause from '@lucide/svelte/icons/circle-pause';
   import Spinner from '../../shared/Spinner.svelte';
   import type { WorkspaceStatus } from '../../types';
 

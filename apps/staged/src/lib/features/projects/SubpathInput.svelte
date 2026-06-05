@@ -12,8 +12,9 @@
 </script>
 
 <script lang="ts">
-  import { FolderOpen } from 'lucide-svelte';
+  import FolderOpen from '@lucide/svelte/icons/folder-open';
   import * as commands from '../../api/commands';
+  import { Input } from '$lib/components/ui/input';
 
   interface Props {
     value: string;
@@ -32,7 +33,7 @@
   let suggestions = $state<string[]>([]);
   let showDropdown = $state(false);
   let highlightedIndex = $state(-1);
-  let inputEl: HTMLInputElement | undefined = $state();
+  let inputEl: HTMLInputElement | null = $state(null);
 
   // Expose the API to the parent via bindable prop
   $effect(() => {
@@ -205,9 +206,9 @@
 
 <div class="subpath-input-wrapper">
   <div class="input-container">
-    <input
-      bind:this={inputEl}
-      class="subpath-input"
+    <Input
+      bind:ref={inputEl}
+      class="min-h-[42px] rounded-[10px] bg-background px-3.5 py-2.5 text-base"
       type="text"
       bind:value
       oninput={handleInput}
@@ -252,33 +253,6 @@
     position: relative;
     display: flex;
     align-items: center;
-  }
-
-  .subpath-input {
-    width: 100%;
-    min-height: 42px;
-    border: 1.5px solid var(--border-muted);
-    background: transparent;
-    color: var(--text-primary);
-    border-radius: 10px;
-    padding: 10px 14px;
-    font-size: var(--size-md);
-    font-family: inherit;
-    outline: none;
-    transition: border-color 0.15s ease;
-    box-sizing: border-box;
-  }
-
-  .subpath-input:focus {
-    border-color: var(--ui-accent);
-  }
-
-  .subpath-input::placeholder {
-    color: var(--text-faint);
-  }
-
-  .subpath-input:disabled {
-    opacity: 0.6;
   }
 
   .suggestions-dropdown {

@@ -9,10 +9,10 @@ export const HASHTAG_TOKEN_RE = /#(note|commit|review|project-note|image):([^\s]
  * Inline SVG markup for each hashtag type icon (lucide icons at 12px).
  *
  * NOTE: These raw SVG strings intentionally duplicate the lucide icon paths
- * used via `lucide-svelte` components in the HashtagInput dropdown. This is
+ * used via `@lucide/svelte` components in the HashtagInput dropdown. This is
  * necessary because `renderHashtagTokens` produces a plain HTML string where
  * Svelte components can't render. If you update an icon here, update the
- * corresponding lucide-svelte component import in HashtagInput.svelte too.
+ * corresponding `@lucide/svelte` component import in HashtagInput.svelte too.
  */
 export const hashtagTypeIconSvg: Record<string, string> = {
   note: '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 13H8"/><path d="M16 13h-2"/><path d="M10 17H8"/><path d="M16 17h-2"/></svg>',

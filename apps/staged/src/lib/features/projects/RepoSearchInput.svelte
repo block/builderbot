@@ -7,9 +7,15 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { Search, Lock, Globe, Clock, Plus, Command } from 'lucide-svelte';
+  import Search from '@lucide/svelte/icons/search';
+  import Lock from '@lucide/svelte/icons/lock';
+  import Globe from '@lucide/svelte/icons/globe';
+  import Clock from '@lucide/svelte/icons/clock';
+  import Plus from '@lucide/svelte/icons/plus';
+  import Command from '@lucide/svelte/icons/command';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
+  import { Input } from '$lib/components/ui/input';
   import * as commands from '../../api/commands';
   import type { GitHubRepo, RecentRepo } from '../../types';
   import { parseGitHubUrl, type RepoSelection } from '../../shared/githubUrl';
@@ -41,15 +47,6 @@
   let isSearching = $state(false);
   let directFetchRepo = $state<GitHubRepo | null>(null);
   let dropdownOpen = $state(false);
-  let dropdownStyle = $state('');
-
-  function updateDropdownPosition() {
-    if (!inputEl) return;
-    const rect = inputEl.closest('.search-input')!.getBoundingClientRect();
-    const top = rect.bottom + 4;
-    const maxH = Math.max(120, window.innerHeight - top - 12);
-    dropdownStyle = `position:fixed;top:${top}px;left:${rect.left}px;width:${rect.width}px;max-height:${maxH}px`;
-  }
 
   function isOwnerRepoFormat(input: string): boolean {
     const trimmed = input.trim();
@@ -209,7 +206,6 @@
   }
 
   function handleFocus() {
-    updateDropdownPosition();
     dropdownOpen = true;
   }
 
@@ -264,10 +260,7 @@
   }
 </script>
 
-<svelte:window
-  onclick={handleClickOutside}
-  onresize={() => dropdownOpen && updateDropdownPosition()}
-/>
+<svelte:window onclick={handleClickOutside} />
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
@@ -279,8 +272,8 @@
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <div class="search-input" class:disabled onclick={() => inputEl?.focus()}>
     <Search size={14} class="search-icon" />
-    <input
-      bind:this={inputEl}
+    <Input
+      bind:ref={inputEl}
       bind:value={query}
       type="text"
       placeholder="Search or paste a repository..."
@@ -290,11 +283,12 @@
       {disabled}
       oninput={handleInput}
       onfocus={handleFocus}
+      class="border-0 bg-transparent shadow-none px-0 py-0 h-auto min-h-0 focus-visible:ring-0 focus-visible:border-0 md:text-base"
     />
   </div>
 
   {#if dropdownOpen}
-    <div class="repo-dropdown" style={dropdownStyle}>
+    <div class="repo-dropdown">
       {#if filteredRecentRepos.length > 0}
         {#each filteredRecentRepos as recent, i}
           {@const hue = recentHue(recent)}
@@ -392,6 +386,10 @@
 </div>
 
 <style>
+  .repo-search-wrapper {
+    position: relative;
+  }
+
   .search-input {
     display: flex;
     align-items: center;
@@ -400,7 +398,7 @@
     padding: 10px 14px;
     border: 1.5px solid var(--border-muted);
     border-radius: 10px;
-    background: transparent;
+    background: var(--bg-primary);
     transition: border-color 0.15s ease;
   }
 
@@ -418,26 +416,11 @@
     flex-shrink: 0;
   }
 
-  .search-input input {
-    flex: 1;
-    background: transparent;
-    border: none;
-    outline: none;
-    font-size: var(--size-md);
-    color: var(--text-primary);
-    padding: 0;
-    font-family: inherit;
-  }
-
-  .search-input input::placeholder {
-    color: var(--text-faint);
-  }
-
-  .search-input input:disabled {
-    cursor: not-allowed;
-  }
-
   .repo-dropdown {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
     max-height: 280px;
     overflow-y: auto;
     display: flex;

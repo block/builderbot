@@ -7,21 +7,28 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Plus, Play, MoreVertical, Download, Pin, Copy, FolderOpen } from 'lucide-svelte';
+  import Plus from '@lucide/svelte/icons/plus';
+  import Play from '@lucide/svelte/icons/play';
+  import MoreVertical from '@lucide/svelte/icons/more-vertical';
+  import Download from '@lucide/svelte/icons/download';
+  import Pin from '@lucide/svelte/icons/pin';
+  import Copy from '@lucide/svelte/icons/copy';
+  import FolderOpen from '@lucide/svelte/icons/folder-open';
   import type { RepoHomeItem } from '../../types';
   import { darkMode } from '../../stores/isDark.svelte';
   import { badgeFg, badgeBorder } from '../../shared/badgeColors';
-  import ContextMenu from '../../shared/menu/ContextMenu.svelte';
-  import type { MenuItem } from '../../shared/menu/types';
   import {
     getAvailableOpeners,
     openInApp,
     copyPathToClipboard,
     type OpenerApp,
   } from '../branches/branch';
+  import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import * as commands from '../../api/commands';
-  import { alerts } from '../../shared/alerts.svelte';
+  import { toast } from 'svelte-sonner';
   import Spinner from '../../shared/Spinner.svelte';
+  import { Button } from '$lib/components/ui/button';
+  import * as Tooltip from '$lib/components/ui/tooltip';
 
   interface Props {
     repo: RepoHomeItem;
@@ -41,7 +48,6 @@
     onPinnedReposChanged,
   }: Props = $props();
 
-  let contextMenu = $state<ReturnType<typeof ContextMenu> | undefined>();
   let openerApps = $state<OpenerApp[]>([]);
   let clonePath = $state<string | null>(null);
   let cloning = $state(false);
@@ -86,11 +92,9 @@
       onPinnedReposChanged?.();
     } catch (e) {
       console.error('[SidebarPinnedRepo] Failed to clone repo:', e);
-      alerts.show({
-        tone: 'error',
-        title: 'Clone failed',
-        message: e instanceof Error ? e.message : String(e),
-        durationMs: 5000,
+      toast.error('Clone failed', {
+        description: e instanceof Error ? e.message : String(e),
+        duration: 5000,
       });
     } finally {
       cloning = false;
@@ -107,66 +111,15 @@
     }
   }
 
-  function openContextMenu(event: MouseEvent) {
-    event.preventDefault();
-    event.stopPropagation();
-
-    const items: MenuItem[] = [];
-
-    if (repo.hasLocalClone && clonePath) {
-      const path = clonePath;
-
-      // Open-in submenu
-      if (openerApps.length > 0) {
-        items.push({
-          type: 'submenu',
-          label: 'Open in\u2026',
-          icon: FolderOpen,
-          children: openerApps.map((app) => ({
-            type: 'action' as const,
-            label: app.name,
-            iconSrc: app.icon ?? undefined,
-            onSelect: async () => {
-              try {
-                await openInApp(path, app.id);
-              } catch (e) {
-                alerts.show({
-                  tone: 'error',
-                  title: `Failed to open in ${app.name}`,
-                  message: e instanceof Error ? e.message : String(e),
-                  durationMs: 3000,
-                });
-              }
-            },
-          })),
-        });
-      }
-
-      // Copy path
-      items.push({
-        type: 'action',
-        label: 'Copy Path',
-        icon: Copy,
-        onSelect: () => copyPathToClipboard(path),
+  async function handleOpenInApp(path: string, app: OpenerApp) {
+    try {
+      await openInApp(path, app.id);
+    } catch (e) {
+      toast.error(`Failed to open in ${app.name}`, {
+        description: e instanceof Error ? e.message : String(e),
+        duration: 3000,
       });
-
-      items.push({ type: 'separator' });
     }
-
-    // Unpin
-    items.push({
-      type: 'action',
-      label: 'Unpin Repo',
-      icon: Pin,
-      onSelect: handleUnpin,
-    });
-
-    contextMenu?.open({
-      x: event.clientX,
-      y: event.clientY,
-      items,
-      ariaLabel: `Actions for ${repo.shortName}`,
-    });
   }
 
   function handleDragStart(e: DragEvent) {
@@ -222,68 +175,137 @@
   <div class="card-stripe"></div>
 
   <div class="card-content">
-    <div class="card-name-row" title={subtitle}>
-      <span class="repo-name">{repo.shortName}</span>
-      {#if subpathLabel}
-        <span class="subpath-badge">{subpathLabel}</span>
-      {/if}
-    </div>
+    <Tooltip.Root>
+      <Tooltip.Trigger>
+        {#snippet child({ props })}
+          <div {...props} class="card-name-row">
+            <span class="repo-name">{repo.shortName}</span>
+            {#if subpathLabel}
+              <span class="subpath-badge">{subpathLabel}</span>
+            {/if}
+          </div>
+        {/snippet}
+      </Tooltip.Trigger>
+      <Tooltip.Content>{subtitle}</Tooltip.Content>
+    </Tooltip.Root>
 
     <div class="card-actions">
-      <button
-        class="action-btn"
-        title="New project"
-        onclick={(e) => {
-          e.stopPropagation();
-          openNewProjectForRepo();
-        }}
-      >
-        <Plus size={12} />
-      </button>
+      <Tooltip.Root>
+        <Tooltip.Trigger>
+          {#snippet child({ props })}
+            <Button
+              {...props}
+              variant="ghost"
+              class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] [&_svg]:!size-3"
+              onclick={(e) => {
+                e.stopPropagation();
+                openNewProjectForRepo();
+              }}
+            >
+              <Plus size={12} />
+            </Button>
+          {/snippet}
+        </Tooltip.Trigger>
+        <Tooltip.Content>New project</Tooltip.Content>
+      </Tooltip.Root>
 
       {#if repo.hasLocalClone}
-        <button
-          class="action-btn run-btn"
-          title="Run"
-          onclick={(e) => {
-            e.stopPropagation();
-            // Run primary action — requires backend wiring (run action against main clone)
-            alerts.show({
-              tone: 'info',
-              title: 'Run action',
-              message: 'Running actions against pinned repos is coming soon.',
-              durationMs: 2000,
-            });
-          }}
-        >
-          <Play size={12} />
-        </button>
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            {#snippet child({ props })}
+              <Button
+                {...props}
+                variant="ghost"
+                class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--ui-success)] [&_svg]:!size-3"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  // Run primary action — requires backend wiring (run action against main clone)
+                  toast.info('Run action', {
+                    description: 'Running actions against pinned repos is coming soon.',
+                    duration: 2000,
+                  });
+                }}
+              >
+                <Play size={12} />
+              </Button>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content>Run</Tooltip.Content>
+        </Tooltip.Root>
       {:else}
-        <button
-          class="action-btn download-btn"
-          title="Clone repo locally"
-          disabled={cloning}
-          onclick={(e) => {
-            e.stopPropagation();
-            handleClone();
-          }}
-        >
-          {#if cloning}
-            <Spinner size={12} />
-          {:else}
-            <Download size={12} />
-          {/if}
-        </button>
+        <Tooltip.Root>
+          <Tooltip.Trigger>
+            {#snippet child({ props })}
+              <span {...props} class="inline-flex">
+                <Button
+                  variant="ghost"
+                  class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--ui-accent)] [&_svg]:!size-3"
+                  disabled={cloning}
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    handleClone();
+                  }}
+                >
+                  {#if cloning}
+                    <Spinner size={12} />
+                  {:else}
+                    <Download size={12} />
+                  {/if}
+                </Button>
+              </span>
+            {/snippet}
+          </Tooltip.Trigger>
+          <Tooltip.Content>Clone repo locally</Tooltip.Content>
+        </Tooltip.Root>
       {/if}
 
-      <button class="action-btn more-btn" title="More options" onclick={openContextMenu}>
-        <MoreVertical size={12} />
-      </button>
+      <DropdownMenu.Root>
+        <DropdownMenu.Trigger
+          class="inline-flex size-[22px] items-center justify-center rounded-[4px] bg-transparent text-[var(--text-secondary)] transition-colors hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]"
+          title="More options"
+          aria-label="More options"
+        >
+          <MoreVertical size={12} />
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[172px]">
+          {#if repo.hasLocalClone && clonePath}
+            {@const path = clonePath}
+            {#if openerApps.length > 0}
+              <DropdownMenu.Sub>
+                <DropdownMenu.SubTrigger>
+                  <FolderOpen size={14} /> Open in…
+                </DropdownMenu.SubTrigger>
+                <DropdownMenu.SubContent class="min-w-[160px]">
+                  {#each openerApps as app (app.id)}
+                    <DropdownMenu.Item onSelect={() => handleOpenInApp(path, app)}>
+                      {#if app.icon}
+                        <img
+                          src={app.icon}
+                          alt=""
+                          width="14"
+                          height="14"
+                          class="shrink-0 rounded-[3px]"
+                        />
+                      {/if}
+                      {app.name}
+                    </DropdownMenu.Item>
+                  {/each}
+                </DropdownMenu.SubContent>
+              </DropdownMenu.Sub>
+            {/if}
+            <DropdownMenu.Item onSelect={() => copyPathToClipboard(path)}>
+              <Copy size={14} /> Copy Path
+            </DropdownMenu.Item>
+            <DropdownMenu.Separator />
+          {/if}
+          <DropdownMenu.Item onSelect={handleUnpin}>
+            <Pin size={14} /> Unpin Repo
+          </DropdownMenu.Item>
+        </DropdownMenu.Content>
+      </DropdownMenu.Root>
     </div>
   </div>
 </div>
-
-<ContextMenu bind:this={contextMenu} ariaLabel="Pinned repo actions" minWidth={172} />
 
 <style>
   .pinned-repo-card {
@@ -367,45 +389,5 @@
     align-items: center;
     gap: 2px;
     flex-shrink: 0;
-  }
-
-  .action-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 22px;
-    height: 22px;
-    border: none;
-    border-radius: 4px;
-    background: transparent;
-    color: var(--text-secondary);
-    cursor: pointer;
-    padding: 0;
-    transition:
-      background 0.12s ease,
-      color 0.12s ease;
-  }
-
-  .action-btn:hover {
-    background: var(--bg-hover);
-    color: var(--text-primary);
-  }
-
-  .action-btn:focus-visible {
-    outline: 2px solid var(--ui-accent);
-    outline-offset: -1px;
-  }
-
-  .action-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .run-btn:hover {
-    color: var(--ui-success, oklch(0.65 0.15 145));
-  }
-
-  .download-btn:hover {
-    color: var(--ui-accent);
   }
 </style>

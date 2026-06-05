@@ -21,7 +21,10 @@
 <script lang="ts">
   import { tick } from 'svelte';
   import type { HashtagItem } from '../../types';
-  import { FileText, GitCommitVertical, FileSearch, Image as ImageLucide } from 'lucide-svelte';
+  import FileText from '@lucide/svelte/icons/file-text';
+  import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
+  import FileSearch from '@lucide/svelte/icons/file-search';
+  import ImageLucide from '@lucide/svelte/icons/image';
   import { HASHTAG_TOKEN_RE, hashtagTypeIconSvg, escapeHtml } from './hashtagItems';
   import { focusAtEndSync } from '../../shared/focusAtEnd';
   import RepoLabel from '../../shared/RepoLabel.svelte';

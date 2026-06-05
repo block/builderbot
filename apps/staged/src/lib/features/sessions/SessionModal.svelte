@@ -488,8 +488,11 @@
     // bail-out or in-flight load can never paint the previously-viewed
     // session — show a clean loading state for the requested id instead. When
     // reopening the same session, keep the existing transcript so it stays
-    // visible (and correct) rather than flashing a loading state.
-    if (session?.id !== sessionId) {
+    // visible (and correct) rather than flashing a loading state. Read the
+    // currently-loaded id via untrack so this synchronous prologue never
+    // subscribes the calling load effect to `session` — which it mutates
+    // below, otherwise re-triggering the effect in a tight infinite loop.
+    if (untrack(() => session?.id) !== sessionId) {
       session = null;
       messages = [];
     }

@@ -1080,8 +1080,16 @@ pub(crate) async fn has_unpushed_commits_impl(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
 
-    git::has_unpushed_commits(Path::new(&workdir.path), &branch.branch_name)
-        .map_err(|e| e.to_string())
+    // Run the blocking git subprocesses on a background thread so a slow cold
+    // `git` invocation can't block the Tauri IPC thread and freeze the UI,
+    // matching the remote path above.
+    let path = workdir.path.clone();
+    let branch_name = branch.branch_name.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        git::has_unpushed_commits(Path::new(&path), &branch_name).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("has_unpushed_commits task failed: {e}"))?
 }
 
 /// Push a branch to its remote by kicking off an agent session.

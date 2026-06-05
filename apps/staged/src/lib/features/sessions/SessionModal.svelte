@@ -159,37 +159,6 @@
 
   const SLIDE_DURATION = 150;
 
-  // -------------------------------------------------------------------------
-  // Diagnostic logging
-  //
-  // Temporary instrumentation to diagnose the "spinner spins forever / load
-  // takes a long time" report. Logs the load lifecycle (effect fires →
-  // loadSession → each backend await → poll) with monotonic timestamps and the
-  // requested vs. currently-loaded session id, so an out-of-order/stuck load or
-  // a slow backend call is visible in the console.
-  let loadSeq = 0;
-  function slog(msg: string, extra?: Record<string, unknown>) {
-    const t = performance.now().toFixed(1);
-    // Read reactive state via untrack so this diagnostic snapshot never
-    // registers dependencies on the calling effect. Otherwise calling slog()
-    // from within the load effect (directly or through loadSession()'s
-    // synchronous prologue) would subscribe the effect to session/loading,
-    // which loadSession() then mutates — re-triggering the effect in a tight
-    // infinite loop that hammers the backend every reactive flush.
-    const snapshot = untrack(() => ({
-      sessionId,
-      loadedId: session?.id ?? null,
-      closed,
-      open,
-      loading,
-    }));
-    // eslint-disable-next-line no-console
-    console.debug(`[SessionModal +${t}ms] ${msg}`, {
-      ...snapshot,
-      ...extra,
-    });
-  }
-
   $effect(() => {
     const rootCandidates: DisplayRootInput = [repoDir, session?.workingDir];
     const nextKey = displayRootKey(rootCandidates);
@@ -442,9 +411,7 @@
     // retrigger this effect.
     const isOpen = open;
     const id = sessionId;
-    slog('load effect fired', { effectOpen: isOpen, effectId: id });
     if (!isOpen || !id) {
-      slog('load effect bail: not open or no id');
       stopPolling();
       return;
     }
@@ -455,11 +422,7 @@
     closed = false;
     stopPolling();
     loadSession().then(() => {
-      if (closed || !open || sessionId !== id) {
-        slog('post-load bail (stale/closed)', { effectId: id });
-        return;
-      }
-      slog('post-load complete', { status: session?.status, msgs: messages.length });
+      if (closed || !open || sessionId !== id) return;
       if (session?.status === 'running') {
         startPolling();
       }
@@ -478,12 +441,7 @@
 
   /** Initial full load. */
   async function loadSession() {
-    const seq = ++loadSeq;
-    slog('loadSession enter', { seq });
-    if (closed) {
-      slog('loadSession bail: closed', { seq });
-      return;
-    }
+    if (closed) return;
     // Clear prior session state when loading a *different* session so a
     // bail-out or in-flight load can never paint the previously-viewed
     // session — show a clean loading state for the requested id instead. When
@@ -498,22 +456,9 @@
     }
     loading = true;
     error = null;
-    const reqId = sessionId;
-    const startedAt = performance.now();
     try {
-      slog('loadSession awaiting backend', { seq, reqId });
       const [s, msgs] = await Promise.all([getSession(sessionId), getSessionMessages(sessionId)]);
-      slog('loadSession backend resolved', {
-        seq,
-        reqId,
-        elapsedMs: +(performance.now() - startedAt).toFixed(1),
-        gotSession: !!s,
-        gotMsgs: msgs.length,
-      });
-      if (closed) {
-        slog('loadSession bail after await: closed', { seq });
-        return;
-      }
+      if (closed) return;
       if (!s) {
         error = 'Session not found';
         return;
@@ -521,11 +466,9 @@
       session = s;
       messages = msgs;
     } catch (e) {
-      slog('loadSession error', { seq, error: e instanceof Error ? e.message : String(e) });
       error = e instanceof Error ? e.message : String(e);
     } finally {
       loading = false;
-      slog('loadSession finally', { seq, elapsedMs: +(performance.now() - startedAt).toFixed(1) });
       // Wait for Svelte to render the messages (they only mount once loading
       // is false) before enabling intro transitions, so existing messages
       // don't all slide in at once.
@@ -537,21 +480,11 @@
 
   /** Incremental poll — re-fetch last message (may have grown) + any new ones. */
   async function poll() {
-    if (!session || closed || pollInFlight) {
-      slog('poll skip', {
-        reason: !session ? 'no session' : closed ? 'closed' : 'in flight',
-      });
-      return;
-    }
+    if (!session || closed || pollInFlight) return;
     pollInFlight = true;
-    const startedAt = performance.now();
     try {
       // Fetch session status
       const s = await getSession(sessionId);
-      slog('poll status resolved', {
-        elapsedMs: +(performance.now() - startedAt).toFixed(1),
-        status: s?.status,
-      });
       if (closed) return;
       if (s) session = s;
 
@@ -581,9 +514,8 @@
         stopPolling();
         processQueue();
       }
-    } catch (e) {
+    } catch {
       // Polling errors are expected during shutdown — silently ignore
-      slog('poll error', { error: e instanceof Error ? e.message : String(e) });
     } finally {
       pollInFlight = false;
     }

@@ -187,6 +187,15 @@
 
   // React to executionId changes (e.g. when "Run again" switches to a new execution)
   $effect(() => {
+    // Bail out unless the modal is actually open with a real execution. The
+    // modal is mounted persistently (open is a prop), so without this guard
+    // every closed instance would still fetch getActionOutputBuffer('') and
+    // install output/status listeners — wasteful on pages with many cards,
+    // and it surfaces a spurious "not found" load error.
+    if (!open || !executionId) {
+      cleanup();
+      return;
+    }
     void executionId; // subscribe to executionId changes
     // Reset state for the new execution
     status = 'running';

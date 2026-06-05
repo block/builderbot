@@ -1185,6 +1185,14 @@
   // Range hover handling
   // ==========================================================================
 
+  // Resolve a line element by its absolute index rather than by NodeList
+  // position. Positional lookups (`querySelectorAll('.line')[n]`) only equal the
+  // absolute index while every line is in the DOM; identity lookups stay correct
+  // once the body is windowed and only a slice of lines is rendered.
+  function lineAt(pane: HTMLElement, index: number): HTMLElement | null {
+    return pane.querySelector(`.line[data-line-index="${index}"]`);
+  }
+
   function updateToolbarPosition() {
     if (hoveredRangeIndex === null || !afterPane || !diffViewerEl) {
       rangeToolbarStyle = null;
@@ -1198,7 +1206,7 @@
     }
 
     const lineIndex = alignmentData.alignment.after.start;
-    const lineEl = afterPane.querySelectorAll('.line')[lineIndex] as HTMLElement | null;
+    const lineEl = lineAt(afterPane, lineIndex);
 
     if (!lineEl) {
       rangeToolbarStyle = null;
@@ -1347,15 +1355,13 @@
     const editorHeight = 120;
 
     const lastLineIndex = Math.max(alignment.after.start, alignment.after.end - 1);
-    const lastLineEl = afterPane.querySelectorAll('.line')[lastLineIndex] as HTMLElement | null;
+    const lastLineEl = lineAt(afterPane, lastLineIndex);
     if (!lastLineEl) return 'below';
 
     const lastLineRect = lastLineEl.getBoundingClientRect();
     const spaceBelow = paneRect.bottom - lastLineRect.bottom;
 
-    const firstLineEl = afterPane.querySelectorAll('.line')[
-      alignment.after.start
-    ] as HTMLElement | null;
+    const firstLineEl = lineAt(afterPane, alignment.after.start);
     if (!firstLineEl) return 'below';
 
     const firstLineRect = firstLineEl.getBoundingClientRect();
@@ -1384,15 +1390,13 @@
 
     if (commentPositionPreference === 'below') {
       const lastLineIndex = Math.max(alignment.after.start, alignment.after.end - 1);
-      anchorLineEl = afterPane.querySelectorAll('.line')[lastLineIndex] as HTMLElement | null;
+      anchorLineEl = lineAt(afterPane, lastLineIndex);
       if (!anchorLineEl) {
         commentEditorStyle = null;
         return;
       }
     } else {
-      anchorLineEl = afterPane.querySelectorAll('.line')[
-        alignment.after.start
-      ] as HTMLElement | null;
+      anchorLineEl = lineAt(afterPane, alignment.after.start);
       if (!anchorLineEl) {
         commentEditorStyle = null;
         return;
@@ -1458,18 +1462,27 @@
   function handleSelectionDragMove(event: MouseEvent) {
     if (!isSelecting || !lineSelection) return;
 
-    const pane = lineSelection.pane === 'before' ? beforePane : afterPane;
+    const side = lineSelection.pane;
+    const pane = side === 'before' ? beforePane : afterPane;
     if (!pane) return;
 
-    const lineElements = pane.querySelectorAll('.line');
-    for (let i = 0; i < lineElements.length; i++) {
-      const rect = lineElements[i].getBoundingClientRect();
-      if (event.clientY >= rect.top && event.clientY < rect.bottom) {
-        if (lineSelection.focusLine !== i) {
-          lineSelection = { ...lineSelection, focusLine: i };
-        }
-        break;
-      }
+    // Map the cursor to an absolute line index arithmetically rather than
+    // hit-testing rendered `.line` rects: the wrapper is transform-translated by
+    // -scrollY over a uniform lineHeight, and once the body is windowed the rows
+    // under the cursor may not be mounted.
+    const lineHeight = scrollController.getDimensions(side).lineHeight || 20;
+    const scrollY =
+      side === 'before' ? scrollController.beforeScrollY : scrollController.afterScrollY;
+    const total = (side === 'before' ? beforeLines.length : afterLines.length) - 1;
+    if (total < 0) return;
+
+    const paneTop = pane.getBoundingClientRect().top;
+    const focusLine = Math.min(
+      Math.max(Math.floor((event.clientY - paneTop + scrollY) / lineHeight), 0),
+      total
+    );
+    if (lineSelection.focusLine !== focusLine) {
+      lineSelection = { ...lineSelection, focusLine };
     }
   }
 
@@ -1521,8 +1534,7 @@
       return;
     }
 
-    const lines = pane.querySelectorAll('.line');
-    const lineEl = lines[selectedLineRange.start] as HTMLElement | null;
+    const lineEl = lineAt(pane, selectedLineRange.start);
     if (!lineEl) {
       lineSelectionToolbarStyle = null;
       lineSelectionToolbarLeft = null;
@@ -1565,9 +1577,8 @@
     const pane = commentingOnLines.pane === 'before' ? beforePane : afterPane;
     if (!pane) return 'below';
 
-    const lines = pane.querySelectorAll('.line');
-    const firstLineEl = lines[commentingOnLines.start] as HTMLElement | null;
-    const lastLineEl = lines[commentingOnLines.end] as HTMLElement | null;
+    const firstLineEl = lineAt(pane, commentingOnLines.start);
+    const lastLineEl = lineAt(pane, commentingOnLines.end);
     if (!firstLineEl || !lastLineEl) return 'below';
 
     const paneRect = pane.getBoundingClientRect();
@@ -1599,13 +1610,13 @@
     let anchorLineEl: HTMLElement | null;
 
     if (lineCommentPositionPreference === 'below') {
-      anchorLineEl = pane.querySelectorAll('.line')[commentingOnLines.end] as HTMLElement | null;
+      anchorLineEl = lineAt(pane, commentingOnLines.end);
       if (!anchorLineEl) {
         lineCommentEditorStyle = null;
         return;
       }
     } else {
-      anchorLineEl = pane.querySelectorAll('.line')[commentingOnLines.start] as HTMLElement | null;
+      anchorLineEl = lineAt(pane, commentingOnLines.start);
       if (!anchorLineEl) {
         lineCommentEditorStyle = null;
         return;
@@ -1737,10 +1748,9 @@
       if (!pane) return;
 
       const lines: string[] = [];
-      const lineElements = pane.querySelectorAll('.line');
 
       for (let i = selectedLineRange.start; i <= selectedLineRange.end; i++) {
-        const lineEl = lineElements[i];
+        const lineEl = lineAt(pane, i);
         if (lineEl) {
           const contentEl = lineEl.querySelector('.line-content');
           if (contentEl) {
@@ -1957,6 +1967,7 @@
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
                     <div
                       class="line"
+                      data-line-index={i}
                       class:range-start={boundary.isStart}
                       class:range-end={boundary.isEnd}
                       class:range-hovered={isInHoveredRange}
@@ -2039,7 +2050,7 @@
                 style="transform: translate(-{scrollController.beforeScrollX}px, -{scrollController.beforeScrollY}px)"
               >
                 {#each beforeLines as line, i}
-                  <div class="line">
+                  <div class="line" data-line-index={i}>
                     <span class="line-content">
                       {#each getHighlightedTokens(i, 'before') as segment}
                         <span
@@ -2133,6 +2144,7 @@
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
                     <div
                       class="line"
+                      data-line-index={i}
                       class:range-start={boundary.isStart}
                       class:range-end={boundary.isEnd}
                       class:range-hovered={isInHoveredRange}
@@ -2224,6 +2236,7 @@
                   <!-- svelte-ignore a11y_no_static_element_interactions -->
                   <div
                     class="line"
+                    data-line-index={i}
                     class:line-selected={isSelected}
                     onmousedown={(e) => handleLineMouseDown('after', i, e)}
                   >

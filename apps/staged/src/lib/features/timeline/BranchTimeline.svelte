@@ -1048,8 +1048,8 @@
                         'inline-flex items-center font-medium transition-all duration-300 disabled:opacity-30 disabled:cursor-not-allowed',
                         '[&_svg]:transition-all [&_svg]:duration-300',
                         actionButtonsEnlarged
-                          ? 'flex-1 justify-center gap-2 px-1.5 py-2.5 h-auto rounded-lg border border-solid border-transparent bg-[var(--bg-elevated)] text-sm hover:not-disabled:bg-[var(--note-bg)] hover:not-disabled:text-[var(--note-color)] [&_svg]:!size-[18px]'
-                          : 'gap-[5px] px-2.5 h-8 rounded-md border border-dashed border-[var(--border-subtle)] bg-transparent text-xs hover:not-disabled:border-[var(--note-color)] hover:not-disabled:bg-[var(--note-bg)] hover:not-disabled:text-[var(--note-color)] [&_svg]:!size-[13px] @max-[480px]/timeline:gap-0.5 @max-[480px]/timeline:px-1.5',
+                          ? 'flex-1 justify-center gap-2 px-1.5 py-2.5 h-auto rounded-lg border border-solid border-transparent bg-[var(--bg-elevated)] text-sm hover:not-disabled:bg-[var(--note-bg)] hover:not-disabled:text-[var(--note-color)] [&_svg]:!size-[18px] [&_svg]:text-[var(--note-color)]'
+                          : 'gap-[5px] px-2.5 h-8 rounded-md border border-dashed border-[var(--note-color)] bg-transparent text-xs hover:not-disabled:border-[var(--note-color)] hover:not-disabled:bg-[var(--note-bg)] hover:not-disabled:text-[var(--note-color)] [&_svg]:!size-[13px] [&_svg]:text-[var(--note-color)] @max-[480px]/timeline:gap-0.5 @max-[480px]/timeline:px-1.5',
                       ]}
                     >
                       <FileText
@@ -1098,8 +1098,8 @@
                         'inline-flex items-center font-medium transition-all duration-300 disabled:opacity-30 disabled:cursor-not-allowed',
                         '[&_svg]:transition-all [&_svg]:duration-300',
                         actionButtonsEnlarged
-                          ? 'flex-1 justify-center gap-2 px-1.5 py-2.5 h-auto rounded-lg border border-solid border-transparent bg-[var(--bg-elevated)] text-sm hover:not-disabled:bg-[var(--commit-bg)] hover:not-disabled:text-[var(--commit-color)] [&_svg]:!size-[18px]'
-                          : 'gap-[5px] px-2.5 h-8 rounded-md border border-dashed border-[var(--border-subtle)] bg-transparent text-xs hover:not-disabled:border-[var(--commit-color)] hover:not-disabled:bg-[var(--commit-bg)] hover:not-disabled:text-[var(--commit-color)] [&_svg]:!size-[13px] @max-[480px]/timeline:gap-0.5 @max-[480px]/timeline:px-1.5',
+                          ? 'flex-1 justify-center gap-2 px-1.5 py-2.5 h-auto rounded-lg border border-solid border-transparent bg-[var(--bg-elevated)] text-sm hover:not-disabled:bg-[var(--commit-bg)] hover:not-disabled:text-[var(--commit-color)] [&_svg]:!size-[18px] [&_svg]:text-[var(--commit-color)]'
+                          : 'gap-[5px] px-2.5 h-8 rounded-md border border-dashed border-[var(--commit-color)] bg-transparent text-xs hover:not-disabled:border-[var(--commit-color)] hover:not-disabled:bg-[var(--commit-bg)] hover:not-disabled:text-[var(--commit-color)] [&_svg]:!size-[13px] [&_svg]:text-[var(--commit-color)] @max-[480px]/timeline:gap-0.5 @max-[480px]/timeline:px-1.5',
                       ]}
                     >
                       <GitCommitVertical
@@ -1148,8 +1148,8 @@
                         'inline-flex items-center font-medium transition-all duration-300 disabled:opacity-30 disabled:cursor-not-allowed',
                         '[&_svg]:transition-all [&_svg]:duration-300',
                         actionButtonsEnlarged
-                          ? 'flex-1 justify-center gap-2 px-1.5 py-2.5 h-auto rounded-lg border border-solid border-transparent bg-[var(--bg-elevated)] text-sm hover:not-disabled:bg-[var(--review-bg)] hover:not-disabled:text-[var(--review-color)] [&_svg]:!size-[18px]'
-                          : 'gap-[5px] px-2.5 h-8 rounded-md border border-dashed border-[var(--border-subtle)] bg-transparent text-xs hover:not-disabled:border-[var(--review-color)] hover:not-disabled:bg-[var(--review-bg)] hover:not-disabled:text-[var(--review-color)] [&_svg]:!size-[13px] @max-[480px]/timeline:gap-0.5 @max-[480px]/timeline:px-1.5',
+                          ? 'flex-1 justify-center gap-2 px-1.5 py-2.5 h-auto rounded-lg border border-solid border-transparent bg-[var(--bg-elevated)] text-sm hover:not-disabled:bg-[var(--review-bg)] hover:not-disabled:text-[var(--review-color)] [&_svg]:!size-[18px] [&_svg]:text-[var(--review-color)]'
+                          : 'gap-[5px] px-2.5 h-8 rounded-md border border-dashed border-[var(--review-color)] bg-transparent text-xs hover:not-disabled:border-[var(--review-color)] hover:not-disabled:bg-[var(--review-bg)] hover:not-disabled:text-[var(--review-color)] [&_svg]:!size-[13px] [&_svg]:text-[var(--review-color)] @max-[480px]/timeline:gap-0.5 @max-[480px]/timeline:px-1.5',
                       ]}
                     >
                       <FileSearch

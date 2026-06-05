@@ -415,6 +415,11 @@
       stopPolling();
       return;
     }
+    // Reset the teardown guard deterministically before loading, in the same
+    // flush. `closed` is a plain (non-reactive) variable, so writing it here
+    // does not retrigger this effect — which is exactly why relying on a
+    // separately-declared reset effect raced ahead of this load.
+    closed = false;
     stopPolling();
     loadSession().then(() => {
       if (closed || !open || sessionId !== id) return;
@@ -437,6 +442,18 @@
   /** Initial full load. */
   async function loadSession() {
     if (closed) return;
+    // Clear prior session state when loading a *different* session so a
+    // bail-out or in-flight load can never paint the previously-viewed
+    // session — show a clean loading state for the requested id instead. When
+    // reopening the same session, keep the existing transcript so it stays
+    // visible (and correct) rather than flashing a loading state. Read the
+    // currently-loaded id via untrack so this synchronous prologue never
+    // subscribes the calling load effect to `session` — which it mutates
+    // below, otherwise re-triggering the effect in a tight infinite loop.
+    if (untrack(() => session?.id) !== sessionId) {
+      session = null;
+      messages = [];
+    }
     loading = true;
     error = null;
     try {
@@ -892,10 +909,6 @@
     stopPolling();
     onClose();
   }
-
-  $effect(() => {
-    if (open) closed = false;
-  });
 
   /** Group consecutive tool_call / tool_result messages into pairs */
   type ToolPair = {

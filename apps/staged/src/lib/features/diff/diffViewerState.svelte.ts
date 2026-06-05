@@ -20,6 +20,19 @@ export interface DiffViewerState {
 }
 
 /**
+ * Timestamp of the most recent diff-open trigger (e.g. a "Diff" button click),
+ * recorded by `markDiffOpenClick`. Lets `createDiffViewerState` log the
+ * click→open gap — the otherwise-invisible window spent mounting DiffModal and
+ * its statically-imported DiffViewer before any diff work begins.
+ */
+let lastOpenClickAt: number | null = null;
+
+/** Stamp the moment a diff-open was triggered, just before showing DiffModal. */
+export function markDiffOpenClick() {
+  lastOpenClickAt = performance.now();
+}
+
+/**
  * Create a reactive diff viewer state instance, pre-bound to Staged's Tauri commands.
  */
 export function createDiffViewerState(branchId: string, scope: DiffScope, commitSha?: string) {
@@ -38,8 +51,13 @@ export function createDiffViewerState(branchId: string, scope: DiffScope, commit
   let selectionGeneration = 0;
   let contextGeneration = 0;
 
+  const clickToOpen =
+    lastOpenClickAt !== null
+      ? ` clickToOpen=${Math.round(performance.now() - lastOpenClickAt)}ms`
+      : '';
+  lastOpenClickAt = null;
   console.info(
-    `[diff] open: branchId=${branchId} scope=${scope} commitSha=${commitSha ?? '(unresolved)'}`
+    `[diff] open: branchId=${branchId} scope=${scope} commitSha=${commitSha ?? '(unresolved)'}${clickToOpen}`
   );
 
   async function loadFiles(generation: number): Promise<void> {

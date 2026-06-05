@@ -422,7 +422,6 @@
       // Inputs relevant to the result are unchanged — skip the git work.
       return;
     }
-    lastSafeSignature = signature;
 
     // Bail out of stale work: if the effect re-fires (or the component tears
     // down) before this run resolves, `stale` flips so we neither spawn the
@@ -462,6 +461,11 @@
         if (safe) nextSafe.add(id);
       }
       safeToDeleteProjects = nextSafe;
+      // Only record the signature once the check actually completes. If this
+      // run is cancelled (re-fire/teardown) before it gets here, the signature
+      // stays unchanged so the next fire reschedules instead of dropping the
+      // check permanently for that signature.
+      lastSafeSignature = signature;
       console.info(
         `[perf][project-switch] ProjectHome safe-to-delete check finished for ` +
           `${projectsSnapshot.length} visible project(s) in ${(performance.now() - startedAt).toFixed(1)}ms`
@@ -469,10 +473,13 @@
     };
 
     // Defer off the critical render path: let the switch's keyed-block swap
-    // flush first, then settle the cosmetic styling during idle.
+    // flush first, then settle the cosmetic styling during idle. The timeout
+    // guarantees the check still runs even while the main thread stays busy
+    // through the post-switch hydration window (otherwise an idle callback can
+    // be deferred indefinitely under sustained load).
     const schedule =
       typeof requestIdleCallback === 'function'
-        ? (cb: () => void) => requestIdleCallback(cb)
+        ? (cb: () => void) => requestIdleCallback(cb, { timeout: 2000 })
         : (cb: () => void) => setTimeout(cb, 0) as unknown as number;
     const cancel =
       typeof cancelIdleCallback === 'function'

@@ -442,11 +442,15 @@
   /** Initial full load. */
   async function loadSession() {
     if (closed) return;
-    // Clear prior session state so a bail-out or in-flight load can never
-    // paint the previously-viewed session — show a clean loading state for the
-    // requested id instead.
-    session = null;
-    messages = [];
+    // Clear prior session state when loading a *different* session so a
+    // bail-out or in-flight load can never paint the previously-viewed
+    // session — show a clean loading state for the requested id instead. When
+    // reopening the same session, keep the existing transcript so it stays
+    // visible (and correct) rather than flashing a loading state.
+    if (session?.id !== sessionId) {
+      session = null;
+      messages = [];
+    }
     loading = true;
     error = null;
     try {

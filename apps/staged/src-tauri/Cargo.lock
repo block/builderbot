@@ -1276,10 +1276,12 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "futures",
+ "nix",
  "reqwest",
  "serde",
  "serde_json",
  "tokio",
+ "wait-timeout",
 ]
 
 [[package]]

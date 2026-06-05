@@ -125,7 +125,7 @@
               {...props}
               variant="ghost"
               type="button"
-              class="flex h-auto w-full items-center justify-start gap-2 rounded px-0 py-1 text-[13px] font-normal text-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-foreground"
+              class="flex h-auto w-full items-center justify-start gap-2 rounded px-0 py-1 text-left text-[13px] font-normal text-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-foreground"
               onclick={() => toggleStep(idx)}
             >
               <span class="step-icon">

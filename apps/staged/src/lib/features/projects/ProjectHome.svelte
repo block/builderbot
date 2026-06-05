@@ -38,7 +38,10 @@
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
-  import { canDeleteProjectWithoutConfirmation } from './projectDeleteSafety';
+  import {
+    canDeleteProjectWithoutConfirmation,
+    computeSafeToDeleteSignature,
+  } from './projectDeleteSafety';
 
   /**
    * Merge incoming branches with existing ones, preserving worktreePath when
@@ -402,40 +405,88 @@
   // Only check visible projects — calling hasUnpushedCommits for every
   // project wastes IPC round-trips (especially expensive for remote branches)
   // and the result is only consumed in the visibleProjects render loop.
+  // Signature of the last inputs the safe-to-delete check actually ran against.
+  // Background hydration/pollers reassign visibleProjects/branchesByProject/
+  // repoCountsByProject many times per switch even when the fields this check
+  // depends on are unchanged; deduping on the signature keeps the expensive
+  // per-branch git work from re-firing on every reassignment.
+  let lastSafeSignature: string | null = null;
   $effect(() => {
+    // Read reactive deps synchronously so the effect re-subscribes correctly.
+    const projectsSnapshot = visibleProjects;
+    const branches = branchesByProject;
+    const repoCounts = repoCountsByProject;
+
+    const signature = computeSafeToDeleteSignature(projectsSnapshot, branches, repoCounts);
+    if (signature === lastSafeSignature) {
+      // Inputs relevant to the result are unchanged — skip the git work.
+      return;
+    }
+    lastSafeSignature = signature;
+
+    // Bail out of stale work: if the effect re-fires (or the component tears
+    // down) before this run resolves, `stale` flips so we neither spawn the
+    // git loop's tail nor clobber newer state.
+    let stale = false;
+    let idleHandle: number | undefined;
+
     const updateSafeStatus = async () => {
       const startedAt = performance.now();
+
+      // Parallelize across projects so the project-home grid doesn't serialize
+      // every project's git work.
+      const results = await Promise.all(
+        projectsSnapshot.map(async (project) => {
+          const projectBranches = branches.get(project.id) || [];
+          const repoCount = repoCounts.get(project.id) || 0;
+
+          // Don't show red styling for projects with no repos — there's nothing
+          // to call attention to when no repositories have been added yet.
+          if (repoCount === 0) {
+            return { id: project.id, safe: false };
+          }
+
+          const safe = await canDeleteProjectWithoutConfirmation({
+            branches: projectBranches,
+            repoCount,
+            hasUnpushedCommits: commands.hasUnpushedCommits,
+          });
+          return { id: project.id, safe };
+        })
+      );
+
+      if (stale) return;
+
       const nextSafe = new Set<string>();
-
-      for (const project of visibleProjects) {
-        const branches = branchesByProject.get(project.id) || [];
-        const repoCount = repoCountsByProject.get(project.id) || 0;
-
-        // Don't show red styling for projects with no repos — there's nothing
-        // to call attention to when no repositories have been added yet.
-        if (repoCount === 0) {
-          continue;
-        }
-
-        const safe = await canDeleteProjectWithoutConfirmation({
-          branches,
-          repoCount,
-          hasUnpushedCommits: commands.hasUnpushedCommits,
-        });
-
-        if (safe) {
-          nextSafe.add(project.id);
-        }
+      for (const { id, safe } of results) {
+        if (safe) nextSafe.add(id);
       }
-
       safeToDeleteProjects = nextSafe;
       console.info(
         `[perf][project-switch] ProjectHome safe-to-delete check finished for ` +
-          `${visibleProjects.length} visible project(s) in ${(performance.now() - startedAt).toFixed(1)}ms`
+          `${projectsSnapshot.length} visible project(s) in ${(performance.now() - startedAt).toFixed(1)}ms`
       );
     };
 
-    updateSafeStatus();
+    // Defer off the critical render path: let the switch's keyed-block swap
+    // flush first, then settle the cosmetic styling during idle.
+    const schedule =
+      typeof requestIdleCallback === 'function'
+        ? (cb: () => void) => requestIdleCallback(cb)
+        : (cb: () => void) => setTimeout(cb, 0) as unknown as number;
+    const cancel =
+      typeof cancelIdleCallback === 'function'
+        ? (handle: number) => cancelIdleCallback(handle)
+        : (handle: number) => clearTimeout(handle);
+
+    idleHandle = schedule(() => {
+      void updateSafeStatus();
+    });
+
+    return () => {
+      stale = true;
+      if (idleHandle !== undefined) cancel(idleHandle);
+    };
   });
 
   $effect(() => {

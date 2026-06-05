@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Branch } from '../../types';
-import { canDeleteProjectWithoutConfirmation } from './projectDeleteSafety';
+import {
+  canDeleteProjectWithoutConfirmation,
+  computeSafeToDeleteSignature,
+} from './projectDeleteSafety';
 
 function branch(overrides: Partial<Branch> = {}): Branch {
   return {
@@ -111,5 +114,43 @@ describe('canDeleteProjectWithoutConfirmation', () => {
       })
     ).resolves.toBe(false);
     expect(onCheckError).toHaveBeenCalledWith(error, checkedBranch);
+  });
+});
+
+describe('computeSafeToDeleteSignature', () => {
+  const projects = [{ id: 'project-1' }];
+
+  it('produces an identical signature for identical inputs', () => {
+    const branchesA = new Map([['project-1', [branch()]]]);
+    const branchesB = new Map([['project-1', [branch()]]]);
+    const repoCounts = new Map([['project-1', 1]]);
+
+    expect(computeSafeToDeleteSignature(projects, branchesA, repoCounts)).toBe(
+      computeSafeToDeleteSignature(projects, branchesB, repoCounts)
+    );
+  });
+
+  it('changes when a branch prHeadSha changes', () => {
+    const repoCounts = new Map([['project-1', 1]]);
+    const before = computeSafeToDeleteSignature(
+      projects,
+      new Map([['project-1', [branch({ prHeadSha: 'abc' })]]]),
+      repoCounts
+    );
+    const after = computeSafeToDeleteSignature(
+      projects,
+      new Map([['project-1', [branch({ prHeadSha: 'def' })]]]),
+      repoCounts
+    );
+
+    expect(before).not.toBe(after);
+  });
+
+  it('changes when the repo count changes', () => {
+    const branches = new Map([['project-1', [branch()]]]);
+    const before = computeSafeToDeleteSignature(projects, branches, new Map([['project-1', 1]]));
+    const after = computeSafeToDeleteSignature(projects, branches, new Map([['project-1', 2]]));
+
+    expect(before).not.toBe(after);
   });
 });

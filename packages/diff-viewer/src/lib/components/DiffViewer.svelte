@@ -251,6 +251,7 @@
   let lastHandledJumpLineToken = $state<number | null>(null);
   let lastAutoScrolledFile: string | null = null;
   let lineCommentEditorRaf: number | null = null;
+  let lineSelectionToolbarRaf: number | null = null;
 
   // Markdown preview mode
   let markdownPreview = $state(false);
@@ -1259,6 +1260,33 @@
     return pane.querySelector(`.line[data-line-index="${index}"]`);
   }
 
+  // Cap on the number of frames a deferred measure waits for the windowed body
+  // to render the rows it needs. A scroll typically renders within one frame;
+  // the budget absorbs a slow render pass without spinning indefinitely.
+  const WINDOW_RENDER_MAX_FRAMES = 5;
+
+  // Phase 3: scroll → window-render → measure sequencing. Setting a pane's scroll
+  // offset recomputes its window and Svelte renders the new rows, but only on a
+  // later frame — so an imperative measure on the *next* frame can still find the
+  // anchor row unmounted, leaving the editor/toolbar silently unpositioned. Retry
+  // `measure` across a bounded number of frames until it reports success: it
+  // returns true to stop (positioned, or nothing to do) and false to retry.
+  // `trackRaf` lets the caller hold the pending frame id so a newer request can
+  // cancel an in-flight wait.
+  function measureAfterWindowRender(
+    measure: () => boolean,
+    trackRaf: (raf: number | null) => void
+  ) {
+    let frames = 0;
+    const tick = () => {
+      trackRaf(null);
+      if (measure() || frames >= WINDOW_RENDER_MAX_FRAMES) return;
+      frames++;
+      trackRaf(requestAnimationFrame(tick));
+    };
+    trackRaf(requestAnimationFrame(tick));
+  }
+
   function updateToolbarPosition() {
     if (hoveredRangeIndex === null || !afterPane || !diffViewerEl) {
       rangeToolbarStyle = null;
@@ -1332,18 +1360,43 @@
 
     lineSelection = { pane: 'after', anchorLine: start, focusLine: end };
     commentingOnLines = { pane: 'after', start, end };
-    lineCommentPositionPreference = decideLineCommentPosition();
     editingCommentId = comment.id;
     activeLineComment = comment;
     lineCommentReadOnly = comment.author === 'agent';
 
-    // scrollToRow updates pane transforms; defer editor positioning until next frame
+    // scrollToRow updates pane transforms, but the windowed body only renders the
+    // target rows on a later frame — wait for the anchor to mount before deciding
+    // the editor's side and positioning it.
+    scheduleLineCommentEditorPositioning();
+  }
+
+  // Resolve the comment editor's side and screen position once the anchor rows are
+  // mounted. Returns true to stop the mount-then-measure retry (positioned, or
+  // nothing to position), false to retry on a later frame.
+  function positionLineCommentEditor(): boolean {
+    if (!commentingOnLines) return true;
+
+    const pane = commentingOnLines.pane === 'before' ? beforePane : afterPane;
+    if (!pane) return true;
+
+    // decideLineCommentPosition measures both the first and last range rows, and
+    // the editor anchors to one of them — require both mounted before measuring.
+    if (!lineAt(pane, commentingOnLines.start) || !lineAt(pane, commentingOnLines.end)) {
+      return false;
+    }
+
+    lineCommentPositionPreference = decideLineCommentPosition();
+    updateLineCommentEditorPosition();
+    return true;
+  }
+
+  function scheduleLineCommentEditorPositioning() {
     if (lineCommentEditorRaf !== null) {
       cancelAnimationFrame(lineCommentEditorRaf);
-    }
-    lineCommentEditorRaf = requestAnimationFrame(() => {
       lineCommentEditorRaf = null;
-      updateLineCommentEditorPosition();
+    }
+    measureAfterWindowRender(positionLineCommentEditor, (raf) => {
+      lineCommentEditorRaf = raf;
     });
   }
 
@@ -1372,11 +1425,10 @@
 
     lineSelection = { pane: 'after', anchorLine: start, focusLine: end };
     commentingOnLines = { pane: 'after', start, end };
-    lineCommentPositionPreference = decideLineCommentPosition();
     editingCommentId = commentId;
     activeLineComment = comment;
     lineCommentReadOnly = false;
-    updateLineCommentEditorPosition();
+    scheduleLineCommentEditorPositioning();
   }
 
   // Jump to a comment requested by the sidebar comments list.
@@ -1560,10 +1612,26 @@
     document.removeEventListener('mousemove', handleSelectionDragMove);
 
     if (lineSelection) {
-      requestAnimationFrame(() => {
-        updateLineSelectionToolbar(true);
-      });
+      scheduleLineSelectionToolbar(true);
     }
+  }
+
+  // Position the line-selection toolbar once the selection's anchor row is
+  // mounted. A drag that ends after auto-scrolling can leave the anchor outside
+  // the freshly rendered window for a frame, so wait for it like the editor.
+  function scheduleLineSelectionToolbar(recalculateLeft = false) {
+    measureAfterWindowRender(
+      () => {
+        if (!selectedLineRange) return true;
+        const pane = selectedLineRange.pane === 'before' ? beforePane : afterPane;
+        if (pane && !lineAt(pane, selectedLineRange.start)) return false;
+        updateLineSelectionToolbar(recalculateLeft);
+        return true;
+      },
+      (raf) => {
+        lineSelectionToolbarRaf = raf;
+      }
+    );
   }
 
   function clearLineSelection() {
@@ -1904,6 +1972,10 @@
       if (lineCommentEditorRaf !== null) {
         cancelAnimationFrame(lineCommentEditorRaf);
         lineCommentEditorRaf = null;
+      }
+      if (lineSelectionToolbarRaf !== null) {
+        cancelAnimationFrame(lineSelectionToolbarRaf);
+        lineSelectionToolbarRaf = null;
       }
       if (connectorRenderer) {
         connectorRenderer.destroy();

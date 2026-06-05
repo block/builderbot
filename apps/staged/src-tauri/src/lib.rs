@@ -1662,7 +1662,6 @@ fn update_project_action(
     command: String,
     action_type: String,
     sort_order: i32,
-    auto_commit: bool,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
     let action = store
@@ -1678,7 +1677,6 @@ fn update_project_action(
         action_type: builderbot_actions::ActionType::parse(&action_type)
             .ok_or_else(|| format!("Invalid action type: {action_type}"))?,
         sort_order,
-        auto_commit,
         run_detection_mode: action.run_detection_mode,
         created_at: action.created_at,
         updated_at: store::now_timestamp(),
@@ -1724,7 +1722,6 @@ fn list_repo_actions(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-#[allow(clippy::too_many_arguments)]
 fn create_repo_action(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     github_repo: String,
@@ -1733,7 +1730,6 @@ fn create_repo_action(
     command: String,
     action_type: String,
     sort_order: i32,
-    auto_commit: bool,
 ) -> Result<store::models::RepoAction, String> {
     let store = get_store(&store)?;
     let context = store
@@ -1741,8 +1737,7 @@ fn create_repo_action(
         .map_err(|e| e.to_string())?;
     let parsed_type = builderbot_actions::ActionType::parse(&action_type)
         .ok_or_else(|| format!("Invalid action type: {action_type}"))?;
-    let action = store::models::RepoAction::new(context.id, name, command, parsed_type, sort_order)
-        .with_auto_commit(auto_commit);
+    let action = store::models::RepoAction::new(context.id, name, command, parsed_type, sort_order);
     store
         .create_repo_action(&action)
         .map_err(|e| e.to_string())?;

@@ -934,7 +934,6 @@ pub struct RepoAction {
     pub command: String,
     pub action_type: ActionType,
     pub sort_order: i32,
-    pub auto_commit: bool,
     pub run_detection_mode: Option<RunDetectionMode>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -956,16 +955,10 @@ impl RepoAction {
             command,
             action_type,
             sort_order,
-            auto_commit: false,
             run_detection_mode: None,
             created_at: now,
             updated_at: now,
         }
-    }
-
-    pub fn with_auto_commit(mut self, auto_commit: bool) -> Self {
-        self.auto_commit = auto_commit;
-        self
     }
 }
 

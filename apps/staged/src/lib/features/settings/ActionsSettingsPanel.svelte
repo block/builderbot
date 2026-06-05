@@ -67,7 +67,6 @@
     name: '',
     command: '',
     actionType: 'run' as ActionType,
-    autoCommit: false,
   });
   let badgeEditName = $state('');
   let badgeEditHue = $state(0);
@@ -313,8 +312,7 @@
           suggestion.name,
           suggestion.command,
           suggestion.actionType,
-          nextSortOrder++,
-          suggestion.autoCommit
+          nextSortOrder++
         );
         if (selectedRepoKey === entryKey) {
           actions = [...actions, newAction];
@@ -336,7 +334,7 @@
   }
 
   function startAddAction() {
-    editForm = { name: '', command: '', actionType: 'run', autoCommit: false };
+    editForm = { name: '', command: '', actionType: 'run' };
     editingAction = {} as ProjectAction;
   }
 
@@ -345,7 +343,6 @@
       name: action.name,
       command: action.command,
       actionType: action.actionType as ActionType,
-      autoCommit: action.autoCommit,
     };
     editingAction = action;
   }
@@ -372,8 +369,7 @@
           editForm.name,
           editForm.command,
           editForm.actionType,
-          nextSortOrder,
-          editForm.autoCommit
+          nextSortOrder
         );
         if (selectedRepoKey === entryKey) {
           actions = [...actions, newAction];
@@ -385,8 +381,7 @@
           editForm.name,
           editForm.command,
           editForm.actionType,
-          editingAction.sortOrder,
-          editForm.autoCommit
+          editingAction.sortOrder
         );
         actions = actions.map((a) =>
           a.id === actionId
@@ -395,7 +390,6 @@
                 name: editForm.name,
                 command: editForm.command,
                 actionType: editForm.actionType,
-                autoCommit: editForm.autoCommit,
               }
             : a
         );
@@ -774,10 +768,6 @@
         <option value="check">check</option>
         <option value="cleanUp">cleanUp</option>
       </select>
-      <label class="checkbox-row">
-        <input type="checkbox" bind:checked={editForm.autoCommit} />
-        Auto-commit
-      </label>
       <div class="editor-buttons">
         <button class="secondary-btn" onclick={cancelEdit}>Cancel</button>
         <button class="primary-btn" onclick={saveAction}>
@@ -1241,14 +1231,6 @@
     background: var(--bg-primary);
     color: var(--text-primary);
     min-width: 0;
-  }
-
-  .checkbox-row {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--text-muted);
-    font-size: var(--size-sm);
   }
 
   .editor-buttons {

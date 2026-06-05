@@ -221,7 +221,6 @@ pub(crate) async fn run_branch_action_impl(
     let metadata = ActionMetadata {
         action_id: action.id.clone(),
         action_name: action.name.clone(),
-        auto_commit: action.auto_commit,
     };
 
     // Clone values needed after execute() moves them.
@@ -309,15 +308,8 @@ pub(crate) async fn run_branch_action_impl(
             shell_command,
         ];
 
-        // Provide auto-commit context so that after a successful action,
-        // git commands run on the remote workspace via `sq blox ws exec`.
-        // When there's no resolved path we can't determine the git working
-        // directory, so auto-commit is skipped (unlikely for remote branches).
-        let auto_commit_info = resolved_repo_path
-            .map(|resolved| (sq_binary.clone(), workspace_name.to_string(), resolved));
-
         let eid = executor
-            .execute_remote(sq_binary, args, metadata, listener, auto_commit_info)
+            .execute_remote(sq_binary, args, metadata, listener)
             .await
             .map_err(|e| format!("Failed to execute remote action: {e}"))?;
 
@@ -653,8 +645,7 @@ pub(crate) async fn run_prerun_actions_impl(
                 suggestion.command,
                 suggestion.action_type,
                 next_sort_order,
-            )
-            .with_auto_commit(suggestion.auto_commit);
+            );
             store
                 .create_repo_action(&action)
                 .map_err(|e| format!("Failed to create detected action: {e}"))?;
@@ -715,7 +706,6 @@ pub(crate) async fn run_prerun_actions_impl(
         let metadata = ActionMetadata {
             action_id: action.id.clone(),
             action_name: action.name.clone(),
-            auto_commit: action.auto_commit,
         };
 
         let execution_id = executor

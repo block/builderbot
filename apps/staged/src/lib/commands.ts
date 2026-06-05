@@ -449,7 +449,6 @@ export interface ProjectAction {
   command: string;
   actionType: string;
   sortOrder: number;
-  autoCommit: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -466,8 +465,7 @@ export function updateProjectAction(
   name: string,
   command: string,
   actionType: string,
-  sortOrder: number,
-  autoCommit: boolean
+  sortOrder: number
 ): Promise<void> {
   return invokeCommand('update_project_action', {
     actionId,
@@ -475,7 +473,6 @@ export function updateProjectAction(
     command,
     actionType,
     sortOrder,
-    autoCommit,
   });
 }
 
@@ -507,8 +504,7 @@ export function createRepoAction(
   name: string,
   command: string,
   actionType: string,
-  sortOrder: number,
-  autoCommit: boolean
+  sortOrder: number
 ): Promise<ProjectAction> {
   return invokeCommand('create_repo_action', {
     githubRepo,
@@ -517,7 +513,6 @@ export function createRepoAction(
     command,
     actionType,
     sortOrder,
-    autoCommit,
   });
 }
 

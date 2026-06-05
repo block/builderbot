@@ -8,7 +8,6 @@
 //!
 //! - **Action Execution**: Spawn shell commands with real-time stdout/stderr streaming
 //! - **Process Management**: Track running processes, stop them, retrieve buffered output
-//! - **Git Integration**: Auto-commit changes after successful action execution
 //! - **AI Detection**: Detect available actions from build files using AI
 //! - **Framework Agnostic**: Works with any event system (Tauri, WebSockets, SSE, etc.)
 //!
@@ -43,7 +42,6 @@
 //!     let metadata = ActionMetadata {
 //!         action_id: "test-action".to_string(),
 //!         action_name: "Run Tests".to_string(),
-//!         auto_commit: false,
 //!     };
 //!
 //!     let execution_id = executor.execute(
@@ -61,7 +59,6 @@
 pub mod acp_provider;
 pub mod detector;
 pub mod executor;
-pub mod git;
 pub mod models;
 
 // Re-export main types for convenience

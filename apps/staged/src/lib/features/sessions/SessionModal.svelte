@@ -24,7 +24,7 @@
     onClose   — callback to close this modal
 -->
 <script lang="ts">
-  import { onMount, onDestroy, tick, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { slide } from 'svelte/transition';
   import X from '@lucide/svelte/icons/x';
   import AlertCircle from '@lucide/svelte/icons/alert-circle';
@@ -375,12 +375,24 @@
   // Lifecycle
   // =========================================================================
 
-  onMount(() => {
-    unregisterSearchTarget = registerSearchShortcutTarget({
+  // Register the global search-shortcut target only while the modal is open.
+  // This component is mounted persistently for every branch card (the `open`
+  // prop toggles visibility), and runSearchShortcut() always dispatches to the
+  // last-registered target. Registering in onMount would let a closed,
+  // off-screen modal capture Cmd/Ctrl+F and search next/previous, so gate
+  // registration on `open` instead.
+  $effect(() => {
+    if (!open) return;
+    const unregister = registerSearchShortcutTarget({
       find: openSearch,
       next: nextMatch,
       previous: previousMatch,
     });
+    unregisterSearchTarget = unregister;
+    return () => {
+      unregister();
+      unregisterSearchTarget = null;
+    };
   });
 
   onDestroy(() => {

@@ -18,7 +18,7 @@
   import * as commands from '../../api/commands';
   import { listenToRepoActionsDetection } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
-  import { goHome, selectProject } from '../layout/navigation.svelte';
+  import { goHome, selectProject, msSinceProjectSwitch } from '../layout/navigation.svelte';
   import ProjectSection from './ProjectSection.svelte';
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
   import NewProjectModal from './NewProjectModal.svelte';
@@ -368,6 +368,17 @@
     )
   );
 
+  // Debug: log how long after a project switch the detail selection resolves.
+  $effect(() => {
+    const id = selectedProjectId;
+    if (!id) return;
+    const found = visibleProjects.length > 0;
+    console.info(
+      `[perf][project-switch] ProjectHome selection resolved for '${id}' ` +
+        `(${visibleProjects.length} visible, found=${found}) at +${msSinceProjectSwitch().toFixed(1)}ms`
+    );
+  });
+
   // Track which projects are safe to delete (for button styling)
   let safeToDeleteProjects = $state<Set<string>>(new Set());
 
@@ -377,6 +388,7 @@
   // and the result is only consumed in the visibleProjects render loop.
   $effect(() => {
     const updateSafeStatus = async () => {
+      const startedAt = performance.now();
       const nextSafe = new Set<string>();
 
       for (const project of visibleProjects) {
@@ -401,6 +413,10 @@
       }
 
       safeToDeleteProjects = nextSafe;
+      console.info(
+        `[perf][project-switch] ProjectHome safe-to-delete check finished for ` +
+          `${visibleProjects.length} visible project(s) in ${(performance.now() - startedAt).toFixed(1)}ms`
+      );
     };
 
     updateSafeStatus();

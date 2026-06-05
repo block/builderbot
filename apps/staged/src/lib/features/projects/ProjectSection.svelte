@@ -30,7 +30,7 @@
     HashtagItem,
   } from '../../types';
   import { projectDisplayName } from '../../shared/utils';
-  import { goHome } from '../layout/navigation.svelte';
+  import { goHome, msSinceProjectSwitch } from '../layout/navigation.svelte';
   import * as commands from '../../api/commands';
   import HashtagInput from '../sessions/HashtagInput.svelte';
   import { buildProjectHashtagItems } from '../sessions/hashtagItems';
@@ -211,9 +211,15 @@
   $effect(() => {
     const _v = hashtagVersion; // reactive dependency for manual invalidation
     let stale = false;
+    const startedAt = performance.now();
     buildProjectHashtagItems(project.id, branches, reposById)
       .then((items) => {
         if (!stale) hashtagItems = items;
+        console.info(
+          `[perf][project-switch] ProjectSection built ${items.length} hashtag item(s) for ` +
+            `'${project.id}' in ${(performance.now() - startedAt).toFixed(1)}ms` +
+            (stale ? ' (stale, discarded)' : '')
+        );
       })
       .catch((err) => {
         console.error('[ProjectSection] Failed to build hashtag items:', err);
@@ -408,8 +414,14 @@
   let deletingNoteIds = $state<Set<string>>(new Set());
 
   async function loadProjectNotes() {
+    const startedAt = performance.now();
     try {
       projectNotes = await commands.listProjectNotes(project.id);
+      console.info(
+        `[perf][project-switch] ProjectSection loaded ${projectNotes.length} note(s) for ` +
+          `'${project.id}' in ${(performance.now() - startedAt).toFixed(1)}ms ` +
+          `(+${msSinceProjectSwitch().toFixed(1)}ms since switch)`
+      );
     } catch (e) {
       console.error('[ProjectSection] Failed to load project notes:', e);
     }
@@ -465,6 +477,10 @@
   // ── Lifecycle ──────────────────────────────────────────────────────────
 
   onMount(() => {
+    console.info(
+      `[perf][project-switch] ProjectSection mounted for '${project.id}' ` +
+        `(${branches.length} branch(es)) at +${msSinceProjectSwitch().toFixed(1)}ms since switch`
+    );
     loadProjectNotes();
 
     // Refresh hashtag items when branch timelines are invalidated (e.g. branch session completion)

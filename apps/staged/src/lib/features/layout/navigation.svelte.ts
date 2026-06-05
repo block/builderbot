@@ -78,8 +78,22 @@ export function showAllRepos(): void {
   navigation.showReposList = true;
 }
 
+/**
+ * Timestamp (performance.now()) of the most recent project switch, used to
+ * measure how long the detail page takes to render. See [perf][project-switch]
+ * debug logs in ProjectHome/ProjectSection.
+ */
+let lastProjectSwitchAt = 0;
+
+/** Elapsed ms since the most recent project switch, for debug perf logging. */
+export function msSinceProjectSwitch(): number {
+  return performance.now() - lastProjectSwitchAt;
+}
+
 /** Navigate to a specific project's detail view. */
 export function selectProject(projectId: string): void {
+  lastProjectSwitchAt = performance.now();
+  console.info(`[perf][project-switch] selectProject('${projectId}') — switch started`);
   showWorkspaceView();
   navigation.selectedProjectId = projectId;
   navigation.showReposList = false;

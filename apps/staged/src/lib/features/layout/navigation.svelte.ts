@@ -78,38 +78,8 @@ export function showAllRepos(): void {
   navigation.showReposList = true;
 }
 
-/**
- * The most recent project switch, used to measure how long the detail page
- * takes to render. Each switch gets a fresh, monotonically increasing token so
- * downstream debug effects can tell whether they are reporting the initial
- * post-switch render or a later re-fire (which would otherwise report a
- * misleading elapsed-since-switch). See [perf][project-switch] debug logs in
- * ProjectHome/ProjectSection.
- */
-let currentSwitch = { projectId: null as string | null, at: 0, token: 0 };
-
-/** Elapsed ms since the most recent project switch, for debug perf logging. */
-export function msSinceProjectSwitch(): number {
-  return performance.now() - currentSwitch.at;
-}
-
-/** Token identifying the most recent project switch (bumped on every switch). */
-export function currentProjectSwitchToken(): number {
-  return currentSwitch.token;
-}
-
-/** The project id targeted by the most recent switch, or null. */
-export function currentProjectSwitchTarget(): string | null {
-  return currentSwitch.projectId;
-}
-
 /** Navigate to a specific project's detail view. */
 export function selectProject(projectId: string): void {
-  const startedAt = performance.now();
-  currentSwitch = { projectId, at: startedAt, token: currentSwitch.token + 1 };
-  console.info(
-    `[perf][project-switch] selectProject('${projectId}') — switch started (token ${currentSwitch.token})`
-  );
   showWorkspaceView();
   navigation.selectedProjectId = projectId;
   navigation.showReposList = false;
@@ -118,13 +88,6 @@ export function selectProject(projectId: string): void {
   if (projectStateStore.isUnread(projectId)) {
     projectStateStore.markAsRead(projectId);
   }
-  // Stamp the end of the synchronous body so we can isolate how much of the
-  // switch latency is spent here vs. in the (unmeasured) keyed-block swap that
-  // tears down the old ProjectSection and mounts the new one.
-  console.info(
-    `[perf][project-switch] selectProject('${projectId}') — synchronous body done in ` +
-      `${(performance.now() - startedAt).toFixed(1)}ms (token ${currentSwitch.token})`
-  );
 }
 
 /** Navigate to a project and scroll to a specific branch card. */

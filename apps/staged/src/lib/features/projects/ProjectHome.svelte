@@ -18,13 +18,7 @@
   import * as commands from '../../api/commands';
   import { listenToRepoActionsDetection } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
-  import {
-    goHome,
-    selectProject,
-    msSinceProjectSwitch,
-    currentProjectSwitchToken,
-    currentProjectSwitchTarget,
-  } from '../layout/navigation.svelte';
+  import { goHome, selectProject } from '../layout/navigation.svelte';
   import ProjectSection from './ProjectSection.svelte';
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
   import NewProjectModal from './NewProjectModal.svelte';
@@ -377,27 +371,6 @@
     )
   );
 
-  // Debug: log how long after a project switch the detail selection resolves.
-  // Only the first firing per switch token reports elapsed-since-switch timing;
-  // later re-fires (driven by events, not the switch) are labelled as re-fires
-  // so they don't report a misleading elapsed value.
-  let lastResolvedSwitchToken = -1;
-  $effect(() => {
-    const id = selectedProjectId;
-    if (!id) return;
-    const found = visibleProjects.length > 0;
-    const token = currentProjectSwitchToken();
-    const isInitial = token !== lastResolvedSwitchToken && id === currentProjectSwitchTarget();
-    lastResolvedSwitchToken = token;
-    console.info(
-      `[perf][project-switch] ProjectHome selection resolved for '${id}' ` +
-        `(${visibleProjects.length} visible, found=${found}) ` +
-        (isInitial
-          ? `at +${msSinceProjectSwitch().toFixed(1)}ms (token ${token})`
-          : `(re-fire, token ${token})`)
-    );
-  });
-
   // Track which projects are safe to delete (for button styling)
   let safeToDeleteProjects = $state<Set<string>>(new Set());
 
@@ -430,8 +403,6 @@
     let idleHandle: number | undefined;
 
     const updateSafeStatus = async () => {
-      const startedAt = performance.now();
-
       // Parallelize across projects so the project-home grid doesn't serialize
       // every project's git work.
       const results = await Promise.all(
@@ -466,10 +437,6 @@
       // stays unchanged so the next fire reschedules instead of dropping the
       // check permanently for that signature.
       lastSafeSignature = signature;
-      console.info(
-        `[perf][project-switch] ProjectHome safe-to-delete check finished for ` +
-          `${projectsSnapshot.length} visible project(s) in ${(performance.now() - startedAt).toFixed(1)}ms`
-      );
     };
 
     // Defer off the critical render path: let the switch's keyed-block swap

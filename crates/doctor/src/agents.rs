@@ -1,10 +1,13 @@
 //! AI agent checks and fix command lookup.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::checks::CLONEFILE_FIX_COMMAND;
+use crate::command::{
+    run_command_with_timeout, CommandError, CommandTimeout, DEFAULT_PROBE_TIMEOUT,
+};
 use crate::resolve::format_command_output;
+use crate::timeout_check::{command_timeout_check, TimeoutCheck};
 use crate::types::{
     AgentVersionInfo, AuthStatus, CheckStatus, DoctorCheck, FixType, InstallSource, ResolvedBinary,
 };
@@ -303,7 +306,9 @@ pub fn check_single_ai_agent(
 
     if let Some(ref path_str) = resolved_path {
         if info.id == "ai-agent-goose" {
-            match Command::new(path_str).arg("acp").arg("--help").output() {
+            let mut command = std::process::Command::new(path_str);
+            command.arg("acp").arg("--help");
+            match run_command_with_timeout(command, "goose acp --help", DEFAULT_PROBE_TIMEOUT) {
                 Ok(output) if output.status.success() => {
                     let raw = format!(
                         "{header}\n{}\n{}",
@@ -363,6 +368,20 @@ pub fn check_single_ai_agent(
                         bridge: None,
                     }
                 }
+                Err(CommandError::Timeout { command, timeout }) => command_timeout_check(
+                    TimeoutCheck::new(
+                        info.id,
+                        info.label,
+                        CheckStatus::Fail,
+                        &header,
+                        command,
+                        timeout,
+                    )
+                    .path(resolved_path)
+                    .install_source(bridge_install_source.clone())
+                    .main(version_readout(bridge_install_source.clone()))
+                    .raw_suffix(Some(&search)),
+                ),
                 Err(e) => DoctorCheck {
                     id: info.id.to_string(),
                     label: info.label.to_string(),
@@ -431,6 +450,10 @@ pub fn check_single_ai_agent(
                         Some(AuthStatus::Unknown),
                         Some(format!("$ {cmd}\n(spawn failure: {e})")),
                     ),
+                    ExecOutcome::Timeout { command, timeout } => {
+                        let timeout = CommandTimeout::new(info.label, command, timeout);
+                        (Some(AuthStatus::Unknown), Some(timeout.raw_output()))
+                    }
                     // Exit 127 means the shell couldn't find the command —
                     // PATH-shadowed or uninstalled. Not the same as "signed
                     // out"; report Unknown so the UI doesn't offer a useless

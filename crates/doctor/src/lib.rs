@@ -6,24 +6,29 @@
 
 pub mod agents;
 pub mod checks;
+mod command;
 pub(crate) mod freshness;
 pub(crate) mod package_ids;
 pub mod resolve;
+mod timeout_check;
 pub mod types;
 
 pub use types::{AgentVersionInfo, CheckStatus, DoctorCheck, DoctorReport, FixType};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use agents::{check_single_ai_agent, derive_update_command, lookup_fix_command, AI_AGENT_CHECKS};
 use checks::{check_clonefile, check_gh, check_gh_auth, check_git, check_git_lfs};
+use command::{
+    format_duration, run_command_with_timeout, CommandError, CommandTimeout, DEFAULT_PROBE_TIMEOUT,
+};
 use freshness::{
     fetch_version_info, is_self_updating, load_cache, save_cache, select_installed_probe,
 };
 use package_ids::{lookup_package_id, LatestSource, Role};
-use resolve::resolve_binary;
+use resolve::resolve_binary_with_diagnostics;
 use types::{InstallSource, ResolvedBinary};
 
 /// Fallback check returned when a spawn_blocking task panics.
@@ -105,13 +110,20 @@ async fn collect_base_report(npm_registry: Option<&str>) -> DoctorReport {
 
     let handles: Vec<_> = binary_names
         .iter()
-        .map(|&name| tokio::task::spawn_blocking(move || (name, resolve_binary(name))))
+        .map(|&name| {
+            tokio::task::spawn_blocking(move || {
+                let (resolved, timeouts) = resolve_binary_with_diagnostics(name);
+                (name, resolved, timeouts)
+            })
+        })
         .collect();
 
     let mut resolved: HashMap<&str, ResolvedBinary> = HashMap::new();
+    let mut resolution_timeouts = Vec::new();
     for handle in handles {
-        if let Ok((name, rb)) = handle.await {
+        if let Ok((name, rb, timeouts)) = handle.await {
             resolved.insert(name, rb);
+            resolution_timeouts.extend(timeouts);
         }
     }
 
@@ -195,7 +207,113 @@ async fn collect_base_report(npm_registry: Option<&str>) -> DoctorReport {
         );
     }
 
+    checks.extend(timeout_diagnostic_checks(resolution_timeouts));
+
     DoctorReport { checks }
+}
+
+fn timeout_diagnostic_checks(timeouts: Vec<CommandTimeout>) -> Vec<DoctorCheck> {
+    let mut seen_timeouts = HashSet::new();
+    let mut used_ids = HashSet::new();
+    let mut checks = Vec::new();
+    for timeout in timeouts {
+        let fingerprint = (
+            timeout.label.clone(),
+            timeout.command.clone(),
+            timeout.timeout,
+        );
+        if !seen_timeouts.insert(fingerprint) {
+            continue;
+        }
+        let id = unique_timeout_diagnostic_id(&timeout, &mut used_ids);
+        checks.push(timeout_diagnostic_check(timeout, id));
+    }
+    checks
+}
+
+fn unique_timeout_diagnostic_id(
+    timeout: &CommandTimeout,
+    used_ids: &mut HashSet<String>,
+) -> String {
+    let slug_source = format!("{} {}", timeout.label, timeout.command);
+    let base = format!("subprocess-timeout-{}", slug(&slug_source));
+    if used_ids.insert(base.clone()) {
+        return base;
+    }
+
+    let suffixed = format!("{base}-{}", stable_timeout_suffix(timeout));
+    if used_ids.insert(suffixed.clone()) {
+        return suffixed;
+    }
+
+    let mut index = 2;
+    loop {
+        let candidate = format!("{suffixed}-{index}");
+        if used_ids.insert(candidate.clone()) {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+fn stable_timeout_suffix(timeout: &CommandTimeout) -> String {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x00000100000001b3;
+
+    fn update(mut hash: u64, bytes: &[u8]) -> u64 {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        hash
+    }
+
+    let mut hash = FNV_OFFSET;
+    hash = update(hash, timeout.label.as_bytes());
+    hash = update(hash, &[0]);
+    hash = update(hash, timeout.command.as_bytes());
+    hash = update(hash, &[0]);
+    hash = update(hash, timeout.timeout.as_nanos().to_string().as_bytes());
+    format!("{hash:016x}")
+}
+
+fn timeout_diagnostic_check(timeout: CommandTimeout, id: String) -> DoctorCheck {
+    DoctorCheck {
+        id,
+        label: timeout.label.clone(),
+        status: CheckStatus::Warn,
+        message: timeout.message(),
+        fix_url: None,
+        fix_command: None,
+        fix_type: None,
+        path: None,
+        bridge_path: None,
+        raw_output: Some(format!(
+            "# Check: {}\n{}",
+            timeout.label,
+            timeout.raw_output()
+        )),
+        auth_status: None,
+        installed_version: None,
+        latest_version: None,
+        update_available: None,
+        install_source: None,
+        self_updating: None,
+        main: None,
+        bridge: None,
+    }
+}
+
+fn slug(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
 }
 
 /// Which binary behind a check a freshness probe targets.
@@ -263,6 +381,44 @@ fn apply_freshness(
             readout.update_fix_type = Some(fix_type);
         }
     }
+}
+
+fn apply_freshness_timeouts(check: &mut DoctorCheck, timeouts: &[CommandTimeout]) {
+    if timeouts.is_empty() {
+        return;
+    }
+
+    if check.status == CheckStatus::Pass {
+        check.status = CheckStatus::Warn;
+    }
+
+    let first = &timeouts[0];
+    let summary = if timeouts.len() == 1 {
+        format!(
+            "freshness timed out after {} running {}",
+            format_duration(first.timeout),
+            first.command
+        )
+    } else {
+        format!(
+            "{} freshness probes timed out, first after {} running {}",
+            timeouts.len(),
+            format_duration(first.timeout),
+            first.command
+        )
+    };
+    check.message = format!("{}; {summary}", check.message);
+
+    let mut raw = check.raw_output.take().unwrap_or_default();
+    if !raw.is_empty() {
+        raw.push('\n');
+    }
+    raw.push_str("# Freshness subprocess timeouts:");
+    for timeout in timeouts {
+        raw.push('\n');
+        raw.push_str(&timeout.raw_output());
+    }
+    check.raw_output = Some(raw);
 }
 
 /// Post-hoc pass: for every check that has a usable binary path and a known
@@ -361,18 +517,20 @@ async fn populate_freshness(
     for check in &mut report.checks {
         let is_agent = check.main.is_some() || check.bridge.is_some();
         if is_agent {
-            if let (Some(readout), Some((info, pkg))) = (
-                check.main.as_mut(),
-                by_target.remove(&(check.id.clone(), ReadoutSlot::Main)),
-            ) {
-                apply_freshness(readout, &info, ReadoutSlot::Main, pkg.as_deref());
+            let mut freshness_timeouts = Vec::new();
+            if let Some((info, pkg)) = by_target.remove(&(check.id.clone(), ReadoutSlot::Main)) {
+                if let Some(readout) = check.main.as_mut() {
+                    apply_freshness(readout, &info, ReadoutSlot::Main, pkg.as_deref());
+                }
+                freshness_timeouts.extend(info.command_timeouts);
             }
-            if let (Some(readout), Some((info, pkg))) = (
-                check.bridge.as_mut(),
-                by_target.remove(&(check.id.clone(), ReadoutSlot::Bridge)),
-            ) {
-                apply_freshness(readout, &info, ReadoutSlot::Bridge, pkg.as_deref());
+            if let Some((info, pkg)) = by_target.remove(&(check.id.clone(), ReadoutSlot::Bridge)) {
+                if let Some(readout) = check.bridge.as_mut() {
+                    apply_freshness(readout, &info, ReadoutSlot::Bridge, pkg.as_deref());
+                }
+                freshness_timeouts.extend(info.command_timeouts);
             }
+            apply_freshness_timeouts(check, &freshness_timeouts);
             // Mirror the headline readout (bridge if present, else main) into the
             // flat fields for backward-compatible consumers.
             let headline = check.bridge.as_ref().or(check.main.as_ref()).map(|r| {
@@ -391,6 +549,7 @@ async fn populate_freshness(
             }
         } else if let Some((info, _pkg)) = by_target.remove(&(check.id.clone(), ReadoutSlot::Flat))
         {
+            apply_freshness_timeouts(check, &info.command_timeouts);
             check.installed_version = info.installed;
             check.latest_version = info.latest;
             let self_updating = is_self_updating(check.install_source.as_ref());
@@ -497,6 +656,9 @@ where
     // writes into `raw_output`.
     on_line(&format!("$ {command}"));
 
+    // Fixes are intentionally not routed through the bounded probe runner:
+    // these are user-triggered install/auth/update actions and can reasonably
+    // be interactive or long-running.
     run_command_streaming(command, on_line).await
 }
 
@@ -571,6 +733,11 @@ pub(crate) enum ExecOutcome {
     /// The shell itself couldn't be spawned (or `wait()` failed). Rare; means
     /// we have no signal at all from the inner command.
     Spawn(std::io::Error),
+    /// The command ran longer than the bounded doctor probe timeout.
+    Timeout {
+        command: String,
+        timeout: std::time::Duration,
+    },
     /// The shell ran, the inner command exited non-zero. Code is `Some(127)`
     /// when the shell reports "command not found".
     Exit {
@@ -586,16 +753,15 @@ pub(crate) fn execute_command_with_path_prefix(
     command: &str,
     path_prefix: &[PathBuf],
 ) -> ExecOutcome {
-    let mut cmd = build_shell_command(command, path_prefix);
-    cmd.stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => return ExecOutcome::Spawn(e),
-    };
-    let output = match child.wait_with_output() {
-        Ok(o) => o,
-        Err(e) => return ExecOutcome::Spawn(e),
+    let cmd = build_shell_command(command, path_prefix);
+    let output = match run_command_with_timeout(cmd, command, DEFAULT_PROBE_TIMEOUT) {
+        Ok(output) => output,
+        Err(CommandError::Spawn { source, .. } | CommandError::Wait { source, .. }) => {
+            return ExecOutcome::Spawn(source)
+        }
+        Err(CommandError::Timeout { command, timeout }) => {
+            return ExecOutcome::Timeout { command, timeout }
+        }
     };
     if output.status.success() {
         ExecOutcome::Ok
@@ -608,9 +774,11 @@ pub(crate) fn execute_command_with_path_prefix(
 }
 
 /// Spawn `command` through a login shell, stream stdout/stderr lines to
-/// `on_line`, and return based on the process exit status. Stderr lines are
-/// also accumulated so a non-zero exit can surface a useful error message
-/// (matching the non-streaming behavior of the previous `execute_command`).
+/// `on_line`, and return based on the process exit status. This path is
+/// deliberately unbounded: fix commands are user-triggered install/auth/update
+/// actions and may prompt or run package managers. Stderr lines are also
+/// accumulated so a non-zero exit can surface a useful error message (matching
+/// the non-streaming behavior of the previous `execute_command`).
 fn run_command_streaming_blocking<F>(command: &str, mut on_line: F) -> Result<(), String>
 where
     F: FnMut(&str),
@@ -686,6 +854,51 @@ mod tests {
     use super::*;
 
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    fn timeout(label: &str, command: &str) -> CommandTimeout {
+        CommandTimeout::new(label, command, Duration::from_secs(15))
+    }
+
+    #[test]
+    fn timeout_diagnostic_ids_are_collision_safe() {
+        let checks = timeout_diagnostic_checks(vec![
+            timeout("A B", "c"),
+            timeout("A", "B C"),
+            timeout("A B", "c"),
+        ]);
+
+        assert_eq!(checks.len(), 2, "exact duplicate timeout should be deduped");
+        assert_eq!(checks[0].id, "subprocess-timeout-a-b-c");
+        assert!(
+            checks[1].id.starts_with("subprocess-timeout-a-b-c-"),
+            "slug collision should get deterministic suffix: {:?}",
+            checks.iter().map(|c| &c.id).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn apply_freshness_timeouts_appends_one_combined_block() {
+        let mut check = DoctorCheck {
+            status: CheckStatus::Pass,
+            message: "Installed".into(),
+            raw_output: Some("base raw".into()),
+            ..empty_check("ai-agent-test", "Test Agent")
+        };
+        let timeouts = [
+            timeout("installed version", "agent --version"),
+            timeout("npm latest version", "npm view agent-acp version"),
+        ];
+
+        apply_freshness_timeouts(&mut check, &timeouts);
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains("2 freshness probes timed out"));
+        let raw = check.raw_output.unwrap();
+        assert_eq!(raw.matches("# Freshness subprocess timeouts:").count(), 1);
+        assert!(raw.contains("$ agent --version"));
+        assert!(raw.contains("$ npm view agent-acp version"));
+    }
 
     /// Streaming helper must invoke `on_line` for each output line of a
     /// successful command. Lines from `.zshrc` etc. may also appear; we only
@@ -803,6 +1016,7 @@ mod tests {
             installed: Some("0.1.0".into()),
             latest: Some("0.2.0".into()),
             update_available: Some(true),
+            command_timeouts: Vec::new(),
         };
         apply_freshness(
             &mut readout,
@@ -829,6 +1043,7 @@ mod tests {
             installed: Some("0.1.0".into()),
             latest: Some("0.2.0".into()),
             update_available: Some(true),
+            command_timeouts: Vec::new(),
         };
         apply_freshness(&mut readout, &info, ReadoutSlot::Bridge, Some("amp"));
         assert_eq!(readout.update_command.as_deref(), Some("brew upgrade amp"),);
@@ -848,6 +1063,7 @@ mod tests {
             installed: Some("1.0.0".into()),
             latest: Some("2.0.0".into()),
             update_available: Some(true),
+            command_timeouts: Vec::new(),
         };
         apply_freshness(
             &mut readout,
@@ -875,6 +1091,7 @@ mod tests {
             installed: Some("0.2.0".into()),
             latest: Some("0.2.0".into()),
             update_available: Some(false),
+            command_timeouts: Vec::new(),
         };
         apply_freshness(&mut readout, &info, ReadoutSlot::Main, Some("amp-acp"));
         assert!(readout.update_command.is_none());

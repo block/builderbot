@@ -655,9 +655,12 @@
     border-radius: 8px;
     max-height: 280px;
     overflow-y: auto;
-    z-index: 9999;
+    z-index: var(--z-index-floating);
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
     padding: 4px;
+    /* bits-ui sets `body { pointer-events: none }` while a dialog is open. The
+       dropdown portals to body, so re-enable pointer events on it explicitly. */
+    pointer-events: auto;
   }
 
   .hashtag-dropdown-section + .hashtag-dropdown-section {

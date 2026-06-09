@@ -12,7 +12,7 @@
 -->
 <script lang="ts">
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
-  import Bot from '@lucide/svelte/icons/bot';
+  import AgentIcon from './AgentIcon.svelte';
   import { agentState, REMOTE_AGENTS } from './agent.svelte';
   import { setAiAgent, getPreferredAgent } from '../settings/preferences.svelte';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
@@ -40,7 +40,7 @@
         {disabled}
         title="Select AI agent"
       >
-        <Bot size={12} />
+        <AgentIcon id={preferredId ?? ''} size={12} />
         <span class="whitespace-nowrap">{currentLabel}</span>
         <ChevronDown size={12} />
       </DropdownMenu.Trigger>
@@ -56,7 +56,10 @@
         >
           {#each agents as provider (provider.id)}
             <DropdownMenu.RadioItem value={provider.id}>
-              {provider.label}
+              <span class="inline-flex items-center gap-1.5">
+                <AgentIcon id={provider.id} size={12} />
+                {provider.label}
+              </span>
             </DropdownMenu.RadioItem>
           {/each}
         </DropdownMenu.RadioGroup>
@@ -69,7 +72,7 @@
       {disabled}
       title={currentLabel}
     >
-      <Bot size={12} />
+      <AgentIcon id={preferredId ?? ''} size={12} />
       <span class="whitespace-nowrap">{currentLabel}</span>
     </button>
   {/if}

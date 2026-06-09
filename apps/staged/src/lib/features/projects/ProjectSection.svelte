@@ -111,13 +111,6 @@
     branches.map((branch) => branch.worktreePath).filter((path): path is string => !!path)
   );
   let addRepoDisabled = $derived(deleting || !canAddRepo);
-  let addRepoTitle = $derived(
-    deleting
-      ? 'Project deletion in progress'
-      : !canAddRepo && addRepoHint
-        ? addRepoHint
-        : 'Add repository to project'
-  );
 
   // For remote projects, derive workspace info from any branch (they all share the same workspace)
   let workspaceBranch = $derived(
@@ -607,60 +600,45 @@
     </div>
     {#if !deleting}
       <div class="header-actions">
-        <Tooltip.Root>
-          <Tooltip.Trigger>
-            {#snippet child({ props })}
-              <span {...props} class="inline-flex">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  class="group gap-2 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:h-10 max-md:justify-center max-md:p-2"
-                  onclick={() => {
-                    addRepoModalOpen = true;
-                  }}
-                  disabled={addRepoDisabled}
-                >
-                  <span
-                    class="flex size-4 shrink-0 items-center justify-center rounded-full bg-[var(--border-muted)] transition-colors group-hover:not-disabled:bg-[var(--border-emphasis)]"
-                  >
-                    <Plus size={12} />
-                  </span>
-                  Add Repo
-                </Button>
-              </span>
-            {/snippet}
-          </Tooltip.Trigger>
-          <Tooltip.Content>{addRepoTitle}</Tooltip.Content>
-        </Tooltip.Root>
-        <Tooltip.Root>
-          <Tooltip.Trigger>
-            {#snippet child({ props })}
-              <Button
-                {...props}
-                variant="ghost"
-                size="sm"
-                class={[
-                  'group gap-2 text-foreground hover:bg-[var(--ui-selection)] hover:text-destructive max-md:h-10 max-md:justify-center max-md:p-2',
-                  safeToDelete && 'border border-destructive text-destructive',
-                ]}
-                onclick={() => onDeleteProject?.()}
-              >
-                <span
-                  class={[
-                    'flex shrink-0 items-center transition-colors',
-                    safeToDelete
-                      ? 'text-destructive'
-                      : 'text-muted-foreground group-hover:text-destructive',
-                  ]}
-                >
-                  <Trash2 size={14} />
-                </span>
-                Remove Project
-              </Button>
-            {/snippet}
-          </Tooltip.Trigger>
-          <Tooltip.Content>Remove project</Tooltip.Content>
-        </Tooltip.Root>
+        <span class="inline-flex">
+          <Button
+            variant="ghost"
+            size="sm"
+            class="group gap-2 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:h-10 max-md:justify-center max-md:p-2"
+            onclick={() => {
+              addRepoModalOpen = true;
+            }}
+            disabled={addRepoDisabled}
+          >
+            <span
+              class="flex size-4 shrink-0 items-center justify-center rounded-full bg-[var(--border-muted)] transition-colors group-hover:not-disabled:bg-[var(--border-emphasis)]"
+            >
+              <Plus size={12} />
+            </span>
+            Add Repo
+          </Button>
+        </span>
+        <Button
+          variant="ghost"
+          size="sm"
+          class={[
+            'group gap-2 text-foreground hover:bg-[var(--ui-selection)] hover:text-destructive max-md:h-10 max-md:justify-center max-md:p-2',
+            safeToDelete && 'border border-destructive text-destructive',
+          ]}
+          onclick={() => onDeleteProject?.()}
+        >
+          <span
+            class={[
+              'flex shrink-0 items-center transition-colors',
+              safeToDelete
+                ? 'text-destructive'
+                : 'text-muted-foreground group-hover:text-destructive',
+            ]}
+          >
+            <Trash2 size={14} />
+          </span>
+          Remove Project
+        </Button>
       </div>
     {/if}
   </div>

@@ -16,6 +16,7 @@
 //! only by the backend (`session_runner` / `agent` modules) via the
 //! `Store` directly.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -1728,12 +1729,14 @@ pub(crate) fn build_branch_context(
     let mut parts = vec![context_preamble()];
     let mut timeline: Vec<TimelineEntry> = Vec::new();
     let mut commit_error = None;
+    let mut visible_shas: HashSet<String> = HashSet::new();
 
     // Commits from git log. Always compare against the remote-tracking base;
     // Staged does not keep local base branches fresh.
     let base_ref = git::origin_ref_for_branch(base_branch);
     match git::get_full_commit_log(worktree, &base_ref) {
         Ok(log) if !log.trim().is_empty() => {
+            visible_shas = parse_commit_shas(&log);
             timeline.extend(parse_timestamped_log(&log));
         }
         Ok(_) => {}
@@ -1751,6 +1754,7 @@ pub(crate) fn build_branch_context(
         branch_id,
         None,
         max_commit_ts,
+        &visible_shas,
     ));
     timeline.extend(image_timeline_entries(store, branch_id, None, project_id));
 
@@ -1774,6 +1778,7 @@ pub(crate) fn build_remote_branch_context(
 ) -> String {
     let mut parts = vec![context_preamble()];
     let mut timeline: Vec<TimelineEntry> = Vec::new();
+    let mut visible_shas: HashSet<String> = HashSet::new();
 
     // Full commit log via ws_exec.
     // Use merge-base to find the fork point so that only the branch's own
@@ -1799,6 +1804,7 @@ pub(crate) fn build_remote_branch_context(
         ],
     ) {
         Ok(log) if !log.trim().is_empty() => {
+            visible_shas = parse_commit_shas(&log);
             timeline.extend(parse_timestamped_log(&log));
         }
         Ok(_) => {}
@@ -1812,8 +1818,15 @@ pub(crate) fn build_remote_branch_context(
     let max_commit_ts = timeline.iter().map(|e| e.timestamp).max();
     std::thread::scope(|s| {
         let note_handle = s.spawn(|| note_timeline_entries(store, branch_id, Some(workspace_name)));
-        let review_handle = s.spawn(|| {
-            review_timeline_entries(store, branch_id, Some(workspace_name), max_commit_ts)
+        let visible_shas = &visible_shas;
+        let review_handle = s.spawn(move || {
+            review_timeline_entries(
+                store,
+                branch_id,
+                Some(workspace_name),
+                max_commit_ts,
+                visible_shas,
+            )
         });
         let image_handle =
             s.spawn(|| image_timeline_entries(store, branch_id, Some(workspace_name), project_id));
@@ -2090,6 +2103,7 @@ fn build_branch_timeline_summary(
 ) -> String {
     let mut timeline: Vec<TimelineEntry> = Vec::new();
     let mut commit_error = None;
+    let mut visible_shas: HashSet<String> = HashSet::new();
 
     // Attempt to include commit log if we can resolve a local worktree
     if let Ok(Some(workdir)) = store.get_workdir_for_branch(&branch.id) {
@@ -2098,6 +2112,7 @@ fn build_branch_timeline_summary(
             let base_ref = git::origin_ref_for_branch(&branch.base_branch);
             match git::get_full_commit_log(worktree, &base_ref) {
                 Ok(log) if !log.trim().is_empty() => {
+                    visible_shas = parse_commit_shas(&log);
                     timeline.extend(parse_timestamped_log(&log));
                 }
                 Ok(_) => {}
@@ -2121,6 +2136,7 @@ fn build_branch_timeline_summary(
         &branch.id,
         workspace_name,
         max_commit_ts,
+        &visible_shas,
     ));
     timeline.extend(image_timeline_entries(
         store,
@@ -2214,6 +2230,29 @@ fn parse_timestamped_log(output: &str) -> Vec<TimelineEntry> {
         }
     }
     entries
+}
+
+/// Extract the set of commit SHAs from a timestamped git log.
+///
+/// The log is produced with `--format=…%x01commit %H%n…`, so each record's
+/// display text begins with a `commit <sha>` line. This mirrors the visible-SHA
+/// set the branch card builds from its commit list, letting the session context
+/// apply the same review-visibility filter (see `review_timeline_entries`).
+fn parse_commit_shas(output: &str) -> HashSet<String> {
+    let mut shas = HashSet::new();
+    for record in output.split('\0') {
+        let Some((_, display)) = record.split_once('\x01') else {
+            continue;
+        };
+        let first_line = display.trim_start().lines().next().unwrap_or("");
+        if let Some(sha) = first_line.strip_prefix("commit ") {
+            let sha = sha.trim();
+            if !sha.is_empty() {
+                shas.insert(sha.to_string());
+            }
+        }
+    }
+    shas
 }
 
 /// Write raw bytes to a file inside a remote workspace via `ws_exec`.
@@ -2583,6 +2622,7 @@ fn review_timeline_entries(
     branch_id: &str,
     workspace_name: Option<&str>,
     max_commit_ts: Option<i64>,
+    visible_shas: &HashSet<String>,
 ) -> Vec<TimelineEntry> {
     let reviews = match store.list_reviews_for_branch(branch_id) {
         Ok(r) => r,
@@ -2595,6 +2635,13 @@ fn review_timeline_entries(
     let mut entries = Vec::new();
     for review in &reviews {
         if review.is_auto {
+            continue;
+        }
+        // Hide reviews whose originating commit is no longer on the branch,
+        // mirroring the branch card timeline so the agent never sees a review
+        // the user can't see in the UI.
+        if !crate::timeline::review_is_visible_in_timeline(review, |sha| visible_shas.contains(sha))
+        {
             continue;
         }
         let has_branch_history_comments = review.comments.iter().any(should_include_in_history);
@@ -3206,7 +3253,8 @@ mod tests {
             store::CommentType::Information,
         );
 
-        let entries = review_timeline_entries(&store, &branch.id, None, None);
+        let visible = HashSet::from(["abc1234".to_string()]);
+        let entries = review_timeline_entries(&store, &branch.id, None, None, &visible);
 
         assert_eq!(entries.len(), 1);
         let content = &entries[0].content;
@@ -3227,7 +3275,8 @@ mod tests {
             store::CommentType::Information,
         );
 
-        let entries = review_timeline_entries(&store, &branch.id, None, None);
+        let visible = HashSet::from(["abc1234".to_string()]);
+        let entries = review_timeline_entries(&store, &branch.id, None, None, &visible);
 
         assert!(entries.is_empty());
     }
@@ -3250,12 +3299,83 @@ mod tests {
         );
 
         store.delete_comment(&deleted.id).unwrap();
-        let entries = review_timeline_entries(&store, &branch.id, None, None);
+        let visible = HashSet::from(["abc1234".to_string()]);
+        let entries = review_timeline_entries(&store, &branch.id, None, None, &visible);
 
         assert_eq!(entries.len(), 1);
         let content = &entries[0].content;
         assert!(content.contains("active comment should appear"));
         assert!(!content.contains("deleted comment should be hidden"));
+    }
+
+    #[test]
+    fn review_timeline_entries_hide_review_whose_commit_left_branch() {
+        let (store, branch) = setup_branch_store();
+        let review = create_branch_review(&store, &branch.id, "gone123");
+        add_agent_comment(
+            &store,
+            &review.id,
+            "issue on a rebased-away commit",
+            store::CommentType::Issue,
+        );
+
+        // The review's commit is not among the branch's current SHAs, mirroring
+        // a rebase/squash that dropped the original commit.
+        let visible = HashSet::from(["still0n".to_string()]);
+        let entries = review_timeline_entries(&store, &branch.id, None, None, &visible);
+
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn review_timeline_entries_keep_review_whose_commit_is_present() {
+        let (store, branch) = setup_branch_store();
+        let review = create_branch_review(&store, &branch.id, "present0");
+        add_agent_comment(
+            &store,
+            &review.id,
+            "issue on a current commit",
+            store::CommentType::Issue,
+        );
+
+        let visible = HashSet::from(["present0".to_string()]);
+        let entries = review_timeline_entries(&store, &branch.id, None, None, &visible);
+
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].content.contains("issue on a current commit"));
+    }
+
+    #[test]
+    fn review_timeline_entries_keep_review_with_user_comment_when_commit_gone() {
+        let (store, branch) = setup_branch_store();
+        let review = create_branch_review(&store, &branch.id, "gone123");
+        let comment = store::Comment::new(
+            "src/lib.rs",
+            crate::git::Span::new(10, 10),
+            "user kept this review alive",
+        )
+        .with_author(store::CommentAuthor::User)
+        .with_comment_type(store::CommentType::Issue);
+        store.add_comment(&review.id, &comment).unwrap();
+
+        // Commit is gone, but a user comment keeps the review visible — matching
+        // the branch card's `review_is_visible_in_timeline` rule.
+        let visible = HashSet::from(["still0n".to_string()]);
+        let entries = review_timeline_entries(&store, &branch.id, None, None, &visible);
+
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].content.contains("user kept this review alive"));
+    }
+
+    #[test]
+    fn parse_commit_shas_extracts_full_shas() {
+        let log = "\u{0}1700000000\u{1}commit abc123def456\nAuthor: A\nDate: d\n\nfirst\
+            \u{0}1700000100\u{1}commit 0011223344ff\nAuthor: B\nDate: d\n\nsecond";
+        let shas = parse_commit_shas(log);
+
+        assert_eq!(shas.len(), 2);
+        assert!(shas.contains("abc123def456"));
+        assert!(shas.contains("0011223344ff"));
     }
 
     #[test]
@@ -3291,7 +3411,8 @@ mod tests {
         );
 
         let max_commit_ts = Some(review.created_at / 1000 + 1);
-        let entries = review_timeline_entries(&store, &branch.id, None, max_commit_ts);
+        let visible = HashSet::from(["abc1234".to_string()]);
+        let entries = review_timeline_entries(&store, &branch.id, None, max_commit_ts, &visible);
 
         assert_eq!(entries.len(), 1);
         assert!(entries[0].content.contains("3 comments, 1 issues"));

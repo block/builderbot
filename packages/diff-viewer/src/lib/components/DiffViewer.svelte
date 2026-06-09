@@ -1379,15 +1379,35 @@
     const pane = commentingOnLines.pane === 'before' ? beforePane : afterPane;
     if (!pane) return true;
 
-    // decideLineCommentPosition measures both the first and last range rows, and
-    // the editor anchors to one of them — require both mounted before measuring.
-    if (!lineAt(pane, commentingOnLines.start) || !lineAt(pane, commentingOnLines.end)) {
-      return false;
+    const firstEl = lineAt(pane, commentingOnLines.start);
+    const lastEl = lineAt(pane, commentingOnLines.end);
+
+    // Both ends mounted: full space-based decision (short ranges).
+    if (firstEl && lastEl) {
+      lineCommentPositionPreference = decideLineCommentPosition();
+      updateLineCommentEditorPosition();
+      return true;
     }
 
-    lineCommentPositionPreference = decideLineCommentPosition();
-    updateLineCommentEditorPosition();
-    return true;
+    // Range taller than the window — both ends can't co-mount in one frame, so
+    // decideLineCommentPosition (which measures both) can never run. Anchor to
+    // whichever end is rendered. Callers scroll to `start` first, so it lands in
+    // the window; position the editor below it (there's space below after the
+    // scroll). Pass the resolved row explicitly so the anchor doesn't have to be
+    // re-derived from the preference against an unmounted row.
+    if (firstEl) {
+      lineCommentPositionPreference = 'below';
+      updateLineCommentEditorPosition(firstEl);
+      return true;
+    }
+    if (lastEl) {
+      lineCommentPositionPreference = 'above';
+      updateLineCommentEditorPosition(lastEl);
+      return true;
+    }
+
+    // Neither end mounted yet: keep retrying for the window render.
+    return false;
   }
 
   function scheduleLineCommentEditorPositioning() {
@@ -1726,7 +1746,7 @@
     return decideCommentPositionBySpace(spaceBelow, spaceAbove, editorHeight);
   }
 
-  function updateLineCommentEditorPosition() {
+  function updateLineCommentEditorPosition(anchorOverride?: HTMLElement) {
     if (!commentingOnLines || !diffViewerEl) {
       lineCommentEditorStyle = null;
       return;
@@ -1743,7 +1763,11 @@
     const editorHeight = 120;
     let anchorLineEl: HTMLElement | null;
 
-    if (lineCommentPositionPreference === 'below') {
+    if (anchorOverride) {
+      // Tall-range path: the caller resolved the only mounted end; use it directly
+      // rather than re-deriving from the preference against an unmounted row.
+      anchorLineEl = anchorOverride;
+    } else if (lineCommentPositionPreference === 'below') {
       anchorLineEl = lineAt(pane, commentingOnLines.end);
       if (!anchorLineEl) {
         lineCommentEditorStyle = null;
@@ -1878,18 +1902,15 @@
 
     if (selectedLineRange) {
       event.preventDefault();
-      const pane = selectedLineRange.pane === 'before' ? beforePane : afterPane;
-      if (!pane) return;
-
+      // Reconstruct from the source-line array by index rather than the DOM:
+      // with the body windowed, rows outside the rendered slice aren't mounted,
+      // so a DOM-based read would silently drop lines from a tall selection.
+      const sourceLines = selectedLineRange.pane === 'before' ? beforeLines : afterLines;
       const lines: string[] = [];
 
       for (let i = selectedLineRange.start; i <= selectedLineRange.end; i++) {
-        const lineEl = lineAt(pane, i);
-        if (lineEl) {
-          const contentEl = lineEl.querySelector('.line-content');
-          if (contentEl) {
-            lines.push(contentEl.textContent || '');
-          }
+        if (i >= 0 && i < sourceLines.length) {
+          lines.push(sourceLines[i]);
         }
       }
 
@@ -2928,10 +2949,6 @@
   }
 
   /* Top spacer reserving the height of unrendered rows above the window. */
-  .line-spacer {
-    flex-shrink: 0;
-  }
-
   .line-content {
     flex: 1;
     padding: 0 12px;

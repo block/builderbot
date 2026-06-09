@@ -132,7 +132,7 @@
   --foreground: var(--text-primary);
   --card: var(--bg-elevated);
   --card-foreground: var(--text-primary);
-  --popover: var(--bg-elevated);
+  --popover: var(--bg-menu);
   --popover-foreground: var(--text-primary);
   --primary: var(--ui-accent);
   --primary-foreground: var(

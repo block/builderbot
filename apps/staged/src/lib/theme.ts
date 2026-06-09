@@ -22,7 +22,8 @@ export interface Theme {
     primary: string; // Main background (same as syntax theme) - used for editor islands
     chrome: string; // Unified chrome background (header, sidebar, spine)
     deepest: string; // Deepest level (tab bar) - pure black/white
-    elevated: string; // Floating elements (dropdowns, tooltips)
+    elevated: string; // Floating elements (cards, dialogs)
+    menu: string; // Menu/popover surfaces (context menu, dropdown, select, popover)
     hover: string; // Hover states
   };
 
@@ -390,6 +391,13 @@ export function createAdaptiveTheme(
       // without going gray, with the ring/shadow the shadcn primitives apply
       // carrying the rest of the lift.
       elevated: isDark ? elevate(0.08) : adjust(primaryBg, -0.04),
+      // Menu/popover surfaces (context menu, dropdown, select, popover) sit on
+      // top of content like other floating surfaces, but unlike cards/dialogs
+      // they read best as a crisp panel rather than a tinted one. Dark themes
+      // reuse the elevated lift; light themes paint pure white (the syntax
+      // background) and lean on the shadcn ring/shadow for the lift, restoring
+      // the white menus that predated the elevated-surface tinting.
+      menu: isDark ? elevate(0.08) : primaryBg,
       hover: elevate(0.06), // Hover state
     },
 
@@ -507,6 +515,7 @@ export function themeToVarMap(t: Theme): Record<string, string> {
     '--bg-chrome': t.bg.chrome,
     '--bg-deepest': t.bg.deepest,
     '--bg-elevated': t.bg.elevated,
+    '--bg-menu': t.bg.menu,
     '--bg-hover': t.bg.hover,
 
     '--border-subtle': t.border.subtle,

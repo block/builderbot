@@ -10,6 +10,7 @@
 
   let canvas: HTMLCanvasElement | null = $state(null);
   let animationId: number | null = null;
+  let resumeAnimation: (() => void) | null = null;
 
   const CONFIG = {
     commitInterval: 600,
@@ -526,12 +527,36 @@
       animationId = requestAnimationFrame(animate);
     }
 
+    // Resume from a paused state without re-seeding the tree; reset the frame
+    // timers so the gap while hidden doesn't produce a huge dt jump.
+    resumeAnimation = () => {
+      if (!canvas) return;
+      lastFrameTime = performance.now();
+      lastCommitTime = performance.now();
+      animationId = requestAnimationFrame(animate);
+    };
+
     animationId = requestAnimationFrame(animate);
+  }
+
+  // Pause the rAF loop while the document is hidden so it stops compositing
+  // canvas frames in the background, and resume when it becomes visible again.
+  function onVisibilityChange() {
+    if (document.visibilityState === 'hidden') {
+      if (animationId !== null) {
+        cancelAnimationFrame(animationId);
+        animationId = null;
+      }
+    } else if (animationId === null) {
+      resumeAnimation?.();
+    }
   }
 
   onMount(() => {
     updateColors();
     startAnimation();
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
 
     const observer = new MutationObserver(() => updateColors());
     observer.observe(document.documentElement, {
@@ -544,6 +569,7 @@
 
   onDestroy(() => {
     if (animationId !== null) cancelAnimationFrame(animationId);
+    document.removeEventListener('visibilitychange', onVisibilityChange);
   });
 </script>
 

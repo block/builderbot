@@ -40,11 +40,7 @@
 </script>
 
 {#if id === 'goose'}
-  <span
-    class="agent-icon goose {className}"
-    role="img"
-    aria-label="Goose"
-    style="--agent-icon-size: {size}px"
+  <span class="agent-icon goose {className}" aria-hidden="true" style="--agent-icon-size: {size}px"
   ></span>
 {:else if id === 'claude'}
   <svg
@@ -145,7 +141,7 @@
     />
   </svg>
 {:else}
-  <Bot {size} class={className} />
+  <Bot {size} class={className} aria-hidden="true" />
 {/if}
 
 <style>

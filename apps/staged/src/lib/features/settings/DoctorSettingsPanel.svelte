@@ -103,7 +103,11 @@
           <h3 class="section-label">Agents</h3>
           <div class="checks-list">
             {#each agentChecks as check (check.id)}
-              <DoctorCheckRow {check} onFixed={runChecksAndRefresh} />
+              <DoctorCheckRow
+                {check}
+                agentId={check.id.replace('ai-agent-', '')}
+                onFixed={runChecksAndRefresh}
+              />
             {/each}
           </div>
         </div>

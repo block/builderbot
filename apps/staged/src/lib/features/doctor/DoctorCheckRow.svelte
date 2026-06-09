@@ -15,12 +15,15 @@
   import type { DoctorCheck } from '../../api/commands';
   import { Button } from '$lib/components/ui/button';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
+  import AgentIcon from '../agents/AgentIcon.svelte';
 
   let {
     check,
+    agentId,
     onFixed,
   }: {
     check: DoctorCheck;
+    agentId?: string;
     onFixed?: () => void;
   } = $props();
 
@@ -73,7 +76,12 @@
   </div>
 
   <div class="check-info">
-    <span class="check-label">{check.label}</span>
+    <span class="check-label">
+      {#if agentId}
+        <AgentIcon id={agentId} size={16} />
+      {/if}
+      {check.label}
+    </span>
     <span class="check-message">{check.message}</span>
     {#if check.path}
       <span class="check-path">{check.path}</span>
@@ -162,6 +170,9 @@
   }
 
   .check-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
     font-size: var(--size-sm);
     font-weight: 500;
     color: var(--text-primary);

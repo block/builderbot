@@ -69,7 +69,11 @@ pub async fn run_doctor_update(
              that does not match the backend-derived update command."
         ));
     }
-    doctor::execute_fix_with_options(check_id, fix_type, Some(command), None).await
+    // Run the backend-derived `expected`, not the frontend-supplied `command`.
+    // They are equal past the guard above, but executing `expected` makes the
+    // command that runs provably the one the backend derived — no dependence on
+    // the equality check surviving future edits.
+    doctor::execute_fix_with_options(check_id, fix_type, Some(expected), None).await
 }
 
 /// Re-run freshness and return the authoritative update command for the given

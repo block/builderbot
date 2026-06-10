@@ -477,7 +477,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         .map_err(|e| e.to_string())?;
     let reviews: Vec<ReviewTimelineItem> = db_reviews
         .into_iter()
-        .filter(|r| review_is_visible_in_timeline(r, &visible_shas))
+        .filter(|r| review_is_visible_in_timeline(r, |sha| visible_shas.contains(sha)))
         .map(|r| {
             let resolved = store.resolve_session_status(r.session_id.as_deref());
             let comment_count = r.comments.len();
@@ -550,9 +550,19 @@ fn remote_git_state_cache_key(
     )
 }
 
-fn review_is_visible_in_timeline(review: &Review, visible_shas: &HashSet<&str>) -> bool {
+/// Whether a review should be shown in a branch's timeline.
+///
+/// A review is hidden once its originating commit is no longer on the branch
+/// (e.g. rebased or squashed away), unless the user has commented on it. This
+/// rule is shared between the branch card timeline and the session-context
+/// branch history (see `session_commands::review_timeline_entries`) so the two
+/// can't drift apart.
+pub(crate) fn review_is_visible_in_timeline(
+    review: &Review,
+    sha_is_visible: impl Fn(&str) -> bool,
+) -> bool {
     review.commit_sha.is_empty()
-        || visible_shas.contains(review.commit_sha.as_str())
+        || sha_is_visible(review.commit_sha.as_str())
         || review
             .comments
             .iter()

@@ -39,7 +39,6 @@
   import ImageViewerModal from '../timeline/ImageViewerModal.svelte';
   import { countUserComments, shouldWarnBeforeDeletingReview } from '../timeline/reviewState';
   import DiffModal from '../diff/DiffModal.svelte';
-  import { markDiffOpenClick } from '../diff/diffViewerState.svelte';
   import SessionModal from '../sessions/SessionModal.svelte';
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
@@ -846,7 +845,6 @@
   }
 
   function handleCommitClick(sha: string) {
-    markDiffOpenClick();
     commitDiffSha = sha;
   }
 
@@ -865,7 +863,6 @@
     const cached = timelineReviewDetailsById[reviewId];
     if (cached) {
       reviewDiffTarget = { commitSha: cached.commitSha, scope: cached.scope, reviewId };
-      markDiffOpenClick();
       showBranchDiff = true;
       return;
     }
@@ -878,7 +875,6 @@
         return;
       }
       reviewDiffTarget = { commitSha: review.commitSha, scope: review.scope, reviewId };
-      markDiffOpenClick();
       showBranchDiff = true;
     } catch (e) {
       console.error('Failed to open review:', e);
@@ -1462,12 +1458,7 @@
             : undefined}
           {forcePushingOrigin}
           rebaseBranchDisabledReason={branchCommandDisabledReason}
-          onViewWorktreeDiff={isLocal
-            ? () => {
-                markDiffOpenClick();
-                showWorktreeDiff = true;
-              }
-            : undefined}
+          onViewWorktreeDiff={isLocal ? () => (showWorktreeDiff = true) : undefined}
           onCommitWorktreeChanges={() =>
             sessionMgr.startOrQueueSession('commit', 'Commit uncommitted changes')}
           onDiscardWorktreeChanges={handleDiscardWorktreeChanges}
@@ -1499,7 +1490,6 @@
                     size="sm"
                     onclick={() => {
                       reviewDiffTarget = null;
-                      markDiffOpenClick();
                       showBranchDiff = true;
                     }}
                     class="text-xs"

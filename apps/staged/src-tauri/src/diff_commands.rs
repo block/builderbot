@@ -548,12 +548,6 @@ pub(crate) fn get_diff_files_impl(
                     &branch_id,
                     sha,
                 ) {
-                    log::info!(
-                        "get_diff_files: remote branch cache hit in {:?}: {} files (sha={})",
-                        start.elapsed(),
-                        cached.files.len(),
-                        &sha[..7.min(sha.len())]
-                    );
                     return Ok(DiffFilesResponse {
                         commit_sha: sha.clone(),
                         files: cached.files,
@@ -570,12 +564,6 @@ pub(crate) fn get_diff_files_impl(
                 &branch_id,
                 sha,
             ) {
-                log::info!(
-                    "get_diff_files: remote commit cache hit in {:?}: {} files (sha={})",
-                    start.elapsed(),
-                    cached.files.len(),
-                    &sha[..7.min(sha.len())]
-                );
                 return Ok(DiffFilesResponse {
                     commit_sha: sha.clone(),
                     files: cached.files,
@@ -584,17 +572,8 @@ pub(crate) fn get_diff_files_impl(
         }
     }
 
-    log::info!(
-        "get_diff_files: remote cache miss, populating cache (scope={scope}, branch_id={branch_id})"
-    );
-    let t_populate = std::time::Instant::now();
     let (index, _, commit_results) =
         ensure_cache_populated(&ctx, &store, &branch_id, &scope, commit_sha.as_deref())?;
-    log::info!(
-        "get_diff_files: ensure_cache_populated done in {:?} (total {:?})",
-        t_populate.elapsed(),
-        start.elapsed()
-    );
 
     if scope == "commit" {
         let sha = commit_sha.ok_or("commit_sha required for commit scope")?;
@@ -683,10 +662,6 @@ pub(crate) fn get_file_diff_impl(
             &commit_sha,
             &path,
         ) {
-            log::info!(
-                "get_file_diff: remote branch cache hit in {:?}: path={path}",
-                start.elapsed()
-            );
             return Ok(file_diff);
         }
     }
@@ -700,23 +675,12 @@ pub(crate) fn get_file_diff_impl(
             &commit_sha,
             &path,
         ) {
-            log::info!(
-                "get_file_diff: remote commit cache hit in {:?}: path={path}",
-                start.elapsed()
-            );
             return Ok(file_diff);
         }
     }
 
-    log::info!("get_file_diff: remote cache miss, populating cache (scope={scope}, path={path})");
-    let t_populate = std::time::Instant::now();
     let (_, branch_file_diffs, commit_results) =
         ensure_cache_populated(&ctx, &store, &branch_id, &scope, Some(&commit_sha))?;
-    log::info!(
-        "get_file_diff: ensure_cache_populated done in {:?} (total {:?})",
-        t_populate.elapsed(),
-        start.elapsed()
-    );
 
     if scope == "commit" {
         if let Some(diff) = commit_results

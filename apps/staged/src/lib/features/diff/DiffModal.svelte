@@ -645,28 +645,6 @@
   // ==========================================================================
 
   let currentDiff = $derived(diffViewer.getCurrentDiff());
-
-  // Render-tail timing: `computeLineDiff` is sub-millisecond, but the syntax
-  // highlighting, DOM construction, and layout/paint the DiffViewer performs
-  // afterwards are never measured. Once a file's diff is in the cache and
-  // selected, time how long it takes to actually hit the screen via a
-  // double-rAF (the second frame fires after the browser has painted). Guarded
-  // by path so unrelated reactive updates (comments, search) don't re-log.
-  let renderTimedPath: string | null = null;
-  $effect(() => {
-    const path = diffViewer.state.selectedFile;
-    const ready = currentDiff !== null && diffViewer.state.loadingFile === null;
-    if (!path || !ready || renderTimedPath === path) return;
-    renderTimedPath = path;
-    const t0 = performance.now();
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        console.info(
-          `[diff] render painted in ${Math.round(performance.now() - t0)}ms: path=${path}`
-        );
-      });
-    });
-  });
   let diffViewerEmptyMessage = $derived(
     diffViewer.state.loading || diffViewer.state.loadingFile !== null
       ? 'Loading changes...'

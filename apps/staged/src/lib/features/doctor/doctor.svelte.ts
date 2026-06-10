@@ -22,6 +22,8 @@ interface DoctorState {
   freshnessLoading: boolean;
   /** IDs of checks with an update currently in flight (blocks double-clicks). */
   updating: string[];
+  /** True while a panel-wide "Update all" run is in progress. */
+  updatingAll: boolean;
 }
 
 export const doctorState: DoctorState = $state({
@@ -29,6 +31,7 @@ export const doctorState: DoctorState = $state({
   loading: false,
   freshnessLoading: false,
   updating: [],
+  updatingAll: false,
 });
 
 /** Version fields the freshness pass fills in; merged onto the base report. */
@@ -196,16 +199,26 @@ export async function updateCheck(check: DoctorCheck): Promise<boolean> {
  * Update every check that has an actionable readout, one check at a time.
  *
  * Serialized across checks (and within each check) to avoid concurrent global
- * installs. The caller is responsible for the single full re-run afterwards
- * (a freshness-only pass would leave updated tools showing stale status/message).
+ * installs. Sets `doctorState.updatingAll` for the duration so the UI can
+ * disable every per-row Update/Fix button — otherwise a user could confirm an
+ * individual update for a check this batch hasn't reached yet, racing a second
+ * global install against the one in flight. The caller is responsible for the
+ * single full re-run afterwards (a freshness-only pass would leave updated
+ * tools showing stale status/message).
  */
 export async function updateAll(): Promise<void> {
-  const checks = doctorState.report?.checks.filter(hasActionableUpdate) ?? [];
-  for (const check of checks) {
-    try {
-      await updateCheck(check);
-    } catch (e) {
-      console.error(`[Doctor] Failed to update ${check.id}:`, e);
+  if (doctorState.updatingAll) return;
+  doctorState.updatingAll = true;
+  try {
+    const checks = doctorState.report?.checks.filter(hasActionableUpdate) ?? [];
+    for (const check of checks) {
+      try {
+        await updateCheck(check);
+      } catch (e) {
+        console.error(`[Doctor] Failed to update ${check.id}:`, e);
+      }
     }
+  } finally {
+    doctorState.updatingAll = false;
   }
 }

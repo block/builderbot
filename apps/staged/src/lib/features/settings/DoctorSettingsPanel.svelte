@@ -49,21 +49,15 @@
   /** True when any check has an actionable update across its readouts. */
   const anyUpdatable = $derived(doctorState.report?.checks.some(hasActionableUpdate) ?? false);
 
-  /** True while a panel-wide update run is in progress. */
-  let updatingAll = $state(false);
-
   async function runUpdateAll() {
-    if (updatingAll) return;
-    updatingAll = true;
-    try {
-      await updateAll();
-      // One full re-run after the batch: re-derives each check's status/message
-      // (so updated tools drop their stale warnings), chains a freshness pass to
-      // clear the badges, and re-discovers providers.
-      if (mounted) await runChecksAndRefresh();
-    } finally {
-      updatingAll = false;
-    }
+    if (doctorState.updatingAll) return;
+    // updateAll owns `doctorState.updatingAll` for its duration, which disables
+    // every per-row Update/Fix button so no individual update can race the batch.
+    await updateAll();
+    // One full re-run after the batch: re-derives each check's status/message
+    // (so updated tools drop their stale warnings), chains a freshness pass to
+    // clear the badges, and re-discovers providers.
+    if (mounted) await runChecksAndRefresh();
   }
 
   let copied = $state(false);
@@ -101,14 +95,24 @@
       {/if}
 
       {#if anyUpdatable && !doctorState.loading}
-        <Button variant="outline" size="sm" disabled={updatingAll} onclick={runUpdateAll}>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={doctorState.updatingAll}
+          onclick={runUpdateAll}
+        >
           <ArrowUpCircle size={14} />
-          {updatingAll ? 'Updating all' : 'Update all'}
+          {doctorState.updatingAll ? 'Updating all' : 'Update all'}
         </Button>
       {/if}
 
       {#if !doctorState.loading}
-        <Button variant="outline" size="sm" disabled={updatingAll} onclick={runChecksAndRefresh}>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={doctorState.updatingAll}
+          onclick={runChecksAndRefresh}
+        >
           <RefreshCw size={14} />
           Re-run
         </Button>

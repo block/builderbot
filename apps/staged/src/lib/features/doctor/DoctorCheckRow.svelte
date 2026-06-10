@@ -71,6 +71,11 @@
   const canUpdate = $derived(hasActionableUpdate(check));
   const updating = $derived(doctorState.updating.includes(check.id));
 
+  // A panel-wide "Update all" run serializes its installs; while it's in flight
+  // this row's actions must stay disabled, or a user could fire a second update
+  // for a check the batch hasn't reached yet and race two global installs.
+  const batchUpdating = $derived(doctorState.updatingAll);
+
   // Show a per-row spinner while the (global, batched) freshness pass runs.
   // Skip `fail` rows — the tool isn't installed, so "checking for an update"
   // is noise — and skip rows that already surface a result (Update button or
@@ -180,14 +185,14 @@
   {/if}
 
   {#if canUpdate}
-    <Button variant="outline" size="sm" disabled={updating} onclick={promptUpdate}>
+    <Button variant="outline" size="sm" disabled={updating || batchUpdating} onclick={promptUpdate}>
       <ArrowUpCircle size={14} />
       {updating ? 'Updating' : 'Update'}
     </Button>
   {/if}
 
   {#if canFix}
-    <Button variant="outline" size="sm" onclick={promptFix}>
+    <Button variant="outline" size="sm" disabled={batchUpdating} onclick={promptFix}>
       <Wrench size={14} />
       Fix
     </Button>

@@ -40,6 +40,7 @@
   } from '../branches/branchCardHelpers';
   import { createImage } from '../../commands';
   import { viewport } from '../../shared/viewport.svelte';
+  import { isMac } from '../keyboard/shortcuts';
 
   interface Props {
     open: boolean;
@@ -205,6 +206,9 @@
 
   let currentModeInfo = $derived(allModes.find((m) => m.value === currentMode)!);
 
+  // Platform-aware modifier label for the ⌘1/2/3 mode-switch hints.
+  let modKey = $derived(isMac() ? '⌘' : 'Ctrl ');
+
   function switchMode(newMode: BranchSessionType) {
     modeMenuOpen = false;
     if (newMode === currentMode) return;
@@ -331,6 +335,27 @@
     }
   }
 
+  // ⌘1 / ⌘2 / ⌘3 (Ctrl on non-Mac) switch the mode while the dialog is open,
+  // whether or not the dropdown is open. Registered as a capture-phase window
+  // listener so it fires before ProjectsList's bubble-phase ⌘1-9 handler
+  // (which would otherwise switch the project behind the dialog); we stop
+  // propagation for handled combos so that handler never sees them.
+  function handleModeShortcut(e: KeyboardEvent) {
+    if (!open) return;
+    const mod = isMac() ? e.metaKey : e.ctrlKey;
+    if (!mod || !/^[0-9]$/.test(e.key)) return;
+    const idx = Number(e.key) - 1;
+    if (idx < 0 || idx >= allModes.length) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    switchMode(allModes[idx].value);
+  }
+
+  $effect(() => {
+    window.addEventListener('keydown', handleModeShortcut, { capture: true });
+    return () => window.removeEventListener('keydown', handleModeShortcut, { capture: true });
+  });
+
   // =========================================================================
   // Drag-and-drop files (via Tauri native drag-drop events)
   // =========================================================================
@@ -396,19 +421,17 @@
     <header class="modal-header">
       <div class="mode-switcher" bind:this={modeMenuEl}>
         <button
-          class="mode-switcher-btn"
+          class={`mode-switcher-btn ${currentModeInfo.iconClass}`}
           onclick={() => (modeMenuOpen = !modeMenuOpen)}
           type="button"
         >
-          <span class="header-icon {currentModeInfo.iconClass}">
-            <currentModeInfo.icon size={14} />
-          </span>
+          <currentModeInfo.icon size={14} />
           <span>{currentModeInfo.label}</span>
           <ChevronDown size={14} />
         </button>
         {#if modeMenuOpen}
           <div class="mode-menu">
-            {#each allModes as m}
+            {#each allModes as m, i}
               <button
                 class="mode-menu-item"
                 class:active={m.value === currentMode}
@@ -419,6 +442,9 @@
                   <m.icon size={14} />
                 </span>
                 <span>{m.label}</span>
+                {#if viewport.showShortcutHints}
+                  <span class="mode-menu-hint">{modKey}{i + 1}</span>
+                {/if}
               </button>
             {/each}
           </div>
@@ -534,18 +560,43 @@
     background: none;
     border: 1px solid transparent;
     border-radius: 6px;
-    padding: 4px 8px;
+    padding: 4px 10px;
     cursor: pointer;
     transition: all 0.1s;
   }
 
-  .mode-switcher-btn:hover {
-    background: var(--bg-hover);
-    border-color: var(--border-subtle);
+  /* The whole trigger reads as a single coloured pill that tracks the mode. */
+  .mode-switcher-btn.note-icon {
+    background: var(--note-bg);
+    color: var(--note-color);
   }
 
+  .mode-switcher-btn.commit-icon {
+    background: var(--commit-bg);
+    color: var(--commit-color);
+  }
+
+  .mode-switcher-btn.review-icon {
+    background: var(--review-bg);
+    color: var(--review-color);
+  }
+
+  .mode-switcher-btn.note-icon:hover {
+    background: var(--note-bg-emphasis);
+  }
+
+  .mode-switcher-btn.commit-icon:hover {
+    background: var(--commit-bg-emphasis);
+  }
+
+  .mode-switcher-btn.review-icon:hover {
+    background: var(--review-bg-emphasis);
+  }
+
+  /* Both glyphs (mode icon + chevron) inherit the pill's tint. */
   .mode-switcher-btn > :global(svg:last-child) {
-    color: var(--text-muted);
+    color: inherit;
+    opacity: 0.7;
     margin-left: 2px;
   }
 
@@ -554,13 +605,13 @@
     top: 100%;
     left: 0;
     margin-top: 4px;
-    background: var(--bg-chrome);
+    background: var(--bg-menu);
     border: 1px solid var(--border-muted);
     border-radius: 8px;
     box-shadow: var(--shadow-elevated);
     padding: 4px;
     z-index: 10;
-    min-width: 180px;
+    min-width: 200px;
   }
 
   .mode-menu-item {
@@ -585,6 +636,15 @@
 
   .mode-menu-item.active {
     background: var(--bg-hover);
+  }
+
+  .mode-menu-hint {
+    margin-left: auto;
+    padding-left: 12px;
+    font-size: var(--size-xs);
+    font-weight: 500;
+    color: var(--text-faint);
+    letter-spacing: 0.04em;
   }
 
   .header-icon {

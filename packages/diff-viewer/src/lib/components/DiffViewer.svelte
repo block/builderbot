@@ -431,7 +431,7 @@
   $effect(() => {
     if (beforePane && beforeLines.length > 0) {
       const lineHeight = measureLineHeight(beforePane);
-      const contentWidth = measureContentWidth(beforePane);
+      const contentWidth = measureContentWidth(beforeLines, beforePane);
       beforeLineHeight = lineHeight || 20;
       beforeViewportHeight = beforePane.clientHeight;
       scrollController.setDimensions('before', {
@@ -447,7 +447,7 @@
   $effect(() => {
     if (afterPane && afterLines.length > 0) {
       const lineHeight = measureLineHeight(afterPane);
-      const contentWidth = measureContentWidth(afterPane);
+      const contentWidth = measureContentWidth(afterLines, afterPane);
       afterLineHeight = lineHeight || 20;
       afterViewportHeight = afterPane.clientHeight;
       scrollController.setDimensions('after', {
@@ -547,7 +547,7 @@
         beforeLineHeight = lh;
         beforeViewportHeight = beforePane.clientHeight;
         beforeContentHeight = beforeLines.length * lh;
-        beforeContentWidth = measureContentWidth(beforePane);
+        beforeContentWidth = measureContentWidth(beforeLines, beforePane);
         scrollController.setDimensions('before', {
           viewportHeight: beforePane.clientHeight,
           contentHeight: beforeContentHeight,
@@ -561,7 +561,7 @@
         afterLineHeight = lh;
         afterViewportHeight = afterPane.clientHeight;
         afterContentHeight = afterLines.length * lh;
-        afterContentWidth = measureContentWidth(afterPane);
+        afterContentWidth = measureContentWidth(afterLines, afterPane);
         scrollController.setDimensions('after', {
           viewportHeight: afterPane.clientHeight,
           contentHeight: afterContentHeight,

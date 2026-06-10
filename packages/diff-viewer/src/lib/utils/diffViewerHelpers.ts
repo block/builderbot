@@ -205,10 +205,68 @@ export function measureLineHeight(pane: HTMLElement | null): number {
   return firstLine ? firstLine.getBoundingClientRect().height : 20;
 }
 
-export function measureContentWidth(pane: HTMLElement | null): number {
+/** Horizontal padding on `.line-content` (`padding: 0 12px`), in pixels. */
+const LINE_CONTENT_PADDING_X = 24;
+
+/**
+ * Display-column count of a line, expanding tabs to the next 8-column tab stop
+ * (the CSS sets no `tab-size`, so the default 8 applies). Iterates by code
+ * point so astral characters count as one. Under a monospace font this is a
+ * faithful proxy for which line is widest in pixels.
+ */
+function displayColumns(line: string): number {
+  let columns = 0;
+  for (const ch of line) {
+    if (ch === '\t') columns += 8 - (columns % 8);
+    else columns += 1;
+  }
+  return columns;
+}
+
+/**
+ * Width of the widest line in pixels, measured from the source text rather than
+ * the rendered DOM.
+ *
+ * The diff body is virtualized — only a window of lines is mounted — so reading
+ * `.lines-wrapper`'s `scrollWidth` only sees the widest *rendered* line and
+ * under-clamps horizontal scrolling when the file's longest line is offscreen.
+ * Instead, pick the widest line by display-column count and measure just that
+ * one line in an offscreen probe span that inherits `.line-content`'s font and
+ * `white-space: pre`. One node, so virtualization is preserved, and the result
+ * reflects the whole file regardless of scroll position.
+ *
+ * Returns at least `pane.clientWidth` to keep the `.lines-wrapper`
+ * `min-width: 100%` floor.
+ */
+export function measureContentWidth(lines: string[], pane: HTMLElement | null): number {
   if (!pane) return 0;
-  const linesWrapper = pane.querySelector('.lines-wrapper') as HTMLElement | null;
-  return linesWrapper ? linesWrapper.scrollWidth : 0;
+  if (lines.length === 0) return 0;
+
+  let widest = '';
+  let maxColumns = -1;
+  for (const line of lines) {
+    const columns = displayColumns(line);
+    if (columns > maxColumns) {
+      maxColumns = columns;
+      widest = line;
+    }
+  }
+
+  // Probe inside the pane so it inherits the live computed font (font-family,
+  // size, and any --code-font-size override), matching the rendered lines.
+  const probe = document.createElement('span');
+  probe.textContent = widest;
+  probe.style.position = 'absolute';
+  probe.style.top = '0';
+  probe.style.left = '0';
+  probe.style.visibility = 'hidden';
+  probe.style.whiteSpace = 'pre';
+  probe.style.pointerEvents = 'none';
+  pane.appendChild(probe);
+  const textWidth = probe.getBoundingClientRect().width;
+  pane.removeChild(probe);
+
+  return Math.max(Math.ceil(textWidth) + LINE_CONTENT_PADDING_X, pane.clientWidth);
 }
 
 export function getTokensForLine(tokens: Token[][], index: number): Token[] {

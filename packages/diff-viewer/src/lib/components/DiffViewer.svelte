@@ -251,6 +251,7 @@
   let lastHandledJumpLineToken = $state<number | null>(null);
   let lastAutoScrolledFile: string | null = null;
   let lineCommentEditorRaf: number | null = null;
+  let lineSelectionToolbarRaf: number | null = null;
 
   // Markdown preview mode
   let markdownPreview = $state(false);
@@ -430,7 +431,9 @@
   $effect(() => {
     if (beforePane && beforeLines.length > 0) {
       const lineHeight = measureLineHeight(beforePane);
-      const contentWidth = measureContentWidth(beforePane);
+      const contentWidth = measureContentWidth(beforeLines, beforePane);
+      beforeLineHeight = lineHeight || 20;
+      beforeViewportHeight = beforePane.clientHeight;
       scrollController.setDimensions('before', {
         viewportHeight: beforePane.clientHeight,
         contentHeight: beforeLines.length * lineHeight,
@@ -444,7 +447,9 @@
   $effect(() => {
     if (afterPane && afterLines.length > 0) {
       const lineHeight = measureLineHeight(afterPane);
-      const contentWidth = measureContentWidth(afterPane);
+      const contentWidth = measureContentWidth(afterLines, afterPane);
+      afterLineHeight = lineHeight || 20;
+      afterViewportHeight = afterPane.clientHeight;
       scrollController.setDimensions('after', {
         viewportHeight: afterPane.clientHeight,
         contentHeight: afterLines.length * lineHeight,
@@ -473,16 +478,76 @@
   let beforeContentHeight = $state(0);
   let afterContentHeight = $state(0);
 
+  // Reactive line/viewport metrics that drive the rendered window (Phase 2
+  // virtualization). Kept in sync wherever dimensions are measured below so the
+  // window deriveds recompute on resize and font changes, not just on scroll.
+  let beforeLineHeight = $state(20);
+  let afterLineHeight = $state(20);
+  let beforeViewportHeight = $state(0);
+  let afterViewportHeight = $state(0);
+
   // Content width needs to be measured after DOM renders, using state + effect
   let beforeContentWidth = $state(0);
   let afterContentWidth = $state(0);
+
+  // ==========================================================================
+  // Rendered window (Phase 2 virtualization)
+  // ==========================================================================
+
+  /**
+   * Rows rendered above/below the viewport. Generous enough to cover the
+   * comment editor's vertical extent (it can render above a multi-line range),
+   * so anchor lookups near a viewport edge still resolve to a mounted row.
+   */
+  const OVERSCAN = 40;
+
+  /**
+   * Compute the absolute index range [start, end) to render for a pane given
+   * its scroll offset and metrics. Returns absolute indices so every existing
+   * `i`-consumer (highlighting, boundaries, class lookups) stays unchanged.
+   */
+  function computeWindow(
+    total: number,
+    lineHeight: number,
+    scrollY: number,
+    viewportHeight: number
+  ): { start: number; indices: number[] } {
+    const lh = lineHeight || 20;
+    const firstVisible = Math.max(0, Math.floor(scrollY / lh));
+    const visibleCount = Math.ceil((viewportHeight || 0) / lh);
+    const start = Math.max(0, firstVisible - OVERSCAN);
+    const end = Math.min(total, firstVisible + visibleCount + OVERSCAN);
+    const indices: number[] = [];
+    for (let i = start; i < end; i++) indices.push(i);
+    return { start, indices };
+  }
+
+  let beforeWindow = $derived(
+    computeWindow(
+      beforeLines.length,
+      beforeLineHeight,
+      scrollController.beforeScrollY,
+      beforeViewportHeight
+    )
+  );
+
+  let afterWindow = $derived(
+    computeWindow(
+      afterLines.length,
+      afterLineHeight,
+      scrollController.afterScrollY,
+      afterViewportHeight
+    )
+  );
 
   function updateContentWidths() {
     requestAnimationFrame(() => {
       if (beforePane) {
         const lh = measureLineHeight(beforePane) || 20;
+        beforeLineHeight = lh;
+        beforeViewportHeight = beforePane.clientHeight;
         beforeContentHeight = beforeLines.length * lh;
-        beforeContentWidth = measureContentWidth(beforePane);
+        beforeContentWidth = measureContentWidth(beforeLines, beforePane);
         scrollController.setDimensions('before', {
           viewportHeight: beforePane.clientHeight,
           contentHeight: beforeContentHeight,
@@ -493,8 +558,10 @@
       }
       if (afterPane) {
         const lh = measureLineHeight(afterPane) || 20;
+        afterLineHeight = lh;
+        afterViewportHeight = afterPane.clientHeight;
         afterContentHeight = afterLines.length * lh;
-        afterContentWidth = measureContentWidth(afterPane);
+        afterContentWidth = measureContentWidth(afterLines, afterPane);
         scrollController.setDimensions('after', {
           viewportHeight: afterPane.clientHeight,
           contentHeight: afterContentHeight,
@@ -1185,6 +1252,41 @@
   // Range hover handling
   // ==========================================================================
 
+  // Resolve a line element by its absolute index rather than by NodeList
+  // position. Positional lookups (`querySelectorAll('.line')[n]`) only equal the
+  // absolute index while every line is in the DOM; identity lookups stay correct
+  // once the body is windowed and only a slice of lines is rendered.
+  function lineAt(pane: HTMLElement, index: number): HTMLElement | null {
+    return pane.querySelector(`.line[data-line-index="${index}"]`);
+  }
+
+  // Cap on the number of frames a deferred measure waits for the windowed body
+  // to render the rows it needs. A scroll typically renders within one frame;
+  // the budget absorbs a slow render pass without spinning indefinitely.
+  const WINDOW_RENDER_MAX_FRAMES = 5;
+
+  // Phase 3: scroll → window-render → measure sequencing. Setting a pane's scroll
+  // offset recomputes its window and Svelte renders the new rows, but only on a
+  // later frame — so an imperative measure on the *next* frame can still find the
+  // anchor row unmounted, leaving the editor/toolbar silently unpositioned. Retry
+  // `measure` across a bounded number of frames until it reports success: it
+  // returns true to stop (positioned, or nothing to do) and false to retry.
+  // `trackRaf` lets the caller hold the pending frame id so a newer request can
+  // cancel an in-flight wait.
+  function measureAfterWindowRender(
+    measure: () => boolean,
+    trackRaf: (raf: number | null) => void
+  ) {
+    let frames = 0;
+    const tick = () => {
+      trackRaf(null);
+      if (measure() || frames >= WINDOW_RENDER_MAX_FRAMES) return;
+      frames++;
+      trackRaf(requestAnimationFrame(tick));
+    };
+    trackRaf(requestAnimationFrame(tick));
+  }
+
   function updateToolbarPosition() {
     if (hoveredRangeIndex === null || !afterPane || !diffViewerEl) {
       rangeToolbarStyle = null;
@@ -1198,7 +1300,7 @@
     }
 
     const lineIndex = alignmentData.alignment.after.start;
-    const lineEl = afterPane.querySelectorAll('.line')[lineIndex] as HTMLElement | null;
+    const lineEl = lineAt(afterPane, lineIndex);
 
     if (!lineEl) {
       rangeToolbarStyle = null;
@@ -1258,18 +1360,63 @@
 
     lineSelection = { pane: 'after', anchorLine: start, focusLine: end };
     commentingOnLines = { pane: 'after', start, end };
-    lineCommentPositionPreference = decideLineCommentPosition();
     editingCommentId = comment.id;
     activeLineComment = comment;
     lineCommentReadOnly = comment.author === 'agent';
 
-    // scrollToRow updates pane transforms; defer editor positioning until next frame
+    // scrollToRow updates pane transforms, but the windowed body only renders the
+    // target rows on a later frame — wait for the anchor to mount before deciding
+    // the editor's side and positioning it.
+    scheduleLineCommentEditorPositioning();
+  }
+
+  // Resolve the comment editor's side and screen position once the anchor rows are
+  // mounted. Returns true to stop the mount-then-measure retry (positioned, or
+  // nothing to position), false to retry on a later frame.
+  function positionLineCommentEditor(): boolean {
+    if (!commentingOnLines) return true;
+
+    const pane = commentingOnLines.pane === 'before' ? beforePane : afterPane;
+    if (!pane) return true;
+
+    const firstEl = lineAt(pane, commentingOnLines.start);
+    const lastEl = lineAt(pane, commentingOnLines.end);
+
+    // Both ends mounted: full space-based decision (short ranges).
+    if (firstEl && lastEl) {
+      lineCommentPositionPreference = decideLineCommentPosition();
+      updateLineCommentEditorPosition();
+      return true;
+    }
+
+    // Range taller than the window — both ends can't co-mount in one frame, so
+    // decideLineCommentPosition (which measures both) can never run. Anchor to
+    // whichever end is rendered. Callers scroll to `start` first, so it lands in
+    // the window; position the editor below it (there's space below after the
+    // scroll). Pass the resolved row explicitly so the anchor doesn't have to be
+    // re-derived from the preference against an unmounted row.
+    if (firstEl) {
+      lineCommentPositionPreference = 'below';
+      updateLineCommentEditorPosition(firstEl);
+      return true;
+    }
+    if (lastEl) {
+      lineCommentPositionPreference = 'above';
+      updateLineCommentEditorPosition(lastEl);
+      return true;
+    }
+
+    // Neither end mounted yet: keep retrying for the window render.
+    return false;
+  }
+
+  function scheduleLineCommentEditorPositioning() {
     if (lineCommentEditorRaf !== null) {
       cancelAnimationFrame(lineCommentEditorRaf);
-    }
-    lineCommentEditorRaf = requestAnimationFrame(() => {
       lineCommentEditorRaf = null;
-      updateLineCommentEditorPosition();
+    }
+    measureAfterWindowRender(positionLineCommentEditor, (raf) => {
+      lineCommentEditorRaf = raf;
     });
   }
 
@@ -1298,11 +1445,10 @@
 
     lineSelection = { pane: 'after', anchorLine: start, focusLine: end };
     commentingOnLines = { pane: 'after', start, end };
-    lineCommentPositionPreference = decideLineCommentPosition();
     editingCommentId = commentId;
     activeLineComment = comment;
     lineCommentReadOnly = false;
-    updateLineCommentEditorPosition();
+    scheduleLineCommentEditorPositioning();
   }
 
   // Jump to a comment requested by the sidebar comments list.
@@ -1347,15 +1493,13 @@
     const editorHeight = 120;
 
     const lastLineIndex = Math.max(alignment.after.start, alignment.after.end - 1);
-    const lastLineEl = afterPane.querySelectorAll('.line')[lastLineIndex] as HTMLElement | null;
+    const lastLineEl = lineAt(afterPane, lastLineIndex);
     if (!lastLineEl) return 'below';
 
     const lastLineRect = lastLineEl.getBoundingClientRect();
     const spaceBelow = paneRect.bottom - lastLineRect.bottom;
 
-    const firstLineEl = afterPane.querySelectorAll('.line')[
-      alignment.after.start
-    ] as HTMLElement | null;
+    const firstLineEl = lineAt(afterPane, alignment.after.start);
     if (!firstLineEl) return 'below';
 
     const firstLineRect = firstLineEl.getBoundingClientRect();
@@ -1384,15 +1528,13 @@
 
     if (commentPositionPreference === 'below') {
       const lastLineIndex = Math.max(alignment.after.start, alignment.after.end - 1);
-      anchorLineEl = afterPane.querySelectorAll('.line')[lastLineIndex] as HTMLElement | null;
+      anchorLineEl = lineAt(afterPane, lastLineIndex);
       if (!anchorLineEl) {
         commentEditorStyle = null;
         return;
       }
     } else {
-      anchorLineEl = afterPane.querySelectorAll('.line')[
-        alignment.after.start
-      ] as HTMLElement | null;
+      anchorLineEl = lineAt(afterPane, alignment.after.start);
       if (!anchorLineEl) {
         commentEditorStyle = null;
         return;
@@ -1458,18 +1600,27 @@
   function handleSelectionDragMove(event: MouseEvent) {
     if (!isSelecting || !lineSelection) return;
 
-    const pane = lineSelection.pane === 'before' ? beforePane : afterPane;
+    const side = lineSelection.pane;
+    const pane = side === 'before' ? beforePane : afterPane;
     if (!pane) return;
 
-    const lineElements = pane.querySelectorAll('.line');
-    for (let i = 0; i < lineElements.length; i++) {
-      const rect = lineElements[i].getBoundingClientRect();
-      if (event.clientY >= rect.top && event.clientY < rect.bottom) {
-        if (lineSelection.focusLine !== i) {
-          lineSelection = { ...lineSelection, focusLine: i };
-        }
-        break;
-      }
+    // Map the cursor to an absolute line index arithmetically rather than
+    // hit-testing rendered `.line` rects: the wrapper is transform-translated by
+    // -scrollY over a uniform lineHeight, and once the body is windowed the rows
+    // under the cursor may not be mounted.
+    const lineHeight = scrollController.getDimensions(side).lineHeight || 20;
+    const scrollY =
+      side === 'before' ? scrollController.beforeScrollY : scrollController.afterScrollY;
+    const total = (side === 'before' ? beforeLines.length : afterLines.length) - 1;
+    if (total < 0) return;
+
+    const paneTop = pane.getBoundingClientRect().top;
+    const focusLine = Math.min(
+      Math.max(Math.floor((event.clientY - paneTop + scrollY) / lineHeight), 0),
+      total
+    );
+    if (lineSelection.focusLine !== focusLine) {
+      lineSelection = { ...lineSelection, focusLine };
     }
   }
 
@@ -1481,10 +1632,26 @@
     document.removeEventListener('mousemove', handleSelectionDragMove);
 
     if (lineSelection) {
-      requestAnimationFrame(() => {
-        updateLineSelectionToolbar(true);
-      });
+      scheduleLineSelectionToolbar(true);
     }
+  }
+
+  // Position the line-selection toolbar once the selection's anchor row is
+  // mounted. A drag that ends after auto-scrolling can leave the anchor outside
+  // the freshly rendered window for a frame, so wait for it like the editor.
+  function scheduleLineSelectionToolbar(recalculateLeft = false) {
+    measureAfterWindowRender(
+      () => {
+        if (!selectedLineRange) return true;
+        const pane = selectedLineRange.pane === 'before' ? beforePane : afterPane;
+        if (pane && !lineAt(pane, selectedLineRange.start)) return false;
+        updateLineSelectionToolbar(recalculateLeft);
+        return true;
+      },
+      (raf) => {
+        lineSelectionToolbarRaf = raf;
+      }
+    );
   }
 
   function clearLineSelection() {
@@ -1521,8 +1688,7 @@
       return;
     }
 
-    const lines = pane.querySelectorAll('.line');
-    const lineEl = lines[selectedLineRange.start] as HTMLElement | null;
+    const lineEl = lineAt(pane, selectedLineRange.start);
     if (!lineEl) {
       lineSelectionToolbarStyle = null;
       lineSelectionToolbarLeft = null;
@@ -1565,9 +1731,8 @@
     const pane = commentingOnLines.pane === 'before' ? beforePane : afterPane;
     if (!pane) return 'below';
 
-    const lines = pane.querySelectorAll('.line');
-    const firstLineEl = lines[commentingOnLines.start] as HTMLElement | null;
-    const lastLineEl = lines[commentingOnLines.end] as HTMLElement | null;
+    const firstLineEl = lineAt(pane, commentingOnLines.start);
+    const lastLineEl = lineAt(pane, commentingOnLines.end);
     if (!firstLineEl || !lastLineEl) return 'below';
 
     const paneRect = pane.getBoundingClientRect();
@@ -1581,7 +1746,7 @@
     return decideCommentPositionBySpace(spaceBelow, spaceAbove, editorHeight);
   }
 
-  function updateLineCommentEditorPosition() {
+  function updateLineCommentEditorPosition(anchorOverride?: HTMLElement) {
     if (!commentingOnLines || !diffViewerEl) {
       lineCommentEditorStyle = null;
       return;
@@ -1598,14 +1763,18 @@
     const editorHeight = 120;
     let anchorLineEl: HTMLElement | null;
 
-    if (lineCommentPositionPreference === 'below') {
-      anchorLineEl = pane.querySelectorAll('.line')[commentingOnLines.end] as HTMLElement | null;
+    if (anchorOverride) {
+      // Tall-range path: the caller resolved the only mounted end; use it directly
+      // rather than re-deriving from the preference against an unmounted row.
+      anchorLineEl = anchorOverride;
+    } else if (lineCommentPositionPreference === 'below') {
+      anchorLineEl = lineAt(pane, commentingOnLines.end);
       if (!anchorLineEl) {
         lineCommentEditorStyle = null;
         return;
       }
     } else {
-      anchorLineEl = pane.querySelectorAll('.line')[commentingOnLines.start] as HTMLElement | null;
+      anchorLineEl = lineAt(pane, commentingOnLines.start);
       if (!anchorLineEl) {
         lineCommentEditorStyle = null;
         return;
@@ -1733,19 +1902,15 @@
 
     if (selectedLineRange) {
       event.preventDefault();
-      const pane = selectedLineRange.pane === 'before' ? beforePane : afterPane;
-      if (!pane) return;
-
+      // Reconstruct from the source-line array by index rather than the DOM:
+      // with the body windowed, rows outside the rendered slice aren't mounted,
+      // so a DOM-based read would silently drop lines from a tall selection.
+      const sourceLines = selectedLineRange.pane === 'before' ? beforeLines : afterLines;
       const lines: string[] = [];
-      const lineElements = pane.querySelectorAll('.line');
 
       for (let i = selectedLineRange.start; i <= selectedLineRange.end; i++) {
-        const lineEl = lineElements[i];
-        if (lineEl) {
-          const contentEl = lineEl.querySelector('.line-content');
-          if (contentEl) {
-            lines.push(contentEl.textContent || '');
-          }
+        if (i >= 0 && i < sourceLines.length) {
+          lines.push(sourceLines[i]);
         }
       }
 
@@ -1828,6 +1993,10 @@
       if (lineCommentEditorRaf !== null) {
         cancelAnimationFrame(lineCommentEditorRaf);
         lineCommentEditorRaf = null;
+      }
+      if (lineSelectionToolbarRaf !== null) {
+        cancelAnimationFrame(lineSelectionToolbarRaf);
+        lineSelectionToolbarRaf = null;
       }
       if (connectorRenderer) {
         connectorRenderer.destroy();
@@ -1946,7 +2115,11 @@
                   class="lines-wrapper"
                   style="transform: translate(-{scrollController.beforeScrollX}px, -{scrollController.beforeScrollY}px)"
                 >
-                  {#each beforeLines as line, i}
+                  <div
+                    class="line-spacer"
+                    style="height: {beforeWindow.start * beforeLineHeight}px"
+                  ></div>
+                  {#each beforeWindow.indices as i (i)}
                     {@const boundary = showRangeMarkers
                       ? getLineBoundary(activeAlignments, 'before', i)
                       : { isStart: false, isEnd: false }}
@@ -1957,6 +2130,7 @@
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
                     <div
                       class="line"
+                      data-line-index={i}
                       class:range-start={boundary.isStart}
                       class:range-end={boundary.isEnd}
                       class:range-hovered={isInHoveredRange}
@@ -2038,8 +2212,12 @@
                 class="lines-wrapper"
                 style="transform: translate(-{scrollController.beforeScrollX}px, -{scrollController.beforeScrollY}px)"
               >
-                {#each beforeLines as line, i}
-                  <div class="line">
+                <div
+                  class="line-spacer"
+                  style="height: {beforeWindow.start * beforeLineHeight}px"
+                ></div>
+                {#each beforeWindow.indices as i (i)}
+                  <div class="line" data-line-index={i}>
                     <span class="line-content">
                       {#each getHighlightedTokens(i, 'before') as segment}
                         <span
@@ -2121,7 +2299,11 @@
                   class="lines-wrapper"
                   style="transform: translate(-{scrollController.afterScrollX}px, -{scrollController.afterScrollY}px)"
                 >
-                  {#each afterLines as line, i}
+                  <div
+                    class="line-spacer"
+                    style="height: {afterWindow.start * afterLineHeight}px"
+                  ></div>
+                  {#each afterWindow.indices as i (i)}
                     {@const boundary = showRangeMarkers
                       ? getLineBoundary(activeAlignments, 'after', i)
                       : { isStart: false, isEnd: false }}
@@ -2133,6 +2315,7 @@
                     <!-- svelte-ignore a11y_no_static_element_interactions -->
                     <div
                       class="line"
+                      data-line-index={i}
                       class:range-start={boundary.isStart}
                       class:range-end={boundary.isEnd}
                       class:range-hovered={isInHoveredRange}
@@ -2219,11 +2402,16 @@
                 class="lines-wrapper"
                 style="transform: translate(-{scrollController.afterScrollX}px, -{scrollController.afterScrollY}px)"
               >
-                {#each afterLines as line, i}
+                <div
+                  class="line-spacer"
+                  style="height: {afterWindow.start * afterLineHeight}px"
+                ></div>
+                {#each afterWindow.indices as i (i)}
                   {@const isSelected = isLineSelected('after', i)}
                   <!-- svelte-ignore a11y_no_static_element_interactions -->
                   <div
                     class="line"
+                    data-line-index={i}
                     class:line-selected={isSelected}
                     onmousedown={(e) => handleLineMouseDown('after', i, e)}
                   >
@@ -2760,6 +2948,7 @@
     position: relative;
   }
 
+  /* Top spacer reserving the height of unrendered rows above the window. */
   .line-content {
     flex: 1;
     padding: 0 12px;

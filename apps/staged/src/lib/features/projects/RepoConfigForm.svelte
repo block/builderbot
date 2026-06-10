@@ -60,6 +60,7 @@
     api?: {
       waitForSubpathValidation: () => Promise<boolean>;
       selectRepo: (selection: RepoSelection) => void;
+      reset: () => void;
     };
   }
 
@@ -80,6 +81,7 @@
       | {
           waitForSubpathValidation: () => Promise<boolean>;
           selectRepo: (selection: RepoSelection) => void;
+          reset: () => void;
         }
       | undefined
     >(undefined),
@@ -170,6 +172,26 @@
     }
   }
 
+  /** Clear all form state, including internal-only fields the parent can't bind.
+   *  Mirrors the Clear button's reset plus the deferred-picker/PR-resolution state. */
+  function reset() {
+    if (branchPickerTimer) clearTimeout(branchPickerTimer);
+    selectedRepo = null;
+    headRepo = null;
+    subpath = '';
+    branchName = '';
+    isNewBranch = false;
+    matchedPr = null;
+    defaultBranch = null;
+    displayRepo = null;
+    isMonorepo = false;
+    checkingMonorepo = false;
+    showBranchPicker = false;
+    resolvingPr = false;
+    pendingPrNumber = null;
+    pendingBranchName = null;
+  }
+
   // Expose validation API to parent
   $effect(() => {
     api = {
@@ -177,6 +199,7 @@
         ? () => subpathApi!.waitForValidation()
         : () => Promise.resolve(true),
       selectRepo: handleRepoSelected,
+      reset,
     };
   });
 

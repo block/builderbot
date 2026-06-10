@@ -36,7 +36,7 @@
   {#if agents.length > 1}
     <DropdownMenu.Root>
       <DropdownMenu.Trigger
-        class="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-[var(--text-faint)] transition-colors hover:bg-[var(--bg-hover)] hover:text-muted-foreground focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40"
+        class="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-[var(--bg-hover)] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40"
         {disabled}
         title="Select AI agent"
       >
@@ -68,7 +68,7 @@
   {:else}
     <button
       type="button"
-      class="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-[var(--text-faint)] disabled:cursor-not-allowed disabled:opacity-40"
+      class="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground disabled:cursor-not-allowed disabled:opacity-40"
       {disabled}
       title={currentLabel}
     >

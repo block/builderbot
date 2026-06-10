@@ -45,7 +45,6 @@
   import { listenForSessionStatus } from './lib/listeners/sessionStatusListener';
   import { darkMode } from './lib/stores/isDark.svelte';
   import * as prPollingService from './lib/services/prPollingService';
-  import { projectsList } from './lib/features/projects/projectsSidebarState.svelte';
   import { reposUiEnabled } from './lib/featureFlags';
   import type { StoreIncompatibility } from './lib/types';
 
@@ -68,12 +67,11 @@
   let storeError = $state<string | null>(null);
 
   // =========================================================================
-  // App-wide PR polling — sync project list and selected project reactively
+  // App-wide PR polling — the backend scheduler owns cadence/concurrency and
+  // derives the project list from the DB. The frontend only forwards the
+  // selected project as an interest hint (focus + lifecycle wiring is in
+  // prPollingService.init(), called from onMount).
   // =========================================================================
-  $effect(() => {
-    prPollingService.setProjects(projectsList.current.map((p) => p.id));
-  });
-
   $effect(() => {
     prPollingService.setSelectedProject(navigation.selectedProjectId);
   });
@@ -226,6 +224,8 @@
 
   onMount(async () => {
     darkMode.init();
+    // Wire up PR-polling interest hints (window focus + backend lifecycle events).
+    prPollingService.init();
     document.addEventListener('keydown', handleKonamiKey);
 
     // Listen for the app menu Preferences item.
@@ -412,6 +412,7 @@
   });
 
   onDestroy(() => {
+    prPollingService.dispose();
     document.removeEventListener('keydown', handleKonamiKey);
     unregisterShortcuts?.();
     unlistenSettings?.();

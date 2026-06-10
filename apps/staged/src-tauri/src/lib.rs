@@ -17,6 +17,7 @@ pub mod image_commands;
 pub mod migrations;
 pub mod note_commands;
 pub mod paths;
+pub mod pr_poll_scheduler;
 pub mod project_commands;
 pub mod project_mcp;
 pub mod prs;
@@ -2002,6 +2003,11 @@ pub fn run() {
             let compat = store::check_db_compatibility(&db_path)
                 .map_err(|e| format!("Cannot check database: {e}"))?;
             let session_registry = Arc::new(session_runner::SessionRegistry::new());
+            // Backend-owned PR-poll scheduler. Managed unconditionally so the
+            // interest/hint commands resolve even before the store exists (e.g.
+            // during the needs-reset prompt); the tick loop is only spawned once
+            // the store is ready (the `Ok` branch below).
+            let pr_scheduler = Arc::new(pr_poll_scheduler::PrPollScheduler::new());
 
             let (store_slot, reset_info) = match compat {
                 store::DbCompatibility::Ok => {
@@ -2024,6 +2030,13 @@ pub fn run() {
                     }
                     // Start the tiered background sync service for all cloned repos.
                     background_sync::spawn(Arc::clone(&store_arc), app.handle().clone());
+                    // Start the backend PR-poll scheduler — it owns polling
+                    // cadence/concurrency; the frontend only sends interest hints.
+                    pr_poll_scheduler::spawn(
+                        Arc::clone(&pr_scheduler),
+                        Arc::clone(&store_arc),
+                        app.handle().clone(),
+                    );
                     // `fsmonitor-v1` only flips `.git/config` flags on stale
                     // clones the user may not visit this session — per-project
                     // `ensure_local_clone` already re-applies the same config
@@ -2069,6 +2082,7 @@ pub fn run() {
 
             app.manage(store_slot);
             app.manage(session_registry);
+            app.manage(pr_scheduler);
             app.manage(Arc::new(actions::ActionExecutor::new()));
             app.manage(Arc::new(actions::ActionRegistry::new()));
             app.manage(ShutdownState::default());
@@ -2238,6 +2252,11 @@ pub fn run() {
             prs::squash_commits,
             prs::clear_branch_pr_status,
             prs::recover_branch_pr,
+            // PR poll scheduler (frontend interest/hint layer)
+            pr_poll_scheduler::set_foreground_project,
+            pr_poll_scheduler::set_focus,
+            pr_poll_scheduler::set_branch_pending,
+            pr_poll_scheduler::refresh_now,
             // Utilities
             util_commands::open_url,
             util_commands::is_sq_available,

@@ -824,13 +824,20 @@ pub async fn refresh_pr_status(
     Ok(())
 }
 
-/// Max concurrent PR-status fetches inside a single `refresh_all_pr_statuses`
-/// call. Each fetch spawns a `gh` subprocess + GitHub round-trip, so we cap the
-/// fan-out to avoid a subprocess thundering herd while still resolving a
-/// project's PRs in ~1 round-trip's wall-clock instead of N (fully serial).
-const PR_REFRESH_CONCURRENCY: usize = 6;
+/// Max concurrent PR-status fetches inside a single project refresh. Each fetch
+/// spawns a `gh` subprocess + GitHub round-trip, so we cap the fan-out to avoid
+/// a subprocess thundering herd while still resolving a project's PRs in ~1
+/// round-trip's wall-clock instead of N (fully serial). The backend PR-poll
+/// scheduler reuses this cap for a single pool shared across all the projects
+/// it refreshes (see `pr_poll_scheduler`).
+pub(crate) const PR_REFRESH_CONCURRENCY: usize = 6;
 
 /// Refresh PR status for all branches in a project.
+///
+/// Thin command wrapper around [`refresh_project_pr_statuses`]; the same core is
+/// also driven on a cadence by the backend PR-poll scheduler. Each command call
+/// gets its own bounded pool (the scheduler instead shares one pool across
+/// projects).
 #[tauri::command(rename_all = "camelCase")]
 pub async fn refresh_all_pr_statuses(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -838,30 +845,46 @@ pub async fn refresh_all_pr_statuses(
     project_id: String,
 ) -> Result<u32, String> {
     let store = get_store(&store)?;
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(PR_REFRESH_CONCURRENCY));
+    refresh_project_pr_statuses(&store, &app_handle, &project_id, semaphore).await
+}
+
+/// Core implementation shared by the `refresh_all_pr_statuses` command and the
+/// backend PR-poll scheduler.
+///
+/// Fans the per-branch fetches out across the bounded `semaphore` pool instead
+/// of awaiting them one at a time. Repo resolution is a cheap local DB read so
+/// it stays on this task; only the network fetch + DB write + per-branch
+/// `pr-status-changed` emit move into the spawned tasks, gated by the semaphore.
+/// A final `pr-statuses-refreshed` event is emitted and the number of branches
+/// refreshed is returned.
+///
+/// The semaphore is passed in (rather than created per call) so the scheduler
+/// can share a single pool across every project it refreshes — a tick that
+/// finds many projects due still caps total concurrent `gh` subprocesses.
+pub(crate) async fn refresh_project_pr_statuses(
+    store: &Arc<Store>,
+    app_handle: &tauri::AppHandle,
+    project_id: &str,
+    semaphore: Arc<tokio::sync::Semaphore>,
+) -> Result<u32, String> {
     let project = store
-        .get_project(&project_id)
+        .get_project(project_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Project not found: {project_id}"))?;
     let branches = store
-        .list_branches_for_project(&project_id)
+        .list_branches_for_project(project_id)
         .map_err(|e| e.to_string())?;
     let branches_with_prs: Vec<_> = branches
         .into_iter()
         .filter(|b| b.pr_number.is_some())
         .collect();
 
-    // Fan the per-branch fetches out across a bounded pool instead of awaiting
-    // them one at a time. Repo resolution is a cheap local DB read so it stays
-    // on this task; only the network fetch + DB write + per-branch emit move
-    // into the spawned tasks, gated by the semaphore. The per-branch
-    // `pr-status-changed` emissions and final `pr-statuses-refreshed` event are
-    // unchanged — only the scheduling is now parallel rather than serial.
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(PR_REFRESH_CONCURRENCY));
     let mut tasks = Vec::new();
 
     for branch in branches_with_prs {
         let pr_number = branch.pr_number.unwrap();
-        let github_repo = match resolve_branch_repo_and_subpath(&store, &project, &branch) {
+        let github_repo = match resolve_branch_repo_and_subpath(store, &project, &branch) {
             Ok((repo, _)) => repo,
             Err(e) => {
                 log::warn!(
@@ -874,7 +897,7 @@ pub async fn refresh_all_pr_statuses(
             }
         };
 
-        let store = Arc::clone(&store);
+        let store = Arc::clone(store);
         let app_handle = app_handle.clone();
         let semaphore = Arc::clone(&semaphore);
         let branch_id = branch.id.clone();
@@ -885,13 +908,13 @@ pub async fn refresh_all_pr_statuses(
             let _permit = semaphore
                 .acquire_owned()
                 .await
-                .map_err(|e| format!("refresh_all_pr_statuses semaphore closed: {e}"))?;
+                .map_err(|e| format!("refresh_project_pr_statuses semaphore closed: {e}"))?;
 
             let pr_result = tauri::async_runtime::spawn_blocking(move || {
                 git::fetch_pr_status_for_repo(&github_repo, pr_number)
             })
             .await
-            .map_err(|e| format!("refresh_all_pr_statuses task failed: {e}"))?;
+            .map_err(|e| format!("refresh_project_pr_statuses task failed: {e}"))?;
 
             match pr_result {
                 Ok(pr_status) => {
@@ -948,13 +971,13 @@ pub async fn refresh_all_pr_statuses(
     for task in tasks {
         let refreshed = task
             .await
-            .map_err(|e| format!("refresh_all_pr_statuses join failed: {e}"))??;
+            .map_err(|e| format!("refresh_project_pr_statuses join failed: {e}"))??;
         if refreshed {
             refreshed_count += 1;
         }
     }
 
-    crate::web_server::emit_to_all(&app_handle, "pr-statuses-refreshed", &project_id);
+    crate::web_server::emit_to_all(app_handle, "pr-statuses-refreshed", project_id);
 
     Ok(refreshed_count)
 }

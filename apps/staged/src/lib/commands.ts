@@ -1071,6 +1071,38 @@ export function refreshAllPrStatuses(projectId: string): Promise<void> {
   return invokeCommand('refresh_all_pr_statuses', { projectId });
 }
 
+// ---------------------------------------------------------------------------
+// PR poll scheduler — interest/hint commands
+//
+// The backend owns PR-polling cadence and concurrency. These commands feed it
+// interest hints; the cadence, dedup, and failure backoff all live in the
+// backend scheduler (see src-tauri/src/pr_poll_scheduler.rs).
+// ---------------------------------------------------------------------------
+
+/** Tell the backend which project is foregrounded/selected (→ selected tier). */
+export function setForegroundProject(projectId: string | null): Promise<void> {
+  return invokeCommand('set_foreground_project', { projectId });
+}
+
+/** Report window focus to the backend. No focused client ⇒ polling pauses. */
+export function setPrPollFocus(focused: boolean): Promise<void> {
+  return invokeCommand('set_focus', { focused });
+}
+
+/** Mark whether a branch has pending CI checks (→ pending tier for its project). */
+export function setBranchPending(
+  branchId: string,
+  projectId: string,
+  pending: boolean
+): Promise<void> {
+  return invokeCommand('set_branch_pending', { branchId, projectId, pending });
+}
+
+/** Nudge the backend to refresh a project's PR statuses now (folded into dedup). */
+export function refreshPrStatusesNow(projectId: string): Promise<void> {
+  return invokeCommand('refresh_now', { projectId });
+}
+
 // =============================================================================
 // Images
 // =============================================================================

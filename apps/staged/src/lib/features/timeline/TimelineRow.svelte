@@ -673,7 +673,6 @@
     border-radius: 6px;
     position: relative;
     transition: background-color 0.15s ease;
-    will-change: transform;
   }
 
   .timeline-row:hover {

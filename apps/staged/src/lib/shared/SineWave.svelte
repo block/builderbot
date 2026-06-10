@@ -7,10 +7,17 @@
   let { size = 20, color = 'currentColor' }: Props = $props();
 
   let phase = $state(0);
+  let svgEl: SVGSVGElement;
 
+  // The wave only needs to animate while it's actually on screen. Gating the
+  // rAF loop on document visibility and viewport intersection stops it from
+  // keeping the compositor warm when the tab is backgrounded or the element is
+  // scrolled out of view.
   $effect(() => {
-    let id: number;
+    let id: number | undefined;
     let t0: number | undefined;
+    let documentVisible = document.visibilityState !== 'hidden';
+    let inViewport = true;
 
     function tick(ts: number) {
       t0 ??= ts;
@@ -18,12 +25,46 @@
       id = requestAnimationFrame(tick);
     }
 
-    id = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(id);
+    function start() {
+      if (id === undefined && documentVisible && inViewport) {
+        t0 = undefined;
+        id = requestAnimationFrame(tick);
+      }
+    }
+
+    function stop() {
+      if (id !== undefined) {
+        cancelAnimationFrame(id);
+        id = undefined;
+      }
+    }
+
+    function onVisibilityChange() {
+      documentVisible = document.visibilityState !== 'hidden';
+      if (documentVisible) start();
+      else stop();
+    }
+
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    const observer = new IntersectionObserver((entries) => {
+      inViewport = entries[entries.length - 1].isIntersecting;
+      if (inViewport) start();
+      else stop();
+    });
+    observer.observe(svgEl);
+
+    start();
+
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      observer.disconnect();
+    };
   });
 
   let pathD = $derived.by(() => {
-    const segments = 64;
+    const segments = 32;
     const startX = 10;
     const endX = 90;
     const range = endX - startX;
@@ -38,7 +79,12 @@
 </script>
 
 <div class="sine-wave-container" style="width: {size}px; height: {size}px;">
-  <svg style="width: {size}px; height: {size}px;" viewBox="0 0 100 100" fill="none">
+  <svg
+    bind:this={svgEl}
+    style="width: {size}px; height: {size}px;"
+    viewBox="0 0 100 100"
+    fill="none"
+  >
     <path
       d={pathD}
       stroke={color}

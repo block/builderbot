@@ -34,9 +34,30 @@
     | {
         waitForSubpathValidation: () => Promise<boolean>;
         selectRepo: (selection: RepoSelection) => void;
+        reset: () => void;
       }
     | undefined
   >(undefined);
+
+  // The modal stays mounted across open/close cycles, so its state survives.
+  // Reset everything on the rising edge of `open` (false -> true) — not on
+  // close — so the dialog's exit animation still plays with its final contents.
+  let wasOpen = false;
+  $effect(() => {
+    if (open && !wasOpen) {
+      selectedRepo = null;
+      headRepo = null;
+      subpath = '';
+      branchName = '';
+      isNewBranch = false;
+      matchedPr = null;
+      defaultBranch = null;
+      saving = false;
+      error = null;
+      repoConfigApi?.reset();
+    }
+    wasOpen = open;
+  });
 
   // Clear error when user edits the subpath
   $effect(() => {

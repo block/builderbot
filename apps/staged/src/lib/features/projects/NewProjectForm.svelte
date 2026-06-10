@@ -52,6 +52,7 @@
     | {
         waitForSubpathValidation: () => Promise<boolean>;
         selectRepo: (selection: RepoSelection) => void;
+        reset: () => void;
       }
     | undefined
   >(undefined);

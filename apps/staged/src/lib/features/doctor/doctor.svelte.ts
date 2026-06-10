@@ -114,6 +114,15 @@ export async function runChecks(): Promise<void> {
 }
 
 /**
+ * Monotonic token identifying the most recently started freshness pass.
+ *
+ * Passes can overlap (a re-run or an update fires while one is in flight) and
+ * resolve out of order. Each pass captures the value here at the start; only
+ * the latest pass is allowed to merge its result or own `freshnessLoading`.
+ */
+let freshnessGeneration = 0;
+
+/**
  * Run the freshness pass and merge its version fields into the current report.
  *
  * Patches per-check rather than replacing the whole report, so the visible rows
@@ -121,14 +130,21 @@ export async function runChecks(): Promise<void> {
  */
 export async function refreshFreshness(): Promise<void> {
   if (!doctorState.report) return;
+  const generation = ++freshnessGeneration;
   doctorState.freshnessLoading = true;
   try {
     const fresh = await runDoctorFreshness();
+    // A newer pass started while this one was in flight: discard this result
+    // entirely. Merging would patch stale version data, and the newer pass
+    // already owns `freshnessLoading`.
+    if (generation !== freshnessGeneration) return;
     mergeFreshness(fresh);
   } catch (e) {
     console.error('[Doctor] Failed to run freshness pass:', e);
   } finally {
-    doctorState.freshnessLoading = false;
+    // Only the latest pass clears the flag, so a superseded pass resolving late
+    // can't switch the spinner off while a newer pass is still running.
+    if (generation === freshnessGeneration) doctorState.freshnessLoading = false;
   }
 }
 
@@ -180,7 +196,8 @@ export async function updateCheck(check: DoctorCheck): Promise<boolean> {
  * Update every check that has an actionable readout, one check at a time.
  *
  * Serialized across checks (and within each check) to avoid concurrent global
- * installs. Runs a single freshness refresh at the end so all badges clear.
+ * installs. The caller is responsible for the single full re-run afterwards
+ * (a freshness-only pass would leave updated tools showing stale status/message).
  */
 export async function updateAll(): Promise<void> {
   const checks = doctorState.report?.checks.filter(hasActionableUpdate) ?? [];
@@ -191,5 +208,4 @@ export async function updateAll(): Promise<void> {
       console.error(`[Doctor] Failed to update ${check.id}:`, e);
     }
   }
-  await refreshFreshness();
 }

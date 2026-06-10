@@ -57,7 +57,10 @@
     updatingAll = true;
     try {
       await updateAll();
-      if (mounted) refreshProviders();
+      // One full re-run after the batch: re-derives each check's status/message
+      // (so updated tools drop their stale warnings), chains a freshness pass to
+      // clear the badges, and re-discovers providers.
+      if (mounted) await runChecksAndRefresh();
     } finally {
       updatingAll = false;
     }

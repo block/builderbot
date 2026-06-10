@@ -17,12 +17,12 @@
   import {
     doctorState,
     updateCheck,
-    refreshFreshness,
     isReadoutActionable,
     hasActionableUpdate,
   } from './doctor.svelte';
   import { Button } from '$lib/components/ui/button';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
+  import Spinner from '../../shared/Spinner.svelte';
   import AgentIcon from '../agents/AgentIcon.svelte';
 
   let {
@@ -71,6 +71,14 @@
   const canUpdate = $derived(hasActionableUpdate(check));
   const updating = $derived(doctorState.updating.includes(check.id));
 
+  // Show a per-row spinner while the (global, batched) freshness pass runs.
+  // Skip `fail` rows — the tool isn't installed, so "checking for an update"
+  // is noise — and skip rows that already surface a result (Update button or
+  // badge) so the spinner and the result never display together.
+  const showFreshnessSpinner = $derived(
+    doctorState.freshnessLoading && check.status !== 'fail' && !canUpdate && readouts.length === 0
+  );
+
   let showUpdateDialog = $state(false);
   let updateError = $state<string | null>(null);
 
@@ -112,9 +120,10 @@
     updateError = null;
     try {
       await updateCheck(check);
-      // Re-probe freshness so the just-cleared badges disappear.
-      await refreshFreshness();
       showUpdateDialog = false;
+      // onFixed (runChecksAndRefresh) is the single full re-run: a base scan
+      // that re-derives status/message, a chained freshness pass that clears
+      // the badges, and a provider refresh. No separate freshness call needed.
       onFixed?.();
     } catch (e) {
       updateError = String(e);
@@ -165,6 +174,10 @@
       </span>
     {/each}
   </div>
+
+  {#if showFreshnessSpinner}
+    <Spinner size={14} />
+  {/if}
 
   {#if canUpdate}
     <Button variant="outline" size="sm" disabled={updating} onclick={promptUpdate}>

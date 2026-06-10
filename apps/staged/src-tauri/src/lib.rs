@@ -2313,7 +2313,9 @@ pub fn run() {
             review_commands::remove_reference_file,
             // Doctor
             doctor::run_doctor,
+            doctor::run_doctor_freshness,
             doctor::run_doctor_fix,
+            doctor::run_doctor_update,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

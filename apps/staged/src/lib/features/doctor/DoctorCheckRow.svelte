@@ -11,8 +11,16 @@
   import XCircle from '@lucide/svelte/icons/x-circle';
   import ExternalLink from '@lucide/svelte/icons/external-link';
   import Wrench from '@lucide/svelte/icons/wrench';
+  import ArrowUpCircle from '@lucide/svelte/icons/arrow-up-circle';
   import { openUrl, runDoctorFix } from '../../api/commands';
-  import type { DoctorCheck } from '../../api/commands';
+  import type { AgentVersionInfo, DoctorCheck } from '../../api/commands';
+  import {
+    doctorState,
+    updateCheck,
+    refreshFreshness,
+    isReadoutActionable,
+    hasActionableUpdate,
+  } from './doctor.svelte';
   import { Button } from '$lib/components/ui/button';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import AgentIcon from '../agents/AgentIcon.svelte';
@@ -31,6 +39,41 @@
   let fixError = $state<string | null>(null);
   let showFixDialog = $state(false);
 
+  // The "Fix" button never handles updates — those use update commands that are
+  // derived per-readout, not the static fix command.
+  const FIX_TYPES = ['command', 'bridge', 'auth'] as const;
+  const canFix = $derived(
+    !!check.fixType &&
+      (FIX_TYPES as readonly string[]).includes(check.fixType) &&
+      !!check.fixCommand &&
+      check.status !== 'pass'
+  );
+
+  /** Readouts (main + bridge) that have any version info worth surfacing. */
+  interface ReadoutEntry {
+    slot: 'main' | 'bridge';
+    info: AgentVersionInfo;
+  }
+  const readouts = $derived(
+    (
+      [
+        { slot: 'main', info: check.main },
+        { slot: 'bridge', info: check.bridge },
+      ] as { slot: 'main' | 'bridge'; info: AgentVersionInfo | null }[]
+    ).filter((r): r is ReadoutEntry => r.info?.updateAvailable === true)
+  );
+
+  /** Update commands that will run when the user confirms (actionable only). */
+  const updateCommands = $derived(
+    [check.main, check.bridge].filter((r) => isReadoutActionable(r)).map((r) => r!.updateCommand!)
+  );
+
+  const canUpdate = $derived(hasActionableUpdate(check));
+  const updating = $derived(doctorState.updating.includes(check.id));
+
+  let showUpdateDialog = $state(false);
+  let updateError = $state<string | null>(null);
+
   function promptFix() {
     if (!check.fixType) return;
     fixError = null;
@@ -43,7 +86,8 @@
     fixing = true;
     fixError = null;
     try {
-      await runDoctorFix(check.id, check.fixType);
+      // canFix guarantees fixType is one of the non-update kinds here.
+      await runDoctorFix(check.id, check.fixType as 'command' | 'bridge' | 'auth');
       showFixDialog = false;
       onFixed?.();
     } catch (e) {
@@ -56,6 +100,30 @@
   function cancelFix() {
     if (fixing) return;
     showFixDialog = false;
+  }
+
+  function promptUpdate() {
+    if (!canUpdate) return;
+    updateError = null;
+    showUpdateDialog = true;
+  }
+
+  async function confirmUpdate() {
+    updateError = null;
+    try {
+      await updateCheck(check);
+      // Re-probe freshness so the just-cleared badges disappear.
+      await refreshFreshness();
+      showUpdateDialog = false;
+      onFixed?.();
+    } catch (e) {
+      updateError = String(e);
+    }
+  }
+
+  function cancelUpdate() {
+    if (updating) return;
+    showUpdateDialog = false;
   }
 </script>
 
@@ -89,9 +157,23 @@
     {#if check.bridgePath}
       <span class="check-path">{check.bridgePath}</span>
     {/if}
+    {#each readouts as readout (readout.slot)}
+      <span class="update-badge" class:info-only={!readout.info.updateCommand}>
+        <ArrowUpCircle size={11} />
+        {readout.slot === 'bridge' ? 'Bridge update' : 'Update'} available:
+        {readout.info.installedVersion ?? '?'} → {readout.info.latestVersion ?? '?'}
+      </span>
+    {/each}
   </div>
 
-  {#if check.fixType && check.fixCommand && check.status !== 'pass'}
+  {#if canUpdate}
+    <Button variant="outline" size="sm" disabled={updating} onclick={promptUpdate}>
+      <ArrowUpCircle size={14} />
+      {updating ? 'Updating' : 'Update'}
+    </Button>
+  {/if}
+
+  {#if canFix}
     <Button variant="outline" size="sm" onclick={promptFix}>
       <Wrench size={14} />
       Fix
@@ -127,6 +209,35 @@
         }}
       >
         {fixing ? 'Running' : fixError ? 'Retry' : 'Run'}
+      </AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
+
+<AlertDialog.Root bind:open={showUpdateDialog}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title
+        >Run update command{updateCommands.length > 1 ? 's' : ''}?</AlertDialog.Title
+      >
+      <AlertDialog.Description class="max-h-[42vh] overflow-auto whitespace-pre-line">
+        {updateCommands.join('\n')}
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    {#if updateError}
+      <p class="text-destructive text-sm">{updateError}</p>
+    {/if}
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel disabled={updating} onclick={cancelUpdate}>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action
+        variant="outline"
+        disabled={updating}
+        onclick={(e) => {
+          e.preventDefault();
+          confirmUpdate();
+        }}
+      >
+        {updating ? 'Updating' : updateError ? 'Retry' : 'Update'}
       </AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>
@@ -191,5 +302,20 @@
     font-family: monospace;
     overflow-wrap: break-word;
     word-wrap: break-word;
+  }
+
+  .update-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    align-self: flex-start;
+    margin-top: 2px;
+    font-size: 10px;
+    color: var(--color-warning, #d29922);
+  }
+
+  /* When there's no runnable command, the badge is informational only. */
+  .update-badge.info-only {
+    color: var(--text-muted);
   }
 </style>

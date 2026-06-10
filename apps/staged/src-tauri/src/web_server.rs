@@ -3654,10 +3654,21 @@ Begin the note with a markdown H1 heading as the title.\n\n"
             let report = doctor::run_checks().await;
             Ok(serde_json::to_value(report).unwrap())
         }
+        "run_doctor_freshness" => {
+            let report = crate::doctor::run_doctor_freshness().await;
+            Ok(serde_json::to_value(report).unwrap())
+        }
         "run_doctor_fix" => {
             let check_id: String = arg(&args, "checkId")?;
             let fix_type: doctor::FixType = arg(&args, "fixType")?;
             doctor::execute_fix(check_id, fix_type).await?;
+            Ok(Value::Null)
+        }
+        "run_doctor_update" => {
+            let check_id: String = arg(&args, "checkId")?;
+            let fix_type: doctor::FixType = arg(&args, "fixType")?;
+            let command: String = arg(&args, "command")?;
+            crate::doctor::run_doctor_update(check_id, fix_type, command).await?;
             Ok(Value::Null)
         }
 

@@ -4,9 +4,16 @@
   import Stethoscope from '@lucide/svelte/icons/stethoscope';
   import ClipboardCopy from '@lucide/svelte/icons/clipboard-copy';
   import Check from '@lucide/svelte/icons/check';
+  import ArrowUpCircle from '@lucide/svelte/icons/arrow-up-circle';
   import Spinner from '../../shared/Spinner.svelte';
   import DoctorCheckRow from '../doctor/DoctorCheckRow.svelte';
-  import { doctorState, runChecks, formatDebugReport } from '../doctor/doctor.svelte';
+  import {
+    doctorState,
+    runChecks,
+    updateAll,
+    hasActionableUpdate,
+    formatDebugReport,
+  } from '../doctor/doctor.svelte';
   import { refreshProviders } from '../agents/agent.svelte';
   import { Button } from '$lib/components/ui/button';
 
@@ -38,6 +45,23 @@
   const agentChecks = $derived(
     doctorState.report?.checks.filter((c) => c.id.startsWith('ai-agent-')) ?? []
   );
+
+  /** True when any check has an actionable update across its readouts. */
+  const anyUpdatable = $derived(doctorState.report?.checks.some(hasActionableUpdate) ?? false);
+
+  /** True while a panel-wide update run is in progress. */
+  let updatingAll = $state(false);
+
+  async function runUpdateAll() {
+    if (updatingAll) return;
+    updatingAll = true;
+    try {
+      await updateAll();
+      if (mounted) refreshProviders();
+    } finally {
+      updatingAll = false;
+    }
+  }
 
   let copied = $state(false);
 
@@ -73,8 +97,15 @@
         </Button>
       {/if}
 
+      {#if anyUpdatable && !doctorState.loading}
+        <Button variant="outline" size="sm" disabled={updatingAll} onclick={runUpdateAll}>
+          <ArrowUpCircle size={14} />
+          {updatingAll ? 'Updating all' : 'Update all'}
+        </Button>
+      {/if}
+
       {#if !doctorState.loading}
-        <Button variant="outline" size="sm" onclick={runChecksAndRefresh}>
+        <Button variant="outline" size="sm" disabled={updatingAll} onclick={runChecksAndRefresh}>
           <RefreshCw size={14} />
           Re-run
         </Button>

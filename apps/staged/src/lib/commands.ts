@@ -1024,6 +1024,39 @@ export function squashCommits(branchId: string, provider?: string): Promise<stri
 // Doctor (Health Check)
 // =============================================================================
 
+export type DoctorFixType = 'command' | 'bridge' | 'auth' | 'updateMain' | 'updateBridge';
+
+export type DoctorInstallSource =
+  | 'brew'
+  | 'npm'
+  | 'cargo'
+  | 'mise'
+  | 'asdf'
+  | 'curlPipe'
+  | 'system'
+  | 'unknown';
+
+/**
+ * Version + install-source readout for one binary behind an agent check.
+ *
+ * An AI-agent check may front two distinct binaries — the agent's own CLI
+ * (`main`) and its ACP bridge (`bridge`) — each versioned independently. Only
+ * `installSource` is populated on the cheap path; the freshness pass fills in
+ * the rest. Note `updateAvailable` is suppressed (null) for self-updating
+ * tools, so treat null as "no actionable update", never as "up to date".
+ */
+export interface AgentVersionInfo {
+  installSource: DoctorInstallSource | null;
+  installedVersion: string | null;
+  latestVersion: string | null;
+  updateAvailable: boolean | null;
+  selfUpdating: boolean | null;
+  /** Source-aware update command. Non-null only when an update is actionable. */
+  updateCommand: string | null;
+  /** 'updateMain' or 'updateBridge', matching this readout's slot. */
+  updateFixType: 'updateMain' | 'updateBridge' | null;
+}
+
 export interface DoctorCheck {
   id: string;
   label: string;
@@ -1031,24 +1064,61 @@ export interface DoctorCheck {
   message: string;
   fixUrl: string | null;
   fixCommand: string | null;
-  fixType: 'command' | 'bridge' | null;
+  fixType: DoctorFixType | null;
   path: string | null;
   bridgePath: string | null;
   rawOutput: string | null;
+  authStatus: 'authenticated' | 'notAuthenticated' | 'notApplicable' | 'unknown' | null;
+  /** Flat version fields mirror the bridge readout (else main) for compat. */
+  installedVersion: string | null;
+  latestVersion: string | null;
+  updateAvailable: boolean | null;
+  installSource: DoctorInstallSource | null;
+  selfUpdating: boolean | null;
+  /** Independent readout for the agent's own CLI (e.g. `claude`, `codex`). */
+  main: AgentVersionInfo | null;
+  /** Independent readout for the agent's ACP bridge (e.g. `claude-agent-acp`). */
+  bridge: AgentVersionInfo | null;
 }
 
 export interface DoctorReport {
   checks: DoctorCheck[];
 }
 
-/** Run all system health checks. */
+/** Run all system health checks (cheap path — no version freshness). */
 export function runDoctor(): Promise<DoctorReport> {
   return invokeCommand('run_doctor');
 }
 
+/**
+ * Re-run all checks with version freshness enabled. Slower (hits npm/brew/
+ * crates.io/GitHub) — call this as a second pass after `runDoctor` so the base
+ * report paints instantly while version/update info fills in.
+ */
+export function runDoctorFreshness(): Promise<DoctorReport> {
+  return invokeCommand('run_doctor_freshness');
+}
+
 /** Run a fix for a doctor check, identified by check ID and fix type. */
-export function runDoctorFix(checkId: string, fixType: 'command' | 'bridge'): Promise<void> {
+export function runDoctorFix(
+  checkId: string,
+  fixType: 'command' | 'bridge' | 'auth'
+): Promise<void> {
   return invokeCommand('run_doctor_fix', { checkId, fixType });
+}
+
+/**
+ * Run a source-aware update for a single readout (main CLI or ACP bridge).
+ *
+ * The backend re-derives the expected command for `(checkId, fixType)` and only
+ * runs it if `command` matches, so this is not a raw-shell-exec path.
+ */
+export function runDoctorUpdate(
+  checkId: string,
+  fixType: 'updateMain' | 'updateBridge',
+  command: string
+): Promise<void> {
+  return invokeCommand('run_doctor_update', { checkId, fixType, command });
 }
 
 // =============================================================================

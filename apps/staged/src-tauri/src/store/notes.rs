@@ -29,8 +29,8 @@ impl Store {
 
     fn insert_note(conn: &rusqlite::Connection, note: &Note) -> Result<(), StoreError> {
         conn.execute(
-            "INSERT INTO notes (id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO notes (id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 note.id,
                 note.branch_id,
@@ -42,6 +42,7 @@ impl Store {
                 note.completed_at,
                 note.suggested_next_commit_step,
                 note.suggested_next_note_step,
+                note.parent_project_note_id,
             ],
         )?;
         Ok(())
@@ -79,7 +80,7 @@ impl Store {
     pub fn get_note(&self, id: &str) -> Result<Option<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id
              FROM notes WHERE id = ?1",
             params![id],
             Self::row_to_note,
@@ -91,11 +92,25 @@ impl Store {
     pub fn list_notes_for_branch(&self, branch_id: &str) -> Result<Vec<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
-             FROM notes WHERE branch_id = ?1
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id
+             FROM notes WHERE branch_id = ?1 AND parent_project_note_id IS NULL
              ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC",
         )?;
         let rows = stmt.query_map(params![branch_id], Self::row_to_note)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// List the child notes aggregated under a given project note. This is the
+    /// dedicated path the parent project-note view uses to fetch its children;
+    /// they are excluded from `list_notes_for_branch`.
+    pub fn list_child_notes(&self, parent_project_note_id: &str) -> Result<Vec<Note>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id
+             FROM notes WHERE parent_project_note_id = ?1
+             ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC",
+        )?;
+        let rows = stmt.query_map(params![parent_project_note_id], Self::row_to_note)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
@@ -103,7 +118,7 @@ impl Store {
     pub fn get_note_by_session(&self, session_id: &str) -> Result<Option<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id
              FROM notes WHERE session_id = ?1",
             params![session_id],
             Self::row_to_note,
@@ -116,7 +131,7 @@ impl Store {
     pub fn get_empty_note_by_session(&self, session_id: &str) -> Result<Option<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, parent_project_note_id
              FROM notes WHERE session_id = ?1 AND content = ''",
             params![session_id],
             Self::row_to_note,
@@ -202,6 +217,7 @@ impl Store {
             completed_at: row.get(7)?,
             suggested_next_commit_step: row.get(8)?,
             suggested_next_note_step: row.get(9)?,
+            parent_project_note_id: row.get(10)?,
         })
     }
 }

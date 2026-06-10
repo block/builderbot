@@ -134,15 +134,28 @@ impl Store {
     }
 
     /// Delete a project note and return its session_id (if any) atomically.
+    ///
+    /// Child notes aggregated under this project note (linked via
+    /// `parent_project_note_id`) are deleted in the same transaction. The
+    /// `notes` and `project_notes` tables have independent lifecycles with no
+    /// FK between them, so this cleanup is enforced here in code. Deleting the
+    /// children fires `trg_cleanup_session_after_note_delete`, so any sessions
+    /// orphaned by the removed children are cleaned up as well.
     pub fn delete_project_note(&self, id: &str) -> Result<Option<String>, StoreError> {
-        let conn = self.conn.lock().unwrap();
-        let session_id: Option<Option<String>> = conn
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "DELETE FROM notes WHERE parent_project_note_id = ?1",
+            params![id],
+        )?;
+        let session_id: Option<Option<String>> = tx
             .query_row(
                 "DELETE FROM project_notes WHERE id = ?1 RETURNING session_id",
                 params![id],
                 |row| row.get(0),
             )
             .optional()?;
+        tx.commit()?;
         Ok(session_id.flatten())
     }
 

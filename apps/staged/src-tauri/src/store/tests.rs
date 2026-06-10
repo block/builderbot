@@ -2311,6 +2311,95 @@ fn test_create_note_with_unique_title_skips_empty_titles() {
     assert_eq!(second.title, "");
 }
 
+#[test]
+fn test_list_child_notes_returns_children_and_excludes_them_from_branch_timeline() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let parent = ProjectNote::new(&project.id, "Parent", "aggregated");
+    store.create_project_note(&parent).unwrap();
+
+    // A standalone branch note plus two children aggregated under the parent.
+    let standalone = Note::new(&branch.id, "Standalone", "top-level");
+    store.create_note(&standalone).unwrap();
+    let child_a = Note::new(&branch.id, "Child A", "a").with_parent_project_note(&parent.id);
+    store.create_note(&child_a).unwrap();
+    let child_b = Note::new(&branch.id, "Child B", "b").with_parent_project_note(&parent.id);
+    store.create_note(&child_b).unwrap();
+
+    // Children are returned by the dedicated parent-note query.
+    let children = store.list_child_notes(&parent.id).unwrap();
+    let child_ids: Vec<_> = children.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(children.len(), 2);
+    assert!(child_ids.contains(&child_a.id.as_str()));
+    assert!(child_ids.contains(&child_b.id.as_str()));
+    assert_eq!(
+        children[0].parent_project_note_id.as_deref(),
+        Some(parent.id.as_str())
+    );
+
+    // ...but excluded from the branch timeline, which only shows the standalone note.
+    let timeline = store.list_notes_for_branch(&branch.id).unwrap();
+    let timeline_ids: Vec<_> = timeline.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(timeline_ids, vec![standalone.id.as_str()]);
+}
+
+#[test]
+fn test_delete_project_note_cascades_to_child_notes() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let parent = ProjectNote::new(&project.id, "Parent", "aggregated");
+    store.create_project_note(&parent).unwrap();
+
+    let child = Note::new(&branch.id, "Child", "c").with_parent_project_note(&parent.id);
+    store.create_note(&child).unwrap();
+    let unrelated = Note::new(&branch.id, "Unrelated", "u");
+    store.create_note(&unrelated).unwrap();
+
+    store.delete_project_note(&parent.id).unwrap();
+
+    // The child note is gone, but the unrelated branch note survives.
+    assert!(store.get_note(&child.id).unwrap().is_none());
+    assert!(store.list_child_notes(&parent.id).unwrap().is_empty());
+    assert!(store.get_note(&unrelated.id).unwrap().is_some());
+}
+
+#[test]
+fn test_delete_project_note_cleans_up_child_note_sessions() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let parent = ProjectNote::new(&project.id, "Parent", "aggregated");
+    store.create_project_note(&parent).unwrap();
+
+    let session = Session::new_running("write child note", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    store
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
+        .unwrap();
+
+    let child = Note::new(&branch.id, "Child", "c")
+        .with_session(&session.id)
+        .with_parent_project_note(&parent.id);
+    store.create_note(&child).unwrap();
+
+    store.delete_project_note(&parent.id).unwrap();
+
+    // Deleting the child fired the note-delete trigger, cleaning up its session.
+    assert!(store.get_note(&child.id).unwrap().is_none());
+    assert!(store.get_session(&session.id).unwrap().is_none());
+}
+
 // =============================================================================
 // Repo Actions
 // =============================================================================

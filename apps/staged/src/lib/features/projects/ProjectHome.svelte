@@ -158,27 +158,54 @@
       }
     );
 
-    // Listen for PR status changes to update branch state
-    const unlistenPrStatus = listenToEvent<PrStatusChangedEvent>('pr-status-changed', (payload) => {
-      // Find the project that contains this branch and update it
-      for (const [projectId, branches] of branchesByProject.entries()) {
-        const branchIndex = branches.findIndex((b) => b.id === payload.branchId);
-        if (branchIndex !== -1) {
-          // Update the branch with new PR status
-          const updatedBranches = [...branches];
-          updatedBranches[branchIndex] = {
-            ...updatedBranches[branchIndex],
-            prState: payload.prState,
-            prChecksStatus: payload.prChecksStatus,
-            prReviewDecision: payload.prReviewDecision,
-            prMergeable: payload.prMergeable,
-            prDraft: payload.prDraft,
-            prHeadSha: payload.prHeadSha,
-            prFetchedAt: payload.prFetchedAt,
-          };
-          branchesByProject = new Map(branchesByProject).set(projectId, updatedBranches);
-          break;
+    // Listen for PR status changes to update branch state.
+    //
+    // A PR-polling cycle emits one `pr-status-changed` per branch, so a storm
+    // of N branches arrives as N separate events. Rebuilding `branchesByProject`
+    // with a fresh `new Map(...)` per event means N allocations + N derivation
+    // re-runs, which can pile up on the main thread during a project switch.
+    // Buffer the events and apply a single rebuild per frame so a burst
+    // coalesces into one reactive flush without dropping any update.
+    let pendingPrStatusEvents: PrStatusChangedEvent[] = [];
+    let prStatusFlushHandle: number | null = null;
+
+    const flushPrStatusEvents = () => {
+      prStatusFlushHandle = null;
+      if (pendingPrStatusEvents.length === 0) return;
+      const events = pendingPrStatusEvents;
+      pendingPrStatusEvents = [];
+
+      // Apply every buffered event onto one fresh Map. Each event re-scans the
+      // in-progress map, so multiple updates to the same project compound
+      // correctly instead of clobbering one another.
+      const next = new Map(branchesByProject);
+      for (const payload of events) {
+        for (const [projectId, branches] of next) {
+          const branchIndex = branches.findIndex((b) => b.id === payload.branchId);
+          if (branchIndex !== -1) {
+            const updatedBranches = [...branches];
+            updatedBranches[branchIndex] = {
+              ...updatedBranches[branchIndex],
+              prState: payload.prState,
+              prChecksStatus: payload.prChecksStatus,
+              prReviewDecision: payload.prReviewDecision,
+              prMergeable: payload.prMergeable,
+              prDraft: payload.prDraft,
+              prHeadSha: payload.prHeadSha,
+              prFetchedAt: payload.prFetchedAt,
+            };
+            next.set(projectId, updatedBranches);
+            break;
+          }
         }
+      }
+      branchesByProject = next;
+    };
+
+    const unlistenPrStatus = listenToEvent<PrStatusChangedEvent>('pr-status-changed', (payload) => {
+      pendingPrStatusEvents.push(payload);
+      if (prStatusFlushHandle === null) {
+        prStatusFlushHandle = requestAnimationFrame(flushPrStatusEvents);
       }
     });
 
@@ -205,6 +232,11 @@
       unlistenDetection();
       unlistenProjectRepoAdded();
       unlistenPrStatus();
+      if (prStatusFlushHandle !== null) {
+        cancelAnimationFrame(prStatusFlushHandle);
+        prStatusFlushHandle = null;
+      }
+      pendingPrStatusEvents = [];
       unlistenSessionStatus();
       workspaceLifecycle.stop();
       projectRunActionsStore.stopListening();

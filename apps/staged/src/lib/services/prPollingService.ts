@@ -25,6 +25,10 @@ const PENDING_INTERVAL = 15_000; // any project with pending CI checks
 const SELECTED_INTERVAL = 60_000; // selected project, no pending checks
 const BACKGROUND_INTERVAL = 5 * 60_000; // non-selected, no pending checks
 const MAX_CONSECUTIVE_FAILURES = 3;
+// After a project switch, hold background-tier refreshes for a beat so the
+// switch's reactive work isn't competing with a background poll cycle for the
+// main thread. Selected/pending tiers still poll during the cooldown.
+const SWITCH_COOLDOWN = 1_500;
 
 // ---------------------------------------------------------------------------
 // State
@@ -59,6 +63,9 @@ let refreshInFlight = false;
 let windowFocused = true;
 let listenersAttached = false;
 
+/** Background-tier polling is deprioritized until this timestamp (see SWITCH_COOLDOWN). */
+let switchCooldownUntil = 0;
+
 /** Project IDs queued for immediate refresh while another refresh is in-flight. */
 const pendingRefreshProjectIds = new Set<string>();
 
@@ -77,6 +84,11 @@ function getProjectInterval(projectId: string): number {
   if (projectHasPendingChecks(projectId)) return PENDING_INTERVAL;
   if (projectId === selectedProjectId) return SELECTED_INTERVAL;
   return BACKGROUND_INTERVAL;
+}
+
+/** Yield to the macrotask queue so foreground work can interleave between projects. */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 /** Return project IDs whose polling interval has elapsed. */
@@ -103,8 +115,15 @@ async function poll() {
 
   refreshInFlight = true;
   const due = getProjectsDue();
+  // Right after a switch, hold background-tier projects so the switch's
+  // reactive work isn't competing with a background poll cycle. They stay due
+  // and poll on the next cycle once the cooldown elapses.
+  const inSwitchCooldown = Date.now() < switchCooldownUntil;
 
   for (const projectId of due) {
+    if (inSwitchCooldown && getProjectInterval(projectId) === BACKGROUND_INTERVAL) {
+      continue;
+    }
     setProjectRefreshing(projectId, true);
     try {
       await refreshAllPrStatuses(projectId);
@@ -128,6 +147,9 @@ async function poll() {
     } finally {
       setProjectRefreshing(projectId, false);
     }
+    // Yield between projects so a project switch's reactive flush can interleave
+    // instead of waiting out the whole serial chain of IPC round-trips.
+    await yieldToEventLoop();
   }
 
   refreshInFlight = false;
@@ -272,6 +294,9 @@ export function setProjects(projectIds: string[]): void {
 export function setSelectedProject(projectId: string | null): void {
   if (selectedProjectId === projectId) return;
   selectedProjectId = projectId;
+  // Give the switch's reactive work room to flush before background polling
+  // resumes competing for the main thread.
+  switchCooldownUntil = Date.now() + SWITCH_COOLDOWN;
   if (projectId && allProjectIds.has(projectId)) {
     // Selected project's interval just changed — trigger a poll if it's due
     poll();

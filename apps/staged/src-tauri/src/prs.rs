@@ -824,6 +824,12 @@ pub async fn refresh_pr_status(
     Ok(())
 }
 
+/// Max concurrent PR-status fetches inside a single `refresh_all_pr_statuses`
+/// call. Each fetch spawns a `gh` subprocess + GitHub round-trip, so we cap the
+/// fan-out to avoid a subprocess thundering herd while still resolving a
+/// project's PRs in ~1 round-trip's wall-clock instead of N (fully serial).
+const PR_REFRESH_CONCURRENCY: usize = 6;
+
 /// Refresh PR status for all branches in a project.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn refresh_all_pr_statuses(
@@ -844,7 +850,14 @@ pub async fn refresh_all_pr_statuses(
         .filter(|b| b.pr_number.is_some())
         .collect();
 
-    let mut refreshed_count = 0u32;
+    // Fan the per-branch fetches out across a bounded pool instead of awaiting
+    // them one at a time. Repo resolution is a cheap local DB read so it stays
+    // on this task; only the network fetch + DB write + per-branch emit move
+    // into the spawned tasks, gated by the semaphore. The per-branch
+    // `pr-status-changed` emissions and final `pr-statuses-refreshed` event are
+    // unchanged — only the scheduling is now parallel rather than serial.
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(PR_REFRESH_CONCURRENCY));
+    let mut tasks = Vec::new();
 
     for branch in branches_with_prs {
         let pr_number = branch.pr_number.unwrap();
@@ -861,60 +874,83 @@ pub async fn refresh_all_pr_statuses(
             }
         };
 
-        let pr_result = {
-            let github_repo = github_repo.clone();
-            tauri::async_runtime::spawn_blocking(move || {
+        let store = Arc::clone(&store);
+        let app_handle = app_handle.clone();
+        let semaphore = Arc::clone(&semaphore);
+        let branch_id = branch.id.clone();
+
+        tasks.push(tauri::async_runtime::spawn(async move {
+            // Hold a permit for the whole fetch so no more than
+            // PR_REFRESH_CONCURRENCY `gh` round-trips are in flight at once.
+            let _permit = semaphore
+                .acquire_owned()
+                .await
+                .map_err(|e| format!("refresh_all_pr_statuses semaphore closed: {e}"))?;
+
+            let pr_result = tauri::async_runtime::spawn_blocking(move || {
                 git::fetch_pr_status_for_repo(&github_repo, pr_number)
             })
             .await
-            .map_err(|e| format!("refresh_all_pr_statuses task failed: {e}"))?
-        };
-        match pr_result {
-            Ok(pr_status) => {
-                let mergeable = pr_status.mergeable == "MERGEABLE";
-                let pr_fetched_at = store::now_timestamp();
+            .map_err(|e| format!("refresh_all_pr_statuses task failed: {e}"))?;
 
-                if let Err(e) = store.update_branch_pr_status(
-                    &branch.id,
-                    Some(pr_status.state.clone()),
-                    Some(pr_status.checks_summary.state.clone()),
-                    pr_status.review_decision.clone(),
-                    Some(mergeable),
-                    Some(pr_status.is_draft),
-                    None,
-                    None,
-                    pr_status.head_sha.clone(),
-                ) {
-                    log::warn!("Failed to update PR status for branch {}: {}", branch.id, e);
-                    continue;
+            match pr_result {
+                Ok(pr_status) => {
+                    let mergeable = pr_status.mergeable == "MERGEABLE";
+                    let pr_fetched_at = store::now_timestamp();
+
+                    if let Err(e) = store.update_branch_pr_status(
+                        &branch_id,
+                        Some(pr_status.state.clone()),
+                        Some(pr_status.checks_summary.state.clone()),
+                        pr_status.review_decision.clone(),
+                        Some(mergeable),
+                        Some(pr_status.is_draft),
+                        None,
+                        None,
+                        pr_status.head_sha.clone(),
+                    ) {
+                        log::warn!("Failed to update PR status for branch {}: {}", branch_id, e);
+                        return Ok::<bool, String>(false);
+                    }
+
+                    crate::web_server::emit_to_all(
+                        &app_handle,
+                        "pr-status-changed",
+                        PrStatusEvent {
+                            branch_id: branch_id.clone(),
+                            pr_state: pr_status.state,
+                            pr_checks_status: pr_status.checks_summary.state,
+                            pr_review_decision: pr_status.review_decision,
+                            pr_mergeable: mergeable,
+                            pr_draft: pr_status.is_draft,
+                            pr_head_sha: pr_status.head_sha,
+                            pr_fetched_at,
+                            failed_checks: pr_status.failed_checks,
+                        },
+                    );
+
+                    Ok(true)
                 }
-
-                refreshed_count += 1;
-
-                crate::web_server::emit_to_all(
-                    &app_handle,
-                    "pr-status-changed",
-                    PrStatusEvent {
-                        branch_id: branch.id.clone(),
-                        pr_state: pr_status.state,
-                        pr_checks_status: pr_status.checks_summary.state,
-                        pr_review_decision: pr_status.review_decision,
-                        pr_mergeable: mergeable,
-                        pr_draft: pr_status.is_draft,
-                        pr_head_sha: pr_status.head_sha,
-                        pr_fetched_at,
-                        failed_checks: pr_status.failed_checks,
-                    },
-                );
+                Err(e) => {
+                    log::warn!(
+                        "Failed to fetch PR status for branch {} (PR #{}): {}",
+                        branch_id,
+                        pr_number,
+                        e
+                    );
+                    Ok(false)
+                }
             }
-            Err(e) => {
-                log::warn!(
-                    "Failed to fetch PR status for branch {} (PR #{}): {}",
-                    branch.id,
-                    pr_number,
-                    e
-                );
-            }
+        }));
+    }
+
+    let mut refreshed_count = 0u32;
+    for task in tasks {
+        let refreshed = task
+            .await
+            .map_err(|e| format!("refresh_all_pr_statuses join failed: {e}"))??;
+        if refreshed {
+            refreshed_count += 1;
         }
     }
 

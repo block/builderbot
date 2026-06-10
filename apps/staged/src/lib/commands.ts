@@ -1077,30 +1077,40 @@ export function refreshAllPrStatuses(projectId: string): Promise<void> {
 // The backend owns PR-polling cadence and concurrency. These commands feed it
 // interest hints; the cadence, dedup, and failure backoff all live in the
 // backend scheduler (see src-tauri/src/pr_poll_scheduler.rs).
+//
+// Interest is tracked per connected client, so every hint carries a `clientId`
+// (see prPollingService.ts). The same id must also be sent on the WS connect
+// query so the backend can correlate interest with disconnect.
 // ---------------------------------------------------------------------------
 
-/** Tell the backend which project is foregrounded/selected (→ selected tier). */
-export function setForegroundProject(projectId: string | null): Promise<void> {
-  return invokeCommand('set_foreground_project', { projectId });
+/** Tell the backend which project this client has foregrounded/selected (→ selected tier). */
+export function setForegroundProject(clientId: string, projectId: string | null): Promise<void> {
+  return invokeCommand('set_foreground_project', { clientId, projectId });
 }
 
-/** Report window focus to the backend. No focused client ⇒ polling pauses. */
-export function setPrPollFocus(focused: boolean): Promise<void> {
-  return invokeCommand('set_focus', { focused });
+/** Report this client's window focus to the backend. No focused client ⇒ polling pauses. */
+export function setPrPollFocus(clientId: string, focused: boolean): Promise<void> {
+  return invokeCommand('set_focus', { clientId, focused });
 }
 
-/** Mark whether a branch has pending CI checks (→ pending tier for its project). */
+/** Mark whether a branch has pending CI checks for this client (→ pending tier for its project). */
 export function setBranchPending(
+  clientId: string,
   branchId: string,
   projectId: string,
   pending: boolean
 ): Promise<void> {
-  return invokeCommand('set_branch_pending', { branchId, projectId, pending });
+  return invokeCommand('set_branch_pending', { clientId, branchId, projectId, pending });
 }
 
 /** Nudge the backend to refresh a project's PR statuses now (folded into dedup). */
-export function refreshPrStatusesNow(projectId: string): Promise<void> {
-  return invokeCommand('refresh_now', { projectId });
+export function refreshPrStatusesNow(clientId: string, projectId: string): Promise<void> {
+  return invokeCommand('refresh_now', { clientId, projectId });
+}
+
+/** Tell the backend this client has disconnected so its interest is dropped. */
+export function disconnectPrPollClient(clientId: string): Promise<void> {
+  return invokeCommand('disconnect_client', { clientId });
 }
 
 // =============================================================================

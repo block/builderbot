@@ -10,8 +10,23 @@
 //! window is focused, via the [`set_foreground_project`], [`set_branch_pending`],
 //! and [`set_focus`] commands. The effective tier for a project is the union of
 //! interest (any foregrounding ⇒ selected; any pending ⇒ fast; nothing focused ⇒
-//! pause). For a single client this is just that client's state, but it is
-//! structured as a union so Phase 2 can extend it across connected clients.
+//! pause).
+//!
+//! ## Per-client interest (Phase 2)
+//!
+//! Interest is tracked **per connected client** — the native Tauri window plus
+//! each WebSocket browser session — keyed by a frontend-supplied `client_id`.
+//! The cadence for a project is the union across all clients ([`PollState::any_focused`],
+//! [`PollState::is_foreground`], [`PollState::project_has_pending`]), so a project
+//! that any client cares about is polled at the appropriate tier; the *work*
+//! bookkeeping (`last_polled_at`/`failures`/`stale`/`forced`) stays project-keyed
+//! and shared, so N clients still trigger only one poll per project per tier.
+//!
+//! Clients are evicted on disconnect (clean WS close ⇒ [`PrPollScheduler::disconnect_client`])
+//! and via a [`CLIENT_TTL_MS`] fallback for dirty drops ([`PollState::evict_stale_clients`],
+//! swept each tick). The native window uses the fixed [`TAURI_CLIENT_ID`], which
+//! is pre-seeded at launch and exempt from TTL eviction (process death is its
+//! teardown), so single-client behaviour stays byte-for-byte equivalent to Phase 1.
 //!
 //! Poll-state (last-polled timestamps, failure counts) is intentionally **not
 //! persisted** — on restart everything is "due", matching the frontend's
@@ -53,9 +68,39 @@ const MAX_CONSECUTIVE_FAILURES: u32 = 3;
 /// wake the loop immediately, so this only bounds the *periodic* re-poll delay.
 const TICK_INTERVAL_SECS: u64 = 5;
 
+/// Well-known id for the native Tauri window. It has no WS heartbeat (the
+/// process dying is its teardown), so it is pre-seeded at launch and exempt from
+/// TTL eviction. Must match `TAURI_CLIENT_ID` in `prPollingService.ts`.
+const TAURI_CLIENT_ID: &str = "tauri-main";
+
+/// How long a client's interest survives without a heartbeat before the tick
+/// loop evicts it — the dirty-drop fallback for WS clients that vanish without a
+/// clean close. Set to ≈3× the expected WS keepalive (≤~30s), so it tolerates
+/// transient lag while bounding spurious pending-tier polls from a dead-but-
+/// counted client to ≲6. The Tauri id is exempt.
+const CLIENT_TTL_MS: i64 = 90_000;
+
 // ---------------------------------------------------------------------------
 // Poll-state — pure decision logic, no clock / store / Tauri handles
 // ---------------------------------------------------------------------------
+
+/// One connected client's interest. The effective cadence for a project is the
+/// *union* of these across all clients (see [`PollState::any_focused`],
+/// [`PollState::is_foreground`], [`PollState::project_has_pending`]).
+#[derive(Default)]
+struct ClientInterest {
+    /// This client's foregrounded/selected project (→ selected tier).
+    foreground_project: Option<String>,
+    /// Whether this client's window is focused.
+    focused: bool,
+    /// branch_id → project_id for branches this client sees as having pending CI
+    /// checks (→ pending tier). Mirrors the granularity the frontend tracks via
+    /// `updateChecksStatus`.
+    pending_branches: HashMap<String, String>,
+    /// Last heartbeat (ms since epoch). Drives TTL eviction of dirty-dropped
+    /// clients; the Tauri id is exempt regardless of this value.
+    last_seen: i64,
+}
 
 /// The poll-state and interest the scheduler owns. Pure: every method that needs
 /// the current time takes `now` (ms since epoch) as a parameter, so the
@@ -69,45 +114,68 @@ struct PollState {
     /// Projects currently reported as stale (failures ≥ threshold). Tracked so a
     /// stale event is only emitted on transitions.
     stale: HashSet<String>,
-    /// The foregrounded/selected project (→ selected tier). `Option` models a
-    /// single client; Phase 2 will union a set across connected clients.
-    foreground_project: Option<String>,
-    /// Whether any client window is focused. No focus ⇒ polling pauses.
-    focused: bool,
-    /// branch_id → project_id for branches with pending CI checks (→ pending
-    /// tier). Mirrors the granularity the frontend tracked via
-    /// `updateChecksStatus`.
-    pending_branches: HashMap<String, String>,
     /// Projects explicitly nudged via `refresh_now`; due on the next tick
-    /// regardless of interval or focus.
+    /// regardless of interval or focus. Project-keyed and global (a nudge is
+    /// about the *project*, not the observer), so it is shared across clients
+    /// and survives the forcing client disconnecting.
     forced: HashSet<String>,
+    /// Per-connected-client interest, keyed by `client_id`. The cadence for a
+    /// project is the union across these (see the union helpers). Only the
+    /// *interest* is per-client; the work bookkeeping above stays project-keyed
+    /// so N clients still trigger only one poll per project per tier.
+    clients: HashMap<String, ClientInterest>,
 }
 
 impl PollState {
     fn new() -> Self {
+        let mut clients = HashMap::new();
+        // Pre-seed the native client as focused so the very first immediate tick
+        // polls at launch, matching Phase 1's `focused: true` default. The Tauri
+        // frontend's later hints update this same entry, and `last_seen: 0` is
+        // fine because the Tauri id is exempt from TTL eviction.
+        clients.insert(
+            TAURI_CLIENT_ID.to_string(),
+            ClientInterest {
+                focused: true,
+                last_seen: 0,
+                ..Default::default()
+            },
+        );
         Self {
             last_polled_at: HashMap::new(),
             failures: HashMap::new(),
             stale: HashSet::new(),
-            foreground_project: None,
-            // Start focused so the very first tick polls at launch, matching the
-            // frontend which began with `windowFocused = true`.
-            focused: true,
-            pending_branches: HashMap::new(),
             forced: HashSet::new(),
+            clients,
         }
     }
 
-    fn project_has_pending(&self, project_id: &str) -> bool {
-        self.pending_branches.values().any(|p| p == project_id)
+    /// Whether any connected client's window is focused. No focused client ⇒
+    /// periodic polling pauses.
+    fn any_focused(&self) -> bool {
+        self.clients.values().any(|c| c.focused)
     }
 
-    /// The polling interval for a project, as the union of current interest.
-    /// Mirrors the frontend `getProjectInterval`.
+    /// Whether any client has this project foregrounded/selected.
+    fn is_foreground(&self, project_id: &str) -> bool {
+        self.clients
+            .values()
+            .any(|c| c.foreground_project.as_deref() == Some(project_id))
+    }
+
+    /// Whether any client sees a pending branch in this project.
+    fn project_has_pending(&self, project_id: &str) -> bool {
+        self.clients
+            .values()
+            .any(|c| c.pending_branches.values().any(|p| p == project_id))
+    }
+
+    /// The polling interval for a project, as the union of current interest
+    /// across all clients. Mirrors the frontend `getProjectInterval`.
     fn interval_for(&self, project_id: &str) -> i64 {
         if self.project_has_pending(project_id) {
             PENDING_INTERVAL_MS
-        } else if self.foreground_project.as_deref() == Some(project_id) {
+        } else if self.is_foreground(project_id) {
             SELECTED_INTERVAL_MS
         } else {
             BACKGROUND_INTERVAL_MS
@@ -129,7 +197,7 @@ impl PollState {
                 due.push(id.clone());
                 continue;
             }
-            if !self.focused {
+            if !self.any_focused() {
                 continue; // no focused client ⇒ pause periodic polling
             }
             let last = self.last_polled_at.get(id).copied().unwrap_or(0);
@@ -140,18 +208,25 @@ impl PollState {
         due
     }
 
-    /// Drop tracking for projects (and pending branches) that no longer exist.
+    /// Drop tracking for projects (and per-client interest in them) that no
+    /// longer exist. Project-keyed work bookkeeping is pruned by membership;
+    /// each client's interest is pruned in place. Client *lifecycle* eviction
+    /// (disconnect / TTL) is separate — that drops whole clients, this drops
+    /// dead projects from surviving clients.
     fn prune(&mut self, known: &HashSet<&str>) {
         self.last_polled_at
             .retain(|k, _| known.contains(k.as_str()));
         self.failures.retain(|k, _| known.contains(k.as_str()));
         self.stale.retain(|k| known.contains(k.as_str()));
         self.forced.retain(|k| known.contains(k.as_str()));
-        self.pending_branches
-            .retain(|_, p| known.contains(p.as_str()));
-        if let Some(fg) = &self.foreground_project {
-            if !known.contains(fg.as_str()) {
-                self.foreground_project = None;
+        for client in self.clients.values_mut() {
+            client
+                .pending_branches
+                .retain(|_, p| known.contains(p.as_str()));
+            if let Some(fg) = &client.foreground_project {
+                if !known.contains(fg.as_str()) {
+                    client.foreground_project = None;
+                }
             }
         }
     }
@@ -184,24 +259,63 @@ impl PollState {
         }
     }
 
-    fn set_foreground(&mut self, project_id: Option<String>) {
-        self.foreground_project = project_id;
+    fn set_foreground(&mut self, client_id: &str, project_id: Option<String>, now: i64) {
+        let client = self.clients.entry(client_id.to_string()).or_default();
+        client.foreground_project = project_id;
+        client.last_seen = now;
     }
 
-    fn set_focus(&mut self, focused: bool) {
-        self.focused = focused;
+    fn set_focus(&mut self, client_id: &str, focused: bool, now: i64) {
+        let client = self.clients.entry(client_id.to_string()).or_default();
+        client.focused = focused;
+        client.last_seen = now;
     }
 
-    fn set_branch_pending(&mut self, branch_id: String, project_id: String, pending: bool) {
+    fn set_branch_pending(
+        &mut self,
+        client_id: &str,
+        branch_id: String,
+        project_id: String,
+        pending: bool,
+        now: i64,
+    ) {
+        let client = self.clients.entry(client_id.to_string()).or_default();
         if pending {
-            self.pending_branches.insert(branch_id, project_id);
+            client.pending_branches.insert(branch_id, project_id);
         } else {
-            self.pending_branches.remove(&branch_id);
+            client.pending_branches.remove(&branch_id);
         }
+        client.last_seen = now;
     }
 
+    /// `refresh_now` nudge. Project-keyed and global — independent of which
+    /// client asked, so it survives that client disconnecting.
     fn force(&mut self, project_id: String) {
         self.forced.insert(project_id);
+    }
+
+    // -- Client lifecycle -------------------------------------------------
+
+    /// Heartbeat: create the client entry if absent and bump its `last_seen` so
+    /// it survives the next TTL sweep. Called on WS connect and each WS ping.
+    fn touch(&mut self, client_id: &str, now: i64) {
+        self.clients
+            .entry(client_id.to_string())
+            .or_default()
+            .last_seen = now;
+    }
+
+    /// Clean disconnect: drop the client and all its interest.
+    fn disconnect_client(&mut self, client_id: &str) {
+        self.clients.remove(client_id);
+    }
+
+    /// Dirty-drop fallback: evict clients not heard from within `ttl_ms`. The
+    /// Tauri id is exempt (the native window has no WS heartbeat; the process
+    /// dying tears it down).
+    fn evict_stale_clients(&mut self, now: i64, ttl_ms: i64) {
+        self.clients
+            .retain(|id, c| id == TAURI_CLIENT_ID || now.saturating_sub(c.last_seen) <= ttl_ms);
     }
 }
 
@@ -231,26 +345,62 @@ impl PrPollScheduler {
         }
     }
 
-    fn set_foreground(&self, project_id: Option<String>) {
-        self.state.lock().unwrap().set_foreground(project_id);
-        self.notify.notify_one();
-    }
+    // These wrappers are the only place that reads the real clock for interest
+    // updates: they stamp `now` and delegate to the pure [`PollState`] methods,
+    // then wake the loop so the union is recomputed promptly. `pub` so the web
+    // server's `dispatch` / `handle_ws` can drive them via the managed
+    // `Arc<PrPollScheduler>` for WebSocket clients.
 
-    fn set_focus(&self, focused: bool) {
-        self.state.lock().unwrap().set_focus(focused);
-        self.notify.notify_one();
-    }
-
-    fn set_branch_pending(&self, branch_id: String, project_id: String, pending: bool) {
+    pub fn set_foreground(&self, client_id: String, project_id: Option<String>) {
+        let now = crate::store::now_timestamp();
         self.state
             .lock()
             .unwrap()
-            .set_branch_pending(branch_id, project_id, pending);
+            .set_foreground(&client_id, project_id, now);
         self.notify.notify_one();
     }
 
-    fn force(&self, project_id: String) {
+    pub fn set_focus(&self, client_id: String, focused: bool) {
+        let now = crate::store::now_timestamp();
+        self.state
+            .lock()
+            .unwrap()
+            .set_focus(&client_id, focused, now);
+        self.notify.notify_one();
+    }
+
+    pub fn set_branch_pending(
+        &self,
+        client_id: String,
+        branch_id: String,
+        project_id: String,
+        pending: bool,
+    ) {
+        let now = crate::store::now_timestamp();
+        self.state
+            .lock()
+            .unwrap()
+            .set_branch_pending(&client_id, branch_id, project_id, pending, now);
+        self.notify.notify_one();
+    }
+
+    pub fn force(&self, project_id: String) {
         self.state.lock().unwrap().force(project_id);
+        self.notify.notify_one();
+    }
+
+    /// Heartbeat for a client (WS connect / ping). Keeps it alive past the TTL.
+    pub fn touch(&self, client_id: String) {
+        let now = crate::store::now_timestamp();
+        self.state.lock().unwrap().touch(&client_id, now);
+        self.notify.notify_one();
+    }
+
+    /// Clean disconnect for a client (WS close). Wakes the loop so a vanished
+    /// focus/foreground/pending recomputes the union promptly (it may now pause
+    /// or slow polling).
+    pub fn disconnect_client(&self, client_id: String) {
+        self.state.lock().unwrap().disconnect_client(&client_id);
         self.notify.notify_one();
     }
 }
@@ -328,6 +478,9 @@ async fn tick(
         let known: HashSet<&str> = project_ids.iter().map(|s| s.as_str()).collect();
         let mut in_flight = scheduler.in_flight.lock().unwrap();
         let mut state = scheduler.state.lock().unwrap();
+        // Evict clients that dropped without a clean WS close before deciding
+        // what is due, so their stale interest stops inflating the union.
+        state.evict_stale_clients(now, CLIENT_TTL_MS);
         state.prune(&known);
         let due = state.due(&project_ids, now, &in_flight);
         for id in &due {
@@ -432,38 +585,60 @@ fn emit_stale(app_handle: &tauri::AppHandle, project_id: &str, stale: bool) {
 // Interest / hint commands
 // ---------------------------------------------------------------------------
 
-/// Set the foregrounded/selected project (→ selected tier). `None` clears it.
+/// Set a client's foregrounded/selected project (→ selected tier). `None`
+/// clears it. The effective tier unions this across all connected clients.
 #[tauri::command(rename_all = "camelCase")]
 pub fn set_foreground_project(
     scheduler: tauri::State<'_, Arc<PrPollScheduler>>,
+    client_id: String,
     project_id: Option<String>,
 ) {
-    scheduler.set_foreground(project_id);
+    scheduler.set_foreground(client_id, project_id);
 }
 
-/// Report window focus. With no focused client, periodic polling pauses (an
-/// explicit `refresh_now` still fetches).
-#[tauri::command]
-pub fn set_focus(scheduler: tauri::State<'_, Arc<PrPollScheduler>>, focused: bool) {
-    scheduler.set_focus(focused);
+/// Report a client's window focus. With no client focused, periodic polling
+/// pauses (an explicit `refresh_now` still fetches).
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_focus(
+    scheduler: tauri::State<'_, Arc<PrPollScheduler>>,
+    client_id: String,
+    focused: bool,
+) {
+    scheduler.set_focus(client_id, focused);
 }
 
-/// Mark whether a branch has pending CI checks (→ pending tier for its project).
+/// Mark whether a branch has pending CI checks for a client (→ pending tier for
+/// its project, unioned across clients).
 #[tauri::command(rename_all = "camelCase")]
 pub fn set_branch_pending(
     scheduler: tauri::State<'_, Arc<PrPollScheduler>>,
+    client_id: String,
     branch_id: String,
     project_id: String,
     pending: bool,
 ) {
-    scheduler.set_branch_pending(branch_id, project_id, pending);
+    scheduler.set_branch_pending(client_id, branch_id, project_id, pending);
 }
 
 /// Explicitly nudge the scheduler to refresh a project now (e.g. just created or
 /// pushed a PR). Folded into the scheduler's dedup rather than fetching directly.
+/// The `client_id` is carried only to keep that client's heartbeat fresh; the
+/// force itself is project-keyed and global.
 #[tauri::command(rename_all = "camelCase")]
-pub fn refresh_now(scheduler: tauri::State<'_, Arc<PrPollScheduler>>, project_id: String) {
+pub fn refresh_now(
+    scheduler: tauri::State<'_, Arc<PrPollScheduler>>,
+    client_id: String,
+    project_id: String,
+) {
+    scheduler.touch(client_id);
     scheduler.force(project_id);
+}
+
+/// Drop a client's interest on clean disconnect. For the native app this fires
+/// from `prPollingService.dispose()`; for web it fires on WS close.
+#[tauri::command(rename_all = "camelCase")]
+pub fn disconnect_client(scheduler: tauri::State<'_, Arc<PrPollScheduler>>, client_id: String) {
+    scheduler.disconnect_client(client_id);
 }
 
 // ---------------------------------------------------------------------------
@@ -482,11 +657,19 @@ mod tests {
         v.iter().map(|s| s.to_string()).collect()
     }
 
+    /// A `PollState` with the launch-seeded Tauri client removed, for
+    /// multi-client tests that want a clean slate of explicitly-added clients.
+    fn empty_state() -> PollState {
+        let mut st = PollState::new();
+        st.disconnect_client(TAURI_CLIENT_ID);
+        st
+    }
+
     #[test]
     fn due_respects_the_three_tiers() {
         let mut st = PollState::new();
-        st.set_foreground(Some("sel".into()));
-        st.set_branch_pending("b1".into(), "pend".into(), true);
+        st.set_foreground(TAURI_CLIENT_ID, Some("sel".into()), 0);
+        st.set_branch_pending(TAURI_CLIENT_ID, "b1".into(), "pend".into(), true, 0);
         for id in ["sel", "pend", "bg"] {
             st.last_polled_at.insert(id.into(), 0);
         }
@@ -516,7 +699,7 @@ mod tests {
     fn unfocused_pauses_periodic_polling_but_not_forced() {
         let mut st = PollState::new();
         st.last_polled_at.insert("p".into(), 0);
-        st.set_focus(false);
+        st.set_focus(TAURI_CLIENT_ID, false, 0);
         let none = HashSet::new();
 
         // Long past every interval, but no focused client ⇒ nothing due.
@@ -600,14 +783,14 @@ mod tests {
     }
 
     #[test]
-    fn prune_drops_unknown_projects_and_their_interest() {
+    fn prune_clears_per_client_foreground_and_pending() {
         let mut st = PollState::new();
         st.last_polled_at.insert("gone".into(), 0);
         st.failures.insert("gone".into(), 2);
         st.stale.insert("gone".into());
         st.force("gone".into());
-        st.set_foreground(Some("gone".into()));
-        st.set_branch_pending("b".into(), "gone".into(), true);
+        st.set_foreground(TAURI_CLIENT_ID, Some("gone".into()), 0);
+        st.set_branch_pending(TAURI_CLIENT_ID, "b".into(), "gone".into(), true, 0);
 
         let known: HashSet<&str> = ["alive"].into_iter().collect();
         st.prune(&known);
@@ -616,7 +799,185 @@ mod tests {
         assert!(st.failures.is_empty());
         assert!(st.stale.is_empty());
         assert!(st.forced.is_empty());
-        assert!(st.pending_branches.is_empty());
-        assert!(st.foreground_project.is_none());
+        // The client itself survives prune (lifecycle is separate); only its
+        // interest in the now-gone project is cleared.
+        let client = &st.clients[TAURI_CLIENT_ID];
+        assert!(client.pending_branches.is_empty());
+        assert!(client.foreground_project.is_none());
+    }
+
+    // -- Phase 2: per-client interest / union / lifecycle ------------------
+
+    #[test]
+    fn union_foreground_across_two_clients() {
+        let mut st = empty_state();
+        st.set_focus("a", true, 0);
+        st.set_focus("b", true, 0);
+        st.set_foreground("a", Some("p1".into()), 0);
+        st.set_foreground("b", Some("p2".into()), 0);
+        for id in ["p1", "p2", "bg"] {
+            st.last_polled_at.insert(id.into(), 0);
+        }
+        // Each client's foreground reaches the selected tier; bg stays slow.
+        assert_eq!(st.interval_for("p1"), SELECTED_INTERVAL_MS);
+        assert_eq!(st.interval_for("p2"), SELECTED_INTERVAL_MS);
+        assert_eq!(st.interval_for("bg"), BACKGROUND_INTERVAL_MS);
+        // Both foregrounded projects are due at the selected interval; bg isn't.
+        assert_eq!(
+            st.due(
+                &ids(&["p1", "p2", "bg"]),
+                SELECTED_INTERVAL_MS,
+                &HashSet::new()
+            ),
+            ids(&["p1", "p2"])
+        );
+    }
+
+    #[test]
+    fn union_pending_beats_foreground() {
+        let mut st = empty_state();
+        // Client A sees a pending branch in p1; client B merely foregrounds p1.
+        st.set_branch_pending("a", "b1".into(), "p1".into(), true, 0);
+        st.set_foreground("b", Some("p1".into()), 0);
+        // Pending wins the union precedence.
+        assert_eq!(st.interval_for("p1"), PENDING_INTERVAL_MS);
+    }
+
+    #[test]
+    fn union_focus() {
+        let mut st = empty_state();
+        st.set_focus("a", false, 0);
+        st.set_focus("b", true, 0);
+        st.last_polled_at.insert("p".into(), 0);
+        let none = HashSet::new();
+
+        // Any client focused ⇒ active.
+        assert!(st.any_focused());
+        assert_eq!(
+            st.due(&ids(&["p"]), BACKGROUND_INTERVAL_MS, &none),
+            ids(&["p"])
+        );
+
+        // All clients unfocused ⇒ paused.
+        st.set_focus("b", false, 0);
+        assert!(!st.any_focused());
+        assert!(st
+            .due(&ids(&["p"]), BACKGROUND_INTERVAL_MS * 10, &none)
+            .is_empty());
+    }
+
+    #[test]
+    fn disconnect_recomputes_union() {
+        let mut st = empty_state();
+        st.set_foreground("a", Some("p1".into()), 0);
+        st.set_foreground("b", Some("p1".into()), 0);
+        assert_eq!(st.interval_for("p1"), SELECTED_INTERVAL_MS);
+
+        // One client leaves: still selected (B still holds it).
+        st.disconnect_client("a");
+        assert!(st.is_foreground("p1"));
+        assert_eq!(st.interval_for("p1"), SELECTED_INTERVAL_MS);
+
+        // Last client holding it leaves: falls back to the background tier.
+        st.disconnect_client("b");
+        assert!(!st.is_foreground("p1"));
+        assert_eq!(st.interval_for("p1"), BACKGROUND_INTERVAL_MS);
+    }
+
+    #[test]
+    fn disconnect_drops_pending() {
+        let mut st = empty_state();
+        st.set_branch_pending("a", "b1".into(), "p".into(), true, 0);
+        assert!(st.project_has_pending("p"));
+        assert_eq!(st.interval_for("p"), PENDING_INTERVAL_MS);
+
+        st.disconnect_client("a");
+        assert!(!st.project_has_pending("p"));
+        assert_eq!(st.interval_for("p"), BACKGROUND_INTERVAL_MS);
+    }
+
+    #[test]
+    fn ttl_evicts_stale_clients_but_exempts_tauri() {
+        // Keep the launch-seeded Tauri client (last_seen = 0).
+        let mut st = PollState::new();
+        st.set_focus("web", true, 0);
+        st.set_foreground("web", Some("p".into()), 0);
+        assert!(st.is_foreground("p"));
+
+        // Sweep well past the TTL relative to last_seen = 0.
+        st.evict_stale_clients(CLIENT_TTL_MS + 1, CLIENT_TTL_MS);
+
+        // The stale web client is gone; its interest no longer counts.
+        assert!(!st.clients.contains_key("web"));
+        assert!(!st.is_foreground("p"));
+        // The Tauri client is exempt despite last_seen = 0, and stays focused.
+        assert!(st.clients.contains_key(TAURI_CLIENT_ID));
+        assert!(st.any_focused());
+    }
+
+    #[test]
+    fn touch_keeps_client_alive() {
+        let mut st = empty_state();
+        st.set_focus("web", true, 0);
+
+        // A heartbeat at the TTL boundary keeps the client alive through a sweep
+        // at the same instant.
+        let now = CLIENT_TTL_MS + 10;
+        st.touch("web", now);
+        st.evict_stale_clients(now, CLIENT_TTL_MS);
+        assert!(st.clients.contains_key("web"));
+        assert!(st.any_focused());
+
+        // Without a further touch, it is evicted once the TTL elapses past the
+        // last heartbeat.
+        st.evict_stale_clients(now + CLIENT_TTL_MS + 1, CLIENT_TTL_MS);
+        assert!(!st.clients.contains_key("web"));
+    }
+
+    #[test]
+    fn forced_is_global_and_survives_disconnect() {
+        let mut st = empty_state();
+        st.last_polled_at.insert("p".into(), 0);
+
+        // Client A nudges a refresh, then disconnects.
+        st.force("p".into());
+        st.disconnect_client("a");
+
+        // `forced` is project-keyed and global, so it outlives the forcing
+        // client and still bypasses the focus pause.
+        assert!(!st.any_focused());
+        assert_eq!(st.due(&ids(&["p"]), 1_000, &HashSet::new()), ids(&["p"]));
+    }
+
+    #[test]
+    fn single_client_equivalence_to_phase1() {
+        // One seeded Tauri client reproduces Phase 1's tier and pause behaviour.
+        let mut st = PollState::new();
+        st.set_foreground(TAURI_CLIENT_ID, Some("sel".into()), 0);
+        st.set_branch_pending(TAURI_CLIENT_ID, "b1".into(), "pend".into(), true, 0);
+        for id in ["sel", "pend", "bg"] {
+            st.last_polled_at.insert(id.into(), 0);
+        }
+        let projects = ids(&["sel", "pend", "bg"]);
+        let none = HashSet::new();
+
+        assert_eq!(
+            st.due(&projects, PENDING_INTERVAL_MS, &none),
+            ids(&["pend"])
+        );
+        assert_eq!(
+            st.due(&projects, SELECTED_INTERVAL_MS, &none),
+            ids(&["sel", "pend"])
+        );
+        assert_eq!(
+            st.due(&projects, BACKGROUND_INTERVAL_MS, &none),
+            ids(&["sel", "pend", "bg"])
+        );
+
+        // Unfocusing the lone client pauses periodic polling.
+        st.set_focus(TAURI_CLIENT_ID, false, 0);
+        assert!(st
+            .due(&projects, BACKGROUND_INTERVAL_MS * 10, &none)
+            .is_empty());
     }
 }

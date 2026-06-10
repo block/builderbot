@@ -23,7 +23,39 @@ import {
   setPrPollFocus,
   setBranchPending,
   refreshPrStatusesNow,
+  disconnectPrPollClient,
 } from '../commands';
+
+// ---------------------------------------------------------------------------
+// Client identity
+// ---------------------------------------------------------------------------
+//
+// The backend tracks PR-poll interest per connected client and unions the
+// cadence across them (see src-tauri/src/pr_poll_scheduler.rs). This module
+// owns a stable id for the lifetime of the page that is threaded through every
+// interest hint.
+//
+//   - Native (Tauri): the fixed well-known id `tauri-main` (must match
+//     `TAURI_CLIENT_ID` in pr_poll_scheduler.rs), so single-client behaviour is
+//     identical to before per-client interest existed.
+//   - Web (browser): a fresh UUID per page load (per tab). The same value must
+//     be appended to the WS connect URL (`?clientId=<id>`) by the web transport
+//     so the backend correlates this client's interest (invoke channel) with
+//     its disconnect (WS close). See `getPrPollClientId`.
+
+const TAURI_CLIENT_ID = 'tauri-main';
+
+const clientId: string = isTauri ? TAURI_CLIENT_ID : crypto.randomUUID();
+
+/**
+ * This client's PR-poll id, stable for the page's lifetime. Exposed so the web
+ * transport can append the *same* id to the events WebSocket connect query
+ * (`?clientId=<id>`) — the backend↔frontend contract requires the same id on
+ * both the invoke and WS channels.
+ */
+export function getPrPollClientId(): string {
+  return clientId;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -100,11 +132,11 @@ function setProjectRefreshing(projectId: string, isRefreshing: boolean) {
 // ---------------------------------------------------------------------------
 
 function handleFocus() {
-  void setPrPollFocus(true).catch(() => {});
+  void setPrPollFocus(clientId, true).catch(() => {});
 }
 
 function handleBlur() {
-  void setPrPollFocus(false).catch(() => {});
+  void setPrPollFocus(clientId, false).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -124,7 +156,7 @@ export function init(): void {
   window.addEventListener('blur', handleBlur);
   // Seed the backend with the current focus state (it defaults to focused, so
   // the initial poll already ran; this corrects it if we launched unfocused).
-  void setPrPollFocus(document.hasFocus()).catch(() => {});
+  void setPrPollFocus(clientId, document.hasFocus()).catch(() => {});
 
   unlistenRefreshState = listenToEvent<PrRefreshStateEvent>('pr-refresh-state', (payload) => {
     setProjectRefreshing(payload.projectId, payload.refreshing);
@@ -146,6 +178,9 @@ export function dispose(): void {
   unlistenRefreshState = null;
   unlistenStale = null;
 
+  // Drop this client's interest so the backend recomputes the union without it.
+  void disconnectPrPollClient(clientId).catch(() => {});
+
   for (const projectId of [...refreshingProjects]) {
     setProjectRefreshing(projectId, false);
   }
@@ -158,7 +193,7 @@ export function dispose(): void {
 /** Set the currently selected project (polls more frequently). */
 export function setSelectedProject(projectId: string | null): void {
   if (!isTauri) return;
-  void setForegroundProject(projectId).catch((e) =>
+  void setForegroundProject(clientId, projectId).catch((e) =>
     console.error('[PrPollingService] set_foreground_project failed:', e)
   );
 }
@@ -170,7 +205,7 @@ export function updateChecksStatus(
   hasPendingChecks: boolean
 ): void {
   if (!isTauri) return;
-  void setBranchPending(branchId, projectId, hasPendingChecks).catch((e) =>
+  void setBranchPending(clientId, branchId, projectId, hasPendingChecks).catch((e) =>
     console.error('[PrPollingService] set_branch_pending failed:', e)
   );
 }
@@ -178,7 +213,7 @@ export function updateChecksStatus(
 /** Trigger an immediate refresh for a specific project (e.g. after PR creation or push). */
 export function refreshNow(projectId: string): void {
   if (!isTauri) return;
-  void refreshPrStatusesNow(projectId).catch((e) =>
+  void refreshPrStatusesNow(clientId, projectId).catch((e) =>
     console.error(`[PrPollingService] refresh_now failed for project=${projectId}:`, e)
   );
 }

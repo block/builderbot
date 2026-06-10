@@ -2257,6 +2257,7 @@ pub fn run() {
             pr_poll_scheduler::set_focus,
             pr_poll_scheduler::set_branch_pending,
             pr_poll_scheduler::refresh_now,
+            pr_poll_scheduler::disconnect_client,
             // Utilities
             util_commands::open_url,
             util_commands::is_sq_available,

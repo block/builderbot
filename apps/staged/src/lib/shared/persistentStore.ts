@@ -12,7 +12,7 @@
 
 import { isTauri, invokeCommand } from '../transport';
 
-/** Log a `persistentStore.set` whose disk write blocks for at least this long. */
+/** Log a `persistentStore.set` whose round-trip takes at least this long. */
 const SLOW_SET_MS = 50;
 
 // ---------------------------------------------------------------------------
@@ -80,11 +80,31 @@ export async function setStoreValue<T>(key: string, value: T): Promise<void> {
     return;
   }
 
+  // Concurrent event-loop probe. `store.set` is an IPC round-trip whose promise
+  // can only resolve once the renderer's main thread is free to process the
+  // response — so a slow `set` reading does NOT prove the disk write was slow,
+  // it may just be queued behind a blocked main thread. This macrotask is
+  // scheduled at the same instant and is delayed by exactly that same block, so
+  // comparing the two attributes the cost: `set` >> `lag` => genuinely slow
+  // backend write/IPC; `set` ≈ `lag` => the write is a co-victim of a
+  // main-thread freeze (look at switchTracer's `maxGap` for the culprit).
+  let lagMs = -1;
+  const probeStart = performance.now();
+  const lagProbe = new Promise<void>((resolve) => {
+    setTimeout(() => {
+      lagMs = performance.now() - probeStart;
+      resolve();
+    }, 0);
+  });
+
   const start = performance.now();
   await backend.store.set(key, value);
   const dur = performance.now() - start;
+  await lagProbe;
   if (dur >= SLOW_SET_MS) {
-    console.info(`[switch] persistentStore.set slow: key=${key} took ${Math.round(dur)}ms`);
+    console.info(
+      `[switch] persistentStore.set slow: key=${key} set=${Math.round(dur)}ms eventLoopLag=${Math.round(lagMs)}ms`
+    );
   }
 }
 

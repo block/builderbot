@@ -736,6 +736,11 @@
     flex-shrink: 0;
     background-color: var(--bg-elevated);
     border: 1px solid var(--border-subtle);
+    /* Pin the icon onto its own compositing layer so it rasterizes at integer
+       pixels and stays put during the row's hover background-color transition.
+       Restores the layer hint #775 dropped from .timeline-row, but on the tiny
+       icon rather than the full-width row to keep that commit's memory win. */
+    transform: translateZ(0);
   }
 
   .timeline-icon.commit-icon {

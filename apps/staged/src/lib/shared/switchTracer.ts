@@ -2,11 +2,14 @@
  * switchTracer — lightweight instrumentation for diagnosing project-switch latency.
  *
  * A "switch" is the window between navigating from one project to another and
- * the UI settling on the next one. We trace the synchronous milestones
- * (selectProject, ProjectSection mount/destroy, the App selectedProjectId
- * effect), count component mounts/unmounts, and watch requestAnimationFrame for
+ * the UI settling on the next one. We trace the synchronous milestones that
+ * subdivide the reactive cascade (selectProject, ProjectHome derive,
+ * ProjectSection construct/mount/destroy, the App selectedProjectId effect),
+ * count component mounts/unmounts, and watch requestAnimationFrame for
  * main-thread stalls — so we can tell genuine rendering cost apart from
- * event-loop starvation (e.g. a PR-poll storm blocking the renderer).
+ * event-loop starvation (e.g. a PR-poll storm blocking the renderer), and so a
+ * freeze names the offending stage (derive vs. old-subtree teardown vs.
+ * new-subtree build) rather than landing in one opaque span.
  *
  * Everything here is console-only. Lifecycle lines are prefixed `[switch #N ...]`;
  * one-off slow-path warnings emitted from other modules use the bare `[switch]`

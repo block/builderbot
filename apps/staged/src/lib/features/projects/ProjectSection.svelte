@@ -107,6 +107,17 @@
     onResumeWorkspace,
   }: Props = $props();
 
+  // Instrumentation (console-only): timestamp the start of this section's
+  // (re)construction. Top-level script runs once per new instance, before the
+  // template builds any child BranchCards, so the gap to the existing
+  // `ProjectSection mount` (onMount, fired after all cards are constructed)
+  // isolates the new-subtree build — BranchCard construction plus each card's
+  // synchronous timeline-cache hydration (see `BranchCard.hydrateSync`) — from
+  // the old-subtree teardown that precedes `ProjectSection destroy`. The
+  // construction-time project id is exactly the value we want here.
+  // svelte-ignore state_referenced_locally
+  switchTracer.mark('ProjectSection construct', project.id);
+
   let sortedBranches = $derived([...branches].sort((a, b) => b.createdAt - a.createdAt));
   let projectDisplayRootCandidates = $derived(
     branches.map((branch) => branch.worktreePath).filter((path): path is string => !!path)

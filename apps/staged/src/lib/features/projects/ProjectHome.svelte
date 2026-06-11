@@ -888,6 +888,9 @@
     min-width: 0;
     min-height: 0;
     overflow: auto;
+    /* Reserve the scrollbar gutter so the centered column never re-centers
+       when the vertical scrollbar appears/disappears (avoids a ~4px jog). */
+    scrollbar-gutter: stable;
     display: flex;
     flex-direction: column;
   }

@@ -6,6 +6,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import * as switchTracer from '../../shared/switchTracer';
   import { listenToEvent } from '../../transport';
   import { untrack } from 'svelte';
   import ChevronLeft from '@lucide/svelte/icons/chevron-left';
@@ -195,6 +196,8 @@
   });
 
   onDestroy(() => {
+    switchTracer.countUnmount('ProjectSection');
+    switchTracer.mark('ProjectSection destroy', project.id);
     liveSessionHintPoller.destroy();
   });
 
@@ -458,6 +461,8 @@
   // ── Lifecycle ──────────────────────────────────────────────────────────
 
   onMount(() => {
+    switchTracer.countMount('ProjectSection');
+    switchTracer.mark('ProjectSection mount', project.id);
     loadProjectNotes();
 
     // Refresh hashtag items when branch timelines are invalidated (e.g. branch session completion)

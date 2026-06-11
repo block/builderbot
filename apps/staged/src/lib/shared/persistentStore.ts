@@ -12,6 +12,9 @@
 
 import { isTauri, invokeCommand } from '../transport';
 
+/** Log a `persistentStore.set` whose disk write blocks for at least this long. */
+const SLOW_SET_MS = 50;
+
 // ---------------------------------------------------------------------------
 // Tauri store backend
 // ---------------------------------------------------------------------------
@@ -77,7 +80,12 @@ export async function setStoreValue<T>(key: string, value: T): Promise<void> {
     return;
   }
 
+  const start = performance.now();
   await backend.store.set(key, value);
+  const dur = performance.now() - start;
+  if (dur >= SLOW_SET_MS) {
+    console.info(`[switch] persistentStore.set slow: key=${key} took ${Math.round(dur)}ms`);
+  }
 }
 
 /**

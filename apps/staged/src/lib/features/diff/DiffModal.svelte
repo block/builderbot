@@ -770,6 +770,22 @@
     diffViewer.selectFile(file.path);
   }
 
+  // Diagnostic: time how long from a file becoming selected to it painting.
+  let lastPaintedDiffPath: string | null = null;
+  $effect(() => {
+    const path = diffViewer.state.selectedFile;
+    if (!path || path === lastPaintedDiffPath) return;
+    lastPaintedDiffPath = path;
+    const start = performance.now();
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        console.info(
+          `[diff] render painted in ${Math.round(performance.now() - start)}ms: path=${path}`
+        );
+      })
+    );
+  });
+
   async function toggleReviewed(event: MouseEvent | KeyboardEvent, file: FileEntry) {
     event.stopPropagation();
     await reviewHandle?.toggleReviewed(file.path);

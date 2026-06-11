@@ -45,6 +45,7 @@
   import { listenForSessionStatus } from './lib/listeners/sessionStatusListener';
   import { darkMode } from './lib/stores/isDark.svelte';
   import * as prPollingService from './lib/services/prPollingService';
+  import * as switchTracer from './lib/shared/switchTracer';
   import { reposUiEnabled } from './lib/featureFlags';
   import type { StoreIncompatibility } from './lib/types';
 
@@ -73,6 +74,7 @@
   // prPollingService.init(), called from onMount).
   // =========================================================================
   $effect(() => {
+    switchTracer.mark('App: selectedProjectId effect → prPolling.setSelectedProject');
     prPollingService.setSelectedProject(navigation.selectedProjectId);
   });
 

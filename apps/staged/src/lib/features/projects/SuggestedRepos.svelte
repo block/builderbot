@@ -128,6 +128,7 @@
         variant="ghost"
         class="size-[22px] rounded-[4px] p-0 text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-secondary)] [&_svg]:!size-3.5"
         aria-label="Dismiss suggestions"
+        title="Dismiss suggestions"
         onclick={handleDismiss}
       >
         <X size={14} />

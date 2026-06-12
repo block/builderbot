@@ -236,7 +236,6 @@ impl PollState {
     fn record_success(&mut self, project_id: &str, now: i64) -> bool {
         self.last_polled_at.insert(project_id.to_string(), now);
         self.failures.remove(project_id);
-        self.forced.remove(project_id);
         self.stale.remove(project_id)
     }
 
@@ -249,7 +248,6 @@ impl PollState {
     /// once a second — exactly the kind of churn the backend should damp.)
     fn record_failure(&mut self, project_id: &str, now: i64) -> bool {
         self.last_polled_at.insert(project_id.to_string(), now);
-        self.forced.remove(project_id);
         let count = self.failures.entry(project_id.to_string()).or_insert(0);
         *count += 1;
         if *count == MAX_CONSECUTIVE_FAILURES {
@@ -742,6 +740,32 @@ mod tests {
         // refresh_now folds in: due immediately regardless of interval.
         st.force("p".into());
         assert_eq!(st.due(&ids(&["p"]), 1_000, &HashSet::new()), ids(&["p"]));
+    }
+
+    #[test]
+    fn refresh_now_during_in_flight_refresh_survives_completion() {
+        for completion in [
+            PollState::record_success as fn(&mut PollState, &str, i64) -> bool,
+            PollState::record_failure,
+        ] {
+            let mut st = PollState::new();
+            st.last_polled_at.insert("p".into(), 0);
+
+            // First nudge is consumed when the tick schedules the refresh.
+            st.force("p".into());
+            assert_eq!(st.due(&ids(&["p"]), 1_000, &HashSet::new()), ids(&["p"]));
+            st.forced.remove("p");
+
+            // A second nudge arrives while that refresh is still in flight, so
+            // it is deduped for now...
+            st.force("p".into());
+            assert!(st.due(&ids(&["p"]), 1_000, &set(&["p"])).is_empty());
+
+            // ...but completing the original refresh must not clear the fresh
+            // nudge. Once in-flight clears, the project is due immediately.
+            completion(&mut st, "p", 2_000);
+            assert_eq!(st.due(&ids(&["p"]), 2_000, &HashSet::new()), ids(&["p"]));
+        }
     }
 
     #[test]

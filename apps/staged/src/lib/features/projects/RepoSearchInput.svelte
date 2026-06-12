@@ -19,6 +19,7 @@
   import * as commands from '../../api/commands';
   import type { GitHubRepo, RecentRepo } from '../../types';
   import { parseGitHubUrl, type RepoSelection } from '../../shared/githubUrl';
+  import { matchesRepoSearch } from '../../shared/repoSearch';
   import { viewport } from '../../shared/viewport.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { darkMode } from '../../stores/isDark.svelte';
@@ -101,11 +102,11 @@
   });
 
   let filteredRecentRepos = $derived.by(() => {
-    const q = query.toLowerCase().trim();
+    const q = query.trim();
     const base = recentRepos.filter(
       (r) => !excludeRepos.has(`${r.githubRepo}\x00${r.subpath ?? ''}`)
     );
-    return q ? base.filter((r) => r.githubRepo.toLowerCase().includes(q)) : base;
+    return q ? base.filter((r) => matchesRepoSearch(r.githubRepo, r.subpath, q)) : base;
   });
 
   const dark = $derived(darkMode.value);

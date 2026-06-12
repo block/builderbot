@@ -182,7 +182,7 @@
   <Button
     variant="outline"
     type="button"
-    class="h-auto gap-1.5 rounded-md border border-dashed border-[var(--border-muted)] bg-transparent px-2.5 py-1.5 text-xs text-[var(--text-faint)] shadow-none hover:border-[var(--border-emphasis)] hover:bg-transparent hover:text-muted-foreground"
+    class="h-8 gap-1.5 rounded-md border border-[var(--border-emphasis)] bg-[var(--bg-hover)] px-3 py-1.5 text-xs font-medium text-muted-foreground shadow-none hover:border-[var(--ui-accent)] hover:bg-[var(--ui-selection)] hover:text-foreground [&_svg]:!size-3.5 [&_svg]:text-[var(--ui-accent)]"
     onclick={openFilePicker}
   >
     <ImagePlus size={14} />

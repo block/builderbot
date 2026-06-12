@@ -497,16 +497,29 @@
         {/if}
       </div>
 
-      <ImageAttachment
-        branchId={branch.id}
-        projectId={branch.projectId}
-        disabled={starting}
-        {imageIds}
-        {onImageIdsChange}
-      />
+      {#if imageIds.length > 0}
+        <ImageAttachment
+          branchId={branch.id}
+          projectId={branch.projectId}
+          disabled={starting}
+          {imageIds}
+          {onImageIdsChange}
+        />
+      {/if}
 
       <div class="form-actions">
-        <AgentSelector disabled={starting} {remote} dropUp />
+        <div class="form-actions-left">
+          <AgentSelector disabled={starting} {remote} dropUp />
+          {#if imageIds.length === 0}
+            <ImageAttachment
+              branchId={branch.id}
+              projectId={branch.projectId}
+              disabled={starting}
+              {imageIds}
+              {onImageIdsChange}
+            />
+          {/if}
+        </div>
         <div class="form-actions-right">
           <Button
             type="button"
@@ -765,6 +778,13 @@
     margin-top: 4px;
   }
 
+  .form-actions-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
   .form-actions-right {
     display: flex;
     gap: 8px;
@@ -786,6 +806,11 @@
     .form-actions {
       align-items: stretch;
       flex-direction: column;
+    }
+
+    .form-actions-left {
+      flex-wrap: wrap;
+      width: 100%;
     }
 
     .form-actions :global(.selector-btn) {

@@ -208,23 +208,25 @@ impl PollState {
         due
     }
 
-    /// Drop tracking for projects (and per-client interest in them) that no
-    /// longer exist. Project-keyed work bookkeeping is pruned by membership;
-    /// each client's interest is pruned in place. Client *lifecycle* eviction
-    /// (disconnect / TTL) is separate — that drops whole clients, this drops
-    /// dead projects from surviving clients.
-    fn prune(&mut self, known: &HashSet<&str>) {
+    /// Drop tracking for projects/branches that no longer exist. Project-keyed
+    /// work bookkeeping is pruned by project membership; each client's interest
+    /// is pruned in place. Client *lifecycle* eviction (disconnect / TTL) is
+    /// separate — that drops whole clients, this drops dead project/branch
+    /// interest from surviving clients.
+    fn prune(&mut self, known_projects: &HashSet<&str>, known_branches: &HashSet<&str>) {
         self.last_polled_at
-            .retain(|k, _| known.contains(k.as_str()));
-        self.failures.retain(|k, _| known.contains(k.as_str()));
-        self.stale.retain(|k| known.contains(k.as_str()));
-        self.forced.retain(|k| known.contains(k.as_str()));
+            .retain(|k, _| known_projects.contains(k.as_str()));
+        self.failures
+            .retain(|k, _| known_projects.contains(k.as_str()));
+        self.stale.retain(|k| known_projects.contains(k.as_str()));
+        self.forced.retain(|k| known_projects.contains(k.as_str()));
         for client in self.clients.values_mut() {
-            client
-                .pending_branches
-                .retain(|_, p| known.contains(p.as_str()));
+            client.pending_branches.retain(|branch_id, project_id| {
+                known_branches.contains(branch_id.as_str())
+                    && known_projects.contains(project_id.as_str())
+            });
             if let Some(fg) = &client.foreground_project {
-                if !known.contains(fg.as_str()) {
+                if !known_projects.contains(fg.as_str()) {
                     client.foreground_project = None;
                 }
             }
@@ -465,6 +467,13 @@ async fn tick(
             return;
         }
     };
+    let branch_ids: Vec<String> = match store.list_branch_ids() {
+        Ok(branch_ids) => branch_ids,
+        Err(e) => {
+            log::warn!("[pr_poll] failed to list branches: {e}");
+            return;
+        }
+    };
 
     let now = crate::store::now_timestamp();
 
@@ -473,13 +482,14 @@ async fn tick(
     // only nesting site; completion handlers below take the two locks
     // sequentially, never nested, so there is no ordering hazard.
     let due = {
-        let known: HashSet<&str> = project_ids.iter().map(|s| s.as_str()).collect();
+        let known_projects: HashSet<&str> = project_ids.iter().map(|s| s.as_str()).collect();
+        let known_branches: HashSet<&str> = branch_ids.iter().map(|s| s.as_str()).collect();
         let mut in_flight = scheduler.in_flight.lock().unwrap();
         let mut state = scheduler.state.lock().unwrap();
         // Evict clients that dropped without a clean WS close before deciding
         // what is due, so their stale interest stops inflating the union.
         state.evict_stale_clients(now, CLIENT_TTL_MS);
-        state.prune(&known);
+        state.prune(&known_projects, &known_branches);
         let due = state.due(&project_ids, now, &in_flight);
         for id in &due {
             in_flight.insert(id.clone());
@@ -816,8 +826,9 @@ mod tests {
         st.set_foreground(TAURI_CLIENT_ID, Some("gone".into()), 0);
         st.set_branch_pending(TAURI_CLIENT_ID, "b".into(), "gone".into(), true, 0);
 
-        let known: HashSet<&str> = ["alive"].into_iter().collect();
-        st.prune(&known);
+        let known_projects: HashSet<&str> = ["alive"].into_iter().collect();
+        let known_branches: HashSet<&str> = HashSet::new();
+        st.prune(&known_projects, &known_branches);
 
         assert!(st.last_polled_at.is_empty());
         assert!(st.failures.is_empty());
@@ -828,6 +839,27 @@ mod tests {
         let client = &st.clients[TAURI_CLIENT_ID];
         assert!(client.pending_branches.is_empty());
         assert!(client.foreground_project.is_none());
+    }
+
+    #[test]
+    fn prune_clears_pending_for_deleted_branch_in_surviving_project() {
+        let mut st = PollState::new();
+        st.set_branch_pending(
+            TAURI_CLIENT_ID,
+            "deleted-branch".into(),
+            "alive".into(),
+            true,
+            0,
+        );
+        assert!(st.project_has_pending("alive"));
+        assert_eq!(st.interval_for("alive"), PENDING_INTERVAL_MS);
+
+        let known_projects: HashSet<&str> = ["alive"].into_iter().collect();
+        let known_branches: HashSet<&str> = ["other-branch"].into_iter().collect();
+        st.prune(&known_projects, &known_branches);
+
+        assert!(!st.project_has_pending("alive"));
+        assert_eq!(st.interval_for("alive"), BACKGROUND_INTERVAL_MS);
     }
 
     // -- Phase 2: per-client interest / union / lifecycle ------------------

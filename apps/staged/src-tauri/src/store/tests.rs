@@ -1,5 +1,6 @@
 //! Tests for the store module.
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use super::models::*;
@@ -309,6 +310,24 @@ fn test_list_branches_includes_both_types() {
     assert_eq!(local_branch.branch_type, BranchType::Local);
     assert_eq!(remote_branch.branch_type, BranchType::Remote);
     assert_eq!(remote_branch.workspace_name.as_deref(), Some("ws-1"));
+}
+
+#[test]
+fn test_list_branch_ids() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+
+    let local = Branch::new(&project.id, "local-feature", "main");
+    let remote = Branch::new_remote(&project.id, "remote-feature", "main", "ws-1");
+    store.create_branch(&local).unwrap();
+    store.create_branch(&remote).unwrap();
+
+    let branch_ids: HashSet<String> = store.list_branch_ids().unwrap().into_iter().collect();
+    assert_eq!(
+        branch_ids,
+        HashSet::from([local.id.clone(), remote.id.clone()])
+    );
 }
 
 #[test]

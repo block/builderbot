@@ -11,7 +11,6 @@
   import GeneralSettingsPanel from './GeneralSettingsPanel.svelte';
   import KeyboardSettingsPanel from './KeyboardSettingsPanel.svelte';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
   import { isTauri } from '../../transport';
 
   let appVersion = $state(__APP_VERSION__);
@@ -34,17 +33,10 @@
 
 <div class="settings-page">
   <header class="settings-header">
-    <Tooltip.Root>
-      <Tooltip.Trigger>
-        {#snippet child({ props })}
-          <Button {...props} variant="ghost" size="sm" onclick={handleBack}>
-            <ArrowLeft size={14} />
-            Back
-          </Button>
-        {/snippet}
-      </Tooltip.Trigger>
-      <Tooltip.Content>Back to workspace</Tooltip.Content>
-    </Tooltip.Root>
+    <Button variant="ghost" size="sm" title="Back to workspace" onclick={handleBack}>
+      <ArrowLeft size={14} />
+      Back
+    </Button>
     <div class="header-text">
       <h1>Settings</h1>
       <p class="header-meta">v{appVersion}</p>

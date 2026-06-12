@@ -28,7 +28,6 @@
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
   import { Input } from '$lib/components/ui/input';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
 
   interface Props {
     onClose: () => void;
@@ -166,22 +165,16 @@
 <div class="launcher">
   <div class="launcher-header">
     <span class="launcher-title">Sessions</span>
-    <Tooltip.Root>
-      <Tooltip.Trigger>
-        {#snippet child({ props })}
-          <Button
-            {...props}
-            variant="ghost"
-            size="icon"
-            class="size-7 rounded-md text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-3.5"
-            onclick={onClose}
-          >
-            <X size={14} />
-          </Button>
-        {/snippet}
-      </Tooltip.Trigger>
-      <Tooltip.Content>Close</Tooltip.Content>
-    </Tooltip.Root>
+    <Button
+      variant="ghost"
+      size="icon"
+      class="size-7 rounded-md text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-3.5"
+      title="Close"
+      aria-label="Close"
+      onclick={onClose}
+    >
+      <X size={14} />
+    </Button>
   </div>
 
   <!-- Create form -->
@@ -194,28 +187,22 @@
       disabled={creating}
       class="flex-1"
     />
-    <Tooltip.Root>
-      <Tooltip.Trigger>
-        {#snippet child({ props })}
-          <span {...props} class="inline-flex">
-            <Button
-              variant="ghost"
-              size="icon"
-              class="size-7 rounded-md text-[var(--ui-accent)] hover:bg-[var(--bg-hover)] hover:text-[var(--ui-accent)] [&_svg]:!size-3.5"
-              onclick={handleCreate}
-              disabled={creating || !prompt.trim()}
-            >
-              {#if creating}
-                <Spinner size={14} />
-              {:else}
-                <Plus size={14} />
-              {/if}
-            </Button>
-          </span>
-        {/snippet}
-      </Tooltip.Trigger>
-      <Tooltip.Content>Create session</Tooltip.Content>
-    </Tooltip.Root>
+    <span class="inline-flex" title="Create session">
+      <Button
+        variant="ghost"
+        size="icon"
+        class="size-7 rounded-md text-[var(--ui-accent)] hover:bg-[var(--bg-hover)] hover:text-[var(--ui-accent)] [&_svg]:!size-3.5"
+        aria-label="Create session"
+        onclick={handleCreate}
+        disabled={creating || !prompt.trim()}
+      >
+        {#if creating}
+          <Spinner size={14} />
+        {:else}
+          <Plus size={14} />
+        {/if}
+      </Button>
+    </span>
   </div>
 
   <!-- Session list -->
@@ -236,40 +223,28 @@
             <span class="session-id">{s.id.slice(0, 8)}</span>
           </div>
           <div class="session-actions">
-            <Tooltip.Root>
-              <Tooltip.Trigger>
-                {#snippet child({ props })}
-                  <span {...props} class="inline-flex">
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      class="size-[22px] rounded text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-3"
-                      onclick={() => openModal(s.id)}
-                      disabled={openModals.has(s.id)}
-                    >
-                      <Eye size={12} />
-                    </Button>
-                  </span>
-                {/snippet}
-              </Tooltip.Trigger>
-              <Tooltip.Content>Open session viewer</Tooltip.Content>
-            </Tooltip.Root>
-            <Tooltip.Root>
-              <Tooltip.Trigger>
-                {#snippet child({ props })}
-                  <Button
-                    {...props}
-                    variant="ghost"
-                    size="icon"
-                    class="size-[22px] rounded text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-destructive [&_svg]:!size-3"
-                    onclick={() => handleDelete(s.id)}
-                  >
-                    <Trash2 size={12} />
-                  </Button>
-                {/snippet}
-              </Tooltip.Trigger>
-              <Tooltip.Content>Delete session</Tooltip.Content>
-            </Tooltip.Root>
+            <span class="inline-flex" title="Open session viewer">
+              <Button
+                variant="ghost"
+                size="icon"
+                class="size-[22px] rounded text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-3"
+                aria-label="Open session viewer"
+                onclick={() => openModal(s.id)}
+                disabled={openModals.has(s.id)}
+              >
+                <Eye size={12} />
+              </Button>
+            </span>
+            <Button
+              variant="ghost"
+              size="icon"
+              class="size-[22px] rounded text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-destructive [&_svg]:!size-3"
+              title="Delete session"
+              aria-label="Delete session"
+              onclick={() => handleDelete(s.id)}
+            >
+              <Trash2 size={12} />
+            </Button>
           </div>
         </div>
       {/each}

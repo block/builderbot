@@ -33,7 +33,6 @@
   import { sanitize } from '../../shared/sanitize';
   import * as Dialog from '$lib/components/ui/dialog';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
   import { createNote, invalidateBranchTimeline } from '../../commands';
   import type { ActionStatusEvent, ActionOutputEvent, OutputChunk, ActionStatus } from './actions';
   import {
@@ -428,122 +427,86 @@
         {/if}
       </div>
       <div class="header-actions">
-        <Tooltip.Root>
-          <Tooltip.Trigger>
-            {#snippet child({ props })}
-              <span {...props} class="inline-flex">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  class={[
-                    'gap-1.5 border-[var(--border-muted)] bg-[var(--bg-secondary)] px-3 text-[13px] font-medium text-foreground shadow-none hover:border-[var(--border-focus)] hover:bg-[var(--bg-hover)] max-[640px]:h-10 max-[640px]:px-2.5',
-                    saveState === 'saved' &&
-                      'cursor-default border-[var(--commit-bg-emphasis)] bg-[var(--commit-bg)] text-[var(--status-added)] hover:border-[var(--commit-bg-emphasis)] hover:bg-[var(--commit-bg)] hover:text-[var(--status-added)]',
-                    saveState === 'error' &&
-                      'cursor-default border-[var(--ui-danger-bg)] bg-[var(--ui-danger-bg)] text-[var(--ui-danger)] hover:border-[var(--ui-danger-bg)] hover:bg-[var(--ui-danger-bg)] hover:text-[var(--ui-danger)]',
-                  ]}
-                  onmousedown={handleSaveMouseDown}
-                  onclick={handleSaveAsNote}
-                  disabled={saveState === 'saved' || saveState === 'error'}
-                >
-                  {#if saveState === 'saved'}
-                    <Check size={14} />
-                    <span>Saved</span>
-                  {:else if saveState === 'error'}
-                    <AlertCircle size={14} />
-                    <span>Failed</span>
-                  {:else}
-                    <StickyNote size={14} />
-                    <span>{selectedText ? 'Save selection' : 'Save log'}</span>
-                  {/if}
-                </Button>
-              </span>
-            {/snippet}
-          </Tooltip.Trigger>
-          <Tooltip.Content>
-            {saveState === 'error'
-              ? (saveError ?? 'Failed to save note')
-              : selectedText
-                ? 'Save selected text as a note'
-                : 'Save full log as a note'}
-          </Tooltip.Content>
-        </Tooltip.Root>
+        <span
+          class="inline-flex"
+          title={saveState === 'error'
+            ? (saveError ?? 'Failed to save note')
+            : selectedText
+              ? 'Save selected text as a note'
+              : 'Save full log as a note'}
+        >
+          <Button
+            variant="outline"
+            size="sm"
+            class={[
+              'gap-1.5 border-[var(--border-muted)] bg-[var(--bg-secondary)] px-3 text-[13px] font-medium text-foreground shadow-none hover:border-[var(--border-focus)] hover:bg-[var(--bg-hover)] max-[640px]:h-10 max-[640px]:px-2.5',
+              saveState === 'saved' &&
+                'cursor-default border-[var(--commit-bg-emphasis)] bg-[var(--commit-bg)] text-[var(--status-added)] hover:border-[var(--commit-bg-emphasis)] hover:bg-[var(--commit-bg)] hover:text-[var(--status-added)]',
+              saveState === 'error' &&
+                'cursor-default border-[var(--ui-danger-bg)] bg-[var(--ui-danger-bg)] text-[var(--ui-danger)] hover:border-[var(--ui-danger-bg)] hover:bg-[var(--ui-danger-bg)] hover:text-[var(--ui-danger)]',
+            ]}
+            onmousedown={handleSaveMouseDown}
+            onclick={handleSaveAsNote}
+            disabled={saveState === 'saved' || saveState === 'error'}
+          >
+            {#if saveState === 'saved'}
+              <Check size={14} />
+              <span>Saved</span>
+            {:else if saveState === 'error'}
+              <AlertCircle size={14} />
+              <span>Failed</span>
+            {:else}
+              <StickyNote size={14} />
+              <span>{selectedText ? 'Save selection' : 'Save log'}</span>
+            {/if}
+          </Button>
+        </span>
         {#if isRunning}
           {@const isCurrentlyStopping = isStopping || isStoppingDerived}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <span {...props} class="inline-flex">
-                  <Button
-                    variant="destructive"
-                    size="sm"
-                    class="gap-1.5 px-3 text-[13px] font-medium max-[640px]:h-10 max-[640px]:px-2.5"
-                    onclick={handleStop}
-                    disabled={isCurrentlyStopping}
-                  >
-                    <CircleStop size={14} />
-                    <span>{isCurrentlyStopping ? 'Stopping…' : 'Stop'}</span>
-                  </Button>
-                </span>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>Stop action</Tooltip.Content>
-          </Tooltip.Root>
+          <span class="inline-flex">
+            <Button
+              variant="destructive"
+              size="sm"
+              class="gap-1.5 px-3 text-[13px] font-medium max-[640px]:h-10 max-[640px]:px-2.5"
+              onclick={handleStop}
+              disabled={isCurrentlyStopping}
+            >
+              <CircleStop size={14} />
+              <span>{isCurrentlyStopping ? 'Stopping…' : 'Stop'}</span>
+            </Button>
+          </span>
         {:else if onRunAgain}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <Button
-                  {...props}
-                  variant="outline"
-                  size="sm"
-                  class="gap-1.5 border-[var(--border-muted)] bg-[var(--bg-secondary)] px-3 text-[13px] font-medium hover:border-[var(--border-focus)] hover:bg-[var(--bg-hover)] max-[640px]:h-10 max-[640px]:px-2.5"
-                  onclick={onRunAgain}
-                >
-                  <RotateCw size={14} />
-                  <span>Run again</span>
-                </Button>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>Run again</Tooltip.Content>
-          </Tooltip.Root>
+          <Button
+            variant="outline"
+            size="sm"
+            class="gap-1.5 border-[var(--border-muted)] bg-[var(--bg-secondary)] px-3 text-[13px] font-medium hover:border-[var(--border-focus)] hover:bg-[var(--bg-hover)] max-[640px]:h-10 max-[640px]:px-2.5"
+            onclick={onRunAgain}
+          >
+            <RotateCw size={14} />
+            <span>Run again</span>
+          </Button>
         {/if}
         {#if status === 'failed' && onRemove}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <Button
-                  {...props}
-                  variant="destructive"
-                  size="sm"
-                  class="gap-1.5 px-3 text-[13px] font-medium max-[640px]:h-10 max-[640px]:px-2.5"
-                  onclick={handleRemove}
-                >
-                  <span>Remove</span>
-                </Button>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>Remove this failed run</Tooltip.Content>
-          </Tooltip.Root>
+          <Button
+            variant="destructive"
+            size="sm"
+            class="gap-1.5 px-3 text-[13px] font-medium max-[640px]:h-10 max-[640px]:px-2.5"
+            title="Remove this failed run"
+            onclick={handleRemove}
+          >
+            <span>Remove</span>
+          </Button>
         {/if}
-        <Tooltip.Root>
-          <Tooltip.Trigger>
-            {#snippet child({ props })}
-              <Button
-                {...props}
-                variant="ghost"
-                size="icon-sm"
-                class="size-8 shrink-0 rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-foreground max-[640px]:size-10 [&_svg]:!size-4"
-                onclick={onClose}
-              >
-                <X size={16} />
-              </Button>
-            {/snippet}
-          </Tooltip.Trigger>
-          <Tooltip.Content>
-            {viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
-          </Tooltip.Content>
-        </Tooltip.Root>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          class="size-8 shrink-0 rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-foreground max-[640px]:size-10 [&_svg]:!size-4"
+          title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
+          aria-label="Close"
+          onclick={onClose}
+        >
+          <X size={16} />
+        </Button>
       </div>
     </header>
 

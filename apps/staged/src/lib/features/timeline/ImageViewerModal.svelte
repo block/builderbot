@@ -9,7 +9,6 @@
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import * as Dialog from '$lib/components/ui/dialog';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
   import { getImageData } from '../../api/commands';
   import { viewport } from '../../shared/viewport.svelte';
 
@@ -54,41 +53,27 @@
       >
       <div class="header-actions">
         {#if onDelete}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <Button
-                  {...props}
-                  variant="ghost"
-                  size="icon-sm"
-                  onclick={onDelete}
-                  class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-destructive [&_svg]:!size-4"
-                >
-                  <Trash2 size={16} />
-                </Button>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>Delete image</Tooltip.Content>
-          </Tooltip.Root>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            title="Delete image"
+            aria-label="Delete image"
+            onclick={onDelete}
+            class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-destructive [&_svg]:!size-4"
+          >
+            <Trash2 size={16} />
+          </Button>
         {/if}
-        <Tooltip.Root>
-          <Tooltip.Trigger>
-            {#snippet child({ props })}
-              <Button
-                {...props}
-                variant="ghost"
-                size="icon-sm"
-                onclick={onClose}
-                class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-[18px]"
-              >
-                <X size={18} />
-              </Button>
-            {/snippet}
-          </Tooltip.Trigger>
-          <Tooltip.Content>
-            {viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
-          </Tooltip.Content>
-        </Tooltip.Root>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
+          aria-label="Close"
+          onclick={onClose}
+          class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-[18px]"
+        >
+          <X size={18} />
+        </Button>
       </div>
     </Dialog.Header>
     <div class="modal-body">

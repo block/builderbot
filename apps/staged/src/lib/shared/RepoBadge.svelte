@@ -7,7 +7,6 @@
 <script lang="ts">
   import { darkMode } from '../stores/isDark.svelte';
   import { badgeBg, badgeFg } from './badgeColors';
-  import * as Tooltip from '$lib/components/ui/tooltip';
 
   interface Props {
     shortName: string;
@@ -22,16 +21,9 @@
   let fg = $derived(badgeFg(hue, darkMode.value));
 </script>
 
-<Tooltip.Root>
-  <Tooltip.Trigger>
-    {#snippet child({ props })}
-      <span class="repo-badge" class:small style="background: {bg}; color: {fg};" {...props}>
-        {shortName}
-      </span>
-    {/snippet}
-  </Tooltip.Trigger>
-  <Tooltip.Content>{shortName}</Tooltip.Content>
-</Tooltip.Root>
+<span class="repo-badge" class:small style="background: {bg}; color: {fg};">
+  {shortName}
+</span>
 
 <style>
   .repo-badge {

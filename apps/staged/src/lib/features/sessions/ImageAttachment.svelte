@@ -17,7 +17,6 @@
   import ImagePlus from '@lucide/svelte/icons/image-plus';
   import Plus from '@lucide/svelte/icons/plus';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
   import { createImageFromData, getImageData, deleteImage } from '../../commands';
   import type { Image } from '../../types';
 
@@ -140,42 +139,30 @@
           <div class="image-placeholder"><ImagePlus size={16} /></div>
         {/if}
         {#if !disabled}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <Button
-                  {...props}
-                  variant="ghost"
-                  size="icon"
-                  class="absolute top-0.5 right-0.5 size-4 rounded-full bg-[var(--bg-deepest)] text-muted-foreground opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-chrome)] hover:text-foreground group-hover/thumb:opacity-100 [&_svg]:!size-2.5"
-                  onclick={() => removeImage(imageId)}
-                >
-                  <X size={10} />
-                </Button>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>Remove image</Tooltip.Content>
-          </Tooltip.Root>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="absolute top-0.5 right-0.5 size-4 rounded-full bg-[var(--bg-deepest)] text-muted-foreground opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-chrome)] hover:text-foreground group-hover/thumb:opacity-100 [&_svg]:!size-2.5"
+            title="Remove image"
+            aria-label="Remove image"
+            onclick={() => removeImage(imageId)}
+          >
+            <X size={10} />
+          </Button>
         {/if}
       </div>
     {/each}
     {#if !disabled}
-      <Tooltip.Root>
-        <Tooltip.Trigger>
-          {#snippet child({ props })}
-            <Button
-              {...props}
-              variant="outline"
-              size="icon"
-              class="size-12 shrink-0 rounded-md border border-dashed border-[var(--border-muted)] bg-transparent text-[var(--text-faint)] shadow-none hover:border-[var(--border-emphasis)] hover:bg-transparent hover:text-muted-foreground [&_svg]:!size-4"
-              onclick={openFilePicker}
-            >
-              <Plus size={16} />
-            </Button>
-          {/snippet}
-        </Tooltip.Trigger>
-        <Tooltip.Content>Add image</Tooltip.Content>
-      </Tooltip.Root>
+      <Button
+        variant="outline"
+        size="icon"
+        class="size-12 shrink-0 rounded-md border border-dashed border-[var(--border-muted)] bg-transparent text-[var(--text-faint)] shadow-none hover:border-[var(--border-emphasis)] hover:bg-transparent hover:text-muted-foreground [&_svg]:!size-4"
+        title="Add image"
+        aria-label="Add image"
+        onclick={openFilePicker}
+      >
+        <Plus size={16} />
+      </Button>
     {/if}
   </div>
 {:else if !disabled}

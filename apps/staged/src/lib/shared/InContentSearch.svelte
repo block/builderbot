@@ -12,7 +12,6 @@
   import { viewport } from './viewport.svelte';
   import { Input } from '$lib/components/ui/input';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
 
   interface Props {
     visible: boolean;
@@ -77,62 +76,46 @@
     {#if counterText}
       <span class="match-counter">{counterText}</span>
     {/if}
-    <Tooltip.Root>
-      <Tooltip.Trigger>
-        {#snippet child({ props })}
-          <Button
-            {...props}
-            variant="ghost"
-            size="icon-xs"
-            class="[&_svg]:size-3.5"
-            onclick={onPrevious}
-            disabled={matchCount === 0}
-          >
-            <ChevronUp size={14} />
-          </Button>
-        {/snippet}
-      </Tooltip.Trigger>
-      <Tooltip.Content>
-        {viewport.showShortcutHints ? 'Previous match (Shift+Enter)' : 'Previous match'}
-      </Tooltip.Content>
-    </Tooltip.Root>
-    <Tooltip.Root>
-      <Tooltip.Trigger>
-        {#snippet child({ props })}
-          <Button
-            {...props}
-            variant="ghost"
-            size="icon-xs"
-            class="[&_svg]:size-3.5"
-            onclick={onNext}
-            disabled={matchCount === 0}
-          >
-            <ChevronDown size={14} />
-          </Button>
-        {/snippet}
-      </Tooltip.Trigger>
-      <Tooltip.Content>
-        {viewport.showShortcutHints ? 'Next match (Enter)' : 'Next match'}
-      </Tooltip.Content>
-    </Tooltip.Root>
-    <Tooltip.Root>
-      <Tooltip.Trigger>
-        {#snippet child({ props })}
-          <Button
-            {...props}
-            variant="ghost"
-            size="icon-xs"
-            class="ml-1 [&_svg]:size-3.5"
-            onclick={onClose}
-          >
-            <X size={14} />
-          </Button>
-        {/snippet}
-      </Tooltip.Trigger>
-      <Tooltip.Content>
-        {viewport.showShortcutHints ? 'Close search (Esc)' : 'Close search'}
-      </Tooltip.Content>
-    </Tooltip.Root>
+    <span
+      class="inline-flex"
+      title={viewport.showShortcutHints ? 'Previous match (Shift+Enter)' : 'Previous match'}
+    >
+      <Button
+        variant="ghost"
+        size="icon-xs"
+        class="[&_svg]:size-3.5"
+        aria-label="Previous match"
+        onclick={onPrevious}
+        disabled={matchCount === 0}
+      >
+        <ChevronUp size={14} />
+      </Button>
+    </span>
+    <span
+      class="inline-flex"
+      title={viewport.showShortcutHints ? 'Next match (Enter)' : 'Next match'}
+    >
+      <Button
+        variant="ghost"
+        size="icon-xs"
+        class="[&_svg]:size-3.5"
+        aria-label="Next match"
+        onclick={onNext}
+        disabled={matchCount === 0}
+      >
+        <ChevronDown size={14} />
+      </Button>
+    </span>
+    <Button
+      variant="ghost"
+      size="icon-xs"
+      class="ml-1 [&_svg]:size-3.5"
+      title={viewport.showShortcutHints ? 'Close search (Esc)' : 'Close search'}
+      aria-label="Close search"
+      onclick={onClose}
+    >
+      <X size={14} />
+    </Button>
   </div>
 {/if}
 

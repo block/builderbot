@@ -19,7 +19,6 @@
   } from '../projects/projectsSidebarState.svelte';
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
 
   onMount(() => {
     const stopWatchingViewport = watchViewport();
@@ -51,78 +50,60 @@
   <div class="traffic-light-spacer"></div>
   {#if !viewport.isMobile}
     <div class="left-actions">
-      <Tooltip.Root>
-        <Tooltip.Trigger>
-          {#snippet child({ props })}
-            <span {...props} class="inline-flex">
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                class="max-md:size-10 [&_svg]:size-3.5"
-                onclick={toggleProjectsSidebar}
-                disabled={!projectsSidebarState.hasProjects}
-              >
-                {#if !sidebarOpen || !projectsSidebarState.hasProjects}
-                  <PanelLeftOpen size={14} />
-                {:else}
-                  <PanelLeftClose size={14} />
-                {/if}
-              </Button>
-            </span>
-          {/snippet}
-        </Tooltip.Trigger>
-        <Tooltip.Content>
-          {sidebarOpen ? 'Hide projects sidebar' : 'Show projects sidebar'}
-        </Tooltip.Content>
-      </Tooltip.Root>
+      <span
+        class="inline-flex"
+        title={sidebarOpen ? 'Hide projects sidebar' : 'Show projects sidebar'}
+      >
+        <Button
+          variant="ghost"
+          size="icon-xs"
+          class="max-md:size-10 [&_svg]:size-3.5"
+          aria-label={sidebarOpen ? 'Hide projects sidebar' : 'Show projects sidebar'}
+          onclick={toggleProjectsSidebar}
+          disabled={!projectsSidebarState.hasProjects}
+        >
+          {#if !sidebarOpen || !projectsSidebarState.hasProjects}
+            <PanelLeftOpen size={14} />
+          {:else}
+            <PanelLeftClose size={14} />
+          {/if}
+        </Button>
+      </span>
     </div>
   {/if}
   <div class="drag-spacer"></div>
 
   <div class="top-bar-actions">
-    <Tooltip.Root>
-      <Tooltip.Trigger>
-        {#snippet child({ props })}
-          <span {...props} class="inline-flex">
-            <Button
-              variant="ghost"
-              size="icon-xs"
-              class="max-md:size-10 [&_svg]:size-3.5"
-              onclick={() => window.dispatchEvent(new CustomEvent('staged:new-project'))}
-              disabled={navigation.activeView === 'settings'}
-            >
-              <Plus size={14} />
-            </Button>
-          </span>
-        {/snippet}
-      </Tooltip.Trigger>
-      <Tooltip.Content>
-        {navigation.activeView === 'settings'
-          ? 'Unavailable while viewing settings'
-          : viewport.showShortcutHints
-            ? 'New project (⌘N)'
-            : 'New project'}
-      </Tooltip.Content>
-    </Tooltip.Root>
+    <span
+      class="inline-flex"
+      title={navigation.activeView === 'settings'
+        ? 'Unavailable while viewing settings'
+        : viewport.showShortcutHints
+          ? 'New project (⌘N)'
+          : 'New project'}
+    >
+      <Button
+        variant="ghost"
+        size="icon-xs"
+        class="max-md:size-10 [&_svg]:size-3.5"
+        aria-label="New project"
+        onclick={() => window.dispatchEvent(new CustomEvent('staged:new-project'))}
+        disabled={navigation.activeView === 'settings'}
+      >
+        <Plus size={14} />
+      </Button>
+    </span>
 
-    <Tooltip.Root>
-      <Tooltip.Trigger>
-        {#snippet child({ props })}
-          <Button
-            {...props}
-            variant="ghost"
-            size="icon-xs"
-            class="max-md:size-10 [&_svg]:size-3.5"
-            onclick={() => openSettings()}
-          >
-            <SlidersHorizontal size={14} />
-          </Button>
-        {/snippet}
-      </Tooltip.Trigger>
-      <Tooltip.Content>
-        {viewport.showShortcutHints ? 'Settings (⌘,)' : 'Settings'}
-      </Tooltip.Content>
-    </Tooltip.Root>
+    <Button
+      variant="ghost"
+      size="icon-xs"
+      class="max-md:size-10 [&_svg]:size-3.5"
+      title={viewport.showShortcutHints ? 'Settings (⌘,)' : 'Settings'}
+      aria-label="Settings"
+      onclick={() => openSettings()}
+    >
+      <SlidersHorizontal size={14} />
+    </Button>
   </div>
 </div>
 

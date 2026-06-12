@@ -22,7 +22,6 @@
   import Spinner from '../../shared/Spinner.svelte';
   import * as ContextMenu from '$lib/components/ui/context-menu';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
 
   export type TimelineItemType =
     | 'commit'
@@ -410,94 +409,68 @@
           </Button>
         {/if}
         {#if onPullClick || pullDisabledReason}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <span {...props} class="inline-flex">
-                  <Button
-                    variant="outline"
-                    size="xs"
-                    onclick={handlePullClick}
-                    disabled={!!pullDisabledReason}
-                    class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
-                  >
-                    Pull
-                  </Button>
-                </span>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>{pullDisabledReason ?? 'Pull'}</Tooltip.Content>
-          </Tooltip.Root>
+          <span class="inline-flex" title={pullDisabledReason}>
+            <Button
+              variant="outline"
+              size="xs"
+              onclick={handlePullClick}
+              disabled={!!pullDisabledReason}
+              class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+            >
+              Pull
+            </Button>
+          </span>
         {/if}
         {#if onPushClick || pushDisabledReason}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <span {...props} class="inline-flex">
-                  <Button
-                    variant="outline"
-                    size="xs"
-                    onclick={handlePushClick}
-                    disabled={!!pushDisabledReason}
-                    class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
-                  >
-                    {pushing ? 'Pushing\u2026' : 'Push'}
-                  </Button>
-                </span>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>
-              {pushDisabledReason ?? (pushing ? 'View push session' : 'Push')}
-            </Tooltip.Content>
-          </Tooltip.Root>
+          <span
+            class="inline-flex"
+            title={pushDisabledReason ?? (pushing ? 'View push session' : undefined)}
+          >
+            <Button
+              variant="outline"
+              size="xs"
+              onclick={handlePushClick}
+              disabled={!!pushDisabledReason}
+              class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+            >
+              {pushing ? 'Pushing\u2026' : 'Push'}
+            </Button>
+          </span>
         {/if}
         {#if onForcePushClick || forcePushDisabledReason}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <span {...props} class="inline-flex">
-                  <Button
-                    variant="outline"
-                    size="xs"
-                    onclick={handleForcePushClick}
-                    disabled={!!forcePushDisabledReason}
-                    class={[
-                      'h-[22px] rounded-md bg-transparent shadow-none',
-                      forcePushing
-                        ? 'border-[var(--border-subtle)] text-[var(--text-muted)] hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground'
-                        : 'border-[var(--ui-danger-bg)] font-medium text-[var(--ui-danger)] hover:border-[var(--ui-danger)] hover:bg-[var(--ui-danger-bg)] hover:text-[var(--ui-danger)]',
-                    ]}
-                  >
-                    {forcePushing ? 'Pushing\u2026' : 'Force Push'}
-                  </Button>
-                </span>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>
-              {forcePushDisabledReason ??
-                (forcePushing ? 'View push session' : 'Force push local branch to origin')}
-            </Tooltip.Content>
-          </Tooltip.Root>
+          <span
+            class="inline-flex"
+            title={forcePushDisabledReason ??
+              (forcePushing ? 'View push session' : 'Force push local branch to origin')}
+          >
+            <Button
+              variant="outline"
+              size="xs"
+              onclick={handleForcePushClick}
+              disabled={!!forcePushDisabledReason}
+              class={[
+                'h-[22px] rounded-md bg-transparent shadow-none',
+                forcePushing
+                  ? 'border-[var(--border-subtle)] text-[var(--text-muted)] hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground'
+                  : 'border-[var(--ui-danger-bg)] font-medium text-[var(--ui-danger)] hover:border-[var(--ui-danger)] hover:bg-[var(--ui-danger-bg)] hover:text-[var(--ui-danger)]',
+              ]}
+            >
+              {forcePushing ? 'Pushing\u2026' : 'Force Push'}
+            </Button>
+          </span>
         {/if}
         {#if onRebaseClick || rebaseDisabledReason}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <span {...props} class="inline-flex">
-                  <Button
-                    variant="outline"
-                    size="xs"
-                    onclick={handleRebaseClick}
-                    disabled={!!rebaseDisabledReason}
-                    class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
-                  >
-                    Rebase
-                  </Button>
-                </span>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>{rebaseDisabledReason ?? 'Rebase'}</Tooltip.Content>
-          </Tooltip.Root>
+          <span class="inline-flex" title={rebaseDisabledReason}>
+            <Button
+              variant="outline"
+              size="xs"
+              onclick={handleRebaseClick}
+              disabled={!!rebaseDisabledReason}
+              class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+            >
+              Rebase
+            </Button>
+          </span>
         {/if}
         {#if onViewDiffClick}
           <Button
@@ -512,44 +485,30 @@
           </Button>
         {/if}
         {#if onCommitChangesClick || commitChangesDisabledReason}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <span {...props} class="inline-flex">
-                  <Button
-                    variant="outline"
-                    size="xs"
-                    onclick={handleCommitChangesClick}
-                    disabled={!!commitChangesDisabledReason}
-                    class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
-                  >
-                    Commit
-                  </Button>
-                </span>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>{commitChangesDisabledReason ?? 'Commit changes'}</Tooltip.Content>
-          </Tooltip.Root>
+          <span class="inline-flex" title={commitChangesDisabledReason ?? 'Commit changes'}>
+            <Button
+              variant="outline"
+              size="xs"
+              onclick={handleCommitChangesClick}
+              disabled={!!commitChangesDisabledReason}
+              class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+            >
+              Commit
+            </Button>
+          </span>
         {/if}
         {#if onDiscardChangesClick || discardChangesDisabledReason}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <span {...props} class="inline-flex">
-                  <Button
-                    variant="outline"
-                    size="xs"
-                    onclick={handleDiscardChangesClick}
-                    disabled={!!discardChangesDisabledReason}
-                    class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
-                  >
-                    Discard
-                  </Button>
-                </span>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>{discardChangesDisabledReason ?? 'Discard changes'}</Tooltip.Content>
-          </Tooltip.Root>
+          <span class="inline-flex" title={discardChangesDisabledReason ?? 'Discard changes'}>
+            <Button
+              variant="outline"
+              size="xs"
+              onclick={handleDiscardChangesClick}
+              disabled={!!discardChangesDisabledReason}
+              class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+            >
+              Discard
+            </Button>
+          </span>
         {/if}
         {#if hasSession && !onStartClick && !isQueued}
           <Button
@@ -564,24 +523,18 @@
           </Button>
         {/if}
         {#if onDeleteClick || deleteDisabledReason}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <span {...props} class="inline-flex">
-                  <Button
-                    variant="ghost"
-                    size="icon-xs"
-                    onclick={handleDeleteClick}
-                    disabled={!!deleteDisabledReason}
-                    class="size-[22px] text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-destructive [&_svg]:!size-3"
-                  >
-                    <Trash2 size={12} />
-                  </Button>
-                </span>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>{deleteDisabledReason ?? 'Delete'}</Tooltip.Content>
-          </Tooltip.Root>
+          <span class="inline-flex" title={deleteDisabledReason ?? 'Delete'}>
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              aria-label="Delete"
+              onclick={handleDeleteClick}
+              disabled={!!deleteDisabledReason}
+              class="size-[22px] text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-destructive [&_svg]:!size-3"
+            >
+              <Trash2 size={12} />
+            </Button>
+          </span>
         {/if}
       </div>
     </div>

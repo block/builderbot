@@ -6,40 +6,14 @@
   Bottom git status rows appear below active and queued work.
   Failed sessions appear in chronological order with completed items.
 -->
-<script module lang="ts">
-  /**
-   * Maximum number of `normalItems` rows a collapsed timeline mounts. Older
-   * rows beyond this are deferred behind a "Show N older" expander and are
-   * genuinely not rendered (not merely hidden) until the user opts in. This
-   * bounds the per-row DOM the synchronous project-switch flush must build for
-   * a long-history branch — Phase 2b of the project-switch-freeze plan, which
-   * bounds the inner `rows` term after Phase 1 cut per-row overlays and Phase
-   * 2a stopped mounting off-screen card interiors. Raise it (or set it very
-   * high) to effectively disable the cap if design rejects the truncated UX.
-   */
-  const TIMELINE_ROW_CAP = 20;
-
-  /**
-   * Whether each branch's timeline is expanded to show its older (deferred)
-   * rows, keyed by the timeline's stable id (see `expansionKey` below).
-   * Module-scoped — not per-instance — so the user's choice survives the whole
-   * `<BranchTimeline>` unmounting when its card scrolls >~1.5 viewports
-   * off-screen (Phase 2a) and later remounting. Mirrors BranchCard's
-   * module-scoped `interiorHeightCache`.
-   */
-  const expandedTimelines = new Map<string, boolean>();
-</script>
-
 <script lang="ts">
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy } from 'svelte';
   import type { Snippet } from 'svelte';
   import { slide } from 'svelte/transition';
   import FileText from '@lucide/svelte/icons/file-text';
   import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
   import FileSearch from '@lucide/svelte/icons/file-search';
   import Plus from '@lucide/svelte/icons/plus';
-  import ChevronUp from '@lucide/svelte/icons/chevron-up';
-  import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import { isResumableReason } from '../../types';
   import type {
     BranchGitState,
@@ -811,41 +785,6 @@
     !!onNewNote || !!onNewCommit || !!onNewReview || !!footerActions
   );
 
-  // ── Row cap / "show older" expander (Phase 2b) ────────────────────────
-  //
-  // Cap how many `normalItems` rows a collapsed timeline mounts; pinned-style
-  // footer rows (gitFooterItems), pending/drop placeholders, and the action
-  // footer render in their own loops and are never capped.
-  //
-  // `normalItems` is sorted ascending by timestamp (see the sort above), so the
-  // most-recent rows users expect to see are the TAIL and the deferred OLDER
-  // rows are the head. We therefore render the last N and defer the start.
-  //
-  // The expanded flag persists in the module-scoped `expandedTimelines` map so
-  // it survives Phase 2a's off-screen unmount. We key on `repoDir` (the
-  // branch's worktree path): BranchTimeline isn't passed `branch.id` and we
-  // must not modify BranchCard, so the worktree path is the most stable
-  // branch-unique identifier already in scope. When absent (rare cloud-only
-  // branches with no local clone), expansion isn't persisted and resets on
-  // scroll-away — an acceptable UI-only degradation, never a data issue.
-  let expansionKey = $derived(repoDir ?? null);
-  // Snapshot the persisted flag once at mount (untrack: we deliberately want the
-  // initial value, not a live dependency — toggling writes back via toggleShowOlder).
-  let showOlder = $state(
-    untrack(() => (repoDir ? (expandedTimelines.get(repoDir) ?? false) : false))
-  );
-  let hiddenOlderCount = $derived(Math.max(0, normalItems.length - TIMELINE_ROW_CAP));
-  let visibleNormalItems = $derived(
-    showOlder || hiddenOlderCount === 0
-      ? normalItems
-      : normalItems.slice(normalItems.length - TIMELINE_ROW_CAP)
-  );
-
-  function toggleShowOlder() {
-    showOlder = !showOlder;
-    if (expansionKey) expandedTimelines.set(expansionKey, showOlder);
-  }
-
   /** True when the timeline has no content and action buttons should be enlarged. */
   let actionButtonsEnlarged = $derived(
     items.length === 0 && pendingDropNotes.length === 0 && pendingItems.length === 0
@@ -944,32 +883,7 @@
 {:else}
   <!-- Unified timeline (vertical) -->
   <div class="timeline">
-    {#if hiddenOlderCount > 0}
-      <!--
-        Older (deferred) rows live at the head of the ascending list, so the
-        expander sits above the visible rows. Collapsed: mount only the latest
-        TIMELINE_ROW_CAP rows. Clicking mounts the rest; "Show less" returns to
-        the cheap state. The hidden rows are sliced out, not display:none'd.
-      -->
-      <div class="show-older-row">
-        <Button
-          variant="ghost"
-          size="xs"
-          class="gap-1 text-muted-foreground"
-          aria-expanded={showOlder}
-          onclick={toggleShowOlder}
-        >
-          {#if showOlder}
-            <ChevronDown size={13} />
-            Show less
-          {:else}
-            <ChevronUp size={13} />
-            Show {hiddenOlderCount} older
-          {/if}
-        </Button>
-      </div>
-    {/if}
-    {#each visibleNormalItems as item, index (item.key)}
+    {#each normalItems as item, index (item.key)}
       <div in:maybeSlide={{ sessionId: item.sessionId }} out:slide={{ duration: 200 }}>
         <TimelineRow
           type={item.type}
@@ -995,7 +909,7 @@
           onDiscardChangesClick={item.onDiscardChanges}
           discardChangesDisabledReason={item.discardChangesDisabledReason}
           deleting={item.deleting}
-          isLast={index === visibleNormalItems.length - 1 &&
+          isLast={index === normalItems.length - 1 &&
             pendingDropNotes.length === 0 &&
             pendingItems.length === 0 &&
             gitFooterItems.length === 0 &&
@@ -1262,13 +1176,6 @@
     color: var(--text-muted);
     font-style: italic;
     text-align: center;
-  }
-
-  /* ── "Show older" expander (Phase 2b row cap) ───────────────────────── */
-
-  .show-older-row {
-    display: flex;
-    padding: 2px 0 4px;
   }
 
   /* ── Footer row with inline add buttons ─────────────────────────────── */

@@ -22,7 +22,6 @@
   import * as commands from '../../api/commands';
   import { toast } from 'svelte-sonner';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
 
   interface Props {
     repo: RepoHomeItem;
@@ -81,77 +80,57 @@
   }
 </script>
 
-<Tooltip.Root>
-  <Tooltip.Trigger>
-    {#snippet child({ props })}
-      <div
-        {...props}
-        class="repo-card"
-        style="--accent: {accentColor}; --card-bg: {bgColor}; --card-bg-hover: {bgHoverColor}; --card-border: {borderColor}; --card-border-hover: {borderHoverColor};"
+<div
+  class="repo-card"
+  style="--accent: {accentColor}; --card-bg: {bgColor}; --card-bg-hover: {bgHoverColor}; --card-border: {borderColor}; --card-border-hover: {borderHoverColor};"
+>
+  <Button
+    variant="ghost"
+    size="icon-sm"
+    class={[
+      'absolute top-1.5 right-1.5 z-[2] size-[26px] hover:bg-[var(--bg-hover)] [&_svg]:!size-3.5',
+      repo.pinned
+        ? 'text-[var(--accent)] hover:text-[var(--accent)]'
+        : 'text-[var(--text-faint)] hover:text-foreground',
+    ]}
+    title={repo.pinned ? 'Unpin repo' : 'Pin repo'}
+    aria-label={repo.pinned ? 'Unpin repo' : 'Pin repo'}
+    onclick={handleTogglePin}
+    disabled={togglingPin}
+  >
+    {#if togglingPin}
+      <Spinner size={14} />
+    {:else if repo.pinned}
+      <Pin size={14} />
+    {:else}
+      <PinOff size={14} />
+    {/if}
+  </Button>
+
+  <span class="card-title" title={repo.shortName}>{repo.shortName}</span>
+
+  <span class="card-subtitle" title={subtitle}>{subtitle}</span>
+
+  {#if !repo.hasLocalClone}
+    <div class="card-footer">
+      <Button
+        variant="outline"
+        size="icon-sm"
+        class="size-7 border-[var(--card-border)] bg-transparent text-[var(--accent)] shadow-none hover:bg-[var(--card-bg-hover)] hover:border-[var(--card-border-hover)] hover:text-[var(--accent)] [&_svg]:!size-3.5"
+        title="Clone repo locally"
+        aria-label="Clone repo locally"
+        onclick={handleClone}
+        disabled={cloning}
       >
-        <Tooltip.Root>
-          <Tooltip.Trigger>
-            {#snippet child({ props: pinProps })}
-              <Button
-                {...pinProps}
-                variant="ghost"
-                size="icon-sm"
-                class={[
-                  'absolute top-1.5 right-1.5 z-[2] size-[26px] hover:bg-[var(--bg-hover)] [&_svg]:!size-3.5',
-                  repo.pinned
-                    ? 'text-[var(--accent)] hover:text-[var(--accent)]'
-                    : 'text-[var(--text-faint)] hover:text-foreground',
-                ]}
-                onclick={handleTogglePin}
-                disabled={togglingPin}
-              >
-                {#if togglingPin}
-                  <Spinner size={14} />
-                {:else if repo.pinned}
-                  <Pin size={14} />
-                {:else}
-                  <PinOff size={14} />
-                {/if}
-              </Button>
-            {/snippet}
-          </Tooltip.Trigger>
-          <Tooltip.Content>{repo.pinned ? 'Unpin repo' : 'Pin repo'}</Tooltip.Content>
-        </Tooltip.Root>
-
-        <span class="card-title">{repo.shortName}</span>
-
-        <span class="card-subtitle">{subtitle}</span>
-
-        {#if !repo.hasLocalClone}
-          <div class="card-footer">
-            <Tooltip.Root>
-              <Tooltip.Trigger>
-                {#snippet child({ props: cloneProps })}
-                  <Button
-                    {...cloneProps}
-                    variant="outline"
-                    size="icon-sm"
-                    class="size-7 border-[var(--card-border)] bg-transparent text-[var(--accent)] shadow-none hover:bg-[var(--card-bg-hover)] hover:border-[var(--card-border-hover)] hover:text-[var(--accent)] [&_svg]:!size-3.5"
-                    onclick={handleClone}
-                    disabled={cloning}
-                  >
-                    {#if cloning}
-                      <Spinner size={14} />
-                    {:else}
-                      <Download size={14} />
-                    {/if}
-                  </Button>
-                {/snippet}
-              </Tooltip.Trigger>
-              <Tooltip.Content>Clone repo locally</Tooltip.Content>
-            </Tooltip.Root>
-          </div>
+        {#if cloning}
+          <Spinner size={14} />
+        {:else}
+          <Download size={14} />
         {/if}
-      </div>
-    {/snippet}
-  </Tooltip.Trigger>
-  <Tooltip.Content>{subtitle}</Tooltip.Content>
-</Tooltip.Root>
+      </Button>
+    </div>
+  {/if}
+</div>
 
 <style>
   .repo-card {

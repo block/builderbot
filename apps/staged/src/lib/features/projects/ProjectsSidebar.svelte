@@ -43,7 +43,6 @@
   import * as ContextMenu from '$lib/components/ui/context-menu';
   import { reposUiEnabled } from '../../featureFlags';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
 
   const devBranch = import.meta.env.VITE_DEV_BRANCH as string | undefined;
 
@@ -326,24 +325,16 @@
       {:else}
         <div class="projects-list">
           {#if reposUiEnabled && pinnedRepos.length > 0}
-            <Tooltip.Root>
-              <Tooltip.Trigger>
-                {#snippet child({ props })}
-                  <button
-                    {...props}
-                    class="project-row all-repos-row"
-                    class:active={navigation.showReposList}
-                    onclick={showAllRepos}
-                  >
-                    <div class="row-main">
-                      <FolderGit2 size={14} />
-                      <span class="project-name">All Repos</span>
-                    </div>
-                  </button>
-                {/snippet}
-              </Tooltip.Trigger>
-              <Tooltip.Content>View all repos</Tooltip.Content>
-            </Tooltip.Root>
+            <button
+              class="project-row all-repos-row"
+              class:active={navigation.showReposList}
+              onclick={showAllRepos}
+            >
+              <div class="row-main">
+                <FolderGit2 size={14} />
+                <span class="project-name">All Repos</span>
+              </div>
+            </button>
 
             <div class="pinned-repos-list" role="list" aria-label="Pinned repos">
               {#each pinnedRepos as repo, index (repo.githubRepo + '\t' + repo.subpath)}
@@ -362,25 +353,16 @@
           {/if}
 
           {#if showAllProjectsRow}
-            <Tooltip.Root>
-              <Tooltip.Trigger>
-                {#snippet child({ props })}
-                  <button
-                    {...props}
-                    class="project-row all-projects-row"
-                    class:active={navigation.selectedProjectId === null &&
-                      !navigation.showReposList}
-                    onclick={openAllProjects}
-                  >
-                    <div class="row-main">
-                      <House size={14} />
-                      <span class="project-name">All Projects</span>
-                    </div>
-                  </button>
-                {/snippet}
-              </Tooltip.Trigger>
-              <Tooltip.Content>Show all projects</Tooltip.Content>
-            </Tooltip.Root>
+            <button
+              class="project-row all-projects-row"
+              class:active={navigation.selectedProjectId === null && !navigation.showReposList}
+              onclick={openAllProjects}
+            >
+              <div class="row-main">
+                <House size={14} />
+                <span class="project-name">All Projects</span>
+              </div>
+            </button>
           {/if}
 
           {#if projects.length === 0}
@@ -523,28 +505,19 @@
               </ContextMenu.Root>
             {/each}
           {/if}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <Button
-                  {...props}
-                  variant="ghost"
-                  class="group h-auto w-full justify-start gap-2.5 px-2.5 py-2 font-medium text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground"
-                  onclick={openNewProject}
-                >
-                  <span
-                    class="flex size-4 shrink-0 items-center justify-center rounded-full bg-[var(--border-muted)] transition-colors group-hover:bg-[var(--border-emphasis)]"
-                  >
-                    <Plus size={12} />
-                  </span>
-                  New project
-                </Button>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>
-              {viewport.showShortcutHints ? 'New project (⌘N)' : 'New project'}
-            </Tooltip.Content>
-          </Tooltip.Root>
+          <Button
+            variant="ghost"
+            class="group h-auto w-full justify-start gap-2.5 px-2.5 py-2 font-medium text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground"
+            title={viewport.showShortcutHints ? 'New project (⌘N)' : 'New project'}
+            onclick={openNewProject}
+          >
+            <span
+              class="flex size-4 shrink-0 items-center justify-center rounded-full bg-[var(--border-muted)] transition-colors group-hover:bg-[var(--border-emphasis)]"
+            >
+              <Plus size={12} />
+            </span>
+            New project
+          </Button>
         </div>
       {/if}
     </div>

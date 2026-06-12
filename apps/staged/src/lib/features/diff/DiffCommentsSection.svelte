@@ -8,7 +8,6 @@
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import Undo2 from '@lucide/svelte/icons/undo-2';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
   import type { Comment } from '../../types';
   import { formatLineRange, truncateText } from './diffModalHelpers';
 
@@ -77,47 +76,35 @@
   </div>
   <div class="section-right">
     {#if comments.length > 0}
-      <Tooltip.Root>
-        <Tooltip.Trigger>
-          {#snippet child({ props })}
-            <Button
-              {...props}
-              variant="ghost"
-              size="icon"
-              class={[
-                'size-auto rounded-[3px] p-0.5 shadow-none hover:bg-[var(--bg-hover)] [&_svg]:!size-3',
-                copiedFeedback
-                  ? 'text-[var(--status-added)] hover:text-[var(--status-added)]'
-                  : 'text-muted-foreground hover:text-foreground',
-              ]}
-              onclick={onCopyAll}
-            >
-              {#if copiedFeedback}
-                <Check size={12} />
-              {:else}
-                <Copy size={12} />
-              {/if}
-            </Button>
-          {/snippet}
-        </Tooltip.Trigger>
-        <Tooltip.Content>Copy all comments</Tooltip.Content>
-      </Tooltip.Root>
-      <Tooltip.Root>
-        <Tooltip.Trigger>
-          {#snippet child({ props })}
-            <Button
-              {...props}
-              variant="ghost"
-              size="icon"
-              class="size-auto rounded-[3px] p-0.5 text-muted-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-destructive [&_svg]:!size-3"
-              onclick={onDeleteAll}
-            >
-              <Trash2 size={12} />
-            </Button>
-          {/snippet}
-        </Tooltip.Trigger>
-        <Tooltip.Content>Delete all comments</Tooltip.Content>
-      </Tooltip.Root>
+      <Button
+        variant="ghost"
+        size="icon"
+        class={[
+          'size-auto rounded-[3px] p-0.5 shadow-none hover:bg-[var(--bg-hover)] [&_svg]:!size-3',
+          copiedFeedback
+            ? 'text-[var(--status-added)] hover:text-[var(--status-added)]'
+            : 'text-muted-foreground hover:text-foreground',
+        ]}
+        title={copiedFeedback ? 'Copied!' : 'Copy all comments'}
+        aria-label={copiedFeedback ? 'Copied!' : 'Copy all comments'}
+        onclick={onCopyAll}
+      >
+        {#if copiedFeedback}
+          <Check size={12} />
+        {:else}
+          <Copy size={12} />
+        {/if}
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon"
+        class="size-auto rounded-[3px] p-0.5 text-muted-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-destructive [&_svg]:!size-3"
+        title="Delete all comments"
+        aria-label="Delete all comments"
+        onclick={onDeleteAll}
+      >
+        <Trash2 size={12} />
+      </Button>
     {/if}
   </div>
 </div>
@@ -135,25 +122,19 @@
           >
             {@render commentItemContent(comment)}
           </button>
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <Button
-                  {...props}
-                  variant="ghost"
-                  size="icon"
-                  class="absolute top-1/2 right-3 z-10 size-auto -translate-y-1/2 rounded p-1 text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-primary)] hover:text-[var(--status-deleted)] group-hover/comment:opacity-100 [&_svg]:!size-3"
-                  onclick={(e: MouseEvent) => {
-                    e.stopPropagation();
-                    onDeleteComment(comment.id);
-                  }}
-                >
-                  <Trash2 size={12} />
-                </Button>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>Delete comment</Tooltip.Content>
-          </Tooltip.Root>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="absolute top-1/2 right-3 z-10 size-auto -translate-y-1/2 rounded p-1 text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-primary)] hover:text-[var(--status-deleted)] group-hover/comment:opacity-100 [&_svg]:!size-3"
+            title="Delete comment"
+            aria-label="Delete comment"
+            onclick={(e: MouseEvent) => {
+              e.stopPropagation();
+              onDeleteComment(comment.id);
+            }}
+          >
+            <Trash2 size={12} />
+          </Button>
         </div>
       </li>
     {/each}
@@ -181,25 +162,19 @@
             <div class="tree-item comment-item" style="padding-left: 8px">
               {@render commentItemContent(comment)}
             </div>
-            <Tooltip.Root>
-              <Tooltip.Trigger>
-                {#snippet child({ props })}
-                  <Button
-                    {...props}
-                    variant="ghost"
-                    size="icon"
-                    class="absolute top-1/2 right-3 z-10 size-auto -translate-y-1/2 rounded p-1 text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-primary)] hover:text-[var(--status-added)] group-hover/comment:opacity-100 [&_svg]:!size-3"
-                    onclick={(e: MouseEvent) => {
-                      e.stopPropagation();
-                      onRestoreComment(comment.id);
-                    }}
-                  >
-                    <Undo2 size={12} />
-                  </Button>
-                {/snippet}
-              </Tooltip.Trigger>
-              <Tooltip.Content>Restore comment</Tooltip.Content>
-            </Tooltip.Root>
+            <Button
+              variant="ghost"
+              size="icon"
+              class="absolute top-1/2 right-3 z-10 size-auto -translate-y-1/2 rounded p-1 text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-primary)] hover:text-[var(--status-added)] group-hover/comment:opacity-100 [&_svg]:!size-3"
+              title="Restore comment"
+              aria-label="Restore comment"
+              onclick={(e: MouseEvent) => {
+                e.stopPropagation();
+                onRestoreComment(comment.id);
+              }}
+            >
+              <Undo2 size={12} />
+            </Button>
           </div>
         </li>
       {/each}

@@ -28,7 +28,6 @@
   import { toast } from 'svelte-sonner';
   import Spinner from '../../shared/Spinner.svelte';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
 
   interface Props {
     repo: RepoHomeItem;
@@ -175,88 +174,63 @@
   <div class="card-stripe"></div>
 
   <div class="card-content">
-    <Tooltip.Root>
-      <Tooltip.Trigger>
-        {#snippet child({ props })}
-          <div {...props} class="card-name-row">
-            <span class="repo-name">{repo.shortName}</span>
-            {#if subpathLabel}
-              <span class="subpath-badge">{subpathLabel}</span>
-            {/if}
-          </div>
-        {/snippet}
-      </Tooltip.Trigger>
-      <Tooltip.Content>{subtitle}</Tooltip.Content>
-    </Tooltip.Root>
+    <div class="card-name-row" title={subtitle}>
+      <span class="repo-name">{repo.shortName}</span>
+      {#if subpathLabel}
+        <span class="subpath-badge">{subpathLabel}</span>
+      {/if}
+    </div>
 
     <div class="card-actions">
-      <Tooltip.Root>
-        <Tooltip.Trigger>
-          {#snippet child({ props })}
-            <Button
-              {...props}
-              variant="ghost"
-              class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] [&_svg]:!size-3"
-              onclick={(e) => {
-                e.stopPropagation();
-                openNewProjectForRepo();
-              }}
-            >
-              <Plus size={12} />
-            </Button>
-          {/snippet}
-        </Tooltip.Trigger>
-        <Tooltip.Content>New project</Tooltip.Content>
-      </Tooltip.Root>
+      <Button
+        variant="ghost"
+        class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)] [&_svg]:!size-3"
+        title="New project"
+        aria-label="New project"
+        onclick={(e) => {
+          e.stopPropagation();
+          openNewProjectForRepo();
+        }}
+      >
+        <Plus size={12} />
+      </Button>
 
       {#if repo.hasLocalClone}
-        <Tooltip.Root>
-          <Tooltip.Trigger>
-            {#snippet child({ props })}
-              <Button
-                {...props}
-                variant="ghost"
-                class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--ui-success)] [&_svg]:!size-3"
-                onclick={(e) => {
-                  e.stopPropagation();
-                  // Run primary action — requires backend wiring (run action against main clone)
-                  toast.info('Run action', {
-                    description: 'Running actions against pinned repos is coming soon.',
-                    duration: 2000,
-                  });
-                }}
-              >
-                <Play size={12} />
-              </Button>
-            {/snippet}
-          </Tooltip.Trigger>
-          <Tooltip.Content>Run</Tooltip.Content>
-        </Tooltip.Root>
+        <Button
+          variant="ghost"
+          class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--ui-success)] [&_svg]:!size-3"
+          title="Run"
+          aria-label="Run"
+          onclick={(e) => {
+            e.stopPropagation();
+            // Run primary action — requires backend wiring (run action against main clone)
+            toast.info('Run action', {
+              description: 'Running actions against pinned repos is coming soon.',
+              duration: 2000,
+            });
+          }}
+        >
+          <Play size={12} />
+        </Button>
       {:else}
-        <Tooltip.Root>
-          <Tooltip.Trigger>
-            {#snippet child({ props })}
-              <span {...props} class="inline-flex">
-                <Button
-                  variant="ghost"
-                  class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--ui-accent)] [&_svg]:!size-3"
-                  disabled={cloning}
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    handleClone();
-                  }}
-                >
-                  {#if cloning}
-                    <Spinner size={12} />
-                  {:else}
-                    <Download size={12} />
-                  {/if}
-                </Button>
-              </span>
-            {/snippet}
-          </Tooltip.Trigger>
-          <Tooltip.Content>Clone repo locally</Tooltip.Content>
-        </Tooltip.Root>
+        <span class="inline-flex" title="Clone repo locally">
+          <Button
+            variant="ghost"
+            class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--ui-accent)] [&_svg]:!size-3"
+            aria-label="Clone repo locally"
+            disabled={cloning}
+            onclick={(e) => {
+              e.stopPropagation();
+              handleClone();
+            }}
+          >
+            {#if cloning}
+              <Spinner size={12} />
+            {:else}
+              <Download size={12} />
+            {/if}
+          </Button>
+        </span>
       {/if}
 
       <DropdownMenu.Root>

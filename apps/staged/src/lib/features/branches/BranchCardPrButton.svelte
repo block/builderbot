@@ -14,7 +14,6 @@
   import Spinner from '../../shared/Spinner.svelte';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
   import { minuteNow, secondNow } from '../../shared/relativeTime.svelte';
   import { listenToEvent } from '../../transport';
   import type {
@@ -723,14 +722,7 @@
         {/if}
       </span>
       {#if prStatusStale}
-        <Tooltip.Root>
-          <Tooltip.Trigger>
-            {#snippet child({ props: staleProps })}
-              <span class="pr-status-stale" {...staleProps}>!</span>
-            {/snippet}
-          </Tooltip.Trigger>
-          <Tooltip.Content>PR status may be outdated</Tooltip.Content>
-        </Tooltip.Root>
+        <span class="pr-status-stale" title="PR status may be outdated">!</span>
       {:else if prStatusIndicator}
         <span class="pr-status-indicator {prStatusIndicator}"></span>
       {/if}
@@ -741,14 +733,7 @@
 {#snippet renderButton()}
   {#if hasCodeChanges || branch.prNumber}
     {#if branch.prNumber}
-      <Tooltip.Root>
-        <Tooltip.Trigger>
-          {#snippet child({ props })}
-            {@render prButton(props)}
-          {/snippet}
-        </Tooltip.Trigger>
-        <Tooltip.Content>{prButtonTitle}</Tooltip.Content>
-      </Tooltip.Root>
+      {@render prButton({ title: prButtonTitle })}
     {:else}
       {@render prButton({})}
     {/if}

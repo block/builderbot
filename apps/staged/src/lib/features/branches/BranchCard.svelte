@@ -62,7 +62,6 @@
   import NoteModal from '../notes/NoteModal.svelte';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
   import {
     fileNameFromPath,
     formatBaseBranch,
@@ -1369,22 +1368,16 @@
         baseBranch={formatBaseBranch(branch.baseBranch)}
       />
       <div class="header-actions">
-        <Tooltip.Root>
-          <Tooltip.Trigger>
-            {#snippet child({ props })}
-              <Button
-                {...props}
-                variant="ghost"
-                size="icon-sm"
-                onclick={() => onDelete?.()}
-                class="size-7 text-[var(--text-faint)]"
-              >
-                <Trash2 size={16} />
-              </Button>
-            {/snippet}
-          </Tooltip.Trigger>
-          <Tooltip.Content>Delete branch</Tooltip.Content>
-        </Tooltip.Root>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          title="Delete branch"
+          aria-label="Delete branch"
+          onclick={() => onDelete?.()}
+          class="size-7 text-[var(--text-faint)]"
+        >
+          <Trash2 size={16} />
+        </Button>
       </div>
     </div>
     <div class="card-content">

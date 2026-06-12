@@ -61,7 +61,6 @@
   import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
   import { createLiveSessionHints } from '../timeline/liveSessionHints';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
   import type { LinkedNoteContext } from '../sessions/noteFreshness';
 
   interface Props {
@@ -513,30 +512,19 @@
 <div class="project-section">
   <div class="project-header" class:deleting>
     <div class="project-info">
-      <Tooltip.Root>
-        <Tooltip.Trigger>
-          {#snippet child({ props })}
-            <Button
-              {...props}
-              variant="ghost"
-              size="icon"
-              class="size-6 shrink-0 text-muted-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:size-10 [&_svg]:!size-4"
-              onclick={goHome}
-            >
-              <ChevronLeft size={16} />
-            </Button>
-          {/snippet}
-        </Tooltip.Trigger>
-        <Tooltip.Content>Back to projects</Tooltip.Content>
-      </Tooltip.Root>
-      <Tooltip.Root>
-        <Tooltip.Trigger>
-          {#snippet child({ props })}
-            <span {...props} class="project-name">{projectDisplayName(project)}</span>
-          {/snippet}
-        </Tooltip.Trigger>
-        <Tooltip.Content>{projectDisplayName(project)}</Tooltip.Content>
-      </Tooltip.Root>
+      <Button
+        variant="ghost"
+        size="icon"
+        class="size-6 shrink-0 text-muted-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:size-10 [&_svg]:!size-4"
+        title="Back to projects"
+        aria-label="Back to projects"
+        onclick={goHome}
+      >
+        <ChevronLeft size={16} />
+      </Button>
+      <span class="project-name" title={projectDisplayName(project)}
+        >{projectDisplayName(project)}</span
+      >
       {#if deleting}
         <div class="deleting-status" role="status" aria-live="polite">
           <Spinner size={12} />
@@ -550,52 +538,39 @@
         </div>
       {/if}
       {#if projectWorkspaceStatus}
-        <Tooltip.Root disabled={!(projectWorkspaceStatus === 'running' && projectWorkstationName)}>
-          <Tooltip.Trigger>
-            {#snippet child({ props })}
-              <div
-                {...props}
-                class="workspace-status-badge"
-                class:starting={projectWorkspaceStatus === 'starting'}
-                class:running={projectWorkspaceStatus === 'running'}
-                class:stopped={projectWorkspaceStatus === 'stopped'}
-                class:suspended={projectWorkspaceStatus === 'suspended'}
-                class:error={projectWorkspaceStatus === 'error'}
-              >
-                {#if projectWorkspaceStatus === 'starting'}
-                  <Spinner size={12} />
-                {:else if projectWorkspaceStatus === 'running'}
-                  <Cloud size={12} />
-                {:else if projectWorkspaceStatus === 'stopped'}
-                  <CirclePause size={12} />
-                {:else if projectWorkspaceStatus === 'suspended'}
-                  <Pause size={12} />
-                {:else if projectWorkspaceStatus === 'error'}
-                  <AlertCircle size={12} />
-                {/if}
-                <span>{statusLabel(projectWorkspaceStatus)}</span>
-                {#if projectWorkspaceStatus === 'suspended' && projectWorkstationName}
-                  <Tooltip.Root>
-                    <Tooltip.Trigger>
-                      {#snippet child({ props: resumeProps })}
-                        <Button
-                          {...resumeProps}
-                          variant="ghost"
-                          class="ml-1 h-auto rounded-none border-l border-[var(--border-muted)] bg-transparent px-1 py-0 text-[length:calc(var(--size-xs)-1px)] font-semibold text-[var(--ui-info)] shadow-none focus-visible:ring-0 hover:bg-transparent hover:text-[var(--ui-info)] hover:underline"
-                          onclick={() => onResumeWorkspace?.(projectWorkstationName!)}
-                        >
-                          Resume
-                        </Button>
-                      {/snippet}
-                    </Tooltip.Trigger>
-                    <Tooltip.Content>Resume suspended workspace</Tooltip.Content>
-                  </Tooltip.Root>
-                {/if}
-              </div>
-            {/snippet}
-          </Tooltip.Trigger>
-          <Tooltip.Content>{projectWorkstationName ?? ''}</Tooltip.Content>
-        </Tooltip.Root>
+        <div
+          class="workspace-status-badge"
+          class:starting={projectWorkspaceStatus === 'starting'}
+          class:running={projectWorkspaceStatus === 'running'}
+          class:stopped={projectWorkspaceStatus === 'stopped'}
+          class:suspended={projectWorkspaceStatus === 'suspended'}
+          class:error={projectWorkspaceStatus === 'error'}
+          title={projectWorkspaceStatus === 'running' && projectWorkstationName
+            ? projectWorkstationName
+            : undefined}
+        >
+          {#if projectWorkspaceStatus === 'starting'}
+            <Spinner size={12} />
+          {:else if projectWorkspaceStatus === 'running'}
+            <Cloud size={12} />
+          {:else if projectWorkspaceStatus === 'stopped'}
+            <CirclePause size={12} />
+          {:else if projectWorkspaceStatus === 'suspended'}
+            <Pause size={12} />
+          {:else if projectWorkspaceStatus === 'error'}
+            <AlertCircle size={12} />
+          {/if}
+          <span>{statusLabel(projectWorkspaceStatus)}</span>
+          {#if projectWorkspaceStatus === 'suspended' && projectWorkstationName}
+            <Button
+              variant="ghost"
+              class="ml-1 h-auto rounded-none border-l border-[var(--border-muted)] bg-transparent px-1 py-0 text-[length:calc(var(--size-xs)-1px)] font-semibold text-[var(--ui-info)] shadow-none focus-visible:ring-0 hover:bg-transparent hover:text-[var(--ui-info)] hover:underline"
+              onclick={() => onResumeWorkspace?.(projectWorkstationName!)}
+            >
+              Resume
+            </Button>
+          {/if}
+        </div>
       {/if}
     </div>
     {#if !deleting}
@@ -664,25 +639,19 @@
     >
       <div class="prompt-input-row">
         {#if imageIds.length === 0}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <Button
-                  {...props}
-                  variant="ghost"
-                  size="icon-sm"
-                  class={[
-                    'size-7 shrink-0 bg-transparent text-[var(--text-faint)] hover:bg-[var(--ui-selection)] hover:text-foreground [&_svg]:!size-3.5',
-                    promptExpanded ? 'max-md:size-10' : 'max-md:size-8',
-                  ]}
-                  onclick={openImagePicker}
-                >
-                  <Paperclip size={14} />
-                </Button>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>Attach image</Tooltip.Content>
-          </Tooltip.Root>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            class={[
+              'size-7 shrink-0 bg-transparent text-[var(--text-faint)] hover:bg-[var(--ui-selection)] hover:text-foreground [&_svg]:!size-3.5',
+              promptExpanded ? 'max-md:size-10' : 'max-md:size-8',
+            ]}
+            title="Attach image"
+            aria-label="Attach image"
+            onclick={openImagePicker}
+          >
+            <Paperclip size={14} />
+          </Button>
         {/if}
         <HashtagInput
           class="prompt-input"
@@ -697,29 +666,23 @@
         />
         <div class="prompt-actions">
           <AgentSelector />
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <span {...props} class="inline-flex">
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    class={[
-                      'size-8 shrink-0 rounded-lg shadow-none [&_svg]:!size-3.5',
-                      promptExpanded
-                        ? 'max-md:size-10 max-md:rounded-lg'
-                        : 'max-md:size-8 max-md:rounded-md',
-                    ]}
-                    onclick={handleSubmitPrompt}
-                    disabled={!canSubmitPrompt}
-                  >
-                    <Send size={14} />
-                  </Button>
-                </span>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>{sendButtonTitle}</Tooltip.Content>
-          </Tooltip.Root>
+          <span class="inline-flex" title={sendButtonTitle}>
+            <Button
+              variant="outline"
+              size="icon"
+              class={[
+                'size-8 shrink-0 rounded-lg shadow-none [&_svg]:!size-3.5',
+                promptExpanded
+                  ? 'max-md:size-10 max-md:rounded-lg'
+                  : 'max-md:size-8 max-md:rounded-md',
+              ]}
+              aria-label={sendButtonTitle}
+              onclick={handleSubmitPrompt}
+              disabled={!canSubmitPrompt}
+            >
+              <Send size={14} />
+            </Button>
+          </span>
         </div>
       </div>
       {#if imageIds.length > 0}
@@ -731,40 +694,28 @@
               {:else}
                 <div class="reply-image-placeholder"><ImagePlus size={16} /></div>
               {/if}
-              <Tooltip.Root>
-                <Tooltip.Trigger>
-                  {#snippet child({ props })}
-                    <Button
-                      {...props}
-                      variant="ghost"
-                      size="icon"
-                      class="absolute top-0.5 right-0.5 size-4 rounded-full bg-[var(--bg-deepest)] text-muted-foreground opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-chrome)] hover:text-foreground group-hover/thumb:opacity-100 [&_svg]:!size-2.5"
-                      onclick={() => removeImage(imageId)}
-                    >
-                      <X size={10} />
-                    </Button>
-                  {/snippet}
-                </Tooltip.Trigger>
-                <Tooltip.Content>Remove image</Tooltip.Content>
-              </Tooltip.Root>
+              <Button
+                variant="ghost"
+                size="icon"
+                class="absolute top-0.5 right-0.5 size-4 rounded-full bg-[var(--bg-deepest)] text-muted-foreground opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-chrome)] hover:text-foreground group-hover/thumb:opacity-100 [&_svg]:!size-2.5"
+                title="Remove image"
+                aria-label="Remove image"
+                onclick={() => removeImage(imageId)}
+              >
+                <X size={10} />
+              </Button>
             </div>
           {/each}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <Button
-                  {...props}
-                  variant="outline"
-                  size="icon"
-                  class="size-12 shrink-0 rounded-md border border-dashed border-[var(--border-muted)] bg-transparent text-[var(--text-faint)] shadow-none hover:border-[var(--border-emphasis)] hover:bg-transparent hover:text-muted-foreground [&_svg]:!size-4"
-                  onclick={openImagePicker}
-                >
-                  <Plus size={16} />
-                </Button>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>Add image</Tooltip.Content>
-          </Tooltip.Root>
+          <Button
+            variant="outline"
+            size="icon"
+            class="size-12 shrink-0 rounded-md border border-dashed border-[var(--border-muted)] bg-transparent text-[var(--text-faint)] shadow-none hover:border-[var(--border-emphasis)] hover:bg-transparent hover:text-muted-foreground [&_svg]:!size-4"
+            title="Add image"
+            aria-label="Add image"
+            onclick={openImagePicker}
+          >
+            <Plus size={16} />
+          </Button>
         </div>
       {/if}
     </div>

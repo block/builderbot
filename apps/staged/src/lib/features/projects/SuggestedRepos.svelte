@@ -19,7 +19,6 @@
   import Spinner from '../../shared/Spinner.svelte';
   import { getStoreValue, setStoreValue } from '../../shared/persistentStore';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
 
   interface Props {
     project: Project;
@@ -125,21 +124,14 @@
   <div class="suggested-repos">
     <div class="suggested-header">
       <span class="suggested-title">Suggested repos</span>
-      <Tooltip.Root>
-        <Tooltip.Trigger>
-          {#snippet child({ props })}
-            <Button
-              {...props}
-              variant="ghost"
-              class="size-[22px] rounded-[4px] p-0 text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-secondary)] [&_svg]:!size-3.5"
-              onclick={handleDismiss}
-            >
-              <X size={14} />
-            </Button>
-          {/snippet}
-        </Tooltip.Trigger>
-        <Tooltip.Content>Dismiss suggestions</Tooltip.Content>
-      </Tooltip.Root>
+      <Button
+        variant="ghost"
+        class="size-[22px] rounded-[4px] p-0 text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-secondary)] [&_svg]:!size-3.5"
+        aria-label="Dismiss suggestions"
+        onclick={handleDismiss}
+      >
+        <X size={14} />
+      </Button>
     </div>
     <div class="suggested-list">
       {#each suggestions as suggestion (suggestionKey(suggestion))}

@@ -66,7 +66,6 @@
   import * as Dialog from '$lib/components/ui/dialog';
   import * as Alert from '$lib/components/ui/alert';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
   import { subscribeDragDrop } from '../branches/dragDrop';
   import {
     isImageFile,
@@ -1046,41 +1045,25 @@
       />
       <div class="header-actions">
         {#if noteInfo?.content.trim() && onOpenNote}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <Button
-                  {...props}
-                  variant="outline"
-                  size="sm"
-                  class="h-7 shrink-0 px-2.5 text-xs text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[700px]:h-10"
-                  onclick={() => onOpenNote?.(noteInfo!)}
-                >
-                  View note
-                </Button>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>Open note</Tooltip.Content>
-          </Tooltip.Root>
+          <Button
+            variant="outline"
+            size="sm"
+            class="h-7 shrink-0 px-2.5 text-xs text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[700px]:h-10"
+            onclick={() => onOpenNote?.(noteInfo!)}
+          >
+            View note
+          </Button>
         {/if}
-        <Tooltip.Root>
-          <Tooltip.Trigger>
-            {#snippet child({ props })}
-              <Button
-                {...props}
-                variant="ghost"
-                size="icon"
-                class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[700px]:size-10 [&_svg]:!size-4"
-                onclick={requestClose}
-              >
-                <X size={16} />
-              </Button>
-            {/snippet}
-          </Tooltip.Trigger>
-          <Tooltip.Content>
-            {viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
-          </Tooltip.Content>
-        </Tooltip.Root>
+        <Button
+          variant="ghost"
+          size="icon"
+          class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[700px]:size-10 [&_svg]:!size-4"
+          title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
+          aria-label="Close"
+          onclick={requestClose}
+        >
+          <X size={16} />
+        </Button>
       </div>
     </header>
 
@@ -1188,26 +1171,20 @@
                           {/each}
                         </div>
                       {/if}
-                      <Tooltip.Root>
-                        <Tooltip.Trigger>
-                          {#snippet child({ props })}
-                            <Button
-                              {...props}
-                              variant="ghost"
-                              size="icon"
-                              class="absolute top-1.5 right-1.5 size-auto rounded p-[3px] text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/bubble:opacity-100 [&_svg]:!size-3"
-                              onclick={() => copyContent(group.message.content, group.message.id)}
-                            >
-                              {#if copiedId === group.message.id}
-                                <Check size={12} />
-                              {:else}
-                                <Copy size={12} />
-                              {/if}
-                            </Button>
-                          {/snippet}
-                        </Tooltip.Trigger>
-                        <Tooltip.Content>Copy message</Tooltip.Content>
-                      </Tooltip.Root>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        class="absolute top-1.5 right-1.5 size-auto rounded p-[3px] text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/bubble:opacity-100 [&_svg]:!size-3"
+                        title={copiedId === group.message.id ? 'Copied!' : 'Copy message'}
+                        aria-label={copiedId === group.message.id ? 'Copied!' : 'Copy message'}
+                        onclick={() => copyContent(group.message.content, group.message.id)}
+                      >
+                        {#if copiedId === group.message.id}
+                          <Check size={12} />
+                        {:else}
+                          <Copy size={12} />
+                        {/if}
+                      </Button>
                     </div>
                   </div>
                 {/if}
@@ -1217,26 +1194,20 @@
                     <div class="markdown-content">
                       {@html renderMarkdown(group.message.content)}
                     </div>
-                    <Tooltip.Root>
-                      <Tooltip.Trigger>
-                        {#snippet child({ props })}
-                          <Button
-                            {...props}
-                            variant="ghost"
-                            size="icon"
-                            class="absolute top-0 right-0 size-auto rounded p-[3px] text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/assistant:opacity-100 [&_svg]:!size-3"
-                            onclick={() => copyContent(group.message.content, group.message.id)}
-                          >
-                            {#if copiedId === group.message.id}
-                              <Check size={12} />
-                            {:else}
-                              <Copy size={12} />
-                            {/if}
-                          </Button>
-                        {/snippet}
-                      </Tooltip.Trigger>
-                      <Tooltip.Content>Copy message</Tooltip.Content>
-                    </Tooltip.Root>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      class="absolute top-0 right-0 size-auto rounded p-[3px] text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/assistant:opacity-100 [&_svg]:!size-3"
+                      title={copiedId === group.message.id ? 'Copied!' : 'Copy message'}
+                      aria-label={copiedId === group.message.id ? 'Copied!' : 'Copy message'}
+                      onclick={() => copyContent(group.message.content, group.message.id)}
+                    >
+                      {#if copiedId === group.message.id}
+                        <Check size={12} />
+                      {:else}
+                        <Copy size={12} />
+                      {/if}
+                    </Button>
                   </div>
                 </div>
               {:else}
@@ -1414,28 +1385,22 @@
     <div class="input-wrapper">
       {#if isPipelinePrelude}
         <div class="input-area pipeline-stop-area">
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <span {...props} class="inline-flex">
-                  <Button
-                    variant="destructive"
-                    size="icon"
-                    class="size-9 shrink-0 rounded-[10px] [&_svg]:!size-4"
-                    onclick={handleCancel}
-                    disabled={cancelling}
-                  >
-                    {#if cancelling}
-                      <Spinner size={16} />
-                    {:else}
-                      <CircleStop size={16} />
-                    {/if}
-                  </Button>
-                </span>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>Stop workflow</Tooltip.Content>
-          </Tooltip.Root>
+          <span class="inline-flex" title="Stop workflow">
+            <Button
+              variant="destructive"
+              size="icon"
+              class="size-9 shrink-0 rounded-[10px] [&_svg]:!size-4"
+              aria-label="Stop workflow"
+              onclick={handleCancel}
+              disabled={cancelling}
+            >
+              {#if cancelling}
+                <Spinner size={16} />
+              {:else}
+                <CircleStop size={16} />
+              {/if}
+            </Button>
+          </span>
         </div>
       {:else}
         {#if hasQueuedMessages}
@@ -1444,24 +1409,18 @@
               <div class="queue-item">
                 <span class="queue-item-label">Queued</span>
                 <span class="queue-item-text">{msg}</span>
-                <Tooltip.Root>
-                  <Tooltip.Trigger>
-                    {#snippet child({ props })}
-                      <Button
-                        {...props}
-                        variant="ghost"
-                        size="icon"
-                        class="size-[18px] shrink-0 rounded text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-destructive [&_svg]:!size-2.5"
-                        onclick={() => {
-                          messageQueue = messageQueue.filter((_, idx) => idx !== i);
-                        }}
-                      >
-                        <X size={10} />
-                      </Button>
-                    {/snippet}
-                  </Tooltip.Trigger>
-                  <Tooltip.Content>Remove from queue</Tooltip.Content>
-                </Tooltip.Root>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="size-[18px] shrink-0 rounded text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-destructive [&_svg]:!size-2.5"
+                  title="Remove from queue"
+                  aria-label="Remove from queue"
+                  onclick={() => {
+                    messageQueue = messageQueue.filter((_, idx) => idx !== i);
+                  }}
+                >
+                  <X size={10} />
+                </Button>
               </div>
             {/each}
           </div>
@@ -1476,42 +1435,30 @@
                   <div class="reply-image-placeholder"><ImagePlus size={16} /></div>
                 {/if}
                 {#if !isLive}
-                  <Tooltip.Root>
-                    <Tooltip.Trigger>
-                      {#snippet child({ props })}
-                        <Button
-                          {...props}
-                          variant="ghost"
-                          size="icon"
-                          class="absolute top-0.5 right-0.5 size-4 rounded-full bg-[var(--bg-deepest)] text-muted-foreground opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-chrome)] hover:text-foreground group-hover/thumb:opacity-100 [&_svg]:!size-2.5"
-                          onclick={() => removeReplyImage(imageId)}
-                        >
-                          <X size={10} />
-                        </Button>
-                      {/snippet}
-                    </Tooltip.Trigger>
-                    <Tooltip.Content>Remove image</Tooltip.Content>
-                  </Tooltip.Root>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    class="absolute top-0.5 right-0.5 size-4 rounded-full bg-[var(--bg-deepest)] text-muted-foreground opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-chrome)] hover:text-foreground group-hover/thumb:opacity-100 [&_svg]:!size-2.5"
+                    title="Remove image"
+                    aria-label="Remove image"
+                    onclick={() => removeReplyImage(imageId)}
+                  >
+                    <X size={10} />
+                  </Button>
                 {/if}
               </div>
             {/each}
             {#if !isLive}
-              <Tooltip.Root>
-                <Tooltip.Trigger>
-                  {#snippet child({ props })}
-                    <Button
-                      {...props}
-                      variant="outline"
-                      size="icon"
-                      class="size-12 shrink-0 rounded-md border border-dashed border-[var(--border-muted)] bg-transparent text-[var(--text-faint)] shadow-none hover:border-[var(--border-emphasis)] hover:bg-transparent hover:text-muted-foreground [&_svg]:!size-4"
-                      onclick={openImagePicker}
-                    >
-                      <Plus size={16} />
-                    </Button>
-                  {/snippet}
-                </Tooltip.Trigger>
-                <Tooltip.Content>Add image</Tooltip.Content>
-              </Tooltip.Root>
+              <Button
+                variant="outline"
+                size="icon"
+                class="size-12 shrink-0 rounded-md border border-dashed border-[var(--border-muted)] bg-transparent text-[var(--text-faint)] shadow-none hover:border-[var(--border-emphasis)] hover:bg-transparent hover:text-muted-foreground [&_svg]:!size-4"
+                title="Add image"
+                aria-label="Add image"
+                onclick={openImagePicker}
+              >
+                <Plus size={16} />
+              </Button>
             {/if}
           </div>
         {/if}
@@ -1526,24 +1473,18 @@
               onchange={handleImageFileSelect}
             />
             {#if replyImageIds.length === 0}
-              <Tooltip.Root>
-                <Tooltip.Trigger>
-                  {#snippet child({ props })}
-                    <span {...props} class="inline-flex">
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        class="size-9 shrink-0 rounded-[10px] text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
-                        onclick={openImagePicker}
-                        disabled={isLive}
-                      >
-                        <Paperclip size={16} />
-                      </Button>
-                    </span>
-                  {/snippet}
-                </Tooltip.Trigger>
-                <Tooltip.Content>Attach image</Tooltip.Content>
-              </Tooltip.Root>
+              <span class="inline-flex" title="Attach image">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="size-9 shrink-0 rounded-[10px] text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
+                  aria-label="Attach image"
+                  onclick={openImagePicker}
+                  disabled={isLive}
+                >
+                  <Paperclip size={16} />
+                </Button>
+              </span>
             {/if}
           {/if}
           <HashtagInput
@@ -1557,51 +1498,39 @@
             items={hashtagItems}
           />
           {#if isLive}
-            <Tooltip.Root>
-              <Tooltip.Trigger>
-                {#snippet child({ props })}
-                  <span {...props} class="inline-flex">
-                    <Button
-                      variant="destructive"
-                      size="icon"
-                      class="size-9 shrink-0 rounded-[10px] [&_svg]:!size-4"
-                      onclick={handleCancel}
-                      disabled={cancelling}
-                    >
-                      {#if cancelling}
-                        <Spinner size={16} />
-                      {:else}
-                        <CircleStop size={16} />
-                      {/if}
-                    </Button>
-                  </span>
-                {/snippet}
-              </Tooltip.Trigger>
-              <Tooltip.Content>Stop session</Tooltip.Content>
-            </Tooltip.Root>
+            <span class="inline-flex" title="Stop session">
+              <Button
+                variant="destructive"
+                size="icon"
+                class="size-9 shrink-0 rounded-[10px] [&_svg]:!size-4"
+                aria-label="Stop session"
+                onclick={handleCancel}
+                disabled={cancelling}
+              >
+                {#if cancelling}
+                  <Spinner size={16} />
+                {:else}
+                  <CircleStop size={16} />
+                {/if}
+              </Button>
+            </span>
           {:else}
-            <Tooltip.Root>
-              <Tooltip.Trigger>
-                {#snippet child({ props })}
-                  <span {...props} class="inline-flex">
-                    <Button
-                      variant="outline"
-                      size="icon"
-                      class="size-9 shrink-0 rounded-[10px] shadow-none disabled:opacity-30 [&_svg]:!size-4"
-                      onclick={handleSend}
-                      disabled={sending || !inputText.trim()}
-                    >
-                      {#if sending}
-                        <Spinner size={16} />
-                      {:else}
-                        <Send size={16} />
-                      {/if}
-                    </Button>
-                  </span>
-                {/snippet}
-              </Tooltip.Trigger>
-              <Tooltip.Content>Send message</Tooltip.Content>
-            </Tooltip.Root>
+            <span class="inline-flex" title="Send message">
+              <Button
+                variant="outline"
+                size="icon"
+                class="size-9 shrink-0 rounded-[10px] shadow-none disabled:opacity-30 [&_svg]:!size-4"
+                aria-label="Send message"
+                onclick={handleSend}
+                disabled={sending || !inputText.trim()}
+              >
+                {#if sending}
+                  <Spinner size={16} />
+                {:else}
+                  <Send size={16} />
+                {/if}
+              </Button>
+            </span>
           {/if}
         </div>
       {/if}

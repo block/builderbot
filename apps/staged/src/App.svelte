@@ -16,7 +16,6 @@
   import SettingsPage from './lib/features/settings/SettingsPage.svelte';
   import { Toaster } from '$lib/components/ui/sonner';
   import { Button } from '$lib/components/ui/button';
-  import { TooltipProvider } from '$lib/components/ui/tooltip';
   import {
     preferences,
     initPreferences,
@@ -444,82 +443,80 @@
 </script>
 
 {#if preferences.loaded}
-  <TooltipProvider delayDuration={500} disableHoverableContent>
-    {#if storeIncompat && storeIncompat.kind === 'needs_reset'}
-      <main class="reset-shell">
-        <div class="update-state">
-          <div class="update-card">
-            <div class="update-header">
-              <h1 class="update-title">Update Required</h1>
-              <span class="version-badge new">v{storeIncompat.appVersion}</span>
-            </div>
-            <p>
-              Staged beta updates can require backwards-incompatible changes. The info stored by
-              Staged (session history, notes) will be cleared, but your
-              <strong>git repos and branches are not affected</strong>.
+  {#if storeIncompat && storeIncompat.kind === 'needs_reset'}
+    <main class="reset-shell">
+      <div class="update-state">
+        <div class="update-card">
+          <div class="update-header">
+            <h1 class="update-title">Update Required</h1>
+            <span class="version-badge new">v{storeIncompat.appVersion}</span>
+          </div>
+          <p>
+            Staged beta updates can require backwards-incompatible changes. The info stored by
+            Staged (session history, notes) will be cleared, but your
+            <strong>git repos and branches are not affected</strong>.
+          </p>
+          <div class="update-footer">
+            <p class="version-hint">
+              Not ready? Install <code>v{storeIncompat.dbAppVersion}</code> instead.
             </p>
-            <div class="update-footer">
-              <p class="version-hint">
-                Not ready? Install <code>v{storeIncompat.dbAppVersion}</code> instead.
-              </p>
-              <div class="update-actions">
-                <Button variant="ghost" size="sm" onclick={handleClose}>Close</Button>
-                <Button variant="outline" size="sm" onclick={handleResetStore} disabled={resetting}>
-                  {resetting ? 'Resetting…' : 'Reset & Update'}
-                </Button>
-              </div>
+            <div class="update-actions">
+              <Button variant="ghost" size="sm" onclick={handleClose}>Close</Button>
+              <Button variant="outline" size="sm" onclick={handleResetStore} disabled={resetting}>
+                {resetting ? 'Resetting…' : 'Reset & Update'}
+              </Button>
             </div>
           </div>
         </div>
-      </main>
-    {:else if storeIncompat && storeIncompat.kind === 'too_new'}
-      <main class="reset-shell">
-        <div class="update-state">
-          <div class="update-card">
-            <div class="update-header">
-              <h1 class="update-title">Update Staged</h1>
-              <span class="version-badge new">v{storeIncompat.dbAppVersion}</span>
-            </div>
-            <p>
-              This database was last used by a newer version of Staged. Please install
-              <strong>v{storeIncompat.dbAppVersion}</strong> or newer to continue.
-            </p>
-            <div class="update-footer">
-              <div></div>
-              <div class="update-actions">
-                <Button variant="ghost" size="sm" onclick={handleClose}>Close</Button>
-              </div>
+      </div>
+    </main>
+  {:else if storeIncompat && storeIncompat.kind === 'too_new'}
+    <main class="reset-shell">
+      <div class="update-state">
+        <div class="update-card">
+          <div class="update-header">
+            <h1 class="update-title">Update Staged</h1>
+            <span class="version-badge new">v{storeIncompat.dbAppVersion}</span>
+          </div>
+          <p>
+            This database was last used by a newer version of Staged. Please install
+            <strong>v{storeIncompat.dbAppVersion}</strong> or newer to continue.
+          </p>
+          <div class="update-footer">
+            <div></div>
+            <div class="update-actions">
+              <Button variant="ghost" size="sm" onclick={handleClose}>Close</Button>
             </div>
           </div>
         </div>
-      </main>
-    {:else}
-      <main>
-        <TopBar />
-        <div class="content">
-          {#if storeError}
-            <div class="error-state">
-              <p>{storeError}</p>
-            </div>
-          {:else if navigation.activeView === 'settings'}
-            <SettingsPage />
-          {:else if reposUiEnabled && navigation.showReposList}
-            <ReposListView />
-          {:else if navigation.selectedProjectId}
-            <ProjectHome selectedProjectId={navigation.selectedProjectId} />
-          {:else}
-            <ProjectsList />
-          {/if}
-        </div>
-      </main>
-    {/if}
+      </div>
+    </main>
+  {:else}
+    <main>
+      <TopBar />
+      <div class="content">
+        {#if storeError}
+          <div class="error-state">
+            <p>{storeError}</p>
+          </div>
+        {:else if navigation.activeView === 'settings'}
+          <SettingsPage />
+        {:else if reposUiEnabled && navigation.showReposList}
+          <ReposListView />
+        {:else if navigation.selectedProjectId}
+          <ProjectHome selectedProjectId={navigation.selectedProjectId} />
+        {:else}
+          <ProjectsList />
+        {/if}
+      </div>
+    </main>
+  {/if}
 
-    {#if showSessionLab}
-      <SessionLauncher onClose={() => (showSessionLab = false)} />
-    {/if}
+  {#if showSessionLab}
+    <SessionLauncher onClose={() => (showSessionLab = false)} />
+  {/if}
 
-    <Toaster position="bottom-right" visibleToasts={4} duration={8000} closeButton expand />
-  </TooltipProvider>
+  <Toaster position="bottom-right" visibleToasts={4} duration={8000} closeButton expand />
 {/if}
 
 <style>

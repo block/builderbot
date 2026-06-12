@@ -13,7 +13,6 @@
   import { marked } from 'marked';
   import * as Dialog from '$lib/components/ui/dialog';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
   import { sanitize } from '../../shared/sanitize';
   import { countAssistantMessagesAfter, handleExternalLinkClick } from '../../api/commands';
   import { formatChatButtonLabel } from '../sessions/noteFreshness';
@@ -218,65 +217,43 @@
         onClose={closeSearch}
       />
       <div class="header-actions">
-        <Tooltip.Root>
-          <Tooltip.Trigger>
-            {#snippet child({ props })}
-              <Button
-                {...props}
-                variant="outline"
-                size="sm"
-                class={[
-                  'h-7 shrink-0 gap-1 border-[var(--border-muted)] bg-transparent px-2.5 text-xs text-muted-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground',
-                  copied && 'text-[var(--status-added)] hover:text-[var(--status-added)]',
-                ]}
-                onclick={handleShare}
-              >
-                {#if copied}
-                  <Check size={16} />
-                {:else}
-                  <Copy size={16} />
-                {/if}
-              </Button>
-            {/snippet}
-          </Tooltip.Trigger>
-          <Tooltip.Content>{copied ? 'Copied!' : 'Copy note to clipboard'}</Tooltip.Content>
-        </Tooltip.Root>
+        <Button
+          variant="outline"
+          size="sm"
+          class={[
+            'h-7 shrink-0 gap-1 border-[var(--border-muted)] bg-transparent px-2.5 text-xs text-muted-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground',
+            copied && 'text-[var(--status-added)] hover:text-[var(--status-added)]',
+          ]}
+          title={copied ? 'Copied!' : 'Copy note to clipboard'}
+          aria-label={copied ? 'Copied!' : 'Copy note to clipboard'}
+          onclick={handleShare}
+        >
+          {#if copied}
+            <Check size={16} />
+          {:else}
+            <Copy size={16} />
+          {/if}
+        </Button>
         {#if canOpenSession}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <Button
-                  {...props}
-                  variant="outline"
-                  size="sm"
-                  class="h-7 shrink-0 gap-1 border-[var(--border-muted)] bg-transparent px-2.5 text-xs text-muted-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
-                  onclick={() => onOpenSession?.(sessionId!)}
-                >
-                  View chat
-                </Button>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>Open chat session</Tooltip.Content>
-          </Tooltip.Root>
+          <Button
+            variant="outline"
+            size="sm"
+            class="h-7 shrink-0 gap-1 border-[var(--border-muted)] bg-transparent px-2.5 text-xs text-muted-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+            onclick={() => onOpenSession?.(sessionId!)}
+          >
+            View chat
+          </Button>
         {/if}
-        <Tooltip.Root>
-          <Tooltip.Trigger>
-            {#snippet child({ props })}
-              <Button
-                {...props}
-                variant="ghost"
-                size="icon-sm"
-                class="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
-                onclick={onClose}
-              >
-                <X size={16} />
-              </Button>
-            {/snippet}
-          </Tooltip.Trigger>
-          <Tooltip.Content>
-            {viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
-          </Tooltip.Content>
-        </Tooltip.Root>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          class="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
+          title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
+          aria-label="Close"
+          onclick={onClose}
+        >
+          <X size={16} />
+        </Button>
       </div>
     </Dialog.Header>
     <div class="modal-body">
@@ -296,22 +273,14 @@
       <div class="next-steps">
         {#if showChatInfo}
           <div class="chat-info-row">
-            <Tooltip.Root>
-              <Tooltip.Trigger>
-                {#snippet child({ props })}
-                  <Button
-                    {...props}
-                    variant="outline"
-                    class="h-auto min-h-9 max-w-full gap-2 border-[var(--border-muted)] bg-[var(--bg-chrome)] px-3.5 py-2 text-sm font-medium text-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
-                    onclick={() => onOpenSession?.(sessionId!)}
-                  >
-                    <MessageCircle size={16} aria-hidden="true" />
-                    <span class="min-w-0 truncate">{chatButtonLabel}</span>
-                  </Button>
-                {/snippet}
-              </Tooltip.Trigger>
-              <Tooltip.Content>Open chat session</Tooltip.Content>
-            </Tooltip.Root>
+            <Button
+              variant="outline"
+              class="h-auto min-h-9 max-w-full gap-2 border-[var(--border-muted)] bg-[var(--bg-chrome)] px-3.5 py-2 text-sm font-medium text-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+              onclick={() => onOpenSession?.(sessionId!)}
+            >
+              <MessageCircle size={16} aria-hidden="true" />
+              <span class="min-w-0 truncate" title={chatButtonLabel}>{chatButtonLabel}</span>
+            </Button>
           </div>
         {/if}
         {#if nextSteps && onStartSession && nextSteps.noteStep}

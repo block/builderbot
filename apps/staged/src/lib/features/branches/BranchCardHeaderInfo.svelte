@@ -6,7 +6,6 @@
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import ParentBranchCommitsHover from './ParentBranchCommitsHover.svelte';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
   import type { ProjectRepo } from '../../types';
 
   interface Props {
@@ -37,21 +36,14 @@
 </script>
 
 {#snippet capsule()}
-  <Tooltip.Root>
-    <Tooltip.Trigger>
-      {#snippet child({ props })}
-        <span class="branch-capsule" {...props}>
-          {baseBranch}{#if parentAheadCount > 0}<span
-              class="ahead-count"
-              transition:fade={{ duration: 150 }}
-            >
-              +{parentAheadCount}</span
-            >{/if}
-        </span>
-      {/snippet}
-    </Tooltip.Trigger>
-    <Tooltip.Content>{baseBranch}</Tooltip.Content>
-  </Tooltip.Root>
+  <span class="branch-capsule" title={baseBranch ?? undefined}>
+    {baseBranch}{#if parentAheadCount > 0}<span
+        class="ahead-count"
+        transition:fade={{ duration: 150 }}
+      >
+        +{parentAheadCount}</span
+      >{/if}
+  </span>
 {/snippet}
 
 {#snippet parentPill()}
@@ -64,24 +56,19 @@
       {@render capsule()}
     {/if}
     {#if parentAheadCount > 0 && onRebase}
-      <Tooltip.Root>
-        <Tooltip.Trigger>
-          {#snippet child({ props })}
-            <span {...props} class="inline-flex" transition:slide={{ axis: 'x', duration: 150 }}>
-              <Button
-                variant="outline"
-                size="xs"
-                disabled={rebaseDisabled}
-                onclick={onRebase}
-                class="h-[22px]">Rebase</Button
-              >
-            </span>
-          {/snippet}
-        </Tooltip.Trigger>
-        <Tooltip.Content>
-          {rebaseDisabled ? 'Rebase unavailable' : 'Rebase onto parent'}
-        </Tooltip.Content>
-      </Tooltip.Root>
+      <span
+        class="inline-flex"
+        title={rebaseDisabled ? 'Rebase unavailable' : 'Rebase onto parent'}
+        transition:slide={{ axis: 'x', duration: 150 }}
+      >
+        <Button
+          variant="outline"
+          size="xs"
+          disabled={rebaseDisabled}
+          onclick={onRebase}
+          class="h-[22px]">Rebase</Button
+        >
+      </span>
     {/if}
   {/if}
 {/snippet}
@@ -90,16 +77,9 @@
   {#if refreshingGitState}
     <Spinner size={10} />
   {:else if fetchError}
-    <Tooltip.Root>
-      <Tooltip.Trigger>
-        {#snippet child({ props })}
-          <span class="fetch-error" {...props} transition:slide={{ axis: 'x', duration: 150 }}>
-            <AlertTriangle size={12} />
-          </span>
-        {/snippet}
-      </Tooltip.Trigger>
-      <Tooltip.Content>{fetchError}</Tooltip.Content>
-    </Tooltip.Root>
+    <span class="fetch-error" title={fetchError} transition:slide={{ axis: 'x', duration: 150 }}>
+      <AlertTriangle size={12} />
+    </span>
   {/if}
 {/snippet}
 
@@ -112,30 +92,16 @@
       /></span
     >
     <div class="header-meta">
-      <Tooltip.Root>
-        <Tooltip.Trigger>
-          {#snippet child({ props })}
-            <span class="branch-capsule" {...props}>{branchName}</span>
-          {/snippet}
-        </Tooltip.Trigger>
-        <Tooltip.Content>{branchName}</Tooltip.Content>
-      </Tooltip.Root>
+      <span class="branch-capsule" title={branchName}>{branchName}</span>
       {#if baseBranch}
         <ChevronRight size={12} />
       {/if}
       {@render parentPill()}
       {#if warning}
-        <Tooltip.Root>
-          <Tooltip.Trigger>
-            {#snippet child({ props })}
-              <span class="branch-warning" {...props}>
-                <AlertTriangle size={12} />
-                <span>{warning}</span>
-              </span>
-            {/snippet}
-          </Tooltip.Trigger>
-          <Tooltip.Content>{warning}</Tooltip.Content>
-        </Tooltip.Root>
+        <span class="branch-warning" title={warning}>
+          <AlertTriangle size={12} />
+          <span>{warning}</span>
+        </span>
       {/if}
       {@render refreshStatus()}
     </div>
@@ -145,17 +111,10 @@
       <div class="header-meta">
         {@render parentPill()}
         {#if warning}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <span class="branch-warning" {...props}>
-                  <AlertTriangle size={12} />
-                  <span>{warning}</span>
-                </span>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>{warning}</Tooltip.Content>
-          </Tooltip.Root>
+          <span class="branch-warning" title={warning}>
+            <AlertTriangle size={12} />
+            <span>{warning}</span>
+          </span>
         {/if}
         {@render refreshStatus()}
       </div>

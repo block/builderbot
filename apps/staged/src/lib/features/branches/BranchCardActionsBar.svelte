@@ -56,7 +56,6 @@
   import { agentState } from '../agents/agent.svelte';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
 
   type MenuIconComponent = typeof MoreVertical;
   type ActionMenuItem = {
@@ -633,62 +632,53 @@
       class:fading={execution.fading}
       transition:slideAndFade={{ duration: 300, axis: 'x' }}
     >
-      <Tooltip.Root>
-        <Tooltip.Trigger>
-          {#snippet child({ props })}
-            <Button
-              {...props}
-              variant="ghost"
-              class={[
-                'h-auto whitespace-nowrap rounded-full border bg-[var(--bg-elevated)] border-[var(--border-muted)] px-3 py-1.5 gap-1.5 text-xs text-foreground hover:bg-[var(--bg-hover)] hover:border-[var(--border-focus)] [&_svg]:!size-3',
-                execution.status === 'completed' &&
-                  'border-[var(--status-added)] text-[var(--status-added)]',
-                execution.status === 'failed' && 'border-destructive text-destructive',
-                isStopping &&
-                  'opacity-60 hover:bg-[var(--bg-elevated)] hover:border-[var(--border-muted)]',
-                showStopIcon && 'border-destructive text-destructive',
-              ]}
-              onclick={() => {
-                if (isRunning && altHeld && !isStopping) {
-                  handleStopAction(execution.executionId, execution.actionName);
-                } else {
-                  handleShowActionOutput(execution);
-                }
-              }}
-            >
-              {#if isStopping}
-                <Spinner size={12} class="danger" />
-              {:else if showStopIcon}
-                <StopCircle size={12} />
-              {:else if isRunning && phase && phase.type !== 'building' && execution.actionType === 'run'}
-                <SineWave size={12} />
-              {:else if isRunning}
-                <Spinner size={12} />
-              {:else if execution.status === 'completed'}
-                <CheckCircle size={12} />
-              {:else if execution.status === 'failed'}
-                <AlertCircle size={12} />
-              {:else}
-                <StopCircle size={12} />
-              {/if}
-              {execution.actionName}
-            </Button>
-          {/snippet}
-        </Tooltip.Trigger>
-        <Tooltip.Content>
-          {isStopping
-            ? 'Stopping…'
-            : showStopIcon
-              ? `Stop ${execution.actionName}`
-              : isRunning
-                ? `View output for ${execution.actionName}`
-                : execution.status === 'completed'
-                  ? `${execution.actionName} completed`
-                  : execution.status === 'failed'
-                    ? `${execution.actionName} failed`
-                    : execution.actionName}
-        </Tooltip.Content>
-      </Tooltip.Root>
+      <Button
+        variant="ghost"
+        class={[
+          'h-auto whitespace-nowrap rounded-full border bg-[var(--bg-elevated)] border-[var(--border-muted)] px-3 py-1.5 gap-1.5 text-xs text-foreground hover:bg-[var(--bg-hover)] hover:border-[var(--border-focus)] [&_svg]:!size-3',
+          execution.status === 'completed' &&
+            'border-[var(--status-added)] text-[var(--status-added)]',
+          execution.status === 'failed' && 'border-destructive text-destructive',
+          isStopping &&
+            'opacity-60 hover:bg-[var(--bg-elevated)] hover:border-[var(--border-muted)]',
+          showStopIcon && 'border-destructive text-destructive',
+        ]}
+        title={isStopping
+          ? 'Stopping…'
+          : showStopIcon
+            ? `Stop ${execution.actionName}`
+            : isRunning
+              ? `View output for ${execution.actionName}`
+              : execution.status === 'completed'
+                ? `${execution.actionName} completed`
+                : execution.status === 'failed'
+                  ? `${execution.actionName} failed`
+                  : execution.actionName}
+        onclick={() => {
+          if (isRunning && altHeld && !isStopping) {
+            handleStopAction(execution.executionId, execution.actionName);
+          } else {
+            handleShowActionOutput(execution);
+          }
+        }}
+      >
+        {#if isStopping}
+          <Spinner size={12} class="danger" />
+        {:else if showStopIcon}
+          <StopCircle size={12} />
+        {:else if isRunning && phase && phase.type !== 'building' && execution.actionType === 'run'}
+          <SineWave size={12} />
+        {:else if isRunning}
+          <Spinner size={12} />
+        {:else if execution.status === 'completed'}
+          <CheckCircle size={12} />
+        {:else if execution.status === 'failed'}
+          <AlertCircle size={12} />
+        {:else}
+          <StopCircle size={12} />
+        {/if}
+        {execution.actionName}
+      </Button>
     </div>
   {/each}
   <!-- Primary run action button -->
@@ -711,150 +701,141 @@
       {#if isRunning && hasEndpoint && phase?.type === 'running' && phase.endpoint}
         <!-- Pill-shaped button when running with endpoint -->
         <div class="primary-action-pill">
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <Button
-                  {...props}
-                  variant="ghost"
-                  class={[
-                    'size-7 rounded-full border-0 bg-transparent text-muted-foreground hover:bg-transparent hover:text-foreground [&_svg]:!size-3.5',
-                    isStopping && 'opacity-60',
-                    showStopIcon && 'text-destructive',
-                  ]}
-                  onclick={() => {
-                    if (altHeld && !isStopping && execution) {
-                      handleStopAction(execution.executionId, primaryRunAction.name);
-                    } else if (execution) {
-                      handleShowActionOutput(execution);
-                    }
-                  }}
-                >
-                  {#if isStopping}
-                    <Spinner size={14} class="danger" />
-                  {:else if showStopIcon}
-                    <StopCircle size={14} />
-                  {:else}
-                    <SineWave size={14} />
-                  {/if}
-                </Button>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>
-              {isStopping
-                ? 'Stopping…'
-                : showStopIcon
-                  ? `Stop ${primaryRunAction.name}`
-                  : `View output for ${primaryRunAction.name}`}
-            </Tooltip.Content>
-          </Tooltip.Root>
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <Button
-                  {...props}
-                  variant="ghost"
-                  class="relative size-7 rounded-none border-0 border-l border-l-[var(--border-muted)] bg-transparent text-muted-foreground hover:bg-[var(--bg-elevated)] hover:text-foreground [&_svg]:!size-3"
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    if (phase?.type === 'running' && phase.endpoint && execution && copyUrl) {
-                      navigator.clipboard.writeText(copyUrl).catch(() => {});
-                      const id = execution.executionId;
-                      if (endpointCopiedTimers[id]) clearTimeout(endpointCopiedTimers[id]);
-                      endpointCopied[id] = true;
-                      endpointCopiedTimers[id] = setTimeout(() => {
-                        delete endpointCopied[id];
-                        delete endpointCopiedTimers[id];
-                      }, 1500);
-                    }
-                  }}
-                >
-                  {#if execution && endpointCopied[execution.executionId]}
-                    <span
-                      class="copy-icon-wrapper"
-                      in:fade={{ duration: 150 }}
-                      out:fade={{ duration: 150 }}
-                    >
-                      <Check size={12} />
-                    </span>
-                  {:else}
-                    <span
-                      class="copy-icon-wrapper"
-                      in:fade={{ duration: 150 }}
-                      out:fade={{ duration: 150 }}
-                    >
-                      <Copy size={12} />
-                    </span>
-                  {/if}
-                </Button>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>Copy endpoint: {copyUrl}</Tooltip.Content>
-          </Tooltip.Root>
-        </div>
-      {:else}
-        <!-- Standard circular button -->
-        <Tooltip.Root>
-          <Tooltip.Trigger>
-            {#snippet child({ props })}
-              <Button
-                {...props}
-                variant="ghost"
-                class={[
-                  'size-7 rounded-full border-0 bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)] [&_svg]:!size-3.5',
-                  isRunning &&
-                    'bg-[var(--bg-hover)] text-muted-foreground hover:bg-[var(--bg-elevated)]',
-                  execution?.status === 'completed' &&
-                    'bg-[var(--bg-hover)] text-[var(--status-added)] hover:bg-[var(--bg-hover)]',
-                  execution?.status === 'failed' &&
-                    'bg-[var(--bg-hover)] text-destructive hover:bg-[var(--bg-hover)]',
-                  isStopping && 'opacity-60 hover:bg-[var(--bg-elevated)]',
-                  showStopIcon && 'text-destructive',
-                ]}
-                onclick={() => {
-                  if (isRunning && altHeld && !isStopping && execution) {
-                    handleStopAction(execution.executionId, primaryRunAction.name);
-                  } else if (isRunning && execution) {
-                    handleShowActionOutput(execution);
-                  } else if (isStopping && execution) {
-                    handleShowActionOutput(execution);
-                  } else {
-                    handleRunAction(primaryRunAction);
-                  }
-                }}
-              >
-                {#if isStopping}
-                  <Spinner size={14} class="danger" />
-                {:else if showStopIcon}
-                  <StopCircle size={14} />
-                {:else if isRunning && phase?.type === 'building'}
-                  <Spinner size={14} />
-                {:else if isRunning}
-                  <SineWave size={14} />
-                {:else if execution?.status === 'completed'}
-                  <CheckCircle size={14} />
-                {:else if execution?.status === 'failed'}
-                  <AlertCircle size={14} />
-                {:else}
-                  <Play size={14} />
-                {/if}
-              </Button>
-            {/snippet}
-          </Tooltip.Trigger>
-          <Tooltip.Content>
-            {isStopping
+          <Button
+            variant="ghost"
+            class={[
+              'size-7 rounded-full border-0 bg-transparent text-muted-foreground hover:bg-transparent hover:text-foreground [&_svg]:!size-3.5',
+              isStopping && 'opacity-60',
+              showStopIcon && 'text-destructive',
+            ]}
+            title={isStopping
               ? 'Stopping…'
               : showStopIcon
                 ? `Stop ${primaryRunAction.name}`
-                : isRunning
-                  ? `View output for ${primaryRunAction.name}`
-                  : execution?.status === 'completed'
-                    ? `${primaryRunAction.name} completed`
-                    : execution?.status === 'failed'
-                      ? `${primaryRunAction.name} failed`
-                      : primaryRunAction.name}
-          </Tooltip.Content>
-        </Tooltip.Root>
+                : `View output for ${primaryRunAction.name}`}
+            aria-label={isStopping
+              ? 'Stopping'
+              : showStopIcon
+                ? `Stop ${primaryRunAction.name}`
+                : `View output for ${primaryRunAction.name}`}
+            onclick={() => {
+              if (altHeld && !isStopping && execution) {
+                handleStopAction(execution.executionId, primaryRunAction.name);
+              } else if (execution) {
+                handleShowActionOutput(execution);
+              }
+            }}
+          >
+            {#if isStopping}
+              <Spinner size={14} class="danger" />
+            {:else if showStopIcon}
+              <StopCircle size={14} />
+            {:else}
+              <SineWave size={14} />
+            {/if}
+          </Button>
+          <Button
+            variant="ghost"
+            class="relative size-7 rounded-none border-0 border-l border-l-[var(--border-muted)] bg-transparent text-muted-foreground hover:bg-[var(--bg-elevated)] hover:text-foreground [&_svg]:!size-3"
+            title={`Copy endpoint: ${copyUrl}`}
+            aria-label="Copy endpoint"
+            onclick={(e) => {
+              e.stopPropagation();
+              if (phase?.type === 'running' && phase.endpoint && execution && copyUrl) {
+                navigator.clipboard.writeText(copyUrl).catch(() => {});
+                const id = execution.executionId;
+                if (endpointCopiedTimers[id]) clearTimeout(endpointCopiedTimers[id]);
+                endpointCopied[id] = true;
+                endpointCopiedTimers[id] = setTimeout(() => {
+                  delete endpointCopied[id];
+                  delete endpointCopiedTimers[id];
+                }, 1500);
+              }
+            }}
+          >
+            {#if execution && endpointCopied[execution.executionId]}
+              <span
+                class="copy-icon-wrapper"
+                in:fade={{ duration: 150 }}
+                out:fade={{ duration: 150 }}
+              >
+                <Check size={12} />
+              </span>
+            {:else}
+              <span
+                class="copy-icon-wrapper"
+                in:fade={{ duration: 150 }}
+                out:fade={{ duration: 150 }}
+              >
+                <Copy size={12} />
+              </span>
+            {/if}
+          </Button>
+        </div>
+      {:else}
+        <!-- Standard circular button -->
+        <Button
+          variant="ghost"
+          class={[
+            'size-7 rounded-full border-0 bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)] [&_svg]:!size-3.5',
+            isRunning && 'bg-[var(--bg-hover)] text-muted-foreground hover:bg-[var(--bg-elevated)]',
+            execution?.status === 'completed' &&
+              'bg-[var(--bg-hover)] text-[var(--status-added)] hover:bg-[var(--bg-hover)]',
+            execution?.status === 'failed' &&
+              'bg-[var(--bg-hover)] text-destructive hover:bg-[var(--bg-hover)]',
+            isStopping && 'opacity-60 hover:bg-[var(--bg-elevated)]',
+            showStopIcon && 'text-destructive',
+          ]}
+          title={isStopping
+            ? 'Stopping…'
+            : showStopIcon
+              ? `Stop ${primaryRunAction.name}`
+              : isRunning
+                ? `View output for ${primaryRunAction.name}`
+                : execution?.status === 'completed'
+                  ? `${primaryRunAction.name} completed`
+                  : execution?.status === 'failed'
+                    ? `${primaryRunAction.name} failed`
+                    : primaryRunAction.name}
+          aria-label={isStopping
+            ? 'Stopping'
+            : showStopIcon
+              ? `Stop ${primaryRunAction.name}`
+              : isRunning
+                ? `View output for ${primaryRunAction.name}`
+                : execution?.status === 'completed'
+                  ? `${primaryRunAction.name} completed`
+                  : execution?.status === 'failed'
+                    ? `${primaryRunAction.name} failed`
+                    : primaryRunAction.name}
+          onclick={() => {
+            if (isRunning && altHeld && !isStopping && execution) {
+              handleStopAction(execution.executionId, primaryRunAction.name);
+            } else if (isRunning && execution) {
+              handleShowActionOutput(execution);
+            } else if (isStopping && execution) {
+              handleShowActionOutput(execution);
+            } else {
+              handleRunAction(primaryRunAction);
+            }
+          }}
+        >
+          {#if isStopping}
+            <Spinner size={14} class="danger" />
+          {:else if showStopIcon}
+            <StopCircle size={14} />
+          {:else if isRunning && phase?.type === 'building'}
+            <Spinner size={14} />
+          {:else if isRunning}
+            <SineWave size={14} />
+          {:else if execution?.status === 'completed'}
+            <CheckCircle size={14} />
+          {:else if execution?.status === 'failed'}
+            <AlertCircle size={14} />
+          {:else}
+            <Play size={14} />
+          {/if}
+        </Button>
       {/if}
     </div>
   {/if}

@@ -23,7 +23,6 @@
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import { Button } from '$lib/components/ui/button';
-  import * as Tooltip from '$lib/components/ui/tooltip';
   import { toast } from 'svelte-sonner';
   import { formatRelativeTimeSeconds } from '../../shared/relativeTime.svelte';
   import { DiffViewer, CrossFileSearchBar } from '@builderbot/diff-viewer/components';
@@ -1228,22 +1227,16 @@
     <div class="title-bar" onpointerdown={startDrag}>
       <div class="traffic-light-spacer"></div>
       <div class="left-actions">
-        <Tooltip.Root>
-          <Tooltip.Trigger>
-            {#snippet child({ props })}
-              <Button
-                {...props}
-                variant="ghost"
-                size="icon"
-                class="size-auto shrink-0 rounded-md p-[5px] text-muted-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-35 [&_svg]:!size-3.5"
-                onclick={onClose}
-              >
-                <ArrowLeft size={14} />
-              </Button>
-            {/snippet}
-          </Tooltip.Trigger>
-          <Tooltip.Content>{viewport.showShortcutHints ? 'Back (Esc)' : 'Back'}</Tooltip.Content>
-        </Tooltip.Root>
+        <Button
+          variant="ghost"
+          size="icon"
+          class="size-auto shrink-0 rounded-md p-[5px] text-muted-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-35 [&_svg]:!size-3.5"
+          title={viewport.showShortcutHints ? 'Back (Esc)' : 'Back'}
+          aria-label="Back"
+          onclick={onClose}
+        >
+          <ArrowLeft size={14} />
+        </Button>
       </div>
       <div class="title-content">
         {#if projectName}
@@ -1256,33 +1249,26 @@
       <div class="drag-spacer"></div>
       {#if showContextSwitcher}
         <div class="context-switcher">
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <span {...props} class="inline-flex">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    class="h-auto gap-1.5 rounded-md border-[var(--border-subtle)] bg-transparent px-2.5 py-1 text-xs font-medium text-muted-foreground shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-3"
-                    disabled={switchingContext}
-                    onclick={() => (showContextDropdown ? closeDropdown() : openDropdown())}
-                    onkeydown={handleDropdownKeydown}
-                    aria-expanded={showContextDropdown}
-                    aria-haspopup="listbox"
-                  >
-                    {#if activeScope === 'branch'}
-                      <GitBranch size={12} />
-                    {:else}
-                      <GitCommitHorizontal size={12} />
-                    {/if}
-                    <span class="context-label">{contextLabel}</span>
-                    <ChevronDown size={12} />
-                  </Button>
-                </span>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>Switch diff context</Tooltip.Content>
-          </Tooltip.Root>
+          <span class="inline-flex" title="Switch diff context">
+            <Button
+              type="button"
+              variant="outline"
+              class="h-auto gap-1.5 rounded-md border-[var(--border-subtle)] bg-transparent px-2.5 py-1 text-xs font-medium text-muted-foreground shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-3"
+              disabled={switchingContext}
+              onclick={() => (showContextDropdown ? closeDropdown() : openDropdown())}
+              onkeydown={handleDropdownKeydown}
+              aria-expanded={showContextDropdown}
+              aria-haspopup="listbox"
+            >
+              {#if activeScope === 'branch'}
+                <GitBranch size={12} />
+              {:else}
+                <GitCommitHorizontal size={12} />
+              {/if}
+              <span class="context-label">{contextLabel}</span>
+              <ChevronDown size={12} />
+            </Button>
+          </span>
           {#if showContextDropdown}
             <div class="context-dropdown" role="listbox" aria-label="Diff context">
               {#each reversedCommits as commit, i (commit.sha)}
@@ -1323,23 +1309,16 @@
         </div>
       {/if}
       {#if isSmallDiffViewport}
-        <Tooltip.Root>
-          <Tooltip.Trigger>
-            {#snippet child({ props })}
-              <Button
-                {...props}
-                variant="ghost"
-                size="icon"
-                class="size-auto shrink-0 rounded-md p-[5px] text-muted-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-35 [&_svg]:!size-3.5"
-                onclick={() => (showMobileSidebar = true)}
-                aria-label="Show changed files"
-              >
-                <PanelRightOpen size={14} />
-              </Button>
-            {/snippet}
-          </Tooltip.Trigger>
-          <Tooltip.Content>Show changed files</Tooltip.Content>
-        </Tooltip.Root>
+        <Button
+          variant="ghost"
+          size="icon"
+          class="size-auto shrink-0 rounded-md p-[5px] text-muted-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-35 [&_svg]:!size-3.5"
+          title="Show changed files"
+          aria-label="Show changed files"
+          onclick={() => (showMobileSidebar = true)}
+        >
+          <PanelRightOpen size={14} />
+        </Button>
       {/if}
     </div>
 
@@ -1394,23 +1373,16 @@
       <div class="mobile-sidebar-dialog">
         <div class="mobile-sidebar-header">
           <span class="mobile-sidebar-title">Changed files</span>
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <Button
-                  {...props}
-                  variant="ghost"
-                  size="icon"
-                  class="size-auto shrink-0 rounded-md p-[5px] text-muted-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-35 [&_svg]:!size-3.5"
-                  onclick={() => (showMobileSidebar = false)}
-                  aria-label="Close changed files"
-                >
-                  <X size={14} />
-                </Button>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>Close changed files</Tooltip.Content>
-          </Tooltip.Root>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="size-auto shrink-0 rounded-md p-[5px] text-muted-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-35 [&_svg]:!size-3.5"
+            title="Close changed files"
+            aria-label="Close changed files"
+            onclick={() => (showMobileSidebar = false)}
+          >
+            <X size={14} />
+          </Button>
         </div>
         <div class="mobile-sidebar-body">
           {@render fileSidebarContents()}

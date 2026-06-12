@@ -329,36 +329,15 @@
         {#if meta || secondaryMeta || tertiaryMeta || (badges && badges.length > 0)}
           <div class="timeline-meta">
             {#if meta}
-              <Tooltip.Root>
-                <Tooltip.Trigger>
-                  {#snippet child({ props })}
-                    <span class="meta-item" {...props}>{meta}</span>
-                  {/snippet}
-                </Tooltip.Trigger>
-                <Tooltip.Content>{meta}</Tooltip.Content>
-              </Tooltip.Root>
+              <span class="meta-item" title={meta}>{meta}</span>
             {/if}
             {#if secondaryMeta}
-              <Tooltip.Root>
-                <Tooltip.Trigger>
-                  {#snippet child({ props })}
-                    <span class="meta-item meta-sha" class:failed-meta={isFailed} {...props}
-                      >{secondaryMeta}</span
-                    >
-                  {/snippet}
-                </Tooltip.Trigger>
-                <Tooltip.Content>{secondaryMeta}</Tooltip.Content>
-              </Tooltip.Root>
+              <span class="meta-item meta-sha" class:failed-meta={isFailed} title={secondaryMeta}
+                >{secondaryMeta}</span
+              >
             {/if}
             {#if tertiaryMeta}
-              <Tooltip.Root>
-                <Tooltip.Trigger>
-                  {#snippet child({ props })}
-                    <span class="meta-item" {...props}>{tertiaryMeta}</span>
-                  {/snippet}
-                </Tooltip.Trigger>
-                <Tooltip.Content>{tertiaryMeta}</Tooltip.Content>
-              </Tooltip.Root>
+              <span class="meta-item" title={tertiaryMeta}>{tertiaryMeta}</span>
             {/if}
             {#if badges}
               {#each badges as badge}
@@ -395,58 +374,40 @@
           !!discardChangesDisabledReason}
       >
         {#if onStartClick}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <Button
-                  {...props}
-                  variant="outline"
-                  size="xs"
-                  onclick={handleStartClick}
-                  class="h-[22px] rounded border-[var(--border-muted)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
-                >
-                  Start
-                </Button>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>Start</Tooltip.Content>
-          </Tooltip.Root>
+          <Button
+            variant="outline"
+            size="xs"
+            onclick={handleStartClick}
+            title="Start"
+            aria-label="Start"
+            class="h-[22px] rounded border-[var(--border-muted)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+          >
+            Start
+          </Button>
         {/if}
         {#if onRetryClick}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <Button
-                  {...props}
-                  variant="ghost"
-                  size="xs"
-                  onclick={handleRetryClick}
-                  class="h-[22px] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
-                >
-                  Retry
-                </Button>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>Retry</Tooltip.Content>
-          </Tooltip.Root>
+          <Button
+            variant="ghost"
+            size="xs"
+            onclick={handleRetryClick}
+            title="Retry"
+            aria-label="Retry"
+            class="h-[22px] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+          >
+            Retry
+          </Button>
         {/if}
         {#if onResumeClick}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <Button
-                  {...props}
-                  variant="outline"
-                  size="xs"
-                  onclick={handleResumeClick}
-                  class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
-                >
-                  Resume
-                </Button>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>Resume session</Tooltip.Content>
-          </Tooltip.Root>
+          <Button
+            variant="outline"
+            size="xs"
+            onclick={handleResumeClick}
+            title="Resume session"
+            aria-label="Resume session"
+            class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+          >
+            Resume
+          </Button>
         {/if}
         {#if onPullClick || pullDisabledReason}
           <Tooltip.Root>
@@ -539,22 +500,16 @@
           </Tooltip.Root>
         {/if}
         {#if onViewDiffClick}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <Button
-                  {...props}
-                  variant="outline"
-                  size="xs"
-                  onclick={handleViewDiffClick}
-                  class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
-                >
-                  Diff
-                </Button>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>View diff</Tooltip.Content>
-          </Tooltip.Root>
+          <Button
+            variant="outline"
+            size="xs"
+            onclick={handleViewDiffClick}
+            title="View diff"
+            aria-label="View diff"
+            class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+          >
+            Diff
+          </Button>
         {/if}
         {#if onCommitChangesClick || commitChangesDisabledReason}
           <Tooltip.Root>
@@ -597,22 +552,16 @@
           </Tooltip.Root>
         {/if}
         {#if hasSession && !onStartClick && !isQueued}
-          <Tooltip.Root>
-            <Tooltip.Trigger>
-              {#snippet child({ props })}
-                <Button
-                  {...props}
-                  variant="ghost"
-                  size="icon-xs"
-                  onclick={handleSessionClick}
-                  class="size-[22px] text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-[var(--ui-accent)] [&_svg]:!size-3"
-                >
-                  <MessageSquare size={12} />
-                </Button>
-              {/snippet}
-            </Tooltip.Trigger>
-            <Tooltip.Content>View session</Tooltip.Content>
-          </Tooltip.Root>
+          <Button
+            variant="ghost"
+            size="icon-xs"
+            onclick={handleSessionClick}
+            title="View session"
+            aria-label="View session"
+            class="size-[22px] text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-[var(--ui-accent)] [&_svg]:!size-3"
+          >
+            <MessageSquare size={12} />
+          </Button>
         {/if}
         {#if onDeleteClick || deleteDisabledReason}
           <Tooltip.Root>

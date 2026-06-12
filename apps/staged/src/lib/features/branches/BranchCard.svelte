@@ -10,6 +10,24 @@
   - Notes open a markdown viewer
   - Each item shows session + delete actions on hover
 -->
+<script module lang="ts">
+  /**
+   * Last-measured rendered height of each branch card's timeline interior,
+   * keyed by `branch.id`. Module-scoped (not per-instance) so a cached height
+   * survives both the interior unmounting when scrolled off-screen AND the
+   * BranchCard component being destroyed/recreated across project switches —
+   * letting the placeholder preserve scroll position without re-measuring.
+   */
+  const interiorHeightCache = new Map<string, number>();
+
+  /**
+   * Fallback placeholder height for a card whose interior has never been
+   * measured (e.g. below the fold on the first render after a switch). It is
+   * corrected to the real height the first time the interior mounts.
+   */
+  const DEFAULT_INTERIOR_HEIGHT = 160;
+</script>
+
 <script lang="ts">
   import { untrack } from 'svelte';
   import FileDiff from '@lucide/svelte/icons/file-diff';
@@ -1200,6 +1218,14 @@
   let dragOver = $state(false);
   let cardElement: HTMLDivElement | undefined = $state();
 
+  // Lazy-mount the heavy timeline interior only when this card is within ~1.5
+  // viewports of the scroll container. Off-screen cards render just the cheap
+  // shell (header) plus a height-preserving placeholder, so switching projects
+  // doesn't synchronously build every branch's <BranchTimeline> at once (the
+  // dominant project-switch-freeze cost). See Phase 2a of the switch-freeze plan.
+  let shouldMountInterior = $state(false);
+  let interiorEl: HTMLDivElement | undefined = $state();
+
   let pendingDropNotes = $state<{ key: string; title: string }[]>([]);
 
   function handleFileDrop(paths: string[]) {
@@ -1268,6 +1294,55 @@
     );
 
     return unsub;
+  });
+
+  // Drive shouldMountInterior from an IntersectionObserver on the card root.
+  // The observer is created (and disconnected on cleanup) inside this effect,
+  // so switching projects tears it down with the component — no leaked
+  // observers. Depends only on cardElement, so it isn't re-created on every
+  // timeline refresh.
+  $effect(() => {
+    const el = cardElement;
+    if (!el) return;
+    // SSR / unsupported environment: mount eagerly so content is never hidden.
+    if (typeof IntersectionObserver === 'undefined') {
+      shouldMountInterior = true;
+      return;
+    }
+    // Prefer the real scroll container (.main-panel) as the observer root; fall
+    // back to the viewport (null) if the card isn't inside one — the card still
+    // moves within the viewport as .main-panel scrolls, so null works too.
+    const root = el.closest('.main-panel');
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          shouldMountInterior = entry.isIntersecting;
+        }
+      },
+      // ~1.5 viewports of slop so interiors mount just before scrolling into
+      // view (seamless) and brief scroll-bys don't thrash mount/unmount.
+      { root, rootMargin: '150% 0px', threshold: 0 }
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  });
+
+  // While the interior is mounted, keep its rendered height cached by branch.id
+  // so the placeholder shown after unmount preserves scroll position (no jump).
+  $effect(() => {
+    const el = interiorEl;
+    if (!el) return;
+    if (typeof ResizeObserver === 'undefined') {
+      const height = el.offsetHeight;
+      if (height > 0) interiorHeightCache.set(branch.id, height);
+      return;
+    }
+    const ro = new ResizeObserver(() => {
+      const height = el.offsetHeight;
+      if (height > 0) interiorHeightCache.set(branch.id, height);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
   });
 </script>
 
@@ -1381,6 +1456,19 @@
       </div>
     </div>
 
+    <BranchCardPrButton
+      bind:this={prButton}
+      {branch}
+      {isLocal}
+      {isRemote}
+      {hasCodeChanges}
+      {timeline}
+      showButton={false}
+      onOpenSession={(sid) => {
+        sessionMgr.openSessionId = sid;
+      }}
+    />
+
     <div class="card-content">
       {#if isRemote && (remoteWorkspaceStatus === 'stopped' || remoteWorkspaceStatus === 'suspended' || remoteWorkspaceStatus === 'error')}
         <RemoteWorkspaceStatusView
@@ -1399,109 +1487,114 @@
           <Button variant="outline" size="xs" onclick={() => loadTimeline()}>Retry</Button>
         </div>
       {:else if timeline || isSettingUp}
-        <BranchTimeline
-          timeline={timeline ?? emptyTimeline}
-          repoDir={branch.worktreePath}
-          {hashtagItems}
-          pendingDropNotes={isLocal ? pendingDropNotes : undefined}
-          pendingItems={sessionMgr.pendingSessionItems}
-          {prunedSessionIds}
-          {error}
-          gitActionDisabledReason={branchIdentityWarning}
-          onRetry={() => loadTimeline()}
-          deletingItems={timelineDeletingItems}
-          reviewCommentBreakdown={timelineReviewDetailsById}
-          onSessionClick={(sid) => sessionMgr.handleTimelineSessionClick(sid)}
-          onResumeClick={(sid) => {
-            commands
-              .resumeSession(sid, 'Continue where you left off.', undefined, branch.id)
-              .then(() => loadTimeline())
-              .catch((e) => {
-                console.error('Failed to resume session:', e);
-                toast.error('Resume failed', {
-                  description:
-                    e instanceof Error
-                      ? e.message
-                      : 'Could not resume the session. Please try again.',
-                });
-              });
-          }}
-          onCommitClick={handleCommitClick}
-          onNoteClick={handleNoteClick}
-          onReviewClick={handleReviewClick}
-          onDeleteCommit={handleDeleteCommit}
-          onDeletePendingCommit={handleDeletePendingCommit}
-          onDeleteNote={handleDeleteNote}
-          onDeleteReview={handleDeleteReview}
-          onImageClick={handleImageClick}
-          onDeleteImage={handleDeleteImage}
-          onStartQueued={() => {
-            commands
-              .drainQueuedSessions(branch.id)
-              .catch((e) => console.error('Failed to drain queued sessions:', e));
-          }}
-          onNewNote={() => sessionMgr.openNewSession('note')}
-          onNewCommit={() => sessionMgr.openNewSession('commit')}
-          onNewReview={hasCodeChanges || sessionMgr.hasCommitSessionInProgress
-            ? (e) => sessionMgr.openNewSession('review', e)
-            : undefined}
-          onPullOrigin={handlePullOrigin}
-          onPushOrigin={handlePushOrigin}
-          onOpenPushSession={pushSessionId && pushSessionId !== '__pending__'
-            ? openPushSession
-            : undefined}
-          onRebaseBranch={() => startBranchCommandPipeline('rebase')}
-          onRebaseBranchOntoOrigin={() => startBranchCommandPipeline('rebase', 'origin')}
-          onForcePush={handleForcePush}
-          onOpenForcePushSession={forcePushSessionId && forcePushSessionId !== '__pending__'
-            ? openForcePushSession
-            : undefined}
-          {forcePushingOrigin}
-          rebaseBranchDisabledReason={branchCommandDisabledReason}
-          onViewWorktreeDiff={isLocal ? () => (showWorktreeDiff = true) : undefined}
-          onCommitWorktreeChanges={() =>
-            sessionMgr.startOrQueueSession('commit', 'Commit uncommitted changes')}
-          onDiscardWorktreeChanges={handleDiscardWorktreeChanges}
-          onNewSessionReferring={(ref) => sessionMgr.openNewSessionReferring(ref)}
-          newSessionDisabled={sessionMgr.isNewSessionDisabled || gitUnsafeActionsDisabled}
-          {pullingOrigin}
-          {pushingOrigin}
-          {discardingWorktreeChanges}
-          {provisioningLabel}
-          {provisioningDetail}
-        >
-          {#snippet footerActions()}
-            {#if hasCodeChanges || branch.prNumber}
-              <div class="footer-right-actions">
-                <BranchCardPrButton
-                  bind:this={prButton}
-                  {branch}
-                  {isLocal}
-                  {isRemote}
-                  {hasCodeChanges}
-                  {timeline}
-                  onOpenSession={(sid) => {
-                    sessionMgr.openSessionId = sid;
-                  }}
-                />
-                {#if hasCodeChanges}
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onclick={() => {
-                      reviewDiffTarget = null;
-                      showBranchDiff = true;
-                    }}
-                    class="text-xs"
-                  >
-                    <FileDiff size={13} />
-                    <span>Diff</span>
-                  </Button>
+        {#if shouldMountInterior}
+          <div class="timeline-interior" bind:this={interiorEl}>
+            <BranchTimeline
+              timeline={timeline ?? emptyTimeline}
+              repoDir={branch.worktreePath}
+              {hashtagItems}
+              pendingDropNotes={isLocal ? pendingDropNotes : undefined}
+              pendingItems={sessionMgr.pendingSessionItems}
+              {prunedSessionIds}
+              {error}
+              gitActionDisabledReason={branchIdentityWarning}
+              onRetry={() => loadTimeline()}
+              deletingItems={timelineDeletingItems}
+              reviewCommentBreakdown={timelineReviewDetailsById}
+              onSessionClick={(sid) => sessionMgr.handleTimelineSessionClick(sid)}
+              onResumeClick={(sid) => {
+                commands
+                  .resumeSession(sid, 'Continue where you left off.', undefined, branch.id)
+                  .then(() => loadTimeline())
+                  .catch((e) => {
+                    console.error('Failed to resume session:', e);
+                    toast.error('Resume failed', {
+                      description:
+                        e instanceof Error
+                          ? e.message
+                          : 'Could not resume the session. Please try again.',
+                    });
+                  });
+              }}
+              onCommitClick={handleCommitClick}
+              onNoteClick={handleNoteClick}
+              onReviewClick={handleReviewClick}
+              onDeleteCommit={handleDeleteCommit}
+              onDeletePendingCommit={handleDeletePendingCommit}
+              onDeleteNote={handleDeleteNote}
+              onDeleteReview={handleDeleteReview}
+              onImageClick={handleImageClick}
+              onDeleteImage={handleDeleteImage}
+              onStartQueued={() => {
+                commands
+                  .drainQueuedSessions(branch.id)
+                  .catch((e) => console.error('Failed to drain queued sessions:', e));
+              }}
+              onNewNote={() => sessionMgr.openNewSession('note')}
+              onNewCommit={() => sessionMgr.openNewSession('commit')}
+              onNewReview={hasCodeChanges || sessionMgr.hasCommitSessionInProgress
+                ? (e) => sessionMgr.openNewSession('review', e)
+                : undefined}
+              onPullOrigin={handlePullOrigin}
+              onPushOrigin={handlePushOrigin}
+              onOpenPushSession={pushSessionId && pushSessionId !== '__pending__'
+                ? openPushSession
+                : undefined}
+              onRebaseBranch={() => startBranchCommandPipeline('rebase')}
+              onRebaseBranchOntoOrigin={() => startBranchCommandPipeline('rebase', 'origin')}
+              onForcePush={handleForcePush}
+              onOpenForcePushSession={forcePushSessionId && forcePushSessionId !== '__pending__'
+                ? openForcePushSession
+                : undefined}
+              {forcePushingOrigin}
+              rebaseBranchDisabledReason={branchCommandDisabledReason}
+              onViewWorktreeDiff={isLocal ? () => (showWorktreeDiff = true) : undefined}
+              onCommitWorktreeChanges={() =>
+                sessionMgr.startOrQueueSession('commit', 'Commit uncommitted changes')}
+              onDiscardWorktreeChanges={handleDiscardWorktreeChanges}
+              onNewSessionReferring={(ref) => sessionMgr.openNewSessionReferring(ref)}
+              newSessionDisabled={sessionMgr.isNewSessionDisabled || gitUnsafeActionsDisabled}
+              {pullingOrigin}
+              {pushingOrigin}
+              {discardingWorktreeChanges}
+              {provisioningLabel}
+              {provisioningDetail}
+            >
+              {#snippet footerActions()}
+                {#if hasCodeChanges || branch.prNumber}
+                  <div class="footer-right-actions">
+                    {#if prButton}
+                      {@render prButton.renderButton()}
+                    {/if}
+                    {#if hasCodeChanges}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onclick={() => {
+                          reviewDiffTarget = null;
+                          showBranchDiff = true;
+                        }}
+                        class="text-xs"
+                      >
+                        <FileDiff size={13} />
+                        <span>Diff</span>
+                      </Button>
+                    {/if}
+                  </div>
                 {/if}
-              </div>
-            {/if}
-          {/snippet}
-        </BranchTimeline>
+              {/snippet}
+            </BranchTimeline>
+          </div>
+        {:else}
+          <!-- Off-screen: render a height-preserving placeholder (last-measured
+               interior height, cached by branch.id) instead of the heavy
+               timeline, so the scrollbar/scroll position stay correct. -->
+          <div
+            class="timeline-placeholder"
+            style:min-height="{interiorHeightCache.get(branch.id) ?? DEFAULT_INTERIOR_HEIGHT}px"
+            aria-hidden="true"
+          ></div>
+        {/if}
       {/if}
     </div>
   {/if}

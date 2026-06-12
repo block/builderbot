@@ -46,10 +46,21 @@
     isRemote: boolean;
     hasCodeChanges: boolean;
     timeline: BranchTimelineData | null;
+    showButton?: boolean;
     onOpenSession?: (sessionId: string) => void;
   }
 
-  let { branch, isLocal, isRemote, hasCodeChanges, timeline, onOpenSession }: Props = $props();
+  let {
+    branch,
+    isLocal,
+    isRemote,
+    hasCodeChanges,
+    timeline,
+    showButton = true,
+    onOpenSession,
+  }: Props = $props();
+
+  export { renderButton };
 
   // =========================================================================
   // Option-key tracking (for draft PR creation)
@@ -727,19 +738,25 @@
   </span>
 {/snippet}
 
-{#if hasCodeChanges || branch.prNumber}
-  {#if branch.prNumber}
-    <Tooltip.Root>
-      <Tooltip.Trigger>
-        {#snippet child({ props })}
-          {@render prButton(props)}
-        {/snippet}
-      </Tooltip.Trigger>
-      <Tooltip.Content>{prButtonTitle}</Tooltip.Content>
-    </Tooltip.Root>
-  {:else}
-    {@render prButton({})}
+{#snippet renderButton()}
+  {#if hasCodeChanges || branch.prNumber}
+    {#if branch.prNumber}
+      <Tooltip.Root>
+        <Tooltip.Trigger>
+          {#snippet child({ props })}
+            {@render prButton(props)}
+          {/snippet}
+        </Tooltip.Trigger>
+        <Tooltip.Content>{prButtonTitle}</Tooltip.Content>
+      </Tooltip.Root>
+    {:else}
+      {@render prButton({})}
+    {/if}
   {/if}
+{/snippet}
+
+{#if showButton}
+  {@render renderButton()}
 {/if}
 
 <AlertDialog.Root bind:open={showPrErrorDialog}>

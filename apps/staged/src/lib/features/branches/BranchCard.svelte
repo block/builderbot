@@ -1456,6 +1456,19 @@
       </div>
     </div>
 
+    <BranchCardPrButton
+      bind:this={prButton}
+      {branch}
+      {isLocal}
+      {isRemote}
+      {hasCodeChanges}
+      {timeline}
+      showButton={false}
+      onOpenSession={(sid) => {
+        sessionMgr.openSessionId = sid;
+      }}
+    />
+
     <div class="card-content">
       {#if isRemote && (remoteWorkspaceStatus === 'stopped' || remoteWorkspaceStatus === 'suspended' || remoteWorkspaceStatus === 'error')}
         <RemoteWorkspaceStatusView
@@ -1550,17 +1563,9 @@
               {#snippet footerActions()}
                 {#if hasCodeChanges || branch.prNumber}
                   <div class="footer-right-actions">
-                    <BranchCardPrButton
-                      bind:this={prButton}
-                      {branch}
-                      {isLocal}
-                      {isRemote}
-                      {hasCodeChanges}
-                      {timeline}
-                      onOpenSession={(sid) => {
-                        sessionMgr.openSessionId = sid;
-                      }}
-                    />
+                    {#if prButton}
+                      {@render prButton.renderButton()}
+                    {/if}
                     {#if hasCodeChanges}
                       <Button
                         variant="outline"

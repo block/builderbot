@@ -11,7 +11,6 @@
  */
 
 import { getStoreValue, setStoreValue } from '../../shared/persistentStore';
-import * as switchTracer from '../../shared/switchTracer';
 import * as commands from '../../api/commands';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { projectsList } from '../projects/projectsSidebarState.svelte';
@@ -81,7 +80,6 @@ export function showAllRepos(): void {
 
 /** Navigate to a specific project's detail view. */
 export function selectProject(projectId: string): void {
-  switchTracer.beginSwitch(navigation.selectedProjectId, projectId);
   showWorkspaceView();
   navigation.selectedProjectId = projectId;
   navigation.showReposList = false;
@@ -90,7 +88,6 @@ export function selectProject(projectId: string): void {
   if (projectStateStore.isUnread(projectId)) {
     projectStateStore.markAsRead(projectId);
   }
-  switchTracer.mark('navigation.selectProject sync complete');
 }
 
 /** Navigate to a project and scroll to a specific branch card. */

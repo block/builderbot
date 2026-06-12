@@ -11,8 +11,7 @@
   - Each item shows session + delete actions on hover
 -->
 <script lang="ts">
-  import { untrack, onMount, onDestroy } from 'svelte';
-  import * as switchTracer from '../../shared/switchTracer';
+  import { untrack } from 'svelte';
   import FileDiff from '@lucide/svelte/icons/file-diff';
   import AlertCircle from '@lucide/svelte/icons/alert-circle';
   import Cloud from '@lucide/svelte/icons/cloud';
@@ -542,7 +541,6 @@
   {
     // svelte-ignore state_referenced_locally
     const initBranch = branch;
-    const hydrateStart = performance.now();
     untrack(() => {
       const key = branchTimelineReadyKey(initBranch);
       if (key) {
@@ -552,11 +550,7 @@
         }
       }
     });
-    switchTracer.recordSync('BranchCard.hydrateSync', performance.now() - hydrateStart);
   }
-
-  onMount(() => switchTracer.countMount('BranchCard'));
-  onDestroy(() => switchTracer.countUnmount('BranchCard'));
 
   /** Number of finalized commits on this branch. */
   let commitCount = $derived(timeline?.commits.filter((c) => c.sha).length ?? 0);

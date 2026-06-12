@@ -6,7 +6,6 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import * as switchTracer from '../../shared/switchTracer';
   import { getWindowSync, listenToEvent } from '../../transport';
   import type {
     Project,
@@ -403,18 +402,6 @@
       })
     )
   );
-
-  // Instrumentation (console-only): bracket the ProjectHome reactive recompute
-  // on a project switch. `$effect.pre` runs inside the flush *before* the keyed
-  // `{#each visibleProjects}` block reconciles, so this mark lands between
-  // `navigation.selectProject sync complete` and the old `ProjectSection destroy`
-  // — splitting switchTracer's previously-opaque "selectProject → ProjectSection
-  // destroy" freeze bracket into the derive stage (up to this mark) and the
-  // old-subtree teardown that follows it. Reading `visibleProjects` here also
-  // forces that derivation at a known point so its cost lands in this span.
-  $effect.pre(() => {
-    switchTracer.mark('ProjectHome derive', `${visibleProjects.length} visible`);
-  });
 
   // Track which projects are safe to delete (for button styling)
   let safeToDeleteProjects = $state<Set<string>>(new Set());

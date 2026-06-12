@@ -419,34 +419,44 @@
   >
     <Dialog.Title class="sr-only">New {currentModeInfo.label} session</Dialog.Title>
     <header class="modal-header">
-      <div class="mode-switcher" bind:this={modeMenuEl}>
-        <button
-          class={`mode-switcher-btn ${currentModeInfo.iconClass}`}
-          onclick={() => (modeMenuOpen = !modeMenuOpen)}
-          type="button"
-        >
-          <currentModeInfo.icon size={14} />
-          <span>{currentModeInfo.label}</span>
-          <ChevronDown size={14} />
-        </button>
-        {#if modeMenuOpen}
-          <div class="mode-menu">
-            {#each allModes as m, i}
-              <button
-                class="mode-menu-item"
-                class:active={m.value === currentMode}
-                type="button"
-                onclick={() => switchMode(m.value)}
-              >
-                <span class="header-icon {m.iconClass}">
-                  <m.icon size={14} />
-                </span>
-                <span>{m.label}</span>
-                {#if viewport.showShortcutHints}
-                  <span class="mode-menu-hint">{modKey}{i + 1}</span>
-                {/if}
-              </button>
-            {/each}
+      <div class="header-left">
+        <div class="mode-switcher" bind:this={modeMenuEl}>
+          <button
+            class={`mode-switcher-btn ${currentModeInfo.iconClass}`}
+            onclick={() => (modeMenuOpen = !modeMenuOpen)}
+            type="button"
+          >
+            <currentModeInfo.icon size={14} />
+            <span>{currentModeInfo.label}</span>
+            <ChevronDown size={14} />
+          </button>
+          {#if modeMenuOpen}
+            <div class="mode-menu">
+              {#each allModes as m, i}
+                <button
+                  class="mode-menu-item"
+                  class:active={m.value === currentMode}
+                  type="button"
+                  onclick={() => switchMode(m.value)}
+                >
+                  <span class="header-icon {m.iconClass}">
+                    <m.icon size={14} />
+                  </span>
+                  <span>{m.label}</span>
+                  {#if viewport.showShortcutHints}
+                    <span class="mode-menu-hint">{modKey}{i + 1}</span>
+                  {/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+        {#if repoLabel}
+          <div class="repo-info">
+            <RepoLabel
+              githubRepo={repoLabel.headRepo ?? repoLabel.githubRepo}
+              subpath={repoLabel.subpath}
+            />
           </div>
         {/if}
       </div>
@@ -469,15 +479,6 @@
     </header>
 
     <form class="modal-body" onsubmit={handleSubmit}>
-      {#if repoLabel}
-        <div class="repo-info">
-          <RepoLabel
-            githubRepo={repoLabel.headRepo ?? repoLabel.githubRepo}
-            subpath={repoLabel.subpath}
-          />
-        </div>
-      {/if}
-
       <div class="form-group">
         <HashtagInput
           bind:textareaEl
@@ -542,12 +543,22 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 8px;
     padding: 10px 18px;
     border-bottom: 1px solid var(--border-subtle);
   }
 
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1;
+  }
+
   .mode-switcher {
     position: relative;
+    flex-shrink: 0;
   }
 
   .mode-switcher-btn {
@@ -676,6 +687,17 @@
     flex-shrink: 0;
   }
 
+  .repo-info {
+    min-width: 0;
+    padding: 4px 10px;
+    background: var(--bg-hover);
+    border-radius: 6px;
+    font-size: var(--size-sm);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   /* Body */
   .modal-body {
     padding: 18px;
@@ -684,16 +706,6 @@
     gap: 14px;
     flex: 1;
     min-height: 0;
-  }
-
-  .repo-info {
-    padding: 8px 10px;
-    background: var(--bg-hover);
-    border-radius: 6px;
-    font-size: var(--size-sm);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .form-group {

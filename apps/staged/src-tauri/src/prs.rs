@@ -967,17 +967,48 @@ pub(crate) async fn refresh_project_pr_statuses(
         }));
     }
 
+    let refreshed_count = collect_branch_refresh_results(tasks).await?;
+
+    crate::web_server::emit_to_all(app_handle, "pr-statuses-refreshed", project_id);
+
+    Ok(refreshed_count)
+}
+
+async fn collect_branch_refresh_results<T, E>(tasks: Vec<T>) -> Result<u32, String>
+where
+    T: std::future::Future<Output = Result<Result<bool, String>, E>>,
+    E: std::fmt::Display,
+{
     let mut refreshed_count = 0u32;
+    let mut completed_count = 0u32;
+    let mut task_errors = Vec::new();
+
     for task in tasks {
-        let refreshed = task
-            .await
-            .map_err(|e| format!("refresh_project_pr_statuses join failed: {e}"))??;
-        if refreshed {
-            refreshed_count += 1;
+        match task.await {
+            Ok(Ok(refreshed)) => {
+                completed_count += 1;
+                if refreshed {
+                    refreshed_count += 1;
+                }
+            }
+            Ok(Err(e)) => {
+                log::warn!("PR status refresh task failed: {e}");
+                task_errors.push(e);
+            }
+            Err(e) => {
+                let message = format!("PR status refresh task join failed: {e}");
+                log::warn!("{message}");
+                task_errors.push(message);
+            }
         }
     }
 
-    crate::web_server::emit_to_all(app_handle, "pr-statuses-refreshed", project_id);
+    if completed_count == 0 && !task_errors.is_empty() {
+        return Err(format!(
+            "all PR status refresh tasks failed: {}",
+            task_errors.join("; ")
+        ));
+    }
 
     Ok(refreshed_count)
 }
@@ -1316,6 +1347,40 @@ mod tests {
             } => (label, prompt_template),
             PipelineStep::Command { .. } => panic!("expected AI handoff step at index {index}"),
         }
+    }
+
+    #[tokio::test]
+    async fn collect_branch_refresh_results_tolerates_partial_task_failure() {
+        let tasks = vec![
+            tokio::spawn(async { Ok::<bool, String>(true) }),
+            tokio::spawn(async {
+                panic!("simulated branch task panic");
+                #[allow(unreachable_code)]
+                Ok::<bool, String>(true)
+            }),
+            tokio::spawn(async { Ok::<bool, String>(false) }),
+        ];
+
+        let refreshed_count = collect_branch_refresh_results(tasks).await.unwrap();
+
+        assert_eq!(refreshed_count, 1);
+    }
+
+    #[tokio::test]
+    async fn collect_branch_refresh_results_fails_when_all_tasks_fail() {
+        let tasks = vec![
+            tokio::spawn(async { Err::<bool, String>("simulated semaphore failure".to_string()) }),
+            tokio::spawn(async {
+                panic!("simulated branch task panic");
+                #[allow(unreachable_code)]
+                Ok::<bool, String>(true)
+            }),
+        ];
+
+        let err = collect_branch_refresh_results(tasks).await.unwrap_err();
+
+        assert!(err.contains("all PR status refresh tasks failed"));
+        assert!(err.contains("simulated semaphore failure"));
     }
 
     #[test]

@@ -980,15 +980,16 @@ where
     E: std::fmt::Display,
 {
     let mut refreshed_count = 0u32;
-    let mut completed_count = 0u32;
+    let mut failed_branch_count = 0u32;
     let mut task_errors = Vec::new();
 
     for task in tasks {
         match task.await {
             Ok(Ok(refreshed)) => {
-                completed_count += 1;
                 if refreshed {
                     refreshed_count += 1;
+                } else {
+                    failed_branch_count += 1;
                 }
             }
             Ok(Err(e)) => {
@@ -1003,10 +1004,16 @@ where
         }
     }
 
-    if completed_count == 0 && !task_errors.is_empty() {
+    if refreshed_count == 0 && (failed_branch_count > 0 || !task_errors.is_empty()) {
+        let mut errors = Vec::new();
+        if failed_branch_count > 0 {
+            errors.push(format!("{failed_branch_count} branch refreshes failed"));
+        }
+        errors.extend(task_errors);
+
         return Err(format!(
             "all PR status refresh tasks failed: {}",
-            task_errors.join("; ")
+            errors.join("; ")
         ));
     }
 
@@ -1381,6 +1388,19 @@ mod tests {
 
         assert!(err.contains("all PR status refresh tasks failed"));
         assert!(err.contains("simulated semaphore failure"));
+    }
+
+    #[tokio::test]
+    async fn collect_branch_refresh_results_fails_when_all_branches_fail() {
+        let tasks = vec![
+            tokio::spawn(async { Ok::<bool, String>(false) }),
+            tokio::spawn(async { Ok::<bool, String>(false) }),
+        ];
+
+        let err = collect_branch_refresh_results(tasks).await.unwrap_err();
+
+        assert!(err.contains("all PR status refresh tasks failed"));
+        assert!(err.contains("2 branch refreshes failed"));
     }
 
     #[test]

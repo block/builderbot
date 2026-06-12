@@ -21,12 +21,14 @@
   import { createImageFromData, getImageData, deleteImage } from '../../commands';
   import type { Image } from '../../types';
 
+  type ImageIdsUpdate = string[] | ((current: string[]) => string[]);
+
   interface Props {
     branchId: string;
     projectId: string;
     disabled?: boolean;
     imageIds: string[];
-    onImageIdsChange: (ids: string[]) => void;
+    onImageIdsChange: (update: ImageIdsUpdate) => void;
   }
 
   let { branchId, projectId, disabled = false, imageIds, onImageIdsChange }: Props = $props();
@@ -86,7 +88,7 @@
         base64,
         true
       );
-      onImageIdsChange([...imageIds, image.id]);
+      onImageIdsChange((current) => [...current, image.id]);
       // Set preview immediately from the local data
       const dataUrl = `data:${file.type};base64,${base64}`;
       previews = new Map(previews);
@@ -110,7 +112,7 @@
   }
 
   function removeImage(imageId: string) {
-    onImageIdsChange(imageIds.filter((id) => id !== imageId));
+    onImageIdsChange((current) => current.filter((id) => id !== imageId));
     previews = new Map(previews);
     previews.delete(imageId);
     deleteImage(imageId).catch((err) => {

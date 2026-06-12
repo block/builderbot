@@ -383,9 +383,11 @@
     }
   }
 
+  type ImageIdsUpdate = string[] | ((current: string[]) => string[]);
+
   // Keep imageIds in sync with ImageAttachment changes
-  function onImageIdsChange(ids: string[]) {
-    imageIds = ids;
+  function onImageIdsChange(update: ImageIdsUpdate) {
+    imageIds = typeof update === 'function' ? update(imageIds) : update;
   }
 
   // Subscribe to the shared drag-drop service so the modal intercepts

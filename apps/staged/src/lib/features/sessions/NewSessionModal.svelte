@@ -90,6 +90,8 @@
   let isCommit = $derived(currentMode === 'commit');
   let isReview = $derived(currentMode === 'review');
   let isNote = $derived(!isCommit && !isReview);
+  const footerControlClass =
+    'h-9 gap-1.5 rounded-md border border-[var(--border-muted)] bg-[var(--bg-primary)] px-4 py-2 text-sm font-medium text-muted-foreground shadow-none transition-colors hover:bg-[var(--bg-hover)] hover:text-foreground max-[640px]:h-11 max-[640px]:justify-center';
 
   function selectPromptContent(el: HTMLElement, selection: 'all' | 'last-line') {
     const sel = window.getSelection();
@@ -492,9 +494,6 @@
           disabled={starting}
           items={hashtagItems}
         />
-        {#if viewport.showShortcutHints}
-          <span class="hint">{willQueue ? '⌘ Enter to queue' : '⌘ Enter to start'}</span>
-        {/if}
       </div>
 
       {#if imageIds.length > 0}
@@ -509,7 +508,7 @@
 
       <div class="form-actions">
         <div class="form-actions-left">
-          <AgentSelector disabled={starting} {remote} dropUp />
+          <AgentSelector disabled={starting} {remote} dropUp triggerClass={footerControlClass} />
           {#if imageIds.length === 0}
             <ImageAttachment
               branchId={branch.id}
@@ -532,8 +531,8 @@
           </Button>
           <Button
             type="submit"
-            variant="outline"
-            class="gap-1.5 px-4 py-2 text-sm font-medium max-[640px]:h-11 max-[640px]:flex-1 max-[640px]:justify-center"
+            variant="default"
+            class="gap-1.5 px-4 py-2 text-sm font-semibold shadow-none hover:bg-[var(--ui-accent-hover)] max-[640px]:h-11 max-[640px]:flex-1 max-[640px]:justify-center"
             disabled={starting || (!isReview && !prompt.trim())}
           >
             {#if starting}
@@ -761,12 +760,6 @@
   .form-group :global(.hashtag-editor):focus {
     outline: none;
     border-color: var(--border-emphasis);
-  }
-
-  .hint {
-    font-size: var(--size-xs);
-    color: var(--text-faint);
-    text-align: right;
   }
 
   /* Actions */

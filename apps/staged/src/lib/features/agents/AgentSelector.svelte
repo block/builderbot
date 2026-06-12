@@ -15,15 +15,17 @@
   import AgentIcon from './AgentIcon.svelte';
   import { agentState, REMOTE_AGENTS } from './agent.svelte';
   import { setAiAgent, getPreferredAgent } from '../settings/preferences.svelte';
+  import { cn } from '$lib/components/utils';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
 
   interface Props {
     disabled?: boolean;
     remote?: boolean;
     dropUp?: boolean;
+    triggerClass?: string;
   }
 
-  let { disabled = false, remote = false, dropUp = false }: Props = $props();
+  let { disabled = false, remote = false, dropUp = false, triggerClass }: Props = $props();
 
   let agents = $derived(remote ? REMOTE_AGENTS : agentState.providers);
 
@@ -36,7 +38,10 @@
   {#if agents.length > 1}
     <DropdownMenu.Root>
       <DropdownMenu.Trigger
-        class="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-[var(--bg-hover)] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40"
+        class={cn(
+          'inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-[var(--bg-hover)] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40',
+          triggerClass
+        )}
         {disabled}
         title="Select AI agent"
       >
@@ -68,7 +73,10 @@
   {:else}
     <button
       type="button"
-      class="inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground disabled:cursor-not-allowed disabled:opacity-40"
+      class={cn(
+        'inline-flex items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground disabled:cursor-not-allowed disabled:opacity-40',
+        triggerClass
+      )}
       {disabled}
       title={currentLabel}
     >

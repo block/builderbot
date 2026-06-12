@@ -89,6 +89,8 @@
   let isCommit = $derived(currentMode === 'commit');
   let isReview = $derived(currentMode === 'review');
   let isNote = $derived(!isCommit && !isReview);
+  const footerControlClass =
+    'h-9 gap-1.5 rounded-md border border-[var(--border-muted)] bg-[var(--bg-primary)] px-4 py-2 text-sm font-medium text-muted-foreground shadow-none transition-colors hover:bg-[var(--bg-hover)] hover:text-foreground max-[640px]:h-11 max-[640px]:justify-center';
 
   function selectPromptContent(el: HTMLElement, selection: 'all' | 'last-line') {
     const sel = window.getSelection();
@@ -380,9 +382,11 @@
     }
   }
 
+  type ImageIdsUpdate = string[] | ((current: string[]) => string[]);
+
   // Keep imageIds in sync with ImageAttachment changes
-  function onImageIdsChange(ids: string[]) {
-    imageIds = ids;
+  function onImageIdsChange(update: ImageIdsUpdate) {
+    imageIds = typeof update === 'function' ? update(imageIds) : update;
   }
 
   // Subscribe to the shared drag-drop service so the modal intercepts
@@ -418,34 +422,44 @@
   >
     <Dialog.Title class="sr-only">New {currentModeInfo.label} session</Dialog.Title>
     <header class="modal-header">
-      <div class="mode-switcher" bind:this={modeMenuEl}>
-        <button
-          class={`mode-switcher-btn ${currentModeInfo.iconClass}`}
-          onclick={() => (modeMenuOpen = !modeMenuOpen)}
-          type="button"
-        >
-          <currentModeInfo.icon size={14} />
-          <span>{currentModeInfo.label}</span>
-          <ChevronDown size={14} />
-        </button>
-        {#if modeMenuOpen}
-          <div class="mode-menu">
-            {#each allModes as m, i}
-              <button
-                class="mode-menu-item"
-                class:active={m.value === currentMode}
-                type="button"
-                onclick={() => switchMode(m.value)}
-              >
-                <span class="header-icon {m.iconClass}">
-                  <m.icon size={14} />
-                </span>
-                <span>{m.label}</span>
-                {#if viewport.showShortcutHints}
-                  <span class="mode-menu-hint">{modKey}{i + 1}</span>
-                {/if}
-              </button>
-            {/each}
+      <div class="header-left">
+        <div class="mode-switcher" bind:this={modeMenuEl}>
+          <button
+            class={`mode-switcher-btn ${currentModeInfo.iconClass}`}
+            onclick={() => (modeMenuOpen = !modeMenuOpen)}
+            type="button"
+          >
+            <currentModeInfo.icon size={14} />
+            <span>{currentModeInfo.label}</span>
+            <ChevronDown size={14} />
+          </button>
+          {#if modeMenuOpen}
+            <div class="mode-menu">
+              {#each allModes as m, i}
+                <button
+                  class="mode-menu-item"
+                  class:active={m.value === currentMode}
+                  type="button"
+                  onclick={() => switchMode(m.value)}
+                >
+                  <span class="header-icon {m.iconClass}">
+                    <m.icon size={14} />
+                  </span>
+                  <span>{m.label}</span>
+                  {#if viewport.showShortcutHints}
+                    <span class="mode-menu-hint">{modKey}{i + 1}</span>
+                  {/if}
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+        {#if repoLabel}
+          <div class="repo-info">
+            <RepoLabel
+              githubRepo={repoLabel.headRepo ?? repoLabel.githubRepo}
+              subpath={repoLabel.subpath}
+            />
           </div>
         {/if}
       </div>
@@ -462,15 +476,6 @@
     </header>
 
     <form class="modal-body" onsubmit={handleSubmit}>
-      {#if repoLabel}
-        <div class="repo-info">
-          <RepoLabel
-            githubRepo={repoLabel.headRepo ?? repoLabel.githubRepo}
-            subpath={repoLabel.subpath}
-          />
-        </div>
-      {/if}
-
       <div class="form-group">
         <HashtagInput
           bind:textareaEl
@@ -484,21 +489,31 @@
           disabled={starting}
           items={hashtagItems}
         />
-        {#if viewport.showShortcutHints}
-          <span class="hint">{willQueue ? '⌘ Enter to queue' : '⌘ Enter to start'}</span>
-        {/if}
       </div>
 
-      <ImageAttachment
-        branchId={branch.id}
-        projectId={branch.projectId}
-        disabled={starting}
-        {imageIds}
-        {onImageIdsChange}
-      />
+      {#if imageIds.length > 0}
+        <ImageAttachment
+          branchId={branch.id}
+          projectId={branch.projectId}
+          disabled={starting}
+          {imageIds}
+          {onImageIdsChange}
+        />
+      {/if}
 
       <div class="form-actions">
-        <AgentSelector disabled={starting} {remote} dropUp />
+        <div class="form-actions-left">
+          <AgentSelector disabled={starting} {remote} dropUp triggerClass={footerControlClass} />
+          {#if imageIds.length === 0}
+            <ImageAttachment
+              branchId={branch.id}
+              projectId={branch.projectId}
+              disabled={starting}
+              {imageIds}
+              {onImageIdsChange}
+            />
+          {/if}
+        </div>
         <div class="form-actions-right">
           <Button
             type="button"
@@ -511,8 +526,8 @@
           </Button>
           <Button
             type="submit"
-            variant="outline"
-            class="gap-1.5 px-4 py-2 text-sm font-medium max-[640px]:h-11 max-[640px]:flex-1 max-[640px]:justify-center"
+            variant="default"
+            class="gap-1.5 px-4 py-2 text-sm font-semibold shadow-none hover:bg-[var(--ui-accent-hover)] max-[640px]:h-11 max-[640px]:flex-1 max-[640px]:justify-center"
             disabled={starting || (!isReview && !prompt.trim())}
           >
             {#if starting}
@@ -535,12 +550,22 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 8px;
     padding: 10px 18px;
     border-bottom: 1px solid var(--border-subtle);
   }
 
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    flex: 1;
+  }
+
   .mode-switcher {
     position: relative;
+    flex-shrink: 0;
   }
 
   .mode-switcher-btn {
@@ -669,6 +694,17 @@
     flex-shrink: 0;
   }
 
+  .repo-info {
+    min-width: 0;
+    padding: 4px 10px;
+    background: var(--bg-hover);
+    border-radius: 6px;
+    font-size: var(--size-sm);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   /* Body */
   .modal-body {
     padding: 18px;
@@ -677,16 +713,6 @@
     gap: 14px;
     flex: 1;
     min-height: 0;
-  }
-
-  .repo-info {
-    padding: 8px 10px;
-    background: var(--bg-hover);
-    border-radius: 6px;
-    font-size: var(--size-sm);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
   }
 
   .form-group {
@@ -731,12 +757,6 @@
     border-color: var(--border-emphasis);
   }
 
-  .hint {
-    font-size: var(--size-xs);
-    color: var(--text-faint);
-    text-align: right;
-  }
-
   /* Actions */
   .form-actions {
     display: flex;
@@ -744,6 +764,13 @@
     justify-content: space-between;
     gap: 8px;
     margin-top: 4px;
+  }
+
+  .form-actions-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
   }
 
   .form-actions-right {
@@ -767,6 +794,11 @@
     .form-actions {
       align-items: stretch;
       flex-direction: column;
+    }
+
+    .form-actions-left {
+      flex-wrap: wrap;
+      width: 100%;
     }
 
     .form-actions :global(.selector-btn) {

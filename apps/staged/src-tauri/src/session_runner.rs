@@ -2267,7 +2267,7 @@ struct SuggestedNextSteps {
 /// inside.  Returns `None` if the block is missing or cannot be parsed.
 fn extract_suggested_next_steps(text: &str) -> Option<SuggestedNextSteps> {
     let marker = "```suggested-next-steps";
-    let start_pos = find_opening_fence(text, marker)?;
+    let start_pos = find_suggested_next_steps_opening_fence(text, marker)?;
     let block_start = start_pos + marker.len();
     let content_start = block_start + text[block_start..].find('\n')? + 1;
     let end_pos = find_closing_fence(&text[content_start..])?;
@@ -2279,6 +2279,30 @@ fn extract_suggested_next_steps(text: &str) -> Option<SuggestedNextSteps> {
             None
         }
     }
+}
+
+/// Find a `suggested-next-steps` opening fence.
+///
+/// The normal fence finder requires markers to appear at the start of a line
+/// because review extraction should not match markers mentioned in prose. Notes
+/// can arrive with this fence attached to the final sentence, so this finder
+/// accepts inline markers while still requiring the rest of the marker line to
+/// contain only optional whitespace before the newline.
+fn find_suggested_next_steps_opening_fence(text: &str, marker: &str) -> Option<usize> {
+    let mut pos = 0;
+    while pos < text.len() {
+        let candidate = text[pos..].find(marker)?;
+        let abs = pos + candidate;
+        let after_marker = &text[abs + marker.len()..];
+        if after_marker
+            .find('\n')
+            .is_some_and(|newline| after_marker[..newline].trim().is_empty())
+        {
+            return Some(abs);
+        }
+        pos = abs + marker.len();
+    }
+    None
 }
 
 /// Find an opening fence marker (e.g. ` ```review-title `) that appears at the
@@ -3193,6 +3217,20 @@ Body
         assert_eq!(
             steps.suggested_next_note_step.as_deref(),
             Some("Research alternatives")
+        );
+    }
+
+    #[test]
+    fn extract_steps_valid_inline_opening_fence() {
+        let text = "Ready to return the note.```suggested-next-steps\n{\"suggestedNextCommitStep\": \"Reduce churn\", \"suggestedNextNoteStep\": \"Plan IPC fix\"}\n```\n";
+        let steps = extract_suggested_next_steps(text).unwrap();
+        assert_eq!(
+            steps.suggested_next_commit_step.as_deref(),
+            Some("Reduce churn")
+        );
+        assert_eq!(
+            steps.suggested_next_note_step.as_deref(),
+            Some("Plan IPC fix")
         );
     }
 

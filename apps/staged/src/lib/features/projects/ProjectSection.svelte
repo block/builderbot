@@ -34,6 +34,7 @@
   import * as commands from '../../api/commands';
   import HashtagInput from '../sessions/HashtagInput.svelte';
   import { buildProjectHashtagItems } from '../sessions/hashtagItems';
+  import { branchTimelineReadyKey } from '../branches/branchTimelineReady';
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import BranchCard from '../branches/BranchCard.svelte';
@@ -44,6 +45,9 @@
   import SuggestedRepos from './SuggestedRepos.svelte';
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
   import TimelineRow from '../timeline/TimelineRow.svelte';
+  import TimelineContextMenu, {
+    type TimelineContextMenuAction,
+  } from '../timeline/TimelineContextMenu.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
   import SessionModal from '../sessions/SessionModal.svelte';
   import AgentSelector from '../agents/AgentSelector.svelte';
@@ -200,19 +204,65 @@
   // Hashtag reference items
   let hashtagItems = $state<HashtagItem[]>([]);
   let hashtagVersion = $state(0);
+  let hashtagInputFocused = $state(false);
+  let hashtagLoadGeneration = 0;
+  let loadedHashtagSignature: string | null = null;
+  let loadingHashtagSignature: string | null = null;
+  let hashtagSignature = $derived.by(() => {
+    const readyBranchParts = branches.map((branch) => {
+      const readyKey = branchTimelineReadyKey(branch) ?? '';
+      const repo = branch.projectRepoId ? reposById.get(branch.projectRepoId) : null;
+      return [
+        branch.id,
+        readyKey,
+        branch.branchName,
+        branch.projectRepoId ?? '',
+        repo?.githubRepo ?? '',
+        repo?.subpath ?? '',
+      ].join(':');
+    });
+    const noteParts = projectNotes.map((note) =>
+      [note.id, note.title, note.updatedAt, note.completedAt ?? ''].join(':')
+    );
+
+    return [project.id, hashtagVersion, readyBranchParts.join('|'), noteParts.join('|')].join(';');
+  });
+
+  async function ensureHashtagItems() {
+    const signature = hashtagSignature;
+    if (signature === loadedHashtagSignature) return;
+    if (signature === loadingHashtagSignature) return;
+
+    const generation = ++hashtagLoadGeneration;
+    loadingHashtagSignature = signature;
+    const branchesSnapshot = [...branches];
+    const reposSnapshot = new Map(reposById);
+    const notesSnapshot = [...projectNotes];
+
+    try {
+      const items = await buildProjectHashtagItems(
+        project.id,
+        branchesSnapshot,
+        reposSnapshot,
+        notesSnapshot
+      );
+      if (generation !== hashtagLoadGeneration) return;
+      if (signature !== hashtagSignature) return;
+      hashtagItems = items;
+      loadedHashtagSignature = signature;
+    } catch (err) {
+      console.error('[ProjectSection] Failed to build hashtag items:', err);
+    } finally {
+      if (loadingHashtagSignature === signature) {
+        loadingHashtagSignature = null;
+      }
+    }
+  }
+
   $effect(() => {
-    const _v = hashtagVersion; // reactive dependency for manual invalidation
-    let stale = false;
-    buildProjectHashtagItems(project.id, branches, reposById)
-      .then((items) => {
-        if (!stale) hashtagItems = items;
-      })
-      .catch((err) => {
-        console.error('[ProjectSection] Failed to build hashtag items:', err);
-      });
-    return () => {
-      stale = true;
-    };
+    const _signature = hashtagSignature;
+    if (!hashtagInputFocused) return;
+    void ensureHashtagItems();
   });
 
   // Image attachment state
@@ -247,6 +297,8 @@
 
   function handlePromptFocusIn() {
     promptExpanded = true;
+    hashtagInputFocused = true;
+    void ensureHashtagItems();
   }
 
   function handlePromptFocusOut(e: FocusEvent) {
@@ -258,6 +310,7 @@
       return;
     }
     promptExpanded = false;
+    hashtagInputFocused = false;
   }
 
   async function handleImageFileSelect(e: Event) {
@@ -434,6 +487,16 @@
       return (a.completedAt ?? a.createdAt) - (b.completedAt ?? b.createdAt);
     })
   );
+  let projectNoteContextMenuActions = $derived.by(() => {
+    const actions: TimelineContextMenuAction[] = [];
+    for (const note of timelineNotes) {
+      const key = projectNoteContextMenuKey(note);
+      if (key) {
+        actions.push({ key, hashtagRef: `#project-note:${note.id}` });
+      }
+    }
+    return actions;
+  });
 
   let openNote = $state<{
     title: string;
@@ -442,6 +505,21 @@
     noteUpdatedAt?: number;
   } | null>(null);
   let openSessionId = $state<string | null>(null);
+
+  function isCompletedProjectNote(note: ProjectNote): boolean {
+    const isRunning = isSessionActive(note.sessionStatus);
+    const isFailed = !isRunning && !!note.sessionId && !note.content.trim();
+    return !isRunning && !isFailed;
+  }
+
+  function projectNoteContextMenuKey(note: ProjectNote): string | undefined {
+    return isCompletedProjectNote(note) ? `project-note-${note.id}` : undefined;
+  }
+
+  function handleProjectNoteNewSessionReferring(ref: string) {
+    promptText = buildReferringPrompt(promptText, ref);
+    focusAtEnd(promptTextarea);
+  }
 
   function linkedNoteContext(note: ProjectNote | undefined): LinkedNoteContext | null {
     if (!note) return null;
@@ -729,50 +807,51 @@
         <FileText size={13} />
         <span>Project Notes</span>
       </div>
-      <div class="notes-timeline">
-        {#each timelineNotes as note, index (note.id)}
-          {@const isRunning = isSessionActive(note.sessionStatus)}
-          {@const isFailed = !isRunning && !!note.sessionId && !note.content.trim()}
-          {@const noteType = isRunning ? 'generating-note' : isFailed ? 'failed-note' : 'note'}
-          {@const liveHint =
-            isRunning && note.sessionId ? liveSessionHints[note.sessionId] : undefined}
-          <TimelineRow
-            type={noteType}
-            title={isRunning
-              ? 'Generating note…'
-              : isFailed
-                ? 'Session finished — no note created'
-                : note.title || 'Untitled note'}
-            secondaryMeta={isRunning
-              ? (liveHint ?? 'Generating note')
-              : isFailed
+      <TimelineContextMenu
+        actions={projectNoteContextMenuActions}
+        onNewSessionReferring={handleProjectNoteNewSessionReferring}
+      >
+        <div class="notes-timeline">
+          {#each timelineNotes as note, index (note.id)}
+            {@const isRunning = isSessionActive(note.sessionStatus)}
+            {@const isFailed = !isRunning && !!note.sessionId && !note.content.trim()}
+            {@const noteType = isRunning ? 'generating-note' : isFailed ? 'failed-note' : 'note'}
+            {@const liveHint =
+              isRunning && note.sessionId ? liveSessionHints[note.sessionId] : undefined}
+            <TimelineRow
+              type={noteType}
+              title={isRunning
+                ? 'Generating note…'
+                : isFailed
+                  ? 'Session finished — no note created'
+                  : note.title || 'Untitled note'}
+              secondaryMeta={isRunning
+                ? (liveHint ?? 'Generating note')
+                : isFailed
+                  ? undefined
+                  : formatRelativeTime(note.completedAt ?? note.createdAt, nowMs)}
+              deleting={deletingNoteIds.has(note.id)}
+              isLast={index === timelineNotes.length - 1}
+              sessionId={note.sessionId ?? undefined}
+              onItemClick={isRunning || isFailed
                 ? undefined
-                : formatRelativeTime(note.completedAt ?? note.createdAt, nowMs)}
-            deleting={deletingNoteIds.has(note.id)}
-            isLast={index === timelineNotes.length - 1}
-            sessionId={note.sessionId ?? undefined}
-            onItemClick={isRunning || isFailed
-              ? undefined
-              : () => {
-                  openNote = {
-                    title: note.title,
-                    content: note.content,
-                    sessionId: note.sessionId ?? undefined,
-                    noteUpdatedAt: note.updatedAt,
-                  };
-                }}
-            onSessionClick={(sid) => {
-              openSessionId = sid;
-            }}
-            onDeleteClick={() => handleDeleteNote(note.id)}
-            hashtagRef={noteType === 'note' ? `#project-note:${note.id}` : undefined}
-            onNewSessionReferring={(ref) => {
-              promptText = buildReferringPrompt(promptText, ref);
-              focusAtEnd(promptTextarea);
-            }}
-          />
-        {/each}
-      </div>
+                : () => {
+                    openNote = {
+                      title: note.title,
+                      content: note.content,
+                      sessionId: note.sessionId ?? undefined,
+                      noteUpdatedAt: note.updatedAt,
+                    };
+                  }}
+              onSessionClick={(sid) => {
+                openSessionId = sid;
+              }}
+              onDeleteClick={() => handleDeleteNote(note.id)}
+              contextMenuKey={projectNoteContextMenuKey(note)}
+            />
+          {/each}
+        </div>
+      </TimelineContextMenu>
     </div>
   {/if}
 

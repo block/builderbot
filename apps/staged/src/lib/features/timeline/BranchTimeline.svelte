@@ -22,6 +22,9 @@
   } from '../../types';
   import type { NoteClickInfo } from '../sessions/noteFreshness';
   import TimelineRow from './TimelineRow.svelte';
+  import TimelineContextMenu, {
+    type TimelineContextMenuAction,
+  } from './TimelineContextMenu.svelte';
   import { Button } from '$lib/components/ui/button';
   import type { TimelineItemType, TimelineBadge } from './TimelineRow.svelte';
   import { escapeHtml, hasHashtagTokens, renderHashtagTokens } from '../sessions/hashtagItems';
@@ -781,6 +784,18 @@
 
   let normalItems = $derived(items.filter((item) => item.placement !== 'git-footer'));
   let gitFooterItems = $derived(items.filter((item) => item.placement === 'git-footer'));
+  let timelineContextMenuActions = $derived.by(() => {
+    const actions: TimelineContextMenuAction[] = [];
+    for (const item of normalItems) {
+      const action = contextMenuActionForItem(item);
+      if (action) actions.push(action);
+    }
+    for (const item of gitFooterItems) {
+      const action = contextMenuActionForItem(item);
+      if (action) actions.push(action);
+    }
+    return actions;
+  });
   let actionFooterVisible = $derived(
     !!onNewNote || !!onNewCommit || !!onNewReview || !!footerActions
   );
@@ -812,6 +827,19 @@
 
   function isResumable(item: DisplayItem): boolean {
     return !!item.sessionId && isResumableReason(item.completionReason) && !item.deleting;
+  }
+
+  function hasContextMenuAction(item: DisplayItem): boolean {
+    return !!item.commitSha || (!!item.hashtagRef && !!onNewSessionReferring);
+  }
+
+  function contextMenuActionForItem(item: DisplayItem): TimelineContextMenuAction | null {
+    if (!hasContextMenuAction(item)) return null;
+    return {
+      key: item.key,
+      commitSha: item.commitSha,
+      hashtagRef: item.hashtagRef,
+    };
   }
 
   function handleDeleteClick(item: DisplayItem, opts?: { altKey: boolean }) {
@@ -882,281 +910,282 @@
   <p class="no-items">No commits or notes yet</p>
 {:else}
   <!-- Unified timeline (vertical) -->
-  <div class="timeline">
-    {#each normalItems as item, index (item.key)}
-      <div in:maybeSlide={{ sessionId: item.sessionId }} out:slide={{ duration: 200 }}>
-        <TimelineRow
-          type={item.type}
-          title={item.title}
-          titleHtml={item.titleHtml}
-          meta={item.meta}
-          secondaryMeta={item.secondaryMeta}
-          tertiaryMeta={item.tertiaryMeta}
-          badges={item.badges}
-          onPullClick={item.onPull}
-          pullDisabledReason={item.pullDisabledReason}
-          onPushClick={item.onPush}
-          pushDisabledReason={item.pushDisabledReason}
-          onRebaseClick={item.onRebase}
-          rebaseDisabledReason={item.rebaseDisabledReason}
-          onForcePushClick={item.onForcePush}
-          forcePushDisabledReason={item.forcePushDisabledReason}
-          forcePushing={item.forcePushing}
-          pushing={item.pushing}
-          onViewDiffClick={item.onViewDiff}
-          onCommitChangesClick={item.onCommitChanges}
-          commitChangesDisabledReason={item.commitChangesDisabledReason}
-          onDiscardChangesClick={item.onDiscardChanges}
-          discardChangesDisabledReason={item.discardChangesDisabledReason}
-          deleting={item.deleting}
-          isLast={index === normalItems.length - 1 &&
-            pendingDropNotes.length === 0 &&
-            pendingItems.length === 0 &&
-            gitFooterItems.length === 0 &&
-            !error &&
-            !actionFooterVisible}
-          sessionId={item.sessionId}
-          deleteDisabledReason={isDeletable(item) ? item.deleteDisabledReason : undefined}
-          commitSha={item.commitSha}
-          hashtagRef={item.hashtagRef}
-          showConnector={item.showConnector}
-          {onNewSessionReferring}
-          {onSessionClick}
-          onItemClick={() => handleItemClick(item)}
-          onDeleteClick={!isDeletable(item) || item.deleteDisabledReason
-            ? undefined
-            : (opts) => handleDeleteClick(item, opts)}
-          onStartClick={item.type.startsWith('queued-') && !hasActiveSession
-            ? onStartQueued
-            : undefined}
-          onResumeClick={isResumable(item) && onResumeClick && item.sessionId && !hasActiveSession
-            ? () => onResumeClick!(item.sessionId!)
-            : undefined}
-        />
-      </div>
-    {/each}
-    {#each pendingDropNotes as drop, index (drop.key)}
-      <div transition:slide={{ duration: 200 }}>
-        <TimelineRow
-          type="generating-note"
-          title={drop.title}
-          secondaryMeta="adding..."
-          isLast={index === pendingDropNotes.length - 1 &&
-            pendingItems.length === 0 &&
-            gitFooterItems.length === 0 &&
-            !error &&
-            !actionFooterVisible}
-        />
-      </div>
-    {/each}
-    {#each pendingItems as item, index (item.key)}
-      <div in:slide={{ duration: 200 }} out:maybeSlide={{ sessionId: item.sessionId }}>
-        <TimelineRow
-          type={item.type}
-          title={item.title}
-          titleHtml={hashtagItems.length > 0 && hasHashtagTokens(item.title)
-            ? renderHashtagTokens(item.title, hashtagItems)
-            : undefined}
-          secondaryMeta={item.sessionId
-            ? (liveSessionHints[item.sessionId] ??
-              item.secondaryMeta ??
-              fallbackHintForPendingType(item.type))
-            : item.secondaryMeta}
-          isLast={index === pendingItems.length - 1 &&
-            gitFooterItems.length === 0 &&
-            !error &&
-            !actionFooterVisible}
-        />
-      </div>
-    {/each}
-    {#each gitFooterItems as item, index (item.key)}
-      <div transition:slide={{ duration: 200 }}>
-        <TimelineRow
-          type={item.type}
-          title={item.title}
-          titleHtml={item.titleHtml}
-          meta={item.meta}
-          secondaryMeta={item.secondaryMeta}
-          tertiaryMeta={item.tertiaryMeta}
-          badges={item.badges}
-          onPullClick={item.onPull}
-          pullDisabledReason={item.pullDisabledReason}
-          onPushClick={item.onPush}
-          pushDisabledReason={item.pushDisabledReason}
-          onRebaseClick={item.onRebase}
-          rebaseDisabledReason={item.rebaseDisabledReason}
-          onForcePushClick={item.onForcePush}
-          forcePushDisabledReason={item.forcePushDisabledReason}
-          forcePushing={item.forcePushing}
-          pushing={item.pushing}
-          onViewDiffClick={item.onViewDiff}
-          onCommitChangesClick={item.onCommitChanges}
-          commitChangesDisabledReason={item.commitChangesDisabledReason}
-          onDiscardChangesClick={item.onDiscardChanges}
-          discardChangesDisabledReason={item.discardChangesDisabledReason}
-          deleting={item.deleting}
-          isLast={index === gitFooterItems.length - 1 && !error}
-          sessionId={item.sessionId}
-          deleteDisabledReason={isDeletable(item) ? item.deleteDisabledReason : undefined}
-          commitSha={item.commitSha}
-          hashtagRef={item.hashtagRef}
-          showConnector={item.showConnector}
-          {onNewSessionReferring}
-          {onSessionClick}
-          onItemClick={() => handleItemClick(item)}
-          onDeleteClick={!isDeletable(item) || item.deleteDisabledReason
-            ? undefined
-            : (opts) => handleDeleteClick(item, opts)}
-          onStartClick={item.type.startsWith('queued-') && !hasActiveSession
-            ? onStartQueued
-            : undefined}
-          onResumeClick={isResumable(item) && onResumeClick && item.sessionId && !hasActiveSession
-            ? () => onResumeClick!(item.sessionId!)
-            : undefined}
-        />
-      </div>
-    {/each}
-    {#if error}
-      <div transition:slide={{ duration: 200 }}>
-        <TimelineRow
-          type="load-error"
-          title="Failed to load commits"
-          secondaryMeta={error}
-          isLast={!actionFooterVisible}
-          onRetryClick={onRetry}
-        />
-      </div>
-    {/if}
-    {#if actionFooterVisible}
-      <div class="footer-row" class:footer-row-enlarged={actionButtonsEnlarged}>
-        <div class="footer-left-actions" class:footer-left-actions-enlarged={actionButtonsEnlarged}>
-          {#if onNewNote}
-            <span class={actionButtonsEnlarged ? 'inline-flex flex-1' : 'inline-flex'}>
-              <Button
-                variant="ghost"
-                onclick={onNewNote}
-                disabled={newSessionDisabled}
-                aria-label="New note"
-                class={[
-                  'inline-flex items-center font-medium transition-all duration-300 disabled:opacity-30 disabled:cursor-not-allowed',
-                  '[&_svg]:transition-all [&_svg]:duration-300',
-                  actionButtonsEnlarged
-                    ? 'flex-1 justify-center gap-2 px-1.5 py-2.5 h-auto rounded-lg border border-solid border-transparent bg-[var(--bg-elevated)] text-sm hover:not-disabled:bg-[var(--note-bg)] hover:not-disabled:text-[var(--note-color)] [&_svg]:!size-[18px] [&_svg]:text-[var(--note-color)]'
-                    : 'gap-[5px] px-2.5 h-8 rounded-md border border-dashed border-[var(--border-subtle)] bg-transparent text-xs hover:not-disabled:border-[var(--note-color)] hover:not-disabled:bg-[var(--note-bg)] hover:not-disabled:text-[var(--note-color)] [&_svg]:!size-[13px] [&_svg]:text-[var(--note-color)] @max-[480px]/timeline:gap-0.5 @max-[480px]/timeline:px-1.5',
-                ]}
-              >
-                <FileText
-                  class={actionButtonsEnlarged
-                    ? ''
-                    : '@max-3xl/timeline:hidden @max-[480px]/timeline:inline-block'}
-                  size={18}
-                />
-                <Plus
-                  class={actionButtonsEnlarged
-                    ? 'hidden'
-                    : 'hidden @max-3xl/timeline:inline-block @max-[480px]/timeline:!size-[10px]'}
-                  size={18}
-                />
-                <span class={!actionButtonsEnlarged ? '@max-3xl/timeline:hidden' : ''}
-                  >New note</span
-                >
-                <span
+  <TimelineContextMenu actions={timelineContextMenuActions} {onNewSessionReferring}>
+    <div class="timeline">
+      {#each normalItems as item, index (item.key)}
+        <div>
+          <TimelineRow
+            type={item.type}
+            title={item.title}
+            titleHtml={item.titleHtml}
+            meta={item.meta}
+            secondaryMeta={item.secondaryMeta}
+            tertiaryMeta={item.tertiaryMeta}
+            badges={item.badges}
+            onPullClick={item.onPull}
+            pullDisabledReason={item.pullDisabledReason}
+            onPushClick={item.onPush}
+            pushDisabledReason={item.pushDisabledReason}
+            onRebaseClick={item.onRebase}
+            rebaseDisabledReason={item.rebaseDisabledReason}
+            onForcePushClick={item.onForcePush}
+            forcePushDisabledReason={item.forcePushDisabledReason}
+            forcePushing={item.forcePushing}
+            pushing={item.pushing}
+            onViewDiffClick={item.onViewDiff}
+            onCommitChangesClick={item.onCommitChanges}
+            commitChangesDisabledReason={item.commitChangesDisabledReason}
+            onDiscardChangesClick={item.onDiscardChanges}
+            discardChangesDisabledReason={item.discardChangesDisabledReason}
+            deleting={item.deleting}
+            isLast={index === normalItems.length - 1 &&
+              pendingDropNotes.length === 0 &&
+              pendingItems.length === 0 &&
+              gitFooterItems.length === 0 &&
+              !error &&
+              !actionFooterVisible}
+            sessionId={item.sessionId}
+            deleteDisabledReason={isDeletable(item) ? item.deleteDisabledReason : undefined}
+            contextMenuKey={hasContextMenuAction(item) ? item.key : undefined}
+            showConnector={item.showConnector}
+            {onSessionClick}
+            onItemClick={() => handleItemClick(item)}
+            onDeleteClick={!isDeletable(item) || item.deleteDisabledReason
+              ? undefined
+              : (opts) => handleDeleteClick(item, opts)}
+            onStartClick={item.type.startsWith('queued-') && !hasActiveSession
+              ? onStartQueued
+              : undefined}
+            onResumeClick={isResumable(item) && onResumeClick && item.sessionId && !hasActiveSession
+              ? () => onResumeClick!(item.sessionId!)
+              : undefined}
+          />
+        </div>
+      {/each}
+      {#each pendingDropNotes as drop, index (drop.key)}
+        <div transition:slide={{ duration: 200 }}>
+          <TimelineRow
+            type="generating-note"
+            title={drop.title}
+            secondaryMeta="adding..."
+            isLast={index === pendingDropNotes.length - 1 &&
+              pendingItems.length === 0 &&
+              gitFooterItems.length === 0 &&
+              !error &&
+              !actionFooterVisible}
+          />
+        </div>
+      {/each}
+      {#each pendingItems as item, index (item.key)}
+        <div in:slide={{ duration: 200 }} out:maybeSlide={{ sessionId: item.sessionId }}>
+          <TimelineRow
+            type={item.type}
+            title={item.title}
+            titleHtml={hashtagItems.length > 0 && hasHashtagTokens(item.title)
+              ? renderHashtagTokens(item.title, hashtagItems)
+              : undefined}
+            secondaryMeta={item.sessionId
+              ? (liveSessionHints[item.sessionId] ??
+                item.secondaryMeta ??
+                fallbackHintForPendingType(item.type))
+              : item.secondaryMeta}
+            isLast={index === pendingItems.length - 1 &&
+              gitFooterItems.length === 0 &&
+              !error &&
+              !actionFooterVisible}
+          />
+        </div>
+      {/each}
+      {#each gitFooterItems as item, index (item.key)}
+        <div>
+          <TimelineRow
+            type={item.type}
+            title={item.title}
+            titleHtml={item.titleHtml}
+            meta={item.meta}
+            secondaryMeta={item.secondaryMeta}
+            tertiaryMeta={item.tertiaryMeta}
+            badges={item.badges}
+            onPullClick={item.onPull}
+            pullDisabledReason={item.pullDisabledReason}
+            onPushClick={item.onPush}
+            pushDisabledReason={item.pushDisabledReason}
+            onRebaseClick={item.onRebase}
+            rebaseDisabledReason={item.rebaseDisabledReason}
+            onForcePushClick={item.onForcePush}
+            forcePushDisabledReason={item.forcePushDisabledReason}
+            forcePushing={item.forcePushing}
+            pushing={item.pushing}
+            onViewDiffClick={item.onViewDiff}
+            onCommitChangesClick={item.onCommitChanges}
+            commitChangesDisabledReason={item.commitChangesDisabledReason}
+            onDiscardChangesClick={item.onDiscardChanges}
+            discardChangesDisabledReason={item.discardChangesDisabledReason}
+            deleting={item.deleting}
+            isLast={index === gitFooterItems.length - 1 && !error}
+            sessionId={item.sessionId}
+            deleteDisabledReason={isDeletable(item) ? item.deleteDisabledReason : undefined}
+            contextMenuKey={hasContextMenuAction(item) ? item.key : undefined}
+            showConnector={item.showConnector}
+            {onSessionClick}
+            onItemClick={() => handleItemClick(item)}
+            onDeleteClick={!isDeletable(item) || item.deleteDisabledReason
+              ? undefined
+              : (opts) => handleDeleteClick(item, opts)}
+            onStartClick={item.type.startsWith('queued-') && !hasActiveSession
+              ? onStartQueued
+              : undefined}
+            onResumeClick={isResumable(item) && onResumeClick && item.sessionId && !hasActiveSession
+              ? () => onResumeClick!(item.sessionId!)
+              : undefined}
+          />
+        </div>
+      {/each}
+      {#if error}
+        <div>
+          <TimelineRow
+            type="load-error"
+            title="Failed to load commits"
+            secondaryMeta={error}
+            isLast={!actionFooterVisible}
+            onRetryClick={onRetry}
+          />
+        </div>
+      {/if}
+      {#if actionFooterVisible}
+        <div class="footer-row" class:footer-row-enlarged={actionButtonsEnlarged}>
+          <div
+            class="footer-left-actions"
+            class:footer-left-actions-enlarged={actionButtonsEnlarged}
+          >
+            {#if onNewNote}
+              <span class={actionButtonsEnlarged ? 'inline-flex flex-1' : 'inline-flex'}>
+                <Button
+                  variant="ghost"
+                  onclick={onNewNote}
+                  disabled={newSessionDisabled}
+                  aria-label="New note"
                   class={[
-                    'hidden',
-                    !actionButtonsEnlarged &&
-                      '@max-3xl/timeline:inline @max-[480px]/timeline:hidden',
-                  ]}>Note</span
+                    'inline-flex items-center font-medium transition-all duration-300 disabled:opacity-30 disabled:cursor-not-allowed',
+                    '[&_svg]:transition-all [&_svg]:duration-300',
+                    actionButtonsEnlarged
+                      ? 'flex-1 justify-center gap-2 px-1.5 py-2.5 h-auto rounded-lg border border-solid border-transparent bg-[var(--bg-elevated)] text-sm hover:not-disabled:bg-[var(--note-bg)] hover:not-disabled:text-[var(--note-color)] [&_svg]:!size-[18px] [&_svg]:text-[var(--note-color)]'
+                      : 'gap-[5px] px-2.5 h-8 rounded-md border border-dashed border-[var(--border-subtle)] bg-transparent text-xs hover:not-disabled:border-[var(--note-color)] hover:not-disabled:bg-[var(--note-bg)] hover:not-disabled:text-[var(--note-color)] [&_svg]:!size-[13px] [&_svg]:text-[var(--note-color)] @max-[480px]/timeline:gap-0.5 @max-[480px]/timeline:px-1.5',
+                  ]}
                 >
-              </Button>
-            </span>
-          {/if}
-          {#if onNewCommit}
-            <span class={actionButtonsEnlarged ? 'inline-flex flex-1' : 'inline-flex'}>
-              <Button
-                variant="ghost"
-                onclick={onNewCommit}
-                disabled={newSessionDisabled}
-                aria-label="New commit"
-                class={[
-                  'inline-flex items-center font-medium transition-all duration-300 disabled:opacity-30 disabled:cursor-not-allowed',
-                  '[&_svg]:transition-all [&_svg]:duration-300',
-                  actionButtonsEnlarged
-                    ? 'flex-1 justify-center gap-2 px-1.5 py-2.5 h-auto rounded-lg border border-solid border-transparent bg-[var(--bg-elevated)] text-sm hover:not-disabled:bg-[var(--commit-bg)] hover:not-disabled:text-[var(--commit-color)] [&_svg]:!size-[18px] [&_svg]:text-[var(--commit-color)]'
-                    : 'gap-[5px] px-2.5 h-8 rounded-md border border-dashed border-[var(--border-subtle)] bg-transparent text-xs hover:not-disabled:border-[var(--commit-color)] hover:not-disabled:bg-[var(--commit-bg)] hover:not-disabled:text-[var(--commit-color)] [&_svg]:!size-[13px] [&_svg]:text-[var(--commit-color)] @max-[480px]/timeline:gap-0.5 @max-[480px]/timeline:px-1.5',
-                ]}
-              >
-                <GitCommitVertical
-                  class={actionButtonsEnlarged
-                    ? ''
-                    : '@max-3xl/timeline:hidden @max-[480px]/timeline:inline-block'}
-                  size={18}
-                />
-                <Plus
-                  class={actionButtonsEnlarged
-                    ? 'hidden'
-                    : 'hidden @max-3xl/timeline:inline-block @max-[480px]/timeline:!size-[10px]'}
-                  size={18}
-                />
-                <span class={!actionButtonsEnlarged ? '@max-3xl/timeline:hidden' : ''}
-                  >New commit</span
-                >
-                <span
+                  <FileText
+                    class={actionButtonsEnlarged
+                      ? ''
+                      : '@max-3xl/timeline:hidden @max-[480px]/timeline:inline-block'}
+                    size={18}
+                  />
+                  <Plus
+                    class={actionButtonsEnlarged
+                      ? 'hidden'
+                      : 'hidden @max-3xl/timeline:inline-block @max-[480px]/timeline:!size-[10px]'}
+                    size={18}
+                  />
+                  <span class={!actionButtonsEnlarged ? '@max-3xl/timeline:hidden' : ''}
+                    >New note</span
+                  >
+                  <span
+                    class={[
+                      'hidden',
+                      !actionButtonsEnlarged &&
+                        '@max-3xl/timeline:inline @max-[480px]/timeline:hidden',
+                    ]}>Note</span
+                  >
+                </Button>
+              </span>
+            {/if}
+            {#if onNewCommit}
+              <span class={actionButtonsEnlarged ? 'inline-flex flex-1' : 'inline-flex'}>
+                <Button
+                  variant="ghost"
+                  onclick={onNewCommit}
+                  disabled={newSessionDisabled}
+                  aria-label="New commit"
                   class={[
-                    'hidden',
-                    !actionButtonsEnlarged &&
-                      '@max-3xl/timeline:inline @max-[480px]/timeline:hidden',
-                  ]}>Commit</span
+                    'inline-flex items-center font-medium transition-all duration-300 disabled:opacity-30 disabled:cursor-not-allowed',
+                    '[&_svg]:transition-all [&_svg]:duration-300',
+                    actionButtonsEnlarged
+                      ? 'flex-1 justify-center gap-2 px-1.5 py-2.5 h-auto rounded-lg border border-solid border-transparent bg-[var(--bg-elevated)] text-sm hover:not-disabled:bg-[var(--commit-bg)] hover:not-disabled:text-[var(--commit-color)] [&_svg]:!size-[18px] [&_svg]:text-[var(--commit-color)]'
+                      : 'gap-[5px] px-2.5 h-8 rounded-md border border-dashed border-[var(--border-subtle)] bg-transparent text-xs hover:not-disabled:border-[var(--commit-color)] hover:not-disabled:bg-[var(--commit-bg)] hover:not-disabled:text-[var(--commit-color)] [&_svg]:!size-[13px] [&_svg]:text-[var(--commit-color)] @max-[480px]/timeline:gap-0.5 @max-[480px]/timeline:px-1.5',
+                  ]}
                 >
-              </Button>
-            </span>
-          {/if}
-          {#if onNewReview}
-            <span class={actionButtonsEnlarged ? 'inline-flex flex-1' : 'inline-flex'}>
-              <Button
-                variant="ghost"
-                onclick={(e) => onNewReview?.(e)}
-                disabled={newSessionDisabled}
-                aria-label="New code review"
-                class={[
-                  'inline-flex items-center font-medium transition-all duration-300 disabled:opacity-30 disabled:cursor-not-allowed',
-                  '[&_svg]:transition-all [&_svg]:duration-300',
-                  actionButtonsEnlarged
-                    ? 'flex-1 justify-center gap-2 px-1.5 py-2.5 h-auto rounded-lg border border-solid border-transparent bg-[var(--bg-elevated)] text-sm hover:not-disabled:bg-[var(--review-bg)] hover:not-disabled:text-[var(--review-color)] [&_svg]:!size-[18px] [&_svg]:text-[var(--review-color)]'
-                    : 'gap-[5px] px-2.5 h-8 rounded-md border border-dashed border-[var(--border-subtle)] bg-transparent text-xs hover:not-disabled:border-[var(--review-color)] hover:not-disabled:bg-[var(--review-bg)] hover:not-disabled:text-[var(--review-color)] [&_svg]:!size-[13px] [&_svg]:text-[var(--review-color)] @max-[480px]/timeline:gap-0.5 @max-[480px]/timeline:px-1.5',
-                ]}
-              >
-                <FileSearch
-                  class={actionButtonsEnlarged
-                    ? ''
-                    : '@max-3xl/timeline:hidden @max-[480px]/timeline:inline-block'}
-                  size={18}
-                />
-                <Plus
-                  class={actionButtonsEnlarged
-                    ? 'hidden'
-                    : 'hidden @max-3xl/timeline:inline-block @max-[480px]/timeline:!size-[10px]'}
-                  size={18}
-                />
-                <span class={!actionButtonsEnlarged ? '@max-3xl/timeline:hidden' : ''}
-                  >New code review</span
-                >
-                <span
+                  <GitCommitVertical
+                    class={actionButtonsEnlarged
+                      ? ''
+                      : '@max-3xl/timeline:hidden @max-[480px]/timeline:inline-block'}
+                    size={18}
+                  />
+                  <Plus
+                    class={actionButtonsEnlarged
+                      ? 'hidden'
+                      : 'hidden @max-3xl/timeline:inline-block @max-[480px]/timeline:!size-[10px]'}
+                    size={18}
+                  />
+                  <span class={!actionButtonsEnlarged ? '@max-3xl/timeline:hidden' : ''}
+                    >New commit</span
+                  >
+                  <span
+                    class={[
+                      'hidden',
+                      !actionButtonsEnlarged &&
+                        '@max-3xl/timeline:inline @max-[480px]/timeline:hidden',
+                    ]}>Commit</span
+                  >
+                </Button>
+              </span>
+            {/if}
+            {#if onNewReview}
+              <span class={actionButtonsEnlarged ? 'inline-flex flex-1' : 'inline-flex'}>
+                <Button
+                  variant="ghost"
+                  onclick={(e) => onNewReview?.(e)}
+                  disabled={newSessionDisabled}
+                  aria-label="New code review"
                   class={[
-                    'hidden',
-                    !actionButtonsEnlarged &&
-                      '@max-3xl/timeline:inline @max-[480px]/timeline:hidden',
-                  ]}>Code review</span
+                    'inline-flex items-center font-medium transition-all duration-300 disabled:opacity-30 disabled:cursor-not-allowed',
+                    '[&_svg]:transition-all [&_svg]:duration-300',
+                    actionButtonsEnlarged
+                      ? 'flex-1 justify-center gap-2 px-1.5 py-2.5 h-auto rounded-lg border border-solid border-transparent bg-[var(--bg-elevated)] text-sm hover:not-disabled:bg-[var(--review-bg)] hover:not-disabled:text-[var(--review-color)] [&_svg]:!size-[18px] [&_svg]:text-[var(--review-color)]'
+                      : 'gap-[5px] px-2.5 h-8 rounded-md border border-dashed border-[var(--border-subtle)] bg-transparent text-xs hover:not-disabled:border-[var(--review-color)] hover:not-disabled:bg-[var(--review-bg)] hover:not-disabled:text-[var(--review-color)] [&_svg]:!size-[13px] [&_svg]:text-[var(--review-color)] @max-[480px]/timeline:gap-0.5 @max-[480px]/timeline:px-1.5',
+                  ]}
                 >
-              </Button>
-            </span>
+                  <FileSearch
+                    class={actionButtonsEnlarged
+                      ? ''
+                      : '@max-3xl/timeline:hidden @max-[480px]/timeline:inline-block'}
+                    size={18}
+                  />
+                  <Plus
+                    class={actionButtonsEnlarged
+                      ? 'hidden'
+                      : 'hidden @max-3xl/timeline:inline-block @max-[480px]/timeline:!size-[10px]'}
+                    size={18}
+                  />
+                  <span class={!actionButtonsEnlarged ? '@max-3xl/timeline:hidden' : ''}
+                    >New code review</span
+                  >
+                  <span
+                    class={[
+                      'hidden',
+                      !actionButtonsEnlarged &&
+                        '@max-3xl/timeline:inline @max-[480px]/timeline:hidden',
+                    ]}>Code review</span
+                  >
+                </Button>
+              </span>
+            {/if}
+          </div>
+          {#if footerActions && !actionButtonsEnlarged}
+            {@render footerActions()}
           {/if}
         </div>
-        {#if footerActions && !actionButtonsEnlarged}
-          {@render footerActions()}
-        {/if}
-      </div>
-    {/if}
-  </div>
+      {/if}
+    </div>
+  </TimelineContextMenu>
 {/if}
 
 <style>

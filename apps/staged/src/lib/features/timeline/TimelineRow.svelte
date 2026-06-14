@@ -11,16 +11,13 @@
   import FileSearch from '@lucide/svelte/icons/file-search';
   import ImageLucide from '@lucide/svelte/icons/image';
   import MessageSquare from '@lucide/svelte/icons/message-square';
-  import MessageSquarePlus from '@lucide/svelte/icons/message-square-plus';
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import AlertTriangle from '@lucide/svelte/icons/alert-triangle';
   import Clock from '@lucide/svelte/icons/clock';
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import GitMerge from '@lucide/svelte/icons/git-merge';
   import ChevronsDown from '@lucide/svelte/icons/chevrons-down';
-  import Copy from '@lucide/svelte/icons/copy';
   import Spinner from '../../shared/Spinner.svelte';
-  import * as ContextMenu from '$lib/components/ui/context-menu';
   import { Button } from '$lib/components/ui/button';
 
   export type TimelineItemType =
@@ -89,12 +86,8 @@
     onDiscardChangesClick?: () => void;
     discardChangesDisabledReason?: string;
     showConnector?: boolean;
-    /** Full commit SHA for the context menu "Copy SHA" action. */
-    commitSha?: string;
-    /** Hashtag reference token (e.g. "#commit:abc123") for "New session referring to this". */
-    hashtagRef?: string;
-    /** Callback invoked when the user picks "New session referring to this" from the context menu. */
-    onNewSessionReferring?: (hashtagRef: string) => void;
+    /** Key used by the parent timeline context menu to look up row actions. */
+    contextMenuKey?: string;
   }
 
   let {
@@ -131,9 +124,7 @@
     onDiscardChangesClick,
     discardChangesDisabledReason,
     showConnector = true,
-    commitSha,
-    hashtagRef,
-    onNewSessionReferring,
+    contextMenuKey,
   }: Props = $props();
 
   let isNote = $derived(
@@ -178,6 +169,16 @@
   );
   let isClickable = $derived(!!onItemClick && !isPending && !isFailed);
   let hasSession = $derived(!!sessionId && !deleting);
+  let pullTitle = $derived(pullDisabledReason ?? 'Pull');
+  let pushTitle = $derived(pushDisabledReason ?? (pushing ? 'View push session' : 'Push'));
+  let forcePushTitle = $derived(
+    forcePushDisabledReason ??
+      (forcePushing ? 'View push session' : 'Force push local branch to origin')
+  );
+  let rebaseTitle = $derived(rebaseDisabledReason ?? 'Rebase');
+  let commitChangesTitle = $derived(commitChangesDisabledReason ?? 'Commit changes');
+  let discardChangesTitle = $derived(discardChangesDisabledReason ?? 'Discard changes');
+  let deleteTitle = $derived(deleteDisabledReason ?? 'Delete');
 
   function handleRowClick() {
     if (isClickable) {
@@ -247,8 +248,13 @@
     onDiscardChangesClick?.();
   }
 
-  // ── Context menu ────────────────────────────────────────────────────
-  let hasContextMenu = $derived(!!commitSha || (!!hashtagRef && !!onNewSessionReferring));
+  function handleRowContextMenu(e: MouseEvent) {
+    if (!contextMenuKey) e.stopPropagation();
+  }
+
+  function handleRowPointerDown(e: PointerEvent) {
+    if (!contextMenuKey && e.pointerType !== 'mouse') e.stopPropagation();
+  }
 </script>
 
 {#snippet rowBody()}
@@ -262,6 +268,9 @@
     class:git-state={isGitState}
     class:compact={type === 'load-error'}
     onclick={handleRowClick}
+    oncontextmenu={handleRowContextMenu}
+    onpointerdown={handleRowPointerDown}
+    data-timeline-context-menu-key={contextMenuKey}
   >
     <div class="timeline-marker">
       <div
@@ -409,12 +418,14 @@
           </Button>
         {/if}
         {#if onPullClick || pullDisabledReason}
-          <span class="inline-flex" title={pullDisabledReason}>
+          <span class="inline-flex" title={pullTitle}>
             <Button
               variant="outline"
               size="xs"
               onclick={handlePullClick}
               disabled={!!pullDisabledReason}
+              title={pullTitle}
+              aria-label={pullTitle}
               class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
             >
               Pull
@@ -422,15 +433,14 @@
           </span>
         {/if}
         {#if onPushClick || pushDisabledReason}
-          <span
-            class="inline-flex"
-            title={pushDisabledReason ?? (pushing ? 'View push session' : undefined)}
-          >
+          <span class="inline-flex" title={pushTitle}>
             <Button
               variant="outline"
               size="xs"
               onclick={handlePushClick}
               disabled={!!pushDisabledReason}
+              title={pushTitle}
+              aria-label={pushTitle}
               class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
             >
               {pushing ? 'Pushing\u2026' : 'Push'}
@@ -438,16 +448,14 @@
           </span>
         {/if}
         {#if onForcePushClick || forcePushDisabledReason}
-          <span
-            class="inline-flex"
-            title={forcePushDisabledReason ??
-              (forcePushing ? 'View push session' : 'Force push local branch to origin')}
-          >
+          <span class="inline-flex" title={forcePushTitle}>
             <Button
               variant="outline"
               size="xs"
               onclick={handleForcePushClick}
               disabled={!!forcePushDisabledReason}
+              title={forcePushTitle}
+              aria-label={forcePushTitle}
               class={[
                 'h-[22px] rounded-md bg-transparent shadow-none',
                 forcePushing
@@ -460,12 +468,14 @@
           </span>
         {/if}
         {#if onRebaseClick || rebaseDisabledReason}
-          <span class="inline-flex" title={rebaseDisabledReason}>
+          <span class="inline-flex" title={rebaseTitle}>
             <Button
               variant="outline"
               size="xs"
               onclick={handleRebaseClick}
               disabled={!!rebaseDisabledReason}
+              title={rebaseTitle}
+              aria-label={rebaseTitle}
               class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
             >
               Rebase
@@ -485,12 +495,14 @@
           </Button>
         {/if}
         {#if onCommitChangesClick || commitChangesDisabledReason}
-          <span class="inline-flex" title={commitChangesDisabledReason ?? 'Commit changes'}>
+          <span class="inline-flex" title={commitChangesTitle}>
             <Button
               variant="outline"
               size="xs"
               onclick={handleCommitChangesClick}
               disabled={!!commitChangesDisabledReason}
+              title={commitChangesTitle}
+              aria-label={commitChangesTitle}
               class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
             >
               Commit
@@ -498,12 +510,14 @@
           </span>
         {/if}
         {#if onDiscardChangesClick || discardChangesDisabledReason}
-          <span class="inline-flex" title={discardChangesDisabledReason ?? 'Discard changes'}>
+          <span class="inline-flex" title={discardChangesTitle}>
             <Button
               variant="outline"
               size="xs"
               onclick={handleDiscardChangesClick}
               disabled={!!discardChangesDisabledReason}
+              title={discardChangesTitle}
+              aria-label={discardChangesTitle}
               class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
             >
               Discard
@@ -523,13 +537,14 @@
           </Button>
         {/if}
         {#if onDeleteClick || deleteDisabledReason}
-          <span class="inline-flex" title={deleteDisabledReason ?? 'Delete'}>
+          <span class="inline-flex" title={deleteTitle}>
             <Button
               variant="ghost"
               size="icon-xs"
-              aria-label="Delete"
               onclick={handleDeleteClick}
               disabled={!!deleteDisabledReason}
+              title={deleteTitle}
+              aria-label={deleteTitle}
               class="size-[22px] text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-destructive [&_svg]:!size-3"
             >
               <Trash2 size={12} />
@@ -541,29 +556,7 @@
   </div>
 {/snippet}
 
-{#if hasContextMenu}
-  <ContextMenu.Root>
-    <ContextMenu.Trigger class="contents">
-      {@render rowBody()}
-    </ContextMenu.Trigger>
-    <ContextMenu.Content class="min-w-[140px]">
-      {#if commitSha}
-        <ContextMenu.Item
-          onSelect={() => navigator.clipboard.writeText(commitSha!).catch(() => {})}
-        >
-          <Copy size={14} /> Copy SHA
-        </ContextMenu.Item>
-      {/if}
-      {#if hashtagRef && onNewSessionReferring}
-        <ContextMenu.Item onSelect={() => onNewSessionReferring!(hashtagRef!)}>
-          <MessageSquarePlus size={14} /> New session referring to this
-        </ContextMenu.Item>
-      {/if}
-    </ContextMenu.Content>
-  </ContextMenu.Root>
-{:else}
-  {@render rowBody()}
-{/if}
+{@render rowBody()}
 
 <style>
   .timeline-row {

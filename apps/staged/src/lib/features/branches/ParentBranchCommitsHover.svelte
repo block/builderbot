@@ -1,10 +1,10 @@
 <script lang="ts">
   import { onDestroy, tick } from 'svelte';
   import type { Snippet } from 'svelte';
-  import { listenToEvent } from '../../transport';
   import { listParentBranchCommits, type ParentBranchCommit } from '../../commands';
   import { formatRelativeTimeSeconds } from '../../shared/relativeTime.svelte';
-  import type { BranchGitState } from '../../types';
+  import * as Tooltip from '$lib/components/ui/tooltip';
+  import { onBranchGitStateUpdated } from '../../services/branchEventService';
 
   interface Props {
     branchId: string;
@@ -130,17 +130,13 @@
   }
 
   $effect(() => {
-    const unlisten = listenToEvent<{ branchId: string; gitState: BranchGitState }>(
-      'git-state-updated',
-      (payload) => {
-        if (payload.branchId !== branchId) return;
-        commits = null;
-        loadVersion++;
-        if (open) {
-          void loadCommits();
-        }
+    const unlisten = onBranchGitStateUpdated(branchId, () => {
+      commits = null;
+      loadVersion++;
+      if (open) {
+        void loadCommits();
       }
-    );
+    });
     return () => unlisten();
   });
 

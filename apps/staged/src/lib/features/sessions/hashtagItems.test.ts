@@ -263,4 +263,21 @@ describe('buildProjectHashtagItems', () => {
     expect(getBranchTimeline).toHaveBeenNthCalledWith(1, 'local-ready');
     expect(getBranchTimeline).toHaveBeenNthCalledWith(2, 'remote-ready');
   });
+
+  it('reuses provided project notes instead of fetching them again', async () => {
+    vi.mocked(getBranchTimeline).mockResolvedValue(emptyTimeline());
+
+    const items = await buildProjectHashtagItems('project-1', [], undefined, [
+      projectNote({ id: 'provided-note', title: 'Provided note' }),
+    ]);
+
+    expect(listProjectNotes).not.toHaveBeenCalled();
+    expect(items).toContainEqual(
+      expect.objectContaining({
+        type: 'project-note',
+        id: 'provided-note',
+        title: 'Provided note',
+      })
+    );
+  });
 });

@@ -1,18 +1,18 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { listenToEvent } from '../../transport';
   import Send from '@lucide/svelte/icons/send';
   import Spinner from '../../shared/Spinner.svelte';
   import { Button } from '$lib/components/ui/button';
   import { toast } from 'svelte-sonner';
   import * as commands from '../../api/commands';
   import { getCommitPrefillFromReviewComments } from '../branches/commitSessionPrefill';
-  import type { SessionStatusPayload, HashtagItem } from '../../types';
+  import type { HashtagItem } from '../../types';
   import HashtagInput from '../sessions/HashtagInput.svelte';
   import { buildBranchHashtagItems } from '../sessions/hashtagItems';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { viewport } from '../../shared/viewport.svelte';
+  import { onBranchSessionStatus } from '../../services/branchEventService';
 
   interface Props {
     branchId: string;
@@ -103,8 +103,7 @@
 
     document.addEventListener('keydown', handleGlobalKeydown);
 
-    const unlisten = listenToEvent<SessionStatusPayload>('session-status-changed', (payload) => {
-      if (payload.branchId !== branchId) return;
+    const unlisten = onBranchSessionStatus(branchId, () => {
       void refreshQueueState(true);
     });
 

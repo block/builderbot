@@ -26,7 +26,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import SineWave from '../../shared/SineWave.svelte';
   import ActionOutputModal from '../actions/ActionOutputModal.svelte';
-  import { listenToEvent, type UnlistenFn } from '../../transport';
+  import type { UnlistenFn } from '../../transport';
   import type { Branch, ProjectRepo } from '../../types';
   import * as commands from '../../api/commands';
   import type { ProjectAction } from '../../api/commands';
@@ -36,7 +36,6 @@
     clearActionExecution,
     stopBranchAction,
     getRunPhase,
-    listenToRunPhaseChanged,
     listenToRepoActionsDetection,
     type ActionStatusEvent,
     type ActionType,
@@ -54,6 +53,7 @@
   import { bloxEnv } from '../../stores/bloxEnv.svelte';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState } from '../agents/agent.svelte';
+  import { onBranchActionStatus, onBranchRunPhaseChanged } from '../../services/branchEventService';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import { Button } from '$lib/components/ui/button';
 
@@ -225,12 +225,7 @@
   $effect(() => {
     const branchId = branch.id;
 
-    const unlistenActionStatus = listenToEvent<ActionStatusEvent>('action_status', (payload) => {
-      // Only process events for this branch
-      if (payload.branchId !== branchId) {
-        return;
-      }
-
+    const unlistenActionStatus = onBranchActionStatus(branchId, (payload: ActionStatusEvent) => {
       const existingIndex = runningActions.findIndex((a) => a.executionId === payload.executionId);
 
       if (payload.status === 'running') {
@@ -298,11 +293,9 @@
       }
     });
 
-    const unlistenRunPhaseChanged = listenToRunPhaseChanged((event) => {
-      if (event.branchId === branchId) {
-        runPhases.set(event.executionId, event.phase);
-        runPhases = new Map(runPhases);
-      }
+    const unlistenRunPhaseChanged = onBranchRunPhaseChanged(branchId, (event) => {
+      runPhases.set(event.executionId, event.phase);
+      runPhases = new Map(runPhases);
     });
 
     return () => {

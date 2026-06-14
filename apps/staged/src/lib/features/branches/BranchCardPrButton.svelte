@@ -15,12 +15,10 @@
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
   import { minuteNow, secondNow } from '../../shared/relativeTime.svelte';
-  import { listenToEvent } from '../../transport';
   import type {
     Branch,
     BranchTimeline as BranchTimelineData,
     PrFailedCheck,
-    PrStatusChangedEvent,
     Session,
   } from '../../types';
   import * as commands from '../../api/commands';
@@ -38,6 +36,10 @@
   import { prStateStore, type PrState } from '../../stores/prState.svelte';
   import { pushStateStore, type PushState } from '../../stores/pushState.svelte';
   import * as prPollingService from '../../services/prPollingService';
+  import {
+    onBranchPrStatusChanged,
+    onBranchPrStatusCleared,
+  } from '../../services/branchEventService';
 
   interface Props {
     branch: Branch;
@@ -170,39 +172,35 @@
   $effect(() => {
     const branchId = branch.id;
 
-    const unlistenStatus = listenToEvent<PrStatusChangedEvent>('pr-status-changed', (payload) => {
-      if (payload.branchId === branchId) {
-        prStatusState = payload.prState;
-        prStatusChecks = payload.prChecksStatus;
-        prStatusReviewDecision = payload.prReviewDecision;
-        prStatusMergeable = payload.prMergeable;
-        prStatusDraft = payload.prDraft;
-        prHeadSha = payload.prHeadSha;
-        prFetchedAt = payload.prFetchedAt;
-        failedChecks = payload.failedChecks ?? [];
-        prStatusCleared = false;
-        // Update the polling service with the new checks status
-        prPollingService.updateChecksStatus(
-          branchId,
-          branch.projectId,
-          payload.prChecksStatus === 'PENDING'
-        );
-      }
+    const unlistenStatus = onBranchPrStatusChanged(branchId, (payload) => {
+      prStatusState = payload.prState;
+      prStatusChecks = payload.prChecksStatus;
+      prStatusReviewDecision = payload.prReviewDecision;
+      prStatusMergeable = payload.prMergeable;
+      prStatusDraft = payload.prDraft;
+      prHeadSha = payload.prHeadSha;
+      prFetchedAt = payload.prFetchedAt;
+      failedChecks = payload.failedChecks ?? [];
+      prStatusCleared = false;
+      // Update the polling service with the new checks status
+      prPollingService.updateChecksStatus(
+        branchId,
+        branch.projectId,
+        payload.prChecksStatus === 'PENDING'
+      );
     });
 
-    const unlistenCleared = listenToEvent<string>('pr-status-cleared', (clearedBranchId) => {
-      if (clearedBranchId === branchId) {
-        prStatusState = null;
-        prStatusChecks = null;
-        prStatusReviewDecision = null;
-        prStatusMergeable = null;
-        prStatusDraft = null;
-        prHeadSha = null;
-        prFetchedAt = null;
-        failedChecks = [];
-        prStatusCleared = true;
-        prPollingService.updateChecksStatus(branchId, branch.projectId, false);
-      }
+    const unlistenCleared = onBranchPrStatusCleared(branchId, () => {
+      prStatusState = null;
+      prStatusChecks = null;
+      prStatusReviewDecision = null;
+      prStatusMergeable = null;
+      prStatusDraft = null;
+      prHeadSha = null;
+      prFetchedAt = null;
+      failedChecks = [];
+      prStatusCleared = true;
+      prPollingService.updateChecksStatus(branchId, branch.projectId, false);
     });
 
     return () => {

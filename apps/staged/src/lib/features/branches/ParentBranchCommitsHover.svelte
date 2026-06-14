@@ -3,7 +3,6 @@
   import type { Snippet } from 'svelte';
   import { listParentBranchCommits, type ParentBranchCommit } from '../../commands';
   import { formatRelativeTimeSeconds } from '../../shared/relativeTime.svelte';
-  import * as Tooltip from '$lib/components/ui/tooltip';
   import { onBranchGitStateUpdated } from '../../services/branchEventService';
 
   interface Props {

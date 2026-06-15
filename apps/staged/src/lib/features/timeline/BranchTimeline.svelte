@@ -1218,6 +1218,9 @@
     margin: 0 -8px;
     position: relative;
     z-index: 1;
+    /* Keep footer controls on a tiny stable layer while row hover backgrounds
+       repaint above, without restoring a compositor layer on every row. */
+    transform: translateZ(0);
     transition:
       gap 0.3s ease,
       padding 0.3s ease,

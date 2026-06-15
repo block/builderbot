@@ -1983,7 +1983,53 @@ fn run_post_completion_hooks(
 /// to prior text (for example, `Preamble.---\n# Title`) by accepting inline
 /// rules only when the remaining content starts with an H1.
 fn extract_note_content(text: &str) -> Option<String> {
+    let sanitized = strip_suggested_next_steps_blocks(text);
+    let text = sanitized.as_deref().unwrap_or(text);
     extract_note_after_standalone_hr(text).or_else(|| extract_note_after_inline_hr(text))
+}
+
+/// Remove assistant response metadata before scanning for the note separator.
+/// The note body remains normal markdown and can still contain fenced code.
+fn strip_suggested_next_steps_blocks(text: &str) -> Option<String> {
+    let marker = "```suggested-next-steps";
+    let mut output = String::new();
+    let mut last_copied = 0;
+    let mut search_from = 0;
+    let mut removed_any = false;
+
+    while search_from < text.len() {
+        let Some(rel_pos) = find_suggested_next_steps_opening_fence(&text[search_from..], marker)
+        else {
+            break;
+        };
+        let start_pos = search_from + rel_pos;
+        let block_start = start_pos + marker.len();
+        let Some(newline_pos) = text[block_start..].find('\n') else {
+            break;
+        };
+        let content_start = block_start + newline_pos + 1;
+        let Some(end_pos) = find_closing_fence(&text[content_start..]) else {
+            break;
+        };
+
+        let closing_start = content_start + end_pos;
+        let after_closing = text[closing_start..]
+            .find('\n')
+            .map(|newline| closing_start + newline + 1)
+            .unwrap_or(text.len());
+
+        output.push_str(&text[last_copied..start_pos]);
+        last_copied = after_closing;
+        search_from = after_closing;
+        removed_any = true;
+    }
+
+    if removed_any {
+        output.push_str(&text[last_copied..]);
+        Some(output)
+    } else {
+        None
+    }
 }
 
 fn extract_note_after_standalone_hr(text: &str) -> Option<String> {
@@ -3078,6 +3124,29 @@ Second batch:
         assert_eq!(
             content,
             Some("# Repo Purpose\nThis repo ships desktop tooling.".to_string())
+        );
+    }
+
+    #[test]
+    fn note_content_strips_inline_suggested_steps_before_hr_with_code_fence_body() {
+        let text = r#"I focused the plan on the parser and tests.```suggested-next-steps
+{"suggestedNextCommitStep":"Fix note parsing","suggestedNextNoteStep":null}
+```
+---
+# Harden Note Detection
+Strip metadata before scanning for the note separator.
+
+```rust
+fn example() {}
+```
+
+Keep normal markdown fences in the note body."#;
+        let content = extract_note_content(text);
+        assert_eq!(
+            content,
+            Some(
+                "# Harden Note Detection\nStrip metadata before scanning for the note separator.\n\n```rust\nfn example() {}\n```\n\nKeep normal markdown fences in the note body.".to_string()
+            )
         );
     }
 

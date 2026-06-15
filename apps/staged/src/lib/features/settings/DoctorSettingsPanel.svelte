@@ -4,9 +4,16 @@
   import Stethoscope from '@lucide/svelte/icons/stethoscope';
   import ClipboardCopy from '@lucide/svelte/icons/clipboard-copy';
   import Check from '@lucide/svelte/icons/check';
+  import ArrowUpCircle from '@lucide/svelte/icons/arrow-up-circle';
   import Spinner from '../../shared/Spinner.svelte';
   import DoctorCheckRow from '../doctor/DoctorCheckRow.svelte';
-  import { doctorState, runChecks, formatDebugReport } from '../doctor/doctor.svelte';
+  import {
+    doctorState,
+    runChecks,
+    updateAll,
+    hasActionableUpdate,
+    formatDebugReport,
+  } from '../doctor/doctor.svelte';
   import { refreshProviders } from '../agents/agent.svelte';
   import { Button } from '$lib/components/ui/button';
 
@@ -38,6 +45,20 @@
   const agentChecks = $derived(
     doctorState.report?.checks.filter((c) => c.id.startsWith('ai-agent-')) ?? []
   );
+
+  /** True when any check has an actionable update across its readouts. */
+  const anyUpdatable = $derived(doctorState.report?.checks.some(hasActionableUpdate) ?? false);
+
+  async function runUpdateAll() {
+    if (doctorState.updatingAll) return;
+    // updateAll owns `doctorState.updatingAll` for its duration, which disables
+    // every per-row Update/Fix button so no individual update can race the batch.
+    await updateAll();
+    // One full re-run after the batch: re-derives each check's status/message
+    // (so updated tools drop their stale warnings), chains a freshness pass to
+    // clear the badges, and re-discovers providers.
+    if (mounted) await runChecksAndRefresh();
+  }
 
   let copied = $state(false);
 
@@ -73,8 +94,25 @@
         </Button>
       {/if}
 
+      {#if anyUpdatable && !doctorState.loading}
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={doctorState.updatingAll}
+          onclick={runUpdateAll}
+        >
+          <ArrowUpCircle size={14} />
+          {doctorState.updatingAll ? 'Updating all' : 'Update all'}
+        </Button>
+      {/if}
+
       {#if !doctorState.loading}
-        <Button variant="outline" size="sm" onclick={runChecksAndRefresh}>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={doctorState.updatingAll}
+          onclick={runChecksAndRefresh}
+        >
           <RefreshCw size={14} />
           Re-run
         </Button>

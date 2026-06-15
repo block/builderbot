@@ -74,6 +74,11 @@
   let loading = $state(true);
   let error = $state<string | null>(null);
   let loadGeneration = 0;
+  let initialLoadComplete = $state(false);
+  let lastSelectedProjectId: string | null = null;
+  let backgroundHydrationCancel: (() => void) | null = null;
+  let queuedSessionDrainCancel: (() => void) | null = null;
+  const queuedSessionDrainBranchIds = new Set<string>();
 
   // Store health — if non-null the DB needs a reset before we can proceed
   let storeIncompat = $state<StoreIncompatibility | null>(null);
@@ -201,11 +206,14 @@
     );
 
     return () => {
+      loadGeneration++;
       window.removeEventListener('staged:new-project', onNewProject);
       unlistenDetection();
       unlistenProjectRepoAdded();
       unlistenPrStatus();
       unlistenSessionStatus();
+      cancelBackgroundHydration();
+      cancelQueuedSessionDrain();
       workspaceLifecycle.stop();
       projectRunActionsStore.stopListening();
     };
@@ -244,8 +252,186 @@
     getWindowSync().close();
   }
 
+  function scheduleDeferredTask(callback: () => void, timeout = 1500): () => void {
+    const schedule =
+      typeof requestIdleCallback === 'function'
+        ? (cb: () => void) => requestIdleCallback(cb, { timeout })
+        : (cb: () => void) => setTimeout(cb, 0) as unknown as number;
+    const cancel =
+      typeof cancelIdleCallback === 'function'
+        ? (handle: number) => cancelIdleCallback(handle)
+        : (handle: number) => clearTimeout(handle);
+
+    const handle = schedule(callback);
+    return () => cancel(handle);
+  }
+
+  function cancelBackgroundHydration() {
+    backgroundHydrationCancel?.();
+    backgroundHydrationCancel = null;
+  }
+
+  function cancelQueuedSessionDrain() {
+    queuedSessionDrainCancel?.();
+    queuedSessionDrainCancel = null;
+    queuedSessionDrainBranchIds.clear();
+  }
+
+  function scheduleQueuedSessionDrain(branches: Branch[]) {
+    for (const branch of branches) {
+      const isLocalReady = branch.branchType === 'local' && branch.worktreePath;
+      const isRemoteReady = branch.branchType === 'remote' && branch.workspaceStatus === 'running';
+      if (isLocalReady || isRemoteReady) {
+        queuedSessionDrainBranchIds.add(branch.id);
+      }
+    }
+
+    if (queuedSessionDrainBranchIds.size === 0 || queuedSessionDrainCancel) return;
+
+    queuedSessionDrainCancel = scheduleDeferredTask(() => {
+      queuedSessionDrainCancel = null;
+      const branchIds = Array.from(queuedSessionDrainBranchIds);
+      queuedSessionDrainBranchIds.clear();
+      for (const branchId of branchIds) {
+        commands.drainQueuedSessions(branchId).catch((e) => {
+          console.error('[ProjectHome] Failed to drain queued sessions on startup:', e);
+        });
+      }
+    }, 3000);
+  }
+
+  async function hydrateProject(
+    project: Project,
+    generation: number,
+    options: { drainQueuedSessions?: boolean } = {}
+  ): Promise<Branch[] | null> {
+    const [branches, repos] = await Promise.all([
+      commands.listBranchesForProject(project.id),
+      commands.listProjectRepos(project.id),
+    ]);
+    if (generation !== loadGeneration) return null;
+
+    const mergedBranches = mergeBranchesPreservingWorktree(
+      branchesByProject.get(project.id) || [],
+      branches
+    );
+    branchesByProject = new Map(branchesByProject).set(project.id, mergedBranches);
+    workspaceLifecycle.enqueueInitialSetup(project.id, mergedBranches);
+    replaceProjectRepos(project.id, repos);
+    void repoBadgeStore.ensureForRepos(
+      repos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
+    );
+    projectRunActionsStore
+      .hydrateFromProjectBranches(branchesByProject, {
+        branchIds: mergedBranches.map((b) => b.id),
+      })
+      .catch(console.error);
+
+    if (options.drainQueuedSessions) {
+      scheduleQueuedSessionDrain(mergedBranches);
+    }
+
+    return mergedBranches;
+  }
+
+  async function hydrateAllProjects(projectList: Project[], generation: number) {
+    await Promise.all(
+      projectList.map(async (project) => {
+        try {
+          await hydrateProject(project, generation, { drainQueuedSessions: true });
+        } catch (e) {
+          console.error(`[ProjectHome] Failed to hydrate project '${project.id}':`, e);
+        }
+      })
+    );
+  }
+
+  function scheduleBackgroundHydration(
+    projectList: Project[],
+    foregroundProjectId: string | null,
+    generation: number
+  ) {
+    cancelBackgroundHydration();
+
+    const queue = projectList.filter((project) => project.id !== foregroundProjectId);
+    if (queue.length === 0) return;
+
+    let cancelled = false;
+    let cancelScheduledTask: (() => void) | null = null;
+
+    const hydrateNext = () => {
+      cancelScheduledTask = null;
+      if (cancelled || generation !== loadGeneration) return;
+
+      const project = queue.shift();
+      if (!project) return;
+
+      hydrateProject(project, generation, { drainQueuedSessions: true })
+        .catch((e) => {
+          console.error(`[ProjectHome] Failed to background hydrate project '${project.id}':`, e);
+        })
+        .finally(() => {
+          if (cancelled || generation !== loadGeneration || queue.length === 0) return;
+          cancelScheduledTask = scheduleDeferredTask(hydrateNext, 3000);
+        });
+    };
+
+    cancelScheduledTask = scheduleDeferredTask(hydrateNext, 3000);
+    backgroundHydrationCancel = () => {
+      cancelled = true;
+      cancelScheduledTask?.();
+    };
+  }
+
+  async function hydrateActionDetection(projectList: Project[], generation: number) {
+    try {
+      const contexts = await commands.listActionContexts();
+      if (generation !== loadGeneration) return;
+      detectingProjectIds = new Set(
+        projectList
+          .filter((project) =>
+            contexts.some(
+              (context) =>
+                context.detectingActions &&
+                context.githubRepo === project.githubRepo &&
+                context.subpath === project.subpath
+            )
+          )
+          .map((project) => project.id)
+      );
+    } catch (e) {
+      console.error('[ProjectHome] Failed to load action contexts:', e);
+    }
+  }
+
+  async function hydrateForCurrentSelection(projectId: string | null) {
+    const generation = ++loadGeneration;
+    cancelBackgroundHydration();
+    error = null;
+
+    const projectList = projects;
+    if (projectId) {
+      const project = projectList.find((p) => p.id === projectId);
+      if (!project) return;
+      try {
+        await hydrateProject(project, generation, { drainQueuedSessions: true });
+      } catch (e) {
+        if (generation !== loadGeneration) return;
+        console.error(`[ProjectHome] Failed to hydrate selected project '${project.id}':`, e);
+      }
+      if (generation !== loadGeneration) return;
+      scheduleBackgroundHydration(projectList, projectId, generation);
+    } else {
+      await hydrateAllProjects(projectList, generation);
+    }
+
+    void hydrateActionDetection(projectList, generation);
+  }
+
   async function loadData() {
     const generation = ++loadGeneration;
+    initialLoadComplete = false;
+    cancelBackgroundHydration();
     if (projects.length === 0) {
       loading = true;
     }
@@ -273,62 +459,27 @@
       }
       reposById = prunedRepos;
 
-      await Promise.all(
-        projectList.map(async (project) => {
+      if (selectedProjectId) {
+        const selectedProject = projectList.find((project) => project.id === selectedProjectId);
+        if (selectedProject) {
           try {
-            const [branches, repos] = await Promise.all([
-              commands.listBranchesForProject(project.id),
-              commands.listProjectRepos(project.id),
-            ]);
-            if (generation !== loadGeneration) return;
-            branchesByProject = new Map(branchesByProject).set(project.id, branches);
-            workspaceLifecycle.enqueueInitialSetup(project.id, branches);
-            replaceProjectRepos(project.id, repos);
-
-            // On startup, drain queued sessions for branches that are already ready.
-            for (const branch of branches) {
-              const isLocalReady = branch.branchType === 'local' && branch.worktreePath;
-              const isRemoteReady =
-                branch.branchType === 'remote' && branch.workspaceStatus === 'running';
-              if (isLocalReady || isRemoteReady) {
-                commands.drainQueuedSessions(branch.id).catch((e) => {
-                  console.error('[ProjectHome] Failed to drain queued sessions on startup:', e);
-                });
-              }
-            }
+            await hydrateProject(selectedProject, generation, { drainQueuedSessions: true });
           } catch (e) {
-            console.error(`[ProjectHome] Failed to hydrate project '${project.id}':`, e);
+            console.error(
+              `[ProjectHome] Failed to hydrate selected project '${selectedProject.id}':`,
+              e
+            );
           }
-        })
-      );
-
-      projectRunActionsStore.hydrateFromProjectBranches(branchesByProject).catch(console.error);
-
-      // Ensure badges exist for all loaded repos
-      const allRepos = [...reposById.values()].map((r) => ({
-        githubRepo: r.githubRepo,
-        subpath: r.subpath,
-      }));
-      void repoBadgeStore.ensureForRepos(allRepos);
-
-      try {
-        const contexts = await commands.listActionContexts();
+        }
         if (generation !== loadGeneration) return;
-        detectingProjectIds = new Set(
-          projectList
-            .filter((project) =>
-              contexts.some(
-                (context) =>
-                  context.detectingActions &&
-                  context.githubRepo === project.githubRepo &&
-                  context.subpath === project.subpath
-              )
-            )
-            .map((project) => project.id)
-        );
-      } catch (e) {
-        console.error('[ProjectHome] Failed to load action contexts:', e);
+        scheduleBackgroundHydration(projectList, selectedProjectId, generation);
+      } else {
+        await hydrateAllProjects(projectList, generation);
       }
+
+      lastSelectedProjectId = selectedProjectId;
+      initialLoadComplete = true;
+      void hydrateActionDetection(projectList, generation);
     } catch (e) {
       if (generation !== loadGeneration) return;
       error = e instanceof Error ? e.message : String(e);
@@ -338,6 +489,14 @@
       }
     }
   }
+
+  $effect(() => {
+    const projectId = selectedProjectId;
+    if (!initialLoadComplete) return;
+    if (projectId === lastSelectedProjectId) return;
+    lastSelectedProjectId = projectId;
+    void hydrateForCurrentSelection(projectId);
+  });
 
   let visibleProjects = $derived(
     selectedProjectId ? projects.filter((project) => project.id === selectedProjectId) : projects

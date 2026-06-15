@@ -36,6 +36,9 @@ class ProjectRunActionsStore {
   /** Manual reactivity version counter */
   private version = $state(0);
 
+  /** Branches whose current running-action state has already been queried. */
+  private hydratedBranchIds = new Set<string>();
+
   private unlisteners: UnlistenFn[] = [];
   private initialized = false;
 
@@ -82,6 +85,7 @@ class ProjectRunActionsStore {
     this.unlisteners = [];
     this.executions = new Map();
     this.branchToProject = new Map();
+    this.hydratedBranchIds.clear();
     this.initialized = false;
     this.version++;
   }
@@ -105,7 +109,10 @@ class ProjectRunActionsStore {
    * project→branches map. Convenience wrapper used by both ProjectsList
    * and ProjectHome after loading branch data.
    */
-  async hydrateFromProjectBranches(branchesByProject: Map<string, Branch[]>): Promise<void> {
+  async hydrateFromProjectBranches(
+    branchesByProject: Map<string, Branch[]>,
+    options: { branchIds?: Iterable<string>; force?: boolean } = {}
+  ): Promise<void> {
     const branchProjectMap = new Map<string, string[]>();
     const allBranchIds: string[] = [];
     for (const [projectId, branches] of branchesByProject) {
@@ -118,15 +125,21 @@ class ProjectRunActionsStore {
       }
     }
     this.updateBranchProjectMap(branchProjectMap);
-    await this.hydrateFromBranches(allBranchIds);
+    await this.hydrateFromBranches(options.branchIds ?? allBranchIds, options.force ?? false);
   }
 
   /**
    * Hydrate initial state by querying running actions for all known branches.
    */
-  private async hydrateFromBranches(branchIds: string[]): Promise<void> {
+  private async hydrateFromBranches(branchIds: Iterable<string>, force: boolean): Promise<void> {
+    const uniqueBranchIds = Array.from(new Set(branchIds));
+    const branchIdsToHydrate = force
+      ? uniqueBranchIds
+      : uniqueBranchIds.filter((branchId) => !this.hydratedBranchIds.has(branchId));
+    if (branchIdsToHydrate.length === 0) return;
+
     const results = await Promise.allSettled(
-      branchIds.map(async (branchId) => {
+      branchIdsToHydrate.map(async (branchId) => {
         const actions = await getRunningBranchActions(branchId);
         return { branchId, actions };
       })
@@ -136,6 +149,7 @@ class ProjectRunActionsStore {
     const runActions: { executionId: string; branchId: string }[] = [];
     for (const result of results) {
       if (result.status !== 'fulfilled') continue;
+      this.hydratedBranchIds.add(result.value.branchId);
       for (const action of result.value.actions) {
         if (action.actionType !== 'run') continue;
         runActions.push({ executionId: action.executionId, branchId: action.branchId });

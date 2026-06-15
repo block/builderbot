@@ -125,7 +125,8 @@ export async function buildBranchHashtagItems(
 export async function buildProjectHashtagItems(
   projectId: string,
   branches: Branch[],
-  reposById?: Map<string, ProjectRepo>
+  reposById?: Map<string, ProjectRepo>,
+  knownProjectNotes?: ProjectNote[]
 ): Promise<HashtagItem[]> {
   const readyBranches = branches.filter((branch) => branchTimelineReadyKey(branch) !== null);
 
@@ -133,7 +134,7 @@ export async function buildProjectHashtagItems(
     Promise.allSettled(
       readyBranches.map((b) => getBranchTimeline(b.id).then((t) => ({ branch: b, timeline: t })))
     ),
-    listProjectNotes(projectId),
+    knownProjectNotes ? Promise.resolve(knownProjectNotes) : listProjectNotes(projectId),
   ]);
 
   const timelines = timelineResults

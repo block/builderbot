@@ -41,7 +41,6 @@
   import Spinner from '../../shared/Spinner.svelte';
   import { isSessionActive } from '../../shared/sessionStatus';
   import { deleteSessionLinkedItem } from '../../shared/deleteSessionLinkedItem';
-  import { listenToEvent } from '../../transport';
   import { subscribeDragDrop } from './dragDrop';
   import type {
     Branch,
@@ -49,7 +48,6 @@
     BranchTimeline as BranchTimelineData,
     HashtagItem,
     ProjectRepo,
-    SessionStatusPayload,
     WorkspaceStatus,
   } from '../../types';
   import * as commands from '../../api/commands';
@@ -81,6 +79,11 @@
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { pushStateStore } from '../../stores/pushState.svelte';
+  import {
+    onBranchGitStateUpdated,
+    onBranchSetupProgress,
+    onSessionStatusChanged,
+  } from '../../services/branchEventService';
   import type { WorktreeChangesPreview } from '../../commands';
   import type { LinkedNoteContext, NoteClickInfo } from '../sessions/noteFreshness';
 
@@ -217,22 +220,12 @@
   let setupDetail: string | null = $state(null);
 
   $effect(() => {
-    const eventNames = ['worktree-setup-progress', 'workspace-setup-progress'] as const;
-    const unlisteners = eventNames.map((eventName) =>
-      listenToEvent<{ branchId: string; phase: string; detail: string | null }>(
-        eventName,
-        (payload) => {
-          if (payload.branchId === branch.id) {
-            setupPhase = payload.phase;
-            setupDetail = payload.detail;
-          }
-        }
-      )
-    );
+    const unlisten = onBranchSetupProgress(branch.id, (payload) => {
+      setupPhase = payload.phase;
+      setupDetail = payload.detail;
+    });
 
-    return () => {
-      for (const fn of unlisteners) fn();
-    };
+    return () => unlisten();
   });
 
   // Reset setup state when provisioning completes
@@ -605,71 +598,63 @@
   $effect(() => {
     const branchId = branch.id;
 
-    const unlistenStatus = listenToEvent<SessionStatusPayload>(
-      'session-status-changed',
-      (payload) => {
-        const {
-          sessionId: eventSessionId,
-          status,
-          branchId: eventBranchId,
-          isAutoReview,
-        } = payload;
-        if (status === 'completed' || status === 'error' || status === 'cancelled') {
-          // If this is the auto review session completing, just clear tracking
-          if (eventSessionId === sessionMgr.autoReviewSessionId) {
-            sessionMgr.autoReviewSessionId = null;
-            return;
-          }
+    const unlistenStatus = onSessionStatusChanged((payload) => {
+      const { sessionId: eventSessionId, status, branchId: eventBranchId, isAutoReview } = payload;
+      if (status === 'completed' || status === 'error' || status === 'cancelled') {
+        // If this is the auto review session completing, just clear tracking
+        if (eventSessionId === sessionMgr.autoReviewSessionId) {
+          sessionMgr.autoReviewSessionId = null;
+          return;
+        }
 
-          // Push/force-push session tracking lives in pushStateStore and is
-          // cleared centrally by sessionStatusListener.handlePushCompletion.
+        // Push/force-push session tracking lives in pushStateStore and is
+        // cleared centrally by sessionStatusListener.handlePushCompletion.
 
-          // Skip normal completion handling for any auto review session
-          if (isAutoReview) {
-            return;
-          }
+        // Skip normal completion handling for any auto review session
+        if (isAutoReview) {
+          return;
+        }
 
-          // Skip reload for the adopted auto-review session completing —
-          // the timeline was already updated optimistically during adoption.
-          if (eventSessionId === sessionMgr.adoptedSessionId) {
-            sessionMgr.adoptedSessionId = null;
-            return;
-          }
+        // Skip reload for the adopted auto-review session completing —
+        // the timeline was already updated optimistically during adoption.
+        if (eventSessionId === sessionMgr.adoptedSessionId) {
+          sessionMgr.adoptedSessionId = null;
+          return;
+        }
 
-          // Only reload if this session belongs to our branch
-          if (eventBranchId && eventBranchId !== branchId) return;
+        // Only reload if this session belongs to our branch
+        if (eventBranchId && eventBranchId !== branchId) return;
 
-          commands.invalidateBranchTimeline(branch.id);
+        commands.invalidateBranchTimeline(branch.id);
+        loadTimeline();
+        // Handle PR session completion
+        if (prButton && eventSessionId === prButton.getPrSessionId()) {
+          prButton.handlePrSessionComplete(status);
+        }
+        // Handle push session completion
+        if (prButton && eventSessionId === prButton.getPushSessionId()) {
+          prButton.handlePushSessionComplete(status);
+        }
+      } else if (status === 'running' && eventBranchId === branchId) {
+        // Track auto review sessions started by the backend
+        if (isAutoReview) {
+          sessionMgr.autoReviewSessionId = eventSessionId;
+          commands.findFreshAutoReview(branchId).then((review) => {
+            if (review) {
+              sessionMgr.autoReviewId = review.id;
+            }
+          });
+        }
+        // Refresh the timeline so the pending note/commit stub appears immediately.
+        // Skip if a session start is in-flight (pending item has no sessionId yet),
+        // because startBranchSessionWithPendingItem will call loadTimeline after
+        // it gets the sessionId — otherwise pruning can't match the pending item
+        // and both the pending and real items briefly render simultaneously.
+        if (!isAutoReview && !sessionMgr.isSessionStartPending) {
           loadTimeline();
-          // Handle PR session completion
-          if (prButton && eventSessionId === prButton.getPrSessionId()) {
-            prButton.handlePrSessionComplete(status);
-          }
-          // Handle push session completion
-          if (prButton && eventSessionId === prButton.getPushSessionId()) {
-            prButton.handlePushSessionComplete(status);
-          }
-        } else if (status === 'running' && eventBranchId === branchId) {
-          // Track auto review sessions started by the backend
-          if (isAutoReview) {
-            sessionMgr.autoReviewSessionId = eventSessionId;
-            commands.findFreshAutoReview(branchId).then((review) => {
-              if (review) {
-                sessionMgr.autoReviewId = review.id;
-              }
-            });
-          }
-          // Refresh the timeline so the pending note/commit stub appears immediately.
-          // Skip if a session start is in-flight (pending item has no sessionId yet),
-          // because startBranchSessionWithPendingItem will call loadTimeline after
-          // it gets the sessionId — otherwise pruning can't match the pending item
-          // and both the pending and real items briefly render simultaneously.
-          if (!isAutoReview && !sessionMgr.isSessionStartPending) {
-            loadTimeline();
-          }
         }
       }
-    );
+    });
 
     return () => {
       unlistenStatus();
@@ -681,16 +666,12 @@
   $effect(() => {
     const branchId = branch.id;
 
-    const unlistenGitState = listenToEvent<{ branchId: string; gitState: BranchGitState }>(
-      'git-state-updated',
-      (payload) => {
-        if (payload.branchId !== branchId) return;
-        if (timeline) {
-          timeline = { ...timeline, gitState: payload.gitState };
-        }
-        refreshingGitState = false;
+    const unlistenGitState = onBranchGitStateUpdated(branchId, (payload) => {
+      if (timeline) {
+        timeline = { ...timeline, gitState: payload.gitState };
       }
-    );
+      refreshingGitState = false;
+    });
 
     return () => {
       unlistenGitState();

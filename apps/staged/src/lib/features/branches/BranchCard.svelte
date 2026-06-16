@@ -1710,6 +1710,7 @@
     {notePrefill}
     remote={isRemote}
     willQueue={sessionMgr.willQueue}
+    willQueueForMode={(mode) => sessionMgr.willQueueForMode(mode)}
     onClose={(draft) => {
       // Don't persist prefilled text as a draft — it should be re-evaluated
       // each time the dialog opens based on the current timeline state.

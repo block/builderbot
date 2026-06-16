@@ -276,32 +276,35 @@ export default class BranchCardSessionManager {
     }
   }
 
-  async startBranchSessionWithPendingItem(
-    mode: BranchSessionType,
-    prompt: string,
-    imageIds: string[] = []
-  ) {
+  async startOrQueueSession(mode: BranchSessionType, prompt: string, imageIds: string[] = []) {
     const branch = this.getBranch();
     const isRemote = this.getIsRemote();
+    const willQueue = this.willQueueForMode(mode);
 
     if (this.autoReviewSessionId && mode !== 'note') {
       this.cancelAutoReview();
     }
 
     const pendingKey = `session-start-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const queueMeta = this.getTimeline()
+      ? 'Queued \u2014 waiting for current session\u2026'
+      : 'Queued \u2014 waiting for workspace\u2026';
+
     this.pendingSessionItems = [
       ...this.pendingSessionItems,
       {
         key: pendingKey,
-        type: this.pendingSessionTypeForMode(mode),
+        type: willQueue
+          ? this.queuedSessionTypeForMode(mode)
+          : this.pendingSessionTypeForMode(mode),
         title: this.pendingSessionTitleForMode(mode, prompt),
-        secondaryMeta: this.pendingSessionMetaForMode(mode),
+        secondaryMeta: willQueue ? queueMeta : this.pendingSessionMetaForMode(mode),
       },
     ];
 
     try {
       const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
-      const result = await commands.startBranchSession(
+      const result = await commands.startOrQueueBranchSession(
         branch.id,
         prompt,
         mode,
@@ -313,12 +316,16 @@ export default class BranchCardSessionManager {
         throw new Error('Failed to start session: no session ID returned');
       }
 
+      const queued = result.sessionStatus === 'queued';
       this.pendingSessionItems = this.pendingSessionItems.map((item) =>
         item.key === pendingKey
           ? {
               ...item,
+              type: queued
+                ? this.queuedSessionTypeForMode(mode)
+                : this.pendingSessionTypeForMode(mode),
               sessionId: result.sessionId,
-              secondaryMeta: undefined,
+              secondaryMeta: queued ? queueMeta : undefined,
             }
           : item
       );
@@ -330,70 +337,6 @@ export default class BranchCardSessionManager {
         description: e instanceof Error ? e.message : String(e),
         duration: Infinity,
       });
-    }
-  }
-
-  async queueBranchSession(mode: BranchSessionType, prompt: string, imageIds: string[] = []) {
-    const branch = this.getBranch();
-    const isRemote = this.getIsRemote();
-
-    if (this.autoReviewSessionId && mode !== 'note') {
-      this.cancelAutoReview();
-    }
-
-    const pendingKey = `session-queue-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const queueMeta = this.getTimeline()
-      ? 'Queued \u2014 waiting for current session\u2026'
-      : 'Queued \u2014 waiting for workspace\u2026';
-
-    this.pendingSessionItems = [
-      ...this.pendingSessionItems,
-      {
-        key: pendingKey,
-        type: this.queuedSessionTypeForMode(mode),
-        title: this.pendingSessionTitleForMode(mode, prompt),
-        secondaryMeta: queueMeta,
-      },
-    ];
-
-    try {
-      const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
-      const result = await commands.queueBranchSession(
-        branch.id,
-        prompt,
-        mode,
-        getPreferredAgent(agents) ?? undefined,
-        imageIds.length > 0 ? imageIds : undefined
-      );
-
-      if (!result || !result.sessionId) {
-        throw new Error('Failed to queue session: no session ID returned');
-      }
-
-      this.pendingSessionItems = this.pendingSessionItems.map((item) =>
-        item.key === pendingKey
-          ? {
-              ...item,
-              sessionId: result.sessionId,
-            }
-          : item
-      );
-
-      this.loadTimeline();
-    } catch (e) {
-      this.pendingSessionItems = this.pendingSessionItems.filter((item) => item.key !== pendingKey);
-      toast.error('Unable to queue session', {
-        description: e instanceof Error ? e.message : String(e),
-        duration: Infinity,
-      });
-    }
-  }
-
-  async startOrQueueSession(mode: BranchSessionType, prompt: string, imageIds: string[] = []) {
-    if (this.willQueueForMode(mode)) {
-      await this.queueBranchSession(mode, prompt, imageIds);
-    } else {
-      await this.startBranchSessionWithPendingItem(mode, prompt, imageIds);
     }
   }
 

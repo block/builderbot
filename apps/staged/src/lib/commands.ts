@@ -661,6 +661,25 @@ export function startBranchSession(
   });
 }
 
+/** Start a branch session immediately when compatible, otherwise queue it. */
+export function startOrQueueBranchSession(
+  branchId: string,
+  prompt: string,
+  sessionType: BranchSessionType,
+  provider?: string,
+  imageIds?: string[],
+  launchContext?: BranchSessionLaunchContext
+): Promise<BranchSessionResponse> {
+  return invokeCommand('start_or_queue_branch_session', {
+    branchId,
+    prompt,
+    sessionType,
+    provider: provider ?? null,
+    imageIds: imageIds ?? null,
+    launchContext: launchContext ?? null,
+  });
+}
+
 /** Queue a branch-scoped session to run after current work completes. */
 export function queueBranchSession(
   branchId: string,

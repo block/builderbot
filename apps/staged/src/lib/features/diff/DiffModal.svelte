@@ -65,7 +65,6 @@
     type TreeNode,
   } from './diffModalHelpers';
   import { viewport } from '../../shared/viewport.svelte';
-  import { shouldQueueBranchSession } from '../branches/branchSessionQueue';
 
   // ==========================================================================
   // Props
@@ -438,39 +437,23 @@
       commitSha: diffViewer.state.commitSha ?? '',
       reviewId: activeReviewId ?? null,
     };
-    let shouldQueue = true;
 
     try {
-      const timeline = await commands.getBranchTimeline(branchId, { force: true });
-      shouldQueue = shouldQueueBranchSession({ mode, timeline });
-
       const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
       const provider = getPreferredAgent(agents) ?? undefined;
-
-      if (shouldQueue) {
-        await commands.queueBranchSession(
-          branchId,
-          prompt,
-          mode,
-          provider,
-          undefined,
-          launchContext
-        );
-      } else {
-        await commands.startBranchSession(
-          branchId,
-          prompt,
-          mode,
-          provider,
-          undefined,
-          launchContext
-        );
-      }
+      const result = await commands.startOrQueueBranchSession(
+        branchId,
+        prompt,
+        mode,
+        provider,
+        undefined,
+        launchContext
+      );
 
       const label = mode === 'note' ? 'Note' : 'Commit';
-      toast.success(`${label} session ${shouldQueue ? 'queued' : 'started'}`);
+      toast.success(`${label} session ${result.sessionStatus === 'queued' ? 'queued' : 'started'}`);
     } catch (e) {
-      toast.error(`Unable to ${shouldQueue ? 'queue' : 'start'} ${mode} session`, {
+      toast.error(`Unable to start ${mode} session`, {
         description: e instanceof Error ? e.message : String(e),
         duration: Infinity,
       });
@@ -509,39 +492,23 @@
       commitSha: diffViewer.state.commitSha ?? '',
       reviewId: activeReviewId ?? null,
     };
-    let shouldQueue = true;
 
     try {
-      const timeline = await commands.getBranchTimeline(branchId, { force: true });
-      shouldQueue = shouldQueueBranchSession({ mode: data.mode, timeline });
-
       const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
       const provider = getPreferredAgent(agents) ?? undefined;
-
-      if (shouldQueue) {
-        await commands.queueBranchSession(
-          branchId,
-          data.prompt,
-          data.mode,
-          provider,
-          data.imageIds,
-          launchContext
-        );
-      } else {
-        await commands.startBranchSession(
-          branchId,
-          data.prompt,
-          data.mode,
-          provider,
-          data.imageIds,
-          launchContext
-        );
-      }
+      const result = await commands.startOrQueueBranchSession(
+        branchId,
+        data.prompt,
+        data.mode,
+        provider,
+        data.imageIds,
+        launchContext
+      );
 
       const label = data.mode === 'note' ? 'Note' : data.mode === 'commit' ? 'Commit' : 'Review';
-      toast.success(`${label} session ${shouldQueue ? 'queued' : 'started'}`);
+      toast.success(`${label} session ${result.sessionStatus === 'queued' ? 'queued' : 'started'}`);
     } catch (e) {
-      toast.error(`Unable to ${shouldQueue ? 'queue' : 'start'} ${data.mode} session`, {
+      toast.error(`Unable to start ${data.mode} session`, {
         description: e instanceof Error ? e.message : String(e),
         duration: Infinity,
       });

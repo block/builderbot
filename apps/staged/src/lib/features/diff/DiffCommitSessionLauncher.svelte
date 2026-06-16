@@ -150,9 +150,8 @@
     }
 
     starting = true;
-    let shouldQueue = true;
     try {
-      shouldQueue = await refreshQueueState(true);
+      await refreshQueueState(true);
 
       const launchContext = {
         source: 'diff_viewer' as const,
@@ -164,35 +163,21 @@
       const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
       const provider = getPreferredAgent(agents) ?? undefined;
 
-      if (shouldQueue) {
-        await commands.queueBranchSession(
-          branchId,
-          finalPrompt,
-          'commit',
-          provider,
-          undefined,
-          launchContext
-        );
-      } else {
-        await commands.startBranchSession(
-          branchId,
-          finalPrompt,
-          'commit',
-          provider,
-          undefined,
-          launchContext
-        );
-      }
+      await commands.startOrQueueBranchSession(
+        branchId,
+        finalPrompt,
+        'commit',
+        provider,
+        undefined,
+        launchContext
+      );
 
       onStarted();
     } catch (e) {
-      toast.error(
-        shouldQueue ? 'Unable to queue commit session' : 'Unable to start commit session',
-        {
-          description: e instanceof Error ? e.message : String(e),
-          duration: Infinity,
-        }
-      );
+      toast.error('Unable to start commit session', {
+        description: e instanceof Error ? e.message : String(e),
+        duration: Infinity,
+      });
     } finally {
       starting = false;
     }

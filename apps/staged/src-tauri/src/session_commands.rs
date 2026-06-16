@@ -516,6 +516,10 @@ impl BranchSessionScheduleKind {
         )
     }
 
+    fn allows_parallel_instances(self) -> bool {
+        matches!(self, BranchSessionScheduleKind::Note)
+    }
+
     fn branch_session_type(self) -> Option<BranchSessionType> {
         match self {
             BranchSessionScheduleKind::Commit => Some(BranchSessionType::Commit),
@@ -545,7 +549,7 @@ fn can_start_with_active_branch_sessions(
         return false;
     }
 
-    !active.contains(&candidate)
+    candidate.allows_parallel_instances() || !active.contains(&candidate)
 }
 
 fn note_session_schedule() -> BranchSessionSchedule {
@@ -3587,6 +3591,19 @@ mod tests {
     }
 
     #[test]
+    fn running_note_allows_queued_note() {
+        let (store, branch) = setup_branch_store();
+        create_branch_note_session(&store, &branch.id, store::SessionStatus::Running);
+
+        let active = running_branch_session_kinds(&store, &branch.id).unwrap();
+
+        assert!(can_start_with_active_branch_sessions(
+            BranchSessionScheduleKind::Note,
+            &active
+        ));
+    }
+
+    #[test]
     fn running_review_allows_queued_note() {
         let (store, branch) = setup_branch_store();
         create_branch_review_session(&store, &branch.id, store::SessionStatus::Running);
@@ -3595,6 +3612,19 @@ mod tests {
 
         assert!(can_start_with_active_branch_sessions(
             BranchSessionScheduleKind::Note,
+            &active
+        ));
+    }
+
+    #[test]
+    fn running_review_blocks_queued_review() {
+        let (store, branch) = setup_branch_store();
+        create_branch_review_session(&store, &branch.id, store::SessionStatus::Running);
+
+        let active = running_branch_session_kinds(&store, &branch.id).unwrap();
+
+        assert!(!can_start_with_active_branch_sessions(
+            BranchSessionScheduleKind::Review,
             &active
         ));
     }
@@ -3631,7 +3661,7 @@ mod tests {
     }
 
     #[test]
-    fn branch_start_decision_allows_note_and_review_to_overlap_but_not_match() {
+    fn branch_start_decision_allows_parallel_notes_and_note_review_overlap() {
         let (store, branch) = setup_branch_store();
         create_branch_note_session(&store, &branch.id, store::SessionStatus::Running);
 
@@ -3640,7 +3670,7 @@ mod tests {
                 .unwrap()
         );
         assert!(
-            should_queue_branch_session_start(&store, &branch.id, &BranchSessionType::Note)
+            !should_queue_branch_session_start(&store, &branch.id, &BranchSessionType::Note)
                 .unwrap()
         );
         assert!(
@@ -3720,6 +3750,33 @@ mod tests {
     }
 
     #[test]
+    fn drain_scan_starts_multiple_queued_notes_before_commit_barrier() {
+        let mut active = HashSet::new();
+        let queued = vec![
+            (
+                "note-1".to_string(),
+                schedule(BranchSessionScheduleKind::Note),
+            ),
+            (
+                "note-2".to_string(),
+                schedule(BranchSessionScheduleKind::Note),
+            ),
+            (
+                "commit".to_string(),
+                schedule(BranchSessionScheduleKind::Commit),
+            ),
+            (
+                "note-3".to_string(),
+                schedule(BranchSessionScheduleKind::Note),
+            ),
+        ];
+
+        let drainable = drainable_session_ids_for_active_set(&queued, &mut active);
+
+        assert_eq!(drainable, vec!["note-1".to_string(), "note-2".to_string()]);
+    }
+
+    #[test]
     fn running_auto_review_does_not_block_queued_user_sessions() {
         let (store, branch) = setup_branch_store();
         create_auto_review(&store, &branch.id, store::SessionStatus::Running);
@@ -3786,11 +3843,15 @@ mod tests {
                 schedule(BranchSessionScheduleKind::Review),
             ),
             (
+                "note-2".to_string(),
+                schedule(BranchSessionScheduleKind::Note),
+            ),
+            (
                 "commit".to_string(),
                 schedule(BranchSessionScheduleKind::Commit),
             ),
             (
-                "note-2".to_string(),
+                "note-3".to_string(),
                 schedule(BranchSessionScheduleKind::Note),
             ),
         ];
@@ -3799,8 +3860,35 @@ mod tests {
 
         assert_eq!(
             drainable,
-            vec!["note-1".to_string(), "review-1".to_string()]
+            vec![
+                "note-1".to_string(),
+                "review-1".to_string(),
+                "note-2".to_string()
+            ]
         );
+    }
+
+    #[test]
+    fn drain_scan_does_not_skip_over_manual_review_blocker() {
+        let mut active = HashSet::new();
+        let queued = vec![
+            (
+                "review-1".to_string(),
+                schedule(BranchSessionScheduleKind::Review),
+            ),
+            (
+                "review-2".to_string(),
+                schedule(BranchSessionScheduleKind::Review),
+            ),
+            (
+                "note-1".to_string(),
+                schedule(BranchSessionScheduleKind::Note),
+            ),
+        ];
+
+        let drainable = drainable_session_ids_for_active_set(&queued, &mut active);
+
+        assert_eq!(drainable, vec!["review-1".to_string()]);
     }
 
     fn create_branch_review(

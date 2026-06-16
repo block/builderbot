@@ -65,6 +65,7 @@ export function canStartBranchSession({
 
   const running = runningBranchSessionTypes(timeline);
   if (running.has('commit')) return false;
+  if (mode === 'note') return true;
   if (mode === 'commit') return running.size === 0;
 
   return !running.has(mode);

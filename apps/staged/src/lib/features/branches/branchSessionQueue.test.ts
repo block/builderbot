@@ -74,13 +74,13 @@ describe('shouldQueueBranchSession', () => {
     }
   });
 
-  it('queues same-type note or review sessions', () => {
+  it('allows same-type notes but queues same-type reviews', () => {
     expect(
       shouldQueueBranchSession({
         mode: 'note',
         timeline: timeline({ note: 'running' }),
       })
-    ).toBe(true);
+    ).toBe(false);
     expect(
       shouldQueueBranchSession({
         mode: 'review',

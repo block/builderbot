@@ -1,24 +1,36 @@
 <!--
-  ImageAttachment.svelte — Attach images to a session prompt
+  ImageAttachment.svelte — Attach images or text snippets to a session prompt
 
   Provides a file picker button, thumbnail previews with remove buttons,
   and clipboard paste support (Ctrl/Cmd+V). Images are uploaded to the
   backend as base64-encoded data via the `create_image_from_data` command.
+
+  Text snippets are modal-local (folded into the prompt on submit, never
+  persisted): they render as chips alongside the image thumbnails, and an
+  optional "Attach clipboard" button is shown when the parent supplies
+  eligible clipboard text.
 
   Props:
     branchId        — branch to associate images with, or null for project-only images
     projectId       — project to associate images with
     disabled        — disable interactions (e.g. while session is starting)
     imageIds        — current list of attached image IDs
-    onImageIdsChange — callback when the list changes
+    onImageIdsChange — callback when the image list changes
+    textSnippets     — current list of attached text snippets
+    onRemoveSnippet  — callback to remove a snippet by id
+    clipboardText    — eligible clipboard text, or null when not offering it
+    onAttachClipboard — callback to attach the current clipboard text as a snippet
 -->
 <script lang="ts">
   import X from '@lucide/svelte/icons/x';
   import ImagePlus from '@lucide/svelte/icons/image-plus';
   import Plus from '@lucide/svelte/icons/plus';
+  import ClipboardPaste from '@lucide/svelte/icons/clipboard-paste';
+  import FileText from '@lucide/svelte/icons/file-text';
   import { Button } from '$lib/components/ui/button';
   import { createImageFromData, getImageData, deleteImage } from '../../commands';
   import type { Image } from '../../types';
+  import type { TextSnippet } from './sessionModalHelpers';
 
   type ImageIdsUpdate = string[] | ((current: string[]) => string[]);
 
@@ -28,9 +40,25 @@
     disabled?: boolean;
     imageIds: string[];
     onImageIdsChange: (update: ImageIdsUpdate) => void;
+    textSnippets?: TextSnippet[];
+    onRemoveSnippet?: (id: string) => void;
+    clipboardText?: string | null;
+    onAttachClipboard?: () => void;
   }
 
-  let { branchId, projectId, disabled = false, imageIds, onImageIdsChange }: Props = $props();
+  let {
+    branchId,
+    projectId,
+    disabled = false,
+    imageIds,
+    onImageIdsChange,
+    textSnippets = [],
+    onRemoveSnippet,
+    clipboardText = null,
+    onAttachClipboard,
+  }: Props = $props();
+
+  let hasAttachments = $derived(imageIds.length > 0 || textSnippets.length > 0);
 
   let previews = $state<Map<string, string>>(new Map());
   let fileInput: HTMLInputElement;
@@ -131,7 +159,7 @@
   onchange={handleFileSelect}
 />
 
-{#if imageIds.length > 0}
+{#if hasAttachments}
   <div class="attached-images">
     {#each imageIds as imageId}
       <div class="group/thumb image-thumb">
@@ -154,6 +182,24 @@
         {/if}
       </div>
     {/each}
+    {#each textSnippets as snippet (snippet.id)}
+      <div class="snippet-chip" title={snippet.text}>
+        <FileText size={12} class="shrink-0 text-[var(--text-faint)]" />
+        <span class="snippet-chip-label">{snippet.label}</span>
+        {#if !disabled}
+          <Button
+            variant="ghost"
+            size="icon"
+            class="size-4 shrink-0 rounded-full text-muted-foreground shadow-none hover:bg-[var(--bg-chrome)] hover:text-foreground [&_svg]:!size-2.5"
+            title="Remove snippet"
+            aria-label="Remove snippet"
+            onclick={() => onRemoveSnippet?.(snippet.id)}
+          >
+            <X size={10} />
+          </Button>
+        {/if}
+      </div>
+    {/each}
     {#if !disabled}
       <Button
         variant="outline"
@@ -165,18 +211,44 @@
       >
         <Plus size={16} />
       </Button>
+      {#if clipboardText}
+        <Button
+          variant="outline"
+          size="icon"
+          class="size-12 shrink-0 rounded-md border border-dashed border-[var(--border-muted)] bg-transparent text-[var(--text-faint)] shadow-none hover:border-[var(--border-emphasis)] hover:bg-transparent hover:text-muted-foreground [&_svg]:!size-4"
+          title="Attach clipboard"
+          aria-label="Attach clipboard"
+          onclick={() => onAttachClipboard?.()}
+        >
+          <ClipboardPaste size={16} />
+        </Button>
+      {/if}
     {/if}
   </div>
 {:else if !disabled}
-  <Button
-    variant="outline"
-    type="button"
-    class="gap-1.5 px-4 py-2 text-sm font-medium text-muted-foreground shadow-none hover:text-foreground max-[768px]:h-11 max-[768px]:justify-center"
-    onclick={openFilePicker}
-  >
-    <ImagePlus size={14} />
-    <span>Attach images</span>
-  </Button>
+  <div class="attach-controls">
+    <Button
+      variant="outline"
+      type="button"
+      class="gap-1.5 px-4 py-2 text-sm font-medium text-muted-foreground shadow-none hover:text-foreground max-[768px]:h-11 max-[768px]:justify-center"
+      onclick={openFilePicker}
+    >
+      <ImagePlus size={14} />
+      <span>Attach images or text snippets</span>
+    </Button>
+    {#if clipboardText}
+      <Button
+        variant="outline"
+        type="button"
+        class="gap-1.5 px-4 py-2 text-sm font-medium text-muted-foreground shadow-none hover:text-foreground max-[768px]:h-11 max-[768px]:justify-center"
+        title="Attach clipboard"
+        onclick={() => onAttachClipboard?.()}
+      >
+        <ClipboardPaste size={14} />
+        <span>Attach clipboard</span>
+      </Button>
+    {/if}
+  </div>
 {/if}
 
 <style>
@@ -226,5 +298,33 @@
     width: 100%;
     height: 100%;
     color: var(--text-faint);
+  }
+
+  .attach-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .snippet-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 220px;
+    height: 48px;
+    padding: 0 6px 0 10px;
+    border-radius: 6px;
+    border: 1px solid var(--border-muted);
+    background: var(--bg-hover);
+    flex-shrink: 0;
+  }
+
+  .snippet-chip-label {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--size-sm);
+    color: var(--text-primary);
   }
 </style>

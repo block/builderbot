@@ -9,6 +9,7 @@
     "core:window:allow-show",
     "core:window:allow-close",
     "clipboard-manager:allow-write-text",
+    "clipboard-manager:allow-read-text",
     "window-state:default",
     "store:default",
     "core:window:allow-set-badge-count",

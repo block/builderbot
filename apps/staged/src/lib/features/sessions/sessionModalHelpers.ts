@@ -1,6 +1,44 @@
 import { normalizeDisplayRoots, type DisplayRootInput } from './pathDisplayRoots';
 import type { Session } from '../../types';
 
+/** A text snippet attached to a new-session prompt (modal-local, never persisted). */
+export interface TextSnippet {
+  id: string;
+  label: string;
+  text: string;
+}
+
+/**
+ * Minimum clipboard length (exclusive) before the "Attach clipboard" button is
+ * offered. Short clipboard contents (e.g. a copied word) aren't worth a chip.
+ */
+export const CLIPBOARD_SNIPPET_MIN_LENGTH = 64;
+
+/** Whether clipboard text is long enough to warrant offering it as a snippet. */
+export function shouldOfferClipboardSnippet(text: string | null | undefined): boolean {
+  return !!text && text.length > CLIPBOARD_SNIPPET_MIN_LENGTH;
+}
+
+/** Build a short, single-line preview label for a snippet chip. */
+export function snippetLabel(text: string, maxLength = 40): string {
+  const collapsed = text.replace(/\s+/g, ' ').trim();
+  if (!collapsed) return 'snippet';
+  if (collapsed.length <= maxLength) return collapsed;
+  return collapsed.slice(0, maxLength - 1).trimEnd() + '…';
+}
+
+/**
+ * Fold attached text snippets into a prompt string. Each snippet is appended
+ * wrapped in an `<attached-snippet>` block so the agent can distinguish pasted
+ * context from the typed prompt. Snippets ride along regardless of mode.
+ */
+export function foldSnippetsIntoPrompt(prompt: string, snippets: { text: string }[]): string {
+  return snippets.reduce(
+    (acc, snippet) => `${acc}\n\n<attached-snippet>\n${snippet.text}\n</attached-snippet>`,
+    prompt
+  );
+}
+
 export interface ParsedToolCall {
   name: string;
   args: Record<string, unknown>;

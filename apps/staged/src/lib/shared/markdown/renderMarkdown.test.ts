@@ -60,13 +60,13 @@ describe('renderMarkdown', () => {
     });
 
     expect(html).toContain('See ');
-    expect(html).toContain('class="hashtag-badge stable-raster stable-raster-glyphs"');
+    expect(html).toContain('class="hashtag-badge type-note stable-raster stable-raster-glyphs"');
     expect(html).toContain('role="button"');
     expect(html).toContain('tabindex="0"');
     expect(html).toContain('data-hashtag-ref="#note:note-1"');
     expect(html).toContain('data-hashtag-type="note"');
     expect(html).toContain('data-hashtag-id="note-1"');
-    expect(html).toContain('style="background: var(--note-bg); color: var(--note-color);"');
+    expect(html).not.toContain('style=');
     expect(html).toContain('<svg xmlns="http://www.w3.org/2000/svg"');
     expect(html).toContain('<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2');
     expect(html).toContain('Escaped &lt;title&gt; &amp; &quot;quotes&quot;');

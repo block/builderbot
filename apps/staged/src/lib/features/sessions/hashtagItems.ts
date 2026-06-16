@@ -1,3 +1,4 @@
+import { Marked, type TokenizerAndRendererExtension } from 'marked';
 import type { BranchTimeline, HashtagItem, ProjectNote, Branch, ProjectRepo } from '../../types';
 import { getBranchTimeline, listProjectNotes } from '../../commands';
 import { branchTimelineReadyKey } from '../branches/branchTimelineReady';
@@ -373,10 +374,46 @@ type RenderHashtagTokenOptions = {
   interactive?: boolean;
 };
 
+/** Resolve the label for a `#type:id` badge: the item title, else a fallback. */
+function hashtagBadgeLabel(type: string, id: string, item: HashtagItem | undefined): string {
+  if (item) return item.title;
+  return type === 'commit' && id.length > 12 ? id.slice(0, 8) + '…' : id;
+}
+
+/**
+ * Build the HTML for a single hashtag badge.
+ *
+ * Colours come from CSS classes (`.hashtag-badge.type-<kind>`) rather than
+ * inline `style`, so the badge survives `sanitize` (which strips `style` but
+ * keeps `class`). The `data-hashtag-*` attributes let a delegated click handler
+ * navigate to the referenced item.
+ */
+export function renderHashtagBadge(
+  type: string,
+  id: string,
+  item: HashtagItem | undefined,
+  options: RenderHashtagTokenOptions = {}
+): string {
+  const { interactive = true } = options;
+  const targetType = item?.type ?? type;
+  const iconSvg = hashtagTypeIconSvg[targetType] ?? '';
+  const label = hashtagBadgeLabel(type, id, item);
+  const ref = `#${type}:${id}`;
+  const interactionAttributes = interactive
+    ? ` role="button" tabindex="0" data-hashtag-ref="${escapeHtml(ref)}"`
+    : '';
+  return (
+    `<span class="hashtag-badge type-${targetType} stable-raster stable-raster-glyphs"` +
+    `${interactionAttributes} data-hashtag-kind="${escapeHtml(targetType)}" ` +
+    `data-hashtag-type="${escapeHtml(targetType)}" ` +
+    `data-hashtag-id="${escapeHtml(item?.id ?? id)}">${iconSvg} ${escapeHtml(label)}</span>`
+  );
+}
+
 /**
  * Replace `#type:id` tokens in plain text with inline badge HTML.
- * Plain-text segments are HTML-escaped; badge spans use CSS custom-property
- * colours from `hashtagTypeColors`.
+ * Plain-text segments are HTML-escaped; badge spans use CSS classes for their
+ * colours (see {@link renderHashtagBadge}).
  */
 export function renderHashtagTokens(
   text: string,
@@ -401,22 +438,9 @@ export function renderHashtagTokens(
 
     const type = match[1];
     const id = match[2];
-    const item = findHashtagItemInMap(itemsByKey, type, id);
-    const targetType = item?.type ?? type;
-    const iconSvg = hashtagTypeIconSvg[targetType] ?? '';
-    const colors = hashtagTypeColors[targetType] ?? { color: '--text-muted', bg: '--bg-secondary' };
-    const title = item
-      ? item.title
-      : type === 'commit' && id.length > 12
-        ? id.slice(0, 8) + '…'
-        : id;
-    const ref = `#${type}:${id}`;
-    const interactionAttributes = interactive
-      ? ` role="button" tabindex="0" data-hashtag-ref="${escapeHtml(ref)}"`
-      : '';
-    parts.push(
-      `<span class="hashtag-badge stable-raster stable-raster-glyphs"${interactionAttributes} data-hashtag-type="${escapeHtml(targetType)}" data-hashtag-id="${escapeHtml(item?.id ?? id)}" style="background: var(${colors.bg}); color: var(${colors.color});">${iconSvg} ${escapeHtml(title)}</span>`
-    );
+    parts.push(renderHashtagBadge(type, id, findHashtagItemInMap(itemsByKey, type, id), {
+      interactive,
+    }));
 
     lastIndex = match.index + match[0].length;
   }
@@ -426,4 +450,48 @@ export function renderHashtagTokens(
   }
 
   return parts.join('');
+}
+
+/**
+ * Build a `marked` instance that renders `#type:id` hashtag tokens as badge
+ * spans during Markdown parsing.
+ *
+ * Running as an inline tokenizer extension (rather than a regex over the
+ * produced HTML) means fenced and inline code are already separate tokens by
+ * the time this runs, so tokens inside code are left untouched. Titles are
+ * resolved from `items`; unknown ids fall back to a readable label.
+ */
+export function createHashtagMarked(items: HashtagItem[]): Marked {
+  const itemsByKey = new Map<string, HashtagItem>();
+  for (const item of items) {
+    itemsByKey.set(`${item.type}:${item.id}`, item);
+  }
+
+  // Where the next possible hashtag begins (used by marked to bound plain-text
+  // runs); the anchored `tokenRe` then confirms a full match at that position.
+  const startRe = /#(?:note|commit|review|project-note|image):/;
+  const tokenRe = new RegExp(`^${HASHTAG_TOKEN_RE.source}`);
+
+  const hashtagExtension: TokenizerAndRendererExtension = {
+    name: 'hashtag',
+    level: 'inline',
+    start(src) {
+      const index = src.search(startRe);
+      return index < 0 ? undefined : index;
+    },
+    tokenizer(src) {
+      const match = tokenRe.exec(src);
+      if (!match) return undefined;
+      return { type: 'hashtag', raw: match[0], kind: match[1], id: match[2] };
+    },
+    renderer(token) {
+      const kind = String(token.kind);
+      const id = String(token.id);
+      return renderHashtagBadge(kind, id, findHashtagItemInMap(itemsByKey, kind, id));
+    },
+  };
+
+  const md = new Marked({ breaks: true, gfm: true });
+  md.use({ extensions: [hashtagExtension] });
+  return md;
 }

@@ -15,6 +15,7 @@
     Branch,
     ProjectNote,
     HashtagItem,
+    NoteTimelineItem,
   } from '../../types';
   import * as commands from '../../api/commands';
   import { buildProjectHashtagItems } from '../sessions/hashtagItems';
@@ -306,12 +307,44 @@
   };
 
   let openNote = $state<OpenProjectNoteState | null>(null);
+  let childHashtagItems = $state<HashtagItem[]>([]);
+  let childHashtagLoadGeneration = 0;
+  let noteModalHashtagItems = $derived([...hashtagItems, ...childHashtagItems]);
 
   $effect(() => {
     const _signature = hashtagSignature;
     if (!openNote) return;
     void ensureHashtagItems();
   });
+
+  function childNoteToHashtagItem(note: NoteTimelineItem): HashtagItem {
+    return {
+      type: 'note',
+      id: note.id,
+      title: note.title,
+      color: '--note-color',
+      bgColor: '--note-bg',
+      projectId: project.id,
+      noteContent: note.content,
+      noteSessionId: note.sessionId,
+      noteUpdatedAt: note.updatedAt,
+    };
+  }
+
+  async function loadChildHashtagItems(parentProjectNoteId: string) {
+    const generation = ++childHashtagLoadGeneration;
+    try {
+      const children = await commands.listChildNotes(parentProjectNoteId);
+      if (generation !== childHashtagLoadGeneration) return;
+      if (openNote?.noteId !== parentProjectNoteId) return;
+      childHashtagItems = children.filter((note) => note.title.trim()).map(childNoteToHashtagItem);
+    } catch (e) {
+      if (generation !== childHashtagLoadGeneration) return;
+      if (openNote?.noteId !== parentProjectNoteId) return;
+      console.error('[ProjectSection] Failed to load child notes:', e);
+      childHashtagItems = [];
+    }
+  }
 
   function isCompletedProjectNote(note: ProjectNote): boolean {
     const isRunning = isSessionActive(note.sessionStatus);
@@ -341,6 +374,15 @@
 
   function openProjectNote(note: ProjectNote, chatOpen = false) {
     openNote = projectNoteToOpenState(note, chatOpen);
+    childHashtagItems = [];
+    void ensureHashtagItems();
+    void loadChildHashtagItems(note.id);
+  }
+
+  function closeOpenNote() {
+    openNote = null;
+    childHashtagItems = [];
+    childHashtagLoadGeneration++;
   }
 
   function currentDialogReferenceEntry(): ReferenceHistoryEntry | null {
@@ -357,7 +399,7 @@
         noteUpdatedAt: openNote.noteUpdatedAt,
         projectId: project.id,
         repoDir: projectDisplayRootCandidates,
-        hashtagItems,
+        hashtagItems: noteModalHashtagItems,
         diffContext: referenceDiffContext,
       };
     }
@@ -366,12 +408,12 @@
   }
 
   function closeReferenceDialogs() {
-    openNote = null;
+    closeOpenNote();
   }
 
   function handleHashtagClick(click: HashtagClickInfo) {
     const target = resolveHashtagReference(click, {
-      hashtagItems,
+      hashtagItems: noteModalHashtagItems,
       diffContext: referenceDiffContext,
     });
     if (!target) return;
@@ -585,10 +627,10 @@
     onChatOpenChange={(chatOpen) => {
       if (openNote) openNote = { ...openNote, chatOpen };
     }}
-    {hashtagItems}
+    hashtagItems={noteModalHashtagItems}
     referenceNav={disabledReferenceNav}
     onClose={() => {
-      openNote = null;
+      closeOpenNote();
       void loadProjectNotes();
     }}
     onOpenSession={handleOpenInnerSession}

@@ -2438,6 +2438,55 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             }
             Ok(Value::Null)
         }
+        "get_note" => {
+            let store = get_store(store_mutex)?;
+            let note_id: String = arg(&args, "noteId")?;
+            let note = store.get_note(&note_id).map_err(|e| e.to_string())?;
+            let item = note.map(|n| {
+                let resolved = store.resolve_session_status(n.session_id.as_deref());
+                crate::NoteTimelineItem {
+                    id: n.id,
+                    title: n.title,
+                    content: n.content,
+                    session_id: resolved.session_id,
+                    session_status: resolved.status,
+                    completion_reason: resolved.completion_reason,
+                    created_at: n.created_at,
+                    updated_at: n.updated_at,
+                    completed_at: n.completed_at,
+                    suggested_next_commit_step: n.suggested_next_commit_step,
+                    suggested_next_note_step: n.suggested_next_note_step,
+                }
+            });
+            Ok(serde_json::to_value(item).unwrap())
+        }
+        "list_child_notes" => {
+            let store = get_store(store_mutex)?;
+            let parent_project_note_id: String = arg(&args, "parentProjectNoteId")?;
+            let notes = store
+                .list_child_notes(&parent_project_note_id)
+                .map_err(|e| e.to_string())?;
+            let items: Vec<crate::NoteTimelineItem> = notes
+                .into_iter()
+                .map(|n| {
+                    let resolved = store.resolve_session_status(n.session_id.as_deref());
+                    crate::NoteTimelineItem {
+                        id: n.id,
+                        title: n.title,
+                        content: n.content,
+                        session_id: resolved.session_id,
+                        session_status: resolved.status,
+                        completion_reason: resolved.completion_reason,
+                        created_at: n.created_at,
+                        updated_at: n.updated_at,
+                        completed_at: n.completed_at,
+                        suggested_next_commit_step: n.suggested_next_commit_step,
+                        suggested_next_note_step: n.suggested_next_note_step,
+                    }
+                })
+                .collect();
+            Ok(serde_json::to_value(items).unwrap())
+        }
         "create_project_note" => {
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;

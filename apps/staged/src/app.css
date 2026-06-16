@@ -265,6 +265,34 @@ mark.search-match-current {
   flex-shrink: 0;
 }
 
+/*
+ * Per-type badge colours, mirroring `hashtagTypeColors` in hashtagItems.ts.
+ * Sourced as CSS classes (not inline `style`) so badges injected into
+ * sanitized note-body HTML keep their colours — `sanitize` strips `style` but
+ * allows `class` on span.
+ */
+.hashtag-badge.type-note,
+.hashtag-badge.type-project-note {
+  background: var(--note-bg);
+  color: var(--note-color);
+}
+
+.hashtag-badge.type-commit {
+  background: var(--commit-bg);
+  color: var(--commit-color);
+}
+
+.hashtag-badge.type-review {
+  background: var(--review-bg);
+  color: var(--review-color);
+}
+
+.hashtag-badge.type-image {
+  background: var(--image-bg);
+  color: var(--image-color);
+}
+
+/* Hashtag badges rendered inside a clickable note body. */
 .hashtag-badge[data-hashtag-ref] {
   cursor: pointer;
 }

@@ -1,8 +1,30 @@
 //! Note commands — note CRUD operations for branches and projects.
 
+use crate::store::models::Note;
 use crate::store::Store;
 use crate::NoteTimelineItem;
 use std::sync::{Arc, Mutex};
+
+/// Convert a stored [`Note`] into a [`NoteTimelineItem`] with its session
+/// status resolved. Mirrors the mapping used when building branch timelines so
+/// note lookups outside the timeline (e.g. the project-note child view) stay
+/// consistent.
+fn note_to_timeline_item(store: &Store, note: Note) -> NoteTimelineItem {
+    let resolved = store.resolve_session_status(note.session_id.as_deref());
+    NoteTimelineItem {
+        id: note.id,
+        title: note.title,
+        content: note.content,
+        session_id: resolved.session_id,
+        session_status: resolved.status,
+        completion_reason: resolved.completion_reason,
+        created_at: note.created_at,
+        updated_at: note.updated_at,
+        completed_at: note.completed_at,
+        suggested_next_commit_step: note.suggested_next_commit_step,
+        suggested_next_note_step: note.suggested_next_note_step,
+    }
+}
 
 /// Create a standalone note (no session) for a branch.
 #[tauri::command(rename_all = "camelCase")]
@@ -69,6 +91,40 @@ pub fn get_branch_note_by_session(
     crate::get_store(&store)?
         .get_note_by_session(&session_id)
         .map_err(|e| e.to_string())
+}
+
+/// Fetch a single note by id (no branch filter), with resolved session status.
+///
+/// Used by the project-note view to open a `#note:<id>` reference — including
+/// child notes that live on other repo branches and are therefore absent from
+/// any single branch timeline.
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_note(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    note_id: String,
+) -> Result<Option<NoteTimelineItem>, String> {
+    let store = crate::get_store(&store)?;
+    let note = store.get_note(&note_id).map_err(|e| e.to_string())?;
+    Ok(note.map(|n| note_to_timeline_item(&store, n)))
+}
+
+/// List the child notes aggregated under a given project note, with resolved
+/// session status. Children are hidden from branch timelines, so this is the
+/// dedicated path the parent project-note view uses to resolve `#note:<id>`
+/// hashtag references to their titles.
+#[tauri::command(rename_all = "camelCase")]
+pub fn list_child_notes(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    parent_project_note_id: String,
+) -> Result<Vec<NoteTimelineItem>, String> {
+    let store = crate::get_store(&store)?;
+    let notes = store
+        .list_child_notes(&parent_project_note_id)
+        .map_err(|e| e.to_string())?;
+    Ok(notes
+        .into_iter()
+        .map(|n| note_to_timeline_item(&store, n))
+        .collect())
 }
 
 // =============================================================================

@@ -51,23 +51,27 @@ describe('shouldQueueBranchSession', () => {
   });
 
   it('queues new work behind any queued user session', () => {
-    for (const mode of ['commit', 'note', 'review'] satisfies BranchSessionType[]) {
-      expect(
-        shouldQueueBranchSession({
-          mode,
-          timeline: timeline({ review: 'queued' }),
-        })
-      ).toBe(true);
+    for (const queuedMode of ['commit', 'note', 'review'] satisfies BranchSessionType[]) {
+      for (const mode of ['commit', 'note', 'review'] satisfies BranchSessionType[]) {
+        expect(
+          shouldQueueBranchSession({
+            mode,
+            timeline: timeline({ [queuedMode]: 'queued' }),
+          })
+        ).toBe(true);
+      }
     }
   });
 
   it('ignores auto reviews when deciding whether user work can start', () => {
-    expect(
-      shouldQueueBranchSession({
-        mode: 'note',
-        timeline: timeline({}, 'running'),
-      })
-    ).toBe(false);
+    for (const mode of ['commit', 'note', 'review'] satisfies BranchSessionType[]) {
+      expect(
+        shouldQueueBranchSession({
+          mode,
+          timeline: timeline({}, 'running'),
+        })
+      ).toBe(false);
+    }
   });
 
   it('queues same-type note or review sessions', () => {

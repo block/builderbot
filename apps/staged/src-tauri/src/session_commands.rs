@@ -3380,17 +3380,20 @@ mod tests {
     }
 
     #[test]
-    fn running_auto_review_does_not_block_queued_note() {
+    fn running_auto_review_does_not_block_queued_user_sessions() {
         let (store, branch) = setup_branch_store();
         create_auto_review(&store, &branch.id, store::SessionStatus::Running);
 
         let active = running_branch_session_kinds(&store, &branch.id).unwrap();
 
         assert!(active.is_empty());
-        assert!(can_start_with_active_branch_sessions(
+        for kind in [
             BranchSessionScheduleKind::Note,
-            &active
-        ));
+            BranchSessionScheduleKind::Review,
+            BranchSessionScheduleKind::Commit,
+        ] {
+            assert!(can_start_with_active_branch_sessions(kind, &active));
+        }
     }
 
     #[test]

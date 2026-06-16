@@ -2181,11 +2181,13 @@ This is a remote-workspace project. Use the project MCP tools to orchestrate wor
 
     let start_repo_session_desc = if is_remote {
         "- start_repo_session: Use this to make changes or run tasks in one of the project's \
-repositories. It enqueues work and returns a `repo_session_id` immediately. Use \
-`expected_outcome=\"note_in_repo\"` for repo notes, `expected_outcome=\"commit\"` for \
-code changes/commits, and `expected_outcome=\"code_review\"` for an AI code review of the \
-changes on a repo's branch; commit sessions create signed-off conventional commits. For remote branches \
-this subagent runs on the remote workspace, where file access, notes, commits, and reviews must happen.\n\
+repositories. It enqueues work and returns a `repo_session_id` immediately. For notes, prefer \
+`expected_outcome=\"child_note\"` so the note attaches to this project note and stays out of the \
+repo's visible timeline; use `expected_outcome=\"note_in_repo\"` (a detached note) only when the \
+note should stand alone in the repo. Use `expected_outcome=\"commit\"` for code changes/commits and \
+`expected_outcome=\"code_review\"` for an AI code review of the changes on a repo's branch; commit \
+sessions create signed-off conventional commits. For remote branches this subagent runs on the \
+remote workspace, where file access, notes, commits, and reviews must happen.\n\
 - wait_for_repo_session: Use this to wait on a previously started repo session by passing the \
 `repo_session_id`. It returns the queue state (`queued`, `running`, `completed`, `cancelled`, \
 or `failed`), any available artifacts, and activity details. Prefer another \
@@ -2195,15 +2197,16 @@ when the user wants the session stopped. Cancellation is best used when the user
 down a different path rather than when you are surprised at how long the session is taking."
     } else {
         "- start_repo_session: Use this to make changes or run tasks in one of the project's \
-repositories. It enqueues work and returns a `repo_session_id` immediately. Use \
-`expected_outcome=\"note_in_repo\"` for repo notes, `expected_outcome=\"commit\"` for \
-code changes/commits, and `expected_outcome=\"code_review\"` for an AI code review of the \
-changes on a repo's branch; commit sessions create signed-off conventional commits. Do not ask for \
-multiple outcomes (e.g. a note and a commit) in a single start_repo_session request — choose one \
-outcome per call. All \
-reasoning specific to a repo must be done within a repo session rather than in this project-wide \
-context. You MUST NOT write files directly — all file writes MUST go through start_repo_session \
-with expected_outcome=\"commit\".\n\
+repositories. It enqueues work and returns a `repo_session_id` immediately. For notes, prefer \
+`expected_outcome=\"child_note\"` so the note attaches to this project note and stays out of the \
+repo's visible timeline; use `expected_outcome=\"note_in_repo\"` (a detached note) only when the \
+note should stand alone in the repo. Use `expected_outcome=\"commit\"` for code changes/commits and \
+`expected_outcome=\"code_review\"` for an AI code review of the changes on a repo's branch; commit \
+sessions create signed-off conventional commits. Do not ask for multiple outcomes (e.g. a note and \
+a commit) in a single start_repo_session request — choose one outcome per call. All reasoning \
+specific to a repo must be done within a repo session rather than in this project-wide context. \
+You MUST NOT write files directly — all file writes MUST go through start_repo_session with \
+expected_outcome=\"commit\".\n\
 - wait_for_repo_session: Use this to wait on a previously started repo session by passing the \
 `repo_session_id`. It returns the queue state (`queued`, `running`, `completed`, `cancelled`, \
 or `failed`), any available artifacts, and activity details. Prefer another \
@@ -2243,6 +2246,10 @@ error and the next action needed.\
 To discover repositories that might be relevant, use `gh` to explore repos in the user's \
 GitHub organizations. Only add repos from organizations the user already belongs to.\n\n\
 {standalone_guidance}\n\n\
+When you delegate work via `start_repo_session`, organize the end of the note into sections \
+that group the delegated work — for example `## Research`, `## Plans`, or `## Collected logs` — \
+and reference each spawned child note using the hashtag form `#note:<id>`, where `<id>` is the \
+`artifact.id` returned by `start_repo_session`.\n\n\
 To return the note, include a horizontal rule (---) followed by the note content. \
 Begin the note with a markdown H1 heading as the title.\n\n"
     )

@@ -27,8 +27,10 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum RepoSessionOutcome {
-    /// The session should produce a note in the repository. A note stub is created and
-    /// the agent is instructed to output note content after a horizontal rule (---).
+    /// The session should produce a "detached" note in the repository — a note that
+    /// stands alone in the repo's visible timeline, not aggregated under a project note.
+    /// A note stub is created and the agent is instructed to output note content after a
+    /// horizontal rule (---).
     NoteInRepo,
     /// The session should make code changes and create a commit. A pending commit record
     /// is created and the agent is instructed to commit with a signed-off conventional
@@ -87,9 +89,14 @@ struct StartRepoSessionParams {
     /// What the session should produce. Controls the prompt given to the agent and what
     /// artifact (if any) is created in the database.
     ///
-    /// - `"note_in_repo"`: Use this for generating notes that can be referred to again
-    ///   later by other sessions or by the user. Useful for architecture overviews, plans,
-    ///   research.
+    /// - `"child_note"`: Prefer this for research/planning spawned by this project
+    ///   session, so the work attaches to this project note and stays out of the repo's
+    ///   visible timeline. The returned `artifact.id` is the child note's id; reference
+    ///   it from the project note as `#note:<id>`. Useful for architecture overviews,
+    ///   plans, research, and reviews delegated from a project session.
+    /// - `"note_in_repo"`: A "detached" note that stands alone in the repo's visible
+    ///   timeline. Use this only when the note should stand alone in the repo rather than
+    ///   be aggregated under this project note.
     /// - `"commit"`: Use this to request code changes. Agent makes code changes and
     ///   creates a signed-off commit with a conventional commit message.
     /// - `"code_review"`: Use this to request an AI code review of the changes on the
@@ -580,7 +587,7 @@ impl ProjectToolsHandler {
 #[tool_router]
 impl ProjectToolsHandler {
     #[tool(
-        description = "Enqueue an agent session in one of the project's repositories and return immediately with an opaque `repo_session_id`. Use `expected_outcome=\"note_in_repo\"` for repo notes, `expected_outcome=\"commit\"` for code changes and a signed-off conventional commit, or `expected_outcome=\"code_review\"` for an AI code review of the changes on the repo's branch. The `repo` + `subpath` combination must exactly match an entry already in the project."
+        description = "Enqueue an agent session in one of the project's repositories and return immediately with an opaque `repo_session_id`. Set `expected_outcome`: prefer `\"child_note\"` for research/planning spawned by this project session (the note attaches to this project note and stays out of the repo's visible timeline), use `\"note_in_repo\"` for a detached note that should stand alone in the repo, `\"commit\"` for code changes and a signed-off conventional commit, or `\"code_review\"` for an AI code review of the changes on the repo's branch. The `repo` + `subpath` combination must exactly match an entry already in the project."
     )]
     async fn start_repo_session(
         &self,

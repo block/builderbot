@@ -2920,6 +2920,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     branch_id: None,
                     project_id: None,
                     expose_pikchr_tools: false,
+                    parent_project_note_id: None,
                 },
                 store,
                 app_handle.clone(),
@@ -3116,6 +3117,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     branch_id: config_branch_id,
                     project_id: config_project_id,
                     expose_pikchr_tools,
+                    // When resuming a project session, keep its parent project note
+                    // in scope so `child_note` repo sessions still attach to it.
+                    parent_project_note_id: project_note.as_ref().map(|note| note.id.clone()),
                 },
                 Arc::clone(&store),
                 app_handle.clone(),
@@ -3287,6 +3291,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     project_id: Some(project_id),
                     // Project sessions are always local and write project notes.
                     expose_pikchr_tools: true,
+                    // This project session's note is the parent for any
+                    // `child_note` repo sessions it spawns.
+                    parent_project_note_id: Some(note_id.clone()),
                 },
                 store,
                 app_handle.clone(),

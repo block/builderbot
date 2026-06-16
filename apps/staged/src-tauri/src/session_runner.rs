@@ -394,6 +394,10 @@ pub struct SessionConfig {
     /// rather than silently dropping the tool. Only honored for local sessions
     /// (`workspace_name.is_none()`); remote sessions can't reach localhost.
     pub expose_pikchr_tools: bool,
+    /// Parent project note id for project sessions. Passed to the MCP server so
+    /// repo sessions started with `expected_outcome="child_note"` attach their
+    /// note to this parent. `None` for non-project sessions.
+    pub parent_project_note_id: Option<String>,
 }
 
 /// Start a session: persist the user message, spawn the agent, stream to DB.
@@ -572,6 +576,7 @@ pub fn start_session(
                     config.action_registry.clone(),
                     config.provider.clone(),
                     config.acp_config_selection.clone(),
+                    config.parent_project_note_id.clone(),
                     cancel_token.clone(),
                 )
                 .await
@@ -1288,6 +1293,10 @@ pub fn start_pipeline_session(
                     // Deterministic pipelines hand off to a code-focused AI step,
                     // not a note-writing session.
                     expose_pikchr_tools: false,
+                    // Pipelines are branch-scoped and never set up the project MCP
+                    // server (mcp_project_id is None above), so there is no parent
+                    // project note for a `child_note` outcome to attach to.
+                    parent_project_note_id: None,
                 };
                 if let Err(e) = start_session(
                     ai_config,

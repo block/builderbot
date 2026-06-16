@@ -1110,6 +1110,7 @@ pub async fn start_session(
             branch_id: None,
             project_id: None,
             expose_pikchr_tools: false,
+            parent_project_note_id: None,
         },
         store,
         app_handle,
@@ -1368,6 +1369,9 @@ pub(crate) async fn resume_session_for_store(
             branch_id: config_branch_id,
             project_id: config_project_id,
             expose_pikchr_tools,
+            // When resuming a project session, keep its parent project note in
+            // scope so `child_note` repo sessions still attach to it.
+            parent_project_note_id: project_note.as_ref().map(|note| note.id.clone()),
         },
         Arc::clone(&store),
         app_handle,
@@ -2334,6 +2338,9 @@ pub async fn start_project_session(
             project_id: Some(project_id),
             // Project sessions are always local and write project notes.
             expose_pikchr_tools: true,
+            // This project session's note is the parent for any `child_note`
+            // repo sessions it spawns.
+            parent_project_note_id: Some(note_id.clone()),
         },
         store,
         app_handle,
@@ -2728,6 +2735,7 @@ fn launch_running_branch_session(
             branch_id: Some(branch_id),
             project_id: Some(project_id),
             expose_pikchr_tools,
+            parent_project_note_id: None,
         },
         store,
         app_handle,
@@ -3270,6 +3278,7 @@ async fn start_queued_session_for_branch(
                 matches!(session_type, BranchSessionType::Note),
                 branch.workspace_name.as_deref(),
             ),
+            parent_project_note_id: None,
         },
         store,
         app_handle,
@@ -3669,6 +3678,7 @@ pub async fn trigger_auto_review(
             project_id: Some(branch.project_id.clone()),
             // Auto-review sessions don't write notes.
             expose_pikchr_tools: false,
+            parent_project_note_id: None,
         },
         store,
         app_handle,

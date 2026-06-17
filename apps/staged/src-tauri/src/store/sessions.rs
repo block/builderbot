@@ -148,6 +148,21 @@ impl Store {
         Ok(rows > 0)
     }
 
+    /// Atomically claim a queued session for execution by this process.
+    ///
+    /// Returns `true` if the row was updated, `false` if the session was no
+    /// longer queued, for example because it was cancelled after the queue was
+    /// snapshotted.
+    pub fn transition_queued_to_running(&self, id: &str) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE sessions SET status = 'running', error_message = NULL, completion_reason = NULL, updated_at = ?1, owner_pid = ?2
+             WHERE id = ?3 AND status = 'queued'",
+            params![now_timestamp(), std::process::id(), id],
+        )?;
+        Ok(rows > 0)
+    }
+
     /// Atomically transition a session to `Running`, but only if it is NOT
     /// already running. Returns `true` if the row was updated, `false` if
     /// the session was already running (or didn't exist).

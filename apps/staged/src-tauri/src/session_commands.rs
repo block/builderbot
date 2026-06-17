@@ -1643,7 +1643,7 @@ async fn start_queued_session_for_branch(
     // Atomically transition session from queued to running.
     // If another drain call already claimed this session, bail out.
     let transitioned = store
-        .transition_to_running(&session_id)
+        .transition_queued_to_running(&session_id)
         .map_err(|e| e.to_string())?;
     if !transitioned {
         return Ok(false);

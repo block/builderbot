@@ -489,7 +489,7 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
     let effective_provider = session.provider.clone().or(provider);
 
     let transitioned = store
-        .transition_to_running(&session.id)
+        .transition_queued_to_running(&session.id)
         .map_err(|e| e.to_string())?;
     if !transitioned {
         return Ok(false);

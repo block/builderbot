@@ -994,7 +994,7 @@
 </script>
 
 <TopBarPortal
-  title={selectedProject ? projectDisplayName(selectedProject) : 'Project'}
+  title={selectedProject ? '' : 'Project'}
   leftActions={projectTopBarLeftActions}
   badges={projectTopBarBadges}
   rightActions={projectTopBarRightActions}

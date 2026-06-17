@@ -686,11 +686,35 @@ fn has_queued_user_branch_session(store: &Store, branch_id: &str) -> Result<bool
     Ok(false)
 }
 
+fn branch_session_start_waits_for_provisioning(
+    store: &Store,
+    branch_id: &str,
+) -> Result<bool, String> {
+    let branch = store
+        .get_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    match branch.branch_type {
+        store::BranchType::Local => store
+            .get_workdir_for_branch(branch_id)
+            .map(|workdir| workdir.is_none())
+            .map_err(|e| e.to_string()),
+        store::BranchType::Remote => {
+            Ok(branch.workspace_status != Some(store::WorkspaceStatus::Running))
+        }
+    }
+}
+
 fn should_queue_branch_session_start(
     store: &Store,
     branch_id: &str,
     session_type: &BranchSessionType,
 ) -> Result<bool, String> {
+    if branch_session_start_waits_for_provisioning(store, branch_id)? {
+        return Ok(true);
+    }
+
     if has_queued_user_branch_session(store, branch_id)? {
         return Ok(true);
     }
@@ -3475,6 +3499,27 @@ mod tests {
         (store, branch)
     }
 
+    fn setup_branch_store_with_workdir() -> (Arc<Store>, store::Branch) {
+        let (store, branch) = setup_branch_store();
+        let workdir_path = format!("/tmp/staged-test-workdir-{}", branch.id);
+        let workdir =
+            store::Workdir::new(&branch.project_id, &workdir_path).with_branch(&branch.id);
+        store.create_workdir(&workdir).unwrap();
+        (store, branch)
+    }
+
+    fn setup_remote_branch_store(status: store::WorkspaceStatus) -> (Arc<Store>, store::Branch) {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let mut project = store::Project::new("test-owner/test-repo");
+        project.location = store::ProjectLocation::Remote;
+        store.create_project(&project).unwrap();
+        let mut branch =
+            store::Branch::new_remote(&project.id, "feature", "main", "test-workspace");
+        branch.workspace_status = Some(status);
+        store.create_branch(&branch).unwrap();
+        (store, branch)
+    }
+
     fn ids(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
     }
@@ -3647,8 +3692,53 @@ mod tests {
     }
 
     #[test]
-    fn branch_start_decision_queues_all_user_modes_behind_running_commit() {
+    fn branch_start_decision_queues_local_branch_without_workdir() {
         let (store, branch) = setup_branch_store();
+
+        for session_type in [
+            BranchSessionType::Note,
+            BranchSessionType::Review,
+            BranchSessionType::Commit,
+        ] {
+            assert!(should_queue_branch_session_start(&store, &branch.id, &session_type).unwrap());
+        }
+    }
+
+    #[test]
+    fn branch_start_decision_queues_remote_branch_until_workspace_running() {
+        let (store, branch) = setup_remote_branch_store(store::WorkspaceStatus::Starting);
+
+        for session_type in [
+            BranchSessionType::Note,
+            BranchSessionType::Review,
+            BranchSessionType::Commit,
+        ] {
+            assert!(should_queue_branch_session_start(&store, &branch.id, &session_type).unwrap());
+        }
+    }
+
+    #[test]
+    fn branch_start_decision_uses_compatibility_for_running_remote_branch() {
+        let (store, branch) = setup_remote_branch_store(store::WorkspaceStatus::Running);
+        create_branch_note_session(&store, &branch.id, store::SessionStatus::Running);
+
+        assert!(
+            !should_queue_branch_session_start(&store, &branch.id, &BranchSessionType::Review)
+                .unwrap()
+        );
+        assert!(
+            !should_queue_branch_session_start(&store, &branch.id, &BranchSessionType::Note)
+                .unwrap()
+        );
+        assert!(
+            should_queue_branch_session_start(&store, &branch.id, &BranchSessionType::Commit)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn branch_start_decision_queues_all_user_modes_behind_running_commit() {
+        let (store, branch) = setup_branch_store_with_workdir();
         create_branch_commit_session(&store, &branch.id, store::SessionStatus::Running);
 
         for session_type in [
@@ -3662,7 +3752,7 @@ mod tests {
 
     #[test]
     fn branch_start_decision_allows_parallel_notes_and_note_review_overlap() {
-        let (store, branch) = setup_branch_store();
+        let (store, branch) = setup_branch_store_with_workdir();
         create_branch_note_session(&store, &branch.id, store::SessionStatus::Running);
 
         assert!(
@@ -3678,7 +3768,7 @@ mod tests {
                 .unwrap()
         );
 
-        let (store, branch) = setup_branch_store();
+        let (store, branch) = setup_branch_store_with_workdir();
         create_branch_review_session(&store, &branch.id, store::SessionStatus::Running);
 
         assert!(
@@ -3697,7 +3787,7 @@ mod tests {
 
     #[test]
     fn branch_start_decision_queues_behind_existing_queued_user_session() {
-        let (store, branch) = setup_branch_store();
+        let (store, branch) = setup_branch_store_with_workdir();
         create_branch_note_session(&store, &branch.id, store::SessionStatus::Queued);
 
         for session_type in [
@@ -3795,7 +3885,7 @@ mod tests {
 
     #[test]
     fn branch_start_decision_ignores_auto_review_barriers() {
-        let (store, branch) = setup_branch_store();
+        let (store, branch) = setup_branch_store_with_workdir();
         create_auto_review(&store, &branch.id, store::SessionStatus::Running);
         create_auto_review(&store, &branch.id, store::SessionStatus::Queued);
 

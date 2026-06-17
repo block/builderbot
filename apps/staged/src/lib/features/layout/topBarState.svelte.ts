@@ -4,6 +4,7 @@ export interface TopBarContent {
   title: string;
   subtitle: string | null;
   leading: Snippet | null;
+  center: Snippet | null;
   badges: Snippet | null;
   leftActions: Snippet | null;
   rightActions: Snippet | null;
@@ -15,6 +16,7 @@ export const topBar = $state<TopBarContent>({
   title: '',
   subtitle: null,
   leading: null,
+  center: null,
   badges: null,
   leftActions: null,
   rightActions: null,
@@ -26,6 +28,7 @@ function applyTopBar(content: TopBarRegistration): void {
   topBar.title = content.title ?? '';
   topBar.subtitle = content.subtitle ?? null;
   topBar.leading = content.leading ?? null;
+  topBar.center = content.center ?? null;
   topBar.badges = content.badges ?? null;
   topBar.leftActions = content.leftActions ?? null;
   topBar.rightActions = content.rightActions ?? null;

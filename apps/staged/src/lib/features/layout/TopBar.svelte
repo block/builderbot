@@ -81,6 +81,12 @@
     </div>
   {/if}
 
+  {#if topBar.center}
+    <div class="center-content">
+      {@render topBar.center()}
+    </div>
+  {/if}
+
   <div class="drag-spacer"></div>
 
   {#if topBar.rightActions}
@@ -92,6 +98,8 @@
 
 <style>
   .top-bar {
+    position: relative;
+    isolation: isolate;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -115,6 +123,8 @@
   }
 
   .left-actions {
+    position: relative;
+    z-index: 1;
     display: flex;
     align-items: center;
     gap: 4px;
@@ -122,6 +132,8 @@
   }
 
   .title-content {
+    position: relative;
+    z-index: 1;
     display: flex;
     align-items: center;
     gap: 8px;
@@ -157,6 +169,21 @@
     white-space: nowrap;
   }
 
+  .center-content {
+    position: absolute;
+    z-index: 0;
+    top: 50%;
+    left: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: min(42vw, 420px);
+    min-width: 0;
+    pointer-events: none;
+    transform: translate(-50%, -50%);
+    -webkit-app-region: drag;
+  }
+
   .subtitle {
     min-width: 0;
     overflow: hidden;
@@ -169,6 +196,7 @@
 
   .top-bar-actions {
     position: relative;
+    z-index: 1;
     display: flex;
     align-items: center;
     gap: 4px;
@@ -192,6 +220,10 @@
 
     .title-content {
       max-width: min(46vw, 420px);
+    }
+
+    .center-content {
+      width: min(34vw, 240px);
     }
 
     .subtitle {

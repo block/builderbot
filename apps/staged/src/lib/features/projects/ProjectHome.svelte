@@ -105,6 +105,11 @@
   let showNewProjectModal = $state(false);
   let showAddRepoModal = $state(false);
 
+  // Project-detail top-bar title handoff.
+  let mainPanelEl = $state<HTMLDivElement | null>(null);
+  let projectTitleElement = $state<HTMLHeadingElement | null>(null);
+  let showTopBarProjectName = $state(false);
+
   // Delete confirmation state
   let projectToDelete = $state<Project | null>(null);
   let branchToDelete = $state<{ branch: Branch; project: Project } | null>(null);
@@ -555,6 +560,38 @@
   let selectedProject = $derived(
     selectedProjectId ? projects.find((project) => project.id === selectedProjectId) || null : null
   );
+
+  function updateTopBarProjectNameVisibility(): void {
+    if (!selectedProject || !mainPanelEl || !projectTitleElement) {
+      showTopBarProjectName = false;
+      return;
+    }
+
+    const panelTop = mainPanelEl.getBoundingClientRect().top;
+    const titleBottom = projectTitleElement.getBoundingClientRect().bottom;
+    showTopBarProjectName = titleBottom <= panelTop + 1;
+  }
+
+  function setProjectTitleElement(element: HTMLHeadingElement | null): void {
+    projectTitleElement = element;
+    updateTopBarProjectNameVisibility();
+  }
+
+  $effect(() => {
+    selectedProject;
+    projectTitleElement;
+    mainPanelEl;
+    loading;
+
+    if (typeof requestAnimationFrame !== 'function') {
+      updateTopBarProjectNameVisibility();
+      return;
+    }
+
+    const frame = requestAnimationFrame(updateTopBarProjectNameVisibility);
+    return () => cancelAnimationFrame(frame);
+  });
+
   let selectedProjectDeleting = $derived(
     selectedProject ? deletingProjectNames.has(selectedProject.id) : false
   );
@@ -996,6 +1033,7 @@
 <TopBarPortal
   title={selectedProject ? '' : 'Project'}
   leftActions={projectTopBarLeftActions}
+  center={projectTopBarCenter}
   badges={projectTopBarBadges}
   rightActions={projectTopBarRightActions}
 />
@@ -1023,6 +1061,13 @@
         {/if}
       </Button>
     </span>
+  {/if}
+{/snippet}
+
+{#snippet projectTopBarCenter()}
+  {#if selectedProject && showTopBarProjectName}
+    {@const topBarProjectName = projectDisplayName(selectedProject)}
+    <span class="top-bar-project-name" title={topBarProjectName}>{topBarProjectName}</span>
   {/if}
 {/snippet}
 
@@ -1139,7 +1184,12 @@
     onRemoveProject={handleDeleteProjectRequest}
   />
 
-  <div class="main-panel" class:no-pad={!loading && !hasContent}>
+  <div
+    class="main-panel"
+    class:no-pad={!loading && !hasContent}
+    bind:this={mainPanelEl}
+    onscroll={updateTopBarProjectNameVisibility}
+  >
     {#if storeIncompat && storeIncompat.kind === 'needs_reset'}
       <div class="update-state">
         <div class="update-card">
@@ -1208,6 +1258,7 @@
             onDeleteBranch={(branchId) => handleDeleteBranchRequest(branchId, project)}
             onRenameBranch={(branchId, branchName) =>
               handleRenameBranch(branchId, project.id, branchName)}
+            onProjectTitleElement={selectedProjectId ? setProjectTitleElement : undefined}
             onRepoSelected={(selection) => handleRepoSelected(project.id, selection)}
             onRetryWorktree={(branchId) => setupBranchWorktree(branchId, project.id)}
           />
@@ -1302,6 +1353,20 @@
     font-size: calc(var(--size-xs) - 1px);
     font-weight: 500;
     line-height: 1;
+    white-space: nowrap;
+  }
+
+  .top-bar-project-name {
+    display: inline-block;
+    max-width: 100%;
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-primary);
+    font-size: var(--size-sm);
+    font-weight: 650;
+    line-height: 1.2;
+    text-align: center;
+    text-overflow: ellipsis;
     white-space: nowrap;
   }
 

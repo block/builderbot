@@ -45,6 +45,7 @@
     workspaceErrors?: Map<string, string>;
     onDeleteBranch?: (branchId: string) => void;
     onRenameBranch?: (branchId: string, branchName: string) => void;
+    onProjectTitleElement?: (element: HTMLHeadingElement | null) => void;
     onRepoSelected?: (selection: RepoPickerSelection) => void | Promise<void>;
     onRetryWorktree?: (branchId: string) => void;
   }
@@ -59,6 +60,7 @@
     workspaceErrors = new Map(),
     onDeleteBranch,
     onRenameBranch,
+    onProjectTitleElement,
     onRepoSelected,
     onRetryWorktree,
   }: Props = $props();
@@ -70,6 +72,16 @@
   function repoForBranch(branch: Branch): ProjectRepo | null {
     if (!branch.projectRepoId) return null;
     return reposById.get(branch.projectRepoId) ?? null;
+  }
+
+  function reportProjectTitleElement(node: HTMLHeadingElement) {
+    onProjectTitleElement?.(node);
+
+    return {
+      destroy() {
+        onProjectTitleElement?.(null);
+      },
+    };
   }
 
   // ── Project session dialog ─────────────────────────────────────────────
@@ -342,7 +354,7 @@
 
 <div class="project-section">
   <section class="project-overview-card">
-    <h2 class="project-title">{projectDisplayName(project)}</h2>
+    <h2 class="project-title" use:reportProjectTitleElement>{projectDisplayName(project)}</h2>
 
     {#if projectNotes.length > 0}
       {@const nowMs = minuteNow.now()}

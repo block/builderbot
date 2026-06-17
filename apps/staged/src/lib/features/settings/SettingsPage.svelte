@@ -1,16 +1,15 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import ArrowLeft from '@lucide/svelte/icons/arrow-left';
   import FolderGit2 from '@lucide/svelte/icons/folder-git-2';
   import Keyboard from '@lucide/svelte/icons/keyboard';
   import Settings2 from '@lucide/svelte/icons/settings-2';
   import Stethoscope from '@lucide/svelte/icons/stethoscope';
-  import { closeSettings, navigation } from '../layout/navigation.svelte';
+  import { navigation, openSettings } from '../layout/navigation.svelte';
+  import TopBarPortal from '../layout/TopBarPortal.svelte';
   import ActionsSettingsPanel from './ActionsSettingsPanel.svelte';
   import DoctorSettingsPanel from './DoctorSettingsPanel.svelte';
   import GeneralSettingsPanel from './GeneralSettingsPanel.svelte';
   import KeyboardSettingsPanel from './KeyboardSettingsPanel.svelte';
-  import { Button } from '$lib/components/ui/button';
   import { isTauri } from '../../transport';
 
   let appVersion = $state(__APP_VERSION__);
@@ -25,31 +24,18 @@
       console.warn('[Settings] Could not load runtime app version', error);
     }
   });
-
-  function handleBack() {
-    closeSettings();
-  }
 </script>
 
-<div class="settings-page">
-  <header class="settings-header">
-    <Button variant="ghost" size="sm" title="Back to workspace" onclick={handleBack}>
-      <ArrowLeft size={14} />
-      Back
-    </Button>
-    <div class="header-text">
-      <h1>Settings</h1>
-      <p class="header-meta">v{appVersion}</p>
-    </div>
-  </header>
+<TopBarPortal title="Settings" subtitle={`v${appVersion}`} />
 
+<div class="settings-page">
   <div class="settings-body">
     <aside class="settings-nav" aria-label="Settings sections">
       <div class="settings-nav-list">
         <button
           class="nav-item"
           class:active={navigation.settingsSection === 'general'}
-          onclick={() => (navigation.settingsSection = 'general')}
+          onclick={() => openSettings('general')}
         >
           <div class="nav-main">
             <Settings2 size={14} />
@@ -62,7 +48,7 @@
         <button
           class="nav-item"
           class:active={navigation.settingsSection === 'repo'}
-          onclick={() => (navigation.settingsSection = 'repo')}
+          onclick={() => openSettings('repo')}
         >
           <div class="nav-main">
             <FolderGit2 size={14} />
@@ -75,7 +61,7 @@
         <button
           class="nav-item"
           class:active={navigation.settingsSection === 'keyboard'}
-          onclick={() => (navigation.settingsSection = 'keyboard')}
+          onclick={() => openSettings('keyboard')}
         >
           <div class="nav-main">
             <Keyboard size={14} />
@@ -88,7 +74,7 @@
         <button
           class="nav-item"
           class:active={navigation.settingsSection === 'doctor'}
-          onclick={() => (navigation.settingsSection = 'doctor')}
+          onclick={() => openSettings('doctor')}
         >
           <div class="nav-main">
             <Stethoscope size={14} />
@@ -122,31 +108,6 @@
     display: flex;
     flex-direction: column;
     background: var(--bg-primary);
-  }
-
-  .settings-header {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    padding: 14px 16px;
-    border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 60%, transparent);
-    background: color-mix(in srgb, var(--bg-chrome) 82%, transparent);
-  }
-
-  .header-text {
-    min-width: 0;
-  }
-
-  .header-text h1 {
-    margin: 0;
-    font-size: calc(var(--size-xl) * 1.1);
-    line-height: 1.2;
-  }
-
-  .header-meta {
-    margin: 4px 0 0;
-    font-size: var(--size-sm);
-    color: var(--text-muted);
   }
 
   .settings-body {
@@ -251,11 +212,6 @@
   }
 
   @media (max-width: 920px) {
-    .settings-header {
-      flex-direction: column;
-      align-items: flex-start;
-    }
-
     .settings-body {
       grid-template-columns: 1fr;
       grid-template-rows: auto 1fr;

@@ -20,6 +20,7 @@ export interface Theme {
   // Base colors
   bg: {
     primary: string; // Main background (same as syntax theme) - used for editor islands
+    appBar: string; // Persistent app top bar surface
     chrome: string; // Unified chrome background (header, sidebar, spine)
     deepest: string; // Deepest level (tab bar) - pure black/white
     elevated: string; // Floating elements (cards, dialogs)
@@ -381,6 +382,7 @@ export function createAdaptiveTheme(
 
     bg: {
       primary: primaryBg, // Editor islands - may be adjusted from syntax theme for contrast
+      appBar: primaryBg, // Persistent app surface, not recessed chrome
       chrome: chromeColor, // Calculated for consistent contrast ratio
       deepest: deepestColor, // Darker than chrome (2x the luminance diff)
       // Floating surfaces (dialogs, popovers, dropdowns, cards) sit ON TOP of
@@ -512,6 +514,7 @@ export function themeToVarMap(t: Theme): Record<string, string> {
     '--theme-is-dark': t.isDark ? '1' : '0',
 
     '--bg-primary': t.bg.primary,
+    '--bg-app-bar': t.bg.appBar,
     '--bg-chrome': t.bg.chrome,
     '--bg-deepest': t.bg.deepest,
     '--bg-elevated': t.bg.elevated,

@@ -8,29 +8,13 @@
   import { onMount, onDestroy } from 'svelte';
   import { listenToEvent } from '../../transport';
   import { untrack } from 'svelte';
-  import ChevronLeft from '@lucide/svelte/icons/chevron-left';
-  import Trash2 from '@lucide/svelte/icons/trash-2';
   import Plus from '@lucide/svelte/icons/plus';
   import Send from '@lucide/svelte/icons/send';
   import FileText from '@lucide/svelte/icons/file-text';
-  import CircleCheck from '@lucide/svelte/icons/circle-check';
-  import CirclePause from '@lucide/svelte/icons/circle-pause';
-  import Pause from '@lucide/svelte/icons/pause';
-  import AlertCircle from '@lucide/svelte/icons/alert-circle';
-  import Cloud from '@lucide/svelte/icons/cloud';
   import Paperclip from '@lucide/svelte/icons/paperclip';
   import X from '@lucide/svelte/icons/x';
   import ImagePlus from '@lucide/svelte/icons/image-plus';
-  import type {
-    Project,
-    ProjectRepo,
-    Branch,
-    WorkspaceStatus,
-    ProjectNote,
-    HashtagItem,
-  } from '../../types';
-  import { projectDisplayName } from '../../shared/utils';
-  import { goHome } from '../layout/navigation.svelte';
+  import type { Project, ProjectRepo, Branch, ProjectNote, HashtagItem } from '../../types';
   import * as commands from '../../api/commands';
   import HashtagInput from '../sessions/HashtagInput.svelte';
   import { buildProjectHashtagItems } from '../sessions/hashtagItems';
@@ -41,7 +25,6 @@
   import Spinner from '../../shared/Spinner.svelte';
   import { isSessionActive } from '../../shared/sessionStatus';
   import { deleteSessionLinkedItem } from '../../shared/deleteSessionLinkedItem';
-  import AddRepoModal from './AddRepoModal.svelte';
   import SuggestedRepos from './SuggestedRepos.svelte';
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
   import TimelineRow from '../timeline/TimelineRow.svelte';
@@ -71,88 +54,34 @@
     project: Project;
     branches: Branch[];
     reposById?: Map<string, ProjectRepo>;
-    canAddRepo?: boolean;
-    addRepoHint?: string | null;
     deleting?: boolean;
-    safeToDelete?: boolean;
     deletingBranches?: Set<string>;
     worktreeErrors?: Map<string, string>;
     workspaceErrors?: Map<string, string>;
-    detecting?: boolean;
-    excludeRepos?: Set<string>;
-    onDeleteProject?: () => void;
     onDeleteBranch?: (branchId: string) => void;
     onRenameBranch?: (branchId: string, branchName: string) => void;
     onRepoSelected?: (selection: RepoPickerSelection) => void | Promise<void>;
     onRetryWorktree?: (branchId: string) => void;
-    onResumeWorkspace?: (workspaceName: string) => void;
   }
 
   let {
     project,
     branches,
     reposById = new Map(),
-    canAddRepo = true,
-    addRepoHint = null,
     deleting = false,
-    safeToDelete = false,
     deletingBranches = new Set(),
     worktreeErrors = new Map(),
     workspaceErrors = new Map(),
-    detecting = false,
-    excludeRepos,
-    onDeleteProject,
     onDeleteBranch,
     onRenameBranch,
     onRepoSelected,
     onRetryWorktree,
-    onResumeWorkspace,
   }: Props = $props();
 
   let sortedBranches = $derived([...branches].sort((a, b) => b.createdAt - a.createdAt));
   let projectDisplayRootCandidates = $derived(
     branches.map((branch) => branch.worktreePath).filter((path): path is string => !!path)
   );
-  let addRepoDisabled = $derived(deleting || !canAddRepo);
-
-  // For remote projects, derive workspace info from any branch (they all share the same workspace)
-  let workspaceBranch = $derived(
-    project.location === 'remote' ? (branches.find((b) => b.workspaceStatus) ?? null) : null
-  );
-  let projectWorkspaceStatus = $derived<WorkspaceStatus | null>(
-    workspaceBranch?.workspaceStatus ?? null
-  );
-  // For remote projects, derive workstation name from any branch (they all share the same workspace)
-  let projectWorkstationName = $derived<string | null>(
-    project.location === 'remote'
-      ? (branches.find((b) => b.workspaceName)?.workspaceName ?? null)
-      : null
-  );
-
-  let addRepoModalOpen = $state(false);
-
-  function statusLabel(status: WorkspaceStatus | null): string {
-    switch (status) {
-      case 'starting':
-        return 'Provisioning';
-      case 'running':
-        return 'Running';
-      case 'stopped':
-        return 'Stopped';
-      case 'suspended':
-        return 'Suspended';
-      case 'error':
-        return 'Error';
-      default:
-        return '';
-    }
-  }
-
-  async function handleRepoSelected(selection: RepoPickerSelection) {
-    addRepoModalOpen = false;
-    await onRepoSelected?.(selection);
-  }
-
   function repoForBranch(branch: Branch): ProjectRepo | null {
     if (!branch.projectRepoId) return null;
     return reposById.get(branch.projectRepoId) ?? null;
@@ -588,114 +517,6 @@
 </script>
 
 <div class="project-section">
-  <div class="project-header" class:deleting>
-    <div class="project-info">
-      <Button
-        variant="ghost"
-        size="icon"
-        class="size-6 shrink-0 text-muted-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:size-10 [&_svg]:!size-4"
-        title="Back to projects"
-        aria-label="Back to projects"
-        onclick={goHome}
-      >
-        <ChevronLeft size={16} />
-      </Button>
-      <span class="project-name" title={projectDisplayName(project)}
-        >{projectDisplayName(project)}</span
-      >
-      {#if deleting}
-        <div class="deleting-status" role="status" aria-live="polite">
-          <Spinner size={12} />
-          <span>Deleting…</span>
-        </div>
-      {/if}
-      {#if detecting}
-        <div class="detecting-status">
-          <Spinner size={12} />
-          <span>Detecting actions</span>
-        </div>
-      {/if}
-      {#if projectWorkspaceStatus}
-        <div
-          class="workspace-status-badge"
-          class:starting={projectWorkspaceStatus === 'starting'}
-          class:running={projectWorkspaceStatus === 'running'}
-          class:stopped={projectWorkspaceStatus === 'stopped'}
-          class:suspended={projectWorkspaceStatus === 'suspended'}
-          class:error={projectWorkspaceStatus === 'error'}
-          title={projectWorkspaceStatus === 'running' && projectWorkstationName
-            ? projectWorkstationName
-            : undefined}
-        >
-          {#if projectWorkspaceStatus === 'starting'}
-            <Spinner size={12} />
-          {:else if projectWorkspaceStatus === 'running'}
-            <Cloud size={12} />
-          {:else if projectWorkspaceStatus === 'stopped'}
-            <CirclePause size={12} />
-          {:else if projectWorkspaceStatus === 'suspended'}
-            <Pause size={12} />
-          {:else if projectWorkspaceStatus === 'error'}
-            <AlertCircle size={12} />
-          {/if}
-          <span>{statusLabel(projectWorkspaceStatus)}</span>
-          {#if projectWorkspaceStatus === 'suspended' && projectWorkstationName}
-            <Button
-              variant="ghost"
-              class="ml-1 h-auto rounded-none border-l border-[var(--border-muted)] bg-transparent px-1 py-0 text-[length:calc(var(--size-xs)-1px)] font-semibold text-[var(--ui-info)] shadow-none focus-visible:ring-0 hover:bg-transparent hover:text-[var(--ui-info)] hover:underline"
-              onclick={() => onResumeWorkspace?.(projectWorkstationName!)}
-            >
-              Resume
-            </Button>
-          {/if}
-        </div>
-      {/if}
-    </div>
-    {#if !deleting}
-      <div class="header-actions">
-        <span class="inline-flex">
-          <Button
-            variant="ghost"
-            size="sm"
-            class="group gap-2 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:h-10 max-md:justify-center max-md:p-2"
-            onclick={() => {
-              addRepoModalOpen = true;
-            }}
-            disabled={addRepoDisabled}
-          >
-            <span
-              class="flex size-4 shrink-0 items-center justify-center rounded-full bg-[var(--border-muted)] transition-colors group-hover:not-disabled:bg-[var(--border-emphasis)]"
-            >
-              <Plus size={12} />
-            </span>
-            Add Repo
-          </Button>
-        </span>
-        <Button
-          variant="ghost"
-          size="sm"
-          class={[
-            'group gap-2 text-foreground hover:bg-[var(--ui-selection)] hover:text-destructive max-md:h-10 max-md:justify-center max-md:p-2',
-            safeToDelete && 'border border-destructive text-destructive',
-          ]}
-          onclick={() => onDeleteProject?.()}
-        >
-          <span
-            class={[
-              'flex shrink-0 items-center transition-colors',
-              safeToDelete
-                ? 'text-destructive'
-                : 'text-muted-foreground group-hover:text-destructive',
-            ]}
-          >
-            <Trash2 size={14} />
-          </span>
-          Remove Project
-        </Button>
-      </div>
-    {/if}
-  </div>
-
   <!-- Project session prompt -->
   <div class="project-prompt-section">
     <input
@@ -911,129 +732,11 @@
   }}
 />
 
-<AddRepoModal
-  open={addRepoModalOpen}
-  {excludeRepos}
-  onAdded={handleRepoSelected}
-  onClose={() => {
-    addRepoModalOpen = false;
-  }}
-/>
-
 <style>
   .project-section {
     display: flex;
     flex-direction: column;
     gap: 16px;
-  }
-
-  .project-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 16px 0 8px;
-    position: sticky;
-    top: 0;
-    z-index: 10;
-    background-color: var(--bg-chrome);
-  }
-
-  .project-info {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-    flex: 1;
-  }
-
-  .project-name {
-    font-size: var(--size-xl);
-    font-weight: 600;
-    color: var(--text-primary);
-    letter-spacing: -0.01em;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .header-actions {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-
-  .detecting-status {
-    height: 22px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-left: 8px;
-    padding: 0 10px;
-    border-radius: 999px;
-    background-color: var(--bg-primary);
-    color: var(--text-primary);
-    font-size: calc(var(--size-xs) - 1px);
-    font-weight: 500;
-    line-height: 1;
-    border: 1px solid var(--border-muted);
-  }
-
-  .deleting-status {
-    height: 22px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-left: 8px;
-    padding: 0 10px;
-    border-radius: 999px;
-    background-color: var(--bg-primary);
-    color: var(--text-primary);
-    font-size: calc(var(--size-xs) - 1px);
-    font-weight: 500;
-    line-height: 1;
-    border: 1px solid var(--border-muted);
-  }
-
-  .workspace-status-badge {
-    height: 22px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-left: 8px;
-    padding: 0 10px;
-    border-radius: 999px;
-    background-color: var(--bg-primary);
-    color: var(--text-primary);
-    font-size: calc(var(--size-xs) - 1px);
-    font-weight: 500;
-    line-height: 1;
-    border: 1px solid var(--border-muted);
-  }
-
-  .workspace-status-badge.starting {
-    border-color: var(--ui-info);
-    color: var(--ui-info);
-  }
-
-  .workspace-status-badge.running {
-    border-color: var(--border-muted);
-    color: var(--text-primary);
-  }
-
-  .workspace-status-badge.stopped {
-    border-color: var(--border-muted);
-    color: var(--text-muted);
-  }
-
-  .workspace-status-badge.suspended {
-    border-color: var(--border-muted);
-    color: var(--text-muted);
-  }
-
-  .workspace-status-badge.error {
-    border-color: var(--ui-danger);
-    color: var(--ui-danger);
   }
 
   /* ── Project prompt ──────────────────────────────────────────────────── */
@@ -1199,35 +902,6 @@
   @media (max-width: 720px) {
     .project-section {
       gap: 14px;
-    }
-
-    .project-header {
-      align-items: stretch;
-      flex-direction: column;
-      gap: 8px;
-      padding: 12px 0 6px;
-    }
-
-    .project-info {
-      flex-wrap: wrap;
-    }
-
-    .project-name {
-      flex: 1 1 160px;
-      font-size: var(--size-lg);
-    }
-
-    .header-actions {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      gap: 6px;
-      width: 100%;
-    }
-
-    .detecting-status,
-    .deleting-status,
-    .workspace-status-badge {
-      margin-left: 0;
     }
 
     .prompt-input-row {

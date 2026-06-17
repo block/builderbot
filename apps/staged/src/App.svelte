@@ -14,6 +14,7 @@
   import ReposListView from './lib/features/projects/ReposListView.svelte';
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
   import SettingsPage from './lib/features/settings/SettingsPage.svelte';
+  import DiffModal from './lib/features/diff/DiffModal.svelte';
   import { Toaster } from '$lib/components/ui/sonner';
   import { Button } from '$lib/components/ui/button';
   import {
@@ -30,6 +31,7 @@
     navigation,
     initNavigation,
     openSettings,
+    popDetailRoute,
     selectPreviousProject,
     selectNextProject,
   } from './lib/features/layout/navigation.svelte';
@@ -502,6 +504,24 @@
           </div>
         {:else if navigation.activeView === 'settings'}
           <SettingsPage />
+        {:else if navigation.currentRoute.kind === 'diff'}
+          <DiffModal
+            branchId={navigation.currentRoute.branchId}
+            projectId={navigation.currentRoute.projectId}
+            commitSha={navigation.currentRoute.commitSha}
+            scope={navigation.currentRoute.scope}
+            reviewId={navigation.currentRoute.reviewId}
+            beforeLabel={navigation.currentRoute.beforeLabel}
+            afterLabel={navigation.currentRoute.afterLabel}
+            readonly={navigation.currentRoute.readonly}
+            commits={navigation.currentRoute.commits}
+            baseBranchLabel={navigation.currentRoute.baseBranchLabel}
+            branchLabel={navigation.currentRoute.branchLabel}
+            projectName={navigation.currentRoute.projectName}
+            githubRepo={navigation.currentRoute.githubRepo}
+            subpath={navigation.currentRoute.subpath}
+            onClose={popDetailRoute}
+          />
         {:else if reposUiEnabled && navigation.showReposList}
           <ReposListView />
         {:else if navigation.selectedProjectId}
@@ -542,7 +562,6 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-    border-top: 1px solid color-mix(in srgb, var(--border-subtle) 50%, transparent);
   }
 
   .reset-shell {

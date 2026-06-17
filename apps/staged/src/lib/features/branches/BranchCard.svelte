@@ -54,7 +54,6 @@
   import BranchTimeline from '../timeline/BranchTimeline.svelte';
   import ImageViewerModal from '../timeline/ImageViewerModal.svelte';
   import { countUserComments, shouldWarnBeforeDeletingReview } from '../timeline/reviewState';
-  import DiffModal from '../diff/DiffModal.svelte';
   import SessionModal from '../sessions/SessionModal.svelte';
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
@@ -84,6 +83,7 @@
     onBranchSetupProgress,
     onSessionStatusChanged,
   } from '../../services/branchEventService';
+  import { openDiffRoute } from '../layout/navigation.svelte';
   import type { WorktreeChangesPreview } from '../../commands';
   import type { LinkedNoteContext, NoteClickInfo } from '../sessions/noteFreshness';
 
@@ -150,8 +150,6 @@
   let error = $state<string | null>(null);
   let pullingOrigin = $state(false);
   let discardingWorktreeChanges = $state(false);
-  let showBranchDiff = $state(false);
-  let showWorktreeDiff = $state(false);
   let loadedTimelineKey = $state<string | null>(null);
   type TimelineFullReview = NonNullable<Awaited<ReturnType<typeof commands.getReview>>>;
   type TimelineReviewDetails = {
@@ -186,11 +184,6 @@
   });
   let hashtagItems = $derived([...timelineHashtagItems, ...projectNoteHashtagItems]);
   let reviewDetailsLoadVersion = 0;
-  let reviewDiffTarget = $state<{
-    commitSha: string;
-    scope: 'branch' | 'commit';
-    reviewId: string;
-  } | null>(null);
 
   /** True when the branch is still provisioning (local worktree or remote workspace). */
   let isProvisioning = $derived(
@@ -443,7 +436,6 @@
   }
 
   // Commit diff modal (opened by clicking a commit in the timeline)
-  let commitDiffSha = $state<string | null>(null);
 
   // Note modal (opened by clicking a note in the timeline)
   let openNote = $state<{
@@ -829,6 +821,40 @@
   // Timeline item interactions
   // =========================================================================
 
+  function openDiffDetail(options: {
+    commitSha?: string;
+    scope?: 'branch' | 'commit' | 'worktree';
+    reviewId?: string;
+    beforeLabel?: string;
+    afterLabel?: string;
+    readonly?: boolean;
+  }) {
+    openDiffRoute({
+      branchId: branch.id,
+      projectId: branch.projectId,
+      commitSha: options.commitSha,
+      scope: options.scope ?? 'branch',
+      reviewId: options.reviewId,
+      beforeLabel:
+        options.beforeLabel ??
+        (options.scope === 'commit' ? 'parent' : formatBaseBranch(branch.baseBranch)),
+      afterLabel:
+        options.afterLabel ??
+        (options.scope === 'worktree'
+          ? 'worktree'
+          : options.commitSha
+            ? options.commitSha.slice(0, 7)
+            : branch.branchName),
+      readonly: options.readonly,
+      commits: timeline?.commits,
+      baseBranchLabel: formatBaseBranch(branch.baseBranch),
+      branchLabel: branch.branchName,
+      projectName,
+      githubRepo: repoLabel?.headRepo ?? repoLabel?.githubRepo,
+      subpath: repoLabel?.subpath,
+    });
+  }
+
   /** Look up note info from timeline data by session ID (for cross-modal navigation). */
   function findNoteForSession(sessionId: string): LinkedNoteContext | null {
     const note = timeline?.notes.find((n) => n.sessionId === sessionId);
@@ -843,7 +869,12 @@
   }
 
   function handleCommitClick(sha: string) {
-    commitDiffSha = sha;
+    openDiffDetail({
+      commitSha: sha,
+      scope: 'commit',
+      beforeLabel: 'parent',
+      afterLabel: sha.slice(0, 7),
+    });
   }
 
   function handleNoteClick(note: NoteClickInfo) {
@@ -860,8 +891,13 @@
   async function handleReviewClick(reviewId: string) {
     const cached = timelineReviewDetailsById[reviewId];
     if (cached) {
-      reviewDiffTarget = { commitSha: cached.commitSha, scope: cached.scope, reviewId };
-      showBranchDiff = true;
+      openDiffDetail({
+        commitSha: cached.commitSha,
+        scope: cached.scope,
+        reviewId,
+        beforeLabel: cached.scope === 'commit' ? 'parent' : formatBaseBranch(branch.baseBranch),
+        afterLabel: cached.commitSha.slice(0, 7),
+      });
       return;
     }
 
@@ -872,8 +908,13 @@
         await loadTimeline();
         return;
       }
-      reviewDiffTarget = { commitSha: review.commitSha, scope: review.scope, reviewId };
-      showBranchDiff = true;
+      openDiffDetail({
+        commitSha: review.commitSha,
+        scope: review.scope,
+        reviewId,
+        beforeLabel: review.scope === 'commit' ? 'parent' : formatBaseBranch(branch.baseBranch),
+        afterLabel: review.commitSha.slice(0, 7),
+      });
     } catch (e) {
       console.error('Failed to open review:', e);
       notifyError('Failed to open review', e);
@@ -1522,7 +1563,15 @@
                 : undefined}
               {forcePushingOrigin}
               rebaseBranchDisabledReason={branchCommandDisabledReason}
-              onViewWorktreeDiff={isLocal ? () => (showWorktreeDiff = true) : undefined}
+              onViewWorktreeDiff={isLocal
+                ? () =>
+                    openDiffDetail({
+                      scope: 'worktree',
+                      readonly: true,
+                      beforeLabel: 'HEAD',
+                      afterLabel: 'worktree',
+                    })
+                : undefined}
               onCommitWorktreeChanges={() =>
                 sessionMgr.startOrQueueSession('commit', 'Commit uncommitted changes')}
               onDiscardWorktreeChanges={handleDiscardWorktreeChanges}
@@ -1545,8 +1594,11 @@
                         variant="outline"
                         size="sm"
                         onclick={() => {
-                          reviewDiffTarget = null;
-                          showBranchDiff = true;
+                          openDiffDetail({
+                            scope: 'branch',
+                            beforeLabel: formatBaseBranch(branch.baseBranch),
+                            afterLabel: branch.branchName,
+                          });
                         }}
                         class="text-xs"
                       >
@@ -1573,74 +1625,6 @@
     </div>
   {/if}
 </div>
-
-{#if showBranchDiff}
-  <DiffModal
-    branchId={branch.id}
-    projectId={branch.projectId}
-    commitSha={reviewDiffTarget?.commitSha}
-    scope={reviewDiffTarget?.scope ?? 'branch'}
-    reviewId={reviewDiffTarget?.reviewId}
-    beforeLabel={reviewDiffTarget?.scope === 'commit'
-      ? 'parent'
-      : formatBaseBranch(branch.baseBranch)}
-    afterLabel={reviewDiffTarget?.commitSha
-      ? reviewDiffTarget.commitSha.slice(0, 7)
-      : branch.branchName}
-    commits={timeline?.commits}
-    baseBranchLabel={formatBaseBranch(branch.baseBranch)}
-    branchLabel={branch.branchName}
-    {projectName}
-    githubRepo={repoLabel?.headRepo ?? repoLabel?.githubRepo}
-    subpath={repoLabel?.subpath}
-    onClose={() => {
-      showBranchDiff = false;
-      reviewDiffTarget = null;
-      loadTimeline();
-    }}
-  />
-{/if}
-
-{#if showWorktreeDiff}
-  <DiffModal
-    branchId={branch.id}
-    projectId={branch.projectId}
-    scope="worktree"
-    readonly
-    beforeLabel="HEAD"
-    afterLabel="worktree"
-    baseBranchLabel={formatBaseBranch(branch.baseBranch)}
-    branchLabel={branch.branchName}
-    {projectName}
-    githubRepo={repoLabel?.headRepo ?? repoLabel?.githubRepo}
-    subpath={repoLabel?.subpath}
-    onClose={() => {
-      showWorktreeDiff = false;
-      loadTimeline();
-    }}
-  />
-{/if}
-
-{#if commitDiffSha}
-  <DiffModal
-    branchId={branch.id}
-    projectId={branch.projectId}
-    commitSha={commitDiffSha}
-    scope="commit"
-    beforeLabel="parent"
-    afterLabel={commitDiffSha.slice(0, 7)}
-    commits={timeline?.commits}
-    baseBranchLabel={formatBaseBranch(branch.baseBranch)}
-    branchLabel={branch.branchName}
-    {projectName}
-    githubRepo={repoLabel?.headRepo ?? repoLabel?.githubRepo}
-    subpath={repoLabel?.subpath}
-    onClose={() => {
-      commitDiffSha = null;
-      loadTimeline();
-    }}
-  />
-{/if}
 
 <NoteModal
   open={openNote !== null}

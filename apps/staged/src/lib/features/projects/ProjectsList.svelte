@@ -13,6 +13,7 @@
   import GitPullRequestDraft from '@lucide/svelte/icons/git-pull-request-draft';
   import Mail from '@lucide/svelte/icons/mail';
   import Plus from '@lucide/svelte/icons/plus';
+  import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
   import Sprout from '@lucide/svelte/icons/sprout';
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import type {
@@ -34,9 +35,8 @@
   } from '../../shared/utils';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
-  import { selectProject, showAllRepos } from '../layout/navigation.svelte';
+  import { openSettings, selectProject, showAllRepos } from '../layout/navigation.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
-  import ProjectsSidebar from './ProjectsSidebar.svelte';
   import { getProjectStatus } from './projectStatus';
   import * as ContextMenu from '$lib/components/ui/context-menu';
   import SplashScreen from './SplashScreen.svelte';
@@ -59,6 +59,7 @@
   import { canDeleteProjectWithoutConfirmation } from './projectDeleteSafety';
   import { viewport } from '../../shared/viewport.svelte';
   import { reposUiEnabled } from '../../featureFlags';
+  import TopBarPortal from '../layout/TopBarPortal.svelte';
 
   type FilterKind = 'unread' | 'running' | { repo: string; subpath: string };
 
@@ -599,20 +600,34 @@
   onmousemove={handleMouseMove}
 />
 
-<div class="projects-list-page">
-  <ProjectsSidebar
-    {projects}
-    {loading}
-    {error}
-    {deletingProjectNames}
-    {repoCountsByProject}
-    {reposByProject}
-    {projectBranches}
-    showAllProjectsRow={true}
-    onMarkProjectUnread={handleMarkProjectUnread}
-    onRemoveProject={handleRemoveProject}
-  />
+<TopBarPortal title="Projects" rightActions={rootTopBarActions} />
 
+{#snippet rootTopBarActions()}
+  <span class="inline-flex" title={viewport.showShortcutHints ? 'New project (⌘N)' : 'New project'}>
+    <Button
+      variant="ghost"
+      size="icon-xs"
+      class="max-md:size-10 [&_svg]:size-3.5"
+      aria-label="New project"
+      onclick={() => (showNewProjectModal = true)}
+    >
+      <Plus size={14} />
+    </Button>
+  </span>
+
+  <Button
+    variant="ghost"
+    size="icon-xs"
+    class="max-md:size-10 [&_svg]:size-3.5"
+    title={viewport.showShortcutHints ? 'Settings (⌘,)' : 'Settings'}
+    aria-label="Settings"
+    onclick={() => openSettings()}
+  >
+    <SlidersHorizontal size={14} />
+  </Button>
+{/snippet}
+
+<div class="projects-list-page">
   <div class="main-panel" bind:this={mainPanelEl} onscroll={handleMainPanelScroll}>
     <div class="content" class:empty-layout={!loading && !error && projects.length === 0}>
       {#if loading}
@@ -649,18 +664,6 @@
           </div>
         {/if}
 
-        <div class="title-row">
-          <h1>Projects</h1>
-          <Button
-            variant="outline"
-            size="sm"
-            class="gap-1.5 border-transparent bg-[var(--bg-elevated)] font-semibold shadow-none hover:bg-[var(--bg-hover)]"
-            onclick={() => (showNewProjectModal = true)}
-          >
-            <Plus size={14} />
-            New project
-          </Button>
-        </div>
         {#if projects.length > 0}
           <div class="filter-bar">
             <button
@@ -893,7 +896,6 @@
 
 <style>
   .projects-list-page {
-    --sidebar-title-offset: 42px;
     flex: 1;
     min-height: 0;
     display: flex;
@@ -911,7 +913,7 @@
 
   .content {
     flex: 1;
-    padding: var(--sidebar-title-offset) 24px 24px;
+    padding: 24px;
     max-width: 900px;
     width: 100%;
     margin: 0 auto;
@@ -933,20 +935,6 @@
 
   .state.error {
     color: var(--ui-danger);
-  }
-
-  .title-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 16px;
-  }
-
-  .title-row h1 {
-    margin: 0;
-    font-size: var(--size-xl);
-    font-weight: 700;
-    color: var(--text-primary);
   }
 
   .filter-bar {
@@ -1308,23 +1296,8 @@
   }
 
   @media (max-width: 640px) {
-    .projects-list-page {
-      --sidebar-title-offset: 20px;
-    }
-
     .content {
-      padding: var(--sidebar-title-offset) 16px 16px;
-    }
-
-    .title-row {
-      align-items: flex-start;
-      gap: 12px;
-    }
-
-    .title-row :global(button) {
-      min-height: 40px;
-      padding: 8px 12px;
-      flex-shrink: 0;
+      padding: 16px;
     }
 
     .filter-bar {

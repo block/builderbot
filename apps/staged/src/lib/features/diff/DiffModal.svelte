@@ -1247,10 +1247,10 @@
   {/if}
 {/snippet}
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="diff-detail" onkeydown={handleKeydown}>
+<div class="diff-detail">
   <div class="modal-body">
     <!-- Diff viewer -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="diff-viewer-container"
       class:mobile-diff-dragging={mobileDiffIsDragging}

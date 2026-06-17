@@ -127,6 +127,12 @@
     window.dispatchEvent(new CustomEvent('staged:new-project'));
   }
 
+  function navigateBack(): boolean {
+    if (!navigation.canGoBack) return false;
+    popDetailRoute();
+    return true;
+  }
+
   async function logUpdater(message: string) {
     console.warn(message);
     try {
@@ -310,6 +316,14 @@
         keys: ['n'],
         modifiers: { meta: true },
         handler: requestNewProject,
+      },
+      {
+        id: 'app-go-back',
+        description: 'Back',
+        category: 'app',
+        keys: ['ArrowLeft'],
+        modifiers: { meta: true },
+        handler: navigateBack,
       },
       {
         id: 'search-find',

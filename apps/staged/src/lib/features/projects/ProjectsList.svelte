@@ -31,7 +31,7 @@
     projectDisplayName,
     aggregateProjectPrStatus,
     projectHasCodeChanges,
-    projectSubtitle,
+    projectActivity,
   } from '../../shared/utils';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
@@ -711,8 +711,8 @@
             )}
             {@const prStatus = getProjectPrStatus(project.id)}
             {@const repos = reposByProject.get(project.id) ?? []}
-            {@const repoCount = repoCountsByProject.get(project.id) ?? (project.githubRepo ? 1 : 0)}
             {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}
+            {@const activity = projectActivity(sessionTypes, status.runActionPhase)}
             {@const workspaceStatus =
               project.location === 'remote' ? getProjectWorkspaceStatus(project.id) : null}
             <div class="project-card-wrapper" use:trackProjectCard={project.id}>
@@ -855,9 +855,11 @@
                   </ContextMenu.Item>
                 </ContextMenu.Content>
               </ContextMenu.Root>
-              <div class="card-location">
-                {projectSubtitle(repoCount, sessionTypes, status.runActionPhase)}
-              </div>
+              {#if activity}
+                <div class="card-location">
+                  {activity}
+                </div>
+              {/if}
             </div>
           {/each}
         </div>
@@ -1105,7 +1107,7 @@
     flex-direction: column;
     gap: 8px;
     text-align: left;
-    background: var(--bg-elevated);
+    background: var(--bg-primary);
     border: none;
     border-radius: 10px;
     padding: 16px;
@@ -1128,7 +1130,7 @@
   }
 
   .project-card.deleting:hover {
-    background: var(--bg-elevated);
+    background: var(--bg-primary);
   }
 
   .card-header {

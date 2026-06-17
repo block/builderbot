@@ -538,7 +538,7 @@
     position: relative;
     flex-shrink: 0;
     border-right: 1px solid color-mix(in srgb, var(--border-subtle) 50%, transparent);
-    background-color: var(--bg-surface);
+    background-color: var(--bg-app-bar);
     display: flex;
     flex-direction: column;
     min-height: 0;

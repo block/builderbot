@@ -1008,16 +1008,18 @@
     >
       <Button
         variant="ghost"
-        size="icon-xs"
-        class="max-md:size-10 [&_svg]:size-3.5"
+        size="sm"
+        class="top-bar-action gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:size-10 max-md:p-0 [&_svg]:size-3.5"
         aria-label={sidebarOpen ? 'Hide projects sidebar' : 'Show projects sidebar'}
         onclick={toggleProjectsSidebar}
         disabled={!projectsSidebarState.hasProjects}
       >
         {#if !sidebarOpen || !projectsSidebarState.hasProjects}
           <PanelLeftOpen size={14} />
+          <span class="top-bar-action-label">Show Sidebar</span>
         {:else}
           <PanelLeftClose size={14} />
+          <span class="top-bar-action-label">Hide Sidebar</span>
         {/if}
       </Button>
     </span>

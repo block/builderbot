@@ -42,13 +42,14 @@
     {#if navigation.canGoBack}
       <Button
         variant="ghost"
-        size="icon-xs"
-        class="max-md:size-10 [&_svg]:size-3.5"
+        size="sm"
+        class="top-bar-action gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:size-10 max-md:p-0 [&_svg]:size-3.5"
         title={viewport.showShortcutHints ? 'Back (⌘← / Esc)' : 'Back'}
         aria-label="Back"
         onclick={popDetailRoute}
       >
         <ArrowLeft size={14} />
+        <span class="top-bar-action-label">Back</span>
       </Button>
     {/if}
 
@@ -175,6 +176,11 @@
     -webkit-app-region: no-drag;
   }
 
+  :global(.top-bar-action) {
+    height: 28px;
+    min-width: 0;
+  }
+
   @media (max-width: 768px) {
     .top-bar {
       padding: 6px 8px;
@@ -189,6 +195,10 @@
     }
 
     .subtitle {
+      display: none;
+    }
+
+    .top-bar-action-label {
       display: none;
     }
   }

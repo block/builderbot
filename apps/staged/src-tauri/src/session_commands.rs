@@ -509,42 +509,13 @@ pub struct ProjectSessionResponse {
     pub note_id: String,
 }
 
-/// Start a project-level session.
-///
-/// Project sessions operate at the project level rather than a specific branch.
-/// The agent receives project context (all repos, existing project notes).
-/// Sessions receive an MCP server with tools to start repo subagent sessions
-/// and add repos.
-/// Always creates a ProjectNote stub that is populated when the session completes.
-#[tauri::command(rename_all = "camelCase")]
-#[allow(clippy::too_many_arguments)]
-pub async fn start_project_session(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
-    action_executor: tauri::State<'_, Arc<ActionExecutor>>,
-    action_registry: tauri::State<'_, Arc<ActionRegistry>>,
-    app_handle: tauri::AppHandle,
-    project_id: String,
-    prompt: String,
-    provider: Option<String>,
-    image_ids: Option<Vec<String>>,
-) -> Result<ProjectSessionResponse, String> {
-    let store = get_store(&store)?;
+const PROJECT_SESSION_TIMELINE_REFERENCE_GUIDANCE: &str = "When referring to existing timeline \
+items in notes or repo-session instructions, use hashtag references in the form #<type>:<id>, \
+for example #note:123, #commit:<sha>, and #review:456. When starting a repo-level session from a \
+note, do not paste or rewrite the note contents; reference the note and relevant section instead, \
+for example: `Implement \"Step 5: unit tests\" from #note:123`.";
 
-    let project = store
-        .get_project(&project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {project_id}"))?;
-
-    // Build project context for the prompt
-    let project_context = build_project_session_context(&store, &project, None);
-
-    // Build the full prompt.
-    // The project-session prompt shares most of its structure between local and
-    // remote projects. Only the preamble, start_repo_session description, and an
-    // optional coordinator reminder differ.
-    let is_remote = project.location == store::ProjectLocation::Remote;
-
+pub(crate) fn build_project_session_action_instructions(is_remote: bool) -> String {
     let preamble = if is_remote {
         "This top-level project session runs locally and acts as a coordinator. \
 For repository-specific execution, use MCP subagent tools.\n\n\
@@ -585,12 +556,13 @@ repository edits directly here; use `start_repo_session` for implementation work
         ""
     };
 
-    let action_instructions = format!(
+    format!(
         "The user is requesting work at the project level. Investigate and \
 fulfill the request below, then produce a project note summarizing what you found and any \
 actions taken.\n\n\
 {preamble}\n\n\
 {start_repo_session_desc}\n\n\
+{PROJECT_SESSION_TIMELINE_REFERENCE_GUIDANCE}\n\n\
 - add_project_repo: Use this when the task requires a repository that isn't yet in the \
 project. Pass the GitHub repo slug to add it.\n\n\
 IMPORTANT: `add_project_repo` and `start_repo_session` are MCP tools, not shell commands. \
@@ -602,7 +574,41 @@ To discover repositories that might be relevant, use `gh` to explore repos in th
 GitHub organizations. Only add repos from organizations the user already belongs to.\n\n\
 To return the note, include a horizontal rule (---) followed by the note content. \
 Begin the note with a markdown H1 heading as the title.\n\n"
-    );
+    )
+}
+
+/// Start a project-level session.
+///
+/// Project sessions operate at the project level rather than a specific branch.
+/// The agent receives project context (all repos, existing project notes).
+/// Sessions receive an MCP server with tools to start repo subagent sessions
+/// and add repos.
+/// Always creates a ProjectNote stub that is populated when the session completes.
+#[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
+pub async fn start_project_session(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    action_executor: tauri::State<'_, Arc<ActionExecutor>>,
+    action_registry: tauri::State<'_, Arc<ActionRegistry>>,
+    app_handle: tauri::AppHandle,
+    project_id: String,
+    prompt: String,
+    provider: Option<String>,
+    image_ids: Option<Vec<String>>,
+) -> Result<ProjectSessionResponse, String> {
+    let store = get_store(&store)?;
+
+    let project = store
+        .get_project(&project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {project_id}"))?;
+
+    // Build project context for the prompt
+    let project_context = build_project_session_context(&store, &project, None);
+
+    let is_remote = project.location == store::ProjectLocation::Remote;
+    let action_instructions = build_project_session_action_instructions(is_remote);
 
     let full_prompt = format!(
         "<action>\n{action_instructions}\n\nProject information:\n{project_context}\n</action>\n\n{prompt}"
@@ -3141,6 +3147,30 @@ mod tests {
             infer_branch_resume_session_type("Write a project note."),
             None
         );
+    }
+
+    fn assert_project_session_reference_guidance(prompt: &str) {
+        assert!(prompt.contains("hashtag references in the form #<type>:<id>"));
+        assert!(prompt.contains("#note:123"));
+        assert!(prompt.contains("#commit:<sha>"));
+        assert!(prompt.contains("#review:456"));
+        assert!(prompt.contains("do not paste or rewrite the note contents"));
+        assert!(prompt.contains("reference the note and relevant section instead"));
+        assert!(prompt.contains("Implement \"Step 5: unit tests\" from #note:123"));
+    }
+
+    #[test]
+    fn local_project_session_prompt_includes_timeline_reference_guidance() {
+        let prompt = build_project_session_action_instructions(false);
+
+        assert_project_session_reference_guidance(&prompt);
+    }
+
+    #[test]
+    fn remote_project_session_prompt_includes_timeline_reference_guidance() {
+        let prompt = build_project_session_action_instructions(true);
+
+        assert_project_session_reference_guidance(&prompt);
     }
 
     #[test]

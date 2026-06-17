@@ -13,6 +13,7 @@
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { viewport } from '../../shared/viewport.svelte';
   import { onBranchSessionStatus } from '../../services/branchEventService';
+  import { shouldQueueBranchSession } from '../branches/branchSessionQueue';
 
   interface Props {
     branchId: string;
@@ -44,7 +45,7 @@
   let isDirty = $state(false);
   let starting = $state(false);
   let timelineLoading = $state(true);
-  let hasRunningSession = $state(false);
+  let shouldQueueCommitSession = $state(true);
   let textareaElement = $state<HTMLElement | null>(null);
 
   // Hashtag reference items
@@ -66,7 +67,7 @@
   const MAX_TEXTAREA_HEIGHT_PX = 260;
 
   let suggestedPrompt = $derived(getCommitPrefillFromReviewComments(visibleCommentCount));
-  let willQueue = $derived(timelineLoading || hasRunningSession);
+  let willQueue = $derived(timelineLoading || shouldQueueCommitSession);
 
   $effect(() => {
     if (!isDirty) {
@@ -79,23 +80,17 @@
     syncTextareaHeight();
   });
 
-  async function refreshQueueState(force = false) {
+  async function refreshQueueState(force = false): Promise<boolean> {
     try {
       const timeline = await commands.getBranchTimeline(branchId, { force });
-      hasRunningSession =
-        timeline.commits.some(
-          (c) => c.sessionStatus === 'running' || c.sessionStatus === 'queued'
-        ) ||
-        timeline.notes.some((n) => n.sessionStatus === 'running' || n.sessionStatus === 'queued') ||
-        timeline.reviews.some(
-          (r) => !r.isAuto && (r.sessionStatus === 'running' || r.sessionStatus === 'queued')
-        );
+      shouldQueueCommitSession = shouldQueueBranchSession({ mode: 'commit', timeline });
     } catch (e) {
       console.error('[DiffCommitSessionLauncher] Failed to load timeline:', e);
-      hasRunningSession = false;
+      shouldQueueCommitSession = true;
     } finally {
       timelineLoading = false;
     }
+    return shouldQueueCommitSession;
   }
 
   onMount(() => {
@@ -168,35 +163,21 @@
       const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
       const provider = getPreferredAgent(agents) ?? undefined;
 
-      if (hasRunningSession) {
-        await commands.queueBranchSession(
-          branchId,
-          finalPrompt,
-          'commit',
-          provider,
-          undefined,
-          launchContext
-        );
-      } else {
-        await commands.startBranchSession(
-          branchId,
-          finalPrompt,
-          'commit',
-          provider,
-          undefined,
-          launchContext
-        );
-      }
+      await commands.startOrQueueBranchSession(
+        branchId,
+        finalPrompt,
+        'commit',
+        provider,
+        undefined,
+        launchContext
+      );
 
       onStarted();
     } catch (e) {
-      toast.error(
-        hasRunningSession ? 'Unable to queue commit session' : 'Unable to start commit session',
-        {
-          description: e instanceof Error ? e.message : String(e),
-          duration: Infinity,
-        }
-      );
+      toast.error('Unable to start commit session', {
+        description: e instanceof Error ? e.message : String(e),
+        duration: Infinity,
+      });
     } finally {
       starting = false;
     }

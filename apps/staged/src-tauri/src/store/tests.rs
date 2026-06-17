@@ -464,6 +464,48 @@ fn test_transition_from_active_does_not_overwrite_completed_session() {
 }
 
 #[test]
+fn test_transition_queued_to_running_claims_queued_session() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_queued("queued");
+    store.create_session(&session).unwrap();
+
+    let transitioned = store.transition_queued_to_running(&session.id).unwrap();
+    assert!(transitioned);
+
+    let final_state = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(final_state.status, SessionStatus::Running);
+    assert_eq!(final_state.owner_pid, Some(std::process::id()));
+}
+
+#[test]
+fn test_transition_queued_to_running_does_not_overwrite_cancelled_session() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_queued("cancelled before claim");
+    store.create_session(&session).unwrap();
+    store
+        .update_session_status(
+            &session.id,
+            SessionStatus::Cancelled,
+            None,
+            Some(&CompletionReason::Interrupted),
+        )
+        .unwrap();
+
+    let transitioned = store.transition_queued_to_running(&session.id).unwrap();
+    assert!(!transitioned);
+
+    let final_state = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(final_state.status, SessionStatus::Cancelled);
+    assert_eq!(
+        final_state.completion_reason,
+        Some(CompletionReason::Interrupted)
+    );
+    assert_eq!(final_state.owner_pid, None);
+}
+
+#[test]
 fn test_queued_pipeline_commit_owns_branch_queue_position() {
     let store = Store::in_memory().unwrap();
     let project = Project::new("test-owner/test-repo");

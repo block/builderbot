@@ -7,7 +7,7 @@
 //!
 //! Only commands the frontend legitimately needs are exposed here:
 //! - `start_session` / `resume_session` — kick off agent work
-//! - `start_branch_session` — kick off branch-scoped agent work (note/commit)
+//! - `start_or_queue_branch_session` — start or enqueue branch-scoped agent work
 //! - `cancel_session` / `delete_session` — lifecycle control
 //! - `get_session` / `get_session_messages` / `get_session_messages_since` — reads for polling
 //!
@@ -16,9 +16,9 @@
 //! only by the backend (`session_runner` / `agent` modules) via the
 //! `Store` directly.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -474,12 +474,275 @@ pub enum BranchSessionType {
     Review,
 }
 
+impl BranchSessionType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            BranchSessionType::Commit => "commit",
+            BranchSessionType::Note => "note",
+            BranchSessionType::Review => "review",
+        }
+    }
+
+    fn schedule_kind(&self) -> BranchSessionScheduleKind {
+        match self {
+            BranchSessionType::Commit => BranchSessionScheduleKind::Commit,
+            BranchSessionType::Note => BranchSessionScheduleKind::Note,
+            BranchSessionType::Review => BranchSessionScheduleKind::Review,
+        }
+    }
+}
+
 fn extra_env_for_branch_session(session_type: &BranchSessionType) -> Vec<(String, String)> {
     if matches!(session_type, BranchSessionType::Commit) {
         session_runner::git_identity_env_from_global_config()
     } else {
         vec![]
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum BranchSessionScheduleKind {
+    Commit,
+    Note,
+    Review,
+    CommitPipeline,
+}
+
+impl BranchSessionScheduleKind {
+    fn is_exclusive(self) -> bool {
+        matches!(
+            self,
+            BranchSessionScheduleKind::Commit | BranchSessionScheduleKind::CommitPipeline
+        )
+    }
+
+    fn allows_parallel_instances(self) -> bool {
+        matches!(self, BranchSessionScheduleKind::Note)
+    }
+
+    fn branch_session_type(self) -> Option<BranchSessionType> {
+        match self {
+            BranchSessionScheduleKind::Commit => Some(BranchSessionType::Commit),
+            BranchSessionScheduleKind::Note => Some(BranchSessionType::Note),
+            BranchSessionScheduleKind::Review => Some(BranchSessionType::Review),
+            BranchSessionScheduleKind::CommitPipeline => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BranchSessionSchedule {
+    kind: BranchSessionScheduleKind,
+    review_id: Option<String>,
+    blocks_queue: bool,
+}
+
+fn can_start_with_active_branch_sessions(
+    candidate: BranchSessionScheduleKind,
+    active: &HashSet<BranchSessionScheduleKind>,
+) -> bool {
+    if candidate.is_exclusive() {
+        return active.is_empty();
+    }
+
+    if active.iter().any(|kind| kind.is_exclusive()) {
+        return false;
+    }
+
+    candidate.allows_parallel_instances() || !active.contains(&candidate)
+}
+
+fn note_session_schedule() -> BranchSessionSchedule {
+    BranchSessionSchedule {
+        kind: BranchSessionScheduleKind::Note,
+        review_id: None,
+        blocks_queue: true,
+    }
+}
+
+fn review_session_schedule(review: &store::Review) -> BranchSessionSchedule {
+    BranchSessionSchedule {
+        kind: BranchSessionScheduleKind::Review,
+        review_id: Some(review.id.clone()),
+        blocks_queue: !review.is_auto,
+    }
+}
+
+fn commit_session_schedule(kind: BranchSessionScheduleKind) -> BranchSessionSchedule {
+    BranchSessionSchedule {
+        kind,
+        review_id: None,
+        blocks_queue: true,
+    }
+}
+
+fn is_commit_pipeline_session(session: &store::Session) -> bool {
+    session
+        .pipeline
+        .as_ref()
+        .and_then(|pipeline| pipeline.kind.as_ref())
+        .is_some()
+}
+
+fn resolve_branch_session_schedule(
+    store: &Store,
+    branch_id: &str,
+    session: &store::Session,
+    require_artifact: bool,
+) -> Result<Option<BranchSessionSchedule>, String> {
+    if is_commit_pipeline_session(session) {
+        let commit = store
+            .get_commit_by_session(&session.id)
+            .map_err(|e| e.to_string())?;
+        return match commit {
+            Some(commit) if commit.branch_id == branch_id => Ok(Some(commit_session_schedule(
+                BranchSessionScheduleKind::CommitPipeline,
+            ))),
+            Some(_) => Ok(None),
+            None if require_artifact => Err(format!(
+                "Queued pipeline session {} has no linked commit",
+                session.id
+            )),
+            None => Ok(None),
+        };
+    }
+
+    if let Some(commit) = store
+        .get_commit_by_session(&session.id)
+        .map_err(|e| e.to_string())?
+    {
+        return Ok((commit.branch_id == branch_id)
+            .then(|| commit_session_schedule(BranchSessionScheduleKind::Commit)));
+    }
+
+    if let Some(note) = store
+        .get_note_by_session(&session.id)
+        .map_err(|e| e.to_string())?
+    {
+        return Ok((note.branch_id == branch_id).then(note_session_schedule));
+    }
+
+    if let Some(review) = store
+        .get_review_by_session(&session.id)
+        .map_err(|e| e.to_string())?
+    {
+        return Ok((review.branch_id == branch_id).then(|| review_session_schedule(&review)));
+    }
+
+    if require_artifact {
+        Err(format!(
+            "Queued session {} has no linked artifact",
+            session.id
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
+fn running_branch_session_kinds(
+    store: &Store,
+    branch_id: &str,
+) -> Result<HashSet<BranchSessionScheduleKind>, String> {
+    let running = store.get_running_sessions().map_err(|e| e.to_string())?;
+    let mut active = HashSet::new();
+    for session in running {
+        if let Some(schedule) = resolve_branch_session_schedule(store, branch_id, &session, false)?
+        {
+            if schedule.blocks_queue {
+                active.insert(schedule.kind);
+            }
+        }
+    }
+    Ok(active)
+}
+
+fn branch_session_launch_locks() -> &'static Mutex<HashMap<String, Arc<Mutex<()>>>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+    LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn branch_session_launch_lock_for(branch_id: &str) -> Arc<Mutex<()>> {
+    let mut locks = branch_session_launch_locks().lock().unwrap();
+    Arc::clone(
+        locks
+            .entry(branch_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(()))),
+    )
+}
+
+fn has_queued_user_branch_session(store: &Store, branch_id: &str) -> Result<bool, String> {
+    let queued = store
+        .get_queued_sessions_for_branch(branch_id)
+        .map_err(|e| e.to_string())?;
+
+    for session in queued {
+        if let Some(schedule) = resolve_branch_session_schedule(store, branch_id, &session, true)? {
+            if schedule.blocks_queue {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+fn branch_session_start_waits_for_provisioning(
+    store: &Store,
+    branch_id: &str,
+) -> Result<bool, String> {
+    let branch = store
+        .get_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    match branch.branch_type {
+        store::BranchType::Local => store
+            .get_workdir_for_branch(branch_id)
+            .map(|workdir| workdir.is_none())
+            .map_err(|e| e.to_string()),
+        store::BranchType::Remote => {
+            Ok(branch.workspace_status != Some(store::WorkspaceStatus::Running))
+        }
+    }
+}
+
+fn should_queue_branch_session_start(
+    store: &Store,
+    branch_id: &str,
+    session_type: &BranchSessionType,
+) -> Result<bool, String> {
+    if branch_session_start_waits_for_provisioning(store, branch_id)? {
+        return Ok(true);
+    }
+
+    if has_queued_user_branch_session(store, branch_id)? {
+        return Ok(true);
+    }
+
+    let active = running_branch_session_kinds(store, branch_id)?;
+    Ok(!can_start_with_active_branch_sessions(
+        session_type.schedule_kind(),
+        &active,
+    ))
+}
+
+#[cfg(test)]
+fn drainable_session_ids_for_active_set(
+    queued: &[(String, BranchSessionSchedule)],
+    active: &mut HashSet<BranchSessionScheduleKind>,
+) -> Vec<String> {
+    let mut drainable = Vec::new();
+    for (session_id, schedule) in queued {
+        if !can_start_with_active_branch_sessions(schedule.kind, active) {
+            break;
+        }
+
+        drainable.push(session_id.clone());
+        if schedule.blocks_queue {
+            active.insert(schedule.kind);
+        }
+    }
+    drainable
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -491,6 +754,13 @@ pub struct BranchSessionLaunchContext {
     pub review_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum BranchSessionLaunchStatus {
+    Running,
+    Queued,
+}
+
 /// Response from starting a branch session.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -498,6 +768,7 @@ pub struct BranchSessionResponse {
     pub session_id: String,
     /// The ID of the artifact created (commit or note).
     pub artifact_id: String,
+    pub session_status: BranchSessionLaunchStatus,
 }
 
 /// Response from starting a project session.
@@ -666,39 +937,55 @@ pub async fn start_project_session(
     })
 }
 
-/// Start a branch-scoped session (note or commit).
-///
-/// This builds the full prompt (action tag + branch history + user prompt),
-/// creates the artifact stub, and kicks off the agent in the branch's workdir.
-///
-/// For remote branches (those with a `workspace_name`), the session runs via
-/// `blox acp` instead of a local agent binary. Branch context and commit
-/// detection are skipped since there is no local worktree.
-#[allow(clippy::too_many_arguments)]
-#[tauri::command(rename_all = "camelCase")]
-pub async fn start_branch_session(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
-    app_handle: tauri::AppHandle,
-    branch_id: String,
-    prompt: String,
+struct PreparedBranchSessionStart {
+    branch: store::Branch,
     session_type: BranchSessionType,
     provider: Option<String>,
-    image_ids: Option<Vec<String>>,
-    launch_context: Option<BranchSessionLaunchContext>,
-) -> Result<BranchSessionResponse, String> {
-    let store = get_store(&store)?;
+    working_dir: PathBuf,
+    full_prompt: String,
+    pre_head_sha: Option<String>,
+    review_tip_sha: Option<String>,
+    remote_working_dir: Option<PathBuf>,
+}
 
-    if matches!(
-        session_type,
-        BranchSessionType::Commit | BranchSessionType::Review
-    ) {
-        cancel_in_flight_auto_review_for_branch(&store, &registry, &branch_id)?;
-    }
+struct CreatedBranchSession {
+    session: store::Session,
+    artifact_id: String,
+}
 
-    // Resolve branch → project
+fn resolve_branch_session_provider(
+    store: &Arc<Store>,
+    branch_id: &str,
+    session_type: &BranchSessionType,
+    provider: Option<String>,
+) -> Result<Option<String>, String> {
     let branch = store
-        .get_branch(&branch_id)
+        .get_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    if matches!(session_type, BranchSessionType::Review) {
+        Some(resolve_review_provider(
+            provider,
+            branch.workspace_name.is_some(),
+        ))
+        .transpose()
+    } else {
+        Ok(provider)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_branch_session_start(
+    store: &Arc<Store>,
+    branch_id: &str,
+    prompt: &str,
+    session_type: BranchSessionType,
+    provider: Option<String>,
+    launch_context: Option<&BranchSessionLaunchContext>,
+) -> Result<PreparedBranchSessionStart, String> {
+    let branch = store
+        .get_branch(branch_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
@@ -708,24 +995,19 @@ pub async fn start_branch_session(
         .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
 
     let is_remote = branch.workspace_name.is_some();
-    let provider = if matches!(session_type, BranchSessionType::Review) {
-        Some(resolve_review_provider(provider, is_remote)?)
-    } else {
-        provider
-    };
 
     // Resolve working directory and branch context.
     // Remote branches use ws_exec for git operations; local branches use the worktree directly.
     let (working_dir, branch_context) = if is_remote {
         // For remote branches, use the derived clone path as a fallback working dir.
         // The actual work happens via ws_exec, not local filesystem.
-        let fallback_dir = resolve_branch_repo_slug(&store, &project, &branch)
+        let fallback_dir = resolve_branch_repo_slug(store, &project, &branch)
             .and_then(|repo| crate::paths::repos_dir().map(|d| d.join(repo)))
             .unwrap_or_else(|| PathBuf::from("/tmp"));
         let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
         let base_branch = branch.base_branch.clone();
-        let store_for_context = Arc::clone(&store);
-        let branch_id_for_context = branch_id.clone();
+        let store_for_context = Arc::clone(store);
+        let branch_id_for_context = branch_id.to_string();
         let project_id_for_context = branch.project_id.clone();
         let ctx = tauri::async_runtime::spawn_blocking(move || {
             build_remote_branch_context(
@@ -741,7 +1023,7 @@ pub async fn start_branch_session(
         (fallback_dir, ctx)
     } else {
         let workdir = store
-            .get_workdir_for_branch(&branch_id)
+            .get_workdir_for_branch(branch_id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
 
@@ -765,110 +1047,68 @@ pub async fn start_branch_session(
         let ctx = build_branch_context(
             &worktree_path,
             &branch.base_branch,
-            &store,
-            &branch_id,
+            store,
+            branch_id,
             &branch.project_id,
         );
         (worktree_path, ctx)
     };
 
-    // Build the full prompt with action instructions + project information + branch context.
-    let project_information = build_project_context(&store, &project, &branch);
-    let full_prompt = build_full_prompt(
-        &prompt,
-        &project_information,
-        &branch_context,
-        &session_type,
-        launch_context.as_ref(),
-        Some(&branch.base_branch),
-    );
-
-    // Create the session
-    let mut session = store::Session::new_running(&full_prompt, &working_dir);
-    if let Some(ref p) = provider {
-        session = session.with_provider(p);
-    }
-    store.create_session(&session).map_err(|e| e.to_string())?;
-
-    // Emit a "running" event so the frontend can register the session in its
-    // state stores (project list spinner, unread badges, etc.) regardless of
-    // which UI surface started the session.
-    let session_type_str = match session_type {
-        BranchSessionType::Commit => "commit",
-        BranchSessionType::Note => "note",
-        BranchSessionType::Review => "review",
-    };
-    session_runner::emit_session_running(
-        &app_handle,
-        &session.id,
-        &branch_id,
-        &branch.project_id,
-        session_type_str,
-    );
-
-    // Create artifact stub and compute pre-head SHA
-    let (artifact_id, pre_head_sha) = match session_type {
-        BranchSessionType::Note => {
-            let note = store::Note::new(&branch_id, &prompt, "").with_session(&session.id);
-            store.create_note(&note).map_err(|e| e.to_string())?;
-            (note.id, None)
-        }
-        BranchSessionType::Commit => {
-            let commit = store::Commit::new_pending(&branch_id).with_session(&session.id);
-            store.create_commit(&commit).map_err(|e| e.to_string())?;
-            // For remote branches, get HEAD via ws_exec; for local, use git directly.
-            let head_sha = if is_remote {
-                let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
-                match run_blox_blocking(move || {
-                    blox::ws_exec(&workspace_name, &["git", "rev-parse", "HEAD"])
-                })
-                .await
-                {
-                    Ok(sha) => Some(sha.trim().to_string()),
-                    Err(e) => {
-                        log::warn!("Failed to get remote HEAD SHA via ws_exec: {e}");
-                        None
-                    }
+    let pre_head_sha = if matches!(session_type, BranchSessionType::Commit) {
+        if is_remote {
+            let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
+            match run_blox_blocking(move || {
+                blox::ws_exec(&workspace_name, &["git", "rev-parse", "HEAD"])
+            })
+            .await
+            {
+                Ok(sha) => Some(sha.trim().to_string()),
+                Err(e) => {
+                    log::warn!("Failed to get remote HEAD SHA via ws_exec: {e}");
+                    None
                 }
-            } else {
-                Some(
-                    git::get_head_sha(&working_dir)
-                        .map_err(|e| format!("Failed to get HEAD SHA: {e}"))?,
-                )
-            };
-            (commit.id, head_sha)
+            }
+        } else {
+            Some(
+                git::get_head_sha(&working_dir)
+                    .map_err(|e| format!("Failed to get HEAD SHA: {e}"))?,
+            )
         }
-        BranchSessionType::Review => {
-            // Get the current tip SHA for the review anchor
-            let tip_sha = if is_remote {
-                let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
-                run_blox_blocking(move || {
-                    blox::ws_exec(&workspace_name, &["git", "rev-parse", "HEAD"])
-                })
+    } else {
+        None
+    };
+
+    let review_tip_sha = if matches!(session_type, BranchSessionType::Review) {
+        let tip_sha = if is_remote {
+            let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
+            run_blox_blocking(move || blox::ws_exec(&workspace_name, &["git", "rev-parse", "HEAD"]))
                 .await
                 .map(|s| s.trim().to_string())
                 .unwrap_or_else(|_| "unknown".to_string())
-            } else {
-                git::get_head_sha(&working_dir)
-                    .map_err(|e| format!("Failed to get HEAD SHA: {e}"))?
-            };
-
-            let review = store::Review::new(&branch_id, &tip_sha, store::ReviewScope::Branch)
-                .with_session(&session.id);
-            store.create_review(&review).map_err(|e| e.to_string())?;
-            (review.id, None)
-        }
+        } else {
+            git::get_head_sha(&working_dir).map_err(|e| format!("Failed to get HEAD SHA: {e}"))?
+        };
+        Some(tip_sha)
+    } else {
+        None
     };
 
-    // Review sessions have a required provider by this point; other session
-    // types keep the caller's optional selection.
-    let effective_provider = provider;
+    // Build the full prompt with action instructions + project information + branch context.
+    let project_information = build_project_context(store, &project, &branch);
+    let full_prompt = build_full_prompt(
+        prompt,
+        &project_information,
+        &branch_context,
+        &session_type,
+        launch_context,
+        Some(&branch.base_branch),
+    );
 
     // Resolve the actual workspace path for remote branches so the remote agent
     // starts in the correct repo directory (not the workspace default).
     let remote_working_dir = if is_remote {
         let ws_name = branch.workspace_name.as_deref().unwrap().to_string();
-        let store_for_resolve = Arc::clone(&store);
+        let store_for_resolve = Arc::clone(store);
         let branch_for_resolve = branch.clone();
         match tauri::async_runtime::spawn_blocking(move || {
             crate::branches::resolve_branch_workspace_subpath(
@@ -890,23 +1130,145 @@ pub async fn start_branch_session(
         None
     };
 
+    Ok(PreparedBranchSessionStart {
+        branch,
+        session_type,
+        provider,
+        working_dir,
+        full_prompt,
+        pre_head_sha,
+        review_tip_sha,
+        remote_working_dir,
+    })
+}
+
+fn insert_running_branch_session(
+    store: &Arc<Store>,
+    prepared: &PreparedBranchSessionStart,
+    prompt: &str,
+) -> Result<CreatedBranchSession, String> {
+    let mut session = store::Session::new_running(&prepared.full_prompt, &prepared.working_dir);
+    if let Some(ref p) = prepared.provider {
+        session = session.with_provider(p);
+    }
+    store.create_session(&session).map_err(|e| e.to_string())?;
+
+    let artifact_id = match &prepared.session_type {
+        BranchSessionType::Note => {
+            let note = store::Note::new(&prepared.branch.id, prompt, "").with_session(&session.id);
+            store.create_note(&note).map_err(|e| e.to_string())?;
+            note.id
+        }
+        BranchSessionType::Commit => {
+            let commit = store::Commit::new_pending(&prepared.branch.id).with_session(&session.id);
+            store.create_commit(&commit).map_err(|e| e.to_string())?;
+            commit.id
+        }
+        BranchSessionType::Review => {
+            let review = store::Review::new(
+                &prepared.branch.id,
+                prepared.review_tip_sha.as_deref().unwrap_or("unknown"),
+                store::ReviewScope::Branch,
+            )
+            .with_session(&session.id);
+            store.create_review(&review).map_err(|e| e.to_string())?;
+            review.id
+        }
+    };
+
+    Ok(CreatedBranchSession {
+        session,
+        artifact_id,
+    })
+}
+
+fn insert_queued_branch_session(
+    store: &Arc<Store>,
+    branch_id: &str,
+    prompt: &str,
+    session_type: &BranchSessionType,
+    provider: Option<String>,
+    image_ids: &[String],
+    launch_context: Option<&BranchSessionLaunchContext>,
+) -> Result<BranchSessionResponse, String> {
+    let queued_prompt = embed_launch_context(prompt, launch_context)?;
+    let mut session = store::Session::new_queued(&queued_prompt);
+    if let Some(ref p) = provider {
+        session = session.with_provider(p);
+    }
+    store.create_session(&session).map_err(|e| e.to_string())?;
+
+    store
+        .set_images_session_id(image_ids, &session.id)
+        .map_err(|e| e.to_string())?;
+
+    let artifact_id = match session_type {
+        BranchSessionType::Note => {
+            let note = store::Note::new(branch_id, prompt, "").with_session(&session.id);
+            store.create_note(&note).map_err(|e| e.to_string())?;
+            note.id
+        }
+        BranchSessionType::Commit => {
+            let commit = store::Commit::new_pending(branch_id).with_session(&session.id);
+            store.create_commit(&commit).map_err(|e| e.to_string())?;
+            commit.id
+        }
+        BranchSessionType::Review => {
+            let review = store::Review::new(branch_id, "", store::ReviewScope::Branch)
+                .with_session(&session.id);
+            store.create_review(&review).map_err(|e| e.to_string())?;
+            review.id
+        }
+    };
+
+    Ok(BranchSessionResponse {
+        session_id: session.id,
+        artifact_id,
+        session_status: BranchSessionLaunchStatus::Queued,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn launch_running_branch_session(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    app_handle: tauri::AppHandle,
+    prepared: PreparedBranchSessionStart,
+    created: CreatedBranchSession,
+    image_ids: Vec<String>,
+) -> Result<BranchSessionResponse, String> {
+    let session_type = prepared.session_type;
+    let branch = prepared.branch;
+    let session_type_str = session_type.as_str();
+    let branch_id = branch.id.clone();
+    let project_id = branch.project_id.clone();
+    let workspace_name = branch.workspace_name.clone();
+
+    session_runner::emit_session_running(
+        &app_handle,
+        &created.session.id,
+        &branch_id,
+        &project_id,
+        session_type_str,
+    );
+
     session_runner::start_session(
         SessionConfig {
-            session_id: session.id.clone(),
-            prompt: full_prompt,
-            working_dir,
+            session_id: created.session.id.clone(),
+            prompt: prepared.full_prompt,
+            working_dir: prepared.working_dir,
             agent_session_id: None,
-            pre_head_sha,
-            provider: effective_provider,
-            workspace_name: branch.workspace_name.clone(),
+            pre_head_sha: prepared.pre_head_sha,
+            provider: prepared.provider,
+            workspace_name,
             extra_env: extra_env_for_branch_session(&session_type),
             mcp_project_id: None,
             action_executor: None,
             action_registry: None,
-            remote_working_dir,
-            image_ids: image_ids.unwrap_or_default(),
+            remote_working_dir: prepared.remote_working_dir,
+            image_ids,
             branch_id: Some(branch_id),
-            project_id: Some(branch.project_id.clone()),
+            project_id: Some(project_id),
         },
         store,
         app_handle,
@@ -914,9 +1276,172 @@ pub async fn start_branch_session(
     )?;
 
     Ok(BranchSessionResponse {
-        session_id: session.id,
-        artifact_id,
+        session_id: created.session.id,
+        artifact_id: created.artifact_id,
+        session_status: BranchSessionLaunchStatus::Running,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn start_or_queue_branch_session_for_store(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    prompt: String,
+    session_type: BranchSessionType,
+    provider: Option<String>,
+    image_ids: Option<Vec<String>>,
+    launch_context: Option<BranchSessionLaunchContext>,
+) -> Result<BranchSessionResponse, String> {
+    let image_ids = image_ids.unwrap_or_default();
+
+    if matches!(
+        session_type,
+        BranchSessionType::Commit | BranchSessionType::Review
+    ) {
+        cancel_in_flight_auto_review_for_branch(&store, &registry, &branch_id)?;
+    }
+
+    let provider = resolve_branch_session_provider(&store, &branch_id, &session_type, provider)?;
+    let launch_lock = branch_session_launch_lock_for(&branch_id);
+
+    {
+        let _guard = launch_lock.lock().unwrap();
+        if should_queue_branch_session_start(&store, &branch_id, &session_type)? {
+            return insert_queued_branch_session(
+                &store,
+                &branch_id,
+                &prompt,
+                &session_type,
+                provider,
+                &image_ids,
+                launch_context.as_ref(),
+            );
+        }
+    }
+
+    let prepared = prepare_branch_session_start(
+        &store,
+        &branch_id,
+        &prompt,
+        session_type.clone(),
+        provider.clone(),
+        launch_context.as_ref(),
+    )
+    .await?;
+
+    let created = {
+        let _guard = launch_lock.lock().unwrap();
+        if should_queue_branch_session_start(&store, &branch_id, &session_type)? {
+            return insert_queued_branch_session(
+                &store,
+                &branch_id,
+                &prompt,
+                &session_type,
+                provider,
+                &image_ids,
+                launch_context.as_ref(),
+            );
+        }
+        insert_running_branch_session(&store, &prepared, &prompt)?
+    };
+
+    launch_running_branch_session(store, registry, app_handle, prepared, created, image_ids)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn queue_branch_session_for_store(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    branch_id: String,
+    prompt: String,
+    session_type: BranchSessionType,
+    provider: Option<String>,
+    image_ids: Option<Vec<String>>,
+    launch_context: Option<BranchSessionLaunchContext>,
+) -> Result<BranchSessionResponse, String> {
+    let image_ids = image_ids.unwrap_or_default();
+
+    if matches!(
+        session_type,
+        BranchSessionType::Commit | BranchSessionType::Review
+    ) {
+        cancel_in_flight_auto_review_for_branch(&store, &registry, &branch_id)?;
+    }
+
+    let provider = resolve_branch_session_provider(&store, &branch_id, &session_type, provider)?;
+    let launch_lock = branch_session_launch_lock_for(&branch_id);
+    let _guard = launch_lock.lock().unwrap();
+    insert_queued_branch_session(
+        &store,
+        &branch_id,
+        &prompt,
+        &session_type,
+        provider,
+        &image_ids,
+        launch_context.as_ref(),
+    )
+}
+
+/// Start or queue a branch-scoped session.
+///
+/// Kept for compatibility with older callers; it now delegates to the backend
+/// scheduling guard rather than unconditionally starting work.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(rename_all = "camelCase")]
+pub async fn start_branch_session(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    prompt: String,
+    session_type: BranchSessionType,
+    provider: Option<String>,
+    image_ids: Option<Vec<String>>,
+    launch_context: Option<BranchSessionLaunchContext>,
+) -> Result<BranchSessionResponse, String> {
+    let store = get_store(&store)?;
+    start_or_queue_branch_session_for_store(
+        store,
+        Arc::clone(&registry),
+        app_handle,
+        branch_id,
+        prompt,
+        session_type,
+        provider,
+        image_ids,
+        launch_context,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command(rename_all = "camelCase")]
+pub async fn start_or_queue_branch_session(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    prompt: String,
+    session_type: BranchSessionType,
+    provider: Option<String>,
+    image_ids: Option<Vec<String>>,
+    launch_context: Option<BranchSessionLaunchContext>,
+) -> Result<BranchSessionResponse, String> {
+    let store = get_store(&store)?;
+    start_or_queue_branch_session_for_store(
+        store,
+        Arc::clone(&registry),
+        app_handle,
+        branch_id,
+        prompt,
+        session_type,
+        provider,
+        image_ids,
+        launch_context,
+    )
+    .await
 }
 
 // =============================================================================
@@ -941,72 +1466,23 @@ pub fn queue_branch_session(
     launch_context: Option<BranchSessionLaunchContext>,
 ) -> Result<BranchSessionResponse, String> {
     let store = get_store(&store)?;
-
-    if matches!(
+    queue_branch_session_for_store(
+        store,
+        Arc::clone(&registry),
+        branch_id,
+        prompt,
         session_type,
-        BranchSessionType::Commit | BranchSessionType::Review
-    ) {
-        cancel_in_flight_auto_review_for_branch(&store, &registry, &branch_id)?;
-    }
-
-    // Validate that the branch exists.
-    let branch = store
-        .get_branch(&branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-    let is_remote = branch.workspace_name.is_some();
-    let provider = if matches!(session_type, BranchSessionType::Review) {
-        Some(resolve_review_provider(provider, is_remote)?)
-    } else {
-        provider
-    };
-
-    // Create the queued session — prompt is stored raw (not enriched with
-    // context) since context will be built when the session is drained.
-    let queued_prompt = embed_launch_context(&prompt, launch_context.as_ref())?;
-    let mut session = store::Session::new_queued(&queued_prompt);
-    if let Some(ref p) = provider {
-        session = session.with_provider(p);
-    }
-    store.create_session(&session).map_err(|e| e.to_string())?;
-
-    // Link any attached images to the queued session so they are available at drain time.
-    if let Some(ref ids) = image_ids {
-        store
-            .set_images_session_id(ids, &session.id)
-            .map_err(|e| e.to_string())?;
-    }
-
-    // Create the artifact stub, following the same pattern as start_branch_session.
-    let artifact_id = match session_type {
-        BranchSessionType::Note => {
-            let note = store::Note::new(&branch_id, &prompt, "").with_session(&session.id);
-            store.create_note(&note).map_err(|e| e.to_string())?;
-            note.id
-        }
-        BranchSessionType::Commit => {
-            let commit = store::Commit::new_pending(&branch_id).with_session(&session.id);
-            store.create_commit(&commit).map_err(|e| e.to_string())?;
-            commit.id
-        }
-        BranchSessionType::Review => {
-            let review = store::Review::new(&branch_id, "", store::ReviewScope::Branch)
-                .with_session(&session.id);
-            store.create_review(&review).map_err(|e| e.to_string())?;
-            review.id
-        }
-    };
-
-    Ok(BranchSessionResponse {
-        session_id: session.id,
-        artifact_id,
-    })
+        provider,
+        image_ids,
+        launch_context,
+    )
 }
 
-/// Drain the oldest queued session for a branch by starting it.
+/// Drain queued sessions for a branch by starting compatible work.
 ///
-/// Queries all queued sessions for the given branch and starts only the first
-/// one (oldest by `created_at`). Returns whether a session was started.
+/// Queries queued sessions for the given branch oldest-first, starts compatible
+/// note/review pairs, and stops at the first FIFO barrier. Returns whether at
+/// least one session was started.
 #[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
 pub async fn drain_queued_sessions(
@@ -1027,7 +1503,7 @@ pub async fn drain_queued_sessions(
     .await
 }
 
-/// Start the oldest queued branch session if one exists and the branch is idle.
+/// Start queued branch sessions while they can safely run together.
 ///
 /// This is shared by the Tauri command and backend lifecycle hooks so queue
 /// progression remains owned by the backend.
@@ -1038,62 +1514,70 @@ pub async fn drain_queued_sessions_for_branch(
     branch_id: String,
     provider: Option<String>,
 ) -> Result<bool, String> {
-    // Bail out if the branch already has a running session to prevent
-    // concurrent sessions on the same branch.
-    if store
-        .has_running_session_for_branch(&branch_id)
-        .unwrap_or(false)
-    {
-        return Ok(false);
-    }
-
     let queued = store
         .get_queued_sessions_for_branch(&branch_id)
         .map_err(|e| e.to_string())?;
 
-    let session = match queued.into_iter().next() {
-        Some(s) => s,
-        None => return Ok(false),
-    };
+    let mut active = running_branch_session_kinds(&store, &branch_id)?;
+    let mut started_any = false;
 
-    if session
-        .pipeline
-        .as_ref()
-        .and_then(|pipeline| pipeline.kind.as_ref())
-        .is_some()
-    {
-        if store
-            .get_commit_by_session(&session.id)
-            .map_err(|e| e.to_string())?
-            .is_none()
-        {
-            return Err(format!(
-                "Queued pipeline session {} has no linked commit",
-                session.id
-            ));
+    for session in queued {
+        let schedule = match resolve_branch_session_schedule(&store, &branch_id, &session, true)? {
+            Some(schedule) => schedule,
+            None => continue,
+        };
+
+        if !can_start_with_active_branch_sessions(schedule.kind, &active) {
+            break;
         }
 
+        let started = start_queued_session_for_branch(
+            Arc::clone(&store),
+            Arc::clone(&registry),
+            app_handle.clone(),
+            branch_id.clone(),
+            session,
+            schedule.clone(),
+            provider.clone(),
+        )
+        .await?;
+
+        if started {
+            started_any = true;
+            if schedule.blocks_queue {
+                active.insert(schedule.kind);
+            }
+        } else {
+            active = running_branch_session_kinds(&store, &branch_id)?;
+        }
+    }
+
+    Ok(started_any)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn start_queued_session_for_branch(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    session: store::Session,
+    schedule: BranchSessionSchedule,
+    provider: Option<String>,
+) -> Result<bool, String> {
+    if matches!(schedule.kind, BranchSessionScheduleKind::CommitPipeline) {
         return crate::prs::start_queued_commit_pipeline_for_branch(
             store, registry, app_handle, branch_id, session, provider,
         )
         .await;
     }
 
-    // Look up which artifact type is linked to this session so we know
-    // what kind of branch session to start.
-    let (session_type, review_id) =
-        if let Ok(Some(_commit)) = store.get_commit_by_session(&session.id) {
-            (BranchSessionType::Commit, None)
-        } else if let Ok(Some(_note)) = store.get_note_by_session(&session.id) {
-            (BranchSessionType::Note, None)
-        } else if let Ok(Some(review)) = store.get_review_by_session(&session.id) {
-            (BranchSessionType::Review, Some(review.id))
-        } else {
-            return Err(format!(
-                "Queued session {} has no linked artifact",
-                session.id
-            ));
-        };
+    let session_type = schedule.kind.branch_session_type().ok_or_else(|| {
+        format!(
+            "Queued session {} cannot start as an agent session",
+            session.id
+        )
+    })?;
 
     // Use the original prompt from the queued session.
     let (prompt, launch_context) = extract_launch_context(&session.prompt)?;
@@ -1189,7 +1673,7 @@ pub async fn drain_queued_sessions_for_branch(
     // Atomically transition session from queued to running.
     // If another drain call already claimed this session, bail out.
     let transitioned = store
-        .transition_to_running(&session_id)
+        .transition_queued_to_running(&session_id)
         .map_err(|e| e.to_string())?;
     if !transitioned {
         return Ok(false);
@@ -1207,7 +1691,7 @@ pub async fn drain_queued_sessions_for_branch(
     // Update the review's commit_sha now that we have the working directory.
     // At queue time, reviews are created with an empty commit_sha since the
     // workspace may not exist yet.
-    if let Some(ref review_id) = review_id {
+    if let Some(ref review_id) = schedule.review_id {
         let tip_sha = if is_remote {
             let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
             run_blox_blocking(move || blox::ws_exec(&workspace_name, &["git", "rev-parse", "HEAD"]))
@@ -1611,6 +2095,7 @@ pub async fn trigger_auto_review(
     Ok(BranchSessionResponse {
         session_id: session.id,
         artifact_id: review.id,
+        session_status: BranchSessionLaunchStatus::Running,
     })
 }
 
@@ -3020,6 +3505,27 @@ mod tests {
         (store, branch)
     }
 
+    fn setup_branch_store_with_workdir() -> (Arc<Store>, store::Branch) {
+        let (store, branch) = setup_branch_store();
+        let workdir_path = format!("/tmp/staged-test-workdir-{}", branch.id);
+        let workdir =
+            store::Workdir::new(&branch.project_id, &workdir_path).with_branch(&branch.id);
+        store.create_workdir(&workdir).unwrap();
+        (store, branch)
+    }
+
+    fn setup_remote_branch_store(status: store::WorkspaceStatus) -> (Arc<Store>, store::Branch) {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let mut project = store::Project::new("test-owner/test-repo");
+        project.location = store::ProjectLocation::Remote;
+        store.create_project(&project).unwrap();
+        let mut branch =
+            store::Branch::new_remote(&project.id, "feature", "main", "test-workspace");
+        branch.workspace_status = Some(status);
+        store.create_branch(&branch).unwrap();
+        (store, branch)
+    }
+
     fn ids(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
     }
@@ -3051,6 +3557,434 @@ mod tests {
             .with_auto();
         store.create_review(&review).unwrap();
         (session, review)
+    }
+
+    fn create_session_with_status(
+        store: &Arc<Store>,
+        prompt: &str,
+        status: store::SessionStatus,
+    ) -> store::Session {
+        let session = match status {
+            store::SessionStatus::Queued => store::Session::new_queued(prompt),
+            store::SessionStatus::Running => store::Session::new_running(prompt, Path::new("/tmp")),
+            other => panic!("unsupported scheduler test status: {}", other.as_str()),
+        };
+        store.create_session(&session).unwrap();
+        session
+    }
+
+    fn create_branch_note_session(
+        store: &Arc<Store>,
+        branch_id: &str,
+        status: store::SessionStatus,
+    ) -> store::Session {
+        let session = create_session_with_status(store, "note", status);
+        let note = store::Note::new(branch_id, "note", "").with_session(&session.id);
+        store.create_note(&note).unwrap();
+        session
+    }
+
+    fn create_branch_review_session(
+        store: &Arc<Store>,
+        branch_id: &str,
+        status: store::SessionStatus,
+    ) -> store::Session {
+        let session = create_session_with_status(store, "review", status);
+        let review = store::Review::new(branch_id, "abc123", store::ReviewScope::Branch)
+            .with_session(&session.id);
+        store.create_review(&review).unwrap();
+        session
+    }
+
+    fn create_branch_commit_session(
+        store: &Arc<Store>,
+        branch_id: &str,
+        status: store::SessionStatus,
+    ) -> store::Session {
+        let session = create_session_with_status(store, "commit", status);
+        let commit = store::Commit::new_pending(branch_id).with_session(&session.id);
+        store.create_commit(&commit).unwrap();
+        session
+    }
+
+    fn create_branch_commit_pipeline_session(
+        store: &Arc<Store>,
+        branch_id: &str,
+    ) -> store::Session {
+        let mut session = store::Session::new_running("rebase", Path::new("/tmp"));
+        session.pipeline =
+            Some(store::PipelineExecution::from_steps(&[]).with_kind(store::PipelineKind::Rebase));
+        store.create_session(&session).unwrap();
+        let commit = store::Commit::new_pending(branch_id).with_session(&session.id);
+        store.create_commit(&commit).unwrap();
+        session
+    }
+
+    fn schedule(kind: BranchSessionScheduleKind) -> BranchSessionSchedule {
+        BranchSessionSchedule {
+            kind,
+            review_id: None,
+            blocks_queue: true,
+        }
+    }
+
+    #[test]
+    fn running_note_allows_queued_review() {
+        let (store, branch) = setup_branch_store();
+        create_branch_note_session(&store, &branch.id, store::SessionStatus::Running);
+
+        let active = running_branch_session_kinds(&store, &branch.id).unwrap();
+
+        assert!(can_start_with_active_branch_sessions(
+            BranchSessionScheduleKind::Review,
+            &active
+        ));
+    }
+
+    #[test]
+    fn running_note_allows_queued_note() {
+        let (store, branch) = setup_branch_store();
+        create_branch_note_session(&store, &branch.id, store::SessionStatus::Running);
+
+        let active = running_branch_session_kinds(&store, &branch.id).unwrap();
+
+        assert!(can_start_with_active_branch_sessions(
+            BranchSessionScheduleKind::Note,
+            &active
+        ));
+    }
+
+    #[test]
+    fn running_review_allows_queued_note() {
+        let (store, branch) = setup_branch_store();
+        create_branch_review_session(&store, &branch.id, store::SessionStatus::Running);
+
+        let active = running_branch_session_kinds(&store, &branch.id).unwrap();
+
+        assert!(can_start_with_active_branch_sessions(
+            BranchSessionScheduleKind::Note,
+            &active
+        ));
+    }
+
+    #[test]
+    fn running_review_blocks_queued_review() {
+        let (store, branch) = setup_branch_store();
+        create_branch_review_session(&store, &branch.id, store::SessionStatus::Running);
+
+        let active = running_branch_session_kinds(&store, &branch.id).unwrap();
+
+        assert!(!can_start_with_active_branch_sessions(
+            BranchSessionScheduleKind::Review,
+            &active
+        ));
+    }
+
+    #[test]
+    fn running_commit_blocks_queued_note_and_review() {
+        let (store, branch) = setup_branch_store();
+        create_branch_commit_session(&store, &branch.id, store::SessionStatus::Running);
+
+        let active = running_branch_session_kinds(&store, &branch.id).unwrap();
+
+        assert!(!can_start_with_active_branch_sessions(
+            BranchSessionScheduleKind::Note,
+            &active
+        ));
+        assert!(!can_start_with_active_branch_sessions(
+            BranchSessionScheduleKind::Review,
+            &active
+        ));
+    }
+
+    #[test]
+    fn branch_start_decision_queues_local_branch_without_workdir() {
+        let (store, branch) = setup_branch_store();
+
+        for session_type in [
+            BranchSessionType::Note,
+            BranchSessionType::Review,
+            BranchSessionType::Commit,
+        ] {
+            assert!(should_queue_branch_session_start(&store, &branch.id, &session_type).unwrap());
+        }
+    }
+
+    #[test]
+    fn branch_start_decision_queues_remote_branch_until_workspace_running() {
+        let (store, branch) = setup_remote_branch_store(store::WorkspaceStatus::Starting);
+
+        for session_type in [
+            BranchSessionType::Note,
+            BranchSessionType::Review,
+            BranchSessionType::Commit,
+        ] {
+            assert!(should_queue_branch_session_start(&store, &branch.id, &session_type).unwrap());
+        }
+    }
+
+    #[test]
+    fn branch_start_decision_uses_compatibility_for_running_remote_branch() {
+        let (store, branch) = setup_remote_branch_store(store::WorkspaceStatus::Running);
+        create_branch_note_session(&store, &branch.id, store::SessionStatus::Running);
+
+        assert!(
+            !should_queue_branch_session_start(&store, &branch.id, &BranchSessionType::Review)
+                .unwrap()
+        );
+        assert!(
+            !should_queue_branch_session_start(&store, &branch.id, &BranchSessionType::Note)
+                .unwrap()
+        );
+        assert!(
+            should_queue_branch_session_start(&store, &branch.id, &BranchSessionType::Commit)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn branch_start_decision_queues_all_user_modes_behind_running_commit() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        create_branch_commit_session(&store, &branch.id, store::SessionStatus::Running);
+
+        for session_type in [
+            BranchSessionType::Note,
+            BranchSessionType::Review,
+            BranchSessionType::Commit,
+        ] {
+            assert!(should_queue_branch_session_start(&store, &branch.id, &session_type).unwrap());
+        }
+    }
+
+    #[test]
+    fn branch_start_decision_allows_parallel_notes_and_note_review_overlap() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        create_branch_note_session(&store, &branch.id, store::SessionStatus::Running);
+
+        assert!(
+            !should_queue_branch_session_start(&store, &branch.id, &BranchSessionType::Review)
+                .unwrap()
+        );
+        assert!(
+            !should_queue_branch_session_start(&store, &branch.id, &BranchSessionType::Note)
+                .unwrap()
+        );
+        assert!(
+            should_queue_branch_session_start(&store, &branch.id, &BranchSessionType::Commit)
+                .unwrap()
+        );
+
+        let (store, branch) = setup_branch_store_with_workdir();
+        create_branch_review_session(&store, &branch.id, store::SessionStatus::Running);
+
+        assert!(
+            !should_queue_branch_session_start(&store, &branch.id, &BranchSessionType::Note)
+                .unwrap()
+        );
+        assert!(
+            should_queue_branch_session_start(&store, &branch.id, &BranchSessionType::Review)
+                .unwrap()
+        );
+        assert!(
+            should_queue_branch_session_start(&store, &branch.id, &BranchSessionType::Commit)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn branch_start_decision_queues_behind_existing_queued_user_session() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        create_branch_note_session(&store, &branch.id, store::SessionStatus::Queued);
+
+        for session_type in [
+            BranchSessionType::Note,
+            BranchSessionType::Review,
+            BranchSessionType::Commit,
+        ] {
+            assert!(should_queue_branch_session_start(&store, &branch.id, &session_type).unwrap());
+        }
+    }
+
+    #[test]
+    fn running_commit_pipeline_blocks_queued_note_and_review() {
+        let (store, branch) = setup_branch_store();
+        create_branch_commit_pipeline_session(&store, &branch.id);
+
+        let active = running_branch_session_kinds(&store, &branch.id).unwrap();
+
+        assert!(!can_start_with_active_branch_sessions(
+            BranchSessionScheduleKind::Note,
+            &active
+        ));
+        assert!(!can_start_with_active_branch_sessions(
+            BranchSessionScheduleKind::Review,
+            &active
+        ));
+    }
+
+    #[test]
+    fn queued_commit_acts_as_fifo_barrier() {
+        let mut active = HashSet::new();
+        let queued = vec![
+            (
+                "note-1".to_string(),
+                schedule(BranchSessionScheduleKind::Note),
+            ),
+            (
+                "commit".to_string(),
+                schedule(BranchSessionScheduleKind::Commit),
+            ),
+            (
+                "review-1".to_string(),
+                schedule(BranchSessionScheduleKind::Review),
+            ),
+        ];
+
+        let drainable = drainable_session_ids_for_active_set(&queued, &mut active);
+
+        assert_eq!(drainable, vec!["note-1".to_string()]);
+    }
+
+    #[test]
+    fn drain_scan_starts_multiple_queued_notes_before_commit_barrier() {
+        let mut active = HashSet::new();
+        let queued = vec![
+            (
+                "note-1".to_string(),
+                schedule(BranchSessionScheduleKind::Note),
+            ),
+            (
+                "note-2".to_string(),
+                schedule(BranchSessionScheduleKind::Note),
+            ),
+            (
+                "commit".to_string(),
+                schedule(BranchSessionScheduleKind::Commit),
+            ),
+            (
+                "note-3".to_string(),
+                schedule(BranchSessionScheduleKind::Note),
+            ),
+        ];
+
+        let drainable = drainable_session_ids_for_active_set(&queued, &mut active);
+
+        assert_eq!(drainable, vec!["note-1".to_string(), "note-2".to_string()]);
+    }
+
+    #[test]
+    fn running_auto_review_does_not_block_queued_user_sessions() {
+        let (store, branch) = setup_branch_store();
+        create_auto_review(&store, &branch.id, store::SessionStatus::Running);
+
+        let active = running_branch_session_kinds(&store, &branch.id).unwrap();
+
+        assert!(active.is_empty());
+        for kind in [
+            BranchSessionScheduleKind::Note,
+            BranchSessionScheduleKind::Review,
+            BranchSessionScheduleKind::Commit,
+        ] {
+            assert!(can_start_with_active_branch_sessions(kind, &active));
+        }
+    }
+
+    #[test]
+    fn branch_start_decision_ignores_auto_review_barriers() {
+        let (store, branch) = setup_branch_store_with_workdir();
+        create_auto_review(&store, &branch.id, store::SessionStatus::Running);
+        create_auto_review(&store, &branch.id, store::SessionStatus::Queued);
+
+        for session_type in [
+            BranchSessionType::Note,
+            BranchSessionType::Review,
+            BranchSessionType::Commit,
+        ] {
+            assert!(!should_queue_branch_session_start(&store, &branch.id, &session_type).unwrap());
+        }
+    }
+
+    #[test]
+    fn explicit_queue_response_reports_queued_status() {
+        let (store, branch) = setup_branch_store();
+        let registry = Arc::new(session_runner::SessionRegistry::new());
+
+        let response = queue_branch_session_for_store(
+            Arc::clone(&store),
+            registry,
+            branch.id.clone(),
+            "capture a note".to_string(),
+            BranchSessionType::Note,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(response.session_status, BranchSessionLaunchStatus::Queued);
+        let session = store.get_session(&response.session_id).unwrap().unwrap();
+        assert_eq!(session.status, store::SessionStatus::Queued);
+    }
+
+    #[test]
+    fn drain_scan_starts_compatible_oldest_sessions_and_stops_at_incompatible_session() {
+        let mut active = HashSet::new();
+        let queued = vec![
+            (
+                "note-1".to_string(),
+                schedule(BranchSessionScheduleKind::Note),
+            ),
+            (
+                "review-1".to_string(),
+                schedule(BranchSessionScheduleKind::Review),
+            ),
+            (
+                "note-2".to_string(),
+                schedule(BranchSessionScheduleKind::Note),
+            ),
+            (
+                "commit".to_string(),
+                schedule(BranchSessionScheduleKind::Commit),
+            ),
+            (
+                "note-3".to_string(),
+                schedule(BranchSessionScheduleKind::Note),
+            ),
+        ];
+
+        let drainable = drainable_session_ids_for_active_set(&queued, &mut active);
+
+        assert_eq!(
+            drainable,
+            vec![
+                "note-1".to_string(),
+                "review-1".to_string(),
+                "note-2".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn drain_scan_does_not_skip_over_manual_review_blocker() {
+        let mut active = HashSet::new();
+        let queued = vec![
+            (
+                "review-1".to_string(),
+                schedule(BranchSessionScheduleKind::Review),
+            ),
+            (
+                "review-2".to_string(),
+                schedule(BranchSessionScheduleKind::Review),
+            ),
+            (
+                "note-1".to_string(),
+                schedule(BranchSessionScheduleKind::Note),
+            ),
+        ];
+
+        let drainable = drainable_session_ids_for_active_set(&queued, &mut active);
+
+        assert_eq!(drainable, vec!["review-1".to_string()]);
     }
 
     fn create_branch_review(

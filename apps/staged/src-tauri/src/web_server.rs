@@ -2841,7 +2841,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
 
             Ok(Value::Null)
         }
-        "start_branch_session" => {
+        "start_branch_session" | "start_or_queue_branch_session" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
             let prompt: String = arg(&args, "prompt")?;
@@ -2851,220 +2851,20 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let launch_context: Option<session_commands::BranchSessionLaunchContext> =
                 opt_arg(&args, "launchContext")?;
 
-            if matches!(
-                session_type,
-                session_commands::BranchSessionType::Commit
-                    | session_commands::BranchSessionType::Review
-            ) {
-                session_commands::cancel_in_flight_auto_review_for_branch(
-                    &store,
-                    session_registry,
-                    &branch_id,
-                )?;
-            }
-
-            let branch = store
-                .get_branch(&branch_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-
-            let project = store
-                .get_project(&branch.project_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
-
-            let is_remote = branch.workspace_name.is_some();
-
-            let (working_dir, branch_context) = if is_remote {
-                let fallback_dir =
-                    session_commands::resolve_branch_repo_slug(&store, &project, &branch)
-                        .and_then(|repo| crate::paths::repos_dir().map(|d| d.join(repo)))
-                        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
-                let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
-                let base_branch = branch.base_branch.clone();
-                let store_for_context = Arc::clone(&store);
-                let branch_id_for_context = branch_id.clone();
-                let project_id_for_context = branch.project_id.clone();
-                let ctx = tokio::task::spawn_blocking(move || {
-                    session_commands::build_remote_branch_context(
-                        &workspace_name,
-                        &base_branch,
-                        &store_for_context,
-                        &branch_id_for_context,
-                        &project_id_for_context,
-                    )
-                })
-                .await
-                .map_err(|e| format!("Failed to build remote branch context: {e}"))?;
-                (fallback_dir, ctx)
-            } else {
-                let workdir = store
-                    .get_workdir_for_branch(&branch_id)
-                    .map_err(|e| e.to_string())?
-                    .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
-
-                let mut worktree_path = std::path::PathBuf::from(&workdir.path);
-                let effective_subpath = if let Some(repo_id) = branch.project_repo_id.as_deref() {
-                    store
-                        .get_project_repo(repo_id)
-                        .ok()
-                        .flatten()
-                        .and_then(|repo| repo.subpath)
-                } else {
-                    project.subpath.clone()
-                };
-                if let Some(ref subpath) = effective_subpath {
-                    worktree_path = worktree_path.join(subpath);
-                }
-
-                let ctx = session_commands::build_branch_context(
-                    &worktree_path,
-                    &branch.base_branch,
-                    &store,
-                    &branch_id,
-                    &branch.project_id,
-                );
-                (worktree_path, ctx)
-            };
-
-            let project_information =
-                session_commands::build_project_context(&store, &project, &branch);
-            let full_prompt = session_commands::build_full_prompt(
-                &prompt,
-                &project_information,
-                &branch_context,
-                &session_type,
-                launch_context.as_ref(),
-                Some(&branch.base_branch),
-            );
-
-            let mut session = store::Session::new_running(&full_prompt, &working_dir);
-            if let Some(ref p) = provider {
-                session = session.with_provider(p);
-            }
-            store.create_session(&session).map_err(|e| e.to_string())?;
-
-            let session_type_str = match session_type {
-                session_commands::BranchSessionType::Commit => "commit",
-                session_commands::BranchSessionType::Note => "note",
-                session_commands::BranchSessionType::Review => "review",
-            };
-            session_runner::emit_session_running(
-                app_handle,
-                &session.id,
-                &branch_id,
-                &branch.project_id,
-                session_type_str,
-            );
-
-            let (artifact_id, pre_head_sha) = match session_type {
-                session_commands::BranchSessionType::Note => {
-                    let note = store::Note::new(&branch_id, &prompt, "").with_session(&session.id);
-                    store.create_note(&note).map_err(|e| e.to_string())?;
-                    (note.id, None)
-                }
-                session_commands::BranchSessionType::Commit => {
-                    let commit = store::Commit::new_pending(&branch_id).with_session(&session.id);
-                    store.create_commit(&commit).map_err(|e| e.to_string())?;
-                    let head_sha = if is_remote {
-                        let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
-                        match session_commands::run_blox_blocking(move || {
-                            crate::blox::ws_exec(&workspace_name, &["git", "rev-parse", "HEAD"])
-                        })
-                        .await
-                        {
-                            Ok(sha) => Some(sha.trim().to_string()),
-                            Err(e) => {
-                                log::warn!("Failed to get remote HEAD SHA via ws_exec: {e}");
-                                None
-                            }
-                        }
-                    } else {
-                        Some(
-                            crate::git::get_head_sha(&working_dir)
-                                .map_err(|e| format!("Failed to get HEAD SHA: {e}"))?,
-                        )
-                    };
-                    (commit.id, head_sha)
-                }
-                session_commands::BranchSessionType::Review => {
-                    let tip_sha = if is_remote {
-                        let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
-                        session_commands::run_blox_blocking(move || {
-                            crate::blox::ws_exec(&workspace_name, &["git", "rev-parse", "HEAD"])
-                        })
-                        .await
-                        .map(|s| s.trim().to_string())
-                        .unwrap_or_else(|_| "unknown".to_string())
-                    } else {
-                        crate::git::get_head_sha(&working_dir)
-                            .map_err(|e| format!("Failed to get HEAD SHA: {e}"))?
-                    };
-
-                    let review =
-                        store::Review::new(&branch_id, &tip_sha, store::ReviewScope::Branch)
-                            .with_session(&session.id);
-                    store.create_review(&review).map_err(|e| e.to_string())?;
-                    (review.id, None)
-                }
-            };
-
-            let effective_provider = provider;
-
-            let remote_working_dir = if is_remote {
-                let ws_name = branch.workspace_name.as_deref().unwrap().to_string();
-                let store_for_resolve = Arc::clone(&store);
-                let branch_for_resolve = branch.clone();
-                match tokio::task::spawn_blocking(move || {
-                    crate::branches::resolve_branch_workspace_subpath(
-                        &store_for_resolve,
-                        &branch_for_resolve,
-                    )
-                    .ok()
-                    .flatten()
-                    .and_then(|subpath| {
-                        crate::branches::resolve_workspace_repo_path(&ws_name, &subpath).ok()
-                    })
-                })
-                .await
-                {
-                    Ok(Some(path)) => Some(std::path::PathBuf::from(path)),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-
-            session_runner::start_session(
-                SessionConfig {
-                    session_id: session.id.clone(),
-                    prompt: full_prompt,
-                    working_dir,
-                    agent_session_id: None,
-                    pre_head_sha,
-                    provider: effective_provider,
-                    workspace_name: branch.workspace_name.clone(),
-                    extra_env: vec![],
-                    mcp_project_id: None,
-                    action_executor: None,
-                    action_registry: None,
-                    remote_working_dir,
-                    image_ids: image_ids.unwrap_or_default(),
-                    branch_id: Some(branch_id),
-                    project_id: Some(branch.project_id.clone()),
-                },
+            let result = session_commands::start_or_queue_branch_session_for_store(
                 store,
-                app_handle.clone(),
                 Arc::clone(session_registry),
-            )?;
-
-            Ok(
-                serde_json::to_value(session_commands::BranchSessionResponse {
-                    session_id: session.id,
-                    artifact_id,
-                })
-                .unwrap(),
+                app_handle.clone(),
+                branch_id,
+                prompt,
+                session_type,
+                provider,
+                image_ids,
+                launch_context,
             )
+            .await?;
+
+            Ok(serde_json::to_value(result).unwrap())
         }
         "start_project_session" => {
             let store = get_store(store_mutex)?;
@@ -3145,63 +2945,18 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let launch_context: Option<session_commands::BranchSessionLaunchContext> =
                 opt_arg(&args, "launchContext")?;
 
-            if matches!(
+            let result = session_commands::queue_branch_session_for_store(
+                store,
+                Arc::clone(session_registry),
+                branch_id,
+                prompt,
                 session_type,
-                session_commands::BranchSessionType::Commit
-                    | session_commands::BranchSessionType::Review
-            ) {
-                session_commands::cancel_in_flight_auto_review_for_branch(
-                    &store,
-                    session_registry,
-                    &branch_id,
-                )?;
-            }
+                provider,
+                image_ids,
+                launch_context,
+            )?;
 
-            let _branch = store
-                .get_branch(&branch_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-
-            let queued_prompt =
-                session_commands::embed_launch_context(&prompt, launch_context.as_ref())?;
-            let mut session = store::Session::new_queued(&queued_prompt);
-            if let Some(ref p) = provider {
-                session = session.with_provider(p);
-            }
-            store.create_session(&session).map_err(|e| e.to_string())?;
-
-            if let Some(ref ids) = image_ids {
-                store
-                    .set_images_session_id(ids, &session.id)
-                    .map_err(|e| e.to_string())?;
-            }
-
-            let artifact_id = match session_type {
-                session_commands::BranchSessionType::Note => {
-                    let note = store::Note::new(&branch_id, &prompt, "").with_session(&session.id);
-                    store.create_note(&note).map_err(|e| e.to_string())?;
-                    note.id
-                }
-                session_commands::BranchSessionType::Commit => {
-                    let commit = store::Commit::new_pending(&branch_id).with_session(&session.id);
-                    store.create_commit(&commit).map_err(|e| e.to_string())?;
-                    commit.id
-                }
-                session_commands::BranchSessionType::Review => {
-                    let review = store::Review::new(&branch_id, "", store::ReviewScope::Branch)
-                        .with_session(&session.id);
-                    store.create_review(&review).map_err(|e| e.to_string())?;
-                    review.id
-                }
-            };
-
-            Ok(
-                serde_json::to_value(session_commands::BranchSessionResponse {
-                    session_id: session.id,
-                    artifact_id,
-                })
-                .unwrap(),
-            )
+            Ok(serde_json::to_value(result).unwrap())
         }
         "drain_queued_sessions" => {
             let store = get_store(store_mutex)?;

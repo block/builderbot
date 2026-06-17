@@ -59,6 +59,8 @@
     remote?: boolean;
     /** When true, the session will be queued rather than started immediately. */
     willQueue?: boolean;
+    /** Mode-aware queue state for callers that allow switching session types. */
+    willQueueForMode?: (mode: BranchSessionType) => boolean;
     onClose: (draft: { prompt: string; mode: BranchSessionType; imageIds: string[] }) => void;
     onSubmit: (data: { prompt: string; mode: BranchSessionType; imageIds: string[] }) => void;
   }
@@ -76,6 +78,7 @@
     notePrefill = '',
     remote = false,
     willQueue = false,
+    willQueueForMode,
     onClose,
     onSubmit,
   }: Props = $props();
@@ -89,6 +92,7 @@
   let isCommit = $derived(currentMode === 'commit');
   let isReview = $derived(currentMode === 'review');
   let isNote = $derived(!isCommit && !isReview);
+  let currentWillQueue = $derived(willQueueForMode?.(currentMode) ?? willQueue);
   const footerControlClass =
     'h-9 gap-1.5 rounded-md border border-[var(--border-muted)] bg-[var(--bg-primary)] px-4 py-2 text-sm font-medium text-muted-foreground shadow-none transition-colors hover:bg-[var(--bg-hover)] hover:text-foreground max-[640px]:h-11 max-[640px]:justify-center';
 
@@ -532,10 +536,10 @@
           >
             {#if starting}
               <Spinner size={14} />
-              {willQueue ? 'Queueing…' : 'Starting…'}
+              {currentWillQueue ? 'Queueing…' : 'Starting…'}
             {:else}
               <Send size={14} />
-              {willQueue ? 'Queue' : 'Start'}
+              {currentWillQueue ? 'Queue' : 'Start'}
             {/if}
           </Button>
         </div>

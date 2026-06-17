@@ -439,42 +439,19 @@
     };
 
     try {
-      // Check if there's a running session to decide queue vs start
-      const timeline = await commands.getBranchTimeline(branchId, { force: true });
-      const hasRunning =
-        timeline.commits.some(
-          (c) => c.sessionStatus === 'running' || c.sessionStatus === 'queued'
-        ) ||
-        timeline.notes.some((n) => n.sessionStatus === 'running' || n.sessionStatus === 'queued') ||
-        timeline.reviews.some(
-          (r) => !r.isAuto && (r.sessionStatus === 'running' || r.sessionStatus === 'queued')
-        );
-
       const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
       const provider = getPreferredAgent(agents) ?? undefined;
-
-      if (hasRunning) {
-        await commands.queueBranchSession(
-          branchId,
-          prompt,
-          mode,
-          provider,
-          undefined,
-          launchContext
-        );
-      } else {
-        await commands.startBranchSession(
-          branchId,
-          prompt,
-          mode,
-          provider,
-          undefined,
-          launchContext
-        );
-      }
+      const result = await commands.startOrQueueBranchSession(
+        branchId,
+        prompt,
+        mode,
+        provider,
+        undefined,
+        launchContext
+      );
 
       const label = mode === 'note' ? 'Note' : 'Commit';
-      toast.success(`${label} session ${hasRunning ? 'queued' : 'started'}`);
+      toast.success(`${label} session ${result.sessionStatus === 'queued' ? 'queued' : 'started'}`);
     } catch (e) {
       toast.error(`Unable to start ${mode} session`, {
         description: e instanceof Error ? e.message : String(e),
@@ -517,41 +494,19 @@
     };
 
     try {
-      const timeline = await commands.getBranchTimeline(branchId, { force: true });
-      const hasRunning =
-        timeline.commits.some(
-          (c) => c.sessionStatus === 'running' || c.sessionStatus === 'queued'
-        ) ||
-        timeline.notes.some((n) => n.sessionStatus === 'running' || n.sessionStatus === 'queued') ||
-        timeline.reviews.some(
-          (r) => !r.isAuto && (r.sessionStatus === 'running' || r.sessionStatus === 'queued')
-        );
-
       const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
       const provider = getPreferredAgent(agents) ?? undefined;
-
-      if (hasRunning) {
-        await commands.queueBranchSession(
-          branchId,
-          data.prompt,
-          data.mode,
-          provider,
-          data.imageIds,
-          launchContext
-        );
-      } else {
-        await commands.startBranchSession(
-          branchId,
-          data.prompt,
-          data.mode,
-          provider,
-          data.imageIds,
-          launchContext
-        );
-      }
+      const result = await commands.startOrQueueBranchSession(
+        branchId,
+        data.prompt,
+        data.mode,
+        provider,
+        data.imageIds,
+        launchContext
+      );
 
       const label = data.mode === 'note' ? 'Note' : data.mode === 'commit' ? 'Commit' : 'Review';
-      toast.success(`${label} session ${hasRunning ? 'queued' : 'started'}`);
+      toast.success(`${label} session ${result.sessionStatus === 'queued' ? 'queued' : 'started'}`);
     } catch (e) {
       toast.error(`Unable to start ${data.mode} session`, {
         description: e instanceof Error ? e.message : String(e),

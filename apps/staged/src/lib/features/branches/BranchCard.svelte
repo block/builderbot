@@ -647,7 +647,7 @@
         }
         // Refresh the timeline so the pending note/commit stub appears immediately.
         // Skip if a session start is in-flight (pending item has no sessionId yet),
-        // because startBranchSessionWithPendingItem will call loadTimeline after
+        // because startOrQueueSession will call loadTimeline after
         // it gets the sessionId — otherwise pruning can't match the pending item
         // and both the pending and real items briefly render simultaneously.
         if (!isAutoReview && !sessionMgr.isSessionStartPending) {
@@ -1710,6 +1710,7 @@
     {notePrefill}
     remote={isRemote}
     willQueue={sessionMgr.willQueue}
+    willQueueForMode={(mode) => sessionMgr.willQueueForMode(mode)}
     onClose={(draft) => {
       // Don't persist prefilled text as a draft — it should be re-evaluated
       // each time the dialog opens based on the current timeline state.

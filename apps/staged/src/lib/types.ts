@@ -405,6 +405,7 @@ export interface SessionMessage {
 // =============================================================================
 
 export type BranchSessionType = 'note' | 'commit' | 'review';
+export type BranchSessionLaunchStatus = 'running' | 'queued';
 
 export interface BranchSessionLaunchContext {
   source: 'diff_viewer';
@@ -416,6 +417,7 @@ export interface BranchSessionLaunchContext {
 export interface BranchSessionResponse {
   sessionId: string;
   artifactId: string;
+  sessionStatus: BranchSessionLaunchStatus;
 }
 
 // =============================================================================

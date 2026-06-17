@@ -398,7 +398,7 @@
         <Button
           variant="ghost"
           onclick={openProjectSessionModal}
-          aria-label="Start project session"
+          aria-label="New project note"
           class={[
             'inline-flex items-center font-medium transition-all duration-300',
             '[&_svg]:transition-all [&_svg]:duration-300',
@@ -408,7 +408,7 @@
           ]}
         >
           <FileText size={18} />
-          <span>Start project session</span>
+          <span>New project note</span>
         </Button>
       </span>
     </div>

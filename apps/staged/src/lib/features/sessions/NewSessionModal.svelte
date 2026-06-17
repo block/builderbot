@@ -107,6 +107,7 @@
   let canSubmit = $derived(
     !!activeProjectId && !starting && !submitDisabledReason && (isReview || !!prompt.trim())
   );
+  let submitLabel = $derived(currentWillQueue ? 'Queue' : isProjectNote ? 'New' : 'Start');
   const footerControlClass =
     'h-9 gap-1.5 rounded-md border border-[var(--border-muted)] bg-[var(--bg-primary)] px-4 py-2 text-sm font-medium text-muted-foreground shadow-none transition-colors hover:bg-[var(--bg-hover)] hover:text-foreground max-[640px]:h-11 max-[640px]:justify-center';
 
@@ -570,7 +571,7 @@
               {currentWillQueue ? 'Queueing…' : 'Starting…'}
             {:else}
               <Send size={14} />
-              {currentWillQueue ? 'Queue' : 'Start'}
+              {submitLabel}
             {/if}
           </Button>
         </div>

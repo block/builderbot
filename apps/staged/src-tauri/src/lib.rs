@@ -140,6 +140,7 @@ pub struct CommitTimelineItem {
     pub session_id: Option<String>,
     pub session_status: Option<String>,
     pub completion_reason: Option<String>,
+    pub cancellation_source: Option<String>,
     /// Whether this commit was authored by the current git user.
     pub is_own_commit: bool,
 }
@@ -154,6 +155,7 @@ pub struct NoteTimelineItem {
     pub session_id: Option<String>,
     pub session_status: Option<String>,
     pub completion_reason: Option<String>,
+    pub cancellation_source: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub completed_at: Option<i64>,
@@ -172,6 +174,7 @@ pub struct ReviewTimelineItem {
     pub session_status: Option<String>,
     pub session_provider: Option<String>,
     pub completion_reason: Option<String>,
+    pub cancellation_source: Option<String>,
     pub title: Option<String>,
     pub comment_count: usize,
     pub is_auto: bool,
@@ -191,6 +194,7 @@ pub struct ImageTimelineItem {
     pub session_id: Option<String>,
     pub session_status: Option<String>,
     pub completion_reason: Option<String>,
+    pub cancellation_source: Option<String>,
     pub created_at: i64,
 }
 
@@ -1260,6 +1264,7 @@ async fn get_repo_default_branch_timeline(
                         session_id: None,
                         session_status: None,
                         completion_reason: None,
+                        cancellation_source: None,
                         is_own_commit: false,
                     })
                 } else {

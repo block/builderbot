@@ -17,7 +17,7 @@ use tauri::AppHandle;
 
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::session_runner::SessionRegistry;
-use crate::store::{Branch, ProjectRepo, SessionStatus, Store};
+use crate::store::{Branch, CancellationSource, ProjectRepo, SessionStatus, Store};
 use tokio_util::sync::CancellationToken;
 
 /// What outcome the caller expects from a `start_repo_session` call.
@@ -232,6 +232,9 @@ impl ProjectToolsHandler {
         }
         if let Some(reason) = session.completion_reason.as_ref() {
             payload["completion_reason"] = serde_json::Value::String(reason.as_str().to_string());
+        }
+        if let Some(source) = session.cancellation_source.as_ref() {
+            payload["cancellation_source"] = serde_json::Value::String(source.as_str().to_string());
         }
         if let Some(error) = session.error_message.as_ref() {
             payload["error_message"] = serde_json::Value::String(error.clone());
@@ -498,11 +501,12 @@ impl ProjectToolsHandler {
         // Atomically try to cancel from queued state first. If the session
         // was already picked up by the drain loop (transitioned to running),
         // this returns false and we fall through to the running-cancel path.
-        let was_queued = match self.store.transition_from_queued(
+        let was_queued = match self.store.transition_from_queued_with_cancellation_source(
             &handle.session_id,
             SessionStatus::Cancelled,
             None,
             Some(&crate::store::CompletionReason::Interrupted),
+            Some(&CancellationSource::ProjectSession),
         ) {
             Ok(updated) => updated,
             Err(e) => return format!("Error cancelling repo session: {e}"),
@@ -512,6 +516,21 @@ impl ProjectToolsHandler {
             // Successfully cancelled from queued state. Drain the next
             // queued session for this branch so it can start.
             if let Ok(Some(branch_id)) = self.store.get_branch_id_for_session(&handle.session_id) {
+                crate::web_server::emit_to_all(
+                    &self.app_handle,
+                    "session-status-changed",
+                    crate::session_runner::SessionStatusEvent {
+                        session_id: handle.session_id.clone(),
+                        status: "cancelled".to_string(),
+                        error_message: None,
+                        completion_reason: Some("interrupted".to_string()),
+                        cancellation_source: Some("project_session".to_string()),
+                        branch_id: Some(branch_id.clone()),
+                        project_id: Some(self.project_id.clone()),
+                        session_type: None,
+                        is_auto_review: false,
+                    },
+                );
                 let _ = crate::session_commands::drain_queued_sessions_for_branch(
                     Arc::clone(&self.store),
                     Arc::clone(&self.registry),
@@ -523,7 +542,8 @@ impl ProjectToolsHandler {
             }
         } else {
             // Session is running (or already terminal). Ask the runner to cancel.
-            self.registry.cancel(&handle.session_id);
+            self.registry
+                .cancel_with_source(&handle.session_id, Some(CancellationSource::ProjectSession));
         }
 
         match self.repo_session_payload(&p.repo_session_id, &handle) {

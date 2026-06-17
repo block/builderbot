@@ -346,6 +346,7 @@ pub async fn resume_session(
             status: "running".to_string(),
             error_message: None,
             completion_reason: None,
+            cancellation_source: None,
             branch_id: event_branch_id,
             project_id: event_project_id.or(mcp_project_id.clone()),
             session_type,
@@ -413,18 +414,20 @@ pub fn cancel_session(
     app_handle: tauri::AppHandle,
     session_id: String,
 ) -> Result<(), String> {
-    let was_running = registry.cancel(&session_id);
+    let was_running =
+        registry.cancel_with_source(&session_id, Some(store::CancellationSource::User));
     if !was_running {
         let store = get_store(&store)?;
         if let Ok(Some(session)) = store.get_session(&session_id) {
             if session.status == store::SessionStatus::Running
                 || session.status == store::SessionStatus::Queued
             {
-                let _ = store.update_session_status(
+                let _ = store.update_session_status_with_cancellation_source(
                     &session_id,
                     store::SessionStatus::Cancelled,
                     None,
                     Some(&store::CompletionReason::Interrupted),
+                    Some(&store::CancellationSource::User),
                 );
                 let branch_id = store.get_branch_id_for_session(&session_id).ok().flatten();
                 let project_id = store.get_project_id_for_session(&session_id).ok().flatten();
@@ -436,6 +439,7 @@ pub fn cancel_session(
                         status: "cancelled".to_string(),
                         error_message: None,
                         completion_reason: Some("interrupted".to_string()),
+                        cancellation_source: Some("user".to_string()),
                         branch_id,
                         project_id,
                         session_type: None,
@@ -1776,6 +1780,7 @@ async fn start_queued_session_for_branch(
             status: "running".to_string(),
             error_message: None,
             completion_reason: None,
+            cancellation_source: None,
             branch_id: Some(branch_id.clone()),
             project_id: Some(branch.project_id.clone()),
             session_type: Some(session_type_str.to_string()),
@@ -2037,6 +2042,7 @@ pub async fn trigger_auto_review(
             status: "running".to_string(),
             error_message: None,
             completion_reason: None,
+            cancellation_source: None,
             branch_id: Some(branch_id.clone()),
             project_id: Some(branch.project_id.clone()),
             session_type: Some("review".to_string()),

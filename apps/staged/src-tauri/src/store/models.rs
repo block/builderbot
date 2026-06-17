@@ -493,6 +493,33 @@ impl CompletionReason {
     }
 }
 
+/// Who requested cancellation for a cancelled session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CancellationSource {
+    /// The user stopped the session directly.
+    User,
+    /// A parent project session cancelled one of its repo sessions.
+    ProjectSession,
+}
+
+impl CancellationSource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::ProjectSession => "project_session",
+        }
+    }
+
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        match s {
+            "user" => Some(Self::User),
+            "project_session" => Some(Self::ProjectSession),
+            _ => None,
+        }
+    }
+}
+
 /// A unit of AI work. Sessions are standalone records; artifacts (commits,
 /// notes, reviews) point at them via `session_id`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -511,6 +538,9 @@ pub struct Session {
     pub error_message: Option<String>,
     /// Why the session reached its terminal state. `None` while running/queued.
     pub completion_reason: Option<CompletionReason>,
+    /// Who requested cancellation. `None` unless the session was cancelled and
+    /// the cancellation source is known.
+    pub cancellation_source: Option<CancellationSource>,
     pub created_at: i64,
     pub updated_at: i64,
     /// PID of the Staged process that owns this session while it is running.
@@ -534,6 +564,7 @@ impl Session {
             agent_id: None,
             error_message: None,
             completion_reason: None,
+            cancellation_source: None,
             created_at: now,
             updated_at: now,
             owner_pid: Some(std::process::id()),
@@ -555,6 +586,7 @@ impl Session {
             agent_id: None,
             error_message: None,
             completion_reason: None,
+            cancellation_source: None,
             created_at: now,
             updated_at: now,
             owner_pid: None,
@@ -765,6 +797,9 @@ pub struct ProjectNote {
     /// Why the session reached its terminal state.
     #[serde(skip_deserializing)]
     pub completion_reason: Option<String>,
+    /// Who requested cancellation when known.
+    #[serde(skip_deserializing)]
+    pub cancellation_source: Option<String>,
 }
 
 impl ProjectNote {
@@ -784,6 +819,7 @@ impl ProjectNote {
             suggested_next_note_step: None,
             session_status: None,
             completion_reason: None,
+            cancellation_source: None,
         }
     }
 

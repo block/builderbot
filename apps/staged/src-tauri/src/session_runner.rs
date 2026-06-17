@@ -118,6 +118,7 @@ pub struct SessionStatusEvent {
     pub status: String,
     pub error_message: Option<String>,
     pub completion_reason: Option<String>,
+    pub cancellation_source: Option<String>,
     /// Set on `"running"` events emitted when an MCP tool starts a repo session,
     /// so the frontend can register the session and refresh the branch timeline.
     pub branch_id: Option<String>,
@@ -138,7 +139,12 @@ pub struct SessionStatusEvent {
 /// Managed as Tauri state. The background thread for each session removes
 /// itself from the registry when it exits (regardless of outcome).
 pub struct SessionRegistry {
-    running: std::sync::Mutex<HashMap<String, CancellationToken>>,
+    running: std::sync::Mutex<HashMap<String, Arc<RunningSession>>>,
+}
+
+struct RunningSession {
+    token: CancellationToken,
+    cancellation_source: std::sync::Mutex<Option<crate::store::CancellationSource>>,
 }
 
 impl Default for SessionRegistry {
@@ -157,8 +163,12 @@ impl SessionRegistry {
     /// Register a new session and return a `CancellationToken` for it.
     fn register(&self, session_id: &str) -> CancellationToken {
         let token = CancellationToken::new();
+        let running_session = Arc::new(RunningSession {
+            token: token.clone(),
+            cancellation_source: std::sync::Mutex::new(None),
+        });
         let mut running = self.running.lock().unwrap();
-        running.insert(session_id.to_string(), token.clone());
+        running.insert(session_id.to_string(), running_session);
         token
     }
 
@@ -172,12 +182,36 @@ impl SessionRegistry {
     /// Cancel a running session. Returns true if the session was found and
     /// signalled, false if it wasn't running (already finished or unknown).
     pub fn cancel(&self, session_id: &str) -> bool {
-        if let Some(token) = self.running.lock().unwrap().get(session_id) {
-            token.cancel();
+        self.cancel_with_source(session_id, None)
+    }
+
+    /// Cancel a running session and optionally remember who requested it.
+    pub fn cancel_with_source(
+        &self,
+        session_id: &str,
+        source: Option<crate::store::CancellationSource>,
+    ) -> bool {
+        let running_session = self.running.lock().unwrap().get(session_id).cloned();
+        if let Some(running_session) = running_session {
+            if let Some(source) = source {
+                *running_session.cancellation_source.lock().unwrap() = Some(source);
+            }
+            running_session.token.cancel();
             true
         } else {
             false
         }
+    }
+
+    pub fn cancellation_source(
+        &self,
+        session_id: &str,
+    ) -> Option<crate::store::CancellationSource> {
+        self.running
+            .lock()
+            .unwrap()
+            .get(session_id)
+            .and_then(|running| running.cancellation_source.lock().unwrap().clone())
     }
 
     /// Returns true if the given session is currently tracked as running.
@@ -420,6 +454,8 @@ pub fn start_session(
                 .await
         });
 
+        let cancellation_source = registry.cancellation_source(&session_id_for_status);
+
         // Always deregister, regardless of outcome.
         registry.deregister(&session_id_for_status);
 
@@ -465,12 +501,16 @@ pub fn start_session(
         };
 
         let status_enum = SessionStatus::parse(new_status).unwrap();
+        let cancellation_source_for_status = (status_enum == SessionStatus::Cancelled)
+            .then_some(cancellation_source.as_ref())
+            .flatten();
         let transitioned = store_for_status
-            .transition_from_running(
+            .transition_from_running_with_cancellation_source(
                 &session_id_for_status,
                 status_enum,
                 error_msg.as_deref(),
                 Some(&completion_reason),
+                cancellation_source_for_status,
             )
             .unwrap_or(false);
 
@@ -483,6 +523,7 @@ pub fn start_session(
             new_status,
             error_msg,
             Some(&completion_reason),
+            cancellation_source_for_status,
             config.branch_id.clone(),
             config.project_id.clone(),
         );
@@ -677,6 +718,7 @@ pub fn start_pipeline_session(
                     "completed",
                     None,
                     Some(&reason),
+                    None,
                     config.branch_id.clone(),
                     config.project_id.clone(),
                 );
@@ -773,6 +815,7 @@ pub fn start_pipeline_session(
                         "error",
                         Some(e),
                         Some(&CompletionReason::Crashed),
+                        None,
                         config.branch_id.clone(),
                         config.project_id.clone(),
                     );
@@ -806,6 +849,7 @@ pub fn start_pipeline_session(
                     "completed",
                     None,
                     Some(&reason),
+                    None,
                     config.branch_id.clone(),
                     config.project_id.clone(),
                 );
@@ -821,13 +865,15 @@ pub fn start_pipeline_session(
             PipelineOutcome::Cancelled => {
                 resolve_pipeline_artifacts_without_ai(&config, &store_for_status, false);
                 let reason = CompletionReason::Interrupted;
+                let cancellation_source = registry.cancellation_source(&session_id);
                 registry.deregister(&session_id);
                 let transitioned = store_for_status
-                    .transition_from_running(
+                    .transition_from_running_with_cancellation_source(
                         &session_id,
                         SessionStatus::Cancelled,
                         None,
                         Some(&reason),
+                        cancellation_source.as_ref(),
                     )
                     .unwrap_or(false);
                 emit_status(
@@ -836,6 +882,7 @@ pub fn start_pipeline_session(
                     "cancelled",
                     None,
                     Some(&reason),
+                    cancellation_source.as_ref(),
                     config.branch_id.clone(),
                     config.project_id.clone(),
                 );
@@ -1632,6 +1679,7 @@ pub fn recover_dead_sessions(
                 "error",
                 None,
                 Some(&CompletionReason::AppQuit),
+                None,
                 recovered_branch_id.clone(),
                 recovered_project_id,
             );
@@ -2411,6 +2459,7 @@ fn emit_status(
     status: &str,
     error: Option<String>,
     completion_reason: Option<&CompletionReason>,
+    cancellation_source: Option<&crate::store::CancellationSource>,
     branch_id: Option<String>,
     project_id: Option<String>,
 ) {
@@ -2419,6 +2468,7 @@ fn emit_status(
         status: status.to_string(),
         error_message: error,
         completion_reason: completion_reason.map(|r| r.as_str().to_string()),
+        cancellation_source: cancellation_source.map(|source| source.as_str().to_string()),
         branch_id,
         project_id,
         session_type: None,
@@ -2443,6 +2493,7 @@ pub fn emit_session_running(
         status: "running".to_string(),
         error_message: None,
         completion_reason: None,
+        cancellation_source: None,
         branch_id: Some(branch_id.to_string()),
         project_id: Some(project_id.to_string()),
         session_type: Some(session_type.to_string()),

@@ -710,6 +710,27 @@ fn test_completion_reason_round_trips() {
 }
 
 #[test]
+fn test_cancellation_source_round_trips() {
+    let store = Store::in_memory().unwrap();
+
+    for source in [CancellationSource::User, CancellationSource::ProjectSession] {
+        let session = Session::new_running("test source", Path::new("/tmp"));
+        store.create_session(&session).unwrap();
+        store
+            .transition_from_running_with_cancellation_source(
+                &session.id,
+                SessionStatus::Cancelled,
+                None,
+                Some(&CompletionReason::Interrupted),
+                Some(&source),
+            )
+            .unwrap();
+        let fetched = store.get_session(&session.id).unwrap().unwrap();
+        assert_eq!(fetched.cancellation_source.as_ref(), Some(&source));
+    }
+}
+
+#[test]
 fn test_session_messages() {
     let store = Store::in_memory().unwrap();
 

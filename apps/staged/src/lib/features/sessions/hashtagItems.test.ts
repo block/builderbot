@@ -65,6 +65,7 @@ function projectNote(overrides: Partial<ProjectNote> = {}): ProjectNote {
     suggestedNextNoteStep: null,
     sessionStatus: null,
     completionReason: null,
+    cancellationSource: null,
     ...overrides,
   };
 }
@@ -94,6 +95,7 @@ describe('timelineToHashtagItems', () => {
           sessionId: null,
           sessionStatus: null,
           completionReason: null,
+          cancellationSource: null,
         },
       ],
     });
@@ -117,6 +119,7 @@ describe('timelineToHashtagItems', () => {
           sessionId: null,
           sessionStatus: null,
           completionReason: null,
+          cancellationSource: null,
           createdAt: 1000,
           updatedAt: 1000,
           completedAt: 1000,
@@ -130,6 +133,7 @@ describe('timelineToHashtagItems', () => {
           sessionId: null,
           sessionStatus: null,
           completionReason: null,
+          cancellationSource: null,
           createdAt: 5000,
           updatedAt: 5000,
           completedAt: 5000,
@@ -151,6 +155,7 @@ describe('timelineToHashtagItems', () => {
           sessionId: null,
           sessionStatus: null,
           completionReason: null,
+          cancellationSource: null,
         },
         {
           id: 'new-commit-id',
@@ -165,6 +170,7 @@ describe('timelineToHashtagItems', () => {
           sessionId: null,
           sessionStatus: null,
           completionReason: null,
+          cancellationSource: null,
         },
       ],
       reviews: [
@@ -176,6 +182,7 @@ describe('timelineToHashtagItems', () => {
           sessionStatus: null,
           sessionProvider: null,
           completionReason: null,
+          cancellationSource: null,
           title: 'Old review',
           commentCount: 0,
           isAuto: false,
@@ -191,6 +198,7 @@ describe('timelineToHashtagItems', () => {
           sessionStatus: null,
           sessionProvider: null,
           completionReason: null,
+          cancellationSource: null,
           title: 'New review',
           commentCount: 0,
           isAuto: false,
@@ -208,6 +216,7 @@ describe('timelineToHashtagItems', () => {
           sessionId: null,
           sessionStatus: null,
           completionReason: null,
+          cancellationSource: null,
           createdAt: 4000,
         },
         {
@@ -218,6 +227,7 @@ describe('timelineToHashtagItems', () => {
           sessionId: null,
           sessionStatus: null,
           completionReason: null,
+          cancellationSource: null,
           createdAt: 8000,
         },
       ],

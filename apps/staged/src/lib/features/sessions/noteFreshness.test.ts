@@ -23,6 +23,7 @@ function session(
     agentId: null,
     errorMessage: null,
     completionReason,
+    cancellationSource: null,
     createdAt: 1000,
     updatedAt: 2000,
   };

@@ -605,6 +605,21 @@
     }
   }
 
+  function sessionEndMessage(current: Session): string {
+    if (current.completionReason === 'crashed') return 'This session ended unexpectedly.';
+    if (current.completionReason === 'app_quit') {
+      return 'This session was interrupted when Staged closed.';
+    }
+    if (current.completionReason === 'interrupted') {
+      if (current.cancellationSource === 'project_session') {
+        return 'This session was stopped by its project session.';
+      }
+      if (current.cancellationSource === 'user') return 'You stopped this session.';
+      return 'This session was stopped.';
+    }
+    return 'This session can be resumed.';
+  }
+
   // =========================================================================
   // Input handling
   // =========================================================================
@@ -1360,11 +1375,7 @@
           <Alert.Root class="mt-3">
             <Info class={isWarning ? 'text-[var(--ui-warning)]' : 'text-[var(--text-muted)]'} />
             <Alert.Description>
-              {session.completionReason === 'crashed'
-                ? 'This session ended unexpectedly.'
-                : session.completionReason === 'app_quit'
-                  ? 'This session was interrupted when Staged closed.'
-                  : 'You stopped this session.'}
+              {sessionEndMessage(session)}
             </Alert.Description>
             <Alert.Action>
               <Button

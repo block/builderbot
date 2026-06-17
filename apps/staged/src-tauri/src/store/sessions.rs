@@ -2,7 +2,9 @@
 
 use rusqlite::{params, OptionalExtension};
 
-use super::models::{CompletionReason, PipelineExecution, Session, SessionStatus};
+use super::models::{
+    CancellationSource, CompletionReason, PipelineExecution, Session, SessionStatus,
+};
 use super::{now_timestamp, Store, StoreError};
 
 impl Store {
@@ -15,8 +17,8 @@ impl Store {
             .transpose()
             .map_err(|e| StoreError(format!("Failed to serialize pipeline: {e}")))?;
         conn.execute(
-            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, cancellation_source, created_at, updated_at, owner_pid, pipeline)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 session.id,
                 session.prompt,
@@ -26,6 +28,7 @@ impl Store {
                 session.agent_id,
                 session.error_message,
                 session.completion_reason.as_ref().map(|r| r.as_str()),
+                session.cancellation_source.as_ref().map(|s| s.as_str()),
                 session.created_at,
                 session.updated_at,
                 session.owner_pid,
@@ -38,7 +41,7 @@ impl Store {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, cancellation_source, created_at, updated_at, owner_pid, pipeline
              FROM sessions WHERE id = ?1",
             params![id],
             Self::row_to_session,
@@ -56,15 +59,41 @@ impl Store {
         error_message: Option<&str>,
         completion_reason: Option<&CompletionReason>,
     ) -> Result<(), StoreError> {
+        self.update_session_status_with_cancellation_source(
+            id,
+            status,
+            error_message,
+            completion_reason,
+            None,
+        )
+    }
+
+    /// Update session status with optional cancellation source.
+    ///
+    /// `cancellation_source` is persisted only for cancelled sessions and is
+    /// cleared on every non-cancelled transition.
+    pub fn update_session_status_with_cancellation_source(
+        &self,
+        id: &str,
+        status: SessionStatus,
+        error_message: Option<&str>,
+        completion_reason: Option<&CompletionReason>,
+        cancellation_source: Option<&CancellationSource>,
+    ) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         let error_msg = if status == SessionStatus::Error {
             error_message
         } else {
             None
         };
+        let cancellation_source = if status == SessionStatus::Cancelled {
+            cancellation_source.map(|source| source.as_str())
+        } else {
+            None
+        };
         conn.execute(
-            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, updated_at = ?4 WHERE id = ?5",
-            params![status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id],
+            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, cancellation_source = ?4, updated_at = ?5 WHERE id = ?6",
+            params![status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), cancellation_source, now_timestamp(), id],
         )?;
         Ok(())
     }
@@ -83,16 +112,38 @@ impl Store {
         error_message: Option<&str>,
         completion_reason: Option<&CompletionReason>,
     ) -> Result<bool, StoreError> {
+        self.transition_from_running_with_cancellation_source(
+            id,
+            new_status,
+            error_message,
+            completion_reason,
+            None,
+        )
+    }
+
+    pub fn transition_from_running_with_cancellation_source(
+        &self,
+        id: &str,
+        new_status: SessionStatus,
+        error_message: Option<&str>,
+        completion_reason: Option<&CompletionReason>,
+        cancellation_source: Option<&CancellationSource>,
+    ) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let error_msg = if new_status == SessionStatus::Error {
             error_message
         } else {
             None
         };
+        let cancellation_source = if new_status == SessionStatus::Cancelled {
+            cancellation_source.map(|source| source.as_str())
+        } else {
+            None
+        };
         let rows = conn.execute(
-            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, updated_at = ?4
-             WHERE id = ?5 AND status = 'running'",
-            params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id],
+            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, cancellation_source = ?4, updated_at = ?5
+             WHERE id = ?6 AND status = 'running'",
+            params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), cancellation_source, now_timestamp(), id],
         )?;
         Ok(rows > 0)
     }
@@ -109,16 +160,38 @@ impl Store {
         error_message: Option<&str>,
         completion_reason: Option<&CompletionReason>,
     ) -> Result<bool, StoreError> {
+        self.transition_from_active_with_cancellation_source(
+            id,
+            new_status,
+            error_message,
+            completion_reason,
+            None,
+        )
+    }
+
+    pub fn transition_from_active_with_cancellation_source(
+        &self,
+        id: &str,
+        new_status: SessionStatus,
+        error_message: Option<&str>,
+        completion_reason: Option<&CompletionReason>,
+        cancellation_source: Option<&CancellationSource>,
+    ) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let error_msg = if new_status == SessionStatus::Error {
             error_message
         } else {
             None
         };
+        let cancellation_source = if new_status == SessionStatus::Cancelled {
+            cancellation_source.map(|source| source.as_str())
+        } else {
+            None
+        };
         let rows = conn.execute(
-            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, updated_at = ?4
-             WHERE id = ?5 AND status IN ('queued', 'running')",
-            params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id],
+            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, cancellation_source = ?4, updated_at = ?5
+             WHERE id = ?6 AND status IN ('queued', 'running')",
+            params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), cancellation_source, now_timestamp(), id],
         )?;
         Ok(rows > 0)
     }
@@ -134,16 +207,38 @@ impl Store {
         error_message: Option<&str>,
         completion_reason: Option<&CompletionReason>,
     ) -> Result<bool, StoreError> {
+        self.transition_from_queued_with_cancellation_source(
+            id,
+            new_status,
+            error_message,
+            completion_reason,
+            None,
+        )
+    }
+
+    pub fn transition_from_queued_with_cancellation_source(
+        &self,
+        id: &str,
+        new_status: SessionStatus,
+        error_message: Option<&str>,
+        completion_reason: Option<&CompletionReason>,
+        cancellation_source: Option<&CancellationSource>,
+    ) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let error_msg = if new_status == SessionStatus::Error {
             error_message
         } else {
             None
         };
+        let cancellation_source = if new_status == SessionStatus::Cancelled {
+            cancellation_source.map(|source| source.as_str())
+        } else {
+            None
+        };
         let rows = conn.execute(
-            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, updated_at = ?4
-             WHERE id = ?5 AND status = 'queued'",
-            params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), now_timestamp(), id],
+            "UPDATE sessions SET status = ?1, error_message = ?2, completion_reason = ?3, cancellation_source = ?4, updated_at = ?5
+             WHERE id = ?6 AND status = 'queued'",
+            params![new_status.as_str(), error_msg, completion_reason.map(|r| r.as_str()), cancellation_source, now_timestamp(), id],
         )?;
         Ok(rows > 0)
     }
@@ -156,7 +251,7 @@ impl Store {
     pub fn transition_queued_to_running(&self, id: &str) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let rows = conn.execute(
-            "UPDATE sessions SET status = 'running', error_message = NULL, completion_reason = NULL, updated_at = ?1, owner_pid = ?2
+            "UPDATE sessions SET status = 'running', error_message = NULL, completion_reason = NULL, cancellation_source = NULL, updated_at = ?1, owner_pid = ?2
              WHERE id = ?3 AND status = 'queued'",
             params![now_timestamp(), std::process::id(), id],
         )?;
@@ -172,7 +267,7 @@ impl Store {
     pub fn transition_to_running(&self, id: &str) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let rows = conn.execute(
-            "UPDATE sessions SET status = 'running', error_message = NULL, completion_reason = NULL, updated_at = ?1, owner_pid = ?2
+            "UPDATE sessions SET status = 'running', error_message = NULL, completion_reason = NULL, cancellation_source = NULL, updated_at = ?1, owner_pid = ?2
              WHERE id = ?3 AND status != 'running'",
             params![now_timestamp(), std::process::id(), id],
         )?;
@@ -212,7 +307,7 @@ impl Store {
     pub fn get_running_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, cancellation_source, created_at, updated_at, owner_pid, pipeline
              FROM sessions WHERE status = 'running'",
         )?;
         let sessions = stmt
@@ -285,7 +380,7 @@ impl Store {
     ) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT s.id, s.prompt, s.status, s.working_dir, s.provider, s.agent_id, s.error_message, s.completion_reason, s.created_at, s.updated_at, s.owner_pid, s.pipeline
+            "SELECT s.id, s.prompt, s.status, s.working_dir, s.provider, s.agent_id, s.error_message, s.completion_reason, s.cancellation_source, s.created_at, s.updated_at, s.owner_pid, s.pipeline
              FROM sessions s
              WHERE s.status = 'queued'
                AND (
@@ -410,7 +505,8 @@ impl Store {
     fn row_to_session(row: &rusqlite::Row) -> rusqlite::Result<Session> {
         let status_str: String = row.get(2)?;
         let reason_str: Option<String> = row.get(7)?;
-        let pipeline_json: Option<String> = row.get(11)?;
+        let cancellation_source_str: Option<String> = row.get(8)?;
+        let pipeline_json: Option<String> = row.get(12)?;
         let pipeline = pipeline_json.as_deref().and_then(|s| {
             serde_json::from_str(s)
                 .map_err(|e| log::warn!("Failed to deserialize pipeline JSON: {e}"))
@@ -425,9 +521,12 @@ impl Store {
             agent_id: row.get(5)?,
             error_message: row.get(6)?,
             completion_reason: reason_str.as_deref().and_then(CompletionReason::parse),
-            created_at: row.get(8)?,
-            updated_at: row.get(9)?,
-            owner_pid: row.get(10)?,
+            cancellation_source: cancellation_source_str
+                .as_deref()
+                .and_then(CancellationSource::parse),
+            created_at: row.get(9)?,
+            updated_at: row.get(10)?,
+            owner_pid: row.get(11)?,
             pipeline,
         })
     }

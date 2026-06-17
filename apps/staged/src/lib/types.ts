@@ -133,6 +133,7 @@ export interface CommitTimelineItem {
   sessionId: string | null;
   sessionStatus: string | null;
   completionReason: string | null;
+  cancellationSource: CancellationSource | null;
   /** Whether this commit was authored by the current git user. */
   isOwnCommit: boolean;
 }
@@ -144,6 +145,7 @@ export interface NoteTimelineItem {
   sessionId: string | null;
   sessionStatus: string | null;
   completionReason: string | null;
+  cancellationSource: CancellationSource | null;
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
@@ -159,6 +161,7 @@ export interface ReviewTimelineItem {
   sessionStatus: string | null;
   sessionProvider: string | null;
   completionReason: string | null;
+  cancellationSource: CancellationSource | null;
   title: string | null;
   commentCount: number;
   isAuto: boolean;
@@ -175,6 +178,7 @@ export interface ImageTimelineItem {
   sessionId: string | null;
   sessionStatus: string | null;
   completionReason: string | null;
+  cancellationSource: CancellationSource | null;
   createdAt: number;
 }
 
@@ -309,6 +313,7 @@ export interface ProjectNote {
   suggestedNextNoteStep: string | null;
   sessionStatus: string | null;
   completionReason: string | null;
+  cancellationSource: CancellationSource | null;
 }
 
 export interface ProjectSessionResponse {
@@ -323,6 +328,7 @@ export interface ProjectSessionResponse {
 export type SessionStatus = 'queued' | 'running' | 'completed' | 'error' | 'cancelled';
 
 export type CompletionReason = 'turn_complete' | 'interrupted' | 'crashed' | 'app_quit' | 'unknown';
+export type CancellationSource = 'user' | 'project_session';
 
 /** Completion reasons that indicate a session can be resumed. */
 export const RESUMABLE_REASONS: ReadonlySet<CompletionReason> = new Set<CompletionReason>([
@@ -344,6 +350,7 @@ export interface Session {
   agentId: string | null;
   errorMessage: string | null;
   completionReason: CompletionReason | null;
+  cancellationSource: CancellationSource | null;
   createdAt: number;
   updatedAt: number;
   /** Pipeline execution state. Present when the session was started via a command pipeline. */
@@ -429,7 +436,8 @@ export interface SessionStatusPayload {
   sessionId: string;
   status: SessionStatus;
   errorMessage?: string | null;
-  completionReason?: string | null;
+  completionReason?: CompletionReason | null;
+  cancellationSource?: CancellationSource | null;
   branchId?: string;
   projectId?: string;
   sessionType?: string;

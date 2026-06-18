@@ -1137,7 +1137,7 @@
         disabled={selectedProjectAddRepoDisabled}
       >
         <span
-          class="flex size-4 shrink-0 items-center justify-center rounded-full bg-[var(--border-muted)] transition-colors group-hover:not-disabled:bg-[var(--border-emphasis)]"
+          class="flex size-4 shrink-0 items-center justify-center text-muted-foreground transition-colors group-hover:not-disabled:text-foreground"
         >
           <Plus size={12} />
         </span>

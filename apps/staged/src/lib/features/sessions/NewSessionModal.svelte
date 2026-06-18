@@ -88,6 +88,11 @@
       provider?: string;
       acpConfigSelection?: AcpConfigSelection | null;
     }) => void;
+    onDraftChange?: (
+      draft: { prompt: string; mode: BranchSessionType; imageIds: string[] },
+      opts?: { immediate?: boolean }
+    ) => void | Promise<void>;
+    loadDraftForMode?: (mode: BranchSessionType) => Promise<string | null>;
   }
 
   let {
@@ -109,6 +114,8 @@
     willQueueForMode,
     onClose,
     onSubmit,
+    onDraftChange,
+    loadDraftForMode,
   }: Props = $props();
 
   let prompt = $state('');
@@ -120,6 +127,8 @@
     providerId: null,
     acpConfigSelection: null,
   });
+  let modeSwitchGeneration = 0;
+  let switchingMode = false;
 
   // Text-snippet attachment state (modal-local — folded into the prompt on
   // submit or on close, never persisted to the backend).
@@ -263,7 +272,19 @@
   // Platform-aware modifier label for the ⌘1/2/3 mode-switch hints.
   let modKey = $derived(isMac() ? '⌘' : 'Ctrl ');
 
-  function switchMode(newMode: BranchSessionType) {
+  function focusPrompt(selection: 'all' | 'last-line' | null) {
+    tick().then(() => {
+      if (!textareaEl) return;
+      textareaEl.focus();
+      if (selection && textareaEl.textContent) {
+        selectPromptContent(textareaEl, selection);
+      } else {
+        placeCursorAtEnd(textareaEl);
+      }
+    });
+  }
+
+  async function switchMode(newMode: BranchSessionType) {
     if (isProjectNote) return;
     modeMenuOpen = false;
     if (newMode === currentMode) return;
@@ -274,24 +295,52 @@
     const isPromptPrefill =
       (commitPrefill && prompt === commitPrefill) || (notePrefill && prompt === notePrefill);
     const userDraft = isPromptPrefill ? '' : prompt;
+    const previousMode = currentMode;
+    const generation = ++modeSwitchGeneration;
 
+    await onDraftChange?.({ prompt: userDraft, mode: previousMode, imageIds }, { immediate: true });
+    if (generation !== modeSwitchGeneration) return;
+
+    switchingMode = true;
     currentMode = newMode;
+
+    if (loadDraftForMode) {
+      let cachedDraft: string | null = null;
+      try {
+        cachedDraft = await loadDraftForMode(newMode);
+      } catch (err) {
+        console.error('[NewSessionModal] Failed to load draft:', err);
+      }
+      if (generation !== modeSwitchGeneration) return;
+
+      const modePrefill =
+        newMode === 'commit' ? commitPrefill : newMode === 'note' ? notePrefill : '';
+      if (cachedDraft) {
+        prompt = cachedDraft;
+        focusPrompt(null);
+      } else if (modePrefill) {
+        prompt = modePrefill;
+        focusPrompt(modePrefill.includes('\n') ? 'last-line' : prefillSelection);
+      } else {
+        prompt = '';
+        focusPrompt(null);
+      }
+      switchingMode = false;
+      onDraftChange?.({ prompt, mode: currentMode, imageIds });
+      return;
+    }
 
     // Apply prefill when switching to commit or note mode with no user draft
     const modePrefill =
       newMode === 'commit' ? commitPrefill : newMode === 'note' ? notePrefill : '';
     if (modePrefill && !userDraft) {
       prompt = modePrefill;
-      const modeSelection = modePrefill.includes('\n') ? 'last-line' : prefillSelection;
-      tick().then(() => {
-        if (textareaEl && textareaEl.textContent) {
-          selectPromptContent(textareaEl, modeSelection);
-          textareaEl.focus();
-        }
-      });
+      focusPrompt(modePrefill.includes('\n') ? 'last-line' : prefillSelection);
     } else {
       prompt = userDraft;
     }
+    switchingMode = false;
+    onDraftChange?.({ prompt, mode: currentMode, imageIds });
   }
 
   // Close mode menu on outside click
@@ -377,6 +426,11 @@
   function removeSnippet(id: string) {
     textSnippets = textSnippets.filter((s) => s.id !== id);
   }
+
+  $effect(() => {
+    if (!initialized || switchingMode) return;
+    onDraftChange?.({ prompt, mode: currentMode, imageIds });
+  });
 
   // Focus textarea on mount (one-time).
   // We await tick() so the DOM reflects the prompt value set by the init effect above.

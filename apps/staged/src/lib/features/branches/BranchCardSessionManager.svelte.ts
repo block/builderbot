@@ -16,6 +16,7 @@ import type {
   BranchSessionType,
 } from '../../types';
 import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
+import { createDraftWriteScheduler, loadDraft } from '../../shared/draftCache';
 import { shouldQueueBranchSession } from './branchSessionQueue';
 import {
   getPendingSessionItems,
@@ -36,6 +37,8 @@ export default class BranchCardSessionManager {
   private loadTimeline: (opts?: { timelineKey?: string | null; force?: boolean }) => void =
     undefined!;
   private getTimeline: () => BranchTimelineData | null = () => null;
+  private draftWriter = createDraftWriteScheduler();
+  private openNewSessionRequest = 0;
 
   // New session modal state
   showNewSession = $state(false);
@@ -98,6 +101,10 @@ export default class BranchCardSessionManager {
     });
   }
 
+  private draftKeyForMode(mode: BranchSessionType): string {
+    return `draft:branch-session:${this.getBranch().id}:${mode}`;
+  }
+
   async startOrQueueSession(
     mode: BranchSessionType,
     prompt: string,
@@ -120,22 +127,38 @@ export default class BranchCardSessionManager {
     });
   }
 
-  openNewSession(mode: BranchSessionType, e?: MouseEvent) {
+  async openNewSession(mode: BranchSessionType, e?: MouseEvent) {
     if (mode === 'review' && e?.altKey) {
       void this.startReviewSessionWithoutDialog();
       return;
     }
+    const request = ++this.openNewSessionRequest;
     this.newSessionMode = mode;
+    const draft = await this.loadNewSessionDraftForMode(mode);
+    if (request !== this.openNewSessionRequest) return;
+    this.draftPrompt = draft ?? '';
     this.showNewSession = true;
   }
 
-  openNewSessionReferring(hashtagRef: string) {
-    const hadContent = this.showNewSession && this.draftPrompt.trim();
+  async openNewSessionReferring(hashtagRef: string) {
+    const request = ++this.openNewSessionRequest;
+    const wasOpen = this.showNewSession;
+    const hadContent = wasOpen && this.draftPrompt.trim();
+    if (!wasOpen) {
+      this.newSessionMode = 'commit';
+      const draft = await this.loadNewSessionDraftForMode('commit');
+      if (request !== this.openNewSessionRequest) return;
+      this.draftPrompt = draft ?? this.draftPrompt;
+    }
     this.draftPrompt = buildReferringPrompt(this.draftPrompt, hashtagRef);
-    if (!hadContent) {
+    if (!wasOpen || !hadContent) {
       this.newSessionMode = 'commit';
       this.showNewSession = true;
     }
+    this.handleNewSessionDraftChange(
+      { prompt: this.draftPrompt, mode: this.newSessionMode, imageIds: this.draftImageIds },
+      { immediate: true }
+    );
   }
 
   async startReviewSessionWithoutDialog() {
@@ -143,15 +166,33 @@ export default class BranchCardSessionManager {
     this.showNewSession = false;
     this.draftPrompt = '';
     this.draftImageIds = [];
+    void this.draftWriter.clearNow(this.draftKeyForMode('review'));
 
     const reviewPrompt = 'Review the code changes on this branch.';
     await this.startOrQueueSession('review', reviewPrompt);
   }
 
-  handleNewSessionClose(draft: { prompt: string; mode: BranchSessionType; imageIds: string[] }) {
+  async loadNewSessionDraftForMode(mode: BranchSessionType): Promise<string | null> {
+    return loadDraft(this.draftKeyForMode(mode));
+  }
+
+  handleNewSessionDraftChange(
+    draft: { prompt: string; mode: BranchSessionType; imageIds: string[] },
+    opts: { immediate?: boolean } = {}
+  ) {
     this.draftPrompt = draft.prompt;
     this.newSessionMode = draft.mode;
     this.draftImageIds = draft.imageIds;
+    const key = this.draftKeyForMode(draft.mode);
+    if (opts.immediate) {
+      void this.draftWriter.saveNow(key, draft.prompt);
+    } else {
+      this.draftWriter.scheduleSave(key, draft.prompt);
+    }
+  }
+
+  handleNewSessionClose(draft: { prompt: string; mode: BranchSessionType; imageIds: string[] }) {
+    this.handleNewSessionDraftChange(draft, { immediate: true });
     this.showNewSession = false;
   }
 
@@ -166,6 +207,7 @@ export default class BranchCardSessionManager {
     this.showNewSession = false;
     this.draftPrompt = '';
     this.draftImageIds = [];
+    void this.draftWriter.clearNow(this.draftKeyForMode(data.mode));
 
     const prompt =
       data.prompt.trim() === '' && data.mode === 'review'

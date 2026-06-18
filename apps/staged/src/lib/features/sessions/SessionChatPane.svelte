@@ -180,6 +180,7 @@
   import { renderMarkdown as renderSharedMarkdown } from '../../shared/markdown/renderMarkdown';
   import { loadPikchrRenderer, type PikchrRenderer } from '../../shared/markdown/pikchrRendering';
   import { getNoteFollowupLabel, noteActivityLabel, type LinkedNoteContext } from './noteFreshness';
+  import { createDraftWriteScheduler, loadDraft } from '../../shared/draftCache';
   import NoteActivityCard from './NoteActivityCard.svelte';
   import { splitAtNoteIndicator } from './noteIndicators';
   import type { HashtagClickInfo } from '../references/referenceHistory.svelte';
@@ -302,6 +303,14 @@
   let expandedTools = $state<Set<string>>(new Set());
   let displayRoots = $state<string[]>([]);
   let currentDisplayRootKey = '';
+
+  const replyDraftWriter = createDraftWriteScheduler();
+  let loadedDraftSessionId: string | null = null;
+  let draftLoadGeneration = 0;
+
+  function replyDraftKey(id: string): string {
+    return `draft:session-reply:${id}`;
+  }
   let discoveredFollowupConfig = $state<AcpConfigDiscovery | null>(null);
   let modelSpecificFollowupConfig = $state<AcpConfigDiscovery | null>(null);
   let modelSpecificFollowupModelValue = $state<string | null>(null);
@@ -698,6 +707,7 @@
     stopPolling();
     unlistenStatus?.();
     unlistenBackgroundHold?.();
+    replyDraftWriter.cancel();
   });
 
   // This pane is mounted once and reused across opens (`sessionPanePool`
@@ -753,6 +763,32 @@
 
   $effect(() => {
     onSessionChange?.(session);
+  });
+
+  $effect(() => {
+    const isActive = active;
+    const id = sessionId;
+    if (!isActive || !id) {
+      loadedDraftSessionId = null;
+      return;
+    }
+
+    const generation = ++draftLoadGeneration;
+    loadedDraftSessionId = null;
+    loadDraft(replyDraftKey(id)).then((draft) => {
+      if (generation !== draftLoadGeneration || !active || sessionId !== id) return;
+      inputText = draft ?? '';
+      loadedDraftSessionId = id;
+      tick().then(() => autoResize());
+    });
+  });
+
+  $effect(() => {
+    const isActive = active;
+    const id = sessionId;
+    const text = inputText;
+    if (!isActive || !id || loadedDraftSessionId !== id) return;
+    replyDraftWriter.scheduleSave(replyDraftKey(id), text);
   });
 
   $effect(() => {
@@ -1209,6 +1245,7 @@
   async function handleSend() {
     const text = inputText.trim();
     if (!text) return;
+    void replyDraftWriter.clearNow(replyDraftKey(sessionId));
     inputText = '';
     const imageIdsToSend = replyImageIds.length > 0 ? [...replyImageIds] : undefined;
     replyImageIds = [];

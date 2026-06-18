@@ -134,6 +134,16 @@
   const SMALL_DIFF_BREAKPOINT = 700;
   const MOBILE_DIFF_REST_OFFSET = 20;
   const MOBILE_DIFF_EDGE_PEEK = 28;
+  const MOBILE_DIFF_REVEAL_HIT_WIDTH = 28;
+
+  type DiffViewerScrollApi = {
+    scrollBy: (side: 'before' | 'after', deltaY: number) => void;
+    scrollByX: (side: 'before' | 'after', deltaX: number) => void;
+    scrollByXBoth: (deltaX: number) => void;
+    canScrollX: (side: 'before' | 'after') => boolean;
+  };
+
+  type MobileDiffGestureMode = 'pending' | 'vertical-scroll' | 'horizontal-scroll' | 'pane-drag';
 
   // Create review state once we have a resolved commitSha (skip in readonly mode).
   // NOTE: This effect's tracked dependencies are `diffViewer.state.commitSha` and
@@ -311,12 +321,14 @@
   let mobileDiffPointerId: number | null = null;
   let mobileDiffStartX = 0;
   let mobileDiffStartY = 0;
+  let mobileDiffLastX = 0;
   let mobileDiffStartDragX = 0;
   let mobileDiffIsDragging = $state(false);
-  let mobileDiffIsScrolling = false;
+  let mobileDiffGestureMode: MobileDiffGestureMode = 'pending';
+  let mobileDiffCanDragPane = false;
+  let mobileDiffCanScrollCode = false;
   let mobileDiffLastY = 0;
-  let diffViewerScrollApi: { scrollBy: (side: 'before' | 'after', deltaY: number) => void } | null =
-    $state(null);
+  let diffViewerScrollApi: DiffViewerScrollApi | null = $state(null);
   let mobileDiffStyle = $derived(
     `--mobile-diff-drag-x: ${mobileDiffDragX}px;` +
       `--mobile-diff-rest-offset: ${MOBILE_DIFF_REST_OFFSET}px;` +
@@ -1008,7 +1020,9 @@
   function resetMobileDiffDrag() {
     mobileDiffPointerId = null;
     mobileDiffIsDragging = false;
-    mobileDiffIsScrolling = false;
+    mobileDiffGestureMode = 'pending';
+    mobileDiffCanDragPane = false;
+    mobileDiffCanScrollCode = false;
     mobileDiffDragX = 0;
   }
 
@@ -1018,21 +1032,45 @@
     );
   }
 
+  function isMobileDiffCodeTarget(target: HTMLElement): boolean {
+    return !!target.closest(
+      '.after-pane .code-container, .after-pane .lines-wrapper, .after-pane .line'
+    );
+  }
+
+  function isMobileDiffRevealTarget(
+    target: HTMLElement,
+    event: PointerEvent | MouseEvent
+  ): boolean {
+    if (target.closest('.spine')) return true;
+
+    const afterPane = target.closest('.after-pane') as HTMLElement | null;
+    if (!afterPane) return false;
+
+    const paneRect = afterPane.getBoundingClientRect();
+    return event.clientX - paneRect.left <= MOBILE_DIFF_REVEAL_HIT_WIDTH;
+  }
+
   function handleMobileDiffPointerDown(event: PointerEvent) {
     if (!isSmallDiffViewport) return;
     if (event.pointerType === 'mouse' && event.button !== 0) return;
 
     const target = event.target as HTMLElement;
-    if (!target.closest('.after-pane, .spine')) return;
+    const canDragPane = isMobileDiffRevealTarget(target, event);
+    const canScrollCode = !canDragPane && isMobileDiffCodeTarget(target);
+    if (!canDragPane && !canScrollCode) return;
     if (isMobileDiffInteractiveTarget(target)) return;
 
     mobileDiffPointerId = event.pointerId;
     mobileDiffStartX = event.clientX;
     mobileDiffStartY = event.clientY;
+    mobileDiffLastX = event.clientX;
     mobileDiffLastY = event.clientY;
     mobileDiffStartDragX = mobileDiffDragX;
     mobileDiffIsDragging = false;
-    mobileDiffIsScrolling = false;
+    mobileDiffGestureMode = 'pending';
+    mobileDiffCanDragPane = canDragPane;
+    mobileDiffCanScrollCode = canScrollCode;
   }
 
   function handleMobileDiffPointerMove(event: PointerEvent) {
@@ -1041,8 +1079,7 @@
     const deltaX = event.clientX - mobileDiffStartX;
     const deltaY = event.clientY - mobileDiffStartY;
 
-    // Already in vertical scroll mode — translate touch delta to scroll
-    if (mobileDiffIsScrolling) {
+    if (mobileDiffGestureMode === 'vertical-scroll') {
       event.preventDefault();
       const moveDeltaY = event.clientY - mobileDiffLastY;
       mobileDiffLastY = event.clientY;
@@ -1050,22 +1087,50 @@
       return;
     }
 
-    if (!mobileDiffIsDragging) {
-      // Determine gesture direction once past dead zone
-      if (Math.abs(deltaX) > 8 && Math.abs(deltaX) > Math.abs(deltaY)) {
-        // Horizontal intent — capture pointer and start drag
+    if (mobileDiffGestureMode === 'horizontal-scroll') {
+      event.preventDefault();
+      const moveDeltaX = event.clientX - mobileDiffLastX;
+      mobileDiffLastX = event.clientX;
+      diffViewerScrollApi?.scrollByXBoth(-moveDeltaX);
+      return;
+    }
+
+    if (mobileDiffGestureMode === 'pane-drag') {
+      event.preventDefault();
+      const nextX = mobileDiffStartDragX + deltaX;
+      mobileDiffDragX = Math.max(0, Math.min(getMobileDiffMaxDrag(), nextX));
+      return;
+    }
+
+    // Determine gesture direction once past the dead zone, then keep that mode
+    // for the rest of the pointer sequence.
+    if (Math.abs(deltaX) > 8 && Math.abs(deltaX) > Math.abs(deltaY)) {
+      if (mobileDiffCanDragPane) {
+        mobileDiffGestureMode = 'pane-drag';
         mobileDiffIsDragging = true;
         diffViewerContainerEl?.setPointerCapture(event.pointerId);
-      } else if (Math.abs(deltaY) > 8 && Math.abs(deltaY) > Math.abs(deltaX)) {
-        // Vertical intent — start scroll mode
-        mobileDiffIsScrolling = true;
-        mobileDiffLastY = event.clientY;
+      } else if (mobileDiffCanScrollCode && diffViewerScrollApi?.canScrollX('after')) {
+        mobileDiffGestureMode = 'horizontal-scroll';
+        mobileDiffLastX = event.clientX;
+        diffViewerContainerEl?.setPointerCapture(event.pointerId);
         event.preventDefault();
-        diffViewerScrollApi?.scrollBy('after', -deltaY);
+        diffViewerScrollApi.scrollByXBoth(-deltaX);
         return;
       } else {
         return;
       }
+    } else if (
+      mobileDiffCanScrollCode &&
+      Math.abs(deltaY) > 8 &&
+      Math.abs(deltaY) > Math.abs(deltaX)
+    ) {
+      mobileDiffGestureMode = 'vertical-scroll';
+      mobileDiffLastY = event.clientY;
+      event.preventDefault();
+      diffViewerScrollApi?.scrollBy('after', -deltaY);
+      return;
+    } else {
+      return;
     }
 
     event.preventDefault();
@@ -1084,7 +1149,7 @@
   function handleMobileDiffMouseDownCapture(event: MouseEvent) {
     if (!isSmallDiffViewport) return;
     const target = event.target as HTMLElement;
-    if (!target.closest('.spine')) return;
+    if (!isMobileDiffRevealTarget(target, event)) return;
     event.stopPropagation();
   }
 </script>
@@ -1746,8 +1811,8 @@
       transform: translateX(calc(var(--mobile-diff-rest-offset) + var(--mobile-diff-drag-x, 0px)));
       transition: transform 0.22s ease;
       z-index: 3;
-      cursor: grab;
-      touch-action: pan-y;
+      cursor: default;
+      touch-action: none;
       box-shadow:
         -18px 0 28px color-mix(in srgb, var(--bg-deepest) 52%, transparent),
         var(--shadow-elevated);
@@ -1776,7 +1841,7 @@
       transition: transform 0.22s ease;
       z-index: 4;
       cursor: grab;
-      touch-action: pan-y;
+      touch-action: none;
       background-color: var(--bg-primary);
     }
 

@@ -82,6 +82,13 @@
   import HorizontalScrollbar from './HorizontalScrollbar.svelte';
   import StructuralHeaderStack from './StructuralHeaderStack.svelte';
 
+  type DiffViewerScrollApi = {
+    scrollBy: (side: 'before' | 'after', deltaY: number) => void;
+    scrollByX: (side: 'before' | 'after', deltaX: number) => void;
+    scrollByXBoth: (deltaX: number) => void;
+    canScrollX: (side: 'before' | 'after') => boolean;
+  };
+
   // ==========================================================================
   // Props
   // ==========================================================================
@@ -127,7 +134,7 @@
     commentGithubState?: (comment: Comment) => GithubButtonState;
 
     /** Bindable API object exposing scroll control for external callers (e.g. mobile touch scroll). */
-    scrollApi?: { scrollBy: (side: 'before' | 'after', deltaY: number) => void } | null;
+    scrollApi?: DiffViewerScrollApi | null;
   }
 
   let {
@@ -372,8 +379,33 @@
 
   // Expose scroll API for external callers (e.g. mobile touch scroll in DiffModal)
   scrollApi = {
-    scrollBy: (side, deltaY) => scrollController.scrollBy(side, deltaY),
+    scrollBy: (side, deltaY) => {
+      scrollController.scrollBy(side, deltaY);
+      updateScrollPositionedElements();
+    },
+    scrollByX: (side, deltaX) => {
+      scrollController.scrollByX(side, deltaX);
+      updateScrollPositionedElements();
+    },
+    scrollByXBoth: (deltaX) => {
+      scrollController.scrollByXBoth(deltaX);
+      updateScrollPositionedElements();
+    },
+    canScrollX: (side) => {
+      const dims = scrollController.getDimensions(side);
+      return (dims.contentWidth ?? 0) > (dims.viewportWidth ?? 0) + 1;
+    },
   };
+
+  function updateScrollPositionedElements() {
+    requestAnimationFrame(() => {
+      redrawConnectorsImpl();
+      updateToolbarPosition();
+      updateCommentEditorPosition();
+      updateLineSelectionToolbar();
+      updateLineCommentEditorPosition();
+    });
+  }
 
   let afterStructuralDeclarations = $derived.by(() => {
     if (!afterPath || isDeletedFile || afterLines.length === 0) return [];

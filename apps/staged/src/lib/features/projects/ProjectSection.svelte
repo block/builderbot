@@ -65,6 +65,7 @@
     type ReferenceDiffContext,
     type ReferenceHistoryEntry,
   } from '../references/referenceHistory.svelte';
+  import { createDraftWriteScheduler, loadDraft } from '../../shared/draftCache';
 
   interface Props {
     project: Project;
@@ -121,9 +122,15 @@
   let showProjectSessionModal = $state(false);
   let draftProjectPrompt = $state('');
   let draftProjectImageIds = $state<string[]>([]);
+  const projectDraftWriter = createDraftWriteScheduler();
+  let projectDraftLoadGeneration = 0;
   let preferredProvider = $derived(getPreferredAgent(agentState.providers) ?? undefined);
   /** Session IDs for running project sessions (all produce notes). */
   let activeSessionIds = $state<Set<string>>(new Set());
+
+  function projectDraftKey(projectId: string): string {
+    return `draft:project-session:${projectId}`;
+  }
 
   // ── Live session hints/titles (latest agent message + ACP title for running notes) ──
   let liveSessionHints = $state<Record<string, string>>({});
@@ -173,6 +180,7 @@
 
   onDestroy(() => {
     liveSessionHintPoller.destroy();
+    projectDraftWriter.cancel();
   });
 
   // ── In-flight repo sessions spawned by running project sessions ────────
@@ -309,9 +317,38 @@
     void ensureHashtagItems();
   });
 
-  function openProjectSessionModal() {
+  async function loadProjectSessionDraft() {
+    if (draftProjectPrompt.trim()) return;
+
+    const projectId = project.id;
+    const generation = ++projectDraftLoadGeneration;
+    try {
+      const draft = await loadDraft(projectDraftKey(projectId));
+      if (generation !== projectDraftLoadGeneration || project.id !== projectId) return;
+      draftProjectPrompt = draft ?? '';
+    } catch (err) {
+      console.error('[ProjectSection] Failed to load project draft:', err);
+    }
+  }
+
+  async function openProjectSessionModal() {
+    await loadProjectSessionDraft();
     showProjectSessionModal = true;
     void ensureHashtagItems();
+  }
+
+  function handleProjectSessionDraftChange(
+    draft: { prompt: string; imageIds: string[] },
+    opts: { immediate?: boolean } = {}
+  ) {
+    draftProjectPrompt = draft.prompt;
+    draftProjectImageIds = draft.imageIds;
+    const key = projectDraftKey(project.id);
+    if (opts.immediate) {
+      void projectDraftWriter.saveNow(key, draft.prompt);
+    } else {
+      projectDraftWriter.scheduleSave(key, draft.prompt);
+    }
   }
 
   async function handleSubmitProjectSession(data: {
@@ -325,6 +362,7 @@
     if (!text || !provider) return;
 
     const imageIdsToSend = data.imageIds.length > 0 ? [...data.imageIds] : undefined;
+    void projectDraftWriter.clearNow(projectDraftKey(project.id));
     try {
       const response = await commands.startProjectSession(
         project.id,
@@ -482,9 +520,12 @@
     return `project-note-${note.id}`;
   }
 
-  function handleProjectNoteNewSessionReferring(ref: string) {
+  async function handleProjectNoteNewSessionReferring(ref: string) {
+    await loadProjectSessionDraft();
     draftProjectPrompt = buildReferringPrompt(draftProjectPrompt, ref);
-    openProjectSessionModal();
+    showProjectSessionModal = true;
+    void ensureHashtagItems();
+    void projectDraftWriter.saveNow(projectDraftKey(project.id), draftProjectPrompt);
   }
 
   function projectNoteToOpenState(note: ProjectNote, chatOpen = false): OpenProjectNoteState {
@@ -802,9 +843,11 @@
     initialImageIds={draftProjectImageIds}
     {hashtagItems}
     submitDisabledReason={preferredProvider ? null : 'No AI agent available'}
+    onDraftChange={(draft, opts) => {
+      handleProjectSessionDraftChange(draft, opts);
+    }}
     onClose={(draft) => {
-      draftProjectPrompt = draft.prompt;
-      draftProjectImageIds = draft.imageIds;
+      handleProjectSessionDraftChange(draft, { immediate: true });
       showProjectSessionModal = false;
     }}
     onSubmit={(data) => {

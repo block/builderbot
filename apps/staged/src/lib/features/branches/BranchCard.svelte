@@ -2359,6 +2359,16 @@
     remote={isRemote}
     willQueue={sessionMgr.willQueue}
     willQueueForMode={(mode) => sessionMgr.willQueueForMode(mode)}
+    loadDraftForMode={(mode) => sessionMgr.loadNewSessionDraftForMode(mode)}
+    onDraftChange={(draft, opts) => {
+      // Don't persist prefilled text as a draft — it should be re-evaluated
+      // each time the dialog opens based on the current timeline state.
+      const prompt =
+        draft.prompt.trim() === commitPrefill.trim() || draft.prompt.trim() === notePrefill.trim()
+          ? ''
+          : draft.prompt;
+      sessionMgr.handleNewSessionDraftChange({ ...draft, prompt }, opts);
+    }}
     onClose={(draft) => {
       // Don't persist prefilled text as a draft — it should be re-evaluated
       // each time the dialog opens based on the current timeline state.

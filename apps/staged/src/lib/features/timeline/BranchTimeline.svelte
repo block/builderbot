@@ -89,8 +89,8 @@
     onPullOrigin?: () => void;
     onPushOrigin?: () => void;
     onRebaseBranch?: () => void;
-    onRebaseBranchOntoOrigin?: () => void;
     onForcePush?: () => void;
+    onResetToOrigin?: () => void;
     onOpenForcePushSession?: () => void;
     forcePushingOrigin?: boolean;
     onOpenPushSession?: () => void;
@@ -102,6 +102,7 @@
     newSessionDisabled?: boolean;
     pullingOrigin?: boolean;
     pushingOrigin?: boolean;
+    resettingToOrigin?: boolean;
     discardingWorktreeChanges?: boolean;
     /** Error message from a failed load/revalidation. */
     error?: string | null;
@@ -144,8 +145,8 @@
     onPullOrigin,
     onPushOrigin,
     onRebaseBranch,
-    onRebaseBranchOntoOrigin,
     onForcePush,
+    onResetToOrigin,
     onOpenForcePushSession,
     forcePushingOrigin = false,
     onOpenPushSession,
@@ -157,6 +158,7 @@
     newSessionDisabled = false,
     pullingOrigin = false,
     pushingOrigin = false,
+    resettingToOrigin = false,
     discardingWorktreeChanges = false,
     error,
     gitActionDisabledReason,
@@ -256,6 +258,9 @@
     onForcePush?: () => void;
     forcePushDisabledReason?: string;
     forcePushing?: boolean;
+    onResetToOrigin?: () => void;
+    resetToOriginDisabledReason?: string;
+    resettingToOrigin?: boolean;
     pushing?: boolean;
     onViewDiff?: () => void;
     onCommitChanges?: () => void;
@@ -437,28 +442,19 @@
           2
         );
         const behindCount = state.upstream.behind;
-        // When `origin/{branch}` is itself behind `origin/{base}` rebasing onto
-        // origin would replay branch commits over a stale tip — almost never
-        // what the user wants. Surface that fact and disable the action; the
-        // companion "rebase onto base" action remains available via onRebase
-        // wired on other rows.
         const baseRefShort = state.base.ref.replace(/^origin\//, '') || state.base.ref;
         const upstreamBehindBase = state.upstream.behindBase;
-        const originBehindBaseReason =
-          upstreamBehindBase > 0
-            ? `origin/${state.currentBranch ?? 'branch'} is ${plural(upstreamBehindBase, 'commit')} behind ${baseRefShort}; rebase onto ${baseRefShort} instead`
-            : undefined;
         const baseSummary =
           upstreamBehindBase > 0
             ? ` and is ${plural(upstreamBehindBase, 'commit')} behind ${baseRefShort}`
             : '';
         const divergedTitle = `origin diverges here and has ${plural(behindCount, 'more commit')}${baseSummary}`;
         const divergedTitleHtml = `<span class="git-ref-badge">origin</span> diverges here and has ${escapeHtml(plural(behindCount, 'more commit'))}${escapeHtml(baseSummary)}`;
-        const rebaseReason = forcePushingOrigin
-          ? 'Force push in progress'
-          : originBehindBaseReason
-            ? originBehindBaseReason
-            : onRebaseBranchOntoOrigin
+        const resetToOriginReason = resettingToOrigin
+          ? 'Resetting...'
+          : forcePushingOrigin
+            ? 'Push in progress'
+            : onResetToOrigin
               ? (rebaseBranchDisabledReason ?? undefined)
               : undefined;
         rows.push({
@@ -468,8 +464,6 @@
           titleHtml: divergedTitleHtml,
           timestamp: placement.timestamp,
           order: placement.order,
-          onRebase: rebaseReason ? undefined : onRebaseBranchOntoOrigin,
-          rebaseDisabledReason: rebaseReason,
           onForcePush: forcePushingOrigin
             ? onOpenForcePushSession
             : rebaseBranchDisabledReason
@@ -481,6 +475,9 @@
               ? (rebaseBranchDisabledReason ?? undefined)
               : undefined,
           forcePushing: forcePushingOrigin,
+          onResetToOrigin: resetToOriginReason ? undefined : onResetToOrigin,
+          resetToOriginDisabledReason: resetToOriginReason,
+          resettingToOrigin,
         });
         break;
       }
@@ -931,6 +928,9 @@
             onForcePushClick={item.onForcePush}
             forcePushDisabledReason={item.forcePushDisabledReason}
             forcePushing={item.forcePushing}
+            onResetToOriginClick={item.onResetToOrigin}
+            resetToOriginDisabledReason={item.resetToOriginDisabledReason}
+            resettingToOrigin={item.resettingToOrigin}
             pushing={item.pushing}
             onViewDiffClick={item.onViewDiff}
             onCommitChangesClick={item.onCommitChanges}
@@ -1015,6 +1015,9 @@
             onForcePushClick={item.onForcePush}
             forcePushDisabledReason={item.forcePushDisabledReason}
             forcePushing={item.forcePushing}
+            onResetToOriginClick={item.onResetToOrigin}
+            resetToOriginDisabledReason={item.resetToOriginDisabledReason}
+            resettingToOrigin={item.resettingToOrigin}
             pushing={item.pushing}
             onViewDiffClick={item.onViewDiff}
             onCommitChangesClick={item.onCommitChanges}

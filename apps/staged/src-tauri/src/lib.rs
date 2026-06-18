@@ -2209,6 +2209,7 @@ pub fn run() {
             timeline::refresh_branch_git_state,
             timeline::list_parent_branch_commits,
             timeline::pull_branch_ff_only,
+            timeline::reset_branch_to_remote,
             // Notes
             note_commands::create_note,
             note_commands::delete_note,

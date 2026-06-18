@@ -327,6 +327,7 @@
   let mobileDiffGestureMode: MobileDiffGestureMode = 'pending';
   let mobileDiffCanDragPane = false;
   let mobileDiffCanScrollCode = false;
+  let mobileDiffMarkdownScrollEl: HTMLElement | null = null;
   let mobileDiffLastY = 0;
   let diffViewerScrollApi: DiffViewerScrollApi | null = $state(null);
   let mobileDiffStyle = $derived(
@@ -1023,6 +1024,7 @@
     mobileDiffGestureMode = 'pending';
     mobileDiffCanDragPane = false;
     mobileDiffCanScrollCode = false;
+    mobileDiffMarkdownScrollEl = null;
     mobileDiffDragX = 0;
   }
 
@@ -1036,6 +1038,23 @@
     return !!target.closest(
       '.after-pane .code-container, .after-pane .lines-wrapper, .after-pane .line'
     );
+  }
+
+  function getMobileDiffMarkdownScrollTarget(target: HTMLElement): HTMLElement | null {
+    return target.closest('.after-pane .code-area.markdown-mode') as HTMLElement | null;
+  }
+
+  function canScrollMobileDiffContent(): boolean {
+    return mobileDiffCanScrollCode || mobileDiffMarkdownScrollEl !== null;
+  }
+
+  function scrollMobileDiffContent(deltaY: number) {
+    if (mobileDiffMarkdownScrollEl) {
+      mobileDiffMarkdownScrollEl.scrollTop += deltaY;
+      return;
+    }
+
+    diffViewerScrollApi?.scrollBy('after', deltaY);
   }
 
   function isMobileDiffRevealTarget(
@@ -1057,9 +1076,12 @@
 
     const target = event.target as HTMLElement;
     const canDragPane = isMobileDiffRevealTarget(target, event);
-    const canScrollCode = !canDragPane && isMobileDiffCodeTarget(target);
-    if (!canDragPane && !canScrollCode) return;
-    if (isMobileDiffInteractiveTarget(target)) return;
+    const markdownScrollEl = !canDragPane ? getMobileDiffMarkdownScrollTarget(target) : null;
+    const canScrollCode =
+      !canDragPane && markdownScrollEl === null && isMobileDiffCodeTarget(target);
+    if (!canDragPane && !canScrollCode && markdownScrollEl === null) return;
+    const isMarkdownLink = markdownScrollEl !== null && target.closest('a') !== null;
+    if (isMobileDiffInteractiveTarget(target) && !isMarkdownLink) return;
 
     mobileDiffPointerId = event.pointerId;
     mobileDiffStartX = event.clientX;
@@ -1071,6 +1093,7 @@
     mobileDiffGestureMode = 'pending';
     mobileDiffCanDragPane = canDragPane;
     mobileDiffCanScrollCode = canScrollCode;
+    mobileDiffMarkdownScrollEl = markdownScrollEl;
   }
 
   function handleMobileDiffPointerMove(event: PointerEvent) {
@@ -1083,7 +1106,7 @@
       event.preventDefault();
       const moveDeltaY = event.clientY - mobileDiffLastY;
       mobileDiffLastY = event.clientY;
-      diffViewerScrollApi?.scrollBy('after', -moveDeltaY);
+      scrollMobileDiffContent(-moveDeltaY);
       return;
     }
 
@@ -1120,14 +1143,14 @@
         return;
       }
     } else if (
-      mobileDiffCanScrollCode &&
+      canScrollMobileDiffContent() &&
       Math.abs(deltaY) > 8 &&
       Math.abs(deltaY) > Math.abs(deltaX)
     ) {
       mobileDiffGestureMode = 'vertical-scroll';
       mobileDiffLastY = event.clientY;
       event.preventDefault();
-      diffViewerScrollApi?.scrollBy('after', -deltaY);
+      scrollMobileDiffContent(-deltaY);
       return;
     } else {
       return;

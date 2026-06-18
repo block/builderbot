@@ -149,7 +149,9 @@
   let refreshingGitState = $state(false);
   let error = $state<string | null>(null);
   let pullingOrigin = $state(false);
+  let resettingToOrigin = $state(false);
   let discardingWorktreeChanges = $state(false);
+  let showResetToOriginDialog = $state(false);
   let loadedTimelineKey = $state<string | null>(null);
   type TimelineFullReview = NonNullable<Awaited<ReturnType<typeof commands.getReview>>>;
   type TimelineReviewDetails = {
@@ -934,6 +936,48 @@
     }
   }
 
+  function formatCommitCount(count: number, noun = 'commit'): string {
+    return `${count} ${noun}${count === 1 ? '' : 's'}`;
+  }
+
+  let resetToOriginTarget = $derived(`origin/${branch.branchName}`);
+  let resetToOriginDescription = $derived.by(() => {
+    const state = timeline?.gitState;
+    if (state?.upstream.relation === 'diverged') {
+      return (
+        `Origin has ${formatCommitCount(state.upstream.behind)} that your local branch does not. ` +
+        `Resetting will discard ${formatCommitCount(state.upstream.ahead, 'local commit')} ` +
+        `and make this branch match ${resetToOriginTarget}. This will also discard ` +
+        'uncommitted changes and remove untracked files.'
+      );
+    }
+
+    return (
+      `Reset ${branch.branchName} to ${resetToOriginTarget}? This will discard local commits ` +
+      'that are not on origin, discard uncommitted changes, and remove untracked files.'
+    );
+  });
+
+  function handleResetToOrigin() {
+    if (timeline?.gitState?.upstream.relation !== 'diverged') return;
+    showResetToOriginDialog = true;
+  }
+
+  async function confirmResetToOrigin() {
+    if (resettingToOrigin || commandPipelinePending || branchSessionBusy) return;
+    showResetToOriginDialog = false;
+    resettingToOrigin = true;
+    try {
+      await commands.resetBranchToRemote(branch.id);
+      commands.invalidateBranchTimeline(branch.id);
+      await loadTimeline({ force: true });
+    } catch (e) {
+      notifyError('Reset to Origin failed', e);
+    } finally {
+      resettingToOrigin = false;
+    }
+  }
+
   // Push state is sourced from the global pushStateStore so it survives the
   // BranchCard remount that happens when the user switches projects and back.
   // The store is shared with BranchCardPrButton (single entry per branch.id),
@@ -1558,6 +1602,7 @@
               onRebaseBranch={() => startBranchCommandPipeline('rebase')}
               onRebaseBranchOntoOrigin={() => startBranchCommandPipeline('rebase', 'origin')}
               onForcePush={handleForcePush}
+              onResetToOrigin={handleResetToOrigin}
               onOpenForcePushSession={forcePushSessionId && forcePushSessionId !== '__pending__'
                 ? openForcePushSession
                 : undefined}
@@ -1579,6 +1624,7 @@
               newSessionDisabled={sessionMgr.isNewSessionDisabled || gitUnsafeActionsDisabled}
               {pullingOrigin}
               {pushingOrigin}
+              {resettingToOrigin}
               {discardingWorktreeChanges}
               {provisioningLabel}
               {provisioningDetail}
@@ -1780,6 +1826,21 @@
       <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
       <AlertDialog.Action variant="destructive" onclick={confirmForcePush}>
         Force Push
+      </AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>
+
+<AlertDialog.Root bind:open={showResetToOriginDialog}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Reset to Origin</AlertDialog.Title>
+      <AlertDialog.Description>{resetToOriginDescription}</AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action variant="destructive" onclick={confirmResetToOrigin}>
+        Reset to Origin
       </AlertDialog.Action>
     </AlertDialog.Footer>
   </AlertDialog.Content>

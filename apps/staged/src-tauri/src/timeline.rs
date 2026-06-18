@@ -858,6 +858,111 @@ fn ensure_worktree_discardable(state: &git::BranchGitState) -> Result<(), String
     Ok(())
 }
 
+fn ensure_reset_to_remote_allowed(state: &git::BranchGitState) -> Result<(), String> {
+    if state.detached_head {
+        return Err("Cannot reset while HEAD is detached".to_string());
+    }
+    if !state.expected_branch_matches {
+        let current = state
+            .current_branch
+            .as_deref()
+            .unwrap_or("an unknown branch");
+        return Err(format!("Cannot reset while checked out on {current}"));
+    }
+    if state.fetch.status == git::FetchStatus::Failed {
+        let detail = state
+            .fetch
+            .error
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("latest origin state could not be fetched");
+        return Err(format!("Cannot reset to origin: {detail}"));
+    }
+    if !state.upstream.exists {
+        return Err(format!(
+            "Cannot reset because {} does not exist",
+            state.upstream.r#ref
+        ));
+    }
+    if state.upstream.relation != git::UpstreamRelation::Diverged {
+        return Err(
+            "Reset to Origin is only available when the branch has diverged from origin"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn reset_branch_to_remote_impl(store: &Arc<Store>, branch_id: &str) -> Result<(), String> {
+    let branch = store
+        .get_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    if let Some(ref ws_name) = branch.workspace_name {
+        let repo_subpath = branches::resolve_branch_workspace_subpath(store, &branch)?;
+        let resolved_path = resolve_repo_path(ws_name, repo_subpath.as_deref())?;
+        let cache_key = remote_git_state_cache_key(
+            ws_name,
+            repo_subpath.as_deref(),
+            &branch.branch_name,
+            &branch.base_branch,
+        );
+        let state = git::compute_branch_git_state_batched(
+            &cache_key,
+            |script, args| {
+                branches::run_workspace_shell(ws_name, script, args).map_err(|e| e.to_string())
+            },
+            &resolved_path,
+            &branch.branch_name,
+            &branch.base_branch,
+            git::FetchMode::Force,
+            git::WorktreeStatusScope::Full,
+        );
+        ensure_reset_to_remote_allowed(&state)?;
+        branches::run_workspace_git(
+            ws_name,
+            repo_subpath.as_deref(),
+            &["reset", "--hard", &state.upstream.r#ref],
+        )
+        .map_err(|e| e.to_string())?;
+        branches::run_workspace_git(ws_name, repo_subpath.as_deref(), &["clean", "-fd"])
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    let workdir = store
+        .get_workdir_for_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
+    let worktree = Path::new(&workdir.path);
+    let state = git::compute_local_branch_git_state(
+        worktree,
+        &branch.branch_name,
+        &branch.base_branch,
+        git::FetchMode::Force,
+        git::WorktreeStatusScope::Full,
+        git::EnvSource::Captured,
+    );
+    ensure_reset_to_remote_allowed(&state)?;
+    git::cli_run(worktree, &["reset", "--hard", &state.upstream.r#ref])
+        .map_err(|e| e.to_string())?;
+    git::cli_run(worktree, &["clean", "-fd"]).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn reset_branch_to_remote(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<(), String> {
+    let store = crate::get_store(&store)?;
+
+    tauri::async_runtime::spawn_blocking(move || reset_branch_to_remote_impl(&store, &branch_id))
+        .await
+        .map_err(|e| format!("Reset task failed: {e}"))?
+}
+
 fn remote_worktree_change_paths(
     workspace_name: &str,
     repo_subpath: Option<&str>,
@@ -1228,6 +1333,82 @@ mod tests {
     use crate::git::Span;
     use crate::store::models::{Branch, Comment, Project, ReviewScope, Workdir};
     use crate::test_utils::TempGitRepo;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use uuid::Uuid;
+
+    struct TempPath {
+        path: PathBuf,
+    }
+
+    impl TempPath {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("staged-{label}-{}", Uuid::new_v4()));
+            fs::create_dir_all(&path).unwrap();
+            Self { path }
+        }
+    }
+
+    impl Drop for TempPath {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    fn run_git(repo: &Path, args: &[&str]) -> String {
+        let mut command = Command::new("git");
+        command
+            .arg("-c")
+            .arg("core.hooksPath=/dev/null")
+            .arg("-C")
+            .arg(repo)
+            .args(args);
+        crate::git::strip_git_env(&mut command);
+
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    fn clone_repo(origin: &TempGitRepo) -> TempPath {
+        let clone_dir = TempPath::new("clone");
+        let mut command = Command::new("git");
+        command.arg("clone").arg(origin.path()).arg(&clone_dir.path);
+        crate::git::strip_git_env(&mut command);
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "git clone failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        run_git(
+            &clone_dir.path,
+            &["config", "user.email", "test@example.com"],
+        );
+        run_git(&clone_dir.path, &["config", "user.name", "Test"]);
+        clone_dir
+    }
+
+    fn remote_backed_feature() -> (TempGitRepo, TempPath) {
+        let origin = TempGitRepo::new();
+        origin.write_file("file.txt", "base\n");
+        origin.commit("base");
+
+        let clone = clone_repo(&origin);
+        run_git(&clone.path, &["checkout", "-b", "feature"]);
+        fs::write(clone.path.join("file.txt"), "base\nfeature\n").unwrap();
+        run_git(&clone.path, &["add", "."]);
+        run_git(&clone.path, &["commit", "-m", "feature"]);
+        run_git(&clone.path, &["push", "origin", "feature:feature"]);
+        run_git(&clone.path, &["fetch", "origin", "main", "feature"]);
+        (origin, clone)
+    }
 
     fn repo_with_visible_and_stale_commit() -> (TempGitRepo, String, String) {
         let repo = TempGitRepo::new();
@@ -1244,17 +1425,113 @@ mod tests {
         (repo, visible_sha, stale_sha)
     }
 
-    fn store_with_branch(repo: &TempGitRepo) -> (Arc<Store>, Branch) {
+    fn store_with_branch_path(path: &Path) -> (Arc<Store>, Branch) {
         let store = Arc::new(Store::in_memory().unwrap());
         let project = Project::new("test-owner/test-repo");
         store.create_project(&project).unwrap();
         let branch = Branch::new(&project.id, "feature", "main");
         store.create_branch(&branch).unwrap();
-        let workdir =
-            Workdir::new(&project.id, repo.path().to_str().unwrap()).with_branch(&branch.id);
+        let workdir = Workdir::new(&project.id, path.to_str().unwrap()).with_branch(&branch.id);
         store.create_workdir(&workdir).unwrap();
 
         (store, branch)
+    }
+
+    fn store_with_branch(repo: &TempGitRepo) -> (Arc<Store>, Branch) {
+        store_with_branch_path(repo.path())
+    }
+
+    #[test]
+    fn reset_branch_to_remote_resets_diverged_branch_and_cleans_worktree() {
+        let (origin, clone) = remote_backed_feature();
+        fs::write(clone.path.join("local.txt"), "local\n").unwrap();
+        run_git(&clone.path, &["add", "."]);
+        run_git(&clone.path, &["commit", "-m", "local"]);
+
+        origin.run_git(&["checkout", "feature"]);
+        origin.write_file("origin.txt", "origin\n");
+        let origin_sha = origin.commit("origin");
+
+        fs::write(clone.path.join("file.txt"), "dirty\n").unwrap();
+        fs::write(clone.path.join("untracked.txt"), "untracked\n").unwrap();
+        let (store, branch) = store_with_branch_path(&clone.path);
+
+        reset_branch_to_remote_impl(&store, &branch.id).unwrap();
+
+        let head = run_git(&clone.path, &["rev-parse", "HEAD"])
+            .trim()
+            .to_string();
+        let upstream = run_git(&clone.path, &["rev-parse", "origin/feature"])
+            .trim()
+            .to_string();
+        assert_eq!(head, upstream);
+        assert_eq!(head, origin_sha);
+        assert!(!clone.path.join("local.txt").exists());
+        assert!(!clone.path.join("untracked.txt").exists());
+        assert!(clone.path.join("origin.txt").exists());
+        assert_eq!(run_git(&clone.path, &["status", "--porcelain"]).trim(), "");
+    }
+
+    #[test]
+    fn reset_branch_to_remote_rejects_local_ahead_branch() {
+        let (_origin, clone) = remote_backed_feature();
+        fs::write(clone.path.join("local.txt"), "local\n").unwrap();
+        run_git(&clone.path, &["add", "."]);
+        run_git(&clone.path, &["commit", "-m", "local"]);
+        let local_sha = run_git(&clone.path, &["rev-parse", "HEAD"])
+            .trim()
+            .to_string();
+        let (store, branch) = store_with_branch_path(&clone.path);
+
+        let err = reset_branch_to_remote_impl(&store, &branch.id).unwrap_err();
+
+        assert!(err.contains("only available when the branch has diverged"));
+        assert_eq!(
+            run_git(&clone.path, &["rev-parse", "HEAD"])
+                .trim()
+                .to_string(),
+            local_sha
+        );
+    }
+
+    #[test]
+    fn reset_branch_to_remote_rejects_missing_upstream() {
+        let origin = TempGitRepo::new();
+        origin.write_file("file.txt", "base\n");
+        origin.commit("base");
+        let clone = clone_repo(&origin);
+        run_git(&clone.path, &["checkout", "-b", "feature"]);
+        fs::write(clone.path.join("file.txt"), "base\nfeature\n").unwrap();
+        run_git(&clone.path, &["add", "."]);
+        run_git(&clone.path, &["commit", "-m", "feature"]);
+        let (store, branch) = store_with_branch_path(&clone.path);
+
+        let err = reset_branch_to_remote_impl(&store, &branch.id).unwrap_err();
+
+        assert!(err.contains("origin/feature does not exist"));
+    }
+
+    #[test]
+    fn reset_branch_to_remote_rejects_wrong_checked_out_branch() {
+        let (_origin, clone) = remote_backed_feature();
+        run_git(&clone.path, &["checkout", "-b", "other"]);
+        let (store, branch) = store_with_branch_path(&clone.path);
+
+        let err = reset_branch_to_remote_impl(&store, &branch.id).unwrap_err();
+
+        assert!(err.contains("checked out on other"));
+    }
+
+    #[test]
+    fn reset_branch_to_remote_rejects_detached_head() {
+        let (_origin, clone) = remote_backed_feature();
+        let head = run_git(&clone.path, &["rev-parse", "HEAD"]);
+        run_git(&clone.path, &["checkout", "--detach", head.trim()]);
+        let (store, branch) = store_with_branch_path(&clone.path);
+
+        let err = reset_branch_to_remote_impl(&store, &branch.id).unwrap_err();
+
+        assert!(err.contains("HEAD is detached"));
     }
 
     #[test]

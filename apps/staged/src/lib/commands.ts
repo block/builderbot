@@ -438,6 +438,10 @@ export function pullBranchFastForward(branchId: string): Promise<void> {
   return invokeCommand('pull_branch_ff_only', { branchId });
 }
 
+export function resetBranchToRemote(branchId: string): Promise<void> {
+  return invokeCommand('reset_branch_to_remote', { branchId });
+}
+
 // =============================================================================
 // Actions
 // =============================================================================

@@ -79,6 +79,9 @@
     onForcePushClick?: () => void;
     forcePushDisabledReason?: string;
     forcePushing?: boolean;
+    onResetToOriginClick?: () => void;
+    resetToOriginDisabledReason?: string;
+    resettingToOrigin?: boolean;
     pushing?: boolean;
     onViewDiffClick?: () => void;
     onCommitChangesClick?: () => void;
@@ -117,6 +120,9 @@
     onForcePushClick,
     forcePushDisabledReason,
     forcePushing = false,
+    onResetToOriginClick,
+    resetToOriginDisabledReason,
+    resettingToOrigin = false,
     pushing = false,
     onViewDiffClick,
     onCommitChangesClick,
@@ -175,6 +181,10 @@
     forcePushDisabledReason ??
       (forcePushing ? 'View push session' : 'Force push local branch to origin')
   );
+  let resetToOriginTitle = $derived(
+    resetToOriginDisabledReason ??
+      (resettingToOrigin ? 'Resetting to origin' : 'Reset local branch to origin')
+  );
   let rebaseTitle = $derived(rebaseDisabledReason ?? 'Rebase');
   let commitChangesTitle = $derived(commitChangesDisabledReason ?? 'Commit changes');
   let discardChangesTitle = $derived(discardChangesDisabledReason ?? 'Discard changes');
@@ -231,6 +241,11 @@
   function handleForcePushClick(e: MouseEvent) {
     e.stopPropagation();
     onForcePushClick?.();
+  }
+
+  function handleResetToOriginClick(e: MouseEvent) {
+    e.stopPropagation();
+    onResetToOriginClick?.();
   }
 
   function handleViewDiffClick(e: MouseEvent) {
@@ -375,6 +390,8 @@
           !!rebaseDisabledReason ||
           !!onForcePushClick ||
           !!forcePushDisabledReason ||
+          !!onResetToOriginClick ||
+          !!resetToOriginDisabledReason ||
           !!onViewDiffClick ||
           !!onCommitChangesClick ||
           !!commitChangesDisabledReason ||
@@ -464,6 +481,26 @@
               ]}
             >
               {forcePushing ? 'Pushing\u2026' : 'Force Push'}
+            </Button>
+          </span>
+        {/if}
+        {#if onResetToOriginClick || resetToOriginDisabledReason}
+          <span class="inline-flex" title={resetToOriginTitle}>
+            <Button
+              variant="outline"
+              size="xs"
+              onclick={handleResetToOriginClick}
+              disabled={!!resetToOriginDisabledReason}
+              title={resetToOriginTitle}
+              aria-label={resetToOriginTitle}
+              class={[
+                'h-[22px] rounded-md bg-transparent shadow-none',
+                resettingToOrigin
+                  ? 'border-[var(--border-subtle)] text-[var(--text-muted)] hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground'
+                  : 'border-[var(--ui-danger-bg)] font-medium text-[var(--ui-danger)] hover:border-[var(--ui-danger)] hover:bg-[var(--ui-danger-bg)] hover:text-[var(--ui-danger)]',
+              ]}
+            >
+              {resettingToOrigin ? 'Resetting\u2026' : 'Reset to Origin'}
             </Button>
           </span>
         {/if}

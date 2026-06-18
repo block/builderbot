@@ -91,6 +91,7 @@
     onRebaseBranch?: () => void;
     onRebaseBranchOntoOrigin?: () => void;
     onForcePush?: () => void;
+    onResetToOrigin?: () => void;
     onOpenForcePushSession?: () => void;
     forcePushingOrigin?: boolean;
     onOpenPushSession?: () => void;
@@ -102,6 +103,7 @@
     newSessionDisabled?: boolean;
     pullingOrigin?: boolean;
     pushingOrigin?: boolean;
+    resettingToOrigin?: boolean;
     discardingWorktreeChanges?: boolean;
     /** Error message from a failed load/revalidation. */
     error?: string | null;
@@ -146,6 +148,7 @@
     onRebaseBranch,
     onRebaseBranchOntoOrigin,
     onForcePush,
+    onResetToOrigin,
     onOpenForcePushSession,
     forcePushingOrigin = false,
     onOpenPushSession,
@@ -157,6 +160,7 @@
     newSessionDisabled = false,
     pullingOrigin = false,
     pushingOrigin = false,
+    resettingToOrigin = false,
     discardingWorktreeChanges = false,
     error,
     gitActionDisabledReason,
@@ -256,6 +260,9 @@
     onForcePush?: () => void;
     forcePushDisabledReason?: string;
     forcePushing?: boolean;
+    onResetToOrigin?: () => void;
+    resetToOriginDisabledReason?: string;
+    resettingToOrigin?: boolean;
     pushing?: boolean;
     onViewDiff?: () => void;
     onCommitChanges?: () => void;
@@ -461,6 +468,13 @@
             : onRebaseBranchOntoOrigin
               ? (rebaseBranchDisabledReason ?? undefined)
               : undefined;
+        const resetToOriginReason = resettingToOrigin
+          ? 'Resetting...'
+          : forcePushingOrigin
+            ? 'Push in progress'
+            : onResetToOrigin
+              ? (rebaseBranchDisabledReason ?? undefined)
+              : undefined;
         rows.push({
           key: 'git-diverged',
           type: 'git-merge-warning',
@@ -481,6 +495,9 @@
               ? (rebaseBranchDisabledReason ?? undefined)
               : undefined,
           forcePushing: forcePushingOrigin,
+          onResetToOrigin: resetToOriginReason ? undefined : onResetToOrigin,
+          resetToOriginDisabledReason: resetToOriginReason,
+          resettingToOrigin,
         });
         break;
       }
@@ -931,6 +948,9 @@
             onForcePushClick={item.onForcePush}
             forcePushDisabledReason={item.forcePushDisabledReason}
             forcePushing={item.forcePushing}
+            onResetToOriginClick={item.onResetToOrigin}
+            resetToOriginDisabledReason={item.resetToOriginDisabledReason}
+            resettingToOrigin={item.resettingToOrigin}
             pushing={item.pushing}
             onViewDiffClick={item.onViewDiff}
             onCommitChangesClick={item.onCommitChanges}
@@ -1015,6 +1035,9 @@
             onForcePushClick={item.onForcePush}
             forcePushDisabledReason={item.forcePushDisabledReason}
             forcePushing={item.forcePushing}
+            onResetToOriginClick={item.onResetToOrigin}
+            resetToOriginDisabledReason={item.resetToOriginDisabledReason}
+            resettingToOrigin={item.resettingToOrigin}
             pushing={item.pushing}
             onViewDiffClick={item.onViewDiff}
             onCommitChangesClick={item.onCommitChanges}

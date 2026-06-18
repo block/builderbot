@@ -391,7 +391,7 @@
                   disabled={status.kind === 'deleting' || !onMarkProjectUnread || !onRemoveProject}
                 >
                   <button
-                    class="project-row"
+                    class="project-row project-item"
                     use:scrollIfActive={navigation.selectedProjectId === project.id}
                     class:active={navigation.selectedProjectId === project.id}
                     class:deleting={status.kind === 'deleting'}
@@ -652,6 +652,10 @@
     background-color: transparent;
   }
 
+  .project-row.project-item {
+    min-height: 52px;
+  }
+
   .row-main {
     display: flex;
     align-items: flex-start;
@@ -721,7 +725,9 @@
     display: flex;
     align-items: center;
     gap: 6px;
+    min-height: 14px;
     font-size: calc(var(--size-xs) - 1px);
+    line-height: 14px;
     color: var(--text-faint);
     white-space: nowrap;
     overflow: hidden;
@@ -730,13 +736,21 @@
 
   .repo-count {
     color: var(--text-faint);
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .badge-row {
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    flex-shrink: 0;
+    min-width: 0;
+    max-width: 100%;
+    min-height: 14px;
+    overflow: hidden;
+    white-space: nowrap;
   }
 
   .activity-separator {
@@ -746,8 +760,10 @@
 
   .activity-text {
     color: var(--text-faint);
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .row-status {

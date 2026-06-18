@@ -203,7 +203,6 @@ fn parse_commit_lines(
                 session_id: resolved.session_id,
                 session_status: resolved.status,
                 completion_reason: resolved.completion_reason,
-                cancellation_source: resolved.cancellation_source,
                 is_own_commit: false, // set later by build_branch_timeline
             });
         }
@@ -266,7 +265,6 @@ fn map_local_commits(
                 session_id: resolved.session_id,
                 session_status: resolved.status,
                 completion_reason: resolved.completion_reason,
-                cancellation_source: resolved.cancellation_source,
                 is_own_commit: false, // set later by build_branch_timeline
             }
         })
@@ -439,7 +437,6 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 session_id: resolved.session_id,
                 session_status: resolved.status,
                 completion_reason: resolved.completion_reason,
-                cancellation_source: resolved.cancellation_source,
                 is_own_commit: true, // pending commits are always the current user's
             });
         }
@@ -466,7 +463,6 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 session_id: resolved.session_id,
                 session_status: resolved.status,
                 completion_reason: resolved.completion_reason,
-                cancellation_source: resolved.cancellation_source,
                 created_at: n.created_at,
                 updated_at: n.updated_at,
                 completed_at: n.completed_at,
@@ -493,7 +489,6 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 session_status: resolved.status,
                 session_provider: resolved.provider,
                 completion_reason: resolved.completion_reason,
-                cancellation_source: resolved.cancellation_source,
                 title: r.title,
                 comment_count,
                 is_auto: r.is_auto,
@@ -520,7 +515,6 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 session_id: resolved.session_id,
                 session_status: resolved.status,
                 completion_reason: resolved.completion_reason,
-                cancellation_source: resolved.cancellation_source,
                 created_at: img.created_at,
             }
         })

@@ -40,6 +40,7 @@
     type PendingHintItemType,
   } from './liveSessionHints';
   import { isEmptyFailedReview } from './reviewState';
+  import { failedArtifactSubtitle } from './sessionFailureCopy';
   import { stripXmlTags } from '../sessions/sessionModalHelpers';
 
   type PendingItem = {
@@ -191,34 +192,6 @@
     return slide(node, { duration: 200 });
   }
 
-  const artifactNoun: Record<string, string> = {
-    commit: 'commit',
-    note: 'note',
-    review: 'comments',
-  };
-
-  function failedSubtitle(
-    completionReason: string | null | undefined,
-    cancellationSource: string | null | undefined,
-    kind: 'commit' | 'note' | 'review'
-  ): string {
-    const noun = artifactNoun[kind];
-    if (completionReason === 'interrupted' && cancellationSource === 'project_session') {
-      return `Session stopped by project session — no ${noun} created`;
-    }
-
-    switch (completionReason) {
-      case 'crashed':
-        return `Session crashed — no ${noun} created`;
-      case 'app_quit':
-        return `Session interrupted — no ${noun} created`;
-      case 'interrupted':
-        return `Session stopped — no ${noun} created`;
-      default:
-        return `Session finished — no ${noun} created`;
-    }
-  }
-
   let liveSessionHints = $state<Record<string, string>>({});
   const liveSessionHintPoller = createLiveSessionHints(
     (nextHints) => {
@@ -270,7 +243,6 @@
     /** When set, delete button is shown but disabled with this tooltip. */
     deleteDisabledReason?: string;
     completionReason?: string | null;
-    cancellationSource?: string | null;
     /** Hashtag reference token for context menu (e.g. "#commit:abc123"). */
     hashtagRef?: string;
     showConnector?: boolean;
@@ -553,11 +525,7 @@
 
       if (isFailed) {
         type = 'failed-commit';
-        secondaryMeta = failedSubtitle(
-          commit.completionReason,
-          commit.cancellationSource,
-          'commit'
-        );
+        secondaryMeta = failedArtifactSubtitle(commit.completionReason, 'commit');
       } else if (isQueued) {
         type = 'queued-commit';
         secondaryMeta = 'Queued';
@@ -590,7 +558,6 @@
             ? (gitActionDisabledReason ?? undefined)
             : undefined,
         completionReason: commit.completionReason,
-        cancellationSource: commit.cancellationSource,
         hashtagRef: type === 'commit' ? `#commit:${commit.sha}` : undefined,
       });
 
@@ -615,7 +582,7 @@
 
       if (isFailed) {
         type = 'failed-note';
-        secondaryMeta = failedSubtitle(note.completionReason, note.cancellationSource, 'note');
+        secondaryMeta = failedArtifactSubtitle(note.completionReason, 'note');
       } else if (isQueued) {
         type = 'queued-note';
         secondaryMeta = 'Queued';
@@ -643,7 +610,6 @@
         noteUpdatedAt: note.updatedAt,
         deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
         completionReason: note.completionReason,
-        cancellationSource: note.cancellationSource,
         hashtagRef: type === 'note' ? `#note:${note.id}` : undefined,
       });
     }
@@ -682,7 +648,7 @@
 
       if (isFailed) {
         type = 'failed-review';
-        meta = failedSubtitle(review.completionReason, review.cancellationSource, 'review');
+        meta = failedArtifactSubtitle(review.completionReason, 'review');
       } else if (isQueued) {
         type = 'queued-review';
         meta = 'Queued';
@@ -708,7 +674,6 @@
         reviewId: review.id,
         deleteDisabledReason: isDeleting ? 'Deleting...' : undefined,
         completionReason: review.completionReason,
-        cancellationSource: review.cancellationSource,
         hashtagRef: type === 'review' ? `#review:${review.id}` : undefined,
       });
     }

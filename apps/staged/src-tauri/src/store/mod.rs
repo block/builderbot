@@ -192,7 +192,6 @@ pub struct ResolvedSession {
     pub session_id: Option<String>,
     pub status: Option<String>,
     pub completion_reason: Option<String>,
-    pub cancellation_source: Option<String>,
     pub provider: Option<String>,
 }
 
@@ -245,11 +244,6 @@ impl Store {
                     completion_reason: session
                         .as_ref()
                         .and_then(|s| s.completion_reason.as_ref().map(|r| r.as_str().to_string())),
-                    cancellation_source: session.as_ref().and_then(|s| {
-                        s.cancellation_source
-                            .as_ref()
-                            .map(|source| source.as_str().to_string())
-                    }),
                     provider: session.as_ref().and_then(|s| s.provider.clone()),
                 }
             }

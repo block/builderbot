@@ -940,7 +940,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                                 session_id: None,
                                 session_status: None,
                                 completion_reason: None,
-                                cancellation_source: None,
                                 is_own_commit: false,
                             })
                         } else {
@@ -2245,7 +2244,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 session_id: None,
                 session_status: None,
                 completion_reason: None,
-                cancellation_source: None,
                 created_at: note.created_at,
                 updated_at: note.updated_at,
                 completed_at: note.completed_at,
@@ -2803,7 +2801,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     status: "running".to_string(),
                     error_message: None,
                     completion_reason: None,
-                    cancellation_source: None,
                     branch_id: event_branch_id,
                     project_id: event_project_id.or(mcp_project_id.clone()),
                     session_type,
@@ -2979,8 +2976,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         }
         "cancel_session" => {
             let session_id: String = arg(&args, "sessionId")?;
-            session_registry
-                .cancel_with_source(&session_id, Some(crate::store::CancellationSource::User));
+            session_registry.cancel(&session_id);
             Ok(Value::Null)
         }
         "delete_session" => {

@@ -1,4 +1,5 @@
 import { normalizeDisplayRoots, type DisplayRootInput } from './pathDisplayRoots';
+import type { Session } from '../../types';
 
 export interface ParsedToolCall {
   name: string;
@@ -8,6 +9,20 @@ export interface ParsedToolCall {
 export interface ToolDisplay {
   verb: string;
   detail: string;
+}
+
+export function sessionEndMessage(current: Pick<Session, 'completionReason'>): string {
+  if (current.completionReason === 'crashed') return 'This session ended unexpectedly.';
+  if (current.completionReason === 'app_quit') {
+    return 'This session was interrupted when Staged closed.';
+  }
+  if (current.completionReason === 'project_session_interrupted') {
+    return 'This session was stopped by its project session.';
+  }
+  if (current.completionReason === 'interrupted') {
+    return 'You stopped this session.';
+  }
+  return 'This session can be resumed.';
 }
 
 /** Pattern matching XML-tagged context blocks embedded in prompts/messages. */

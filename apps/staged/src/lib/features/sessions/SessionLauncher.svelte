@@ -56,7 +56,7 @@
 
   onMount(() => {
     unlistenStatus = listenToEvent<SessionStatusPayload>('session-status-changed', (payload) => {
-      const { sessionId, status, errorMessage, completionReason, cancellationSource } = payload;
+      const { sessionId, status, errorMessage, completionReason } = payload;
       sessions = sessions.map((s) => {
         if (s.id === sessionId) {
           return {
@@ -64,7 +64,6 @@
             status: status as SessionStatus,
             errorMessage: errorMessage ?? s.errorMessage,
             completionReason: completionReason ?? s.completionReason,
-            cancellationSource: cancellationSource ?? s.cancellationSource,
             updatedAt: Date.now(),
           };
         }

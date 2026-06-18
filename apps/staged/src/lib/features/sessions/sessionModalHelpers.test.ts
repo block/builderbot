@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatToolDisplay, makePathsRelative } from './sessionModalHelpers';
+import { formatToolDisplay, makePathsRelative, sessionEndMessage } from './sessionModalHelpers';
 
 describe('makePathsRelative', () => {
   it('matches symlink-style alias pairs', () => {
@@ -46,5 +46,19 @@ describe('makePathsRelative', () => {
       verb: 'Running',
       detail: 'sed -n "1,5p" src/main.ts && cat package.json',
     });
+  });
+});
+
+describe('sessionEndMessage', () => {
+  it('explains project-session interruptions', () => {
+    expect(sessionEndMessage({ completionReason: 'project_session_interrupted' })).toBe(
+      'This session was stopped by its project session.'
+    );
+  });
+
+  it('explains direct interruptions as user stops', () => {
+    expect(sessionEndMessage({ completionReason: 'interrupted' })).toBe(
+      'You stopped this session.'
+    );
   });
 });

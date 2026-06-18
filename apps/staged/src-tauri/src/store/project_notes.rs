@@ -160,7 +160,6 @@ impl Store {
             suggested_next_note_step: row.get(9)?,
             session_status: None,
             completion_reason: None,
-            cancellation_source: None,
         })
     }
 
@@ -176,7 +175,6 @@ impl Store {
         let resolved = self.resolve_session_status(note.session_id.as_deref());
         note.session_status = resolved.status;
         note.completion_reason = resolved.completion_reason;
-        note.cancellation_source = resolved.cancellation_source;
         Ok(Some(note))
     }
 
@@ -190,7 +188,6 @@ impl Store {
             let resolved = self.resolve_session_status(note.session_id.as_deref());
             note.session_status = resolved.status;
             note.completion_reason = resolved.completion_reason;
-            note.cancellation_source = resolved.cancellation_source;
         }
         Ok(notes)
     }

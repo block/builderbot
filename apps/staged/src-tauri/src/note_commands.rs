@@ -24,7 +24,6 @@ pub fn create_note(
         session_id: None,
         session_status: None,
         completion_reason: None,
-        cancellation_source: None,
         created_at: note.created_at,
         updated_at: note.updated_at,
         completed_at: note.completed_at,

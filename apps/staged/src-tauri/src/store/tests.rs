@@ -506,6 +506,31 @@ fn test_transition_queued_to_running_does_not_overwrite_cancelled_session() {
 }
 
 #[test]
+fn test_queued_project_session_cancellation_records_project_session_interrupted() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_queued("cancelled by project session");
+    store.create_session(&session).unwrap();
+
+    let transitioned = store
+        .transition_from_queued(
+            &session.id,
+            SessionStatus::Cancelled,
+            None,
+            Some(&CompletionReason::ProjectSessionInterrupted),
+        )
+        .unwrap();
+    assert!(transitioned);
+
+    let final_state = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(final_state.status, SessionStatus::Cancelled);
+    assert_eq!(
+        final_state.completion_reason,
+        Some(CompletionReason::ProjectSessionInterrupted)
+    );
+}
+
+#[test]
 fn test_queued_pipeline_commit_owns_branch_queue_position() {
     let store = Store::in_memory().unwrap();
     let project = Project::new("test-owner/test-repo");
@@ -690,6 +715,7 @@ fn test_completion_reason_round_trips() {
     for reason in [
         CompletionReason::TurnComplete,
         CompletionReason::Interrupted,
+        CompletionReason::ProjectSessionInterrupted,
         CompletionReason::Crashed,
         CompletionReason::AppQuit,
         CompletionReason::Unknown,
@@ -706,27 +732,6 @@ fn test_completion_reason_round_trips() {
             "round-trip failed for {:?}",
             reason
         );
-    }
-}
-
-#[test]
-fn test_cancellation_source_round_trips() {
-    let store = Store::in_memory().unwrap();
-
-    for source in [CancellationSource::User, CancellationSource::ProjectSession] {
-        let session = Session::new_running("test source", Path::new("/tmp"));
-        store.create_session(&session).unwrap();
-        store
-            .transition_from_running_with_cancellation_source(
-                &session.id,
-                SessionStatus::Cancelled,
-                None,
-                Some(&CompletionReason::Interrupted),
-                Some(&source),
-            )
-            .unwrap();
-        let fetched = store.get_session(&session.id).unwrap().unwrap();
-        assert_eq!(fetched.cancellation_source.as_ref(), Some(&source));
     }
 }
 

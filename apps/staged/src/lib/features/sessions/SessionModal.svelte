@@ -76,6 +76,7 @@
     groupByVerb,
     verbGroupSummary,
     hasXmlBlocks,
+    sessionEndMessage,
     stripCodeFences,
     stripXmlTags,
     type VerbGroup,
@@ -603,21 +604,6 @@
     } finally {
       cancelling = false;
     }
-  }
-
-  function sessionEndMessage(current: Session): string {
-    if (current.completionReason === 'crashed') return 'This session ended unexpectedly.';
-    if (current.completionReason === 'app_quit') {
-      return 'This session was interrupted when Staged closed.';
-    }
-    if (current.completionReason === 'interrupted') {
-      if (current.cancellationSource === 'project_session') {
-        return 'This session was stopped by its project session.';
-      }
-      if (current.cancellationSource === 'user') return 'You stopped this session.';
-      return 'This session was stopped.';
-    }
-    return 'This session can be resumed.';
   }
 
   // =========================================================================

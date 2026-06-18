@@ -89,7 +89,6 @@
     onPullOrigin?: () => void;
     onPushOrigin?: () => void;
     onRebaseBranch?: () => void;
-    onRebaseBranchOntoOrigin?: () => void;
     onForcePush?: () => void;
     onResetToOrigin?: () => void;
     onOpenForcePushSession?: () => void;
@@ -146,7 +145,6 @@
     onPullOrigin,
     onPushOrigin,
     onRebaseBranch,
-    onRebaseBranchOntoOrigin,
     onForcePush,
     onResetToOrigin,
     onOpenForcePushSession,
@@ -444,30 +442,14 @@
           2
         );
         const behindCount = state.upstream.behind;
-        // When `origin/{branch}` is itself behind `origin/{base}` rebasing onto
-        // origin would replay branch commits over a stale tip — almost never
-        // what the user wants. Surface that fact and disable the action; the
-        // companion "rebase onto base" action remains available via onRebase
-        // wired on other rows.
         const baseRefShort = state.base.ref.replace(/^origin\//, '') || state.base.ref;
         const upstreamBehindBase = state.upstream.behindBase;
-        const originBehindBaseReason =
-          upstreamBehindBase > 0
-            ? `origin/${state.currentBranch ?? 'branch'} is ${plural(upstreamBehindBase, 'commit')} behind ${baseRefShort}; rebase onto ${baseRefShort} instead`
-            : undefined;
         const baseSummary =
           upstreamBehindBase > 0
             ? ` and is ${plural(upstreamBehindBase, 'commit')} behind ${baseRefShort}`
             : '';
         const divergedTitle = `origin diverges here and has ${plural(behindCount, 'more commit')}${baseSummary}`;
         const divergedTitleHtml = `<span class="git-ref-badge">origin</span> diverges here and has ${escapeHtml(plural(behindCount, 'more commit'))}${escapeHtml(baseSummary)}`;
-        const rebaseReason = forcePushingOrigin
-          ? 'Force push in progress'
-          : originBehindBaseReason
-            ? originBehindBaseReason
-            : onRebaseBranchOntoOrigin
-              ? (rebaseBranchDisabledReason ?? undefined)
-              : undefined;
         const resetToOriginReason = resettingToOrigin
           ? 'Resetting...'
           : forcePushingOrigin
@@ -482,8 +464,6 @@
           titleHtml: divergedTitleHtml,
           timestamp: placement.timestamp,
           order: placement.order,
-          onRebase: rebaseReason ? undefined : onRebaseBranchOntoOrigin,
-          rebaseDisabledReason: rebaseReason,
           onForcePush: forcePushingOrigin
             ? onOpenForcePushSession
             : rebaseBranchDisabledReason

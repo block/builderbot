@@ -464,26 +464,6 @@
             </Button>
           </span>
         {/if}
-        {#if onForcePushClick || forcePushDisabledReason}
-          <span class="inline-flex" title={forcePushTitle}>
-            <Button
-              variant="outline"
-              size="xs"
-              onclick={handleForcePushClick}
-              disabled={!!forcePushDisabledReason}
-              title={forcePushTitle}
-              aria-label={forcePushTitle}
-              class={[
-                'h-[22px] rounded-md bg-transparent shadow-none',
-                forcePushing
-                  ? 'border-[var(--border-subtle)] text-[var(--text-muted)] hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground'
-                  : 'border-[var(--ui-danger-bg)] font-medium text-[var(--ui-danger)] hover:border-[var(--ui-danger)] hover:bg-[var(--ui-danger-bg)] hover:text-[var(--ui-danger)]',
-              ]}
-            >
-              {forcePushing ? 'Pushing\u2026' : 'Force Push'}
-            </Button>
-          </span>
-        {/if}
         {#if onResetToOriginClick || resetToOriginDisabledReason}
           <span class="inline-flex" title={resetToOriginTitle}>
             <Button
@@ -501,6 +481,26 @@
               ]}
             >
               {resettingToOrigin ? 'Resetting\u2026' : 'Reset to Origin'}
+            </Button>
+          </span>
+        {/if}
+        {#if onForcePushClick || forcePushDisabledReason}
+          <span class="inline-flex" title={forcePushTitle}>
+            <Button
+              variant="outline"
+              size="xs"
+              onclick={handleForcePushClick}
+              disabled={!!forcePushDisabledReason}
+              title={forcePushTitle}
+              aria-label={forcePushTitle}
+              class={[
+                'h-[22px] rounded-md bg-transparent shadow-none',
+                forcePushing
+                  ? 'border-[var(--border-subtle)] text-[var(--text-muted)] hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground'
+                  : 'border-[var(--ui-danger-bg)] font-medium text-[var(--ui-danger)] hover:border-[var(--ui-danger)] hover:bg-[var(--ui-danger-bg)] hover:text-[var(--ui-danger)]',
+              ]}
+            >
+              {forcePushing ? 'Pushing\u2026' : 'Force Push'}
             </Button>
           </span>
         {/if}

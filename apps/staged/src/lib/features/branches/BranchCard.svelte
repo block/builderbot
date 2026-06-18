@@ -1600,7 +1600,6 @@
                 ? openPushSession
                 : undefined}
               onRebaseBranch={() => startBranchCommandPipeline('rebase')}
-              onRebaseBranchOntoOrigin={() => startBranchCommandPipeline('rebase', 'origin')}
               onForcePush={handleForcePush}
               onResetToOrigin={handleResetToOrigin}
               onOpenForcePushSession={forcePushSessionId && forcePushSessionId !== '__pending__'

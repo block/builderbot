@@ -1,13 +1,15 @@
 <!--
-  NewSessionModal.svelte — Start a new branch session on a branch
+  NewSessionModal.svelte — Start a new branch session or project note session
 
   A focused modal with a prompt textarea. The mode (commit/note/review) is
-  switchable via a clickable dropdown in the header. On close, returns
-  whatever text was typed and the current mode so the caller can restore
-  state if the user re-opens the modal.
+  switchable via a clickable dropdown in the header for branch sessions. Project
+  note sessions keep a fixed note mode and show a simple "Project note" header.
+  On close, returns whatever text was typed and the current mode so the caller
+  can restore state if the user re-opens the modal.
 
   Props:
-    branch        — the branch to create a session on
+    branch        — the branch to create a session on, for branch sessions
+    project       — the project to create a note session on, for project sessions
     mode          — 'commit', 'note', or 'review' (initial mode)
     repoLabel     — optional repo label for display (githubRepo + subpath)
     initialPrompt — pre-fill the textarea (e.g. from a previous close)
@@ -24,7 +26,7 @@
   import { tick, untrack } from 'svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
-  import type { Branch, BranchSessionType, HashtagItem, ProjectRepo } from '../../types';
+  import type { Branch, BranchSessionType, HashtagItem, Project, ProjectRepo } from '../../types';
   import AgentSelector from '../agents/AgentSelector.svelte';
   import ImageAttachment from './ImageAttachment.svelte';
   import HashtagInput from './HashtagInput.svelte';
@@ -43,9 +45,11 @@
 
   interface Props {
     open: boolean;
-    branch: Branch;
-    mode: BranchSessionType;
+    branch?: Branch;
+    project?: Project;
+    mode?: BranchSessionType;
     repoLabel?: ProjectRepo | null;
+    hashtagItems?: HashtagItem[];
     initialPrompt?: string;
     initialImageIds?: string[];
     /** When true, the initial prompt is a suggestion — select text according to prefillSelection. */
@@ -57,6 +61,7 @@
     /** Note-mode prefill text — used when switching to note mode with no user draft. */
     notePrefill?: string;
     remote?: boolean;
+    submitDisabledReason?: string | null;
     /** When true, the session will be queued rather than started immediately. */
     willQueue?: boolean;
     /** Mode-aware queue state for callers that allow switching session types. */
@@ -67,9 +72,11 @@
 
   let {
     open,
-    branch,
-    mode,
+    branch = undefined,
+    project = undefined,
+    mode = 'note',
     repoLabel = null,
+    hashtagItems: providedHashtagItems,
     initialPrompt = '',
     initialImageIds = [],
     prefilled = false,
@@ -77,6 +84,7 @@
     commitPrefill = '',
     notePrefill = '',
     remote = false,
+    submitDisabledReason = null,
     willQueue = false,
     willQueueForMode,
     onClose,
@@ -92,7 +100,14 @@
   let isCommit = $derived(currentMode === 'commit');
   let isReview = $derived(currentMode === 'review');
   let isNote = $derived(!isCommit && !isReview);
+  let isProjectNote = $derived(!branch && !!project);
+  let activeProjectId = $derived(branch?.projectId ?? project?.id ?? '');
+  let activeBranchId = $derived(branch?.id ?? null);
   let currentWillQueue = $derived(willQueueForMode?.(currentMode) ?? willQueue);
+  let canSubmit = $derived(
+    !!activeProjectId && !starting && !submitDisabledReason && (isReview || !!prompt.trim())
+  );
+  let submitLabel = $derived(currentWillQueue ? 'Queue' : isProjectNote ? 'New' : 'Start');
   const footerControlClass =
     'h-9 gap-1.5 rounded-md border border-[var(--border-muted)] bg-[var(--bg-primary)] px-4 py-2 text-sm font-medium text-muted-foreground shadow-none transition-colors hover:bg-[var(--bg-hover)] hover:text-foreground max-[640px]:h-11 max-[640px]:justify-center';
 
@@ -215,6 +230,7 @@
   let modKey = $derived(isMac() ? '⌘' : 'Ctrl ');
 
   function switchMode(newMode: BranchSessionType) {
+    if (isProjectNote) return;
     modeMenuOpen = false;
     if (newMode === currentMode) return;
 
@@ -254,6 +270,14 @@
   // Hashtag reference items
   let hashtagItems = $state<HashtagItem[]>([]);
   $effect(() => {
+    if (providedHashtagItems) {
+      hashtagItems = providedHashtagItems;
+      return;
+    }
+    if (!branch) {
+      hashtagItems = [];
+      return;
+    }
     let stale = false;
     buildBranchHashtagItems(branch.id, branch.projectId, {
       branchName: branch.branchName,
@@ -279,7 +303,7 @@
     if (!initialized) {
       initialized = true;
       prompt = initialPrompt;
-      currentMode = mode;
+      currentMode = isProjectNote ? 'note' : mode;
       imageIds = [...initialImageIds];
     }
   });
@@ -319,8 +343,7 @@
   function handleSubmit(e?: Event) {
     e?.preventDefault();
     // Review mode allows empty prompts; other modes require text
-    if (!isReview && !prompt.trim()) return;
-    if (starting) return;
+    if (!canSubmit) return;
 
     starting = true;
     onSubmit({ prompt: prompt.trim(), mode: currentMode, imageIds });
@@ -334,7 +357,7 @@
 
   function handleKeydown(e: KeyboardEvent) {
     // Cmd+Enter to submit
-    if (e.key === 'Enter' && e.metaKey && (prompt.trim() || isReview) && !starting) {
+    if (e.key === 'Enter' && e.metaKey && canSubmit) {
       e.preventDefault();
       handleSubmit();
     }
@@ -347,6 +370,7 @@
   // propagation for handled combos so that handler never sees them.
   function handleModeShortcut(e: KeyboardEvent) {
     if (!open) return;
+    if (isProjectNote) return;
     const mod = isMac() ? e.metaKey : e.ctrlKey;
     if (!mod || !/^[0-9]$/.test(e.key)) return;
     const idx = Number(e.key) - 1;
@@ -366,12 +390,13 @@
   // =========================================================================
 
   async function handleFileDrop(paths: string[]) {
+    if (!activeProjectId) return;
     const imagePaths = paths.filter((p) => isImageFile(p));
     const textPaths = paths.filter((p) => isMaybeTextFile(p));
     const newIds: string[] = [];
     for (const path of imagePaths) {
       try {
-        const image = await createImage(branch.id, branch.projectId, path, true);
+        const image = await createImage(activeBranchId, activeProjectId, path, true);
         newIds.push(image.id);
       } catch (e) {
         console.error('Failed to create image from dropped file:', e);
@@ -424,41 +449,47 @@
     class={`sm:max-w-[580px] max-h-[calc(100vh-16vh)] p-0 gap-0 overflow-hidden flex flex-col border-2 ${dragOver ? 'border-[var(--ui-accent)] bg-[color-mix(in_srgb,var(--ui-accent)_5%,var(--bg-chrome))]' : 'border-transparent'} transition-colors`}
     showCloseButton={false}
   >
-    <Dialog.Title class="sr-only">New {currentModeInfo.label} session</Dialog.Title>
+    <Dialog.Title class="sr-only">
+      {isProjectNote ? 'Project note session' : `New ${currentModeInfo.label} session`}
+    </Dialog.Title>
     <header class="modal-header">
       <div class="header-left">
-        <div class="mode-switcher" bind:this={modeMenuEl}>
-          <button
-            class={`mode-switcher-btn ${currentModeInfo.iconClass}`}
-            onclick={() => (modeMenuOpen = !modeMenuOpen)}
-            type="button"
-          >
-            <currentModeInfo.icon size={14} />
-            <span>{currentModeInfo.label}</span>
-            <ChevronDown size={14} />
-          </button>
-          {#if modeMenuOpen}
-            <div class="mode-menu">
-              {#each allModes as m, i}
-                <button
-                  class="mode-menu-item"
-                  class:active={m.value === currentMode}
-                  type="button"
-                  onclick={() => switchMode(m.value)}
-                >
-                  <span class="header-icon {m.iconClass}">
-                    <m.icon size={14} />
-                  </span>
-                  <span>{m.label}</span>
-                  {#if viewport.showShortcutHints}
-                    <span class="mode-menu-hint">{modKey}{i + 1}</span>
-                  {/if}
-                </button>
-              {/each}
-            </div>
-          {/if}
-        </div>
-        {#if repoLabel}
+        {#if isProjectNote}
+          <div class="project-note-heading">Project note</div>
+        {:else}
+          <div class="mode-switcher" bind:this={modeMenuEl}>
+            <button
+              class={`mode-switcher-btn ${currentModeInfo.iconClass}`}
+              onclick={() => (modeMenuOpen = !modeMenuOpen)}
+              type="button"
+            >
+              <currentModeInfo.icon size={14} />
+              <span>{currentModeInfo.label}</span>
+              <ChevronDown size={14} />
+            </button>
+            {#if modeMenuOpen}
+              <div class="mode-menu">
+                {#each allModes as m, i}
+                  <button
+                    class="mode-menu-item"
+                    class:active={m.value === currentMode}
+                    type="button"
+                    onclick={() => switchMode(m.value)}
+                  >
+                    <span class="header-icon {m.iconClass}">
+                      <m.icon size={14} />
+                    </span>
+                    <span>{m.label}</span>
+                    {#if viewport.showShortcutHints}
+                      <span class="mode-menu-hint">{modKey}{i + 1}</span>
+                    {/if}
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </div>
+        {/if}
+        {#if !isProjectNote && repoLabel}
           <div class="repo-info">
             <RepoLabel
               githubRepo={repoLabel.headRepo ?? repoLabel.githubRepo}
@@ -497,8 +528,8 @@
 
       {#if imageIds.length > 0}
         <ImageAttachment
-          branchId={branch.id}
-          projectId={branch.projectId}
+          branchId={activeBranchId}
+          projectId={activeProjectId}
           disabled={starting}
           {imageIds}
           {onImageIdsChange}
@@ -510,8 +541,8 @@
           <AgentSelector disabled={starting} {remote} dropUp triggerClass={footerControlClass} />
           {#if imageIds.length === 0}
             <ImageAttachment
-              branchId={branch.id}
-              projectId={branch.projectId}
+              branchId={activeBranchId}
+              projectId={activeProjectId}
               disabled={starting}
               {imageIds}
               {onImageIdsChange}
@@ -532,14 +563,15 @@
             type="submit"
             variant="default"
             class="gap-1.5 px-4 py-2 text-sm font-semibold shadow-none hover:bg-[var(--ui-accent-hover)] max-[640px]:h-11 max-[640px]:flex-1 max-[640px]:justify-center"
-            disabled={starting || (!isReview && !prompt.trim())}
+            title={submitDisabledReason ?? undefined}
+            disabled={!canSubmit}
           >
             {#if starting}
               <Spinner size={14} />
               {currentWillQueue ? 'Queueing…' : 'Starting…'}
             {:else}
               <Send size={14} />
-              {currentWillQueue ? 'Queue' : 'Start'}
+              {submitLabel}
             {/if}
           </Button>
         </div>
@@ -570,6 +602,13 @@
   .mode-switcher {
     position: relative;
     flex-shrink: 0;
+  }
+
+  .project-note-heading {
+    color: var(--text-primary);
+    font-size: var(--size-sm);
+    font-weight: 650;
+    line-height: 1.4;
   }
 
   .mode-switcher-btn {

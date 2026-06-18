@@ -1,47 +1,22 @@
 <!--
-  ProjectSection.svelte - A project header + session input + notes + branch cards
+  ProjectSection.svelte - Project overview card + branch cards
 
-  Shows the project name, a prompt input for project-level sessions,
-  project notes, repo controls, and all branch cards for this project.
+  Shows the project name, project notes, project-session entry point, repo
+  controls, and all branch cards for this project.
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { listenToEvent } from '../../transport';
-  import { untrack } from 'svelte';
-  import ChevronLeft from '@lucide/svelte/icons/chevron-left';
-  import Trash2 from '@lucide/svelte/icons/trash-2';
-  import Plus from '@lucide/svelte/icons/plus';
-  import Send from '@lucide/svelte/icons/send';
   import FileText from '@lucide/svelte/icons/file-text';
-  import CircleCheck from '@lucide/svelte/icons/circle-check';
-  import CirclePause from '@lucide/svelte/icons/circle-pause';
-  import Pause from '@lucide/svelte/icons/pause';
-  import AlertCircle from '@lucide/svelte/icons/alert-circle';
-  import Cloud from '@lucide/svelte/icons/cloud';
-  import Paperclip from '@lucide/svelte/icons/paperclip';
-  import X from '@lucide/svelte/icons/x';
-  import ImagePlus from '@lucide/svelte/icons/image-plus';
-  import type {
-    Project,
-    ProjectRepo,
-    Branch,
-    WorkspaceStatus,
-    ProjectNote,
-    HashtagItem,
-  } from '../../types';
-  import { projectDisplayName } from '../../shared/utils';
-  import { goHome } from '../layout/navigation.svelte';
+  import type { Project, ProjectRepo, Branch, ProjectNote, HashtagItem } from '../../types';
   import * as commands from '../../api/commands';
-  import HashtagInput from '../sessions/HashtagInput.svelte';
   import { buildProjectHashtagItems } from '../sessions/hashtagItems';
   import { branchTimelineReadyKey } from '../branches/branchTimelineReady';
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import BranchCard from '../branches/BranchCard.svelte';
-  import Spinner from '../../shared/Spinner.svelte';
   import { isSessionActive } from '../../shared/sessionStatus';
   import { deleteSessionLinkedItem } from '../../shared/deleteSessionLinkedItem';
-  import AddRepoModal from './AddRepoModal.svelte';
   import SuggestedRepos from './SuggestedRepos.svelte';
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
   import TimelineRow from '../timeline/TimelineRow.svelte';
@@ -50,20 +25,13 @@
   } from '../timeline/TimelineContextMenu.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
   import SessionModal from '../sessions/SessionModal.svelte';
-  import AgentSelector from '../agents/AgentSelector.svelte';
+  import NewSessionModal from '../sessions/NewSessionModal.svelte';
   import { agentState } from '../agents/agent.svelte';
   import { getPreferredAgent } from '../settings/preferences.svelte';
-  import { subscribeDragDrop } from '../branches/dragDrop';
-  import {
-    isImageFile,
-    isMaybeTextFile,
-    insertFilePathsAtCursor,
-  } from '../branches/branchCardHelpers';
-  import { createImage, createImageFromData, deleteImage, getImageData } from '../../api/commands';
   import { formatRelativeTime, minuteNow } from '../../shared/relativeTime.svelte';
-  import { focusAtEnd } from '../../shared/focusAtEnd';
   import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
   import { createLiveSessionHints } from '../timeline/liveSessionHints';
+  import { projectDisplayName } from '../../shared/utils';
   import { Button } from '$lib/components/ui/button';
   import type { LinkedNoteContext } from '../sessions/noteFreshness';
 
@@ -71,102 +39,56 @@
     project: Project;
     branches: Branch[];
     reposById?: Map<string, ProjectRepo>;
-    canAddRepo?: boolean;
-    addRepoHint?: string | null;
     deleting?: boolean;
-    safeToDelete?: boolean;
     deletingBranches?: Set<string>;
     worktreeErrors?: Map<string, string>;
     workspaceErrors?: Map<string, string>;
-    detecting?: boolean;
-    excludeRepos?: Set<string>;
-    onDeleteProject?: () => void;
     onDeleteBranch?: (branchId: string) => void;
     onRenameBranch?: (branchId: string, branchName: string) => void;
+    onProjectTitleElement?: (element: HTMLHeadingElement | null) => void;
     onRepoSelected?: (selection: RepoPickerSelection) => void | Promise<void>;
     onRetryWorktree?: (branchId: string) => void;
-    onResumeWorkspace?: (workspaceName: string) => void;
   }
 
   let {
     project,
     branches,
     reposById = new Map(),
-    canAddRepo = true,
-    addRepoHint = null,
     deleting = false,
-    safeToDelete = false,
     deletingBranches = new Set(),
     worktreeErrors = new Map(),
     workspaceErrors = new Map(),
-    detecting = false,
-    excludeRepos,
-    onDeleteProject,
     onDeleteBranch,
     onRenameBranch,
+    onProjectTitleElement,
     onRepoSelected,
     onRetryWorktree,
-    onResumeWorkspace,
   }: Props = $props();
 
   let sortedBranches = $derived([...branches].sort((a, b) => b.createdAt - a.createdAt));
   let projectDisplayRootCandidates = $derived(
     branches.map((branch) => branch.worktreePath).filter((path): path is string => !!path)
   );
-  let addRepoDisabled = $derived(deleting || !canAddRepo);
-
-  // For remote projects, derive workspace info from any branch (they all share the same workspace)
-  let workspaceBranch = $derived(
-    project.location === 'remote' ? (branches.find((b) => b.workspaceStatus) ?? null) : null
-  );
-  let projectWorkspaceStatus = $derived<WorkspaceStatus | null>(
-    workspaceBranch?.workspaceStatus ?? null
-  );
-  // For remote projects, derive workstation name from any branch (they all share the same workspace)
-  let projectWorkstationName = $derived<string | null>(
-    project.location === 'remote'
-      ? (branches.find((b) => b.workspaceName)?.workspaceName ?? null)
-      : null
-  );
-
-  let addRepoModalOpen = $state(false);
-
-  function statusLabel(status: WorkspaceStatus | null): string {
-    switch (status) {
-      case 'starting':
-        return 'Provisioning';
-      case 'running':
-        return 'Running';
-      case 'stopped':
-        return 'Stopped';
-      case 'suspended':
-        return 'Suspended';
-      case 'error':
-        return 'Error';
-      default:
-        return '';
-    }
-  }
-
-  async function handleRepoSelected(selection: RepoPickerSelection) {
-    addRepoModalOpen = false;
-    await onRepoSelected?.(selection);
-  }
-
   function repoForBranch(branch: Branch): ProjectRepo | null {
     if (!branch.projectRepoId) return null;
     return reposById.get(branch.projectRepoId) ?? null;
   }
 
-  // ── Project session input ──────────────────────────────────────────────
-  let promptText = $state('');
-  let promptTextarea = $state<HTMLElement | null>(null);
-  let availableAgents = $derived(agentState.providers);
-  let preferredProvider = $derived(getPreferredAgent(availableAgents) ?? undefined);
-  let canSubmitPrompt = $derived(!!promptText.trim() && !!preferredProvider);
-  let sendButtonTitle = $derived(
-    preferredProvider ? 'Start project session' : 'No AI agent available'
-  );
+  function reportProjectTitleElement(node: HTMLHeadingElement) {
+    onProjectTitleElement?.(node);
+
+    return {
+      destroy() {
+        onProjectTitleElement?.(null);
+      },
+    };
+  }
+
+  // ── Project session dialog ─────────────────────────────────────────────
+  let showProjectSessionModal = $state(false);
+  let draftProjectPrompt = $state('');
+  let draftProjectImageIds = $state<string[]>([]);
+  let preferredProvider = $derived(getPreferredAgent(agentState.providers) ?? undefined);
   /** Session IDs for running project sessions (all produce notes). */
   let activeSessionIds = $state<Set<string>>(new Set());
 
@@ -204,7 +126,6 @@
   // Hashtag reference items
   let hashtagItems = $state<HashtagItem[]>([]);
   let hashtagVersion = $state(0);
-  let hashtagInputFocused = $state(false);
   let hashtagLoadGeneration = 0;
   let loadedHashtagSignature: string | null = null;
   let loadingHashtagSignature: string | null = null;
@@ -261,174 +182,25 @@
 
   $effect(() => {
     const _signature = hashtagSignature;
-    if (!hashtagInputFocused) return;
+    if (!showProjectSessionModal) return;
     void ensureHashtagItems();
   });
 
-  // Image attachment state
-  let imageIds = $state<string[]>([]);
-  let imagePreviews = $state<Map<string, string>>(new Map());
-  let imageFileInput = $state<HTMLInputElement>();
-  let dragOver = $state(false);
-  let promptWrapperEl: HTMLDivElement | undefined = $state();
-  let promptExpanded = $state(false);
-
-  // Load previews for attached images
-  $effect(() => {
-    for (const id of imageIds) {
-      if (!imagePreviews.has(id)) {
-        getImageData(id)
-          .then((dataUrl) => {
-            imagePreviews = new Map(imagePreviews);
-            imagePreviews.set(id, dataUrl);
-          })
-          .catch(() => {
-            // Image may have been deleted — insert sentinel to prevent infinite retry
-            imagePreviews = new Map(imagePreviews);
-            imagePreviews.set(id, '');
-          });
-      }
-    }
-  });
-
-  function openImagePicker() {
-    imageFileInput?.click();
-  }
-
-  function handlePromptFocusIn() {
-    promptExpanded = true;
-    hashtagInputFocused = true;
+  function openProjectSessionModal() {
+    showProjectSessionModal = true;
     void ensureHashtagItems();
   }
 
-  function handlePromptFocusOut(e: FocusEvent) {
-    if (
-      promptWrapperEl &&
-      e.relatedTarget instanceof Node &&
-      promptWrapperEl.contains(e.relatedTarget)
-    ) {
-      return;
-    }
-    promptExpanded = false;
-    hashtagInputFocused = false;
-  }
+  async function handleSubmitProjectSession(data: { prompt: string; imageIds: string[] }) {
+    const text = data.prompt.trim();
+    if (!text || !preferredProvider) return;
 
-  async function handleImageFileSelect(e: Event) {
-    const input = e.target as HTMLInputElement;
-    if (!input.files) return;
-    for (const file of Array.from(input.files)) {
-      await addImageFile(file);
-    }
-    input.value = '';
-  }
-
-  async function addImageFile(file: File) {
-    const buffer = await file.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
-    const chunks: string[] = [];
-    for (let i = 0; i < bytes.length; i += 8192) {
-      chunks.push(String.fromCharCode(...bytes.subarray(i, i + 8192)));
-    }
-    const base64 = btoa(chunks.join(''));
-    try {
-      const image = await createImageFromData(null, project.id, file.name, file.type, base64, true);
-      imageIds = [...imageIds, image.id];
-      const dataUrl = `data:${file.type};base64,${base64}`;
-      imagePreviews = new Map(imagePreviews);
-      imagePreviews.set(image.id, dataUrl);
-    } catch (err) {
-      console.error('Failed to attach image:', err);
-    }
-  }
-
-  function handleImagePaste(e: ClipboardEvent) {
-    const items = e.clipboardData?.items;
-    if (!items) return;
-    for (const item of Array.from(items)) {
-      if (item.type.startsWith('image/')) {
-        e.preventDefault();
-        const file = item.getAsFile();
-        if (file) void addImageFile(file);
-      }
-    }
-  }
-
-  function removeImage(imageId: string) {
-    imageIds = imageIds.filter((id) => id !== imageId);
-    imagePreviews = new Map(imagePreviews);
-    imagePreviews.delete(imageId);
-    deleteImage(imageId).catch((err) => {
-      console.error('Failed to delete image:', err);
-    });
-  }
-
-  async function handleFileDrop(paths: string[]) {
-    const imagePaths = paths.filter((p) => isImageFile(p));
-    const textPaths = paths.filter((p) => isMaybeTextFile(p));
-    const pid = project.id;
-    const newIds: string[] = [];
-    for (const path of imagePaths) {
-      try {
-        const image = await createImage(null, pid, path, true);
-        newIds.push(image.id);
-      } catch (e) {
-        console.error('Failed to create image from dropped file:', e);
-      }
-    }
-    if (newIds.length > 0) {
-      imageIds = [...imageIds, ...newIds];
-    }
-    if (textPaths.length > 0 && promptTextarea) {
-      insertFilePathsAtCursor(promptTextarea, textPaths);
-    }
-  }
-
-  // Subscribe to drag-drop service
-  $effect(() => {
-    const el = promptWrapperEl;
-    if (!el) return;
-    const unsub = untrack(() =>
-      subscribeDragDrop({
-        element: el,
-        onDragOver: (over) => {
-          dragOver = over;
-        },
-        onDrop: (paths) => {
-          handleFileDrop(paths);
-        },
-      })
-    );
-    return unsub;
-  });
-
-  function autoResize(el: HTMLElement) {
-    el.style.height = 'auto';
-    el.style.overflow = 'hidden';
-    const maxHeight = 120; // matches CSS max-height
-    const height = Math.min(el.scrollHeight, maxHeight);
-    el.style.height = height + 'px';
-    if (height >= maxHeight) {
-      el.style.overflow = 'auto';
-    }
-  }
-
-  async function handleSubmitPrompt() {
-    const text = promptText.trim();
-    const provider = preferredProvider;
-    if (!text || !provider) return;
-
-    const imageIdsToSend = imageIds.length > 0 ? [...imageIds] : undefined;
-    promptText = '';
-    imageIds = [];
-    imagePreviews = new Map();
-    if (promptTextarea) {
-      promptTextarea.style.height = 'auto';
-    }
+    const imageIdsToSend = data.imageIds.length > 0 ? [...data.imageIds] : undefined;
     try {
       const response = await commands.startProjectSession(
         project.id,
         text,
-        provider,
+        preferredProvider,
         imageIdsToSend
       );
       activeSessionIds = new Set([...activeSessionIds, response.sessionId]);
@@ -438,13 +210,6 @@
       await loadProjectNotes();
     } catch (e) {
       console.error('[ProjectSection] Failed to start project session:', e);
-    }
-  }
-
-  function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
-      e.preventDefault();
-      handleSubmitPrompt();
     }
   }
 
@@ -517,8 +282,8 @@
   }
 
   function handleProjectNoteNewSessionReferring(ref: string) {
-    promptText = buildReferringPrompt(promptText, ref);
-    focusAtEnd(promptTextarea);
+    draftProjectPrompt = buildReferringPrompt(draftProjectPrompt, ref);
+    openProjectSessionModal();
   }
 
   function linkedNoteContext(note: ProjectNote | undefined): LinkedNoteContext | null {
@@ -588,225 +353,11 @@
 </script>
 
 <div class="project-section">
-  <div class="project-header" class:deleting>
-    <div class="project-info">
-      <Button
-        variant="ghost"
-        size="icon"
-        class="size-6 shrink-0 text-muted-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:size-10 [&_svg]:!size-4"
-        title="Back to projects"
-        aria-label="Back to projects"
-        onclick={goHome}
-      >
-        <ChevronLeft size={16} />
-      </Button>
-      <span class="project-name" title={projectDisplayName(project)}
-        >{projectDisplayName(project)}</span
-      >
-      {#if deleting}
-        <div class="deleting-status" role="status" aria-live="polite">
-          <Spinner size={12} />
-          <span>Deleting…</span>
-        </div>
-      {/if}
-      {#if detecting}
-        <div class="detecting-status">
-          <Spinner size={12} />
-          <span>Detecting actions</span>
-        </div>
-      {/if}
-      {#if projectWorkspaceStatus}
-        <div
-          class="workspace-status-badge"
-          class:starting={projectWorkspaceStatus === 'starting'}
-          class:running={projectWorkspaceStatus === 'running'}
-          class:stopped={projectWorkspaceStatus === 'stopped'}
-          class:suspended={projectWorkspaceStatus === 'suspended'}
-          class:error={projectWorkspaceStatus === 'error'}
-          title={projectWorkspaceStatus === 'running' && projectWorkstationName
-            ? projectWorkstationName
-            : undefined}
-        >
-          {#if projectWorkspaceStatus === 'starting'}
-            <Spinner size={12} />
-          {:else if projectWorkspaceStatus === 'running'}
-            <Cloud size={12} />
-          {:else if projectWorkspaceStatus === 'stopped'}
-            <CirclePause size={12} />
-          {:else if projectWorkspaceStatus === 'suspended'}
-            <Pause size={12} />
-          {:else if projectWorkspaceStatus === 'error'}
-            <AlertCircle size={12} />
-          {/if}
-          <span>{statusLabel(projectWorkspaceStatus)}</span>
-          {#if projectWorkspaceStatus === 'suspended' && projectWorkstationName}
-            <Button
-              variant="ghost"
-              class="ml-1 h-auto rounded-none border-l border-[var(--border-muted)] bg-transparent px-1 py-0 text-[length:calc(var(--size-xs)-1px)] font-semibold text-[var(--ui-info)] shadow-none focus-visible:ring-0 hover:bg-transparent hover:text-[var(--ui-info)] hover:underline"
-              onclick={() => onResumeWorkspace?.(projectWorkstationName!)}
-            >
-              Resume
-            </Button>
-          {/if}
-        </div>
-      {/if}
-    </div>
-    {#if !deleting}
-      <div class="header-actions">
-        <span class="inline-flex">
-          <Button
-            variant="ghost"
-            size="sm"
-            class="group gap-2 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:h-10 max-md:justify-center max-md:p-2"
-            onclick={() => {
-              addRepoModalOpen = true;
-            }}
-            disabled={addRepoDisabled}
-          >
-            <span
-              class="flex size-4 shrink-0 items-center justify-center rounded-full bg-[var(--border-muted)] transition-colors group-hover:not-disabled:bg-[var(--border-emphasis)]"
-            >
-              <Plus size={12} />
-            </span>
-            Add Repo
-          </Button>
-        </span>
-        <Button
-          variant="ghost"
-          size="sm"
-          class={[
-            'group gap-2 text-foreground hover:bg-[var(--ui-selection)] hover:text-destructive max-md:h-10 max-md:justify-center max-md:p-2',
-            safeToDelete && 'border border-destructive text-destructive',
-          ]}
-          onclick={() => onDeleteProject?.()}
-        >
-          <span
-            class={[
-              'flex shrink-0 items-center transition-colors',
-              safeToDelete
-                ? 'text-destructive'
-                : 'text-muted-foreground group-hover:text-destructive',
-            ]}
-          >
-            <Trash2 size={14} />
-          </span>
-          Remove Project
-        </Button>
-      </div>
-    {/if}
-  </div>
+  <section class="project-overview-card">
+    <h2 class="project-title" use:reportProjectTitleElement>{projectDisplayName(project)}</h2>
 
-  <!-- Project session prompt -->
-  <div class="project-prompt-section">
-    <input
-      bind:this={imageFileInput}
-      type="file"
-      accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
-      multiple
-      class="file-input-hidden"
-      onchange={handleImageFileSelect}
-    />
-    <div
-      class="prompt-input-wrapper"
-      class:drag-over={dragOver}
-      class:expanded={promptExpanded}
-      class:has-content={promptText.trim() || imageIds.length > 0}
-      bind:this={promptWrapperEl}
-      onfocusin={handlePromptFocusIn}
-      onfocusout={handlePromptFocusOut}
-    >
-      <div class="prompt-input-row">
-        {#if imageIds.length === 0}
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            class={[
-              'size-7 shrink-0 bg-transparent text-[var(--text-faint)] hover:bg-[var(--ui-selection)] hover:text-foreground [&_svg]:!size-3.5',
-              promptExpanded ? 'max-md:size-10' : 'max-md:size-8',
-            ]}
-            title="Attach image"
-            aria-label="Attach image"
-            onclick={openImagePicker}
-          >
-            <Paperclip size={14} />
-          </Button>
-        {/if}
-        <HashtagInput
-          class="prompt-input"
-          placeholder="Ask about this project…"
-          bind:value={promptText}
-          bind:textareaEl={promptTextarea}
-          onkeydown={handleKeydown}
-          oninput={(e) => autoResize(e.currentTarget as HTMLElement)}
-          onpaste={handleImagePaste}
-          rows={1}
-          items={hashtagItems}
-        />
-        <div class="prompt-actions">
-          <AgentSelector />
-          <span class="inline-flex" title={sendButtonTitle}>
-            <Button
-              variant="outline"
-              size="icon"
-              class={[
-                'size-8 shrink-0 rounded-lg shadow-none [&_svg]:!size-3.5',
-                promptExpanded
-                  ? 'max-md:size-10 max-md:rounded-lg'
-                  : 'max-md:size-8 max-md:rounded-md',
-              ]}
-              aria-label={sendButtonTitle}
-              onclick={handleSubmitPrompt}
-              disabled={!canSubmitPrompt}
-            >
-              <Send size={14} />
-            </Button>
-          </span>
-        </div>
-      </div>
-      {#if imageIds.length > 0}
-        <div class="reply-images">
-          {#each imageIds as imageId}
-            <div class="reply-image-thumb group/thumb">
-              {#if imagePreviews.get(imageId)}
-                <img src={imagePreviews.get(imageId)} alt="attached" />
-              {:else}
-                <div class="reply-image-placeholder"><ImagePlus size={16} /></div>
-              {/if}
-              <Button
-                variant="ghost"
-                size="icon"
-                class="absolute top-0.5 right-0.5 size-4 rounded-full bg-[var(--bg-deepest)] text-muted-foreground opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-chrome)] hover:text-foreground group-hover/thumb:opacity-100 [&_svg]:!size-2.5"
-                title="Remove image"
-                aria-label="Remove image"
-                onclick={() => removeImage(imageId)}
-              >
-                <X size={10} />
-              </Button>
-            </div>
-          {/each}
-          <Button
-            variant="outline"
-            size="icon"
-            class="size-12 shrink-0 rounded-md border border-dashed border-[var(--border-muted)] bg-transparent text-[var(--text-faint)] shadow-none hover:border-[var(--border-emphasis)] hover:bg-transparent hover:text-muted-foreground [&_svg]:!size-4"
-            title="Add image"
-            aria-label="Add image"
-            onclick={openImagePicker}
-          >
-            <Plus size={16} />
-          </Button>
-        </div>
-      {/if}
-    </div>
-  </div>
-
-  <!-- Project notes -->
-  {#if projectNotes.length > 0}
-    {@const nowMs = minuteNow.now()}
-    <div class="project-notes">
-      <div class="notes-header">
-        <FileText size={13} />
-        <span>Project Notes</span>
-      </div>
+    {#if projectNotes.length > 0}
+      {@const nowMs = minuteNow.now()}
       <TimelineContextMenu
         actions={projectNoteContextMenuActions}
         onNewSessionReferring={handleProjectNoteNewSessionReferring}
@@ -831,7 +382,7 @@
                   ? undefined
                   : formatRelativeTime(note.completedAt ?? note.createdAt, nowMs)}
               deleting={deletingNoteIds.has(note.id)}
-              isLast={index === timelineNotes.length - 1}
+              isLast={false}
               sessionId={note.sessionId ?? undefined}
               onItemClick={isRunning || isFailed
                 ? undefined
@@ -852,8 +403,28 @@
           {/each}
         </div>
       </TimelineContextMenu>
+    {/if}
+
+    <div class="project-session-footer" class:empty={projectNotes.length === 0}>
+      <span class={projectNotes.length === 0 ? 'inline-flex flex-1' : 'inline-flex'}>
+        <Button
+          variant="ghost"
+          onclick={openProjectSessionModal}
+          aria-label="New project note"
+          class={[
+            'inline-flex items-center font-medium transition-all duration-300',
+            '[&_svg]:transition-all [&_svg]:duration-300',
+            projectNotes.length === 0
+              ? 'flex-1 justify-center gap-2 px-1.5 py-2.5 h-auto rounded-lg border border-solid border-transparent bg-[var(--bg-elevated)] text-sm hover:bg-[var(--note-bg)] hover:text-[var(--note-color)] [&_svg]:!size-[18px] [&_svg]:text-[var(--note-color)]'
+              : 'gap-[5px] px-2.5 h-8 rounded-md border border-dashed border-[var(--border-subtle)] bg-transparent text-xs hover:border-[var(--note-color)] hover:bg-[var(--note-bg)] hover:text-[var(--note-color)] [&_svg]:!size-[13px] [&_svg]:text-[var(--note-color)]',
+          ]}
+        >
+          <FileText size={18} />
+          <span>New project note</span>
+        </Button>
+      </span>
     </div>
-  {/if}
+  </section>
 
   <div class="branches-list" class:deleting>
     {#each sortedBranches as branch (branch.id)}
@@ -873,6 +444,28 @@
 
   <SuggestedRepos {project} {reposById} {onRepoSelected} />
 </div>
+
+{#if showProjectSessionModal}
+  <NewSessionModal
+    open={true}
+    {project}
+    mode="note"
+    initialPrompt={draftProjectPrompt}
+    initialImageIds={draftProjectImageIds}
+    {hashtagItems}
+    submitDisabledReason={preferredProvider ? null : 'No AI agent available'}
+    onClose={(draft) => {
+      draftProjectPrompt = draft.prompt;
+      draftProjectImageIds = draft.imageIds;
+      showProjectSessionModal = false;
+    }}
+    onSubmit={(data) => {
+      draftProjectPrompt = '';
+      draftProjectImageIds = [];
+      void handleSubmitProjectSession({ prompt: data.prompt, imageIds: data.imageIds });
+    }}
+  />
+{/if}
 
 <NoteModal
   open={openNote !== null}
@@ -911,15 +504,6 @@
   }}
 />
 
-<AddRepoModal
-  open={addRepoModalOpen}
-  {excludeRepos}
-  onAdded={handleRepoSelected}
-  onClose={() => {
-    addRepoModalOpen = false;
-  }}
-/>
-
 <style>
   .project-section {
     display: flex;
@@ -927,260 +511,43 @@
     gap: 16px;
   }
 
-  .project-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 16px 0 8px;
-    position: sticky;
-    top: 0;
-    z-index: 10;
-    background-color: var(--bg-chrome);
-  }
-
-  .project-info {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-    flex: 1;
-  }
-
-  .project-name {
-    font-size: var(--size-xl);
-    font-weight: 600;
-    color: var(--text-primary);
-    letter-spacing: -0.01em;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .header-actions {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-  }
-
-  .detecting-status {
-    height: 22px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-left: 8px;
-    padding: 0 10px;
-    border-radius: 999px;
-    background-color: var(--bg-primary);
-    color: var(--text-primary);
-    font-size: calc(var(--size-xs) - 1px);
-    font-weight: 500;
-    line-height: 1;
-    border: 1px solid var(--border-muted);
-  }
-
-  .deleting-status {
-    height: 22px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-left: 8px;
-    padding: 0 10px;
-    border-radius: 999px;
-    background-color: var(--bg-primary);
-    color: var(--text-primary);
-    font-size: calc(var(--size-xs) - 1px);
-    font-weight: 500;
-    line-height: 1;
-    border: 1px solid var(--border-muted);
-  }
-
-  .workspace-status-badge {
-    height: 22px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-left: 8px;
-    padding: 0 10px;
-    border-radius: 999px;
-    background-color: var(--bg-primary);
-    color: var(--text-primary);
-    font-size: calc(var(--size-xs) - 1px);
-    font-weight: 500;
-    line-height: 1;
-    border: 1px solid var(--border-muted);
-  }
-
-  .workspace-status-badge.starting {
-    border-color: var(--ui-info);
-    color: var(--ui-info);
-  }
-
-  .workspace-status-badge.running {
-    border-color: var(--border-muted);
-    color: var(--text-primary);
-  }
-
-  .workspace-status-badge.stopped {
-    border-color: var(--border-muted);
-    color: var(--text-muted);
-  }
-
-  .workspace-status-badge.suspended {
-    border-color: var(--border-muted);
-    color: var(--text-muted);
-  }
-
-  .workspace-status-badge.error {
-    border-color: var(--ui-danger);
-    color: var(--ui-danger);
-  }
-
-  /* ── Project prompt ──────────────────────────────────────────────────── */
-
-  .project-prompt-section {
-    padding: 0;
-  }
-
-  .file-input-hidden {
-    display: none;
-  }
-
-  .prompt-input-wrapper {
+  .project-overview-card {
     display: flex;
     flex-direction: column;
-    border: 1px solid var(--border-muted);
+    gap: 14px;
+    padding: 18px 16px 14px;
+    border: 1px solid var(--border-subtle);
     border-radius: 8px;
     background-color: var(--bg-primary);
-    transition:
-      border-color 0.15s ease,
-      background-color 0.15s ease;
   }
 
-  .prompt-input-row {
-    display: flex;
-    align-items: flex-end;
-    gap: 8px;
+  .project-title {
     min-width: 0;
-    padding: 6px 8px;
-  }
-
-  .prompt-input-wrapper:focus-within {
-    border-color: var(--border-emphasis);
-  }
-
-  .prompt-input-wrapper.drag-over {
-    border-color: var(--ui-accent);
-    background-color: color-mix(in srgb, var(--ui-accent) 6%, var(--bg-primary));
-  }
-
-  .prompt-input-row :global(.prompt-input) {
-    flex: 1;
     margin: 0;
-    padding: 4px 0;
-    border: none;
-    background: none;
     color: var(--text-primary);
-    font-size: var(--size-md);
-    font-family: inherit;
-    line-height: 1.5;
-    resize: none;
-    outline: none;
-    min-height: 28px;
-    max-height: 120px;
-    overflow-y: hidden;
-  }
-
-  .prompt-input-row :global(.hashtag-input-wrapper) {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .prompt-input-row :global(.hashtag-input-container) {
-    min-width: 0;
-  }
-
-  .prompt-actions {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    flex-shrink: 0;
-  }
-
-  .prompt-input-wrapper.has-content .prompt-input-row {
-    flex-wrap: wrap;
-  }
-
-  .prompt-input-wrapper.has-content .prompt-input-row :global(.hashtag-input-wrapper) {
-    flex: 1 1 calc(100% - 48px);
-  }
-
-  .prompt-input-wrapper.has-content .prompt-actions {
-    width: 100%;
-    justify-content: flex-end;
-    gap: 4px;
-  }
-
-  /* ── Reply image previews ─────────────────────────────────────────── */
-
-  .reply-images {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    padding: 0 8px 8px;
-  }
-
-  .reply-image-thumb {
-    position: relative;
-    width: 48px;
-    height: 48px;
-    border-radius: 6px;
-    overflow: hidden;
-    border: 1px solid var(--border-muted);
-    background: var(--bg-hover);
-    flex-shrink: 0;
-  }
-
-  .reply-image-thumb img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-
-  .reply-image-placeholder {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 100%;
-    height: 100%;
-    color: var(--text-faint);
-  }
-
-  /* ── Project notes ───────────────────────────────────────────────────── */
-
-  .project-notes {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 0;
-  }
-
-  .notes-header {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--text-muted);
-    font-size: var(--size-xs);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    font-size: 22px;
+    font-weight: 700;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
   }
 
   .notes-timeline {
     display: flex;
     flex-direction: column;
     padding: 0 8px;
+  }
+
+  .project-session-footer {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 8px 0;
+    margin: 0 -8px;
+  }
+
+  .project-session-footer.empty {
+    padding: 0;
+    margin: 0;
   }
 
   /* ── Branches list ───────────────────────────────────────────────────── */
@@ -1201,119 +568,12 @@
       gap: 14px;
     }
 
-    .project-header {
-      align-items: stretch;
-      flex-direction: column;
-      gap: 8px;
-      padding: 12px 0 6px;
+    .project-overview-card {
+      padding: 16px 14px 12px;
     }
 
-    .project-info {
-      flex-wrap: wrap;
-    }
-
-    .project-name {
-      flex: 1 1 160px;
-      font-size: var(--size-lg);
-    }
-
-    .header-actions {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-      gap: 6px;
-      width: 100%;
-    }
-
-    .detecting-status,
-    .deleting-status,
-    .workspace-status-badge {
-      margin-left: 0;
-    }
-
-    .prompt-input-row {
-      align-items: center;
-      flex-wrap: nowrap;
-      gap: 4px;
-      padding: 4px 6px;
-    }
-
-    .prompt-input-row :global(.hashtag-input-wrapper) {
-      min-width: 0;
-      flex: 1 1 auto;
-    }
-
-    .prompt-input-row :global(.prompt-input) {
-      height: 32px;
-      max-height: 32px;
-      padding: 5px 0;
-      font-size: var(--size-sm);
-      overflow: hidden;
-      white-space: nowrap;
-    }
-
-    .prompt-actions {
-      width: auto;
-      justify-content: flex-end;
-      gap: 2px;
-      min-width: 0;
-    }
-
-    .prompt-actions :global(.agent-selector) {
-      min-width: 0;
-    }
-
-    .prompt-actions :global(.selector-btn) {
-      justify-content: center;
-      width: 32px;
-      height: 32px;
-      min-height: 32px;
-      padding: 0;
-    }
-
-    .prompt-actions :global(.selector-label) {
-      display: none;
-    }
-
-    .prompt-input-wrapper.expanded .prompt-input-row {
-      align-items: stretch;
-      flex-wrap: wrap;
-      padding: 6px;
-    }
-
-    .prompt-input-wrapper.expanded .prompt-input-row :global(.hashtag-input-wrapper) {
-      flex: 1 1 calc(100% - 48px);
-    }
-
-    .prompt-input-wrapper.expanded .prompt-input-row :global(.prompt-input) {
-      height: auto;
-      max-height: 120px;
-      padding: 4px 2px;
-      min-height: 40px;
-      font-size: var(--size-md);
-      overflow-y: auto;
-      white-space: pre-wrap;
-    }
-
-    .prompt-input-wrapper.expanded .prompt-actions {
-      width: 100%;
-      gap: 4px;
-    }
-
-    .prompt-input-wrapper.expanded .prompt-actions :global(.selector-btn) {
-      justify-content: flex-start;
-      width: auto;
-      height: auto;
-      min-height: 40px;
-      max-width: calc(100vw - 112px);
-      padding: 4px 8px;
-      overflow: hidden;
-    }
-
-    .prompt-input-wrapper.expanded .prompt-actions :global(.selector-label) {
-      display: inline-block;
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
+    .project-title {
+      font-size: 20px;
     }
   }
 </style>

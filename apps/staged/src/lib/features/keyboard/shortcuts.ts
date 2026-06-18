@@ -20,7 +20,7 @@ export interface Shortcut {
   id: string;
   description: string;
   category: ShortcutCategory;
-  handler: () => void;
+  handler: () => void | boolean;
   keys: string[];
   modifiers?: ShortcutModifiers;
   allowInInputs?: boolean;
@@ -171,7 +171,7 @@ function keyMatches(eventKey: string, candidate: string): boolean {
 }
 
 function handleKeydown(event: KeyboardEvent): void {
-  if (suppressionDepth > 0) return;
+  if (suppressionDepth > 0 || event.defaultPrevented) return;
   const inInput = isInputTarget(event.target);
 
   for (const shortcut of shortcuts.values()) {
@@ -181,8 +181,10 @@ function handleKeydown(event: KeyboardEvent): void {
     if (!matchesKey) continue;
     if (!modifiersMatch(event, shortcut.modifiers)) continue;
 
+    const handled = shortcut.handler();
+    if (handled === false) return;
+
     event.preventDefault();
-    shortcut.handler();
     return;
   }
 }
@@ -414,6 +416,5 @@ export async function resetAllShortcutBindings(): Promise<void> {
 export function triggerShortcut(id: string): boolean {
   const shortcut = shortcuts.get(id);
   if (!shortcut) return false;
-  shortcut.handler();
-  return true;
+  return shortcut.handler() !== false;
 }

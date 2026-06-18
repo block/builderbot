@@ -6,11 +6,20 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
+  import AlertCircle from '@lucide/svelte/icons/alert-circle';
+  import CirclePause from '@lucide/svelte/icons/circle-pause';
+  import Cloud from '@lucide/svelte/icons/cloud';
+  import PanelLeftClose from '@lucide/svelte/icons/panel-left-close';
+  import PanelLeftOpen from '@lucide/svelte/icons/panel-left-open';
+  import Pause from '@lucide/svelte/icons/pause';
+  import Plus from '@lucide/svelte/icons/plus';
+  import Trash2 from '@lucide/svelte/icons/trash-2';
   import { getWindowSync, listenToEvent } from '../../transport';
   import type {
     Project,
     ProjectRepo,
     Branch,
+    WorkspaceStatus,
     PrStatusChangedEvent,
     SessionStatusPayload,
     StoreIncompatibility,
@@ -19,15 +28,23 @@
   import { listenToRepoActionsDetection } from '../actions/actions';
   import { projectDisplayName } from '../../shared/utils';
   import { goHome, selectProject } from '../layout/navigation.svelte';
+  import TopBarPortal from '../layout/TopBarPortal.svelte';
   import ProjectSection from './ProjectSection.svelte';
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
+  import AddRepoModal from './AddRepoModal.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import ProjectsSidebar from './ProjectsSidebar.svelte';
   import SplashScreen from './SplashScreen.svelte';
+  import Spinner from '../../shared/Spinner.svelte';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
   import { toast } from 'svelte-sonner';
-  import { setProjects } from './projectsSidebarState.svelte';
+  import {
+    projectsSidebarState,
+    setProjects,
+    setProjectsSidebarCollapsed,
+  } from './projectsSidebarState.svelte';
+  import { viewport } from '../../shared/viewport.svelte';
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
@@ -86,6 +103,12 @@
 
   // Modal state
   let showNewProjectModal = $state(false);
+  let showAddRepoModal = $state(false);
+
+  // Project-detail top-bar title handoff.
+  let mainPanelEl = $state<HTMLDivElement | null>(null);
+  let projectTitleElement = $state<HTMLHeadingElement | null>(null);
+  let showTopBarProjectName = $state(false);
 
   // Delete confirmation state
   let projectToDelete = $state<Project | null>(null);
@@ -537,6 +560,44 @@
   let selectedProject = $derived(
     selectedProjectId ? projects.find((project) => project.id === selectedProjectId) || null : null
   );
+
+  function updateTopBarProjectNameVisibility(): void {
+    if (!selectedProject || !mainPanelEl || !projectTitleElement) {
+      showTopBarProjectName = false;
+      return;
+    }
+
+    const panelTop = mainPanelEl.getBoundingClientRect().top;
+    const titleBottom = projectTitleElement.getBoundingClientRect().bottom;
+    showTopBarProjectName = titleBottom <= panelTop + 1;
+  }
+
+  function setProjectTitleElement(element: HTMLHeadingElement | null): void {
+    projectTitleElement = element;
+    updateTopBarProjectNameVisibility();
+  }
+
+  $effect(() => {
+    selectedProject;
+    projectTitleElement;
+    mainPanelEl;
+    loading;
+
+    if (typeof requestAnimationFrame !== 'function') {
+      updateTopBarProjectNameVisibility();
+      return;
+    }
+
+    const frame = requestAnimationFrame(updateTopBarProjectNameVisibility);
+    return () => cancelAnimationFrame(frame);
+  });
+
+  let selectedProjectDeleting = $derived(
+    selectedProject ? deletingProjectNames.has(selectedProject.id) : false
+  );
+  let selectedProjectDetecting = $derived(
+    selectedProject ? detectingProjectIds.has(selectedProject.id) : false
+  );
   let repoCountsByProject = $derived(
     new Map(
       projects.map((project) => {
@@ -549,6 +610,28 @@
       })
     )
   );
+  // Track which projects are safe to delete (for button styling)
+  let safeToDeleteProjects = $state<Set<string>>(new Set());
+  let selectedProjectSafeToDelete = $derived(
+    selectedProject ? safeToDeleteProjects.has(selectedProject.id) : false
+  );
+  let selectedProjectCanAddRepo = $derived(selectedProject ? canAddRepo(selectedProject) : false);
+  let selectedProjectAddRepoHint = $derived(
+    selectedProject && selectedProject.location === 'remote' ? addRepoHint(selectedProject) : null
+  );
+  let selectedProjectAddRepoDisabled = $derived(
+    !selectedProject || selectedProjectDeleting || !selectedProjectCanAddRepo
+  );
+  let selectedProjectExcludeRepos = $derived(
+    selectedProject
+      ? new Set(
+          [...reposById.values()]
+            .filter((repo) => repo.projectId === selectedProject.id)
+            .map((repo) => `${repo.githubRepo}\x00${repo.subpath ?? ''}`)
+        )
+      : new Set<string>()
+  );
+  let sidebarOpen = $derived(!projectsSidebarState.collapsed);
 
   let reposByProject = $derived(
     new Map(
@@ -561,9 +644,6 @@
       })
     )
   );
-
-  // Track which projects are safe to delete (for button styling)
-  let safeToDeleteProjects = $state<Set<string>>(new Set());
 
   // Update safe-to-delete status when branches change.
   // Only check visible projects — calling hasUnpushedCommits for every
@@ -834,6 +914,49 @@
     return 'Workspace must be running before adding another repo.';
   }
 
+  function getRemoteWorkspaceStatus(project: Project | null): WorkspaceStatus | null {
+    if (!project || project.location !== 'remote') return null;
+    return (
+      (branchesByProject.get(project.id) || []).find((b) => b.workspaceStatus)?.workspaceStatus ??
+      null
+    );
+  }
+
+  function getRemoteWorkstationName(project: Project | null): string | null {
+    if (!project || project.location !== 'remote') return null;
+    return (
+      (branchesByProject.get(project.id) || []).find((b) => b.workspaceName)?.workspaceName ?? null
+    );
+  }
+
+  function statusLabel(status: WorkspaceStatus | null): string {
+    switch (status) {
+      case 'starting':
+        return 'Provisioning';
+      case 'running':
+        return 'Running';
+      case 'stopped':
+        return 'Stopped';
+      case 'suspended':
+        return 'Suspended';
+      case 'error':
+        return 'Error';
+      default:
+        return '';
+    }
+  }
+
+  function toggleProjectsSidebar() {
+    setProjectsSidebarCollapsed(!projectsSidebarState.collapsed);
+  }
+
+  async function handleTopBarRepoSelected(selection: RepoPickerSelection) {
+    const project = selectedProject;
+    if (!project) return;
+    showAddRepoModal = false;
+    await handleRepoSelected(project.id, selection);
+  }
+
   $effect(() => {
     branchesByProject;
     if (!loading) {
@@ -907,6 +1030,146 @@
   }
 </script>
 
+<TopBarPortal
+  title={selectedProject ? '' : 'Project'}
+  leftActions={projectTopBarLeftActions}
+  center={projectTopBarCenter}
+  badges={projectTopBarBadges}
+  rightActions={projectTopBarRightActions}
+/>
+
+{#snippet projectTopBarLeftActions()}
+  {#if !viewport.isMobile}
+    <span
+      class="inline-flex"
+      title={sidebarOpen ? 'Hide projects sidebar' : 'Show projects sidebar'}
+    >
+      <Button
+        variant="ghost"
+        size="sm"
+        class="top-bar-action gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:size-10 max-md:p-0 [&_svg]:size-3.5"
+        aria-label={sidebarOpen ? 'Hide projects sidebar' : 'Show projects sidebar'}
+        onclick={toggleProjectsSidebar}
+        disabled={!projectsSidebarState.hasProjects}
+      >
+        {#if !sidebarOpen || !projectsSidebarState.hasProjects}
+          <PanelLeftOpen size={14} />
+          <span class="top-bar-action-label">Show Sidebar</span>
+        {:else}
+          <PanelLeftClose size={14} />
+          <span class="top-bar-action-label">Hide Sidebar</span>
+        {/if}
+      </Button>
+    </span>
+  {/if}
+{/snippet}
+
+{#snippet projectTopBarCenter()}
+  {#if selectedProject && showTopBarProjectName}
+    {@const topBarProjectName = projectDisplayName(selectedProject)}
+    <span class="top-bar-project-name" title={topBarProjectName}>{topBarProjectName}</span>
+  {/if}
+{/snippet}
+
+{#snippet projectTopBarBadges()}
+  {@const workspaceStatus = getRemoteWorkspaceStatus(selectedProject)}
+  {@const workstationName = getRemoteWorkstationName(selectedProject)}
+
+  {#if selectedProjectDeleting}
+    <span class="top-bar-badge" role="status" aria-live="polite">
+      <Spinner size={12} />
+      <span>Deleting</span>
+    </span>
+  {/if}
+
+  {#if selectedProjectDetecting}
+    <span class="top-bar-badge">
+      <Spinner size={12} />
+      <span>Detecting actions</span>
+    </span>
+  {/if}
+
+  {#if workspaceStatus}
+    <span
+      class="top-bar-badge workspace-badge"
+      class:starting={workspaceStatus === 'starting'}
+      class:running={workspaceStatus === 'running'}
+      class:stopped={workspaceStatus === 'stopped'}
+      class:suspended={workspaceStatus === 'suspended'}
+      class:error={workspaceStatus === 'error'}
+      title={workspaceStatus === 'running' && workstationName ? workstationName : undefined}
+    >
+      {#if workspaceStatus === 'starting'}
+        <Spinner size={12} />
+      {:else if workspaceStatus === 'running'}
+        <Cloud size={12} />
+      {:else if workspaceStatus === 'stopped'}
+        <CirclePause size={12} />
+      {:else if workspaceStatus === 'suspended'}
+        <Pause size={12} />
+      {:else if workspaceStatus === 'error'}
+        <AlertCircle size={12} />
+      {/if}
+      <span>{statusLabel(workspaceStatus)}</span>
+      {#if workspaceStatus === 'suspended' && workstationName && selectedProject}
+        <Button
+          variant="ghost"
+          class="ml-1 h-auto rounded-none border-l border-[var(--border-muted)] bg-transparent px-1 py-0 text-[length:calc(var(--size-xs)-1px)] font-semibold text-[var(--ui-accent)] shadow-none focus-visible:ring-0 hover:bg-transparent hover:text-[var(--ui-accent)] hover:underline"
+          onclick={() => workspaceLifecycle.resumeWorkspace(selectedProject!.id, workstationName)}
+        >
+          Resume
+        </Button>
+      {/if}
+    </span>
+  {/if}
+{/snippet}
+
+{#snippet projectTopBarRightActions()}
+  {#if selectedProject && !selectedProjectDeleting}
+    <span class="inline-flex" title={selectedProjectAddRepoHint ?? 'Add repo'}>
+      <Button
+        variant="ghost"
+        size="sm"
+        class="top-bar-action group gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:size-10 max-md:p-0"
+        onclick={() => {
+          showAddRepoModal = true;
+        }}
+        disabled={selectedProjectAddRepoDisabled}
+      >
+        <span
+          class="flex size-4 shrink-0 items-center justify-center text-muted-foreground transition-colors group-hover:not-disabled:text-foreground"
+        >
+          <Plus size={12} />
+        </span>
+        <span class="top-bar-action-label">Add Repo</span>
+      </Button>
+    </span>
+
+    <Button
+      variant="ghost"
+      size="sm"
+      class={[
+        'top-bar-action group gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-destructive max-md:size-10 max-md:p-0',
+        selectedProjectSafeToDelete && 'border border-destructive text-destructive',
+      ]}
+      title="Remove project"
+      onclick={() => handleDeleteProjectRequest(selectedProject)}
+    >
+      <span
+        class={[
+          'flex shrink-0 items-center transition-colors',
+          selectedProjectSafeToDelete
+            ? 'text-destructive'
+            : 'text-muted-foreground group-hover:text-destructive',
+        ]}
+      >
+        <Trash2 size={14} />
+      </span>
+      <span class="top-bar-action-label">Remove Project</span>
+    </Button>
+  {/if}
+{/snippet}
+
 <div class="project-home">
   <ProjectsSidebar
     {projects}
@@ -921,7 +1184,12 @@
     onRemoveProject={handleDeleteProjectRequest}
   />
 
-  <div class="main-panel" class:no-pad={!loading && !hasContent}>
+  <div
+    class="main-panel"
+    class:no-pad={!loading && !hasContent}
+    bind:this={mainPanelEl}
+    onscroll={updateTopBarProjectNameVisibility}
+  >
     {#if storeIncompat && storeIncompat.kind === 'needs_reset'}
       <div class="update-state">
         <div class="update-card">
@@ -983,27 +1251,16 @@
             {project}
             branches={branchesByProject.get(project.id) || []}
             {reposById}
-            canAddRepo={canAddRepo(project)}
-            addRepoHint={project.location === 'remote' ? addRepoHint(project) : null}
             deleting={deletingProjectNames.has(project.id)}
-            safeToDelete={safeToDeleteProjects.has(project.id)}
             {deletingBranches}
             {worktreeErrors}
             {workspaceErrors}
-            detecting={detectingProjectIds.has(project.id)}
-            onDeleteProject={() => handleDeleteProjectRequest(project)}
             onDeleteBranch={(branchId) => handleDeleteBranchRequest(branchId, project)}
             onRenameBranch={(branchId, branchName) =>
               handleRenameBranch(branchId, project.id, branchName)}
-            excludeRepos={new Set(
-              [...reposById.values()]
-                .filter((r) => r.projectId === project.id)
-                .map((r) => `${r.githubRepo}\x00${r.subpath ?? ''}`)
-            )}
+            onProjectTitleElement={selectedProjectId ? setProjectTitleElement : undefined}
             onRepoSelected={(selection) => handleRepoSelected(project.id, selection)}
             onRetryWorktree={(branchId) => setupBranchWorktree(branchId, project.id)}
-            onResumeWorkspace={(workspaceName) =>
-              workspaceLifecycle.resumeWorkspace(project.id, workspaceName)}
           />
         {/each}
       </div>
@@ -1016,6 +1273,15 @@
   open={showNewProjectModal && hasContent}
   onCreated={handleProjectCreated}
   onClose={() => (showNewProjectModal = false)}
+/>
+
+<AddRepoModal
+  open={showAddRepoModal && !!selectedProject}
+  excludeRepos={selectedProjectExcludeRepos}
+  onAdded={handleTopBarRepoSelected}
+  onClose={() => {
+    showAddRepoModal = false;
+  }}
 />
 
 <!-- Delete project confirmation -->
@@ -1072,6 +1338,68 @@
     display: flex;
     background-color: var(--bg-chrome);
     overflow: hidden;
+  }
+
+  .top-bar-badge {
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border-muted);
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: calc(var(--size-xs) - 1px);
+    font-weight: 500;
+    line-height: 1;
+    white-space: nowrap;
+  }
+
+  .top-bar-project-name {
+    display: inline-block;
+    max-width: 100%;
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-primary);
+    font-size: var(--size-sm);
+    font-weight: 650;
+    line-height: 1.2;
+    text-align: center;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .workspace-badge.starting {
+    border-color: var(--ui-accent);
+    color: var(--ui-accent);
+  }
+
+  .workspace-badge.running {
+    border-color: var(--border-muted);
+    color: var(--text-primary);
+  }
+
+  .workspace-badge.stopped,
+  .workspace-badge.suspended {
+    border-color: var(--border-muted);
+    color: var(--text-muted);
+  }
+
+  .workspace-badge.error {
+    border-color: var(--ui-danger);
+    color: var(--ui-danger);
+  }
+
+  :global(.top-bar-action) {
+    height: 28px;
+    min-width: 0;
+  }
+
+  @media (max-width: 768px) {
+    .top-bar-action-label {
+      display: none;
+    }
   }
 
   .main-panel {
@@ -1181,7 +1509,7 @@
     width: 100%;
     max-width: 900px;
     margin: 0 auto;
-    padding: 0 24px 24px;
+    padding: 16px 24px 24px;
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
@@ -1212,7 +1540,7 @@
     }
 
     .projects-list {
-      padding: 0 16px 16px;
+      padding: 12px 16px 16px;
       gap: 20px;
     }
   }

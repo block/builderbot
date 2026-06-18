@@ -6,14 +6,12 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import ArrowLeft from '@lucide/svelte/icons/arrow-left';
   import Pin from '@lucide/svelte/icons/pin';
   import PinOff from '@lucide/svelte/icons/pin-off';
   import Search from '@lucide/svelte/icons/search';
   import Download from '@lucide/svelte/icons/download';
   import type { RepoHomeItem } from '../../types';
   import * as commands from '../../api/commands';
-  import { goHome } from '../layout/navigation.svelte';
   import { darkMode } from '../../stores/isDark.svelte';
   import {
     badgeFg,
@@ -24,7 +22,7 @@
   } from '../../shared/badgeColors';
   import { toast } from 'svelte-sonner';
   import Spinner from '../../shared/Spinner.svelte';
-  import ProjectsSidebar from './ProjectsSidebar.svelte';
+  import TopBarPortal from '../layout/TopBarPortal.svelte';
   import { Input } from '$lib/components/ui/input';
   import { Button } from '$lib/components/ui/button';
 
@@ -119,25 +117,11 @@
   }
 </script>
 
-<div class="repos-list-page">
-  <ProjectsSidebar projects={[]} loading={false} error={null} showAllProjectsRow={false} />
+<TopBarPortal title="Repos" />
 
+<div class="repos-list-page">
   <div class="main-panel">
     <div class="content">
-      <div class="header-row">
-        <Button
-          variant="ghost"
-          size="icon"
-          class="size-8 rounded-lg text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
-          title="Back to home"
-          aria-label="Back to home"
-          onclick={goHome}
-        >
-          <ArrowLeft size={16} />
-        </Button>
-        <h1>Repos</h1>
-      </div>
-
       <div class="search-row">
         <div class="search-input-wrapper">
           <Search size={14} />
@@ -230,7 +214,6 @@
 
 <style>
   .repos-list-page {
-    --sidebar-title-offset: 42px;
     flex: 1;
     min-height: 0;
     display: flex;
@@ -248,7 +231,7 @@
 
   .content {
     flex: 1;
-    padding: var(--sidebar-title-offset) 24px 24px;
+    padding: 24px;
     max-width: 900px;
     width: 100%;
     margin: 0 auto;
@@ -256,21 +239,6 @@
     display: flex;
     flex-direction: column;
     min-height: 100%;
-  }
-
-  .header-row {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 16px;
-  }
-
-  .header-row h1 {
-    flex: 1;
-    margin: 0;
-    font-size: var(--size-xl);
-    font-weight: 700;
-    color: var(--text-primary);
   }
 
   .search-row {
@@ -371,12 +339,8 @@
   }
 
   @media (max-width: 640px) {
-    .repos-list-page {
-      --sidebar-title-offset: 20px;
-    }
-
     .content {
-      padding: var(--sidebar-title-offset) 16px 16px;
+      padding: 16px;
     }
 
     .repos-grid {

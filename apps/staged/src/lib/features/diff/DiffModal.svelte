@@ -14,12 +14,10 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import X from '@lucide/svelte/icons/x';
-  import ArrowLeft from '@lucide/svelte/icons/arrow-left';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import GitCommitHorizontal from '@lucide/svelte/icons/git-commit-horizontal';
   import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
-  import { getWindowSync } from '../../transport';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import { Button } from '$lib/components/ui/button';
@@ -64,7 +62,7 @@
     type FileEntry,
     type TreeNode,
   } from './diffModalHelpers';
-  import { viewport } from '../../shared/viewport.svelte';
+  import TopBarPortal from '../layout/TopBarPortal.svelte';
 
   // ==========================================================================
   // Props
@@ -986,20 +984,6 @@
     };
   });
 
-  // ==========================================================================
-  // Title bar drag support
-  // ==========================================================================
-
-  function startDrag(e: PointerEvent) {
-    if (e.button !== 0) return;
-    const target = e.target as HTMLElement;
-    const isInteractive = target.closest('button, a, input, [role="button"]');
-    if (!isInteractive) {
-      e.preventDefault();
-      getWindowSync().startDragging();
-    }
-  }
-
   function getMobileDiffMaxDrag(): number {
     const width = diffViewerContainerEl?.clientWidth ?? 0;
     return Math.max(0, width - MOBILE_DIFF_EDGE_PEEK - MOBILE_DIFF_REST_OFFSET);
@@ -1174,153 +1158,140 @@
   {/if}
 {/snippet}
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="diff-modal-backdrop" onkeydown={handleKeydown}>
-  <div class="diff-modal">
-    <!-- Title bar -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="title-bar" onpointerdown={startDrag}>
-      <div class="traffic-light-spacer"></div>
-      <div class="left-actions">
+<TopBarPortal
+  title={projectName ?? 'Diff'}
+  badges={diffTopBarBadges}
+  rightActions={diffTopBarActions}
+/>
+
+{#snippet diffTopBarBadges()}
+  {#if githubRepo}
+    <RepoLabel {githubRepo} {subpath} />
+  {/if}
+{/snippet}
+
+{#snippet diffTopBarActions()}
+  {#if showContextSwitcher}
+    <div class="context-switcher">
+      <span class="inline-flex" title="Switch diff context">
         <Button
-          variant="ghost"
-          size="icon"
-          class="size-auto shrink-0 rounded-md p-[5px] text-muted-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-35 [&_svg]:!size-3.5"
-          title={viewport.showShortcutHints ? 'Back (Esc)' : 'Back'}
-          aria-label="Back"
-          onclick={onClose}
+          type="button"
+          variant="outline"
+          class="h-auto gap-1.5 rounded-md border-[var(--border-subtle)] bg-transparent px-2.5 py-1 text-xs font-medium text-muted-foreground shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-3"
+          disabled={switchingContext}
+          onclick={() => (showContextDropdown ? closeDropdown() : openDropdown())}
+          onkeydown={handleDropdownKeydown}
+          aria-expanded={showContextDropdown}
+          aria-haspopup="listbox"
         >
-          <ArrowLeft size={14} />
-        </Button>
-      </div>
-      <div class="title-content">
-        {#if projectName}
-          <span class="project-name">{projectName}</span>
-        {/if}
-        {#if githubRepo}
-          <RepoLabel {githubRepo} {subpath} />
-        {/if}
-      </div>
-      <div class="drag-spacer"></div>
-      {#if showContextSwitcher}
-        <div class="context-switcher">
-          <span class="inline-flex" title="Switch diff context">
-            <Button
-              type="button"
-              variant="outline"
-              class="h-auto gap-1.5 rounded-md border-[var(--border-subtle)] bg-transparent px-2.5 py-1 text-xs font-medium text-muted-foreground shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-3"
-              disabled={switchingContext}
-              onclick={() => (showContextDropdown ? closeDropdown() : openDropdown())}
-              onkeydown={handleDropdownKeydown}
-              aria-expanded={showContextDropdown}
-              aria-haspopup="listbox"
-            >
-              {#if activeScope === 'branch'}
-                <GitBranch size={12} />
-              {:else}
-                <GitCommitHorizontal size={12} />
-              {/if}
-              <span class="context-label">{contextLabel}</span>
-              <ChevronDown size={12} />
-            </Button>
-          </span>
-          {#if showContextDropdown}
-            <div class="context-dropdown" role="listbox" aria-label="Diff context">
-              {#each reversedCommits as commit, i (commit.sha)}
-                <button
-                  type="button"
-                  class="context-option commit-option"
-                  role="option"
-                  aria-selected={activeScope === 'commit' && activeCommitSha === commit.sha}
-                  class:selected={activeScope === 'commit' && activeCommitSha === commit.sha}
-                  class:focused={dropdownFocusIndex === i}
-                  onclick={() => switchDiffContext('commit', commit.sha)}
-                >
-                  <span class="commit-icon-wrapper"><GitCommitHorizontal size={14} /></span>
-                  <span class="option-label commit-option-label">
-                    <span class="commit-subject">{commit.subject}</span>
-                    <span class="commit-meta">
-                      <span class="commit-sha">{commit.shortSha}</span>
-                      <span class="commit-time">{formatRelativeTimeSeconds(commit.timestamp)}</span>
-                    </span>
-                  </span>
-                </button>
-              {/each}
-              <div class="context-separator"></div>
-              <button
-                type="button"
-                class="context-option"
-                role="option"
-                aria-selected={activeScope === 'branch'}
-                class:selected={activeScope === 'branch'}
-                class:focused={dropdownFocusIndex === reversedCommits.length}
-                onclick={() => switchDiffContext('branch')}
-              >
-                <GitBranch size={14} />
-                <span class="option-label">All changes</span>
-              </button>
-            </div>
+          {#if activeScope === 'branch'}
+            <GitBranch size={12} />
+          {:else}
+            <GitCommitHorizontal size={12} />
           {/if}
-        </div>
-      {/if}
-      {#if isSmallDiffViewport}
-        <Button
-          variant="ghost"
-          size="icon"
-          class="size-auto shrink-0 rounded-md p-[5px] text-muted-foreground shadow-none hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-35 [&_svg]:!size-3.5"
-          title="Show changed files"
-          aria-label="Show changed files"
-          onclick={() => (showMobileSidebar = true)}
-        >
-          <PanelRightOpen size={14} />
+          <span class="context-label">{contextLabel}</span>
+          <ChevronDown size={12} />
         </Button>
-      {/if}
-    </div>
-
-    <div class="modal-body">
-      <!-- Diff viewer -->
-      <div
-        class="diff-viewer-container"
-        class:mobile-diff-dragging={mobileDiffIsDragging}
-        style={mobileDiffStyle}
-        bind:this={diffViewerContainerEl}
-        onpointerdown={handleMobileDiffPointerDown}
-        onpointermove={handleMobileDiffPointerMove}
-        onpointerup={handleMobileDiffPointerUp}
-        onpointercancel={handleMobileDiffPointerUp}
-        onmousedowncapture={handleMobileDiffMouseDownCapture}
-      >
-        <DiffViewer
-          diff={currentDiff}
-          comments={readonly ? [] : currentComments}
-          {jumpToComment}
-          {jumpToLine}
-          loading={diffViewer.state.loadingFile !== null && !diffViewer.state.loading}
-          emptyMessage={diffViewerEmptyMessage}
-          beforeLabel={activeBeforeLabel}
-          afterLabel={activeAfterLabel}
-          annotations={revealedAnnotations}
-          {annotationsRevealed}
-          searchState={searchState.state}
-          syntaxThemeVersion={preferences.diffThemeVersion}
-          onAddComment={readonly ? undefined : handleAddComment}
-          onUpdateComment={readonly ? undefined : handleUpdateComment}
-          onDeleteComment={readonly ? undefined : handleDeleteCommentFromViewer}
-          onCommentNote={readonly ? undefined : handleNewNote}
-          onCommentCommit={readonly ? undefined : handleNewCommit}
-          onCommentGithub={readonly || !hasPr ? undefined : handleSendToGithub}
-          commentGithubState={readonly || !hasPr ? undefined : getCommentGithubState}
-          bind:scrollApi={diffViewerScrollApi}
-        />
-      </div>
-
-      <!-- File sidebar (right side) -->
-      {#if !isSmallDiffViewport}
-        <div class="file-sidebar">
-          {@render fileSidebarContents()}
+      </span>
+      {#if showContextDropdown}
+        <div class="context-dropdown" role="listbox" aria-label="Diff context">
+          {#each reversedCommits as commit, i (commit.sha)}
+            <button
+              type="button"
+              class="context-option commit-option"
+              role="option"
+              aria-selected={activeScope === 'commit' && activeCommitSha === commit.sha}
+              class:selected={activeScope === 'commit' && activeCommitSha === commit.sha}
+              class:focused={dropdownFocusIndex === i}
+              onclick={() => switchDiffContext('commit', commit.sha)}
+            >
+              <span class="commit-icon-wrapper"><GitCommitHorizontal size={14} /></span>
+              <span class="option-label commit-option-label">
+                <span class="commit-subject">{commit.subject}</span>
+                <span class="commit-meta">
+                  <span class="commit-sha">{commit.shortSha}</span>
+                  <span class="commit-time">{formatRelativeTimeSeconds(commit.timestamp)}</span>
+                </span>
+              </span>
+            </button>
+          {/each}
+          <div class="context-separator"></div>
+          <button
+            type="button"
+            class="context-option"
+            role="option"
+            aria-selected={activeScope === 'branch'}
+            class:selected={activeScope === 'branch'}
+            class:focused={dropdownFocusIndex === reversedCommits.length}
+            onclick={() => switchDiffContext('branch')}
+          >
+            <GitBranch size={14} />
+            <span class="option-label">All changes</span>
+          </button>
         </div>
       {/if}
     </div>
+  {/if}
+
+  {#if isSmallDiffViewport}
+    <Button
+      variant="ghost"
+      size="icon-xs"
+      class="max-md:size-10 [&_svg]:size-3.5"
+      title="Show changed files"
+      aria-label="Show changed files"
+      onclick={() => (showMobileSidebar = true)}
+    >
+      <PanelRightOpen size={14} />
+    </Button>
+  {/if}
+{/snippet}
+
+<div class="diff-detail">
+  <div class="modal-body">
+    <!-- Diff viewer -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="diff-viewer-container"
+      class:mobile-diff-dragging={mobileDiffIsDragging}
+      style={mobileDiffStyle}
+      bind:this={diffViewerContainerEl}
+      onpointerdown={handleMobileDiffPointerDown}
+      onpointermove={handleMobileDiffPointerMove}
+      onpointerup={handleMobileDiffPointerUp}
+      onpointercancel={handleMobileDiffPointerUp}
+      onmousedowncapture={handleMobileDiffMouseDownCapture}
+    >
+      <DiffViewer
+        diff={currentDiff}
+        comments={readonly ? [] : currentComments}
+        {jumpToComment}
+        {jumpToLine}
+        loading={diffViewer.state.loadingFile !== null && !diffViewer.state.loading}
+        emptyMessage={diffViewerEmptyMessage}
+        beforeLabel={activeBeforeLabel}
+        afterLabel={activeAfterLabel}
+        annotations={revealedAnnotations}
+        {annotationsRevealed}
+        searchState={searchState.state}
+        syntaxThemeVersion={preferences.diffThemeVersion}
+        onAddComment={readonly ? undefined : handleAddComment}
+        onUpdateComment={readonly ? undefined : handleUpdateComment}
+        onDeleteComment={readonly ? undefined : handleDeleteCommentFromViewer}
+        onCommentNote={readonly ? undefined : handleNewNote}
+        onCommentCommit={readonly ? undefined : handleNewCommit}
+        onCommentGithub={readonly || !hasPr ? undefined : handleSendToGithub}
+        commentGithubState={readonly || !hasPr ? undefined : getCommentGithubState}
+        bind:scrollApi={diffViewerScrollApi}
+      />
+    </div>
+
+    <!-- File sidebar (right side) -->
+    {#if !isSmallDiffViewport}
+      <div class="file-sidebar">
+        {@render fileSidebarContents()}
+      </div>
+    {/if}
   </div>
 
   {#if isSmallDiffViewport && showMobileSidebar}
@@ -1363,74 +1334,14 @@
 </div>
 
 <style>
-  /* ========================================================================
-   * Modal backdrop + frame
-   * ====================================================================== */
-
-  .diff-modal-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 1000;
-    background-color: rgba(0, 0, 0, 0.6);
-    display: flex;
-    align-items: stretch;
-    justify-content: center;
-  }
-
-  .diff-modal {
+  .diff-detail {
     display: flex;
     flex-direction: column;
-    position: relative;
     width: 100%;
-    height: 100%;
-    background-color: var(--bg-chrome);
-    border-radius: 0;
-    border: none;
-    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-    overflow: hidden;
-  }
-
-  /* ========================================================================
-   * Title bar
-   * ====================================================================== */
-
-  .title-bar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px;
-    background: var(--bg-chrome);
-    flex-shrink: 0;
-    border-bottom: 1px solid var(--border-subtle);
-  }
-
-  .traffic-light-spacer {
-    width: 70px;
-    flex-shrink: 0;
-    align-self: stretch;
-  }
-
-  .left-actions {
-    display: flex;
-    align-items: center;
-  }
-
-  .title-content {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: var(--size-sm);
-  }
-
-  .project-name {
-    color: var(--text-primary);
-    font-weight: 500;
-  }
-
-  .drag-spacer {
     flex: 1;
-    align-self: stretch;
-    min-width: 20px;
+    min-height: 0;
+    background-color: var(--bg-chrome);
+    overflow: hidden;
   }
 
   /* ========================================================================
@@ -1459,7 +1370,7 @@
     border-radius: 6px;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
     overflow: hidden;
-    z-index: 1001;
+    z-index: var(--z-index-floating);
     min-width: 220px;
     max-width: 340px;
     max-height: 320px;
@@ -1688,24 +1599,6 @@
   }
 
   @media (max-width: 700px) {
-    .title-bar {
-      gap: 6px;
-    }
-
-    .traffic-light-spacer {
-      width: 58px;
-    }
-
-    .title-content {
-      min-width: 0;
-    }
-
-    .project-name {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
     .context-label {
       max-width: 96px;
     }

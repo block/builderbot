@@ -1,28 +1,20 @@
 <!--
-  TopBar.svelte - Minimal top bar with drag region, settings, and new project button
+  TopBar.svelte - Persistent app bar with drag region and route content
 
-  Provides a drag region for window movement, a "+" button for adding new
-  projects, and a settings button.
+  Provides a drag region for window movement while detail routes register the
+  page-specific title, status, navigation, and actions rendered inside it.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import PanelLeftClose from '@lucide/svelte/icons/panel-left-close';
-  import PanelLeftOpen from '@lucide/svelte/icons/panel-left-open';
-  import Plus from '@lucide/svelte/icons/plus';
-  import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
+  import ArrowLeft from '@lucide/svelte/icons/arrow-left';
   import { getWindowSync } from '../../transport';
-  import { navigation, openSettings } from './navigation.svelte';
-  import {
-    hydrateProjectsSidebarState,
-    projectsSidebarState,
-    setProjectsSidebarCollapsed,
-  } from '../projects/projectsSidebarState.svelte';
+  import { navigation, popDetailRoute } from './navigation.svelte';
+  import { topBar } from './topBarState.svelte';
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
   import { Button } from '$lib/components/ui/button';
 
   onMount(() => {
     const stopWatchingViewport = watchViewport();
-    void hydrateProjectsSidebarState();
     return () => {
       stopWatchingViewport();
     };
@@ -38,82 +30,83 @@
     }
   }
 
-  function toggleProjectsSidebar() {
-    setProjectsSidebarCollapsed(!projectsSidebarState.collapsed);
-  }
-
-  let sidebarOpen = $derived(!projectsSidebarState.collapsed);
+  let hasTitle = $derived(
+    !!topBar.title || !!topBar.subtitle || !!topBar.leading || !!topBar.badges
+  );
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div class="top-bar" onpointerdown={startDrag}>
   <div class="traffic-light-spacer"></div>
-  {#if !viewport.isMobile}
-    <div class="left-actions">
-      <span
-        class="inline-flex"
-        title={sidebarOpen ? 'Hide projects sidebar' : 'Show projects sidebar'}
-      >
-        <Button
-          variant="ghost"
-          size="icon-xs"
-          class="max-md:size-10 [&_svg]:size-3.5"
-          aria-label={sidebarOpen ? 'Hide projects sidebar' : 'Show projects sidebar'}
-          onclick={toggleProjectsSidebar}
-          disabled={!projectsSidebarState.hasProjects}
-        >
-          {#if !sidebarOpen || !projectsSidebarState.hasProjects}
-            <PanelLeftOpen size={14} />
-          {:else}
-            <PanelLeftClose size={14} />
-          {/if}
-        </Button>
-      </span>
-    </div>
-  {/if}
-  <div class="drag-spacer"></div>
-
-  <div class="top-bar-actions">
-    <span
-      class="inline-flex"
-      title={navigation.activeView === 'settings'
-        ? 'Unavailable while viewing settings'
-        : viewport.showShortcutHints
-          ? 'New project (⌘N)'
-          : 'New project'}
-    >
+  <div class="left-actions">
+    {#if navigation.canGoBack}
       <Button
         variant="ghost"
-        size="icon-xs"
-        class="max-md:size-10 [&_svg]:size-3.5"
-        aria-label="New project"
-        onclick={() => window.dispatchEvent(new CustomEvent('staged:new-project'))}
-        disabled={navigation.activeView === 'settings'}
+        size="sm"
+        class="top-bar-action gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:size-10 max-md:p-0 [&_svg]:size-3.5"
+        title={viewport.showShortcutHints ? 'Back (⌘← / Esc)' : 'Back'}
+        aria-label="Back"
+        onclick={popDetailRoute}
       >
-        <Plus size={14} />
+        <ArrowLeft size={14} />
+        <span class="top-bar-action-label">Back</span>
       </Button>
-    </span>
+    {/if}
 
-    <Button
-      variant="ghost"
-      size="icon-xs"
-      class="max-md:size-10 [&_svg]:size-3.5"
-      title={viewport.showShortcutHints ? 'Settings (⌘,)' : 'Settings'}
-      aria-label="Settings"
-      onclick={() => openSettings()}
-    >
-      <SlidersHorizontal size={14} />
-    </Button>
+    {#if topBar.leftActions}
+      {@render topBar.leftActions()}
+    {/if}
   </div>
+
+  {#if hasTitle}
+    <div class="title-content">
+      {#if topBar.leading}
+        <div class="leading-slot">
+          {@render topBar.leading()}
+        </div>
+      {/if}
+      <div class="title-text">
+        {#if topBar.title}
+          <div class="title" title={topBar.title}>{topBar.title}</div>
+        {/if}
+        {#if topBar.subtitle}
+          <div class="subtitle" title={topBar.subtitle}>{topBar.subtitle}</div>
+        {/if}
+      </div>
+      {#if topBar.badges}
+        <div class="badge-slot">
+          {@render topBar.badges()}
+        </div>
+      {/if}
+    </div>
+  {/if}
+
+  {#if topBar.center}
+    <div class="center-content">
+      {@render topBar.center()}
+    </div>
+  {/if}
+
+  <div class="drag-spacer"></div>
+
+  {#if topBar.rightActions}
+    <div class="top-bar-actions">
+      {@render topBar.rightActions()}
+    </div>
+  {/if}
 </div>
 
 <style>
   .top-bar {
+    position: relative;
+    isolation: isolate;
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 8px;
-    background: var(--bg-chrome);
+    min-height: 42px;
+    background: var(--bg-app-bar);
+    border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 70%, transparent);
     flex-shrink: 0;
   }
 
@@ -130,15 +123,90 @@
   }
 
   .left-actions {
+    position: relative;
+    z-index: 1;
     display: flex;
     align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
+  .title-content {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    max-width: min(58vw, 720px);
+    -webkit-app-region: no-drag;
+  }
+
+  .leading-slot,
+  .badge-slot {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    flex-shrink: 0;
+  }
+
+  .title-text {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-width: 0;
+  }
+
+  .title {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-primary);
+    font-size: var(--size-sm);
+    font-weight: 650;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .center-content {
+    position: absolute;
+    z-index: 0;
+    top: 50%;
+    left: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: min(42vw, 420px);
+    min-width: 0;
+    pointer-events: none;
+    transform: translate(-50%, -50%);
+    -webkit-app-region: drag;
+  }
+
+  .subtitle {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: calc(var(--size-xs) - 1px);
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .top-bar-actions {
     position: relative;
+    z-index: 1;
     display: flex;
     align-items: center;
     gap: 4px;
+    flex-shrink: 0;
+    -webkit-app-region: no-drag;
+  }
+
+  :global(.top-bar-action) {
+    height: 28px;
+    min-width: 0;
   }
 
   @media (max-width: 768px) {
@@ -148,6 +216,22 @@
 
     .traffic-light-spacer {
       width: 58px;
+    }
+
+    .title-content {
+      max-width: min(46vw, 420px);
+    }
+
+    .center-content {
+      width: min(34vw, 240px);
+    }
+
+    .subtitle {
+      display: none;
+    }
+
+    .top-bar-action-label {
+      display: none;
     }
   }
 </style>

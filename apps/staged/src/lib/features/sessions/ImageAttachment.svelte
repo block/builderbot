@@ -6,7 +6,7 @@
   backend as base64-encoded data via the `create_image_from_data` command.
 
   Props:
-    branchId        — branch to associate images with
+    branchId        — branch to associate images with, or null for project-only images
     projectId       — project to associate images with
     disabled        — disable interactions (e.g. while session is starting)
     imageIds        — current list of attached image IDs
@@ -23,7 +23,7 @@
   type ImageIdsUpdate = string[] | ((current: string[]) => string[]);
 
   interface Props {
-    branchId: string;
+    branchId: string | null;
     projectId: string;
     disabled?: boolean;
     imageIds: string[];

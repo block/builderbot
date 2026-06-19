@@ -536,7 +536,11 @@ impl ProjectToolsHandler {
                         session_id: handle.session_id.clone(),
                         status: "cancelled".to_string(),
                         error_message: None,
-                        completion_reason: Some("project_session_interrupted".to_string()),
+                        completion_reason: Some(
+                            CompletionReason::ProjectSessionInterrupted
+                                .as_str()
+                                .to_string(),
+                        ),
                         branch_id: Some(branch_id.clone()),
                         project_id: Some(self.project_id.clone()),
                         session_type: None,

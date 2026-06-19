@@ -1,0 +1,13 @@
+{
+  "type": "events_api",
+  "envelope_id": "abc-123",
+  "payload": {
+    "event": {
+      "type": "app_mention",
+      "channel": "C0123ABCD",
+      "user": "U07USER",
+      "text": "<@U07BOT> please run the test suite and report failures",
+      "ts": "1718800000.000100"
+    }
+  }
+}

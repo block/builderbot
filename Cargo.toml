@@ -1,4 +1,4 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+members = ["crates/*", "apps/slack-bridge"]
 exclude = ["apps/staged/src-tauri", "apps/differ/src-tauri"]

@@ -4,11 +4,14 @@
   import Check from '@lucide/svelte/icons/check';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Copy from '@lucide/svelte/icons/copy';
+  import FileText from '@lucide/svelte/icons/file-text';
+  import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
   import MessageSquare from '@lucide/svelte/icons/message-square';
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import Undo2 from '@lucide/svelte/icons/undo-2';
   import { Button } from '$lib/components/ui/button';
-  import type { Comment } from '../../types';
+  import type { Comment, CommentSessionState } from '../../types';
+  import Spinner from '../../shared/Spinner.svelte';
   import { formatLineRange, truncateText } from './diffModalHelpers';
 
   interface Props {
@@ -21,6 +24,10 @@
     onDeleteAll: () => void;
     onDeleteComment: (commentId: string) => void;
     onRestoreComment: (commentId: string) => void;
+    /** Note-session state for a comment; omit to fall back to the type icons. */
+    commentNoteState?: (comment: Comment) => CommentSessionState;
+    /** Commit-session state for a comment; omit to fall back to the type icons. */
+    commentCommitState?: (comment: Comment) => CommentSessionState;
   }
 
   let {
@@ -33,6 +40,8 @@
     onDeleteAll,
     onDeleteComment,
     onRestoreComment,
+    commentNoteState,
+    commentCommitState,
   }: Props = $props();
 
   let deletedExpanded = $state(false);
@@ -42,21 +51,56 @@
   }
 </script>
 
-{#snippet commentItemContent(comment: Comment)}
-  <span class="comment-icons">
-    {#if comment.author === 'agent'}
-      <span class="comment-icon agent-icon">
-        <Bot size={12} />
-      </span>
-    {/if}
-    <span class="comment-icon" class:comment-icon-warning={comment.commentType === 'warning'}>
-      {#if comment.commentType === 'warning'}
-        <AlertTriangle size={12} />
-      {:else}
-        <MessageSquare size={12} />
+{#snippet commentItemContent(
+  comment: Comment,
+  noteState: CommentSessionState,
+  commitState: CommentSessionState
+)}
+  {#if noteState !== 'idle' || commitState !== 'idle'}
+    <!-- A launched note/commit session takes precedence over the agent and
+         warning/message icons, mirroring the stateful inline-diff buttons. -->
+    <span class="comment-session-badges">
+      {#if noteState !== 'idle'}
+        <span
+          class="comment-session-badge note"
+          title={noteState === 'running' ? 'Note session in progress' : 'Note ready'}
+        >
+          {#if noteState === 'running'}
+            <Spinner size={12} />
+          {:else}
+            <FileText size={12} />
+          {/if}
+        </span>
+      {/if}
+      {#if commitState !== 'idle'}
+        <span
+          class="comment-session-badge commit"
+          title={commitState === 'running' ? 'Commit session in progress' : 'Commit ready'}
+        >
+          {#if commitState === 'running'}
+            <Spinner size={12} />
+          {:else}
+            <GitCommitVertical size={12} />
+          {/if}
+        </span>
       {/if}
     </span>
-  </span>
+  {:else}
+    <span class="comment-icons">
+      {#if comment.author === 'agent'}
+        <span class="comment-icon agent-icon">
+          <Bot size={12} />
+        </span>
+      {/if}
+      <span class="comment-icon" class:comment-icon-warning={comment.commentType === 'warning'}>
+        {#if comment.commentType === 'warning'}
+          <AlertTriangle size={12} />
+        {:else}
+          <MessageSquare size={12} />
+        {/if}
+      </span>
+    </span>
+  {/if}
   <span class="comment-details">
     <span class="comment-location">
       <span class="comment-file">{getFileName(comment.path)}</span>
@@ -112,6 +156,8 @@
 {#if comments.length > 0}
   <ul class="tree-section comments-section">
     {#each comments as comment (comment.id)}
+      {@const noteState = commentNoteState?.(comment) ?? 'idle'}
+      {@const commitState = commentCommitState?.(comment) ?? 'idle'}
       <li class="tree-item-wrapper">
         <div class="comment-item-container group/comment">
           <button
@@ -120,7 +166,7 @@
             style="padding-left: 8px"
             onclick={() => onSelectComment(comment)}
           >
-            {@render commentItemContent(comment)}
+            {@render commentItemContent(comment, noteState, commitState)}
           </button>
           <Button
             variant="ghost"
@@ -160,7 +206,9 @@
         <li class="tree-item-wrapper">
           <div class="comment-item-container deleted-comment group/comment">
             <div class="tree-item comment-item" style="padding-left: 8px">
-              {@render commentItemContent(comment)}
+              <!-- Deleted comments come from a separate source and aren't
+                   session-seeded, so they always show the type icons. -->
+              {@render commentItemContent(comment, 'idle', 'idle')}
             </div>
             <Button
               variant="ghost"
@@ -328,6 +376,39 @@
 
   .comment-icon.comment-icon-warning {
     color: var(--status-modified);
+  }
+
+  /* Session badges replace the icon gutter when a comment launched a note or
+     commit session. Reuses the --note/--commit colours from the timeline icons
+     (TimelineRow.svelte) and the shared Spinner. Offset left enough that two
+     16px chips still clear the comment text when a comment spawned both. */
+  .comment-session-badges {
+    position: absolute;
+    left: 4px;
+    top: 6px;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+  }
+
+  .comment-session-badge {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    flex-shrink: 0;
+  }
+
+  .comment-session-badge.note {
+    color: var(--note-color);
+    background-color: var(--note-bg);
+  }
+
+  .comment-session-badge.commit {
+    color: var(--commit-color);
+    background-color: var(--commit-bg);
   }
 
   .comment-details {

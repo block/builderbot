@@ -487,6 +487,10 @@ export type {
   ReviewCommands,
 } from '@builderbot/diff-viewer/types';
 
+// CommentSessionState lives with the CommentEditor component, re-exported from
+// the package's components barrel rather than its /types entry.
+export type { CommentSessionState } from '@builderbot/diff-viewer/components';
+
 // =============================================================================
 // Hashtag references
 // =============================================================================

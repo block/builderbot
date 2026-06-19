@@ -1410,6 +1410,8 @@
             onDeleteAll={handleDeleteAllComments}
             onDeleteComment={handleDeleteComment}
             onRestoreComment={handleRestoreComment}
+            commentNoteState={getCommentNoteState}
+            commentCommitState={getCommentCommitState}
           />
         {/if}
       </div>

@@ -15,6 +15,8 @@ function createComment(overrides: Partial<Comment> = {}): Comment {
     githubCommentId: null,
     githubCommentType: null,
     githubCommentStale: false,
+    noteSessionId: null,
+    commitSessionId: null,
     ...overrides,
   };
 }

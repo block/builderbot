@@ -29,6 +29,9 @@
   import DiffCommitSessionLauncher from './DiffCommitSessionLauncher.svelte';
   import DiffReferenceSection from './DiffReferenceSection.svelte';
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
+  import SessionModal from '../sessions/SessionModal.svelte';
+  import NoteModal from '../notes/NoteModal.svelte';
+  import { onSessionStatusChanged } from '../../services/branchEventService';
   import { getPreferredAgent, preferences } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { createDiffViewerState } from './diffViewerState.svelte';
@@ -43,8 +46,10 @@
   import type {
     Branch,
     BranchSessionType,
+    BranchSessionLaunchStatus,
     Comment,
     CommitTimelineItem,
+    SessionStatus,
     SmartDiffAnnotation,
     Span,
   } from '../../types';
@@ -432,6 +437,26 @@
   let showNewSessionModal = $state(false);
   let newSessionMode = $state<BranchSessionType>('note');
   let newSessionPrefill = $state('');
+  /** The comment that opened the New Session dialog, so submit knows the origin. */
+  let newSessionComment = $state<Comment | null>(null);
+
+  // ==========================================================================
+  // Comment ↔ session links (stateful Note/Commit buttons)
+  // ==========================================================================
+
+  /** Linked session dialogs opened from a comment's Note/Commit button. */
+  let openSessionId = $state<string | null>(null);
+  let openNote = $state<{
+    title: string;
+    content: string;
+    sessionId?: string;
+    noteUpdatedAt?: number;
+  } | null>(null);
+
+  /** Live status for every comment-linked session id (note + commit). */
+  let sessionStatusById = $state(new Map<string, SessionStatus>());
+  /** Linked session ids already fetched, to dedupe getSession calls. */
+  const requestedSessionIds = new Set<string>();
 
   function buildCommentPrompt(comment: Comment, mode: 'note' | 'commit'): string {
     const reviewId = reviewHandle?.state.review?.id ?? activeReviewId;
@@ -461,6 +486,8 @@
         launchContext
       );
 
+      linkCommentToSession(comment, mode, result.sessionId, result.sessionStatus);
+
       const label = mode === 'note' ? 'Note' : 'Commit';
       toast.success(`${label} session ${result.sessionStatus === 'queued' ? 'queued' : 'started'}`);
     } catch (e) {
@@ -472,20 +499,44 @@
   }
 
   function handleNewNote(comment: Comment, event: MouseEvent) {
+    // Route by the linked note session's state (idle → start, running → open
+    // session, completed → open note).
+    const state = getCommentNoteState(comment);
+    if (state === 'running' && comment.noteSessionId) {
+      openSessionId = comment.noteSessionId;
+      return;
+    }
+    if (state === 'completed' && comment.noteSessionId) {
+      void openCompletedNote(comment.noteSessionId);
+      return;
+    }
     if (event.altKey) {
       launchSessionDirectly(comment, 'note');
       return;
     }
+    newSessionComment = comment;
     newSessionMode = 'note';
     newSessionPrefill = buildCommentPrompt(comment, 'note');
     showNewSessionModal = true;
   }
 
   function handleNewCommit(comment: Comment, event: MouseEvent) {
+    // Route by the linked commit session's state (idle → start, running → open
+    // session, completed → show the commit in the open diff viewer).
+    const state = getCommentCommitState(comment);
+    if (state === 'running' && comment.commitSessionId) {
+      openSessionId = comment.commitSessionId;
+      return;
+    }
+    if (state === 'completed' && comment.commitSessionId) {
+      void openCompletedCommit(comment.commitSessionId);
+      return;
+    }
     if (event.altKey) {
       launchSessionDirectly(comment, 'commit');
       return;
     }
+    newSessionComment = comment;
     newSessionMode = 'commit';
     newSessionPrefill = buildCommentPrompt(comment, 'commit');
     showNewSessionModal = true;
@@ -497,6 +548,10 @@
     imageIds: string[];
   }) {
     showNewSessionModal = false;
+    // Capture (and clear) the origin comment before awaiting so a follow-up
+    // dialog can't reuse a stale reference.
+    const originComment = newSessionComment;
+    newSessionComment = null;
     const launchContext = {
       source: 'diff_viewer' as const,
       scope: reviewableScope(),
@@ -515,6 +570,10 @@
         data.imageIds,
         launchContext
       );
+
+      if (originComment) {
+        linkCommentToSession(originComment, data.mode, result.sessionId, result.sessionStatus);
+      }
 
       const label = data.mode === 'note' ? 'Note' : data.mode === 'commit' ? 'Commit' : 'Review';
       toast.success(`${label} session ${result.sessionStatus === 'queued' ? 'queued' : 'started'}`);
@@ -599,6 +658,101 @@
     return 'idle';
   }
 
+  /**
+   * Persist + optimistically reflect a comment→session link after a successful
+   * start. Mirrors the GitHub optimistic-update flow. No-op for non note/commit
+   * modes (e.g. review).
+   */
+  function linkCommentToSession(
+    comment: Comment,
+    mode: BranchSessionType,
+    sessionId: string,
+    initialStatus: BranchSessionLaunchStatus
+  ) {
+    if (mode !== 'note' && mode !== 'commit') return;
+
+    // Reflect the link + initial status immediately so the button updates.
+    requestedSessionIds.add(sessionId);
+    sessionStatusById = new Map(sessionStatusById).set(sessionId, initialStatus);
+    if (reviewHandle) {
+      reviewHandle.state.comments = reviewHandle.state.comments.map((c) =>
+        c.id === comment.id
+          ? mode === 'note'
+            ? { ...c, noteSessionId: sessionId }
+            : { ...c, commitSessionId: sessionId }
+          : c
+      );
+    }
+
+    // Persist in the background — the optimistic update already updated the UI.
+    commands
+      .linkCommentSession(comment.id, sessionId, mode)
+      .catch((e) => console.warn('Failed to persist comment session link:', e));
+  }
+
+  /** Map a linked session id's status to the Note/Commit button state. */
+  function sessionStateFor(sessionId: string | null): 'idle' | 'running' | 'completed' {
+    if (!sessionId) return 'idle';
+    switch (sessionStatusById.get(sessionId)) {
+      case 'queued':
+      case 'running':
+        return 'running';
+      case 'completed':
+        return 'completed';
+      // error/cancelled → idle so the user can retry; a dangling link (missing
+      // session, status still unknown) also falls back to idle.
+      default:
+        return 'idle';
+    }
+  }
+
+  function getCommentNoteState(comment: Comment): 'idle' | 'running' | 'completed' {
+    return sessionStateFor(comment.noteSessionId);
+  }
+
+  function getCommentCommitState(comment: Comment): 'idle' | 'running' | 'completed' {
+    return sessionStateFor(comment.commitSessionId);
+  }
+
+  /** Resolve a completed note session's note and open the NoteModal. */
+  async function openCompletedNote(sessionId: string) {
+    try {
+      const note = await commands.getBranchNoteBySession(sessionId);
+      if (!note) {
+        // Link points at a session with no note — fall back to the session view.
+        openSessionId = sessionId;
+        return;
+      }
+      openNote = {
+        title: note.title,
+        content: note.content,
+        sessionId,
+        noteUpdatedAt: note.updatedAt,
+      };
+    } catch (e) {
+      toast.error('Unable to open note', {
+        description: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
+  /** Resolve a completed commit session's sha and show it in the open viewer. */
+  async function openCompletedCommit(sessionId: string) {
+    try {
+      const sha = await commands.getBranchCommitBySession(sessionId);
+      if (!sha) {
+        // Commit hasn't landed yet (pending sha) — show the session instead.
+        openSessionId = sessionId;
+        return;
+      }
+      await switchDiffContext('commit', sha);
+    } catch (e) {
+      toast.error('Unable to show commit', {
+        description: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+
   // Create tracker for search initialization
   const checkSearchInitialization = createSearchInitializationTracker({
     searchState,
@@ -636,6 +790,35 @@
     if (jumpToComment && !currentComments.some((c) => c.id === jumpToComment?.id)) {
       jumpToComment = null;
     }
+  });
+
+  // Seed the status map for every comment-linked session id when comments load.
+  // `requestedSessionIds` dedupes fetches; the map is then kept live by the
+  // `session-status-changed` subscription below.
+  $effect(() => {
+    for (const c of allComments) {
+      for (const id of [c.noteSessionId, c.commitSessionId]) {
+        if (!id || requestedSessionIds.has(id)) continue;
+        requestedSessionIds.add(id);
+        getSession(id)
+          .then((session) => {
+            // Dangling link (session deleted) → leave unset so it reads as idle.
+            if (!session) return;
+            sessionStatusById = new Map(sessionStatusById).set(id, session.status);
+          })
+          .catch((e) => console.warn('Failed to load comment session status:', e));
+      }
+    }
+  });
+
+  // Keep linked-session statuses live while the modal is open. Mirrors the
+  // auto-review polling precedent, but event-driven via the shared listener.
+  $effect(() => {
+    const unlisten = onSessionStatusChanged((payload) => {
+      if (sessionStatusById.get(payload.sessionId) === payload.status) return;
+      sessionStatusById = new Map(sessionStatusById).set(payload.sessionId, payload.status);
+    });
+    return () => unlisten();
   });
 
   /** Convert "information" comments to SmartDiffAnnotation for the overlay system.
@@ -1370,6 +1553,8 @@
         onCommentCommit={readonly ? undefined : handleNewCommit}
         onCommentGithub={readonly || !hasPr ? undefined : handleSendToGithub}
         commentGithubState={readonly || !hasPr ? undefined : getCommentGithubState}
+        commentNoteState={readonly ? undefined : getCommentNoteState}
+        commentCommitState={readonly ? undefined : getCommentCommitState}
         bind:scrollApi={diffViewerScrollApi}
       />
     </div>
@@ -1415,10 +1600,38 @@
       prefillSelection="last-line"
       onClose={() => {
         showNewSessionModal = false;
+        newSessionComment = null;
       }}
       onSubmit={handleSessionModalSubmit}
     />
   {/if}
+
+  <SessionModal
+    open={openSessionId !== null}
+    sessionId={openSessionId ?? ''}
+    repoDir={branch?.worktreePath}
+    {branchId}
+    {projectId}
+    repoLabel={githubRepo ? { githubRepo, subpath: subpath ?? null, headRepo: null } : null}
+    onClose={() => {
+      openSessionId = null;
+    }}
+  />
+
+  <NoteModal
+    open={openNote !== null}
+    title={openNote?.title ?? ''}
+    content={openNote?.content ?? ''}
+    sessionId={openNote?.sessionId}
+    noteUpdatedAt={openNote?.noteUpdatedAt}
+    onClose={() => {
+      openNote = null;
+    }}
+    onOpenSession={(sid) => {
+      openNote = null;
+      openSessionId = sid;
+    }}
+  />
 </div>
 
 <style>

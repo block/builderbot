@@ -89,6 +89,10 @@ export interface Comment {
   githubCommentType: string | null;
   /** Whether the local content has been edited since the last GitHub sync. */
   githubCommentStale: boolean;
+  /** The note session started from this comment's "Note" button, if any. */
+  noteSessionId: string | null;
+  /** The commit session started from this comment's "Commit" button, if any. */
+  commitSessionId: string | null;
 }
 
 /** A review anchored to a branch + commit + scope. */

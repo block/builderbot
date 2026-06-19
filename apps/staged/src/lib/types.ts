@@ -151,6 +151,20 @@ export interface NoteTimelineItem {
   suggestedNextNoteStep: string | null;
 }
 
+/** A full branch note record, as returned by `get_branch_note_by_session`. */
+export interface BranchNote {
+  id: string;
+  branchId: string;
+  sessionId: string | null;
+  title: string;
+  content: string;
+  createdAt: number;
+  updatedAt: number;
+  completedAt: number | null;
+  suggestedNextCommitStep: string | null;
+  suggestedNextNoteStep: string | null;
+}
+
 export interface ReviewTimelineItem {
   id: string;
   commitSha: string;

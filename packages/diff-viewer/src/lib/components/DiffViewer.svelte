@@ -75,7 +75,10 @@
     getHeaderAwareActiveStructuralStack,
     getStructuralDeclarations,
   } from '../utils/structuralHeaders';
-  import CommentEditor, { type GithubButtonState } from './CommentEditor.svelte';
+  import CommentEditor, {
+    type GithubButtonState,
+    type CommentSessionState,
+  } from './CommentEditor.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import BeforeAnnotationOverlay from './BeforeAnnotationOverlay.svelte';
   import Scrollbar from './Scrollbar.svelte';
@@ -132,6 +135,10 @@
     onCommentGithub?: (comment: Comment) => void;
     /** Returns the GitHub button state for a given comment. */
     commentGithubState?: (comment: Comment) => GithubButtonState;
+    /** Returns the "Note" button state (linked note session) for a given comment. */
+    commentNoteState?: (comment: Comment) => CommentSessionState;
+    /** Returns the "Commit" button state (linked commit session) for a given comment. */
+    commentCommitState?: (comment: Comment) => CommentSessionState;
 
     /** Bindable API object exposing scroll control for external callers (e.g. mobile touch scroll). */
     scrollApi?: DiffViewerScrollApi | null;
@@ -158,6 +165,8 @@
     onCommentCommit,
     onCommentGithub,
     commentGithubState,
+    commentNoteState,
+    commentCommitState,
     scrollApi = $bindable(null),
   }: Props = $props();
 
@@ -2560,6 +2569,12 @@
         githubState={existingComment && commentGithubState
           ? commentGithubState(existingComment)
           : 'idle'}
+        noteState={existingComment && commentNoteState
+          ? commentNoteState(existingComment)
+          : 'idle'}
+        commitState={existingComment && commentCommitState
+          ? commentCommitState(existingComment)
+          : 'idle'}
       />
     {/if}
 
@@ -2627,6 +2642,12 @@
           : undefined}
         githubState={existingComment && commentGithubState
           ? commentGithubState(existingComment)
+          : 'idle'}
+        noteState={existingComment && commentNoteState
+          ? commentNoteState(existingComment)
+          : 'idle'}
+        commitState={existingComment && commentCommitState
+          ? commentCommitState(existingComment)
           : 'idle'}
       />
     {/if}

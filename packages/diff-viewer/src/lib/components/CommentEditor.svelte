@@ -10,6 +10,13 @@
 
   export type GithubButtonState = 'idle' | 'sending' | 'sent' | 'stale';
 
+  /**
+   * State of a comment's "Note"/"Commit" button, derived from the linked
+   * session's status by the parent. `queued` is treated as `running`, and
+   * `error`/`cancelled` collapse back to `idle` so the user can retry.
+   */
+  export type CommentSessionState = 'idle' | 'running' | 'completed';
+
   interface Props {
     /** Position relative to the viewer container */
     top: number;
@@ -37,6 +44,10 @@
     onGithub?: () => void;
     /** Current state of the GitHub send/update button. */
     githubState?: GithubButtonState;
+    /** Current state of the "Note" button, reflecting its linked session. */
+    noteState?: CommentSessionState;
+    /** Current state of the "Commit" button, reflecting its linked session. */
+    commitState?: CommentSessionState;
   }
 
   let {
@@ -54,6 +65,8 @@
     onCommit,
     onGithub,
     githubState = 'idle',
+    noteState = 'idle',
+    commitState = 'idle',
   }: Props = $props();
 
   // Track current input value - initialized by effect when existingComment changes
@@ -130,20 +143,38 @@
         {#if onNote}
           <button
             class="comment-action-btn note-btn"
+            class:session-active={noteState !== 'idle'}
             onclick={(e) => onNote?.(e)}
-            title="New note (Option+click to skip dialog)"
+            title={noteState === 'running'
+              ? 'Note session in progress'
+              : noteState === 'completed'
+                ? 'Open note'
+                : 'New note (Option+click to skip dialog)'}
           >
-            <FileText size={12} />
+            {#if noteState === 'running'}
+              <Loader2 size={12} class="spinner" />
+            {:else}
+              <FileText size={12} />
+            {/if}
             <span>Note</span>
           </button>
         {/if}
         {#if onCommit}
           <button
             class="comment-action-btn commit-btn"
+            class:session-active={commitState !== 'idle'}
             onclick={(e) => onCommit?.(e)}
-            title="New commit (Option+click to skip dialog)"
+            title={commitState === 'running'
+              ? 'Commit session in progress'
+              : commitState === 'completed'
+                ? 'Show commit'
+                : 'New commit (Option+click to skip dialog)'}
           >
-            <GitCommitVertical size={12} />
+            {#if commitState === 'running'}
+              <Loader2 size={12} class="spinner" />
+            {:else}
+              <GitCommitVertical size={12} />
+            {/if}
             <span>Commit</span>
           </button>
         {/if}
@@ -286,6 +317,20 @@
   .comment-action-btn.commit-btn:hover {
     color: var(--commit-color);
     border-color: var(--commit-color);
+    background-color: var(--commit-bg);
+  }
+
+  /* Running/completed state — mirrors the styled spinner-with-background and
+     completed icon used on Branch Card timeline rows (TimelineRow.svelte). */
+  .comment-action-btn.note-btn.session-active {
+    color: var(--note-color);
+    border-color: transparent;
+    background-color: var(--note-bg);
+  }
+
+  .comment-action-btn.commit-btn.session-active {
+    color: var(--commit-color);
+    border-color: transparent;
     background-color: var(--commit-bg);
   }
 

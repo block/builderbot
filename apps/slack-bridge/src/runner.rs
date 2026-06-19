@@ -145,7 +145,6 @@ pub async fn run_task(
     let initial = inner.lock().await.state.render();
     sink.update(&initial).await?;
 
-    let driver = AcpDriver::new(agent_id).map_err(|e| anyhow!(e))?;
     let writer: Arc<dyn MessageWriter> = Arc::new(StreamingWriter {
         inner: Arc::clone(&inner),
         sink: Arc::clone(&sink),
@@ -153,18 +152,22 @@ pub async fn run_task(
     });
     let store: Arc<dyn Store> = Arc::new(NoOpStore);
 
-    let result = driver
-        .run(
-            "slack-task",
-            prompt,
-            &[],
-            working_dir,
-            &store,
-            &writer,
-            &cancel,
-            None,
-        )
-        .await;
+    let result = match AcpDriver::new(agent_id).map_err(|e| anyhow!(e)) {
+        Ok(driver) => driver
+            .run(
+                "slack-task",
+                prompt,
+                &[],
+                working_dir,
+                &store,
+                &writer,
+                &cancel,
+                None,
+            )
+            .await
+            .map_err(|e| anyhow!(e)),
+        Err(e) => Err(e),
+    };
 
     let body = {
         let mut guard = inner.lock().await;
@@ -176,7 +179,7 @@ pub async fn run_task(
     };
     sink.update(&body).await?;
 
-    result.map_err(|e| anyhow!(e))
+    result
 }
 
 /// Run [`run_task`] on a dedicated current-thread runtime + `LocalSet`.

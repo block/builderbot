@@ -845,6 +845,10 @@
     font-size: calc(var(--size-xs) - 1px);
     font-weight: 600;
     line-height: 1;
+    /* Pin the review badge onto its own compositing layer (same rationale as
+       .timeline-icon) so its icon stays put during the row's hover
+       background-color transition instead of re-snapping to fractional pixels. */
+    transform: translateZ(0);
   }
 
   /* Actions container — visible on row hover */
@@ -855,6 +859,12 @@
     flex-shrink: 0;
     opacity: 0;
     transition: opacity 0.1s;
+  }
+
+  /* Pin each action-button icon onto its own layer so it doesn't jiggle during
+     the container's opacity fade or the Button's transition-all on hover. */
+  .timeline-actions :global(svg) {
+    transform: translateZ(0);
   }
 
   .timeline-row:hover .timeline-actions,

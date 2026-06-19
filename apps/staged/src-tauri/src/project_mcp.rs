@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 /// nothing in the registry. Covers the startup window between a queued session
 /// transitioning to `running` in the DB and the runner registering its
 /// cancellation token.
-const CANCEL_REGISTRATION_RETRY_DELAY: Duration = Duration::from_millis(250);
+const CANCEL_REGISTRATION_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 /// What outcome the caller expects from a `start_repo_session` call.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]

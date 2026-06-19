@@ -17,7 +17,7 @@ use tauri::AppHandle;
 
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::session_runner::SessionRegistry;
-use crate::store::{Branch, ProjectRepo, SessionStatus, Store};
+use crate::store::{Branch, CompletionReason, ProjectRepo, SessionStatus, Store};
 use tokio_util::sync::CancellationToken;
 
 /// What outcome the caller expects from a `start_repo_session` call.
@@ -276,6 +276,17 @@ impl ProjectToolsHandler {
 
         Ok(payload)
     }
+
+    /// Returns true if the store still records this session as running. Used to
+    /// decide whether to defer a cancellation during the startup window where
+    /// the DB row is already `running` but the runner hasn't registered its
+    /// cancellation token yet.
+    fn session_is_running(&self, session_id: &str) -> bool {
+        matches!(
+            self.store.get_session(session_id),
+            Ok(Some(session)) if session.status == SessionStatus::Running
+        )
+    }
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -502,7 +513,7 @@ impl ProjectToolsHandler {
             &handle.session_id,
             SessionStatus::Cancelled,
             None,
-            Some(&crate::store::CompletionReason::Interrupted),
+            Some(&CompletionReason::ProjectSessionInterrupted),
         ) {
             Ok(updated) => updated,
             Err(e) => return format!("Error cancelling repo session: {e}"),
@@ -512,6 +523,24 @@ impl ProjectToolsHandler {
             // Successfully cancelled from queued state. Drain the next
             // queued session for this branch so it can start.
             if let Ok(Some(branch_id)) = self.store.get_branch_id_for_session(&handle.session_id) {
+                crate::web_server::emit_to_all(
+                    &self.app_handle,
+                    "session-status-changed",
+                    crate::session_runner::SessionStatusEvent {
+                        session_id: handle.session_id.clone(),
+                        status: "cancelled".to_string(),
+                        error_message: None,
+                        completion_reason: Some(
+                            CompletionReason::ProjectSessionInterrupted
+                                .as_str()
+                                .to_string(),
+                        ),
+                        branch_id: Some(branch_id.clone()),
+                        project_id: Some(self.project_id.clone()),
+                        session_type: None,
+                        is_auto_review: false,
+                    },
+                );
                 let _ = crate::session_commands::drain_queued_sessions_for_branch(
                     Arc::clone(&self.store),
                     Arc::clone(&self.registry),
@@ -523,7 +552,29 @@ impl ProjectToolsHandler {
             }
         } else {
             // Session is running (or already terminal). Ask the runner to cancel.
-            self.registry.cancel(&handle.session_id);
+            //
+            // There is a startup race: a queued session becomes `running` in the
+            // DB (so `transition_from_queued` returns false above) a moment before
+            // `start_session` registers its cancellation token. In that window the
+            // registry doesn't yet know about the session and the immediate cancel
+            // attempt returns false, which would silently drop the cancellation.
+            let cancelled = self.registry.cancel_with_completion_reason(
+                &handle.session_id,
+                CompletionReason::ProjectSessionInterrupted,
+            );
+            // If the immediate cancel found nothing but the DB still records the
+            // session as running, we're in that startup window. Defer the
+            // cancellation so `start_session` applies it the instant it registers
+            // its token, guaranteeing the cancellation lands however long startup
+            // takes instead of racing a fixed-delay retry that a slow remote
+            // startup could outlast. The DB gate keeps an already-terminal
+            // session from leaving a stale pending entry behind.
+            if !cancelled && self.session_is_running(&handle.session_id) {
+                self.registry.cancel_or_defer(
+                    &handle.session_id,
+                    CompletionReason::ProjectSessionInterrupted,
+                );
+            }
         }
 
         match self.repo_session_payload(&p.repo_session_id, &handle) {

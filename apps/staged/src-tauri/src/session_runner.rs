@@ -138,7 +138,44 @@ pub struct SessionStatusEvent {
 /// Managed as Tauri state. The background thread for each session removes
 /// itself from the registry when it exits (regardless of outcome).
 pub struct SessionRegistry {
-    running: std::sync::Mutex<HashMap<String, CancellationToken>>,
+    inner: std::sync::Mutex<RegistryInner>,
+}
+
+#[derive(Default)]
+struct RegistryInner {
+    /// Sessions that have registered a cancellation token and are running.
+    running: HashMap<String, Arc<RunningSession>>,
+    /// Cancellations requested for sessions that haven't registered yet.
+    ///
+    /// A queued session flips to `running` in the DB a moment before
+    /// `start_session` calls `register`, so a project-session cancel arriving in
+    /// that startup window finds nothing in `running`. Recording the intent here
+    /// lets `register` apply it the instant the session appears, closing the
+    /// race that a fixed-delay retry could miss for slow (e.g. remote) startups.
+    pending_cancellations: HashMap<String, CompletionReason>,
+}
+
+struct RunningSession {
+    token: CancellationToken,
+    cancellation_completion_reason: std::sync::Mutex<Option<CompletionReason>>,
+}
+
+impl RunningSession {
+    /// Record the completion reason to persist and signal cancellation. A
+    /// `ProjectSessionInterrupted` reason overrides a previously stored one so
+    /// an explicit project cancel wins over an in-flight interrupt.
+    fn apply_cancellation(&self, completion_reason: CompletionReason) {
+        let mut stored_reason = self.cancellation_completion_reason.lock().unwrap();
+        if stored_reason.is_none()
+            || matches!(
+                completion_reason,
+                CompletionReason::ProjectSessionInterrupted
+            )
+        {
+            *stored_reason = Some(completion_reason);
+        }
+        self.token.cancel();
+    }
 }
 
 impl Default for SessionRegistry {
@@ -150,39 +187,105 @@ impl Default for SessionRegistry {
 impl SessionRegistry {
     pub fn new() -> Self {
         Self {
-            running: std::sync::Mutex::new(HashMap::new()),
+            inner: std::sync::Mutex::new(RegistryInner::default()),
         }
     }
 
     /// Register a new session and return a `CancellationToken` for it.
     fn register(&self, session_id: &str) -> CancellationToken {
         let token = CancellationToken::new();
-        let mut running = self.running.lock().unwrap();
-        running.insert(session_id.to_string(), token.clone());
+        let running_session = Arc::new(RunningSession {
+            token: token.clone(),
+            cancellation_completion_reason: std::sync::Mutex::new(None),
+        });
+        let mut inner = self.inner.lock().unwrap();
+        // If a cancellation arrived while this session was still starting up
+        // (DB already `running` but the token not yet registered), apply it now
+        // so the startup race can't drop it.
+        if let Some(completion_reason) = inner.pending_cancellations.remove(session_id) {
+            running_session.apply_cancellation(completion_reason);
+        }
+        inner
+            .running
+            .insert(session_id.to_string(), running_session);
         token
     }
 
     /// Remove a session from the registry (called by the background thread
     /// on exit, regardless of success/failure/cancellation).
     fn deregister(&self, session_id: &str) {
-        let mut running = self.running.lock().unwrap();
-        running.remove(session_id);
+        self.inner.lock().unwrap().running.remove(session_id);
     }
 
     /// Cancel a running session. Returns true if the session was found and
     /// signalled, false if it wasn't running (already finished or unknown).
     pub fn cancel(&self, session_id: &str) -> bool {
-        if let Some(token) = self.running.lock().unwrap().get(session_id) {
-            token.cancel();
+        self.cancel_with_completion_reason(session_id, CompletionReason::Interrupted)
+    }
+
+    /// Cancel a running session and remember the completion reason it should persist.
+    pub fn cancel_with_completion_reason(
+        &self,
+        session_id: &str,
+        completion_reason: CompletionReason,
+    ) -> bool {
+        let running_session = self.inner.lock().unwrap().running.get(session_id).cloned();
+        if let Some(running_session) = running_session {
+            running_session.apply_cancellation(completion_reason);
             true
         } else {
             false
         }
     }
 
+    /// Cancel `session_id` if it's running, otherwise record the cancellation so
+    /// [`register`](Self::register) applies it the moment the session's token is
+    /// registered.
+    ///
+    /// This closes the startup race where a queued session is already `running`
+    /// in the DB but `start_session` hasn't registered its cancellation token
+    /// yet: a plain [`cancel_with_completion_reason`](Self::cancel_with_completion_reason)
+    /// would find nothing and silently drop the cancellation. Deferring the
+    /// intent guarantees it lands however long startup takes (e.g. a remote
+    /// review awaiting a network-bound `git rev-parse`), which a single
+    /// fixed-delay retry could outlast. The check-or-record happens under one
+    /// lock so it can't interleave with a concurrent `register`.
+    pub fn cancel_or_defer(&self, session_id: &str, completion_reason: CompletionReason) {
+        let mut inner = self.inner.lock().unwrap();
+        match inner.running.get(session_id).cloned() {
+            // Registered already (possibly between an earlier cancel attempt and
+            // this call) — cancel it directly.
+            Some(running_session) => {
+                drop(inner);
+                running_session.apply_cancellation(completion_reason);
+            }
+            // Not registered yet — record the intent for `register` to apply.
+            None => {
+                inner
+                    .pending_cancellations
+                    .insert(session_id.to_string(), completion_reason);
+            }
+        }
+    }
+
+    pub fn cancellation_completion_reason(&self, session_id: &str) -> Option<CompletionReason> {
+        self.inner
+            .lock()
+            .unwrap()
+            .running
+            .get(session_id)
+            .and_then(|running| {
+                running
+                    .cancellation_completion_reason
+                    .lock()
+                    .unwrap()
+                    .clone()
+            })
+    }
+
     /// Returns true if the given session is currently tracked as running.
     pub fn is_running(&self, session_id: &str) -> bool {
-        self.running.lock().unwrap().contains_key(session_id)
+        self.inner.lock().unwrap().running.contains_key(session_id)
     }
 }
 
@@ -420,6 +523,10 @@ pub fn start_session(
                 .await
         });
 
+        let cancellation_completion_reason = registry
+            .cancellation_completion_reason(&session_id_for_status)
+            .unwrap_or(CompletionReason::Interrupted);
+
         // Always deregister, regardless of outcome.
         registry.deregister(&session_id_for_status);
 
@@ -434,14 +541,14 @@ pub fn start_session(
         // are harmless no-ops — see module-level docs on the race.
         let (new_status, error_msg, completion_reason) = match result {
             Ok(()) if cancel_token.is_cancelled() => {
-                ("cancelled", None, CompletionReason::Interrupted)
+                ("cancelled", None, cancellation_completion_reason.clone())
             }
             Ok(()) => ("completed", None, CompletionReason::TurnComplete),
             Err(ref e) if cancel_token.is_cancelled() => {
                 log::info!(
                     "Session {session_id_for_status} cancelled (error during teardown: {e})"
                 );
-                ("cancelled", None, CompletionReason::Interrupted)
+                ("cancelled", None, cancellation_completion_reason)
             }
             Err(ref e) => {
                 log::error!("Session {session_id_for_status} failed: {e}");
@@ -820,7 +927,9 @@ pub fn start_pipeline_session(
             }
             PipelineOutcome::Cancelled => {
                 resolve_pipeline_artifacts_without_ai(&config, &store_for_status, false);
-                let reason = CompletionReason::Interrupted;
+                let reason = registry
+                    .cancellation_completion_reason(&session_id)
+                    .unwrap_or(CompletionReason::Interrupted);
                 registry.deregister(&session_id);
                 let transitioned = store_for_status
                     .transition_from_running(
@@ -2678,6 +2787,78 @@ mod tests {
             Some("provider unavailable")
         );
         assert_eq!(failed.completion_reason, Some(CompletionReason::Crashed));
+    }
+
+    #[test]
+    fn running_project_session_cancellation_records_completion_reason_override() {
+        let registry = SessionRegistry::new();
+        registry.register("session-1");
+        registry.register("session-2");
+        registry.register("session-3");
+
+        assert!(registry.cancel_with_completion_reason(
+            "session-1",
+            CompletionReason::ProjectSessionInterrupted
+        ));
+        assert!(registry.cancel("session-2"));
+        assert!(registry.cancel("session-3"));
+        assert!(registry.cancel("session-1"));
+        assert!(registry.cancel_with_completion_reason(
+            "session-2",
+            CompletionReason::ProjectSessionInterrupted
+        ));
+
+        assert_eq!(
+            registry.cancellation_completion_reason("session-1"),
+            Some(CompletionReason::ProjectSessionInterrupted)
+        );
+        assert_eq!(
+            registry.cancellation_completion_reason("session-2"),
+            Some(CompletionReason::ProjectSessionInterrupted)
+        );
+        assert_eq!(
+            registry.cancellation_completion_reason("session-3"),
+            Some(CompletionReason::Interrupted)
+        );
+    }
+
+    #[test]
+    fn cancel_or_defer_before_register_applies_at_registration() {
+        let registry = SessionRegistry::new();
+
+        // Cancellation arrives during the startup window, before the session
+        // registers its token: nothing is running yet, so the intent is deferred.
+        registry.cancel_or_defer(
+            "session-startup",
+            CompletionReason::ProjectSessionInterrupted,
+        );
+        assert!(!registry.is_running("session-startup"));
+
+        // When the session finally registers, the deferred cancellation is
+        // applied immediately: the token is cancelled and the reason recorded.
+        let token = registry.register("session-startup");
+        assert!(token.is_cancelled());
+        assert_eq!(
+            registry.cancellation_completion_reason("session-startup"),
+            Some(CompletionReason::ProjectSessionInterrupted)
+        );
+    }
+
+    #[test]
+    fn cancel_or_defer_cancels_already_registered_session() {
+        let registry = SessionRegistry::new();
+        let token = registry.register("session-running");
+
+        registry.cancel_or_defer(
+            "session-running",
+            CompletionReason::ProjectSessionInterrupted,
+        );
+
+        assert!(token.is_cancelled());
+        assert_eq!(
+            registry.cancellation_completion_reason("session-running"),
+            Some(CompletionReason::ProjectSessionInterrupted)
+        );
     }
 
     fn make_git_repo(test_name: &str) -> PathBuf {

@@ -460,8 +460,10 @@ impl SessionStatus {
 pub enum CompletionReason {
     /// Agent finished its turn normally (`prompt()` → `Ok`).
     TurnComplete,
-    /// User explicitly stopped the session.
+    /// Direct user stop, legacy unknown stop, or generic cancellation.
     Interrupted,
+    /// A parent project session stopped this repo session.
+    ProjectSessionInterrupted,
     /// Agent process exited or connection was lost.
     Crashed,
     /// Staged closed while the session was still running.
@@ -475,6 +477,7 @@ impl CompletionReason {
         match self {
             Self::TurnComplete => "turn_complete",
             Self::Interrupted => "interrupted",
+            Self::ProjectSessionInterrupted => "project_session_interrupted",
             Self::Crashed => "crashed",
             Self::AppQuit => "app_quit",
             Self::Unknown => "unknown",
@@ -485,6 +488,7 @@ impl CompletionReason {
         match s {
             "turn_complete" => Some(Self::TurnComplete),
             "interrupted" => Some(Self::Interrupted),
+            "project_session_interrupted" => Some(Self::ProjectSessionInterrupted),
             "crashed" => Some(Self::Crashed),
             "app_quit" => Some(Self::AppQuit),
             "unknown" => Some(Self::Unknown),

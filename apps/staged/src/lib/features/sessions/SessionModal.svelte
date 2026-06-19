@@ -76,6 +76,7 @@
     groupByVerb,
     verbGroupSummary,
     hasXmlBlocks,
+    sessionEndMessage,
     stripCodeFences,
     stripXmlTags,
     type VerbGroup,
@@ -1360,11 +1361,7 @@
           <Alert.Root class="mt-3">
             <Info class={isWarning ? 'text-[var(--ui-warning)]' : 'text-[var(--text-muted)]'} />
             <Alert.Description>
-              {session.completionReason === 'crashed'
-                ? 'This session ended unexpectedly.'
-                : session.completionReason === 'app_quit'
-                  ? 'This session was interrupted when Staged closed.'
-                  : 'You stopped this session.'}
+              {sessionEndMessage(session)}
             </Alert.Description>
             <Alert.Action>
               <Button

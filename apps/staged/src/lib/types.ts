@@ -322,13 +322,20 @@ export interface ProjectSessionResponse {
 
 export type SessionStatus = 'queued' | 'running' | 'completed' | 'error' | 'cancelled';
 
-export type CompletionReason = 'turn_complete' | 'interrupted' | 'crashed' | 'app_quit' | 'unknown';
+export type CompletionReason =
+  | 'turn_complete'
+  | 'interrupted'
+  | 'project_session_interrupted'
+  | 'crashed'
+  | 'app_quit'
+  | 'unknown';
 
 /** Completion reasons that indicate a session can be resumed. */
 export const RESUMABLE_REASONS: ReadonlySet<CompletionReason> = new Set<CompletionReason>([
   'crashed',
   'app_quit',
   'interrupted',
+  'project_session_interrupted',
 ]);
 
 export function isResumableReason(reason: string | null | undefined): boolean {
@@ -429,7 +436,7 @@ export interface SessionStatusPayload {
   sessionId: string;
   status: SessionStatus;
   errorMessage?: string | null;
-  completionReason?: string | null;
+  completionReason?: CompletionReason | null;
   branchId?: string;
   projectId?: string;
   sessionType?: string;

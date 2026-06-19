@@ -355,7 +355,16 @@
     color: var(--status-added, #3fb950) !important;
   }
 
+  /* Spin in place like the app's shared Spinner. Without an explicit
+     transform-box/origin, WebKit rotates the SVG about an off-center point,
+     making the icon visibly wobble; pin the origin to the exact viewBox
+     center (and promote to a layer) so it spins cleanly. */
   .comment-action-btn :global(.spinner) {
+    display: block;
+    overflow: visible;
+    transform-box: view-box;
+    transform-origin: 50% 50%;
+    backface-visibility: hidden;
     animation: spin 1s linear infinite;
   }
 

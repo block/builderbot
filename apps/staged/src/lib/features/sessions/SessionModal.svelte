@@ -2110,6 +2110,22 @@
     padding-left: 1.5em;
   }
 
+  .markdown-content :global(ul) {
+    list-style-type: disc;
+  }
+
+  .markdown-content :global(ol) {
+    list-style-type: decimal;
+  }
+
+  .markdown-content :global(ul ul) {
+    list-style-type: circle;
+  }
+
+  .markdown-content :global(ul ul ul) {
+    list-style-type: square;
+  }
+
   .markdown-content :global(li) {
     margin: 0.25em 0;
   }

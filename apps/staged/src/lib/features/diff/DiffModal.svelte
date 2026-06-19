@@ -804,6 +804,9 @@
           .then((session) => {
             // Dangling link (session deleted) → leave unset so it reads as idle.
             if (!session) return;
+            // A live `session-status-changed` update may have landed while this
+            // fetch was in flight; that value is fresher, so don't clobber it.
+            if (sessionStatusById.has(id)) return;
             sessionStatusById = new Map(sessionStatusById).set(id, session.status);
           })
           .catch((e) => console.warn('Failed to load comment session status:', e));

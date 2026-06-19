@@ -20,6 +20,12 @@ use crate::session_runner::SessionRegistry;
 use crate::store::{Branch, CompletionReason, ProjectRepo, SessionStatus, Store};
 use tokio_util::sync::CancellationToken;
 
+/// How long to wait before retrying a running-session cancellation that found
+/// nothing in the registry. Covers the startup window between a queued session
+/// transitioning to `running` in the DB and the runner registering its
+/// cancellation token.
+const CANCEL_REGISTRATION_RETRY_DELAY: Duration = Duration::from_millis(250);
+
 /// What outcome the caller expects from a `start_repo_session` call.
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -275,6 +281,17 @@ impl ProjectToolsHandler {
         }
 
         Ok(payload)
+    }
+
+    /// Returns true if the store still records this session as running. Used to
+    /// decide whether a cancellation retry is worthwhile during the startup
+    /// window where the DB row is already `running` but the runner hasn't
+    /// registered its cancellation token yet.
+    fn session_is_running(&self, session_id: &str) -> bool {
+        matches!(
+            self.store.get_session(session_id),
+            Ok(Some(session)) if session.status == SessionStatus::Running
+        )
     }
 }
 
@@ -537,10 +554,25 @@ impl ProjectToolsHandler {
             }
         } else {
             // Session is running (or already terminal). Ask the runner to cancel.
-            self.registry.cancel_with_completion_reason(
+            //
+            // There is a startup race: a queued session becomes `running` in the
+            // DB (so `transition_from_queued` returns false above) a moment before
+            // `start_session` registers its cancellation token. In that window the
+            // registry doesn't yet know about the session and the first cancel
+            // attempt returns false, which would silently drop the cancellation.
+            // If the session is still recorded as running, wait briefly and retry
+            // once so the runner picks up the cancellation after it registers.
+            let cancelled = self.registry.cancel_with_completion_reason(
                 &handle.session_id,
                 CompletionReason::ProjectSessionInterrupted,
             );
+            if !cancelled && self.session_is_running(&handle.session_id) {
+                tokio::time::sleep(CANCEL_REGISTRATION_RETRY_DELAY).await;
+                self.registry.cancel_with_completion_reason(
+                    &handle.session_id,
+                    CompletionReason::ProjectSessionInterrupted,
+                );
+            }
         }
 
         match self.repo_session_payload(&p.repo_session_id, &handle) {

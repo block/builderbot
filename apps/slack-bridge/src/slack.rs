@@ -11,6 +11,8 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
+use reqwest::header::RETRY_AFTER;
+use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -22,6 +24,8 @@ use crate::runner::{run_task_blocking, ProgressSink};
 
 const WEB_API_BASE: &str = "https://slack.com/api";
 const RECONNECT_DELAY: Duration = Duration::from_secs(3);
+const WEB_API_MAX_ATTEMPTS: usize = 3;
+const DEFAULT_RATE_LIMIT_DELAY: Duration = Duration::from_secs(1);
 
 // =============================================================================
 // Web API client
@@ -75,26 +79,61 @@ impl SlackWeb {
     }
 
     async fn call(&self, method: &str, body: &serde_json::Value) -> Result<ApiResult> {
-        let res: ApiResult = self
-            .client
-            .post(format!("{WEB_API_BASE}/{method}"))
-            .bearer_auth(&self.bot_token)
-            .json(body)
-            .send()
-            .await
-            .with_context(|| format!("{method} request failed"))?
-            .json()
-            .await
-            .with_context(|| format!("{method} returned an unparseable response"))?;
+        for attempt in 1..=WEB_API_MAX_ATTEMPTS {
+            let response = self
+                .client
+                .post(format!("{WEB_API_BASE}/{method}"))
+                .bearer_auth(&self.bot_token)
+                .json(body)
+                .send()
+                .await
+                .with_context(|| format!("{method} request failed"))?;
 
-        if !res.ok {
-            return Err(anyhow!(
-                "{method} failed: {}",
-                res.error.as_deref().unwrap_or("unknown error")
-            ));
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                let delay = response
+                    .headers()
+                    .get(RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(parse_retry_after)
+                    .unwrap_or(DEFAULT_RATE_LIMIT_DELAY);
+
+                if attempt < WEB_API_MAX_ATTEMPTS {
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+
+                return Err(anyhow!("{method} rate limited after {attempt} attempts"));
+            }
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                return Err(anyhow!("{method} failed with HTTP {status}: {body}"));
+            }
+
+            let res: ApiResult = response
+                .json()
+                .await
+                .with_context(|| format!("{method} returned an unparseable response"))?;
+
+            if !res.ok {
+                return Err(anyhow!(
+                    "{method} failed: {}",
+                    res.error.as_deref().unwrap_or("unknown error")
+                ));
+            }
+            return Ok(res);
         }
-        Ok(res)
+
+        unreachable!("WEB_API_MAX_ATTEMPTS is non-zero")
     }
+}
+
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    value
+        .parse::<u64>()
+        .ok()
+        .map(Duration::from_secs)
 }
 
 // =============================================================================

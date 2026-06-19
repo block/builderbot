@@ -1884,6 +1884,14 @@
     focusedHunkIndex = null;
 
     const target = event.target as HTMLElement;
+    // The comment editor and line selection belong to this viewer, so only a
+    // click inside the viewer should dismiss them. Anything outside — most
+    // visibly a Note/Commit/Session dialog, which renders into a body portal in
+    // the host app and so carries no markup we can recognize here — must leave
+    // the editor open.
+    if (diffViewerEl && !diffViewerEl.contains(target)) {
+      return;
+    }
     if (
       target.closest('.line-selection-toolbar') ||
       target.closest('.line-comment-editor') ||

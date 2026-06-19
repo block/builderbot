@@ -56,6 +56,21 @@ pub fn delete_note(
     Ok(())
 }
 
+/// Get a single branch note by its linked session ID.
+///
+/// Parallels [`get_project_note_by_session`]; lets the frontend resolve the
+/// note a review comment produced (for `NoteModal`) without refetching the
+/// whole branch timeline.
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_branch_note_by_session(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    session_id: String,
+) -> Result<Option<crate::store::Note>, String> {
+    crate::get_store(&store)?
+        .get_note_by_session(&session_id)
+        .map_err(|e| e.to_string())
+}
+
 // =============================================================================
 // Project note commands
 // =============================================================================

@@ -107,6 +107,40 @@ pub async fn update_comment(
         .map_err(|e| e.to_string())
 }
 
+/// Link a comment to the note/commit session started from its button.
+///
+/// `session_type` is `"note"` or `"commit"`; the two links are independent so
+/// a single comment can have both. Called after a session successfully starts
+/// from a review comment so the button can reflect that session's state.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn link_comment_session(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    comment_id: String,
+    session_id: String,
+    session_type: String,
+) -> Result<(), String> {
+    crate::get_store(&store)?
+        .set_comment_session(&comment_id, &session_type, &session_id)
+        .map_err(|e| e.to_string())
+}
+
+/// Resolve the commit SHA produced by a session.
+///
+/// Returns `None` when no commit is linked to the session or when its SHA has
+/// not landed yet (pending commit). Lets the frontend show a comment's
+/// completed commit in the open diff viewer without refetching the whole
+/// branch timeline.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_branch_commit_by_session(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    session_id: String,
+) -> Result<Option<String>, String> {
+    let commit = crate::get_store(&store)?
+        .get_commit_by_session(&session_id)
+        .map_err(|e| e.to_string())?;
+    Ok(commit.and_then(|c| c.sha))
+}
+
 /// Delete a comment.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn delete_comment(

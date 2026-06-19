@@ -2295,6 +2295,14 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(note).unwrap())
         }
+        "get_branch_note_by_session" => {
+            let store = get_store(store_mutex)?;
+            let session_id: String = arg(&args, "sessionId")?;
+            let note = store
+                .get_note_by_session(&session_id)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(note).unwrap())
+        }
         "delete_project_note" => {
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;
@@ -2547,6 +2555,24 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .update_comment(&comment_id, &content)
                 .map_err(|e| e.to_string())?;
             Ok(Value::Null)
+        }
+        "link_comment_session" => {
+            let store = get_store(store_mutex)?;
+            let comment_id: String = arg(&args, "commentId")?;
+            let session_id: String = arg(&args, "sessionId")?;
+            let session_type: String = arg(&args, "sessionType")?;
+            store
+                .set_comment_session(&comment_id, &session_type, &session_id)
+                .map_err(|e| e.to_string())?;
+            Ok(Value::Null)
+        }
+        "get_branch_commit_by_session" => {
+            let store = get_store(store_mutex)?;
+            let session_id: String = arg(&args, "sessionId")?;
+            let commit = store
+                .get_commit_by_session(&session_id)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(commit.and_then(|c| c.sha)).unwrap())
         }
         "delete_comment" => {
             let store = get_store(store_mutex)?;

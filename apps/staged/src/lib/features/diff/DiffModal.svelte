@@ -1684,10 +1684,10 @@
     top: 100%;
     right: 0;
     margin-top: 4px;
-    background: var(--bg-primary);
+    background: var(--bg-menu);
     border: 1px solid var(--border-muted);
     border-radius: 6px;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    box-shadow: var(--shadow-elevated);
     overflow: hidden;
     z-index: var(--z-index-floating);
     min-width: 220px;

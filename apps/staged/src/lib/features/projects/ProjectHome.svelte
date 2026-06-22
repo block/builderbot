@@ -138,6 +138,8 @@
     const onCacheStale = () => loadData();
     window.addEventListener('staged:new-project', onNewProject);
     window.addEventListener('cache-stale', onCacheStale);
+    const onDeleteCurrentProject = (event: Event) => handleDeleteCurrentProjectShortcut(event);
+    window.addEventListener('staged:delete-current-project', onDeleteCurrentProject);
 
     const unlistenDetection = listenToRepoActionsDetection((event) => {
       const matchingProjectIds = projects
@@ -273,6 +275,7 @@
       loadGeneration++;
       window.removeEventListener('staged:new-project', onNewProject);
       window.removeEventListener('cache-stale', onCacheStale);
+      window.removeEventListener('staged:delete-current-project', onDeleteCurrentProject);
       unlistenDetection();
       unlistenProjectRepoAdded();
       unlistenPrStatus();
@@ -869,6 +872,22 @@
       // Show confirmation dialog
       projectToDelete = project;
     }
+  }
+
+  function handleDeleteCurrentProjectShortcut(event: Event) {
+    if (
+      !selectedProject ||
+      selectedProjectDeleting ||
+      projectToDelete ||
+      branchToDelete ||
+      showNewProjectModal ||
+      showAddRepoModal
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    void handleDeleteProjectRequest(selectedProject);
   }
 
   async function confirmDeleteProject() {

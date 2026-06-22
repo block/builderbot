@@ -236,14 +236,17 @@
   });
 
   async function loadProjectSessionDraft() {
-    if (draftProjectPrompt.trim()) return;
+    const promptWhenLoadStarted = draftProjectPrompt;
+    if (promptWhenLoadStarted.trim()) return;
 
     const projectId = project.id;
     const generation = ++projectDraftLoadGeneration;
     try {
       const draft = await loadDraft(projectDraftKey(projectId));
       if (generation !== projectDraftLoadGeneration || project.id !== projectId) return;
-      draftProjectPrompt = draft ?? '';
+      if (draftProjectPrompt === promptWhenLoadStarted) {
+        draftProjectPrompt = draft ?? '';
+      }
     } catch (err) {
       console.error('[ProjectSection] Failed to load project draft:', err);
     }

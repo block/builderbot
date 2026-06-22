@@ -340,12 +340,15 @@ mark.search-match-current {
  *    utilities `z-(--z-index-overlay)` / `z-(--z-index-floating)` and raw
  *    `var(--z-index-*)` references (e.g. HashtagInput's fixed-positioned
  *    dropdown) resolve to the same source.
+ *    `top-bar` sits above page content and in-content diff controls, while
+ *    staying below full-screen overlays and portaled primitives.
  *    `overlay` sits above the legacy full-screen overlay max (9999, e.g.
  *    .diff-modal-backdrop) so design-system dialogs own the top layer;
  *    `floating` sits one above `overlay` so portaled primitives (dropdown,
  *    select, popover, tooltip, context-menu, hashtag dropdown) paint above
  *    dialog content even when opened from inside a dialog. ── */
 @theme {
+  --z-index-top-bar: 200;
   --z-index-overlay: 10000;
   --z-index-floating: 10001;
 }

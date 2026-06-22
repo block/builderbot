@@ -16,10 +16,18 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
+  import type { Snippet } from 'svelte';
   import { MessageSquarePlus, MessageSquare, X, FileText, Code } from 'lucide-svelte';
   import { marked } from 'marked';
   import { sanitize } from '../utils/sanitize';
-  import type { FileDiff, Alignment, Comment, Span, SmartDiffAnnotation } from '../types';
+  import type {
+    FileDiff,
+    Alignment,
+    Comment,
+    Span,
+    SmartDiffAnnotation,
+    CommentActionContext,
+  } from '../types';
   import {
     initHighlighter,
     highlightLines,
@@ -75,10 +83,7 @@
     getHeaderAwareActiveStructuralStack,
     getStructuralDeclarations,
   } from '../utils/structuralHeaders';
-  import CommentEditor, {
-    type GithubButtonState,
-    type CommentSessionState,
-  } from './CommentEditor.svelte';
+  import CommentEditor from './CommentEditor.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import BeforeAnnotationOverlay from './BeforeAnnotationOverlay.svelte';
   import Scrollbar from './Scrollbar.svelte';
@@ -131,16 +136,8 @@
     onUpdateComment?: (commentId: string, content: string) => Promise<void>;
     onDeleteComment?: (commentId: string) => Promise<void>;
 
-    // -- Comment action callbacks (optional; shown in editor bottom bar) --
-    onCommentNote?: (comment: Comment, event: MouseEvent) => void;
-    onCommentCommit?: (comment: Comment, event: MouseEvent) => void;
-    onCommentGithub?: (comment: Comment) => void;
-    /** Returns the GitHub button state for a given comment. */
-    commentGithubState?: (comment: Comment) => GithubButtonState;
-    /** Returns the "Note" button state (linked note session) for a given comment. */
-    commentNoteState?: (comment: Comment) => CommentSessionState;
-    /** Returns the "Commit" button state (linked commit session) for a given comment. */
-    commentCommitState?: (comment: Comment) => CommentSessionState;
+    /** Host-rendered actions for an existing comment's editor footer. */
+    commentActions?: Snippet<[CommentActionContext]>;
 
     /** Bindable API object exposing scroll control for external callers (e.g. mobile touch scroll). */
     scrollApi?: DiffViewerScrollApi | null;
@@ -164,12 +161,7 @@
     onAddComment,
     onUpdateComment,
     onDeleteComment,
-    onCommentNote,
-    onCommentCommit,
-    onCommentGithub,
-    commentGithubState,
-    commentNoteState,
-    commentCommitState,
+    commentActions,
     scrollApi = $bindable(null),
   }: Props = $props();
 
@@ -2569,24 +2561,7 @@
               handleCommentCancel();
             }
           : undefined}
-        onNote={existingComment && onCommentNote
-          ? (e) => onCommentNote(existingComment, e)
-          : undefined}
-        onCommit={existingComment && onCommentCommit
-          ? (e) => onCommentCommit(existingComment, e)
-          : undefined}
-        onGithub={existingComment && onCommentGithub
-          ? () => onCommentGithub(existingComment)
-          : undefined}
-        githubState={existingComment && commentGithubState
-          ? commentGithubState(existingComment)
-          : 'idle'}
-        noteState={existingComment && commentNoteState
-          ? commentNoteState(existingComment)
-          : 'idle'}
-        commitState={existingComment && commentCommitState
-          ? commentCommitState(existingComment)
-          : 'idle'}
+        {commentActions}
       />
     {/if}
 
@@ -2643,24 +2618,7 @@
               clearLineSelection();
             }
           : undefined}
-        onNote={existingComment && onCommentNote
-          ? (e) => onCommentNote(existingComment, e)
-          : undefined}
-        onCommit={existingComment && onCommentCommit
-          ? (e) => onCommentCommit(existingComment, e)
-          : undefined}
-        onGithub={existingComment && onCommentGithub
-          ? () => onCommentGithub(existingComment)
-          : undefined}
-        githubState={existingComment && commentGithubState
-          ? commentGithubState(existingComment)
-          : 'idle'}
-        noteState={existingComment && commentNoteState
-          ? commentNoteState(existingComment)
-          : 'idle'}
-        commitState={existingComment && commentCommitState
-          ? commentCommitState(existingComment)
-          : 'idle'}
+        {commentActions}
       />
     {/if}
   {/if}

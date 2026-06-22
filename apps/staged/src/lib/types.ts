@@ -479,6 +479,7 @@ export type {
   CommentAuthor,
   CommentType,
   Comment,
+  CommentActionContext,
   Review,
   LineSpan,
   AnnotationCategory,
@@ -487,9 +488,14 @@ export type {
   ReviewCommands,
 } from '@builderbot/diff-viewer/types';
 
-// CommentSessionState lives with the CommentEditor component, re-exported from
-// the package's components barrel rather than its /types entry.
-export type { CommentSessionState } from '@builderbot/diff-viewer/components';
+export type GithubButtonState = 'idle' | 'sending' | 'sent' | 'stale';
+
+/**
+ * State of a review comment's "Note"/"Commit" action, derived from the linked
+ * session's status. `queued` is treated as `running`, and `error`/`cancelled`
+ * collapse back to `idle` so the user can retry.
+ */
+export type CommentSessionState = 'idle' | 'running' | 'completed';
 
 // =============================================================================
 // Hashtag references

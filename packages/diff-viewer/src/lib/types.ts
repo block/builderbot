@@ -95,6 +95,11 @@ export interface Comment {
   commitSessionId: string | null;
 }
 
+/** Context passed to host-rendered comment action snippets. */
+export interface CommentActionContext {
+  comment: Comment;
+}
+
 /** A review anchored to a branch + commit + scope. */
 export interface Review {
   id: string;

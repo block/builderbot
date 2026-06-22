@@ -28,6 +28,7 @@
   import DiffFileTreeSection from './DiffFileTreeSection.svelte';
   import DiffCommitSessionLauncher from './DiffCommitSessionLauncher.svelte';
   import DiffReferenceSection from './DiffReferenceSection.svelte';
+  import ReviewCommentActions from './ReviewCommentActions.svelte';
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
   import SessionModal from '../sessions/SessionModal.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
@@ -48,6 +49,7 @@
     BranchSessionType,
     BranchSessionLaunchStatus,
     Comment,
+    CommentActionContext,
     CommitTimelineItem,
     SessionStatus,
     SmartDiffAnnotation,
@@ -1531,6 +1533,19 @@
   {/if}
 {/snippet}
 
+{#snippet reviewCommentActions(context: CommentActionContext)}
+  <ReviewCommentActions
+    comment={context.comment}
+    noteState={getCommentNoteState(context.comment)}
+    commitState={getCommentCommitState(context.comment)}
+    githubState={getCommentGithubState(context.comment)}
+    {hasPr}
+    onNote={handleNewNote}
+    onCommit={handleNewCommit}
+    onGithub={handleSendToGithub}
+  />
+{/snippet}
+
 <div class="diff-detail" bind:this={diffDetailEl}>
   <div class="modal-body">
     <!-- Diff viewer -->
@@ -1562,12 +1577,7 @@
         onAddComment={readonly ? undefined : handleAddComment}
         onUpdateComment={readonly ? undefined : handleUpdateComment}
         onDeleteComment={readonly ? undefined : handleDeleteCommentFromViewer}
-        onCommentNote={readonly ? undefined : handleNewNote}
-        onCommentCommit={readonly ? undefined : handleNewCommit}
-        onCommentGithub={readonly || !hasPr ? undefined : handleSendToGithub}
-        commentGithubState={readonly || !hasPr ? undefined : getCommentGithubState}
-        commentNoteState={readonly ? undefined : getCommentNoteState}
-        commentCommitState={readonly ? undefined : getCommentCommitState}
+        commentActions={readonly ? undefined : reviewCommentActions}
         clickDismissBoundary={diffDetailEl}
         bind:scrollApi={diffViewerScrollApi}
       />

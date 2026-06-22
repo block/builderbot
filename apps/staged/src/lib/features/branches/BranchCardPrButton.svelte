@@ -443,7 +443,7 @@
 
     try {
       if (status === 'completed' && sid) {
-        const messages = await commands.getSessionMessages(sid);
+        const messages = await commands.getFreshSessionMessages(sid);
         const foundUrl = extractPrUrl(messages);
 
         if (foundUrl) {
@@ -516,7 +516,7 @@
     }
 
     try {
-      const messages = await commands.getSessionMessages(sid);
+      const messages = await commands.getFreshSessionMessages(sid);
       const pipelineOutcome = classifyPipelinePushCompletion(pipeline, messages);
       if (pipelineOutcome) return pipelineOutcome;
       return classifyCompletedPushSession(pipeline, messages);

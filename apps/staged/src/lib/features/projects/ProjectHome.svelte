@@ -135,7 +135,9 @@
     void projectRunActionsStore.startListening();
 
     const onNewProject = () => handleNewProject();
+    const onCacheStale = () => loadData();
     window.addEventListener('staged:new-project', onNewProject);
+    window.addEventListener('cache-stale', onCacheStale);
 
     const unlistenDetection = listenToRepoActionsDetection((event) => {
       const matchingProjectIds = projects
@@ -167,18 +169,18 @@
             commands.listBranchesForProject(projectId),
             commands.listProjectRepos(projectId),
           ]);
-          setProjects(projectsList);
-          projects = projectsList;
+          setProjects(projectsList.data);
+          projects = projectsList.data;
           const mergedBranches = mergeBranchesPreservingWorktree(
             branchesByProject.get(projectId) || [],
-            branches
+            branches.data
           );
           branchesByProject = new Map(branchesByProject).set(projectId, mergedBranches);
           commands.invalidateProjectBranchTimelines(mergedBranches.map((b) => b.id));
           workspaceLifecycle.enqueueInitialSetup(projectId, mergedBranches);
-          replaceProjectRepos(projectId, repos);
+          replaceProjectRepos(projectId, repos.data);
           void repoBadgeStore.ensureForRepos(
-            repos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
+            repos.data.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
           );
         } catch (e) {
           console.error('[ProjectHome] Failed to refresh project after setup progress:', e);
@@ -247,8 +249,20 @@
         const projectId = payload.projectId;
         if (!projectId || !branchesByProject.has(projectId)) return;
         try {
-          const branches = await commands.listBranchesForProject(projectId);
+          const { data: branches, revalidating } = await commands.listBranchesForProject(projectId);
           branchesByProject = new Map(branchesByProject).set(projectId, branches);
+          if (revalidating) {
+            revalidating
+              .then((fresh) => {
+                branchesByProject = new Map(branchesByProject).set(projectId, fresh);
+              })
+              .catch((e) => {
+                console.error(
+                  `Failed to revalidate branches for project ${projectId} after commit:`,
+                  e
+                );
+              });
+          }
         } catch (e) {
           console.error(`Failed to refresh branches for project ${projectId} after commit:`, e);
         }
@@ -258,6 +272,7 @@
     return () => {
       loadGeneration++;
       window.removeEventListener('staged:new-project', onNewProject);
+      window.removeEventListener('cache-stale', onCacheStale);
       unlistenDetection();
       unlistenProjectRepoAdded();
       unlistenPrStatus();
@@ -355,27 +370,20 @@
     }, 3000);
   }
 
-  async function hydrateProject(
-    project: Project,
+  function applyProjectBranches(
+    projectId: string,
+    branches: Branch[],
     generation: number,
     options: { drainQueuedSessions?: boolean } = {}
-  ): Promise<Branch[] | null> {
-    const [branches, repos] = await Promise.all([
-      commands.listBranchesForProject(project.id),
-      commands.listProjectRepos(project.id),
-    ]);
+  ): Branch[] | null {
     if (generation !== loadGeneration) return null;
 
     const mergedBranches = mergeBranchesPreservingWorktree(
-      branchesByProject.get(project.id) || [],
+      branchesByProject.get(projectId) || [],
       branches
     );
-    branchesByProject = new Map(branchesByProject).set(project.id, mergedBranches);
-    workspaceLifecycle.enqueueInitialSetup(project.id, mergedBranches);
-    replaceProjectRepos(project.id, repos);
-    void repoBadgeStore.ensureForRepos(
-      repos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
-    );
+    branchesByProject = new Map(branchesByProject).set(projectId, mergedBranches);
+    workspaceLifecycle.enqueueInitialSetup(projectId, mergedBranches);
     projectRunActionsStore
       .hydrateFromProjectBranches(branchesByProject, {
         branchIds: mergedBranches.map((b) => b.id),
@@ -384,6 +392,53 @@
 
     if (options.drainQueuedSessions) {
       scheduleQueuedSessionDrain(mergedBranches);
+    }
+
+    return mergedBranches;
+  }
+
+  function applyProjectRepos(projectId: string, repos: ProjectRepo[], generation: number) {
+    if (generation !== loadGeneration) return;
+    replaceProjectRepos(projectId, repos);
+    void repoBadgeStore.ensureForRepos(
+      repos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
+    );
+  }
+
+  async function hydrateProject(
+    project: Project,
+    generation: number,
+    options: { drainQueuedSessions?: boolean } = {}
+  ): Promise<Branch[] | null> {
+    const [branchesResult, reposResult] = await Promise.all([
+      commands.listBranchesForProject(project.id),
+      commands.listProjectRepos(project.id),
+    ]);
+    if (generation !== loadGeneration) return null;
+
+    const mergedBranches = applyProjectBranches(project.id, branchesResult.data, generation, {
+      drainQueuedSessions: options.drainQueuedSessions,
+    });
+    applyProjectRepos(project.id, reposResult.data, generation);
+
+    if (branchesResult.revalidating) {
+      branchesResult.revalidating
+        .then((fresh) => {
+          applyProjectBranches(project.id, fresh, generation, {
+            drainQueuedSessions: options.drainQueuedSessions,
+          });
+        })
+        .catch((e) => {
+          console.error(`[ProjectHome] Failed to revalidate branches for '${project.id}':`, e);
+        });
+    }
+
+    if (reposResult.revalidating) {
+      reposResult.revalidating
+        .then((fresh) => applyProjectRepos(project.id, fresh, generation))
+        .catch((e) => {
+          console.error(`[ProjectHome] Failed to revalidate repos for '${project.id}':`, e);
+        });
     }
 
     return mergedBranches;
@@ -493,48 +548,21 @@
     error = null;
     await repoBadgeStore.loadAll();
     try {
-      const projectList = await commands.listProjects();
+      const { data: initialProjectList, revalidating: projectsRevalidating } =
+        await commands.listProjects();
       if (generation !== loadGeneration) return;
-      projects = projectList;
-      setProjects(projectList);
+      await applyProjectList(initialProjectList, generation);
       loading = false;
 
-      // Seed maps so project sections can render immediately.
-      const branchMap = new Map<string, Branch[]>();
-      for (const project of projectList) {
-        branchMap.set(project.id, branchesByProject.get(project.id) || []);
-      }
-      branchesByProject = branchMap;
-
-      // Drop cached repos for projects that no longer exist.
-      const projectIds = new Set(projectList.map((p) => p.id));
-      const prunedRepos = new Map<string, ProjectRepo>();
-      for (const [id, repo] of reposById) {
-        if (projectIds.has(repo.projectId)) prunedRepos.set(id, repo);
-      }
-      reposById = prunedRepos;
-
-      if (selectedProjectId) {
-        const selectedProject = projectList.find((project) => project.id === selectedProjectId);
-        if (selectedProject) {
-          try {
-            await hydrateProject(selectedProject, generation, { drainQueuedSessions: true });
-          } catch (e) {
-            console.error(
-              `[ProjectHome] Failed to hydrate selected project '${selectedProject.id}':`,
-              e
-            );
-          }
+      if (projectsRevalidating) {
+        try {
+          const fresh = await projectsRevalidating;
+          if (generation !== loadGeneration) return;
+          await applyProjectList(fresh, generation);
+        } catch (e) {
+          console.error('[ProjectHome] Failed to revalidate project list:', e);
         }
-        if (generation !== loadGeneration) return;
-        scheduleBackgroundHydration(projectList, selectedProjectId, generation);
-      } else {
-        await hydrateAllProjects(projectList, generation);
       }
-
-      lastSelectedProjectId = selectedProjectId;
-      initialLoadComplete = true;
-      void hydrateActionDetection(projectList, generation);
     } catch (e) {
       if (generation !== loadGeneration) return;
       error = e instanceof Error ? e.message : String(e);
@@ -543,6 +571,57 @@
         loading = false;
       }
     }
+  }
+
+  /**
+   * Apply a list of projects fetched from the backend: seed branch/repo maps,
+   * hydrate the selected project first, and background-hydrate the rest.
+   * Called once with cached data and again if SWR revalidation yields fresh data.
+   */
+  async function applyProjectList(projectList: Project[], generation: number) {
+    projects = projectList;
+    setProjects(projectList);
+
+    // Seed maps so project sections can render immediately.
+    const branchMap = new Map<string, Branch[]>();
+    for (const project of projectList) {
+      branchMap.set(project.id, branchesByProject.get(project.id) || []);
+    }
+    branchesByProject = branchMap;
+
+    // Drop cached repos for projects that no longer exist.
+    const projectIds = new Set(projectList.map((p) => p.id));
+    const prunedRepos = new Map<string, ProjectRepo>();
+    for (const [id, repo] of reposById) {
+      if (projectIds.has(repo.projectId)) prunedRepos.set(id, repo);
+    }
+    reposById = prunedRepos;
+
+    cancelBackgroundHydration();
+
+    if (selectedProjectId) {
+      const selectedProject = projectList.find((project) => project.id === selectedProjectId);
+      if (selectedProject) {
+        try {
+          await hydrateProject(selectedProject, generation, { drainQueuedSessions: true });
+        } catch (e) {
+          if (generation !== loadGeneration) return;
+          console.error(
+            `[ProjectHome] Failed to hydrate selected project '${selectedProject.id}':`,
+            e
+          );
+        }
+      }
+      if (generation !== loadGeneration) return;
+      scheduleBackgroundHydration(projectList, selectedProjectId, generation);
+    } else {
+      await hydrateAllProjects(projectList, generation);
+    }
+
+    if (generation !== loadGeneration) return;
+    lastSelectedProjectId = selectedProjectId;
+    initialLoadComplete = true;
+    void hydrateActionDetection(projectList, generation);
   }
 
   $effect(() => {
@@ -763,9 +842,9 @@
         commands.listBranchesForProject(project.id),
         commands.listProjectRepos(project.id),
       ]);
-      branchesByProject = new Map(branchesByProject).set(project.id, branches);
-      workspaceLifecycle.enqueueInitialSetup(project.id, branches);
-      replaceProjectRepos(project.id, repos);
+      branchesByProject = new Map(branchesByProject).set(project.id, branches.data);
+      workspaceLifecycle.enqueueInitialSetup(project.id, branches.data);
+      replaceProjectRepos(project.id, repos.data);
     } catch (e) {
       console.error('[ProjectHome] Failed to hydrate newly created project:', e);
     }
@@ -873,18 +952,18 @@
         commands.listBranchesForProject(projectId),
         commands.listProjectRepos(projectId),
       ]);
-      setProjects(projectsList);
-      projects = projectsList;
+      setProjects(projectsList.data);
+      projects = projectsList.data;
       const mergedBranches = mergeBranchesPreservingWorktree(
         branchesByProject.get(projectId) || [],
-        branches
+        branches.data
       );
       branchesByProject = new Map(branchesByProject).set(projectId, mergedBranches);
       commands.invalidateProjectBranchTimelines(mergedBranches.map((b) => b.id));
       workspaceLifecycle.enqueueInitialSetup(projectId, mergedBranches);
-      replaceProjectRepos(projectId, repos);
+      replaceProjectRepos(projectId, repos.data);
       void repoBadgeStore.ensureForRepos(
-        repos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
+        repos.data.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
       );
     } catch (e) {
       console.error('Failed to add repo:', e);
@@ -992,10 +1071,10 @@
           commands.listBranchesForProject(branch.projectId),
           commands.listProjectRepos(branch.projectId),
         ]);
-        setProjects(projectsList);
-        projects = projectsList;
-        branchesByProject = new Map(branchesByProject).set(branch.projectId, branches);
-        replaceProjectRepos(branch.projectId, repos);
+        setProjects(projectsList.data);
+        projects = projectsList.data;
+        branchesByProject = new Map(branchesByProject).set(branch.projectId, branches.data);
+        replaceProjectRepos(branch.projectId, repos.data);
       } else {
         await commands.deleteBranch(branch.id);
         // Fallback for legacy branches without repo linkage

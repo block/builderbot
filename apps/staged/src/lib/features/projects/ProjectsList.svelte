@@ -298,9 +298,11 @@
       deletingProjectNames = next;
       loadProjects();
     };
+    const onCacheStale = () => loadProjects();
     window.addEventListener('staged:new-project', onNewProject);
     window.addEventListener('staged:project-delete-start', onProjectDeleteStart);
     window.addEventListener('staged:project-delete-end', onProjectDeleteEnd);
+    window.addEventListener('cache-stale', onCacheStale);
 
     // Listen for PR status changes to update branch state
     const unlistenPrStatus = listenToEvent<PrStatusChangedEvent>('pr-status-changed', (payload) => {
@@ -336,8 +338,20 @@
         const projectId = payload.projectId;
         if (!projectId || !projectBranches.has(projectId)) return;
         try {
-          const branches = await commands.listBranchesForProject(projectId);
+          const { data: branches, revalidating } = await commands.listBranchesForProject(projectId);
           projectBranches = new Map(projectBranches).set(projectId, branches);
+          if (revalidating) {
+            revalidating
+              .then((fresh) => {
+                projectBranches = new Map(projectBranches).set(projectId, fresh);
+              })
+              .catch((e) => {
+                console.error(
+                  `Failed to revalidate branches for project ${projectId} after commit:`,
+                  e
+                );
+              });
+          }
         } catch (e) {
           console.error(`Failed to refresh branches for project ${projectId} after commit:`, e);
         }
@@ -349,6 +363,7 @@
       window.removeEventListener('staged:new-project', onNewProject);
       window.removeEventListener('staged:project-delete-start', onProjectDeleteStart);
       window.removeEventListener('staged:project-delete-end', onProjectDeleteEnd);
+      window.removeEventListener('cache-stale', onCacheStale);
       unlistenPrStatus();
       unlistenSessionStatus();
     };
@@ -360,26 +375,15 @@
     try {
       await repoBadgeStore.loadAll();
       if (reposUiEnabled) void loadHomeRepos();
-      const loadedProjects = await commands.listProjects();
-      projects = loadedProjects;
-      setProjects(loadedProjects);
-      void hydrateRepos(loadedProjects);
-      // Load branches for each project to calculate PR status
-      const branchesMap = new Map<string, Branch[]>();
-      await Promise.all(
-        loadedProjects.map(async (project) => {
-          try {
-            const branches = await commands.listBranchesForProject(project.id);
-            branchesMap.set(project.id, branches);
-          } catch (e) {
-            console.error(`Failed to load branches for project ${project.id}:`, e);
-            branchesMap.set(project.id, []);
-          }
-        })
-      );
-      projectBranches = branchesMap;
+      const { data: initialProjects, revalidating: projectsRevalidating } =
+        await commands.listProjects();
+      await applyProjects(initialProjects);
+      loading = false;
 
-      projectRunActionsStore.hydrateFromProjectBranches(branchesMap).catch(console.error);
+      if (projectsRevalidating) {
+        const fresh = await projectsRevalidating;
+        await applyProjects(fresh);
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -409,14 +413,60 @@
     }
   }
 
+  async function applyProjects(loadedProjects: Project[]) {
+    projects = loadedProjects;
+    setProjects(loadedProjects);
+    void hydrateRepos(loadedProjects);
+
+    const branchesMap = new Map<string, Branch[]>();
+    const branchRevalidations: Array<{ projectId: string; promise: Promise<Branch[]> }> = [];
+    await Promise.all(
+      loadedProjects.map(async (project) => {
+        try {
+          const { data: branches, revalidating } = await commands.listBranchesForProject(
+            project.id
+          );
+          branchesMap.set(project.id, branches);
+          if (revalidating) {
+            branchRevalidations.push({ projectId: project.id, promise: revalidating });
+          }
+        } catch (e) {
+          console.error(`Failed to load branches for project ${project.id}:`, e);
+          branchesMap.set(project.id, []);
+        }
+      })
+    );
+    projectBranches = branchesMap;
+    projectRunActionsStore.hydrateFromProjectBranches(branchesMap).catch(console.error);
+
+    if (branchRevalidations.length > 0) {
+      void Promise.all(
+        branchRevalidations.map(async ({ projectId, promise }) => {
+          try {
+            const fresh = await promise;
+            projectBranches = new Map(projectBranches).set(projectId, fresh);
+          } catch (e) {
+            console.error(`Failed to revalidate branches for project ${projectId}:`, e);
+          }
+        })
+      ).then(() =>
+        projectRunActionsStore.hydrateFromProjectBranches(projectBranches).catch(console.error)
+      );
+    }
+  }
+
   async function hydrateRepos(projectList: Project[]) {
     const generation = ++repoLoadGeneration;
     reposHydrating = true;
     try {
+      const revalidations: Array<{ projectId: string; promise: Promise<ProjectRepo[]> }> = [];
       const entries = await Promise.all(
         projectList.map(async (project) => {
           try {
-            const repos = await commands.listProjectRepos(project.id);
+            const { data: repos, revalidating } = await commands.listProjectRepos(project.id);
+            if (revalidating) {
+              revalidations.push({ projectId: project.id, promise: revalidating });
+            }
             return [project.id, repos] as const;
           } catch (e) {
             console.error(`[ProjectsList] Failed to load repos for project '${project.id}':`, e);
@@ -432,6 +482,20 @@
         repos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
       );
       void repoBadgeStore.ensureForRepos(allRepos);
+
+      for (const { projectId, promise } of revalidations) {
+        void promise
+          .then((fresh) => {
+            if (generation !== repoLoadGeneration) return;
+            reposByProject = new Map(reposByProject).set(projectId, fresh);
+            void repoBadgeStore.ensureForRepos(
+              fresh.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
+            );
+          })
+          .catch((e) => {
+            console.error(`[ProjectsList] Failed to revalidate repos for '${projectId}':`, e);
+          });
+      }
     } finally {
       if (generation === repoLoadGeneration) {
         reposHydrating = false;

@@ -199,10 +199,10 @@
       const contextIdByRepo = new Map(
         actionContexts.map((context) => [repoKey(context.githubRepo, context.subpath), context.id])
       );
-      const projects = await commands.listProjects();
+      const { data: projects } = await commands.listProjects();
       const reposByProject = await Promise.all(
         projects.map(async (project) => {
-          const repos = await commands.listProjectRepos(project.id);
+          const { data: repos } = await commands.listProjectRepos(project.id);
           return { project, repos };
         })
       );

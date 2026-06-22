@@ -43,18 +43,25 @@ export function createDiffViewerState(branchId: string, scope: DiffScope, commit
     state.error = null;
 
     try {
-      const response = await commands.getDiffFiles(
+      const { data: response, revalidating } = await commands.getDiffFiles(
         state.branchId,
         state.commitSha ?? undefined,
         state.scope
       );
       if (generation !== contextGeneration) return;
 
-      state.commitSha = response.commitSha;
-      state.files = response.files;
-
+      applyDiffFilesResponse(response);
       if (state.files.length > 0) {
         await selectFile(sharedFileSummaryPath(state.files[0]));
+      }
+      if (generation === contextGeneration) {
+        state.loading = false;
+      }
+
+      if (revalidating) {
+        const fresh = await revalidating;
+        if (generation !== contextGeneration) return;
+        applyDiffFilesResponse(fresh);
       }
     } catch (e) {
       if (generation !== contextGeneration) return;
@@ -65,6 +72,11 @@ export function createDiffViewerState(branchId: string, scope: DiffScope, commit
         state.loading = false;
       }
     }
+  }
+
+  function applyDiffFilesResponse(response: { commitSha: string; files: FileDiffSummary[] }) {
+    state.commitSha = response.commitSha;
+    state.files = response.files;
   }
 
   async function selectFile(path: string | null): Promise<void> {
@@ -84,18 +96,40 @@ export function createDiffViewerState(branchId: string, scope: DiffScope, commit
     if (cached) return cached;
 
     state.loadingFile = path;
+    const commitSha = state.commitSha;
+    const generation = contextGeneration;
 
     try {
-      const diff = await commands.getFileDiff(state.branchId, state.commitSha, state.scope, path);
+      const { data: diff, revalidating } = await commands.getFileDiff(
+        state.branchId,
+        commitSha,
+        state.scope,
+        path
+      );
+      if (generation !== contextGeneration) return null;
       const newCache = new Map(state.diffCache);
       newCache.set(path, diff);
       state.diffCache = newCache;
+
+      if (revalidating) {
+        revalidating
+          .then((fresh) => {
+            if (generation !== contextGeneration) return;
+            const next = new Map(state.diffCache);
+            next.set(path, fresh);
+            state.diffCache = next;
+          })
+          .catch(() => {});
+      }
       return diff;
     } catch (e) {
+      if (generation !== contextGeneration) return null;
       console.error(`Failed to load diff for ${path}:`, e);
       return null;
     } finally {
-      state.loadingFile = null;
+      if (generation === contextGeneration) {
+        state.loadingFile = null;
+      }
     }
   }
 

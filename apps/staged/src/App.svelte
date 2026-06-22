@@ -44,6 +44,8 @@
   import { projectStateStore } from './lib/stores/projectState.svelte';
   import { initBloxEnv } from './lib/stores/bloxEnv.svelte';
   import { listenForSessionStatus } from './lib/listeners/sessionStatusListener';
+  import { listenForCacheInvalidation } from './lib/listeners/cacheInvalidationListener';
+  import { listenForPageLifecycle } from './lib/listeners/pageLifecycleListener';
   import { darkMode } from './lib/stores/isDark.svelte';
   import * as prPollingService from './lib/services/prPollingService';
   import { reposUiEnabled } from './lib/featureFlags';
@@ -61,6 +63,8 @@
   let unlistenZoomOut: UnlistenFn | undefined;
   let unlistenZoomReset: UnlistenFn | undefined;
   let unlistenSessionStatus: UnlistenFn | undefined;
+  let unlistenCacheInvalidation: UnlistenFn | undefined;
+  let unlistenPageLifecycle: (() => void) | undefined;
   let unregisterShortcuts: (() => void) | null = null;
   let stopUpdaterLoop: (() => void) | null = null;
   let storeIncompat = $state<StoreIncompatibility | null>(null);
@@ -85,7 +89,7 @@
       const projectId = navigation.selectedProjectId;
       if (!projectId) return;
       try {
-        const branches = await commands.listBranchesForProject(projectId);
+        const { data: branches } = await commands.listBranchesForProject(projectId);
         await Promise.allSettled(branches.map((b) => commands.refreshBranchGitState(b.id)));
       } catch {
         // best-effort refresh; ignore failures
@@ -235,6 +239,14 @@
     prPollingService.init();
     document.addEventListener('keydown', handleKonamiKey);
 
+    // Web resume accelerator: the restored project id is available synchronously
+    // (navigation seeds it from localStorage at module load). Warm that project's
+    // branch timelines in parallel right away so cards find data ready, rather
+    // than each doing its own serialized IndexedDB read after ProjectHome mounts.
+    if (navigation.selectedProjectId) {
+      void commands.warmProjectTimelines(navigation.selectedProjectId);
+    }
+
     // Listen for the app menu Preferences item.
     unlistenSettings = listenToEvent('menu:settings', () => {
       if (!triggerShortcut('app-open-settings')) openSettings();
@@ -261,6 +273,8 @@
     // Global session-status listener — must live at App level so it works
     // regardless of which view the user is on. See sessionStatusListener.ts.
     unlistenSessionStatus = listenForSessionStatus();
+    unlistenCacheInvalidation = listenForCacheInvalidation();
+    unlistenPageLifecycle = listenForPageLifecycle();
 
     try {
       await initPreferences();
@@ -438,6 +452,8 @@
     unlistenZoomOut?.();
     unlistenZoomReset?.();
     unlistenSessionStatus?.();
+    unlistenCacheInvalidation?.();
+    unlistenPageLifecycle?.();
     stopUpdaterLoop?.();
   });
 

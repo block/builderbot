@@ -80,11 +80,20 @@ export const agentState = $state({
  * Safe to call multiple times — each call replaces the cached list.
  * Called once at startup and again when the user clicks "Refresh".
  */
-export async function refreshProviders(): Promise<AcpProviderInfo[]> {
+export async function refreshProviders(
+  options: { force?: boolean } = {}
+): Promise<AcpProviderInfo[]> {
   try {
-    const providers = await discoverAcpProviders();
+    const { data: providers, revalidating } = await discoverAcpProviders(options);
     agentState.providers = providers;
     agentState.loaded = true;
+    if (revalidating) {
+      revalidating
+        .then((fresh) => {
+          agentState.providers = fresh;
+        })
+        .catch((e) => console.error('Failed to revalidate ACP providers:', e));
+    }
     return providers;
   } catch (e) {
     console.error('Failed to discover ACP providers:', e);

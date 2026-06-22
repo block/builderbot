@@ -31,7 +31,7 @@
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
   import SessionModal from '../sessions/SessionModal.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
-  import { onSessionStatusChanged } from '../../services/branchEventService';
+  import { onBranchSessionStatus } from '../../services/branchEventService';
   import { getPreferredAgent, preferences } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { createDiffViewerState } from './diffViewerState.svelte';
@@ -818,7 +818,14 @@
   // Keep linked-session statuses live while the modal is open. Mirrors the
   // auto-review polling precedent, but event-driven via the shared listener.
   $effect(() => {
-    const unlisten = onSessionStatusChanged((payload) => {
+    const linkedSessionIds = new Set<string>();
+    for (const comment of allComments) {
+      if (comment.noteSessionId) linkedSessionIds.add(comment.noteSessionId);
+      if (comment.commitSessionId) linkedSessionIds.add(comment.commitSessionId);
+    }
+
+    const unlisten = onBranchSessionStatus(branchId, (payload) => {
+      if (!linkedSessionIds.has(payload.sessionId)) return;
       if (sessionStatusById.get(payload.sessionId) === payload.status) return;
       sessionStatusById = new Map(sessionStatusById).set(payload.sessionId, payload.status);
     });

@@ -2216,6 +2216,7 @@ pub fn run() {
             note_commands::create_project_note,
             note_commands::list_project_notes,
             note_commands::get_project_note_by_session,
+            note_commands::get_branch_note_by_session,
             note_commands::delete_project_note,
             // Images
             image_commands::create_image,
@@ -2307,6 +2308,8 @@ pub fn run() {
             review_commands::unmark_reviewed,
             review_commands::add_comment,
             review_commands::update_comment,
+            review_commands::link_comment_session,
+            review_commands::get_branch_commit_by_session,
             review_commands::delete_comment,
             review_commands::delete_all_comments,
             review_commands::restore_comment,

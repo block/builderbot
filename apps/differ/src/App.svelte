@@ -439,6 +439,8 @@
       githubCommentId: null,
       githubCommentType: null,
       githubCommentStale: false,
+      noteSessionId: null,
+      commitSessionId: null,
     };
     localComments = [...localComments, comment];
   }

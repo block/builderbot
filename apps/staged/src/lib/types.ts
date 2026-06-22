@@ -151,6 +151,20 @@ export interface NoteTimelineItem {
   suggestedNextNoteStep: string | null;
 }
 
+/** A full branch note record, as returned by `get_branch_note_by_session`. */
+export interface BranchNote {
+  id: string;
+  branchId: string;
+  sessionId: string | null;
+  title: string;
+  content: string;
+  createdAt: number;
+  updatedAt: number;
+  completedAt: number | null;
+  suggestedNextCommitStep: string | null;
+  suggestedNextNoteStep: string | null;
+}
+
 export interface ReviewTimelineItem {
   id: string;
   commitSha: string;
@@ -472,6 +486,7 @@ export type {
   CommentAuthor,
   CommentType,
   Comment,
+  CommentActionContext,
   Review,
   LineSpan,
   AnnotationCategory,
@@ -479,6 +494,15 @@ export type {
   DiffCommands,
   ReviewCommands,
 } from '@builderbot/diff-viewer/types';
+
+export type GithubButtonState = 'idle' | 'sending' | 'sent' | 'stale';
+
+/**
+ * State of a review comment's "Note"/"Commit" action, derived from the linked
+ * session's status. `queued` is treated as `running`, and `error`/`cancelled`
+ * collapse back to `idle` so the user can retry.
+ */
+export type CommentSessionState = 'idle' | 'running' | 'completed';
 
 // =============================================================================
 // Hashtag references

@@ -5,10 +5,9 @@
   Handles its own visibility based on scroll position.
 -->
 <script lang="ts">
-  import { Check, FileText, GitCommitVertical, Github, Loader2, Trash2 } from 'lucide-svelte';
-  import type { Comment } from '../types';
-
-  export type GithubButtonState = 'idle' | 'sending' | 'sent' | 'stale';
+  import { Trash2 } from 'lucide-svelte';
+  import type { Snippet } from 'svelte';
+  import type { Comment, CommentActionContext } from '../types';
 
   interface Props {
     /** Position relative to the viewer container */
@@ -29,14 +28,8 @@
     onCancel: () => void;
     /** Called when comment is deleted (only shown if existingComment is set) */
     onDelete?: () => void;
-    /** Called when "Note" action is clicked (only shown if existingComment is set). */
-    onNote?: (event: MouseEvent) => void;
-    /** Called when "Commit" action is clicked (only shown if existingComment is set). */
-    onCommit?: (event: MouseEvent) => void;
-    /** Called when "GitHub" action is clicked (only shown if existingComment is set). */
-    onGithub?: () => void;
-    /** Current state of the GitHub send/update button. */
-    githubState?: GithubButtonState;
+    /** Host-rendered actions for existing comments. */
+    commentActions?: Snippet<[CommentActionContext]>;
   }
 
   let {
@@ -50,10 +43,7 @@
     onSubmit,
     onCancel,
     onDelete,
-    onNote,
-    onCommit,
-    onGithub,
-    githubState = 'idle',
+    commentActions,
   }: Props = $props();
 
   // Track current input value - initialized by effect when existingComment changes
@@ -125,55 +115,9 @@
     <span class="comment-editor-help">
       {readOnly ? 'Read-only · Esc to close' : 'Enter to save · Esc to cancel'}
     </span>
-    {#if existingComment && (onNote || onCommit || onGithub)}
+    {#if existingComment && commentActions}
       <div class="comment-action-buttons">
-        {#if onNote}
-          <button
-            class="comment-action-btn note-btn"
-            onclick={(e) => onNote?.(e)}
-            title="New note (Option+click to skip dialog)"
-          >
-            <FileText size={12} />
-            <span>Note</span>
-          </button>
-        {/if}
-        {#if onCommit}
-          <button
-            class="comment-action-btn commit-btn"
-            onclick={(e) => onCommit?.(e)}
-            title="New commit (Option+click to skip dialog)"
-          >
-            <GitCommitVertical size={12} />
-            <span>Commit</span>
-          </button>
-        {/if}
-        {#if onGithub}
-          <button
-            class="comment-action-btn github-btn"
-            class:github-btn-sent={githubState === 'sent'}
-            onclick={() => onGithub?.()}
-            title={githubState === 'sent'
-              ? 'Open GitHub comment'
-              : githubState === 'stale'
-                ? 'Update on GitHub'
-                : 'Send to GitHub'}
-            disabled={githubState === 'sending'}
-          >
-            {#if githubState === 'sending'}
-              <Loader2 size={12} class="spinner" />
-            {:else if githubState === 'sent'}
-              <Check size={12} class="github-sent-check" />
-              <Github size={12} />
-            {:else}
-              <Github size={12} />
-            {/if}
-            {#if githubState === 'stale'}
-              <span>Update on GitHub</span>
-            {:else}
-              <span>GitHub</span>
-            {/if}
-          </button>
-        {/if}
+        {@render commentActions({ comment: existingComment })}
       </div>
     {/if}
     {#if existingComment && onDelete}
@@ -245,82 +189,6 @@
     display: flex;
     align-items: center;
     gap: 4px;
-  }
-
-  .comment-action-btn {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 2px 6px;
-    border-radius: 4px;
-    border: 1px dashed var(--border-subtle);
-    background: transparent;
-    color: var(--text-muted);
-    font-size: calc(var(--size-xs) - 1px);
-    font-weight: 500;
-    cursor: pointer;
-    transition:
-      color 0.15s,
-      border-color 0.15s,
-      background-color 0.15s;
-  }
-
-  .comment-action-btn.note-btn :global(svg) {
-    color: var(--note-color);
-  }
-
-  .comment-action-btn.commit-btn :global(svg) {
-    color: var(--commit-color);
-  }
-
-  .comment-action-btn.github-btn :global(svg) {
-    color: var(--text-primary);
-  }
-
-  .comment-action-btn.note-btn:hover {
-    color: var(--note-color);
-    border-color: var(--note-color);
-    background-color: var(--note-bg);
-  }
-
-  .comment-action-btn.commit-btn:hover {
-    color: var(--commit-color);
-    border-color: var(--commit-color);
-    background-color: var(--commit-bg);
-  }
-
-  .comment-action-btn.github-btn:hover:not(:disabled) {
-    color: var(--text-primary);
-    border-color: var(--text-muted);
-    background-color: var(--bg-hover);
-  }
-
-  .comment-action-btn.github-btn:disabled {
-    cursor: default;
-    opacity: 0.7;
-  }
-
-  .comment-action-btn.github-btn-sent {
-    border-style: solid;
-    color: var(--text-primary);
-    border-color: var(--status-added, #3fb950);
-  }
-
-  .comment-action-btn.github-btn-sent :global(.github-sent-check) {
-    color: var(--status-added, #3fb950) !important;
-  }
-
-  .comment-action-btn :global(.spinner) {
-    animation: spin 1s linear infinite;
-  }
-
-  @keyframes spin {
-    from {
-      transform: rotate(0deg);
-    }
-    to {
-      transform: rotate(360deg);
-    }
   }
 
   .delete-comment-btn {

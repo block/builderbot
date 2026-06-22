@@ -16,10 +16,18 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
+  import type { Snippet } from 'svelte';
   import { MessageSquarePlus, MessageSquare, X, FileText, Code } from 'lucide-svelte';
   import { marked } from 'marked';
   import { sanitize } from '../utils/sanitize';
-  import type { FileDiff, Alignment, Comment, Span, SmartDiffAnnotation } from '../types';
+  import type {
+    FileDiff,
+    Alignment,
+    Comment,
+    Span,
+    SmartDiffAnnotation,
+    CommentActionContext,
+  } from '../types';
   import {
     initHighlighter,
     highlightLines,
@@ -75,7 +83,7 @@
     getHeaderAwareActiveStructuralStack,
     getStructuralDeclarations,
   } from '../utils/structuralHeaders';
-  import CommentEditor, { type GithubButtonState } from './CommentEditor.svelte';
+  import CommentEditor from './CommentEditor.svelte';
   import AnnotationOverlay from './AnnotationOverlay.svelte';
   import BeforeAnnotationOverlay from './BeforeAnnotationOverlay.svelte';
   import Scrollbar from './Scrollbar.svelte';
@@ -120,18 +128,16 @@
     annotationsRevealed?: boolean;
     /** Search state for highlighting matches in the diff content. */
     searchState?: SearchState;
+    /** Host-owned area where clicks may dismiss this viewer's active line selection. */
+    clickDismissBoundary?: HTMLElement | null;
 
     // -- Comment callbacks (all optional; without them commenting is disabled) --
     onAddComment?: (path: string, span: Span, content: string) => Promise<void>;
     onUpdateComment?: (commentId: string, content: string) => Promise<void>;
     onDeleteComment?: (commentId: string) => Promise<void>;
 
-    // -- Comment action callbacks (optional; shown in editor bottom bar) --
-    onCommentNote?: (comment: Comment, event: MouseEvent) => void;
-    onCommentCommit?: (comment: Comment, event: MouseEvent) => void;
-    onCommentGithub?: (comment: Comment) => void;
-    /** Returns the GitHub button state for a given comment. */
-    commentGithubState?: (comment: Comment) => GithubButtonState;
+    /** Host-rendered actions for an existing comment's editor footer. */
+    commentActions?: Snippet<[CommentActionContext]>;
 
     /** Bindable API object exposing scroll control for external callers (e.g. mobile touch scroll). */
     scrollApi?: DiffViewerScrollApi | null;
@@ -151,13 +157,11 @@
     annotations = [],
     annotationsRevealed = false,
     searchState,
+    clickDismissBoundary = null,
     onAddComment,
     onUpdateComment,
     onDeleteComment,
-    onCommentNote,
-    onCommentCommit,
-    onCommentGithub,
-    commentGithubState,
+    commentActions,
     scrollApi = $bindable(null),
   }: Props = $props();
 
@@ -1875,6 +1879,15 @@
     focusedHunkIndex = null;
 
     const target = event.target as HTMLElement;
+    // The comment editor and line selection belong to this viewer. Host apps
+    // can extend the dismissal area to adjacent chrome (for example, a sidebar)
+    // while body-level dialog portals remain outside that boundary.
+    const isInsideDismissArea =
+      (diffViewerEl?.contains(target) ?? false) ||
+      (clickDismissBoundary?.contains(target) ?? false);
+    if (!isInsideDismissArea) {
+      return;
+    }
     if (
       target.closest('.line-selection-toolbar') ||
       target.closest('.line-comment-editor') ||
@@ -2548,18 +2561,7 @@
               handleCommentCancel();
             }
           : undefined}
-        onNote={existingComment && onCommentNote
-          ? (e) => onCommentNote(existingComment, e)
-          : undefined}
-        onCommit={existingComment && onCommentCommit
-          ? (e) => onCommentCommit(existingComment, e)
-          : undefined}
-        onGithub={existingComment && onCommentGithub
-          ? () => onCommentGithub(existingComment)
-          : undefined}
-        githubState={existingComment && commentGithubState
-          ? commentGithubState(existingComment)
-          : 'idle'}
+        {commentActions}
       />
     {/if}
 
@@ -2616,18 +2618,7 @@
               clearLineSelection();
             }
           : undefined}
-        onNote={existingComment && onCommentNote
-          ? (e) => onCommentNote(existingComment, e)
-          : undefined}
-        onCommit={existingComment && onCommentCommit
-          ? (e) => onCommentCommit(existingComment, e)
-          : undefined}
-        onGithub={existingComment && onCommentGithub
-          ? () => onCommentGithub(existingComment)
-          : undefined}
-        githubState={existingComment && commentGithubState
-          ? commentGithubState(existingComment)
-          : 'idle'}
+        {commentActions}
       />
     {/if}
   {/if}

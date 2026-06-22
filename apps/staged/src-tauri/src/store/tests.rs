@@ -1611,6 +1611,72 @@ fn test_review_with_comments_and_files() {
 }
 
 #[test]
+fn test_set_comment_session_round_trips() {
+    use crate::git::Span;
+
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let review = Review::new(&branch.id, "abc123", ReviewScope::Branch);
+    store.create_review(&review).unwrap();
+
+    let comment = Comment::new("src/main.rs", Span::new(10, 15), "Needs a follow-up");
+    store.add_comment(&review.id, &comment).unwrap();
+
+    // Freshly added comments load with no linked sessions.
+    let loaded = store.get_review(&review.id).unwrap().unwrap();
+    let loaded_comment = loaded.comments.iter().find(|c| c.id == comment.id).unwrap();
+    assert_eq!(loaded_comment.note_session_id, None);
+    assert_eq!(loaded_comment.commit_session_id, None);
+
+    // The note and commit links are independent and coexist on one comment.
+    store
+        .set_comment_session(&comment.id, "note", "note-session-1")
+        .unwrap();
+    store
+        .set_comment_session(&comment.id, "commit", "commit-session-1")
+        .unwrap();
+
+    let linked = store.get_review(&review.id).unwrap().unwrap();
+    let linked_comment = linked.comments.iter().find(|c| c.id == comment.id).unwrap();
+    assert_eq!(
+        linked_comment.note_session_id.as_deref(),
+        Some("note-session-1")
+    );
+    assert_eq!(
+        linked_comment.commit_session_id.as_deref(),
+        Some("commit-session-1")
+    );
+
+    // Re-linking the same type is last-write-wins.
+    store
+        .set_comment_session(&comment.id, "note", "note-session-2")
+        .unwrap();
+    let relinked = store.get_review(&review.id).unwrap().unwrap();
+    let relinked_comment = relinked
+        .comments
+        .iter()
+        .find(|c| c.id == comment.id)
+        .unwrap();
+    assert_eq!(
+        relinked_comment.note_session_id.as_deref(),
+        Some("note-session-2")
+    );
+    assert_eq!(
+        relinked_comment.commit_session_id.as_deref(),
+        Some("commit-session-1")
+    );
+
+    // An unknown session type is rejected.
+    assert!(store
+        .set_comment_session(&comment.id, "bogus", "x")
+        .is_err());
+}
+
+#[test]
 fn test_set_review_auto_restamps_completed_at_when_made_visible() {
     let store = Store::in_memory().unwrap();
     let project = Project::new("test-owner/test-repo");

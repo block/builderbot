@@ -1156,6 +1156,10 @@ pub struct Comment {
     pub github_comment_type: Option<String>,
     /// Whether the local content has been edited since the last GitHub sync.
     pub github_comment_stale: bool,
+    /// The note session started from this comment's "Note" button, if any.
+    pub note_session_id: Option<String>,
+    /// The commit session started from this comment's "Commit" button, if any.
+    pub commit_session_id: Option<String>,
 }
 
 impl Comment {
@@ -1172,6 +1176,8 @@ impl Comment {
             github_comment_id: None,
             github_comment_type: None,
             github_comment_stale: false,
+            note_session_id: None,
+            commit_session_id: None,
         }
     }
 

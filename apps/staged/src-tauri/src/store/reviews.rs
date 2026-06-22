@@ -227,6 +227,32 @@ impl Store {
         Ok(())
     }
 
+    /// Link a comment to the note/commit session started from its button.
+    ///
+    /// `session_type` selects which link to set: `"note"` populates
+    /// `note_session_id`, `"commit"` populates `commit_session_id`. The two
+    /// links are independent so a single comment can spawn both.
+    pub fn set_comment_session(
+        &self,
+        comment_id: &str,
+        session_type: &str,
+        session_id: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        match session_type {
+            "note" => conn.execute(
+                "UPDATE comments SET note_session_id = ?1 WHERE id = ?2",
+                params![session_id, comment_id],
+            )?,
+            "commit" => conn.execute(
+                "UPDATE comments SET commit_session_id = ?1 WHERE id = ?2",
+                params![session_id, comment_id],
+            )?,
+            other => return Err(StoreError(format!("Invalid comment session type: {other}"))),
+        };
+        Ok(())
+    }
+
     /// Soft-delete a comment by setting `deleted_at` to the current timestamp.
     pub fn delete_comment(&self, comment_id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
@@ -266,7 +292,7 @@ impl Store {
     pub fn get_deleted_comments(&self, review_id: &str) -> Result<Vec<Comment>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, path, span_start, span_end, content, author, comment_type, created_at, deleted_at, github_comment_id, github_comment_type, github_comment_stale
+            "SELECT id, path, span_start, span_end, content, author, comment_type, created_at, deleted_at, github_comment_id, github_comment_type, github_comment_stale, note_session_id, commit_session_id
              FROM comments WHERE review_id = ?1 AND deleted_at IS NOT NULL ORDER BY deleted_at DESC",
         )?;
         let comments = stmt
@@ -286,6 +312,8 @@ impl Store {
                     github_comment_id: row.get(9)?,
                     github_comment_type: row.get(10)?,
                     github_comment_stale: row.get(11)?,
+                    note_session_id: row.get(12)?,
+                    commit_session_id: row.get(13)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -520,7 +548,7 @@ impl Store {
 
         // Load comments (only active — soft-deleted comments are excluded)
         let mut stmt = conn.prepare(
-            "SELECT id, path, span_start, span_end, content, author, comment_type, created_at, github_comment_id, github_comment_type, github_comment_stale
+            "SELECT id, path, span_start, span_end, content, author, comment_type, created_at, github_comment_id, github_comment_type, github_comment_stale, note_session_id, commit_session_id
              FROM comments WHERE review_id = ?1 AND deleted_at IS NULL ORDER BY created_at ASC",
         )?;
         review.comments = stmt
@@ -540,6 +568,8 @@ impl Store {
                     github_comment_id: row.get(8)?,
                     github_comment_type: row.get(9)?,
                     github_comment_stale: row.get(10)?,
+                    note_session_id: row.get(11)?,
+                    commit_session_id: row.get(12)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;

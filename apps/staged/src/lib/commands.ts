@@ -24,6 +24,7 @@ import type {
   File,
   Review,
   Comment,
+  BranchNote,
   WorkspaceInfo,
   PullRequest,
   Issue,
@@ -853,6 +854,28 @@ export function addComment(
 /** Update a comment's content. */
 export function updateComment(commentId: string, content: string): Promise<void> {
   return invokeCommand('update_comment', { commentId, content });
+}
+
+/** Link a review comment to the note/commit session started from its button.
+ *  The two links are independent, so a single comment can have both. */
+export function linkCommentSession(
+  commentId: string,
+  sessionId: string,
+  sessionType: 'note' | 'commit'
+): Promise<void> {
+  return invokeCommand('link_comment_session', { commentId, sessionId, sessionType });
+}
+
+/** Resolve the branch note produced by a session (for NoteModal).
+ *  Returns null if no note is linked to the session. */
+export function getBranchNoteBySession(sessionId: string): Promise<BranchNote | null> {
+  return invokeCommand('get_branch_note_by_session', { sessionId });
+}
+
+/** Resolve the commit SHA produced by a session.
+ *  Returns null if no commit is linked, or its SHA is still pending. */
+export function getBranchCommitBySession(sessionId: string): Promise<string | null> {
+  return invokeCommand('get_branch_commit_by_session', { sessionId });
 }
 
 /** Delete a comment (soft delete). */

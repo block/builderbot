@@ -1,7 +1,7 @@
 <!--
   NoteModal.svelte — Markdown viewer for a branch note
 
-  Displays a note's title and rendered markdown content in a clean modal.
+  Displays rendered markdown content in a clean modal.
   Read-only view.
 -->
 <script lang="ts">
@@ -10,6 +10,7 @@
   import Copy from '@lucide/svelte/icons/copy';
   import Check from '@lucide/svelte/icons/check';
   import MessageCircle from '@lucide/svelte/icons/message-circle';
+  import FileText from '@lucide/svelte/icons/file-text';
   import { marked } from 'marked';
   import * as Dialog from '$lib/components/ui/dialog';
   import { Button } from '$lib/components/ui/button';
@@ -20,6 +21,7 @@
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
   import { viewport } from '../../shared/viewport.svelte';
+  import { noteMarkdownWithTitle } from './noteMarkdown';
 
   marked.setOptions({ breaks: true, gfm: true });
 
@@ -55,6 +57,7 @@
   let chatButtonLabel = $derived(formatChatButtonLabel(assistantMessagesAfterNote));
   let canOpenSession = $derived(Boolean(sessionId && onOpenSession));
   let showChatInfo = $derived(canOpenSession && assistantMessagesAfterNote > 0);
+  let noteMarkdown = $derived(noteMarkdownWithTitle(title, content));
 
   // Search state
   let searchVisible = $state(false);
@@ -106,9 +109,8 @@
   }
 
   async function handleShare() {
-    const text = title ? `# ${title}\n\n${content}` : content;
     try {
-      await navigator.clipboard.writeText(text);
+      await navigator.clipboard.writeText(noteMarkdown);
       copied = true;
       setTimeout(() => (copied = false), 1500);
     } catch {
@@ -201,10 +203,13 @@
       class="flex-row items-center justify-between gap-3 px-4 py-3 border-b border-[var(--border-subtle)] flex-shrink-0"
     >
       <div class="header-content">
+        <span class="note-title-icon" aria-hidden="true">
+          <FileText size={13} />
+        </span>
         <Dialog.Title
           class="text-[var(--size-sm)] font-semibold text-foreground overflow-hidden text-ellipsis whitespace-nowrap"
         >
-          {title}
+          Note
         </Dialog.Title>
       </div>
       <InContentSearch
@@ -260,9 +265,9 @@
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div class="modal-content" bind:this={contentEl} onclick={handleExternalLinkClick}>
-        {#if content.trim()}
+        {#if noteMarkdown.trim()}
           <div class="markdown-content">
-            {@html renderMarkdown(content)}
+            {@html renderMarkdown(noteMarkdown)}
           </div>
         {:else}
           <p class="empty-note">This note has no content.</p>
@@ -321,6 +326,18 @@
     gap: 10px;
     min-width: 0;
     flex: 1;
+  }
+
+  .note-title-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 5px;
+    flex-shrink: 0;
+    color: var(--note-color);
+    background: var(--note-bg);
   }
 
   .header-actions {

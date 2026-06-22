@@ -123,6 +123,8 @@
     annotationsRevealed?: boolean;
     /** Search state for highlighting matches in the diff content. */
     searchState?: SearchState;
+    /** Host-owned area where clicks may dismiss this viewer's active line selection. */
+    clickDismissBoundary?: HTMLElement | null;
 
     // -- Comment callbacks (all optional; without them commenting is disabled) --
     onAddComment?: (path: string, span: Span, content: string) => Promise<void>;
@@ -158,6 +160,7 @@
     annotations = [],
     annotationsRevealed = false,
     searchState,
+    clickDismissBoundary = null,
     onAddComment,
     onUpdateComment,
     onDeleteComment,
@@ -1884,12 +1887,13 @@
     focusedHunkIndex = null;
 
     const target = event.target as HTMLElement;
-    // The comment editor and line selection belong to this viewer, so only a
-    // click inside the viewer should dismiss them. Anything outside — most
-    // visibly a Note/Commit/Session dialog, which renders into a body portal in
-    // the host app and so carries no markup we can recognize here — must leave
-    // the editor open.
-    if (diffViewerEl && !diffViewerEl.contains(target)) {
+    // The comment editor and line selection belong to this viewer. Host apps
+    // can extend the dismissal area to adjacent chrome (for example, a sidebar)
+    // while body-level dialog portals remain outside that boundary.
+    const isInsideDismissArea =
+      (diffViewerEl?.contains(target) ?? false) ||
+      (clickDismissBoundary?.contains(target) ?? false);
+    if (!isInsideDismissArea) {
       return;
     }
     if (

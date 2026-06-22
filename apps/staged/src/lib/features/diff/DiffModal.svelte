@@ -319,6 +319,7 @@
   let lineJumpToken = 0;
   let isSmallDiffViewport = $state(false);
   let showMobileSidebar = $state(false);
+  let diffDetailEl: HTMLDivElement | null = $state(null);
   let diffViewerContainerEl: HTMLDivElement | null = $state(null);
   let mobileDiffDragX = $state(0);
   let mobileDiffPointerId: number | null = null;
@@ -1523,7 +1524,7 @@
   {/if}
 {/snippet}
 
-<div class="diff-detail">
+<div class="diff-detail" bind:this={diffDetailEl}>
   <div class="modal-body">
     <!-- Diff viewer -->
     <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -1560,6 +1561,7 @@
         commentGithubState={readonly || !hasPr ? undefined : getCommentGithubState}
         commentNoteState={readonly ? undefined : getCommentNoteState}
         commentCommitState={readonly ? undefined : getCommentCommitState}
+        clickDismissBoundary={diffDetailEl}
         bind:scrollApi={diffViewerScrollApi}
       />
     </div>

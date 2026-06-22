@@ -774,10 +774,13 @@
     }
 
     const generation = ++draftLoadGeneration;
+    const inputTextWhenLoadStarted = untrack(() => inputText);
     loadedDraftSessionId = null;
     loadDraft(replyDraftKey(id)).then((draft) => {
       if (generation !== draftLoadGeneration || !active || sessionId !== id) return;
-      inputText = draft ?? '';
+      if (inputText === inputTextWhenLoadStarted) {
+        inputText = draft ?? '';
+      }
       loadedDraftSessionId = id;
       tick().then(() => autoResize());
     });

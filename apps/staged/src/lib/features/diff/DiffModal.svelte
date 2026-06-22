@@ -490,9 +490,6 @@
       );
 
       linkCommentToSession(comment, mode, result.sessionId, result.sessionStatus);
-
-      const label = mode === 'note' ? 'Note' : 'Commit';
-      toast.success(`${label} session ${result.sessionStatus === 'queued' ? 'queued' : 'started'}`);
     } catch (e) {
       toast.error(`Unable to start ${mode} session`, {
         description: e instanceof Error ? e.message : String(e),
@@ -577,9 +574,6 @@
       if (originComment) {
         linkCommentToSession(originComment, data.mode, result.sessionId, result.sessionStatus);
       }
-
-      const label = data.mode === 'note' ? 'Note' : data.mode === 'commit' ? 'Commit' : 'Review';
-      toast.success(`${label} session ${result.sessionStatus === 'queued' ? 'queued' : 'started'}`);
     } catch (e) {
       toast.error(`Unable to start ${data.mode} session`, {
         description: e instanceof Error ? e.message : String(e),

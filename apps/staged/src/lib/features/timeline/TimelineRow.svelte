@@ -791,6 +791,18 @@
     vertical-align: baseline;
   }
 
+  .timeline-title :global(.hashtag-badge) {
+    display: inline-flex;
+    align-items: center;
+    line-height: 1;
+    vertical-align: -2px;
+    transform: translateZ(0);
+  }
+
+  .timeline-title :global(.hashtag-badge svg) {
+    transform: translateZ(0);
+  }
+
   .timeline-row.git-state .timeline-title :global(.git-ref-badge) {
     color: var(--text-muted);
     font-weight: inherit;

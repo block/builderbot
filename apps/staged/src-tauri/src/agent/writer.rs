@@ -15,9 +15,9 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 
-use crate::store::{MessageRole, Store};
+use crate::store::{AcpMessageMetadata, MessageRole, Store};
 
-use acp_client::strip_code_fences;
+use acp_client::{strip_code_fences, AcpToolCallMetadata};
 
 /// Minimum interval between DB flushes for streaming text. Chunks accumulate
 /// in memory and are written at most this often, reducing mutex contention
@@ -61,6 +61,21 @@ fn format_tool_call_content(title: &str, raw_input: Option<&serde_json::Value>) 
     match raw_input {
         Some(input) => serde_json::json!({ "name": title, "input": input }).to_string(),
         None => title.to_string(),
+    }
+}
+
+fn acp_tool_call_metadata(metadata: AcpToolCallMetadata) -> AcpMessageMetadata {
+    AcpMessageMetadata {
+        acp_event_kind: metadata.event_kind,
+        acp_message_id: metadata.message_id,
+        acp_tool_call_id: metadata.tool_call_id,
+        acp_tool_kind: metadata.tool_kind,
+        acp_tool_status: metadata.tool_status,
+        acp_raw_input: metadata.raw_input,
+        acp_raw_output: metadata.raw_output,
+        acp_content: metadata.content,
+        acp_locations: metadata.locations,
+        ..Default::default()
     }
 }
 
@@ -262,6 +277,75 @@ impl acp_client::MessageWriter for MessageWriter {
     async fn record_tool_result(&self, content: &str) {
         self.record_tool_result(content).await
     }
+
+    async fn on_session_info_update(&self, info: &acp_client::SessionInfoUpdate) {
+        let metadata = AcpMessageMetadata {
+            acp_event_kind: Some("session_info_update".to_string()),
+            acp_session_info: serde_json::to_value(info).ok(),
+            ..Default::default()
+        };
+        if let Err(e) = self
+            .store
+            .add_acp_metadata_message(&self.session_id, &metadata)
+        {
+            log::error!("Failed to persist ACP session info update: {e}");
+        }
+    }
+
+    async fn on_model_state_update(&self, state: &acp_client::SessionModelState) {
+        let metadata = AcpMessageMetadata {
+            acp_event_kind: Some("session_mode_state".to_string()),
+            acp_session_mode_state: serde_json::to_value(state).ok(),
+            ..Default::default()
+        };
+        if let Err(e) = self
+            .store
+            .add_acp_metadata_message(&self.session_id, &metadata)
+        {
+            log::error!("Failed to persist ACP session mode state: {e}");
+        }
+    }
+
+    async fn on_config_option_update(&self, options: &[acp_client::SessionConfigOption]) {
+        if options.is_empty() {
+            return;
+        }
+
+        let metadata = AcpMessageMetadata {
+            acp_event_kind: Some("config_options_update".to_string()),
+            acp_config_options: serde_json::to_value(options).ok(),
+            ..Default::default()
+        };
+        if let Err(e) = self
+            .store
+            .add_acp_metadata_message(&self.session_id, &metadata)
+        {
+            log::error!("Failed to persist ACP config options update: {e}");
+        }
+    }
+
+    async fn record_tool_call_metadata(&self, metadata: AcpToolCallMetadata) {
+        let tool_call_id = metadata.tool_call_id.clone();
+        let metadata = acp_tool_call_metadata(metadata);
+        let row_id = if let Some(tool_call_id) = tool_call_id {
+            let rows = self.tool_call_rows.lock().await;
+            rows.get(&tool_call_id).map(|(row_id, _)| *row_id)
+        } else {
+            None
+        };
+
+        let result = match row_id {
+            Some(row_id) => self.store.update_message_acp_metadata(row_id, &metadata),
+            None => self
+                .store
+                .add_acp_metadata_message(&self.session_id, &metadata)
+                .map(|_| ()),
+        };
+
+        if let Err(e) = result {
+            log::error!("Failed to persist ACP tool-call metadata: {e}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -360,5 +444,37 @@ mod tests {
             serde_json::from_str(&messages[0].content).expect("content should be valid JSON");
         assert_eq!(parsed["name"], "Read file");
         assert_eq!(parsed["input"]["path"], "bar.rs");
+    }
+
+    #[tokio::test]
+    async fn record_tool_call_metadata_updates_existing_tool_call_row() {
+        let (store, session_id, writer) = setup_writer();
+
+        writer.record_tool_call("tc-meta", "Read file", None).await;
+        <MessageWriter as acp_client::MessageWriter>::record_tool_call_metadata(
+            &writer,
+            acp_client::AcpToolCallMetadata {
+                event_kind: Some("tool_call".to_string()),
+                tool_call_id: Some("tc-meta".to_string()),
+                tool_kind: Some("read".to_string()),
+                tool_status: Some("completed".to_string()),
+                raw_input: Some(serde_json::json!({"path": "src/lib.rs"})),
+                ..Default::default()
+            },
+        )
+        .await;
+
+        let messages = store
+            .get_session_messages(&session_id)
+            .expect("query messages");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, MessageRole::ToolCall);
+        assert_eq!(messages[0].acp.acp_event_kind.as_deref(), Some("tool_call"));
+        assert_eq!(messages[0].acp.acp_tool_call_id.as_deref(), Some("tc-meta"));
+        assert_eq!(messages[0].acp.acp_tool_kind.as_deref(), Some("read"));
+        assert_eq!(
+            messages[0].acp.acp_raw_input.as_ref().unwrap()["path"],
+            "src/lib.rs"
+        );
     }
 }

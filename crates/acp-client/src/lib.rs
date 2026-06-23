@@ -22,12 +22,13 @@ mod simple;
 mod types;
 
 // Re-export the main API
-pub use agent_client_protocol::{
-    ConfigOptionUpdate, McpServer, McpServerHttp, McpServerSse, ModelInfo, SessionConfigOption,
-    SessionConfigOptionCategory, SessionInfoUpdate, SessionModelState,
+pub use agent_client_protocol::schema::v1::{
+    ConfigOptionUpdate, McpServer, McpServerHttp, McpServerSse, SessionConfigOption,
+    SessionConfigOptionCategory, SessionInfoUpdate, SessionModeState as SessionModelState,
 };
 pub use driver::{
-    strip_code_fences, AcpDriver, AgentDriver, BasicMessageWriter, MessageWriter, Store,
+    strip_code_fences, AcpDriver, AcpToolCallMetadata, AgentDriver, BasicMessageWriter,
+    MessageWriter, Store,
 };
 pub use simple::{run_acp_prompt, run_acp_prompt_with_interpreter_env_snapshot};
 pub use types::{

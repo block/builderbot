@@ -16,12 +16,18 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::{
-    Agent, ClientSideConnection, ContentBlock as AcpContentBlock, ImageContent, Implementation,
-    InitializeRequest, LoadSessionRequest, McpCapabilities, McpServer, NewSessionRequest,
-    PermissionOptionId, PromptRequest, ProtocolVersion, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionConfigOption, SessionInfoUpdate, SessionModelState, SessionNotification, SessionUpdate,
-    TextContent,
+    schema::{
+        v1::{
+            ContentBlock as AcpContentBlock, ImageContent, Implementation, InitializeRequest,
+            LoadSessionRequest, McpCapabilities, McpServer, NewSessionRequest, PermissionOptionId,
+            PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
+            RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigOption,
+            SessionInfoUpdate, SessionModeState, SessionNotification, SessionUpdate, TextContent,
+            ToolCallContent,
+        },
+        ProtocolVersion,
+    },
+    Agent, ByteStreams, Client, ConnectionTo,
 };
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -81,15 +87,57 @@ pub trait MessageWriter: Send + Sync {
     /// session, or extracted from setup responses.
     async fn on_session_info_update(&self, _info: &SessionInfoUpdate) {}
 
-    /// Called when model state is received from session setup responses.
+    /// Called when mode state is received from session setup responses.
     ///
-    /// `SessionModelState` is only delivered in `NewSessionResponse` and
-    /// `LoadSessionResponse`. Mid-session model changes are surfaced through
+    /// `SessionModeState` is delivered in `NewSessionResponse` and
+    /// `LoadSessionResponse`. Mid-session mode/model changes are surfaced through
     /// `on_config_option_update` via `ConfigOptionUpdate` with category `Model`.
-    async fn on_model_state_update(&self, _state: &SessionModelState) {}
+    async fn on_model_state_update(&self, _state: &SessionModeState) {}
 
     /// Called when session configuration options change.
     async fn on_config_option_update(&self, _options: &[SessionConfigOption]) {}
+
+    /// Attach rich ACP tool-call metadata to an existing tool-call row.
+    async fn record_tool_call_metadata(&self, _metadata: AcpToolCallMetadata) {}
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AcpToolCallMetadata {
+    pub event_kind: Option<String>,
+    pub message_id: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub tool_kind: Option<String>,
+    pub tool_status: Option<String>,
+    pub raw_input: Option<serde_json::Value>,
+    pub raw_output: Option<serde_json::Value>,
+    pub content: Option<serde_json::Value>,
+    pub locations: Option<serde_json::Value>,
+}
+
+impl AcpToolCallMetadata {
+    fn has_update_fields(&self) -> bool {
+        self.tool_kind.is_some()
+            || self.tool_status.is_some()
+            || self.raw_input.is_some()
+            || self.raw_output.is_some()
+            || self.content.is_some()
+            || self.locations.is_some()
+    }
+}
+
+fn serialize_as_string<T: serde::Serialize>(value: &T) -> Option<String> {
+    match serde_json::to_value(value).ok()? {
+        serde_json::Value::String(s) => Some(s),
+        other => Some(other.to_string()),
+    }
+}
+
+fn serialize_non_empty<T: serde::Serialize>(items: &[T]) -> Option<serde_json::Value> {
+    if items.is_empty() {
+        None
+    } else {
+        serde_json::to_value(items).ok()
+    }
 }
 
 /// Storage interface for persisting agent session data.
@@ -225,6 +273,20 @@ impl AcpDriver {
                 "No ACP agent found. Install Goose, Claude Code, Codex, Pi, or Amp and ensure it's on your PATH."
                     .to_string()
             })
+    }
+
+    pub(crate) fn from_agent(agent: &crate::types::AcpAgent) -> Self {
+        Self {
+            binary_path: agent.binary_path.clone(),
+            acp_args: agent.acp_args.clone(),
+            agent_label: agent.label.clone(),
+            is_remote: false,
+            extra_env: Vec::new(),
+            env_snapshot: None,
+            interpreter_env_snapshot: None,
+            mcp_servers: Vec::new(),
+            remote_working_dir: None,
+        }
     }
 
     /// Create a driver that proxies through `sq blox acp <workspace>`.
@@ -692,7 +754,7 @@ impl AgentDriver for AcpDriver {
             .ok_or_else(|| "Failed to get stdout".to_string())?;
 
         let stdin_compat = stdin.compat_write();
-        let incoming_reader: Box<dyn tokio::io::AsyncRead + Unpin> = if self.is_remote {
+        let incoming_reader: Box<dyn tokio::io::AsyncRead + Send + Unpin> = if self.is_remote {
             let (normalized_stdout_writer, normalized_stdout_reader) = tokio::io::duplex(64 * 1024);
             tokio::task::spawn_local(async move {
                 if let Err(error) =
@@ -734,19 +796,6 @@ impl AgentDriver for AcpDriver {
             is_resuming,
             db_messages,
         ));
-        let handler_for_conn = Arc::clone(&handler);
-
-        let (connection, io_future) =
-            ClientSideConnection::new(handler_for_conn, stdin_compat, stdout_compat, |fut| {
-                tokio::task::spawn_local(fut);
-            });
-
-        tokio::task::spawn_local(async move {
-            if let Err(e) = io_future.await {
-                log::error!("ACP IO error: {e:?}");
-            }
-        });
-
         let acp_working_dir = if let Some(ref remote_dir) = self.remote_working_dir {
             remote_dir.clone()
         } else if self.is_remote {
@@ -755,6 +804,9 @@ impl AgentDriver for AcpDriver {
             working_dir.to_path_buf()
         };
 
+        let transport = ByteStreams::new(stdin_compat, stdout_compat);
+        let permission_handler = Arc::clone(&handler);
+        let notification_handler = Arc::clone(&handler);
         let protocol_result = tokio::select! {
             _ = cancel_token.cancelled() => {
                 log::info!("Session {session_id} cancelled");
@@ -762,10 +814,36 @@ impl AgentDriver for AcpDriver {
                 graceful_stop(&mut child, self.is_remote).await;
                 return Ok(());
             }
-            result = run_acp_protocol(
-                &connection, &acp_working_dir, prompt, images, store,
-                session_id, agent_session_id, &handler, &self.mcp_servers,
-            ) => result,
+            result = Client.builder()
+                .name("staged-acp-client")
+                .on_receive_request(
+                    async move |args: RequestPermissionRequest, responder, _connection| {
+                        let response = permission_handler.request_permission(args).await?;
+                        responder.respond(response)
+                    },
+                    agent_client_protocol::on_receive_request!(),
+                )
+                .on_receive_notification(
+                    async move |notification: SessionNotification, _connection| {
+                        notification_handler.session_notification(notification).await
+                    },
+                    agent_client_protocol::on_receive_notification!(),
+                )
+                .connect_with(transport, async |connection| {
+                    run_acp_protocol(
+                        &connection,
+                        &acp_working_dir,
+                        prompt,
+                        images,
+                        store,
+                        session_id,
+                        agent_session_id,
+                        &handler,
+                        &self.mcp_servers,
+                    )
+                    .await
+                    .map_err(agent_client_protocol::util::internal_error)
+                }) => result.map_err(|e| format!("ACP protocol failed: {e:?}")),
         };
 
         writer.finalize().await;
@@ -1160,8 +1238,7 @@ impl AcpNotificationHandler {
     }
 }
 
-#[async_trait(?Send)]
-impl agent_client_protocol::Client for AcpNotificationHandler {
+impl AcpNotificationHandler {
     async fn request_permission(
         &self,
         args: RequestPermissionRequest,
@@ -1204,12 +1281,14 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
                 id: String,
                 title: String,
                 raw_input: Option<serde_json::Value>,
+                metadata: AcpToolCallMetadata,
             },
             ToolCallUpdate {
                 id: String,
                 title: Option<String>,
                 raw_input: Option<serde_json::Value>,
                 result: Option<String>,
+                metadata: AcpToolCallMetadata,
             },
             Ignore,
             Drop,
@@ -1309,26 +1388,72 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
                                 LiveAction::Drop
                             }
                         }
-                        SessionUpdate::ToolCall(tool_call) => LiveAction::RecordToolCall {
-                            id: tool_call.tool_call_id.0.to_string(),
-                            title: tool_call.title.clone(),
-                            raw_input: tool_call.raw_input.clone(),
-                        },
+                        SessionUpdate::ToolCall(tool_call) => {
+                            let id = tool_call.tool_call_id.0.to_string();
+                            LiveAction::RecordToolCall {
+                                id: id.clone(),
+                                title: tool_call.title.clone(),
+                                raw_input: tool_call.raw_input.clone(),
+                                metadata: AcpToolCallMetadata {
+                                    event_kind: Some("tool_call".to_string()),
+                                    tool_call_id: Some(id),
+                                    tool_kind: serialize_as_string(&tool_call.kind),
+                                    tool_status: serialize_as_string(&tool_call.status),
+                                    raw_input: tool_call.raw_input.clone(),
+                                    raw_output: tool_call.raw_output.clone(),
+                                    content: serialize_non_empty(&tool_call.content),
+                                    locations: serialize_non_empty(&tool_call.locations),
+                                    ..Default::default()
+                                },
+                            }
+                        }
                         SessionUpdate::ToolCallUpdate(update) => {
                             let tc_id = update.tool_call_id.0.to_string();
                             let title = update.fields.title.clone();
                             let raw_input = update.fields.raw_input.clone();
+                            let metadata = AcpToolCallMetadata {
+                                event_kind: Some("tool_call_update".to_string()),
+                                tool_call_id: Some(tc_id.clone()),
+                                tool_kind: update
+                                    .fields
+                                    .kind
+                                    .as_ref()
+                                    .and_then(serialize_as_string),
+                                tool_status: update
+                                    .fields
+                                    .status
+                                    .as_ref()
+                                    .and_then(serialize_as_string),
+                                raw_input: raw_input.clone(),
+                                raw_output: update.fields.raw_output.clone(),
+                                content: update
+                                    .fields
+                                    .content
+                                    .as_ref()
+                                    .and_then(|content| serialize_non_empty(content)),
+                                locations: update
+                                    .fields
+                                    .locations
+                                    .as_ref()
+                                    .and_then(|locations| serialize_non_empty(locations)),
+                                ..Default::default()
+                            };
                             let result = update
                                 .fields
                                 .content
                                 .as_ref()
                                 .and_then(|c| extract_content_preview(c));
-                            if title.is_some() || raw_input.is_some() || result.is_some() {
+                            if title.is_some()
+                                || raw_input.is_some()
+                                || result.is_some()
+                                || metadata.has_update_fields()
+                            {
                                 LiveAction::ToolCallUpdate {
                                     id: tc_id,
                                     title,
                                     raw_input,
                                     result,
+                                    metadata,
                                 }
                             } else {
                                 LiveAction::Drop
@@ -1350,22 +1475,26 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
                 id,
                 title,
                 raw_input,
+                metadata,
             } => {
                 self.writer
                     .record_tool_call(&id, &title, raw_input.as_ref())
                     .await;
+                self.writer.record_tool_call_metadata(metadata).await;
             }
             LiveAction::ToolCallUpdate {
                 id,
                 title,
                 raw_input,
                 result,
+                metadata,
             } => {
                 if title.is_some() || raw_input.is_some() {
                     self.writer
                         .update_tool_call_title(&id, title.as_deref(), raw_input.as_ref())
                         .await;
                 }
+                self.writer.record_tool_call_metadata(metadata).await;
                 if let Some(preview) = result {
                     self.writer.record_tool_result(&preview).await;
                 }
@@ -1394,7 +1523,7 @@ fn notification_tool_call_id(update: &SessionUpdate) -> Option<String> {
 
 #[allow(clippy::too_many_arguments)]
 async fn run_acp_protocol(
-    connection: &ClientSideConnection,
+    connection: &ConnectionTo<Agent>,
     working_dir: &Path,
     prompt: &str,
     images: &[(String, String)],
@@ -1460,7 +1589,8 @@ async fn run_acp_protocol(
     handler.transition_to_live().await;
 
     connection
-        .prompt(prompt_request)
+        .send_request(prompt_request)
+        .block_task()
         .await
         .map_err(|e| format!("Prompt failed: {e:?}"))?;
 
@@ -1483,7 +1613,7 @@ fn mcp_server_transport_supported(server: &McpServer, caps: &McpCapabilities) ->
 
 #[allow(clippy::too_many_arguments)]
 async fn setup_acp_session(
-    connection: &ClientSideConnection,
+    connection: &ConnectionTo<Agent>,
     working_dir: &Path,
     store: &Arc<dyn Store>,
     writer: &Arc<dyn MessageWriter>,
@@ -1492,18 +1622,27 @@ async fn setup_acp_session(
     mcp_servers: &[McpServer],
 ) -> Result<String, String> {
     let client_info = Implementation::new("acp-client", env!("CARGO_PKG_VERSION"));
-    let init_request = InitializeRequest::new(ProtocolVersion::LATEST).client_info(client_info);
+    let init_request = InitializeRequest::new(ProtocolVersion::V1).client_info(client_info);
 
     let init_response = connection
-        .initialize(init_request)
+        .send_request(init_request)
+        .block_task()
         .await
         .map_err(|e| format!("ACP init failed: {e:?}"))?;
+
+    if init_response.protocol_version != ProtocolVersion::V1 {
+        return Err(format!(
+            "Agent negotiated unsupported ACP protocol version {} (expected {})",
+            init_response.protocol_version,
+            ProtocolVersion::V1
+        ));
+    }
 
     let mcp_caps = &init_response.agent_capabilities.mcp_capabilities;
 
     // Required servers must all have a supported transport, or the session
     // fails. Route the decision through mcp_server_transport_supported so the
-    // transport->capability mapping lives in exactly one place — a newly added
+    // transport->capability mapping lives in exactly one place: a newly added
     // transport stays validated here instead of silently slipping through.
     if mcp_servers
         .iter()
@@ -1535,15 +1674,16 @@ async fn setup_acp_session(
             );
 
             let load_response = connection
-                .load_session(
+                .send_request(
                     LoadSessionRequest::new(existing_id.to_string(), working_dir.to_path_buf())
                         .mcp_servers(mcp_servers.to_vec()),
                 )
+                .block_task()
                 .await
                 .map_err(|e| format!("Failed to load ACP session: {e:?}"))?;
 
-            if let Some(ref models) = load_response.models {
-                writer.on_model_state_update(models).await;
+            if let Some(ref modes) = load_response.modes {
+                writer.on_model_state_update(modes).await;
             }
             if let Some(ref options) = load_response.config_options {
                 writer.on_config_option_update(options).await;
@@ -1555,7 +1695,8 @@ async fn setup_acp_session(
             let new_session_request =
                 NewSessionRequest::new(working_dir.to_path_buf()).mcp_servers(mcp_servers.to_vec());
             let session_response = connection
-                .new_session(new_session_request)
+                .send_request(new_session_request)
+                .block_task()
                 .await
                 .map_err(|e| format!("Failed to create ACP session: {e:?}"))?;
 
@@ -1564,8 +1705,8 @@ async fn setup_acp_session(
                 .set_agent_session_id(our_session_id, &new_id)
                 .map_err(|e| format!("Failed to save agent session ID: {e}"))?;
 
-            if let Some(ref models) = session_response.models {
-                writer.on_model_state_update(models).await;
+            if let Some(ref modes) = session_response.modes {
+                writer.on_model_state_update(modes).await;
             }
             if let Some(ref options) = session_response.config_options {
                 writer.on_config_option_update(options).await;
@@ -1594,10 +1735,10 @@ pub fn strip_code_fences(content: &str) -> String {
     content.to_string()
 }
 
-fn extract_content_preview(content: &[agent_client_protocol::ToolCallContent]) -> Option<String> {
+fn extract_content_preview(content: &[ToolCallContent]) -> Option<String> {
     for item in content {
         match item {
-            agent_client_protocol::ToolCallContent::Content(c) => {
+            ToolCallContent::Content(c) => {
                 if let AcpContentBlock::Text(text) = &c.content {
                     let preview: String = text.text.chars().take(500).collect();
                     return Some(if text.text.len() > 500 {
@@ -1607,7 +1748,7 @@ fn extract_content_preview(content: &[agent_client_protocol::ToolCallContent]) -
                     });
                 }
             }
-            agent_client_protocol::ToolCallContent::Diff(d) => {
+            ToolCallContent::Diff(d) => {
                 return Some(format!(
                     "{}{}",
                     d.path.display(),
@@ -1618,7 +1759,7 @@ fn extract_content_preview(content: &[agent_client_protocol::ToolCallContent]) -
                     }
                 ));
             }
-            agent_client_protocol::ToolCallContent::Terminal(t) => {
+            ToolCallContent::Terminal(t) => {
                 return Some(format!("Terminal: {}", t.terminal_id.0));
             }
             _ => {}

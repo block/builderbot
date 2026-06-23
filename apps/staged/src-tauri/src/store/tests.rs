@@ -762,6 +762,56 @@ fn test_session_messages() {
 }
 
 #[test]
+fn test_acp_metadata_rows_are_hidden_from_legacy_session_messages() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    let visible_id = store
+        .add_session_message(&session.id, MessageRole::Assistant, "visible")
+        .unwrap();
+    let metadata_id = store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("session_info_update".to_string()),
+                acp_session_info: Some(serde_json::json!({"title": "ACP title"})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let all = store.get_session_messages(&session.id).unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].id, visible_id);
+    assert_eq!(all[0].content, "visible");
+
+    let count = store
+        .count_assistant_messages_after(&session.id, 0)
+        .unwrap();
+    assert_eq!(count, 1);
+
+    let conn = store.conn.lock().unwrap();
+    let raw_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM session_messages WHERE session_id = ?1",
+            [&session.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored_info: String = conn
+        .query_row(
+            "SELECT acp_session_info FROM session_messages WHERE id = ?1",
+            [metadata_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(raw_count, 2);
+    assert_eq!(stored_info, r#"{"title":"ACP title"}"#);
+}
+
+#[test]
 fn test_count_assistant_messages_after() {
     let store = Store::in_memory().unwrap();
 

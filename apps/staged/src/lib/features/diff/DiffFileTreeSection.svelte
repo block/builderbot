@@ -56,7 +56,7 @@
     selectedFile: string | null;
     isCollapsed: (path: string) => boolean;
     onToggleDir: (path: string) => void;
-    onSelectFile: (file: FileEntry) => void;
+    onSelectFile: (file: FileEntry) => void | Promise<void>;
     onToggleReviewed: (event: MouseEvent | KeyboardEvent, file: FileEntry) => void | Promise<void>;
     onJumpToLine?: (lineIndex: number) => void;
     searchState?: SearchStateHandle;

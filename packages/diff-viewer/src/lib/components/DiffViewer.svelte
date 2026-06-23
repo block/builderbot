@@ -1628,6 +1628,16 @@
     await onDeleteComment?.(id);
   }
 
+  async function handleRangeCommentDelete(id: string) {
+    clearRangeSelection();
+    await handleCommentDelete(id);
+  }
+
+  async function handleLineCommentDelete(id: string) {
+    clearLineSelection();
+    await handleCommentDelete(id);
+  }
+
   // ==========================================================================
   // Line selection handling
   // ==========================================================================
@@ -1732,6 +1742,24 @@
 
   async function flushAndClearLineSelection() {
     if (!(await flushLineCommentEditor())) return;
+    clearLineSelection();
+  }
+
+  export async function flushCommentEditors(): Promise<boolean> {
+    if (!(await flushRangeCommentEditor())) return false;
+    if (!(await flushLineCommentEditor())) return false;
+    return true;
+  }
+
+  export async function flushAndClearCommentEditors(): Promise<boolean> {
+    if (!(await flushCommentEditors())) return false;
+    clearRangeSelection();
+    clearLineSelection();
+    return true;
+  }
+
+  export function clearCommentEditors() {
+    clearRangeSelection();
     clearLineSelection();
   }
 
@@ -2597,12 +2625,7 @@
           return handleCommentSubmit(content);
         }}
         onClose={handleCommentCancel}
-        onDelete={existingComment
-          ? () => {
-              handleCommentDelete(existingComment.id);
-              handleCommentCancel();
-            }
-          : undefined}
+        onDelete={existingComment ? () => handleRangeCommentDelete(existingComment.id) : undefined}
         {commentActions}
       />
     {/if}
@@ -2653,12 +2676,7 @@
           return handleLineCommentSubmit(content);
         }}
         onClose={handleLineCommentCancel}
-        onDelete={existingComment
-          ? () => {
-              handleCommentDelete(existingComment.id);
-              clearLineSelection();
-            }
-          : undefined}
+        onDelete={existingComment ? () => handleLineCommentDelete(existingComment.id) : undefined}
         {commentActions}
       />
     {/if}

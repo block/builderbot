@@ -32,7 +32,7 @@
     /** Called when the editor should close after pending work is flushed. */
     onClose: () => void;
     /** Called when comment is deleted (only shown if existingComment is set) */
-    onDelete?: () => void;
+    onDelete?: () => void | Promise<void>;
     /** Host-rendered actions for existing comments. */
     commentActions?: Snippet<[CommentActionContext]>;
   }

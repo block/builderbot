@@ -26,6 +26,7 @@
       isOpen: boolean;
       fileResults: Map<string, FileSearchResult>;
       collapsedSearchResults: Set<string>;
+      currentResultIndex: number;
     };
     toggleSearchResults: (filePath: string) => void;
     areSearchResultsCollapsed: (filePath: string) => boolean;
@@ -42,7 +43,7 @@
       diffCache: Map<string, FileDiff>;
     };
     getCurrentDiff: () => FileDiff | null;
-    selectFile: (path: string) => Promise<void>;
+    selectFile: (path: string) => Promise<boolean | void>;
   }
 
   interface Props {
@@ -56,7 +57,7 @@
     selectedFile: string | null;
     isCollapsed: (path: string) => boolean;
     onToggleDir: (path: string) => void;
-    onSelectFile: (file: FileEntry) => void | Promise<void>;
+    onSelectFile: (file: FileEntry) => boolean | void | Promise<boolean | void>;
     onToggleReviewed: (event: MouseEvent | KeyboardEvent, file: FileEntry) => void | Promise<void>;
     onJumpToLine?: (lineIndex: number) => void;
     searchState?: SearchStateHandle;
@@ -129,16 +130,27 @@
   ) {
     if (!searchState || !diffViewerState) return;
 
+    const previousResultIndex = searchState.state.currentResultIndex;
+    const wasCollapsed = searchState.areSearchResultsCollapsed(filePath);
+
     // Update current result index
     searchState.setCurrentResult(globalIndex);
 
     // Auto-expand search results for this file
-    if (searchState.areSearchResultsCollapsed(filePath)) {
+    if (wasCollapsed) {
       searchState.toggleSearchResults(filePath);
     }
 
     // Select the file and scroll to the match
-    await diffViewerState.selectFile(filePath);
+    const selected = (await diffViewerState.selectFile(filePath)) !== false;
+    if (!selected) {
+      searchState.setCurrentResult(previousResultIndex);
+      if (wasCollapsed) {
+        searchState.toggleSearchResults(filePath);
+      }
+      return;
+    }
+
     // Scroll to the specific line
     if (onJumpToLine) {
       onJumpToLine(match.lineIndex);

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import Send from '@lucide/svelte/icons/send';
   import Spinner from '../../shared/Spinner.svelte';
   import { Button } from '$lib/components/ui/button';
@@ -25,7 +25,8 @@
     githubRepo?: string;
     subpath?: string | null;
     isRemote: boolean;
-    onStarted: () => void;
+    onBeforeStart?: () => boolean | Promise<boolean>;
+    onStarted: () => void | Promise<void>;
   }
 
   let {
@@ -38,6 +39,7 @@
     githubRepo,
     subpath,
     isRemote,
+    onBeforeStart = () => true,
     onStarted,
   }: Props = $props();
 
@@ -141,16 +143,21 @@
   }
 
   async function handleSubmit() {
-    let finalPrompt = draftPrompt.trim();
-    if (!finalPrompt || starting) return;
-
-    // Prepend a reference to the review when launched from a review context
-    if (reviewId) {
-      finalPrompt = `Re: #review:${reviewId}\n${finalPrompt}`;
-    }
+    if (starting || !draftPrompt.trim()) return;
 
     starting = true;
     try {
+      if (!(await onBeforeStart())) return;
+      await tick();
+
+      let finalPrompt = draftPrompt.trim();
+      if (!finalPrompt) return;
+
+      // Prepend a reference to the review when launched from a review context
+      if (reviewId) {
+        finalPrompt = `Re: #review:${reviewId}\n${finalPrompt}`;
+      }
+
       await refreshQueueState(true);
 
       const launchContext = {
@@ -172,7 +179,7 @@
         launchContext
       );
 
-      onStarted();
+      await onStarted();
     } catch (e) {
       toast.error('Unable to start commit session', {
         description: e instanceof Error ? e.message : String(e),

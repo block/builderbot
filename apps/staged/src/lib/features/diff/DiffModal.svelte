@@ -362,6 +362,10 @@
     onClose();
   }
 
+  async function prepareCommitSessionStart(): Promise<boolean> {
+    return await flushActiveCommentEditors();
+  }
+
   // (No confirmation dialogs — soft delete is reversible)
 
   // Annotation reveal state (hold A to reveal)
@@ -939,19 +943,21 @@
     getFiles: () => diffViewer.state.files,
   });
 
-  async function selectFilePath(path: string) {
-    if (!(await flushActiveCommentEditors())) return;
+  async function selectFilePath(path: string): Promise<boolean> {
+    if (!(await flushActiveCommentEditors())) return false;
     selectedCommentId = null;
     if (isSmallDiffViewport) showMobileSidebar = false;
     await diffViewer.selectFile(path);
+    return true;
   }
 
-  async function selectFile(file: FileEntry) {
-    if (!(await flushActiveCommentEditors())) return;
+  async function selectFile(file: FileEntry): Promise<boolean> {
+    if (!(await flushActiveCommentEditors())) return false;
     selectedCommentId = null;
     if (isSmallDiffViewport) showMobileSidebar = false;
     handleSearchOnFileSelect(file.path);
     await diffViewer.selectFile(file.path);
+    return true;
   }
 
   let diffViewerForFileTree = $derived({
@@ -1467,6 +1473,7 @@
           {githubRepo}
           {subpath}
           {isRemote}
+          onBeforeStart={prepareCommitSessionStart}
           onStarted={closeDiffModal}
         />
       {/if}

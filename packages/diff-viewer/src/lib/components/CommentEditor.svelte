@@ -58,6 +58,7 @@
   let saveStatus = $state<CommentSaveStatus>('idle');
   let saveError = $state<unknown>(null);
   let lastExternalCommentId: string | null | undefined = undefined;
+  let flushPendingOnDestroy = true;
 
   const autosave = createCommentAutosaveController({
     addComment: async (content) => {
@@ -99,7 +100,14 @@
   });
 
   onDestroy(() => {
-    autosave.dispose();
+    if (!flushPendingOnDestroy) {
+      autosave.dispose();
+      return;
+    }
+
+    void autosave.flush().finally(() => {
+      autosave.dispose();
+    });
   });
 
   let saveStatusLabel = $derived.by(() => {
@@ -122,6 +130,7 @@
   async function flushAndClose() {
     await ensureSaved();
     if (saveStatus === 'error') return;
+    flushPendingOnDestroy = false;
     onClose();
   }
 
@@ -140,6 +149,8 @@
   }
 
   function handleDelete() {
+    flushPendingOnDestroy = false;
+    autosave.dispose();
     onDelete?.();
   }
 

@@ -5,7 +5,7 @@
   Read-only view.
 -->
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy } from 'svelte';
   import X from '@lucide/svelte/icons/x';
   import Copy from '@lucide/svelte/icons/copy';
   import Check from '@lucide/svelte/icons/check';
@@ -68,12 +68,21 @@
   let contentEl: HTMLDivElement;
   let unregisterSearchTarget: (() => void) | null = null;
 
-  onMount(() => {
-    unregisterSearchTarget = registerSearchShortcutTarget({
+  // Register the global search-shortcut target only while the modal is open.
+  // Branch and project views lazy-mount this component, but this guard keeps
+  // persistent callers from letting a closed note modal capture Cmd/Ctrl+F.
+  $effect(() => {
+    if (!open) return;
+    const unregister = registerSearchShortcutTarget({
       find: openSearch,
       next: nextMatch,
       previous: previousMatch,
     });
+    unregisterSearchTarget = unregister;
+    return () => {
+      unregister();
+      unregisterSearchTarget = null;
+    };
   });
 
   onDestroy(() => {

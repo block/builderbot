@@ -467,42 +467,44 @@
   />
 {/if}
 
-<NoteModal
-  open={openNote !== null}
-  title={openNote?.title ?? ''}
-  content={openNote?.content ?? ''}
-  sessionId={openNote?.sessionId}
-  noteUpdatedAt={openNote?.noteUpdatedAt}
-  onClose={() => (openNote = null)}
-  onOpenSession={(sid) => {
-    openNote = null;
-    openSessionId = sid;
-  }}
-/>
+{#if openNote}
+  <NoteModal
+    open={true}
+    title={openNote.title}
+    content={openNote.content}
+    sessionId={openNote.sessionId}
+    noteUpdatedAt={openNote.noteUpdatedAt}
+    onClose={() => (openNote = null)}
+    onOpenSession={(sid) => {
+      openNote = null;
+      openSessionId = sid;
+    }}
+  />
+{/if}
 
-<SessionModal
-  open={openSessionId !== null}
-  sessionId={openSessionId ?? ''}
-  repoDir={projectDisplayRootCandidates}
-  projectId={project.id}
-  noteInfo={openSessionId
-    ? linkedNoteContext(projectNotes.find((n) => n.sessionId === openSessionId))
-    : null}
-  onOpenNote={(note) => {
-    const sid = openSessionId;
-    openSessionId = null;
-    openNote = {
-      title: note.title,
-      content: note.content,
-      sessionId: sid ?? undefined,
-      noteUpdatedAt: note.updatedAt,
-    };
-  }}
-  onClose={() => {
-    openSessionId = null;
-    loadProjectNotes();
-  }}
-/>
+{#if openSessionId}
+  <SessionModal
+    open={true}
+    sessionId={openSessionId}
+    repoDir={projectDisplayRootCandidates}
+    projectId={project.id}
+    noteInfo={linkedNoteContext(projectNotes.find((n) => n.sessionId === openSessionId))}
+    onOpenNote={(note) => {
+      const sid = openSessionId;
+      openSessionId = null;
+      openNote = {
+        title: note.title,
+        content: note.content,
+        sessionId: sid ?? undefined,
+        noteUpdatedAt: note.updatedAt,
+      };
+    }}
+    onClose={() => {
+      openSessionId = null;
+      loadProjectNotes();
+    }}
+  />
+{/if}
 
 <style>
   .project-section {

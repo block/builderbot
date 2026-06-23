@@ -214,6 +214,8 @@
   // More menu state
   let openerApps = $state<OpenerApp[]>([]);
 
+  const dropdownPanelClass = 'w-[180px]';
+
   let unlistenRepoActionsDetection: UnlistenFn | null = null;
 
   function handleActionsChanged(event: CustomEvent) {
@@ -859,7 +861,7 @@
   >
     <MoreVertical size={16} />
   </DropdownMenu.Trigger>
-  <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[160px]">
+  <DropdownMenu.Content align="end" sideOffset={4} class={dropdownPanelClass}>
     {#if !isSettingUp}
       {#if isRemote && branch.workspaceName}
         <DropdownMenu.Item
@@ -875,7 +877,7 @@
           <DropdownMenu.SubTrigger>
             <Play size={14} /> Actions
           </DropdownMenu.SubTrigger>
-          <DropdownMenu.SubContent class="min-w-[160px]">
+          <DropdownMenu.SubContent class={dropdownPanelClass}>
             {#each actionMenuItems as item, i (i)}
               {#if item.type === 'separator'}
                 <DropdownMenu.Separator />
@@ -888,7 +890,7 @@
                     {/if}
                     {item.label}
                   </DropdownMenu.SubTrigger>
-                  <DropdownMenu.SubContent class="min-w-[160px]">
+                  <DropdownMenu.SubContent class={dropdownPanelClass}>
                     {@render renderSubItems(item.children)}
                   </DropdownMenu.SubContent>
                 </DropdownMenu.Sub>
@@ -911,7 +913,7 @@
           <DropdownMenu.SubTrigger>
             <ExternalLink size={14} /> Open In
           </DropdownMenu.SubTrigger>
-          <DropdownMenu.SubContent class="min-w-[160px]">
+          <DropdownMenu.SubContent class={dropdownPanelClass}>
             {@render renderSubItems(openInMenuItems)}
           </DropdownMenu.SubContent>
         </DropdownMenu.Sub>

@@ -1575,9 +1575,7 @@
     overflow-y: auto;
     padding: 16px;
     min-height: 0;
-    /* Blend the messages-area surface halfway toward the composer's
-       --bg-chrome so it reads as distinct from the input field below. */
-    background: color-mix(in srgb, var(--bg-primary) 50%, var(--bg-chrome) 50%);
+    background: var(--bg-primary);
   }
 
   /* Custom scrollbar */

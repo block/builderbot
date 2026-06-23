@@ -1026,6 +1026,7 @@
       );
     } catch (e) {
       console.error('Failed to rename branch:', e);
+      throw e;
     }
   }
 </script>

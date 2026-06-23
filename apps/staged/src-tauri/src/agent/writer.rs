@@ -14,10 +14,15 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 
+use crate::agent::{PermissionDecision as StagedPermissionDecision, PermissionRegistry};
 use crate::store::{AcpMessageMetadata, MessageRole, Store};
 
-use acp_client::{strip_code_fences, AcpEventMetadata, AcpInitializeMetadata, AcpToolCallMetadata};
+use acp_client::{
+    strip_code_fences, AcpEventMetadata, AcpInitializeMetadata, AcpPermissionDecision,
+    AcpPermissionRequest, AcpToolCallMetadata,
+};
 
 /// Minimum interval between DB flushes for streaming text. Chunks accumulate
 /// in memory and are written at most this often, reducing mutex contention
@@ -46,6 +51,7 @@ pub struct MessageWriter {
     /// ACP can send multiple content updates for one tool call; we update
     /// the same row instead of inserting duplicates.
     current_tool_result_msg_id: Mutex<Option<i64>>,
+    permission_registry: Option<Arc<PermissionRegistry>>,
 }
 
 /// Strip backticks from agent-provided tool-call titles.
@@ -96,6 +102,55 @@ fn acp_event_role(metadata: &AcpMessageMetadata) -> MessageRole {
     }
 }
 
+fn permission_options_json(request: &AcpPermissionRequest) -> Vec<serde_json::Value> {
+    request
+        .options
+        .iter()
+        .map(|option| {
+            serde_json::json!({
+                "optionId": option.option_id,
+                "name": option.name,
+                "kind": option.kind,
+            })
+        })
+        .collect()
+}
+
+fn permission_request_content(
+    request: &AcpPermissionRequest,
+    status: &str,
+    selected_option_id: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "requestId": request.request_id,
+        "sessionId": request.session_id,
+        "toolCallId": request.tool_call_id,
+        "toolTitle": request.tool_title,
+        "toolKind": request.tool_kind,
+        "toolStatus": request.tool_status,
+        "rawInput": request.raw_input,
+        "rawOutput": request.raw_output,
+        "content": request.content,
+        "locations": request.locations,
+        "options": permission_options_json(request),
+        "status": status,
+        "selectedOptionId": selected_option_id,
+        "rawRequest": request.raw_request,
+    })
+}
+
+fn fallback_permission_decision(request: &AcpPermissionRequest) -> AcpPermissionDecision {
+    request
+        .options
+        .first()
+        .map(|option| AcpPermissionDecision::Selected {
+            option_id: option.option_id.clone(),
+        })
+        .unwrap_or(AcpPermissionDecision::Selected {
+            option_id: "approve".to_string(),
+        })
+}
+
 impl MessageWriter {
     pub fn new(session_id: String, store: Arc<Store>) -> Self {
         Self {
@@ -106,7 +161,16 @@ impl MessageWriter {
             last_flush_at: Mutex::new(Instant::now()),
             tool_call_rows: Mutex::new(HashMap::new()),
             current_tool_result_msg_id: Mutex::new(None),
+            permission_registry: None,
         }
+    }
+
+    pub fn with_permission_registry(
+        mut self,
+        permission_registry: Arc<PermissionRegistry>,
+    ) -> Self {
+        self.permission_registry = Some(permission_registry);
+        self
     }
 
     // =====================================================================
@@ -391,6 +455,80 @@ impl acp_client::MessageWriter for MessageWriter {
             log::error!("Failed to persist ACP event metadata: {e}");
         }
     }
+
+    async fn request_permission(
+        &self,
+        request: AcpPermissionRequest,
+        cancel_token: CancellationToken,
+    ) -> AcpPermissionDecision {
+        let Some(registry) = &self.permission_registry else {
+            return if cancel_token.is_cancelled() {
+                AcpPermissionDecision::Cancelled
+            } else {
+                fallback_permission_decision(&request)
+            };
+        };
+
+        let request_metadata = AcpMessageMetadata {
+            acp_event_kind: Some("permission_request".to_string()),
+            acp_tool_call_id: Some(request.tool_call_id.clone()),
+            acp_tool_kind: request.tool_kind.clone(),
+            acp_tool_status: request.tool_status.clone(),
+            acp_raw_input: request.raw_input.clone(),
+            acp_raw_output: request.raw_output.clone(),
+            acp_content: Some(permission_request_content(&request, "pending", None)),
+            acp_locations: request.locations.clone(),
+            ..Default::default()
+        };
+        if let Err(e) = self
+            .store
+            .add_acp_metadata_message(&self.session_id, &request_metadata)
+        {
+            log::error!("Failed to persist ACP permission request: {e}");
+        }
+
+        let receiver = registry.register(request.request_id.clone(), request.session_id.clone());
+        let staged_decision = tokio::select! {
+            _ = cancel_token.cancelled() => StagedPermissionDecision::Cancelled,
+            decision = receiver => decision.unwrap_or(StagedPermissionDecision::Cancelled),
+        };
+        registry.unregister(&request.request_id);
+
+        let (status, selected_option_id, decision) = match staged_decision {
+            StagedPermissionDecision::Selected { option_id } => (
+                "selected",
+                Some(option_id.clone()),
+                AcpPermissionDecision::Selected { option_id },
+            ),
+            StagedPermissionDecision::Cancelled => {
+                ("cancelled", None, AcpPermissionDecision::Cancelled)
+            }
+        };
+
+        let response_metadata = AcpMessageMetadata {
+            acp_event_kind: Some("permission_response".to_string()),
+            acp_tool_call_id: Some(request.tool_call_id.clone()),
+            acp_tool_kind: request.tool_kind.clone(),
+            acp_tool_status: request.tool_status.clone(),
+            acp_raw_input: request.raw_input.clone(),
+            acp_raw_output: request.raw_output.clone(),
+            acp_content: Some(permission_request_content(
+                &request,
+                status,
+                selected_option_id.as_deref(),
+            )),
+            acp_locations: request.locations.clone(),
+            ..Default::default()
+        };
+        if let Err(e) = self
+            .store
+            .add_acp_metadata_message(&self.session_id, &response_metadata)
+        {
+            log::error!("Failed to persist ACP permission response: {e}");
+        }
+
+        decision
+    }
 }
 
 #[cfg(test)]
@@ -399,7 +537,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::MessageWriter;
+    use crate::agent::{PermissionDecision, PermissionRegistry};
     use crate::store::{MessageRole, Session, Store};
+    use acp_client::{AcpPermissionDecision, AcpPermissionOption, AcpPermissionRequest};
+    use tokio_util::sync::CancellationToken;
 
     fn setup_writer() -> (Arc<Store>, String, MessageWriter) {
         let store = Arc::new(Store::in_memory().expect("in-memory store"));
@@ -407,6 +548,150 @@ mod tests {
         store.create_session(&session).expect("create session");
         let writer = MessageWriter::new(session.id.clone(), Arc::clone(&store));
         (store, session.id, writer)
+    }
+
+    fn permission_request(session_id: &str, request_id: &str) -> AcpPermissionRequest {
+        AcpPermissionRequest {
+            request_id: request_id.to_string(),
+            session_id: session_id.to_string(),
+            tool_call_id: "tc-permission".to_string(),
+            tool_title: Some("Edit src/lib.rs".to_string()),
+            tool_kind: Some("edit".to_string()),
+            tool_status: Some("pending".to_string()),
+            raw_input: Some(serde_json::json!({"path": "src/lib.rs"})),
+            raw_output: None,
+            content: None,
+            locations: None,
+            options: vec![
+                AcpPermissionOption {
+                    option_id: "allow-once".to_string(),
+                    name: "Allow once".to_string(),
+                    kind: "allow_once".to_string(),
+                },
+                AcpPermissionOption {
+                    option_id: "reject-once".to_string(),
+                    name: "Deny".to_string(),
+                    kind: "reject_once".to_string(),
+                },
+            ],
+            raw_request: None,
+        }
+    }
+
+    async fn answer_permission(
+        registry: Arc<PermissionRegistry>,
+        request_id: &'static str,
+        decision: PermissionDecision,
+    ) {
+        for _ in 0..20 {
+            match registry.respond(request_id, decision.clone()) {
+                Ok(()) => return,
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(5)).await,
+            }
+        }
+        panic!("permission request was not registered");
+    }
+
+    #[tokio::test]
+    async fn permission_request_returns_approved_option() {
+        let (store, session_id, writer) = setup_writer();
+        let registry = Arc::new(PermissionRegistry::new());
+        let writer = writer.with_permission_registry(Arc::clone(&registry));
+        let request = permission_request(&session_id, "approve-request");
+        let cancel_token = CancellationToken::new();
+
+        let task = tokio::spawn(async move {
+            <MessageWriter as acp_client::MessageWriter>::request_permission(
+                &writer,
+                request,
+                cancel_token,
+            )
+            .await
+        });
+        answer_permission(
+            registry,
+            "approve-request",
+            PermissionDecision::Selected {
+                option_id: "allow-once".to_string(),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            task.await.expect("permission task"),
+            AcpPermissionDecision::Selected {
+                option_id: "allow-once".to_string()
+            }
+        );
+        let metadata = store
+            .get_session_acp_metadata_messages(&session_id)
+            .expect("metadata");
+        assert_eq!(metadata.len(), 2);
+        assert_eq!(
+            metadata[0].acp.acp_event_kind.as_deref(),
+            Some("permission_request")
+        );
+        assert_eq!(
+            metadata[1].acp.acp_event_kind.as_deref(),
+            Some("permission_response")
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_request_returns_denied_option() {
+        let (_store, session_id, writer) = setup_writer();
+        let registry = Arc::new(PermissionRegistry::new());
+        let writer = writer.with_permission_registry(Arc::clone(&registry));
+        let request = permission_request(&session_id, "deny-request");
+        let cancel_token = CancellationToken::new();
+
+        let task = tokio::spawn(async move {
+            <MessageWriter as acp_client::MessageWriter>::request_permission(
+                &writer,
+                request,
+                cancel_token,
+            )
+            .await
+        });
+        answer_permission(
+            registry,
+            "deny-request",
+            PermissionDecision::Selected {
+                option_id: "reject-once".to_string(),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            task.await.expect("permission task"),
+            AcpPermissionDecision::Selected {
+                option_id: "reject-once".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn permission_request_returns_cancelled_outcome() {
+        let (_store, session_id, writer) = setup_writer();
+        let registry = Arc::new(PermissionRegistry::new());
+        let writer = writer.with_permission_registry(Arc::clone(&registry));
+        let request = permission_request(&session_id, "cancel-request");
+        let cancel_token = CancellationToken::new();
+
+        let task = tokio::spawn(async move {
+            <MessageWriter as acp_client::MessageWriter>::request_permission(
+                &writer,
+                request,
+                cancel_token,
+            )
+            .await
+        });
+        answer_permission(registry, "cancel-request", PermissionDecision::Cancelled).await;
+
+        assert_eq!(
+            task.await.expect("permission task"),
+            AcpPermissionDecision::Cancelled
+        );
     }
 
     #[tokio::test]

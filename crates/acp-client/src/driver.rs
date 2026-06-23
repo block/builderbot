@@ -12,6 +12,7 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -43,6 +44,8 @@ use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 
 use crate::types::blox_acp_command;
+
+static PERMISSION_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 // =============================================================================
 // Public traits and types
@@ -106,6 +109,30 @@ pub trait MessageWriter: Send + Sync {
 
     /// Persist an ACP event that does not map cleanly to a visible transcript row.
     async fn record_acp_event_metadata(&self, _metadata: AcpEventMetadata) {}
+
+    /// Ask the client UI to resolve an ACP permission request.
+    ///
+    /// Implementations that cannot prompt should keep the legacy behavior by
+    /// selecting the first option unless the prompt turn has been cancelled.
+    async fn request_permission(
+        &self,
+        request: AcpPermissionRequest,
+        cancel_token: CancellationToken,
+    ) -> AcpPermissionDecision {
+        if cancel_token.is_cancelled() {
+            AcpPermissionDecision::Cancelled
+        } else {
+            request
+                .options
+                .first()
+                .map(|option| AcpPermissionDecision::Selected {
+                    option_id: option.option_id.clone(),
+                })
+                .unwrap_or(AcpPermissionDecision::Selected {
+                    option_id: "approve".to_string(),
+                })
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -146,6 +173,35 @@ pub struct AcpEventMetadata {
     pub message_id: Option<String>,
     pub content: Option<serde_json::Value>,
     pub usage: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AcpPermissionRequest {
+    pub request_id: String,
+    pub session_id: String,
+    pub tool_call_id: String,
+    pub tool_title: Option<String>,
+    pub tool_kind: Option<String>,
+    pub tool_status: Option<String>,
+    pub raw_input: Option<serde_json::Value>,
+    pub raw_output: Option<serde_json::Value>,
+    pub content: Option<serde_json::Value>,
+    pub locations: Option<serde_json::Value>,
+    pub options: Vec<AcpPermissionOption>,
+    pub raw_request: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AcpPermissionOption {
+    pub option_id: String,
+    pub name: String,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcpPermissionDecision {
+    Selected { option_id: String },
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1443,10 +1499,18 @@ impl AcpNotificationHandler {
         &self,
         args: RequestPermissionRequest,
     ) -> agent_client_protocol::Result<RequestPermissionResponse> {
-        Ok(permission_response_for_options(
-            &args.options,
-            self.permission_cancel_token.is_cancelled(),
-        ))
+        if self.permission_cancel_token.is_cancelled() {
+            return Ok(RequestPermissionResponse::new(
+                RequestPermissionOutcome::Cancelled,
+            ));
+        }
+
+        let request = acp_permission_request_from_args(&args);
+        let decision = self
+            .writer
+            .request_permission(request, self.permission_cancel_token.clone())
+            .await;
+        Ok(permission_response_for_decision(decision))
     }
 
     async fn session_notification(
@@ -1462,6 +1526,36 @@ impl AcpNotificationHandler {
             SessionUpdate::ConfigOptionUpdate(update) => {
                 self.writer
                     .on_config_option_update(&update.config_options)
+                    .await;
+                return Ok(());
+            }
+            SessionUpdate::CurrentModeUpdate(update) => {
+                self.writer
+                    .record_acp_event_metadata(AcpEventMetadata {
+                        event_kind: Some("current_mode_update".to_string()),
+                        content: serialize_value(update),
+                        ..Default::default()
+                    })
+                    .await;
+                return Ok(());
+            }
+            SessionUpdate::Plan(plan) => {
+                self.writer
+                    .record_acp_event_metadata(AcpEventMetadata {
+                        event_kind: Some("plan_update".to_string()),
+                        content: serialize_value(plan),
+                        ..Default::default()
+                    })
+                    .await;
+                return Ok(());
+            }
+            SessionUpdate::AvailableCommandsUpdate(update) => {
+                self.writer
+                    .record_acp_event_metadata(AcpEventMetadata {
+                        event_kind: Some("available_commands_update".to_string()),
+                        content: serialize_value(update),
+                        ..Default::default()
+                    })
                     .await;
                 return Ok(());
             }
@@ -1746,12 +1840,13 @@ impl AcpNotificationHandler {
     }
 }
 
-fn permission_response_for_options(
+#[cfg(test)]
+fn permission_decision_for_options(
     options: &[agent_client_protocol::schema::v1::PermissionOption],
     cancelled: bool,
-) -> RequestPermissionResponse {
+) -> AcpPermissionDecision {
     if cancelled {
-        return RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled);
+        return AcpPermissionDecision::Cancelled;
     }
 
     let option_id = options
@@ -1759,9 +1854,69 @@ fn permission_response_for_options(
         .map(|opt| opt.option_id.clone())
         .unwrap_or_else(|| PermissionOptionId::new("approve"));
 
-    RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
-        SelectedPermissionOutcome::new(option_id),
-    ))
+    AcpPermissionDecision::Selected {
+        option_id: option_id.0.as_ref().to_string(),
+    }
+}
+
+#[cfg(test)]
+fn permission_response_for_options(
+    options: &[agent_client_protocol::schema::v1::PermissionOption],
+    cancelled: bool,
+) -> RequestPermissionResponse {
+    permission_response_for_decision(permission_decision_for_options(options, cancelled))
+}
+
+fn permission_response_for_decision(decision: AcpPermissionDecision) -> RequestPermissionResponse {
+    match decision {
+        AcpPermissionDecision::Cancelled => {
+            RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
+        }
+        AcpPermissionDecision::Selected { option_id } => {
+            RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
+                SelectedPermissionOutcome::new(PermissionOptionId::new(option_id)),
+            ))
+        }
+    }
+}
+
+fn acp_permission_request_from_args(args: &RequestPermissionRequest) -> AcpPermissionRequest {
+    let tool = &args.tool_call;
+    let tool_call_id = tool.tool_call_id.0.as_ref().to_string();
+    let request_counter = PERMISSION_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    AcpPermissionRequest {
+        request_id: format!(
+            "{}:{tool_call_id}:{request_counter}",
+            args.session_id.0.as_ref()
+        ),
+        session_id: args.session_id.0.as_ref().to_string(),
+        tool_call_id,
+        tool_title: tool.fields.title.clone(),
+        tool_kind: tool.fields.kind.as_ref().and_then(serialize_as_string),
+        tool_status: tool.fields.status.as_ref().and_then(serialize_as_string),
+        raw_input: tool.fields.raw_input.clone(),
+        raw_output: tool.fields.raw_output.clone(),
+        content: tool
+            .fields
+            .content
+            .as_ref()
+            .and_then(|content| serialize_non_empty(content)),
+        locations: tool
+            .fields
+            .locations
+            .as_ref()
+            .and_then(|locations| serialize_non_empty(locations)),
+        options: args
+            .options
+            .iter()
+            .map(|option| AcpPermissionOption {
+                option_id: option.option_id.0.as_ref().to_string(),
+                name: option.name.clone(),
+                kind: serialize_as_string(&option.kind).unwrap_or_else(|| "unknown".to_string()),
+            })
+            .collect(),
+        raw_request: serialize_value(args),
+    }
 }
 
 /// Extract the tool-call ID from a session update, if it carries one.

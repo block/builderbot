@@ -44,6 +44,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
 use crate::actions::{ActionExecutor, ActionRegistry};
+use crate::agent::{PermissionDecision, PermissionRegistry};
 use crate::pr_poll_scheduler::PrPollScheduler;
 use crate::session_commands;
 use crate::session_runner::{self, SessionConfig, SessionRegistry};
@@ -448,6 +449,8 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
     let app_handle = &state.app_handle;
     let store_mutex: &Mutex<Option<Arc<Store>>> = &app_handle.state::<Mutex<Option<Arc<Store>>>>();
     let session_registry: &Arc<SessionRegistry> = &app_handle.state::<Arc<SessionRegistry>>();
+    let permission_registry: &Arc<PermissionRegistry> =
+        &app_handle.state::<Arc<PermissionRegistry>>();
     let action_executor: &Arc<ActionExecutor> = &app_handle.state::<Arc<ActionExecutor>>();
     let action_registry: &Arc<ActionRegistry> = &app_handle.state::<Arc<ActionRegistry>>();
     let pr_scheduler: &Arc<PrPollScheduler> = &app_handle.state::<Arc<PrPollScheduler>>();
@@ -2805,6 +2808,16 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .get_session_acp_initialization(&session_id)
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(metadata).unwrap())
+        }
+        "respond_acp_permission" => {
+            let request_id: String = arg(&args, "requestId")?;
+            let option_id: Option<String> = opt_arg(&args, "optionId")?;
+            let decision = match option_id {
+                Some(option_id) => PermissionDecision::Selected { option_id },
+                None => PermissionDecision::Cancelled,
+            };
+            permission_registry.respond(&request_id, decision)?;
+            Ok(Value::Null)
         }
         "start_session" => {
             let store = get_store(store_mutex)?;

@@ -41,14 +41,14 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::sync::CancellationToken;
 
 use acp_client::{AgentRunOutcome, McpServer, McpServerHttp};
 
 use crate::actions::{ActionExecutor, ActionRegistry};
-use crate::agent::{AcpDriver, AgentDriver, MessageWriter};
+use crate::agent::{AcpDriver, AgentDriver, MessageWriter, PermissionRegistry};
 use crate::git::Span;
 use crate::shell_env::ShellEnvCache;
 use crate::store::{
@@ -362,6 +362,8 @@ pub fn start_session(
     app_handle: AppHandle,
     registry: Arc<SessionRegistry>,
 ) -> Result<(), String> {
+    let permission_registry = Arc::clone(&app_handle.state::<Arc<PermissionRegistry>>());
+
     // Create the driver eagerly so we fail fast if the agent isn't found.
     // Local sessions without an explicit provider resolve the first available
     // provider and persist it on the session. Review-producing callers resolve
@@ -617,10 +619,10 @@ pub fn start_session(
             let mut include_images = true;
 
             loop {
-                let writer = Arc::new(MessageWriter::new(
-                    config.session_id.clone(),
-                    Arc::clone(&store),
-                ));
+                let writer = Arc::new(
+                    MessageWriter::new(config.session_id.clone(), Arc::clone(&store))
+                        .with_permission_registry(Arc::clone(&permission_registry)),
+                );
                 let store_trait: Arc<dyn acp_client::Store> = store.clone();
                 let writer_trait: Arc<dyn acp_client::MessageWriter> = writer;
                 let images = if include_images {

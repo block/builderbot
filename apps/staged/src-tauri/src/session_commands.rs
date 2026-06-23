@@ -25,7 +25,7 @@ use tauri::path::BaseDirectory;
 use tauri::Manager;
 
 use crate::actions::{ActionExecutor, ActionRegistry};
-use crate::agent::{self, AcpProviderInfo};
+use crate::agent::{self, AcpProviderInfo, PermissionDecision, PermissionRegistry};
 use crate::blox;
 use crate::git;
 use crate::session_runner::{self, SessionConfig};
@@ -374,6 +374,19 @@ pub fn get_session_acp_initialization(
     get_store(&store)?
         .get_session_acp_initialization(&session_id)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn respond_acp_permission(
+    registry: tauri::State<'_, Arc<PermissionRegistry>>,
+    request_id: String,
+    option_id: Option<String>,
+) -> Result<(), String> {
+    let decision = match option_id {
+        Some(option_id) => PermissionDecision::Selected { option_id },
+        None => PermissionDecision::Cancelled,
+    };
+    registry.respond(&request_id, decision)
 }
 
 #[tauri::command]

@@ -33,6 +33,11 @@
   import Send from '@lucide/svelte/icons/send';
   import Copy from '@lucide/svelte/icons/copy';
   import Check from '@lucide/svelte/icons/check';
+  import Clock from '@lucide/svelte/icons/clock';
+  import CircleAlert from '@lucide/svelte/icons/circle-alert';
+  import CircleCheck from '@lucide/svelte/icons/circle-check';
+  import CircleDot from '@lucide/svelte/icons/circle-dot';
+  import CircleSlash from '@lucide/svelte/icons/circle-slash';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Zap from '@lucide/svelte/icons/zap';
@@ -52,9 +57,11 @@
     deleteImage,
     getImageData,
     getSession,
+    getSessionAcpMetadataMessages,
     getSessionMessages,
     getSessionMessagesSince,
     handleExternalLinkClick,
+    respondAcpPermission,
     resumeSession,
   } from '../../api/commands';
   import HashtagInput from './HashtagInput.svelte';
@@ -72,15 +79,24 @@
     isMaybeTextFile,
     insertFilePathsAtCursor,
   } from '../branches/branchCardHelpers';
+  import { hasXmlBlocks, sessionEndMessage, stripXmlTags } from './sessionModalHelpers';
   import {
-    groupByVerb,
-    verbGroupSummary,
-    hasXmlBlocks,
-    sessionEndMessage,
-    stripCodeFences,
-    stripXmlTags,
-    type VerbGroup,
-  } from './sessionModalHelpers';
+    buildAcpTranscriptGroups,
+    diffsFromAcpContent,
+    displayLocations,
+    formatJson,
+    latestAvailableCommands,
+    permissionOptions,
+    permissionRequestId,
+    permissionStatus,
+    permissionToolTitle,
+    simpleUnifiedDiff,
+    terminalRefsFromAcpContent,
+    toolResultText,
+    type AcpCommand,
+    type AcpTranscriptEvent,
+    type AcpTranscriptGroup,
+  } from './acpTranscript';
   import {
     displayRootKey,
     normalizeDisplayRoots,
@@ -152,6 +168,7 @@
 
   let session = $state<Session | null>(null);
   let messages = $state<SessionMessage[]>([]);
+  let acpMetadataMessages = $state<SessionMessage[]>([]);
   let loading = $state(true);
   let error = $state<string | null>(null);
   let cancelling = $state(false);
@@ -164,8 +181,8 @@
   let inputText = $state('');
   let messageQueue = $state<string[]>([]);
   let copiedId = $state<number | string | null>(null);
-  let expandedTools = $state<Set<number>>(new Set());
-  let expandedVerbGroups = $state<Set<string>>(new Set());
+  let expandedTools = $state<Set<string>>(new Set());
+  let permissionSubmitting = $state<Set<string>>(new Set());
   let displayRoots = $state<string[]>([]);
   let currentDisplayRootKey = '';
 
@@ -493,13 +510,15 @@
     if (untrack(() => session?.id) !== sessionId) {
       session = null;
       messages = [];
+      acpMetadataMessages = [];
     }
     loading = true;
     error = null;
     try {
-      const [s, msgsResult] = await Promise.all([
+      const [s, msgsResult, acpMsgs] = await Promise.all([
         getSession(sessionId),
         getSessionMessages(sessionId),
+        getSessionAcpMetadataMessages(sessionId),
       ]);
       if (closed) return;
       if (!s) {
@@ -517,6 +536,7 @@
           })
           .catch(() => {});
       }
+      acpMetadataMessages = acpMsgs;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -542,16 +562,24 @@
 
       // Incremental message fetch
       if (messages.length === 0) {
-        const { data: msgs } = await getSessionMessages(sessionId);
+        const [{ data: msgs }, acpMsgs] = await Promise.all([
+          getSessionMessages(sessionId),
+          getSessionAcpMetadataMessages(sessionId),
+        ]);
         if (closed) return;
+        acpMetadataMessages = acpMsgs;
         if (msgs.length > 0) {
           messages = msgs;
           scrollToBottomIfNear(true);
         }
       } else {
         const lastId = messages[messages.length - 1].id;
-        const updated = await getSessionMessagesSince(sessionId, lastId);
+        const [updated, acpMsgs] = await Promise.all([
+          getSessionMessagesSince(sessionId, lastId),
+          getSessionAcpMetadataMessages(sessionId),
+        ]);
         if (closed) return;
+        acpMetadataMessages = acpMsgs;
         if (updated.length > 0) {
           const prev = messages.slice(0, -1);
           messages = [...prev, ...updated];
@@ -730,24 +758,14 @@
   // Tool call expand/collapse
   // =========================================================================
 
-  function toggleTool(msgId: number) {
+  function toggleTool(key: string) {
     const next = new Set(expandedTools);
-    if (next.has(msgId)) {
-      next.delete(msgId);
-    } else {
-      next.add(msgId);
-    }
-    expandedTools = next;
-  }
-
-  function toggleVerbGroup(key: string) {
-    const next = new Set(expandedVerbGroups);
     if (next.has(key)) {
       next.delete(key);
     } else {
       next.add(key);
     }
-    expandedVerbGroups = next;
+    expandedTools = next;
   }
 
   // =========================================================================
@@ -1064,104 +1082,167 @@
     onClose();
   }
 
-  /** Group consecutive tool_call / tool_result messages into pairs */
-  type ToolPair = {
-    call: SessionMessage;
-    result: SessionMessage | null;
-  };
-
-  type MessageGroup =
-    | { type: 'user'; message: SessionMessage }
-    | { type: 'assistant'; message: SessionMessage }
-    | { type: 'tools'; pairs: ToolPair[] };
-
-  let grouped = $derived.by(() => {
-    const groups: MessageGroup[] = [];
-    let i = 0;
-    while (i < messages.length) {
-      const msg = messages[i];
-      if (msg.role === 'user') {
-        groups.push({ type: 'user', message: msg });
-        i++;
-      } else if (msg.role === 'assistant') {
-        groups.push({ type: 'assistant', message: msg });
-        i++;
-      } else {
-        // tool_call / tool_result: collect into pairs
-        const pairs: ToolPair[] = [];
-        while (
-          i < messages.length &&
-          (messages[i].role === 'tool_call' || messages[i].role === 'tool_result')
-        ) {
-          if (messages[i].role === 'tool_call') {
-            const call = messages[i];
-            i++;
-            // Check if next message is the matching result
-            let result: SessionMessage | null = null;
-            if (i < messages.length && messages[i].role === 'tool_result') {
-              result = messages[i];
-              i++;
-            }
-            pairs.push({ call, result });
-          } else {
-            // Orphan tool_result (shouldn't happen, but handle gracefully)
-            pairs.push({
-              call: messages[i],
-              result: null,
-            });
-            i++;
-          }
-        }
-        groups.push({ type: 'tools', pairs });
-      }
-    }
-    return groups;
+  let grouped = $derived.by(() =>
+    buildAcpTranscriptGroups(messages, acpMetadataMessages, displayRoots)
+  );
+  let slashCommands = $derived.by(() => latestAvailableCommands(acpMetadataMessages));
+  let slashQuery = $derived.by(() => {
+    const trimmed = inputText.trimStart();
+    return trimmed.startsWith('/') ? trimmed.slice(1).toLowerCase() : null;
+  });
+  let matchingSlashCommands = $derived.by(() => {
+    if (slashQuery === null) return [];
+    return slashCommands
+      .filter((command) => command.name.toLowerCase().includes(slashQuery))
+      .slice(0, 6);
   });
 
   let isPipelinePrelude = $derived(isLive && !!session?.pipeline && grouped.length === 0);
 
-  /** For each index in `grouped`, whether a user message exists at a later index.
-   *  Pre-computed in O(N) so the template can do an O(1) lookup instead of
-   *  scanning with `findIndex` per tool group (which was O(N²) total). */
-  let hasUserAfter = $derived.by(() => {
-    const arr = new Array<boolean>(grouped.length);
-    let seen = false;
-    for (let i = grouped.length - 1; i >= 0; i--) {
-      arr[i] = seen;
-      if (grouped[i].type === 'user') seen = true;
-    }
-    return arr;
-  });
+  function insertSlashCommand(command: AcpCommand) {
+    inputText = `/${command.name}${command.inputHint ? ' ' : ''}`;
+    tick().then(() => {
+      inputEl?.focus();
+      autoResize();
+    });
+  }
 
-  /**
-   * Pre-compute verb groups for every tools group in both tenses.
-   * `groupByVerb` is expensive (JSON.parse + string replace per tool call) so we
-   * cache both the past-tense and present-tense variants here. The template then
-   * picks the right variant with a cheap boolean lookup instead of re-running the
-   * heavy computation on every render.
-   */
-  let verbGroupCache = $derived.by(() => {
-    const cache: { past: VerbGroup[]; present: VerbGroup[] }[] = [];
-    for (const group of grouped) {
-      if (group.type === 'tools') {
-        cache.push({
-          past: groupByVerb(group.pairs, displayRoots, true),
-          present: groupByVerb(group.pairs, displayRoots, false),
-        });
-      } else {
-        // Placeholder — tool-group index won't line up otherwise.
-        // We use a separate counter in the template instead.
-        cache.push({ past: [], present: [] });
-      }
+  async function handlePermissionResponse(content: unknown, optionId: string | null) {
+    const requestId = permissionRequestId(content);
+    if (!requestId || permissionSubmitting.has(requestId)) return;
+    permissionSubmitting = new Set(permissionSubmitting).add(requestId);
+    try {
+      await respondAcpPermission(requestId, optionId);
+      acpMetadataMessages = await getSessionAcpMetadataMessages(sessionId);
+    } catch (e) {
+      error = `Failed to answer permission prompt: ${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      const next = new Set(permissionSubmitting);
+      next.delete(requestId);
+      permissionSubmitting = next;
     }
-    return cache;
-  });
+  }
 
-  /** Stable key for a message group — used to key the {#each} block for transitions.
-   *  For tools groups, keys off the first pair — safe because the grouping logic
-   *  in `grouped` always pushes at least one pair before creating a tools group. */
-  function groupKey(group: MessageGroup): string {
-    return group.type === 'tools' ? `t-${group.pairs[0].call.id}` : `m-${group.message.id}`;
+  function isPermissionSubmitting(content: unknown): boolean {
+    const requestId = permissionRequestId(content);
+    return !!requestId && permissionSubmitting.has(requestId);
+  }
+
+  function permissionOptionVariant(kind: string): 'outline' | 'destructive' | 'ghost' {
+    if (kind.startsWith('reject')) return 'destructive';
+    if (kind.startsWith('allow')) return 'outline';
+    return 'ghost';
+  }
+
+  function acpEventSummary(event: AcpTranscriptEvent): string {
+    if (event.kind === 'plan_update') {
+      const entries = arrayProp(event.content, 'entries');
+      return entries.length === 1 ? '1 step' : `${entries.length} steps`;
+    }
+    if (event.kind === 'available_commands_update') {
+      const commands = arrayProp(event.content, 'availableCommands');
+      return commands.length === 1 ? '1 command' : `${commands.length} commands`;
+    }
+    if (event.kind === 'permission_request') {
+      return permissionStatus(event.content) === 'pending'
+        ? 'Waiting for response'
+        : sentenceCase(permissionStatus(event.content));
+    }
+    if (event.kind === 'config_options_update') {
+      const options = Array.isArray(event.content) ? event.content : [];
+      return options.length === 1 ? '1 option' : `${options.length} options`;
+    }
+    return compactJsonSummary(event.content);
+  }
+
+  function planEntries(content: unknown): Record<string, unknown>[] {
+    return arrayProp(content, 'entries');
+  }
+
+  function configOptions(content: unknown): Record<string, unknown>[] {
+    return Array.isArray(content)
+      ? content.filter(
+          (item): item is Record<string, unknown> =>
+            !!item && typeof item === 'object' && !Array.isArray(item)
+        )
+      : [];
+  }
+
+  function availableCommands(content: unknown): AcpCommand[] {
+    const commands = arrayProp(content, 'availableCommands');
+    return commands
+      .map((command) => {
+        const name = stringProp(command, 'name');
+        if (!name) return null;
+        return {
+          name,
+          description: stringProp(command, 'description') ?? '',
+          inputHint: stringProp(objectProp(command, 'input'), 'hint'),
+        };
+      })
+      .filter((command): command is AcpCommand => command !== null);
+  }
+
+  function optionCurrentValue(option: Record<string, unknown>): string {
+    const currentValue = stringProp(option, 'currentValue');
+    if (currentValue) return currentValue;
+    const select = objectProp(option, 'select');
+    return stringProp(select, 'currentValue') ?? '';
+  }
+
+  function optionChoices(option: Record<string, unknown>): { value: string; name: string }[] {
+    const options = arrayProp(option, 'options');
+    if (options.length === 0) return [];
+    if (options.every((item) => arrayProp(item, 'options').length > 0)) {
+      return options.flatMap((group) => optionChoices(group));
+    }
+    return options
+      .map((item) => {
+        const value = stringProp(item, 'value');
+        const name = stringProp(item, 'name') ?? value;
+        return value && name ? { value, name } : null;
+      })
+      .filter((item): item is { value: string; name: string } => item !== null);
+  }
+
+  function stringProp(value: unknown, key: string): string | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const prop = (value as Record<string, unknown>)[key];
+    return typeof prop === 'string' ? prop : null;
+  }
+
+  function objectProp(value: unknown, key: string): Record<string, unknown> | null {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const prop = (value as Record<string, unknown>)[key];
+    return prop && typeof prop === 'object' && !Array.isArray(prop)
+      ? (prop as Record<string, unknown>)
+      : null;
+  }
+
+  function arrayProp(value: unknown, key: string): Record<string, unknown>[] {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return [];
+    const prop = (value as Record<string, unknown>)[key];
+    return Array.isArray(prop)
+      ? prop.filter(
+          (item): item is Record<string, unknown> =>
+            !!item && typeof item === 'object' && !Array.isArray(item)
+        )
+      : [];
+  }
+
+  function compactJsonSummary(value: unknown): string {
+    const text = formatJson(value).replace(/\s+/g, ' ').trim();
+    return text.length > 72 ? `${text.slice(0, 72)}…` : text;
+  }
+
+  function sentenceCase(value: string): string {
+    return value ? value.slice(0, 1).toUpperCase() + value.slice(1).replaceAll('_', ' ') : '';
+  }
+
+  function groupKey(group: AcpTranscriptGroup): string {
+    if (group.type === 'tools') return `t-${group.items[0].key}`;
+    if (group.type === 'acp') return `a-${group.event.id}`;
+    return `m-${group.message.id}`;
   }
 
   /** Slide-in transition that is suppressed during the initial load. */
@@ -1261,7 +1342,7 @@
         <!-- Pipeline is present but no messages yet — pipeline steps are the entire view -->
       {:else}
         <div class="messages">
-          {#each grouped as group, groupIdx (groupKey(group))}
+          {#each grouped as group (groupKey(group))}
             <div in:messageSlide class={group.type === 'user' ? 'user-group' : ''}>
               {#if group.type === 'user'}
                 {@const hasBlocks = cachedHasXmlBlocks(group.message.content)}
@@ -1369,111 +1450,204 @@
                     </Button>
                   </div>
                 </div>
-              {:else}
-                {@const forcePastTense = !isLive || sending || hasUserAfter[groupIdx]}
+              {:else if group.type === 'tools'}
                 <div class="message-row tool-group">
-                  {#each forcePastTense ? verbGroupCache[groupIdx].past : verbGroupCache[groupIdx].present as vg, vgIdx}
-                    {#if vg.items.length === 1}
-                      {@const item = vg.items[0]}
-                      {@const isExpanded = expandedTools.has(item.pair.call.id)}
-                      <div class="tool-card">
-                        <!-- svelte-ignore a11y_click_events_have_key_events -->
-                        <!-- svelte-ignore a11y_no_static_element_interactions -->
-                        <div
-                          class="tool-header"
-                          class:tool-header-expandable={!!item.pair.result}
-                          onclick={() => item.pair.result && toggleTool(item.pair.call.id)}
+                  {#each group.items as item (item.key)}
+                    {@const isExpanded = expandedTools.has(item.key)}
+                    {@const resultText = toolResultText(item)}
+                    {@const rawInputText = formatJson(item.rawInput)}
+                    {@const rawOutputText = formatJson(item.rawOutput)}
+                    {@const diffs = diffsFromAcpContent(item.content, displayRoots)}
+                    {@const locations = displayLocations(item.locations, displayRoots)}
+                    {@const terminalRefs = terminalRefsFromAcpContent(item.content)}
+                    {@const hasDetails =
+                      !!resultText ||
+                      !!rawInputText ||
+                      !!rawOutputText ||
+                      diffs.length > 0 ||
+                      locations.length > 0 ||
+                      terminalRefs.length > 0}
+                    <div class="tool-card">
+                      <!-- svelte-ignore a11y_click_events_have_key_events -->
+                      <!-- svelte-ignore a11y_no_static_element_interactions -->
+                      <div
+                        class="tool-header"
+                        class:tool-header-expandable={hasDetails}
+                        onclick={() => hasDetails && toggleTool(item.key)}
+                      >
+                        <span
+                          class="tool-caret"
+                          class:tool-caret-expanded={isExpanded}
+                          class:tool-caret-hidden={!hasDetails}>›</span
                         >
-                          <span
-                            class="tool-caret"
-                            class:tool-caret-expanded={isExpanded}
-                            class:tool-caret-hidden={!item.pair.result}>›</span
-                          >
-                          <span class="tool-name">{item.verb}</span>
-                          {#if item.detail}
-                            <span class="tool-args-preview">{item.detail}</span>
+                        <span
+                          class="tool-status-dot"
+                          class:status-running={item.statusTone === 'running'}
+                          class:status-success={item.statusTone === 'success'}
+                          class:status-danger={item.statusTone === 'danger'}
+                          class:status-cancelled={item.statusTone === 'cancelled'}
+                        >
+                          {#if item.statusTone === 'running'}
+                            <Clock size={11} />
+                          {:else if item.statusTone === 'success'}
+                            <CircleCheck size={11} />
+                          {:else if item.statusTone === 'danger'}
+                            <CircleAlert size={11} />
+                          {:else if item.statusTone === 'cancelled'}
+                            <CircleSlash size={11} />
+                          {:else}
+                            <CircleDot size={11} />
                           {/if}
-                        </div>
-                        {#if isExpanded && item.pair.result}
-                          {@const resultContent = stripCodeFences(item.pair.result.content)}
-                          <div
-                            class="tool-code-block"
-                            transition:slide={{ duration: SLIDE_DURATION }}
-                          >
-                            {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
-                              <div class="tool-code-command">$ {item.detail}</div>
-                            {/if}
-                            {#if resultContent}
-                              <pre class="tool-code-output">{resultContent}</pre>
-                            {/if}
-                            <div class="tool-code-status">
-                              <Check size={11} /> Success
+                        </span>
+                        <span class="tool-name">{item.verb}</span>
+                        {#if item.detail}
+                          <span class="tool-args-preview">{item.detail}</span>
+                        {/if}
+                        <span class="tool-status-label">{item.statusLabel}</span>
+                      </div>
+                      {#if isExpanded && hasDetails}
+                        <div
+                          class="tool-code-block"
+                          transition:slide={{ duration: SLIDE_DURATION }}
+                        >
+                          {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
+                            <div class="tool-code-command">$ {item.detail}</div>
+                          {/if}
+                          {#if locations.length > 0}
+                            <div class="tool-meta-row">
+                              {#each locations as location}
+                                <span class="tool-chip">{location}</span>
+                              {/each}
                             </div>
+                          {/if}
+                          {#if rawInputText}
+                            <div class="tool-panel-label">Input</div>
+                            <pre class="tool-code-output">{rawInputText}</pre>
+                          {/if}
+                          {#each diffs as diff}
+                            <div class="tool-panel-label">{diff.path}</div>
+                            <pre class="tool-code-output diff-output">{simpleUnifiedDiff(
+                                diff
+                              )}</pre>
+                          {/each}
+                          {#if terminalRefs.length > 0}
+                            <div class="tool-panel-label">Terminal</div>
+                            <div class="tool-meta-row">
+                              {#each terminalRefs as terminalRef}
+                                <span class="tool-chip">{terminalRef}</span>
+                              {/each}
+                            </div>
+                          {/if}
+                          {#if resultText}
+                            <div class="tool-panel-label">Output</div>
+                            <pre class="tool-code-output">{resultText}</pre>
+                          {/if}
+                          {#if rawOutputText && rawOutputText !== resultText}
+                            <div class="tool-panel-label">Raw output</div>
+                            <pre class="tool-code-output">{rawOutputText}</pre>
+                          {/if}
+                          <div
+                            class="tool-code-status"
+                            class:status-danger={item.statusTone === 'danger'}
+                            class:status-cancelled={item.statusTone === 'cancelled'}
+                          >
+                            {#if item.statusTone === 'success'}
+                              <Check size={11} />
+                            {/if}
+                            {item.statusLabel}
+                          </div>
+                        </div>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+              {:else}
+                {@const event = group.event}
+                {@const isExpanded = expandedTools.has(`event:${event.id}`)}
+                <div class="message-row acp-event-row">
+                  <div class="acp-event-card">
+                    <!-- svelte-ignore a11y_click_events_have_key_events -->
+                    <!-- svelte-ignore a11y_no_static_element_interactions -->
+                    <div class="acp-event-header" onclick={() => toggleTool(`event:${event.id}`)}>
+                      <span class="tool-caret" class:tool-caret-expanded={isExpanded}>›</span>
+                      <span class="acp-event-title">{event.title}</span>
+                      <span class="tool-args-preview">{acpEventSummary(event)}</span>
+                    </div>
+                    {#if event.kind === 'permission_request'}
+                      {@const status = permissionStatus(event.content)}
+                      {@const requestId = permissionRequestId(event.content)}
+                      {@const submitting = isPermissionSubmitting(event.content)}
+                      <div class="permission-card-body">
+                        <div class="permission-tool-title">
+                          {permissionToolTitle(event.content, displayRoots)}
+                        </div>
+                        {#if status === 'pending' && requestId}
+                          <div class="permission-actions">
+                            {#each permissionOptions(event.content) as option}
+                              <Button
+                                variant={permissionOptionVariant(option.kind)}
+                                size="xs"
+                                disabled={submitting}
+                                onclick={() =>
+                                  handlePermissionResponse(event.content, option.optionId)}
+                              >
+                                {option.name}
+                              </Button>
+                            {/each}
+                            <Button
+                              variant="ghost"
+                              size="xs"
+                              disabled={submitting}
+                              onclick={() => handlePermissionResponse(event.content, null)}
+                            >
+                              Cancel
+                            </Button>
                           </div>
                         {/if}
                       </div>
-                    {:else}
-                      {@const verbGroupKey = `${vg.items[0].pair.call.id}-${vg.verb}`}
-                      {@const isGroupExpanded = expandedVerbGroups.has(verbGroupKey)}
-                      <div class="tool-card">
-                        <!-- svelte-ignore a11y_click_events_have_key_events -->
-                        <!-- svelte-ignore a11y_no_static_element_interactions -->
-                        <div
-                          class="tool-header tool-header-expandable"
-                          onclick={() => toggleVerbGroup(verbGroupKey)}
-                        >
-                          <span class="tool-caret" class:tool-caret-expanded={isGroupExpanded}
-                            >›</span
-                          >
-                          <span class="tool-name">{vg.verb}</span>
-                          <span class="tool-args-preview">{verbGroupSummary(vg)}</span>
-                        </div>
-                      </div>
-                      {#if isGroupExpanded}
-                        <div transition:slide={{ duration: SLIDE_DURATION }}>
-                          {#each vg.items as item}
-                            {@const isExpanded = expandedTools.has(item.pair.call.id)}
-                            <div class="tool-card tool-card-nested">
-                              <!-- svelte-ignore a11y_click_events_have_key_events -->
-                              <!-- svelte-ignore a11y_no_static_element_interactions -->
-                              <div
-                                class="tool-header"
-                                class:tool-header-expandable={!!item.pair.result}
-                                onclick={() => item.pair.result && toggleTool(item.pair.call.id)}
-                              >
-                                <span
-                                  class="tool-caret"
-                                  class:tool-caret-expanded={isExpanded}
-                                  class:tool-caret-hidden={!item.pair.result}>›</span
-                                >
-                                <span class="tool-name">{item.verb}</span>
-                                {#if item.detail}
-                                  <span class="tool-args-preview">{item.detail}</span>
-                                {/if}
-                              </div>
-                              {#if isExpanded && item.pair.result}
-                                {@const resultContent = stripCodeFences(item.pair.result.content)}
-                                <div
-                                  class="tool-code-block"
-                                  transition:slide={{ duration: SLIDE_DURATION }}
-                                >
-                                  {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
-                                    <div class="tool-code-command">$ {item.detail}</div>
-                                  {/if}
-                                  {#if resultContent}
-                                    <pre class="tool-code-output">{resultContent}</pre>
-                                  {/if}
-                                  <div class="tool-code-status">
-                                    <Check size={11} /> Success
-                                  </div>
-                                </div>
-                              {/if}
-                            </div>
-                          {/each}
-                        </div>
-                      {/if}
                     {/if}
-                  {/each}
+                    {#if isExpanded}
+                      <div class="acp-event-body" transition:slide={{ duration: SLIDE_DURATION }}>
+                        {#if event.kind === 'plan_update'}
+                          <div class="plan-list">
+                            {#each planEntries(event.content) as entry}
+                              <div class="plan-entry">
+                                <span class="plan-status">{stringProp(entry, 'status')}</span>
+                                <span>{stringProp(entry, 'content')}</span>
+                              </div>
+                            {/each}
+                          </div>
+                        {:else if event.kind === 'config_options_update'}
+                          <div class="config-list">
+                            {#each configOptions(event.content) as option}
+                              <label class="config-option">
+                                <span>{stringProp(option, 'name')}</span>
+                                <select disabled value={optionCurrentValue(option)}>
+                                  {#each optionChoices(option) as choice}
+                                    <option value={choice.value}>{choice.name}</option>
+                                  {/each}
+                                </select>
+                              </label>
+                            {/each}
+                          </div>
+                        {:else if event.kind === 'available_commands_update'}
+                          <div class="command-list">
+                            {#each availableCommands(event.content) as command}
+                              <button
+                                class="command-row"
+                                onclick={() => insertSlashCommand(command)}
+                              >
+                                <span>/{command.name}</span>
+                                <small>{command.description}</small>
+                              </button>
+                            {/each}
+                          </div>
+                        {:else}
+                          <pre>{formatJson(event.content)}</pre>
+                        {/if}
+                      </div>
+                    {/if}
+                  </div>
                 </div>
               {/if}
             </div>
@@ -1577,6 +1751,16 @@
                   <X size={10} />
                 </Button>
               </div>
+            {/each}
+          </div>
+        {/if}
+        {#if matchingSlashCommands.length > 0 && !isLive}
+          <div class="slash-command-popover">
+            {#each matchingSlashCommands as command}
+              <button class="slash-command-item" onclick={() => insertSlashCommand(command)}>
+                <span>/{command.name}</span>
+                <small>{command.description || command.inputHint}</small>
+              </button>
             {/each}
           </div>
         {/if}
@@ -1972,10 +2156,6 @@
     min-width: 0;
   }
 
-  .tool-card-nested {
-    padding-left: 16px;
-  }
-
   .tool-header {
     display: flex;
     align-items: center;
@@ -2022,6 +2202,39 @@
     white-space: nowrap;
   }
 
+  .tool-status-dot {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
+    color: var(--text-faint);
+  }
+
+  .tool-status-dot.status-running {
+    color: var(--ui-warning);
+  }
+
+  .tool-status-dot.status-success {
+    color: var(--ui-success, var(--ui-accent));
+  }
+
+  .tool-status-dot.status-danger {
+    color: var(--ui-danger);
+  }
+
+  .tool-status-dot.status-cancelled {
+    color: var(--text-muted);
+  }
+
+  .tool-status-label {
+    flex-shrink: 0;
+    margin-left: auto;
+    color: var(--text-faint);
+    font-size: calc(var(--size-xs) * 0.88);
+  }
+
   .tool-args-preview {
     flex: 1;
     min-width: 0;
@@ -2059,6 +2272,44 @@
     word-break: break-word;
   }
 
+  .diff-output {
+    color: var(--text-primary);
+  }
+
+  .tool-panel-label {
+    margin: 10px 0 4px;
+    color: var(--text-faint);
+    font-family: inherit;
+    font-size: calc(var(--size-xs) * 0.86);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .tool-panel-label:first-child {
+    margin-top: 0;
+  }
+
+  .tool-meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin: 4px 0 8px;
+  }
+
+  .tool-chip {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    padding: 2px 6px;
+    color: var(--text-muted);
+    font-family: inherit;
+    font-size: calc(var(--size-xs) * 0.88);
+    white-space: nowrap;
+  }
+
   .tool-code-status {
     display: flex;
     align-items: center;
@@ -2067,6 +2318,14 @@
     margin-top: 8px;
     font-size: calc(var(--size-xs) * 0.85);
     color: var(--text-muted);
+  }
+
+  .tool-code-status.status-danger {
+    color: var(--ui-danger);
+  }
+
+  .tool-code-status.status-cancelled {
+    color: var(--text-faint);
   }
 
   .tool-code-block::-webkit-scrollbar {
@@ -2092,6 +2351,150 @@
     padding: 4px 0;
   }
 
+  /* ACP metadata cards */
+  .acp-event-row {
+    display: flex;
+  }
+
+  .acp-event-card {
+    width: 100%;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .acp-event-header {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 0;
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+    cursor: pointer;
+  }
+
+  .acp-event-header:hover .acp-event-title {
+    text-decoration: underline;
+  }
+
+  .acp-event-title {
+    flex-shrink: 0;
+    font-weight: 500;
+  }
+
+  .acp-event-body,
+  .permission-card-body {
+    margin-top: 4px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    background: var(--bg-primary);
+    padding: 8px 10px;
+    font-size: var(--size-xs);
+  }
+
+  .acp-event-body pre {
+    margin: 0;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: var(--text-muted);
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: calc(var(--size-xs) * 0.9);
+    line-height: 1.5;
+  }
+
+  .permission-tool-title {
+    color: var(--text-primary);
+    font-size: var(--size-sm);
+    line-height: 1.4;
+    word-break: break-word;
+  }
+
+  .permission-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .plan-list,
+  .config-list,
+  .command-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .plan-entry {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    color: var(--text-muted);
+    line-height: 1.35;
+  }
+
+  .plan-status {
+    flex-shrink: 0;
+    min-width: 74px;
+    color: var(--text-faint);
+    font-size: calc(var(--size-xs) * 0.9);
+    text-transform: capitalize;
+  }
+
+  .config-option {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(140px, 220px);
+    gap: 8px;
+    align-items: center;
+    color: var(--text-muted);
+  }
+
+  .config-option select {
+    min-width: 0;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    background: var(--bg-chrome);
+    color: var(--text-muted);
+    padding: 3px 6px;
+    font: inherit;
+  }
+
+  .command-row,
+  .slash-command-item {
+    display: grid;
+    grid-template-columns: minmax(96px, max-content) minmax(0, 1fr);
+    gap: 8px;
+    width: 100%;
+    align-items: baseline;
+    border: 0;
+    background: transparent;
+    color: var(--text-muted);
+    padding: 4px 6px;
+    text-align: left;
+    font: inherit;
+    cursor: pointer;
+  }
+
+  .command-row:hover,
+  .slash-command-item:hover {
+    background: var(--bg-hover);
+  }
+
+  .command-row span,
+  .slash-command-item span {
+    color: var(--text-primary);
+    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
+    font-size: calc(var(--size-xs) * 0.95);
+  }
+
+  .command-row small,
+  .slash-command-item small {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--text-faint);
+    white-space: nowrap;
+  }
+
   .note-followup-row {
     display: flex;
     justify-content: center;
@@ -2105,6 +2508,18 @@
   }
 
   .queue-popover {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    margin: 0 14px;
+    border: 1px solid var(--border-muted);
+    border-bottom: none;
+    border-radius: 10px 10px 0 0;
+    background: var(--bg-elevated);
+    overflow: hidden;
+  }
+
+  .slash-command-popover {
     display: flex;
     flex-direction: column;
     gap: 0;

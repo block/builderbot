@@ -733,6 +733,10 @@ export function getSessionAcpMetadataMessages(sessionId: string): Promise<Sessio
   return invokeCommand('get_session_acp_metadata_messages', { sessionId });
 }
 
+export function respondAcpPermission(requestId: string, optionId: string | null): Promise<void> {
+  return invokeCommand('respond_acp_permission', { requestId, optionId });
+}
+
 export function countAssistantMessagesAfter(
   sessionId: string,
   afterTimestamp: number

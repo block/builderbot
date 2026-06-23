@@ -412,8 +412,8 @@
           onclick={openProjectSessionModal}
           aria-label="New project note"
           class={[
-            'inline-flex items-center font-medium transition-all duration-300',
-            '[&_svg]:transition-all [&_svg]:duration-300',
+            'inline-flex items-center font-medium transition-[color,background-color,border-color,box-shadow,opacity] duration-300',
+            '[&_svg]:transition-colors [&_svg]:duration-300',
             projectNotes.length === 0
               ? 'flex-1 justify-center gap-2 px-1.5 py-2.5 h-auto rounded-lg border border-solid border-transparent bg-[var(--bg-elevated)] text-sm hover:bg-[var(--note-bg)] hover:text-[var(--note-color)] [&_svg]:!size-[18px] [&_svg]:text-[var(--note-color)]'
               : 'gap-[5px] px-2.5 h-8 rounded-md border border-dashed border-[var(--border-subtle)] bg-transparent text-xs hover:border-[var(--note-color)] hover:bg-[var(--note-bg)] hover:text-[var(--note-color)] [&_svg]:!size-[13px] [&_svg]:text-[var(--note-color)]',

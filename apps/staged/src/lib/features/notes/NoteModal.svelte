@@ -527,6 +527,7 @@
     gap: 8px;
     padding: 12px 16px;
     border-top: 1px solid var(--border-subtle);
+    background: var(--bg-chrome);
     flex-shrink: 0;
   }
 

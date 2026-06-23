@@ -21,7 +21,7 @@
   let fg = $derived(badgeFg(hue, darkMode.value));
 </script>
 
-<span class="repo-badge" class:small style="background: {bg}; color: {fg};">
+<span class="repo-badge stable-raster" class:small style="background: {bg}; color: {fg};">
   {shortName}
 </span>
 

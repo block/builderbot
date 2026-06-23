@@ -245,7 +245,7 @@
 
   function createBadgeElement(item: HashtagItem): HTMLSpanElement {
     const badge = document.createElement('span');
-    badge.className = 'hashtag-badge';
+    badge.className = 'hashtag-badge stable-raster stable-raster-glyphs';
     badge.contentEditable = 'false';
     badge.dataset.token = `#${item.type}:${item.id}`;
     const iconSvg = hashtagTypeIconSvg[item.type] ?? '';

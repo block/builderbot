@@ -114,7 +114,7 @@
     <div class="splash-actions">
       <Button
         variant="outline"
-        class="h-auto rounded-full border-transparent bg-[var(--bg-elevated)] px-9 py-3 text-sm font-medium text-foreground shadow-none transition-all hover:-translate-y-px hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+        class="h-auto rounded-full border-transparent bg-[var(--bg-elevated)] px-9 py-3 text-sm font-medium text-foreground shadow-none transition-[color,background-color,border-color,box-shadow,opacity,transform] hover:-translate-y-px hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
         onclick={openForm}
       >
         Create your first project

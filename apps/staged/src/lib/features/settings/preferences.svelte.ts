@@ -53,6 +53,10 @@ const DEFAULT_APP_MODE: AppMode = 'system';
 
 export type AutoReviewMode = 'never' | 'after-changes';
 
+function normalizeSize(size: number): number {
+  return Math.min(SIZE_MAX, Math.max(SIZE_MIN, Math.round(size)));
+}
+
 // =============================================================================
 // Fixed chrome base colors
 // =============================================================================
@@ -132,6 +136,7 @@ export const preferences = $state({
 // =============================================================================
 
 function applySize() {
+  preferences.sizeBase = normalizeSize(preferences.sizeBase);
   document.documentElement.style.setProperty('--size-base', `${preferences.sizeBase}px`);
 }
 
@@ -212,8 +217,13 @@ export async function initPreferences(): Promise<void> {
 
   // Load size
   const savedSize = await getStoreValue<number>(SIZE_STORE_KEY);
-  if (savedSize !== undefined && savedSize >= SIZE_MIN && savedSize <= SIZE_MAX) {
-    preferences.sizeBase = savedSize;
+  if (
+    typeof savedSize === 'number' &&
+    Number.isFinite(savedSize) &&
+    savedSize >= SIZE_MIN &&
+    savedSize <= SIZE_MAX
+  ) {
+    preferences.sizeBase = normalizeSize(savedSize);
   }
   applySize();
 
@@ -313,7 +323,7 @@ export function setAutoReviewMode(mode: AutoReviewMode): void {
  */
 export function increaseSize(): void {
   if (preferences.sizeBase < SIZE_MAX) {
-    preferences.sizeBase += SIZE_STEP;
+    preferences.sizeBase = normalizeSize(preferences.sizeBase + SIZE_STEP);
     applySize();
     setStoreValue(SIZE_STORE_KEY, preferences.sizeBase);
   }
@@ -324,7 +334,7 @@ export function increaseSize(): void {
  */
 export function decreaseSize(): void {
   if (preferences.sizeBase > SIZE_MIN) {
-    preferences.sizeBase -= SIZE_STEP;
+    preferences.sizeBase = normalizeSize(preferences.sizeBase - SIZE_STEP);
     applySize();
     setStoreValue(SIZE_STORE_KEY, preferences.sizeBase);
   }

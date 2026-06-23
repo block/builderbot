@@ -289,7 +289,7 @@
   >
     <div class="timeline-marker">
       <div
-        class="timeline-icon"
+        class="timeline-icon stable-raster"
         class:commit-icon={type === 'commit' ||
           type === 'pending-commit' ||
           type === 'queued-commit'}
@@ -364,7 +364,7 @@
             {/if}
             {#if badges}
               {#each badges as badge}
-                <span class="meta-badge">
+                <span class="meta-badge stable-raster stable-raster-glyphs">
                   {#if badge.icon === 'warning'}
                     <AlertTriangle size={10} />
                   {:else}
@@ -668,11 +668,6 @@
     flex-shrink: 0;
     background-color: var(--bg-elevated);
     border: 1px solid var(--border-subtle);
-    /* Pin the icon onto its own compositing layer so it rasterizes at integer
-       pixels and stays put during the row's hover background-color transition.
-       Restores the layer hint #775 dropped from .timeline-row, but on the tiny
-       icon rather than the full-width row to keep that commit's memory win. */
-    transform: translateZ(0);
   }
 
   .timeline-icon.commit-icon {
@@ -796,11 +791,6 @@
     align-items: center;
     line-height: 1;
     vertical-align: -2px;
-    transform: translateZ(0);
-  }
-
-  .timeline-title :global(.hashtag-badge svg) {
-    transform: translateZ(0);
   }
 
   .timeline-row.git-state .timeline-title :global(.git-ref-badge) {
@@ -857,10 +847,6 @@
     font-size: calc(var(--size-xs) - 1px);
     font-weight: 600;
     line-height: 1;
-    /* Pin the review badge onto its own compositing layer (same rationale as
-       .timeline-icon) so its icon stays put during the row's hover
-       background-color transition instead of re-snapping to fractional pixels. */
-    transform: translateZ(0);
   }
 
   /* Actions container — visible on row hover */
@@ -871,12 +857,6 @@
     flex-shrink: 0;
     opacity: 0;
     transition: opacity 0.1s;
-  }
-
-  /* Pin each action-button icon onto its own layer so it doesn't jiggle during
-     the container's opacity fade or the Button's transition-all on hover. */
-  .timeline-actions :global(svg) {
-    transform: translateZ(0);
   }
 
   .timeline-row:hover .timeline-actions,

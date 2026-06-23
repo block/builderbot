@@ -314,7 +314,7 @@ export function renderHashtagTokens(text: string, items: HashtagItem[]): string 
         ? id.slice(0, 8) + '…'
         : id;
     parts.push(
-      `<span class="hashtag-badge" style="background: var(${colors.bg}); color: var(${colors.color});">${iconSvg} ${escapeHtml(title)}</span>`
+      `<span class="hashtag-badge stable-raster stable-raster-glyphs" style="background: var(${colors.bg}); color: var(${colors.color});">${iconSvg} ${escapeHtml(title)}</span>`
     );
 
     lastIndex = match.index + match[0].length;

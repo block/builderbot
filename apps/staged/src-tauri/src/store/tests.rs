@@ -812,6 +812,58 @@ fn test_acp_metadata_rows_are_hidden_from_legacy_session_messages() {
 }
 
 #[test]
+fn test_acp_metadata_messages_query_includes_hidden_rows() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    store
+        .add_acp_metadata_message_with_role(
+            &session.id,
+            MessageRole::User,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("user_message_chunk".to_string()),
+                acp_message_id: Some("user-msg-1".to_string()),
+                acp_content: Some(serde_json::json!({
+                    "content": {"type": "text", "text": "hello"}
+                })),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("usage_update".to_string()),
+                acp_usage: Some(serde_json::json!({
+                    "used": 42,
+                    "size": 1000
+                })),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    assert!(
+        store.get_session_messages(&session.id).unwrap().is_empty(),
+        "ACP metadata rows must stay hidden from legacy transcript reads"
+    );
+
+    let metadata_rows = store
+        .get_session_acp_metadata_messages(&session.id)
+        .unwrap();
+    assert_eq!(metadata_rows.len(), 2);
+    assert_eq!(metadata_rows[0].role, MessageRole::User);
+    assert_eq!(
+        metadata_rows[0].acp.acp_message_id.as_deref(),
+        Some("user-msg-1")
+    );
+    assert_eq!(metadata_rows[1].acp.acp_usage.as_ref().unwrap()["used"], 42);
+}
+
+#[test]
 fn test_acp_initialization_metadata_is_queryable() {
     let store = Store::in_memory().unwrap();
 

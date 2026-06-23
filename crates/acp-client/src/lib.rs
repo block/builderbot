@@ -27,8 +27,8 @@ pub use agent_client_protocol::schema::v1::{
     SessionConfigOptionCategory, SessionInfoUpdate, SessionModeState as SessionModelState,
 };
 pub use driver::{
-    strip_code_fences, AcpDriver, AcpInitializeMetadata, AcpToolCallMetadata, AgentDriver,
-    BasicMessageWriter, MessageWriter, Store,
+    strip_code_fences, AcpDriver, AcpEventMetadata, AcpInitializeMetadata, AcpToolCallMetadata,
+    AgentDriver, BasicMessageWriter, MessageWriter, Store,
 };
 pub use simple::{run_acp_prompt, run_acp_prompt_with_interpreter_env_snapshot};
 pub use types::{

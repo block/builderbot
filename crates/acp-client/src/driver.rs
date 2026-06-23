@@ -19,9 +19,9 @@ use agent_client_protocol::{
     schema::{
         v1::{
             AgentCapabilities, AuthMethod, AuthenticateRequest, ContentBlock as AcpContentBlock,
-            ImageContent, Implementation, InitializeRequest, InitializeResponse,
+            ContentChunk, ImageContent, Implementation, InitializeRequest, InitializeResponse,
             LoadSessionRequest, McpCapabilities, McpServer, NewSessionRequest, PermissionOptionId,
-            PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
+            PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
             RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigOption,
             SessionInfoUpdate, SessionModeState, SessionNotification, SessionUpdate, TextContent,
             ToolCallContent,
@@ -103,6 +103,9 @@ pub trait MessageWriter: Send + Sync {
 
     /// Attach rich ACP tool-call metadata to an existing tool-call row.
     async fn record_tool_call_metadata(&self, _metadata: AcpToolCallMetadata) {}
+
+    /// Persist an ACP event that does not map cleanly to a visible transcript row.
+    async fn record_acp_event_metadata(&self, _metadata: AcpEventMetadata) {}
 }
 
 #[derive(Debug, Clone, Default)]
@@ -137,6 +140,14 @@ impl AcpToolCallMetadata {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct AcpEventMetadata {
+    pub event_kind: Option<String>,
+    pub message_id: Option<String>,
+    pub content: Option<serde_json::Value>,
+    pub usage: Option<serde_json::Value>,
+}
+
 fn serialize_as_string<T: serde::Serialize>(value: &T) -> Option<String> {
     match serde_json::to_value(value).ok()? {
         serde_json::Value::String(s) => Some(s),
@@ -150,6 +161,10 @@ fn serialize_non_empty<T: serde::Serialize>(items: &[T]) -> Option<serde_json::V
     } else {
         serde_json::to_value(items).ok()
     }
+}
+
+fn serialize_value<T: serde::Serialize>(value: &T) -> Option<serde_json::Value> {
+    serde_json::to_value(value).ok()
 }
 
 /// Storage interface for persisting agent session data.
@@ -1323,7 +1338,11 @@ impl AcpNotificationHandler {
         // Determine the action to take under the lock, then drop the lock
         // before calling into the writer to avoid holding it across await points.
         enum LiveAction {
-            AppendText(String),
+            AppendText {
+                text: String,
+                metadata: AcpEventMetadata,
+            },
+            RecordAcpEvent(AcpEventMetadata),
             RecordToolCall {
                 id: String,
                 title: String,
@@ -1429,12 +1448,19 @@ impl AcpNotificationHandler {
 
                     match &notification.update {
                         SessionUpdate::AgentMessageChunk(chunk) => {
+                            let metadata = message_chunk_metadata("agent_message_chunk", chunk);
                             if let AcpContentBlock::Text(text) = &chunk.content {
-                                LiveAction::AppendText(text.text.clone())
+                                LiveAction::AppendText {
+                                    text: text.text.clone(),
+                                    metadata,
+                                }
                             } else {
-                                LiveAction::Drop
+                                LiveAction::RecordAcpEvent(metadata)
                             }
                         }
+                        SessionUpdate::UserMessageChunk(chunk) => LiveAction::RecordAcpEvent(
+                            message_chunk_metadata("user_message_chunk", chunk),
+                        ),
                         SessionUpdate::ToolCall(tool_call) => {
                             let id = tool_call.tool_call_id.0.to_string();
                             LiveAction::RecordToolCall {
@@ -1506,6 +1532,9 @@ impl AcpNotificationHandler {
                                 LiveAction::Drop
                             }
                         }
+                        SessionUpdate::UsageUpdate(update) => {
+                            LiveAction::RecordAcpEvent(usage_update_metadata(update))
+                        }
                         _ => LiveAction::Ignore,
                     }
                 }
@@ -1515,8 +1544,12 @@ impl AcpNotificationHandler {
 
         // Execute the live action without holding the phase lock.
         match live_action {
-            LiveAction::AppendText(text) => {
+            LiveAction::AppendText { text, metadata } => {
                 self.writer.append_text(&text).await;
+                self.writer.record_acp_event_metadata(metadata).await;
+            }
+            LiveAction::RecordAcpEvent(metadata) => {
+                self.writer.record_acp_event_metadata(metadata).await;
             }
             LiveAction::RecordToolCall {
                 id,
@@ -1562,6 +1595,38 @@ fn notification_tool_call_id(update: &SessionUpdate) -> Option<String> {
         SessionUpdate::ToolCallUpdate(tcu) => Some(tcu.tool_call_id.0.to_string()),
         _ => None,
     }
+}
+
+fn message_chunk_metadata(event_kind: &str, chunk: &ContentChunk) -> AcpEventMetadata {
+    AcpEventMetadata {
+        event_kind: Some(event_kind.to_string()),
+        message_id: chunk.message_id.as_ref().map(|id| id.0.to_string()),
+        content: serialize_value(chunk),
+        ..Default::default()
+    }
+}
+
+fn usage_update_metadata<T: serde::Serialize>(update: &T) -> AcpEventMetadata {
+    AcpEventMetadata {
+        event_kind: Some("usage_update".to_string()),
+        usage: serialize_value(update),
+        content: serialize_value(update),
+        ..Default::default()
+    }
+}
+
+fn prompt_response_metadata(response: &PromptResponse) -> Option<AcpEventMetadata> {
+    let usage = response.usage.as_ref().and_then(serialize_value);
+    if usage.is_none() {
+        return None;
+    }
+
+    Some(AcpEventMetadata {
+        event_kind: Some("prompt_response".to_string()),
+        message_id: None,
+        usage,
+        content: serialize_value(response),
+    })
 }
 
 // =============================================================================
@@ -1638,11 +1703,15 @@ async fn run_acp_protocol(
 
     handler.transition_to_live().await;
 
-    connection
+    let prompt_response = connection
         .send_request(prompt_request)
         .block_task()
         .await
         .map_err(|e| format!("Prompt failed: {e:?}"))?;
+
+    if let Some(metadata) = prompt_response_metadata(&prompt_response) {
+        handler.writer.record_acp_event_metadata(metadata).await;
+    }
 
     Ok(())
 }

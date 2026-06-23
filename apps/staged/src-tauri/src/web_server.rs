@@ -2790,6 +2790,14 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(count).unwrap())
         }
+        "get_session_acp_metadata_messages" => {
+            let store = get_store(store_mutex)?;
+            let session_id: String = arg(&args, "sessionId")?;
+            let messages = store
+                .get_session_acp_metadata_messages(&session_id)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(messages).unwrap())
+        }
         "get_session_acp_initialization" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;

@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 
 use crate::store::{AcpMessageMetadata, MessageRole, Store};
 
-use acp_client::{strip_code_fences, AcpInitializeMetadata, AcpToolCallMetadata};
+use acp_client::{strip_code_fences, AcpEventMetadata, AcpInitializeMetadata, AcpToolCallMetadata};
 
 /// Minimum interval between DB flushes for streaming text. Chunks accumulate
 /// in memory and are written at most this often, reducing mutex contention
@@ -76,6 +76,23 @@ fn acp_tool_call_metadata(metadata: AcpToolCallMetadata) -> AcpMessageMetadata {
         acp_content: metadata.content,
         acp_locations: metadata.locations,
         ..Default::default()
+    }
+}
+
+fn acp_event_metadata(metadata: AcpEventMetadata) -> AcpMessageMetadata {
+    AcpMessageMetadata {
+        acp_event_kind: metadata.event_kind,
+        acp_message_id: metadata.message_id,
+        acp_content: metadata.content,
+        acp_usage: metadata.usage,
+        ..Default::default()
+    }
+}
+
+fn acp_event_role(metadata: &AcpMessageMetadata) -> MessageRole {
+    match metadata.acp_event_kind.as_deref() {
+        Some("user_message_chunk") => MessageRole::User,
+        _ => MessageRole::Assistant,
     }
 }
 
@@ -363,6 +380,17 @@ impl acp_client::MessageWriter for MessageWriter {
             log::error!("Failed to persist ACP tool-call metadata: {e}");
         }
     }
+
+    async fn record_acp_event_metadata(&self, metadata: AcpEventMetadata) {
+        let metadata = acp_event_metadata(metadata);
+        let role = acp_event_role(&metadata);
+        if let Err(e) =
+            self.store
+                .add_acp_metadata_message_with_role(&self.session_id, role, &metadata)
+        {
+            log::error!("Failed to persist ACP event metadata: {e}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -532,5 +560,49 @@ mod tests {
             false
         );
         assert_eq!(metadata.acp_agent_info.unwrap()["name"], "codex");
+    }
+
+    #[tokio::test]
+    async fn acp_event_metadata_is_persisted_as_hidden_row() {
+        let (store, session_id, writer) = setup_writer();
+
+        <MessageWriter as acp_client::MessageWriter>::record_acp_event_metadata(
+            &writer,
+            acp_client::AcpEventMetadata {
+                event_kind: Some("agent_message_chunk".to_string()),
+                message_id: Some("assistant-msg-1".to_string()),
+                content: Some(serde_json::json!({
+                    "content": {"type": "text", "text": "hello"}
+                })),
+                usage: Some(serde_json::json!({
+                    "totalTokens": 12,
+                    "inputTokens": 5,
+                    "outputTokens": 7
+                })),
+            },
+        )
+        .await;
+
+        assert!(
+            store.get_session_messages(&session_id).unwrap().is_empty(),
+            "ACP event metadata should not appear in transcript rows"
+        );
+
+        let metadata_rows = store
+            .get_session_acp_metadata_messages(&session_id)
+            .unwrap();
+        assert_eq!(metadata_rows.len(), 1);
+        assert_eq!(
+            metadata_rows[0].acp.acp_event_kind.as_deref(),
+            Some("agent_message_chunk")
+        );
+        assert_eq!(
+            metadata_rows[0].acp.acp_message_id.as_deref(),
+            Some("assistant-msg-1")
+        );
+        assert_eq!(
+            metadata_rows[0].acp.acp_usage.as_ref().unwrap()["outputTokens"],
+            7
+        );
     }
 }

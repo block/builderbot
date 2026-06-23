@@ -729,6 +729,10 @@ export function getSessionMessagesSince(
   return invokeCommand('get_session_messages_since', { sessionId, sinceId });
 }
 
+export function getSessionAcpMetadataMessages(sessionId: string): Promise<SessionMessage[]> {
+  return invokeCommand('get_session_acp_metadata_messages', { sessionId });
+}
+
 export function countAssistantMessagesAfter(
   sessionId: string,
   afterTimestamp: number

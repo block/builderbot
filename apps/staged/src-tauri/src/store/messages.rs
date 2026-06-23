@@ -197,6 +197,17 @@ impl Store {
         session_id: &str,
         metadata: &AcpMessageMetadata,
     ) -> Result<i64, StoreError> {
+        self.add_acp_metadata_message_with_role(session_id, MessageRole::Assistant, metadata)
+    }
+
+    /// Insert an ACP metadata-only row with an explicit role. This is used for
+    /// hidden ACP events whose source role matters, such as user message chunks.
+    pub fn add_acp_metadata_message_with_role(
+        &self,
+        session_id: &str,
+        role: MessageRole,
+        metadata: &AcpMessageMetadata,
+    ) -> Result<i64, StoreError> {
         let raw_input = json_column(metadata.acp_raw_input.as_ref());
         let raw_output = json_column(metadata.acp_raw_output.as_ref());
         let content = json_column(metadata.acp_content.as_ref());
@@ -223,7 +234,7 @@ impl Store {
              VALUES (?1, ?2, '', ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 session_id,
-                MessageRole::Assistant.as_str(),
+                role.as_str(),
                 now_timestamp(),
                 metadata.acp_event_kind.as_deref(),
                 metadata.acp_protocol_version.as_deref(),
@@ -245,6 +256,24 @@ impl Store {
             ],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Return rows carrying ACP metadata, including rows hidden from the legacy
+    /// transcript projection.
+    pub fn get_session_acp_metadata_messages(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<SessionMessage>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {SESSION_MESSAGE_COLUMNS}
+             FROM session_messages
+             WHERE session_id = ?1 AND acp_event_kind IS NOT NULL
+             ORDER BY id ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![session_id], session_message_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
     /// Return the latest ACP initialization metadata row for a session.

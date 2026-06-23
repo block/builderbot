@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 
 use crate::store::{AcpMessageMetadata, MessageRole, Store};
 
-use acp_client::{strip_code_fences, AcpToolCallMetadata};
+use acp_client::{strip_code_fences, AcpInitializeMetadata, AcpToolCallMetadata};
 
 /// Minimum interval between DB flushes for streaming text. Chunks accumulate
 /// in memory and are written at most this often, reducing mutex contention
@@ -324,6 +324,23 @@ impl acp_client::MessageWriter for MessageWriter {
         }
     }
 
+    async fn on_initialize(&self, metadata: &AcpInitializeMetadata) {
+        let metadata = AcpMessageMetadata {
+            acp_event_kind: Some("initialize".to_string()),
+            acp_protocol_version: Some(metadata.protocol_version.clone()),
+            acp_agent_capabilities: metadata.agent_capabilities.clone(),
+            acp_auth_methods: metadata.auth_methods.clone(),
+            acp_agent_info: metadata.agent_info.clone(),
+            ..Default::default()
+        };
+        if let Err(e) = self
+            .store
+            .add_acp_metadata_message(&self.session_id, &metadata)
+        {
+            log::error!("Failed to persist ACP initialization metadata: {e}");
+        }
+    }
+
     async fn record_tool_call_metadata(&self, metadata: AcpToolCallMetadata) {
         let tool_call_id = metadata.tool_call_id.clone();
         let metadata = acp_tool_call_metadata(metadata);
@@ -476,5 +493,44 @@ mod tests {
             messages[0].acp.acp_raw_input.as_ref().unwrap()["path"],
             "src/lib.rs"
         );
+    }
+
+    #[tokio::test]
+    async fn initialize_metadata_is_persisted_as_hidden_row() {
+        let (store, session_id, writer) = setup_writer();
+
+        <MessageWriter as acp_client::MessageWriter>::on_initialize(
+            &writer,
+            &acp_client::AcpInitializeMetadata {
+                protocol_version: "1".to_string(),
+                agent_capabilities: Some(serde_json::json!({
+                    "promptCapabilities": {"image": false}
+                })),
+                auth_methods: Some(serde_json::json!([
+                    {"id": "default", "name": "Default"}
+                ])),
+                agent_info: Some(serde_json::json!({
+                    "name": "codex",
+                    "version": "0.1.0"
+                })),
+            },
+        )
+        .await;
+
+        assert!(
+            store.get_session_messages(&session_id).unwrap().is_empty(),
+            "initialization metadata should not appear in transcript rows"
+        );
+
+        let metadata = store
+            .get_session_acp_initialization(&session_id)
+            .unwrap()
+            .expect("initialization metadata");
+        assert_eq!(metadata.acp_protocol_version.as_deref(), Some("1"));
+        assert_eq!(
+            metadata.acp_agent_capabilities.unwrap()["promptCapabilities"]["image"],
+            false
+        );
+        assert_eq!(metadata.acp_agent_info.unwrap()["name"], "codex");
     }
 }

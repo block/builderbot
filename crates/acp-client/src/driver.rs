@@ -18,7 +18,8 @@ use std::time::{Duration, Instant};
 use agent_client_protocol::{
     schema::{
         v1::{
-            ContentBlock as AcpContentBlock, ImageContent, Implementation, InitializeRequest,
+            AgentCapabilities, AuthMethod, AuthenticateRequest, ContentBlock as AcpContentBlock,
+            ImageContent, Implementation, InitializeRequest, InitializeResponse,
             LoadSessionRequest, McpCapabilities, McpServer, NewSessionRequest, PermissionOptionId,
             PromptRequest, RequestPermissionOutcome, RequestPermissionRequest,
             RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigOption,
@@ -97,8 +98,19 @@ pub trait MessageWriter: Send + Sync {
     /// Called when session configuration options change.
     async fn on_config_option_update(&self, _options: &[SessionConfigOption]) {}
 
+    /// Called after ACP initialization has negotiated agent capabilities.
+    async fn on_initialize(&self, _metadata: &AcpInitializeMetadata) {}
+
     /// Attach rich ACP tool-call metadata to an existing tool-call row.
     async fn record_tool_call_metadata(&self, _metadata: AcpToolCallMetadata) {}
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AcpInitializeMetadata {
+    pub protocol_version: String,
+    pub agent_capabilities: Option<serde_json::Value>,
+    pub auth_methods: Option<serde_json::Value>,
+    pub agent_info: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -565,6 +577,43 @@ fn resolve_spawn_working_dir(working_dir: &Path, is_remote: bool) -> PathBuf {
     working_dir.to_path_buf()
 }
 
+fn absolute_local_path(path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .map_err(|e| {
+            format!(
+                "Failed to resolve absolute ACP cwd for {}: {e}",
+                path.display()
+            )
+        })
+}
+
+fn resolve_acp_working_dir(
+    working_dir: &Path,
+    is_remote: bool,
+    remote_working_dir: Option<&Path>,
+) -> Result<PathBuf, String> {
+    if is_remote {
+        let remote_dir = remote_working_dir.ok_or_else(|| {
+            "Remote ACP sessions require an absolute remote working directory; could not resolve the workspace repo path"
+                .to_string()
+        })?;
+        if !remote_dir.is_absolute() {
+            return Err(format!(
+                "Remote ACP working directory must be absolute, got {}",
+                remote_dir.display()
+            ));
+        }
+        return Ok(remote_dir.to_path_buf());
+    }
+
+    absolute_local_path(working_dir)
+}
+
 #[async_trait(?Send)]
 impl AgentDriver for AcpDriver {
     async fn run(
@@ -579,6 +628,11 @@ impl AgentDriver for AcpDriver {
         agent_session_id: Option<&str>,
     ) -> Result<(), String> {
         let spawn_working_dir = resolve_spawn_working_dir(working_dir, self.is_remote);
+        let acp_working_dir = resolve_acp_working_dir(
+            working_dir,
+            self.is_remote,
+            self.remote_working_dir.as_deref(),
+        )?;
         if self.is_remote && spawn_working_dir.as_path() != working_dir {
             log::warn!(
                 "Remote ACP spawn cwd missing ({}); falling back to {}",
@@ -796,14 +850,6 @@ impl AgentDriver for AcpDriver {
             is_resuming,
             db_messages,
         ));
-        let acp_working_dir = if let Some(ref remote_dir) = self.remote_working_dir {
-            remote_dir.clone()
-        } else if self.is_remote {
-            PathBuf::from(".")
-        } else {
-            working_dir.to_path_buf()
-        };
-
         let transport = ByteStreams::new(stdin_compat, stdout_compat);
         let permission_handler = Arc::clone(&handler);
         let notification_handler = Arc::clone(&handler);
@@ -840,6 +886,7 @@ impl AgentDriver for AcpDriver {
                         agent_session_id,
                         &handler,
                         &self.mcp_servers,
+                        &self.agent_label,
                     )
                     .await
                     .map_err(agent_client_protocol::util::internal_error)
@@ -1532,8 +1579,9 @@ async fn run_acp_protocol(
     acp_session_id: Option<&str>,
     handler: &Arc<AcpNotificationHandler>,
     mcp_servers: &[McpServer],
+    agent_label: &str,
 ) -> Result<(), String> {
-    let agent_session_id = tokio::time::timeout(
+    let setup = tokio::time::timeout(
         ACP_SETUP_TIMEOUT,
         setup_acp_session(
             connection,
@@ -1543,6 +1591,7 @@ async fn run_acp_protocol(
             our_session_id,
             acp_session_id,
             mcp_servers,
+            agent_label,
         ),
     )
     .await
@@ -1577,14 +1626,15 @@ async fn run_acp_protocol(
         handler.transition_to_waiting_for_prompt().await;
     }
 
-    let mut content_blocks = vec![AcpContentBlock::Text(TextContent::new(prompt))];
-    for (data, mime_type) in images {
-        content_blocks.push(AcpContentBlock::Image(ImageContent::new(
-            data.as_str(),
-            mime_type.as_str(),
-        )));
+    let supports_images = setup.agent_capabilities.prompt_capabilities.image;
+    if !images.is_empty() && !supports_images {
+        log::warn!(
+            "ACP agent for session {our_session_id} does not advertise promptCapabilities.image; omitting {} image attachment(s)",
+            images.len()
+        );
     }
-    let prompt_request = PromptRequest::new(agent_session_id, content_blocks);
+    let content_blocks = build_prompt_content_blocks(prompt, images, supports_images);
+    let prompt_request = PromptRequest::new(setup.agent_session_id, content_blocks);
 
     handler.transition_to_live().await;
 
@@ -1611,7 +1661,11 @@ fn mcp_server_transport_supported(server: &McpServer, caps: &McpCapabilities) ->
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct AcpSessionSetup {
+    agent_session_id: String,
+    agent_capabilities: AgentCapabilities,
+}
+
 async fn setup_acp_session(
     connection: &ConnectionTo<Agent>,
     working_dir: &Path,
@@ -1620,7 +1674,8 @@ async fn setup_acp_session(
     our_session_id: &str,
     acp_session_id: Option<&str>,
     mcp_servers: &[McpServer],
-) -> Result<String, String> {
+    agent_label: &str,
+) -> Result<AcpSessionSetup, String> {
     let client_info = Implementation::new("acp-client", env!("CARGO_PKG_VERSION"));
     let init_request = InitializeRequest::new(ProtocolVersion::V1).client_info(client_info);
 
@@ -1630,6 +1685,11 @@ async fn setup_acp_session(
         .await
         .map_err(|e| format!("ACP init failed: {e:?}"))?;
 
+    log_initialize_response(agent_label, &init_response);
+    writer
+        .on_initialize(&initialize_metadata(&init_response))
+        .await;
+
     if init_response.protocol_version != ProtocolVersion::V1 {
         return Err(format!(
             "Agent negotiated unsupported ACP protocol version {} (expected {})",
@@ -1638,12 +1698,13 @@ async fn setup_acp_session(
         ));
     }
 
-    let mcp_caps = &init_response.agent_capabilities.mcp_capabilities;
+    authenticate_if_advertised(connection, &init_response.auth_methods).await?;
 
     // Required servers must all have a supported transport, or the session
     // fails. Route the decision through mcp_server_transport_supported so the
     // transport->capability mapping lives in exactly one place: a newly added
     // transport stays validated here instead of silently slipping through.
+    let mcp_caps = &init_response.agent_capabilities.mcp_capabilities;
     if mcp_servers
         .iter()
         .any(|server| !mcp_server_transport_supported(server, mcp_caps))
@@ -1661,9 +1722,11 @@ async fn setup_acp_session(
         ));
     }
 
+    let agent_capabilities = init_response.agent_capabilities.clone();
+
     match acp_session_id {
         Some(existing_id) => {
-            if !init_response.agent_capabilities.load_session {
+            if !agent_capabilities.load_session {
                 return Err(
                     "Agent does not support load_session — cannot resume conversation".to_string(),
                 );
@@ -1689,7 +1752,10 @@ async fn setup_acp_session(
                 writer.on_config_option_update(options).await;
             }
 
-            Ok(existing_id.to_string())
+            Ok(AcpSessionSetup {
+                agent_session_id: existing_id.to_string(),
+                agent_capabilities,
+            })
         }
         None => {
             let new_session_request =
@@ -1712,9 +1778,108 @@ async fn setup_acp_session(
                 writer.on_config_option_update(options).await;
             }
 
-            Ok(new_id)
+            Ok(AcpSessionSetup {
+                agent_session_id: new_id,
+                agent_capabilities,
+            })
         }
     }
+}
+
+fn initialize_metadata(init_response: &InitializeResponse) -> AcpInitializeMetadata {
+    AcpInitializeMetadata {
+        protocol_version: init_response.protocol_version.to_string(),
+        agent_capabilities: serde_json::to_value(&init_response.agent_capabilities).ok(),
+        auth_methods: serde_json::to_value(&init_response.auth_methods).ok(),
+        agent_info: init_response
+            .agent_info
+            .as_ref()
+            .and_then(|info| serde_json::to_value(info).ok()),
+    }
+}
+
+fn log_initialize_response(agent_label: &str, init_response: &InitializeResponse) {
+    let agent_name = init_response
+        .agent_info
+        .as_ref()
+        .map(|info| info.name.as_str())
+        .unwrap_or(agent_label);
+    let agent_version = init_response
+        .agent_info
+        .as_ref()
+        .map(|info| info.version.as_str())
+        .unwrap_or("unknown");
+    let capabilities = serde_json::to_string(&init_response.agent_capabilities)
+        .unwrap_or_else(|_| "<unserializable>".to_string());
+    let auth_methods = describe_auth_methods(&init_response.auth_methods);
+
+    log::debug!(
+        "ACP initialized provider={agent_label} agent={agent_name} version={agent_version} protocol={} capabilities={} auth_methods=[{}]",
+        init_response.protocol_version,
+        capabilities,
+        auth_methods
+    );
+}
+
+fn describe_auth_methods(auth_methods: &[AuthMethod]) -> String {
+    auth_methods
+        .iter()
+        .map(|method| format!("{} ({})", method.name(), method.id()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+async fn authenticate_if_advertised(
+    connection: &ConnectionTo<Agent>,
+    auth_methods: &[AuthMethod],
+) -> Result<(), String> {
+    let Some(method) = auth_methods.first() else {
+        return Ok(());
+    };
+
+    log::debug!(
+        "ACP agent advertised authentication methods; selecting {} ({})",
+        method.name(),
+        method.id()
+    );
+
+    connection
+        .send_request(AuthenticateRequest::new(method.id().clone()))
+        .block_task()
+        .await
+        .map_err(|e| {
+            format!(
+                "ACP authentication failed with method {} ({}): {e:?}",
+                method.name(),
+                method.id()
+            )
+        })?;
+
+    Ok(())
+}
+
+fn build_prompt_content_blocks(
+    prompt: &str,
+    images: &[(String, String)],
+    supports_images: bool,
+) -> Vec<AcpContentBlock> {
+    let mut content_blocks = vec![AcpContentBlock::Text(TextContent::new(prompt))];
+
+    if supports_images {
+        for (data, mime_type) in images {
+            content_blocks.push(AcpContentBlock::Image(ImageContent::new(
+                data.as_str(),
+                mime_type.as_str(),
+            )));
+        }
+    } else if !images.is_empty() {
+        content_blocks.push(AcpContentBlock::Text(TextContent::new(format!(
+            "[{} image attachment(s) omitted because this ACP provider does not advertise promptCapabilities.image]",
+            images.len()
+        ))));
+    }
+
+    content_blocks
 }
 
 /// Strip outer markdown code fences from tool-result content.
@@ -1837,13 +2002,16 @@ impl MessageWriter for BasicMessageWriter {
 #[cfg(test)]
 mod tests {
     use super::{
-        acp_spawn_command, consume_remote_acp_line, decode_remote_acp_line,
-        env_shebang_interpreter, guarded_path_for_agent_binary, is_broad_toolchain_dir,
-        mcp_server_transport_supported, path_with_inserted_agent_bin_dir, remote_acp_segments,
-        resolve_spawn_working_dir, sanitize_remote_acp_chunk, shell_exec_line, shell_quote,
-        AcpDriver, McpCapabilities, McpServer, RemoteLineOutcome,
+        acp_spawn_command, build_prompt_content_blocks, consume_remote_acp_line,
+        decode_remote_acp_line, env_shebang_interpreter, guarded_path_for_agent_binary,
+        is_broad_toolchain_dir, mcp_server_transport_supported, path_with_inserted_agent_bin_dir,
+        remote_acp_segments, resolve_acp_working_dir, resolve_spawn_working_dir,
+        sanitize_remote_acp_chunk, shell_exec_line, shell_quote, AcpDriver, RemoteLineOutcome,
     };
-    use agent_client_protocol::{McpServerHttp, McpServerSse, McpServerStdio};
+    use agent_client_protocol::schema::v1::{
+        ContentBlock as AcpContentBlock, McpCapabilities, McpServer, McpServerHttp, McpServerSse,
+        McpServerStdio,
+    };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2055,6 +2223,60 @@ mod tests {
             remote.interpreter_env_snapshot.is_none(),
             "remote sq proxy launches must keep their inherited environment"
         );
+    }
+
+    #[test]
+    fn remote_acp_working_dir_requires_remote_path() {
+        let error = resolve_acp_working_dir(Path::new("/tmp/local"), true, None)
+            .expect_err("remote ACP cwd should be required");
+        assert!(error.contains("absolute remote working directory"));
+    }
+
+    #[test]
+    fn remote_acp_working_dir_rejects_relative_path() {
+        let error = resolve_acp_working_dir(Path::new("/tmp/local"), true, Some(Path::new("repo")))
+            .expect_err("relative remote ACP cwd should be rejected");
+        assert!(error.contains("must be absolute"));
+    }
+
+    #[test]
+    fn remote_acp_working_dir_uses_absolute_remote_path() {
+        let remote = Path::new("/home/bloxer/repo");
+        assert_eq!(
+            resolve_acp_working_dir(Path::new("/tmp/local"), true, Some(remote)).unwrap(),
+            remote
+        );
+    }
+
+    #[test]
+    fn local_acp_working_dir_is_absolute() {
+        let resolved = resolve_acp_working_dir(Path::new("."), false, None).unwrap();
+        assert!(resolved.is_absolute());
+    }
+
+    #[test]
+    fn image_prompt_blocks_are_omitted_when_unsupported() {
+        let images = vec![("abcd".to_string(), "image/png".to_string())];
+        let blocks = build_prompt_content_blocks("inspect this", &images, false);
+
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(blocks[0], AcpContentBlock::Text(_)));
+        match &blocks[1] {
+            AcpContentBlock::Text(text) => {
+                assert!(text.text.contains("image attachment(s) omitted"));
+            }
+            other => panic!("expected omission notice text block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn image_prompt_blocks_are_sent_when_supported() {
+        let images = vec![("abcd".to_string(), "image/png".to_string())];
+        let blocks = build_prompt_content_blocks("inspect this", &images, true);
+
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(blocks[0], AcpContentBlock::Text(_)));
+        assert!(matches!(blocks[1], AcpContentBlock::Image(_)));
     }
 
     #[test]

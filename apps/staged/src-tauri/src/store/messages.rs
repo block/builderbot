@@ -6,7 +6,8 @@ use super::models::{AcpMessageMetadata, MessageRole, SessionMessage};
 use super::{now_timestamp, Store, StoreError};
 
 const SESSION_MESSAGE_COLUMNS: &str = "id, session_id, role, content, created_at, image_ids,
-    acp_event_kind, acp_message_id, acp_tool_call_id, acp_tool_kind, acp_tool_status,
+    acp_event_kind, acp_protocol_version, acp_agent_capabilities, acp_auth_methods,
+    acp_agent_info, acp_message_id, acp_tool_call_id, acp_tool_kind, acp_tool_status,
     acp_raw_input, acp_raw_output, acp_content, acp_locations, acp_usage,
     acp_session_info, acp_config_options, acp_session_mode_state";
 const VISIBLE_MESSAGE_FILTER: &str = "NOT (content = '' AND acp_event_kind IS NOT NULL)";
@@ -38,18 +39,22 @@ fn session_message_from_row(row: &Row<'_>) -> rusqlite::Result<SessionMessage> {
         image_ids: parse_image_ids(image_ids_raw),
         acp: AcpMessageMetadata {
             acp_event_kind: row.get(6)?,
-            acp_message_id: row.get(7)?,
-            acp_tool_call_id: row.get(8)?,
-            acp_tool_kind: row.get(9)?,
-            acp_tool_status: row.get(10)?,
-            acp_raw_input: parse_json_value(row.get(11)?),
-            acp_raw_output: parse_json_value(row.get(12)?),
-            acp_content: parse_json_value(row.get(13)?),
-            acp_locations: parse_json_value(row.get(14)?),
-            acp_usage: parse_json_value(row.get(15)?),
-            acp_session_info: parse_json_value(row.get(16)?),
-            acp_config_options: parse_json_value(row.get(17)?),
-            acp_session_mode_state: parse_json_value(row.get(18)?),
+            acp_protocol_version: row.get(7)?,
+            acp_agent_capabilities: parse_json_value(row.get(8)?),
+            acp_auth_methods: parse_json_value(row.get(9)?),
+            acp_agent_info: parse_json_value(row.get(10)?),
+            acp_message_id: row.get(11)?,
+            acp_tool_call_id: row.get(12)?,
+            acp_tool_kind: row.get(13)?,
+            acp_tool_status: row.get(14)?,
+            acp_raw_input: parse_json_value(row.get(15)?),
+            acp_raw_output: parse_json_value(row.get(16)?),
+            acp_content: parse_json_value(row.get(17)?),
+            acp_locations: parse_json_value(row.get(18)?),
+            acp_usage: parse_json_value(row.get(19)?),
+            acp_session_info: parse_json_value(row.get(20)?),
+            acp_config_options: parse_json_value(row.get(21)?),
+            acp_session_mode_state: parse_json_value(row.get(22)?),
         },
     })
 }
@@ -133,6 +138,9 @@ impl Store {
         let content = json_column(metadata.acp_content.as_ref());
         let locations = json_column(metadata.acp_locations.as_ref());
         let usage = json_column(metadata.acp_usage.as_ref());
+        let agent_capabilities = json_column(metadata.acp_agent_capabilities.as_ref());
+        let auth_methods = json_column(metadata.acp_auth_methods.as_ref());
+        let agent_info = json_column(metadata.acp_agent_info.as_ref());
         let session_info = json_column(metadata.acp_session_info.as_ref());
         let config_options = json_column(metadata.acp_config_options.as_ref());
         let session_mode_state = json_column(metadata.acp_session_mode_state.as_ref());
@@ -141,21 +149,29 @@ impl Store {
         conn.execute(
             "UPDATE session_messages
              SET acp_event_kind = COALESCE(?1, acp_event_kind),
-                 acp_message_id = COALESCE(?2, acp_message_id),
-                 acp_tool_call_id = COALESCE(?3, acp_tool_call_id),
-                 acp_tool_kind = COALESCE(?4, acp_tool_kind),
-                 acp_tool_status = COALESCE(?5, acp_tool_status),
-                 acp_raw_input = COALESCE(?6, acp_raw_input),
-                 acp_raw_output = COALESCE(?7, acp_raw_output),
-                 acp_content = COALESCE(?8, acp_content),
-                 acp_locations = COALESCE(?9, acp_locations),
-                 acp_usage = COALESCE(?10, acp_usage),
-                 acp_session_info = COALESCE(?11, acp_session_info),
-                 acp_config_options = COALESCE(?12, acp_config_options),
-                 acp_session_mode_state = COALESCE(?13, acp_session_mode_state)
-             WHERE id = ?14",
+                 acp_protocol_version = COALESCE(?2, acp_protocol_version),
+                 acp_agent_capabilities = COALESCE(?3, acp_agent_capabilities),
+                 acp_auth_methods = COALESCE(?4, acp_auth_methods),
+                 acp_agent_info = COALESCE(?5, acp_agent_info),
+                 acp_message_id = COALESCE(?6, acp_message_id),
+                 acp_tool_call_id = COALESCE(?7, acp_tool_call_id),
+                 acp_tool_kind = COALESCE(?8, acp_tool_kind),
+                 acp_tool_status = COALESCE(?9, acp_tool_status),
+                 acp_raw_input = COALESCE(?10, acp_raw_input),
+                 acp_raw_output = COALESCE(?11, acp_raw_output),
+                 acp_content = COALESCE(?12, acp_content),
+                 acp_locations = COALESCE(?13, acp_locations),
+                 acp_usage = COALESCE(?14, acp_usage),
+                 acp_session_info = COALESCE(?15, acp_session_info),
+                 acp_config_options = COALESCE(?16, acp_config_options),
+                 acp_session_mode_state = COALESCE(?17, acp_session_mode_state)
+             WHERE id = ?18",
             params![
                 metadata.acp_event_kind.as_deref(),
+                metadata.acp_protocol_version.as_deref(),
+                agent_capabilities,
+                auth_methods,
+                agent_info,
                 metadata.acp_message_id.as_deref(),
                 metadata.acp_tool_call_id.as_deref(),
                 metadata.acp_tool_kind.as_deref(),
@@ -186,6 +202,9 @@ impl Store {
         let content = json_column(metadata.acp_content.as_ref());
         let locations = json_column(metadata.acp_locations.as_ref());
         let usage = json_column(metadata.acp_usage.as_ref());
+        let agent_capabilities = json_column(metadata.acp_agent_capabilities.as_ref());
+        let auth_methods = json_column(metadata.acp_auth_methods.as_ref());
+        let agent_info = json_column(metadata.acp_agent_info.as_ref());
         let session_info = json_column(metadata.acp_session_info.as_ref());
         let config_options = json_column(metadata.acp_config_options.as_ref());
         let session_mode_state = json_column(metadata.acp_session_mode_state.as_ref());
@@ -194,17 +213,23 @@ impl Store {
         conn.execute(
             "INSERT INTO session_messages (
                  session_id, role, content, created_at, image_ids,
-                 acp_event_kind, acp_message_id, acp_tool_call_id,
-                 acp_tool_kind, acp_tool_status, acp_raw_input, acp_raw_output,
-                 acp_content, acp_locations, acp_usage, acp_session_info,
-                 acp_config_options, acp_session_mode_state
+                 acp_event_kind, acp_protocol_version, acp_agent_capabilities,
+                 acp_auth_methods, acp_agent_info, acp_message_id,
+                 acp_tool_call_id, acp_tool_kind, acp_tool_status,
+                 acp_raw_input, acp_raw_output, acp_content, acp_locations,
+                 acp_usage, acp_session_info, acp_config_options,
+                 acp_session_mode_state
              )
-             VALUES (?1, ?2, '', ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+             VALUES (?1, ?2, '', ?3, NULL, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 session_id,
                 MessageRole::Assistant.as_str(),
                 now_timestamp(),
                 metadata.acp_event_kind.as_deref(),
+                metadata.acp_protocol_version.as_deref(),
+                agent_capabilities,
+                auth_methods,
+                agent_info,
                 metadata.acp_message_id.as_deref(),
                 metadata.acp_tool_call_id.as_deref(),
                 metadata.acp_tool_kind.as_deref(),
@@ -220,6 +245,30 @@ impl Store {
             ],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Return the latest ACP initialization metadata row for a session.
+    ///
+    /// This exposes negotiated provider/protocol/capability data without
+    /// including metadata-only rows in the legacy transcript projection.
+    pub fn get_session_acp_initialization(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<AcpMessageMetadata>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {SESSION_MESSAGE_COLUMNS}
+             FROM session_messages
+             WHERE session_id = ?1 AND acp_event_kind = 'initialize'
+             ORDER BY id DESC
+             LIMIT 1"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query(params![session_id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(session_message_from_row(row)?.acp)),
+            None => Ok(None),
+        }
     }
 
     /// Count assistant messages created after a given timestamp.

@@ -812,6 +812,61 @@ fn test_acp_metadata_rows_are_hidden_from_legacy_session_messages() {
 }
 
 #[test]
+fn test_acp_initialization_metadata_is_queryable() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("initialize".to_string()),
+                acp_protocol_version: Some("1".to_string()),
+                acp_agent_capabilities: Some(serde_json::json!({
+                    "loadSession": true,
+                    "promptCapabilities": {"image": true},
+                    "mcpCapabilities": {"http": true, "sse": false}
+                })),
+                acp_auth_methods: Some(serde_json::json!([
+                    {"id": "default", "name": "Default"}
+                ])),
+                acp_agent_info: Some(serde_json::json!({
+                    "name": "goose",
+                    "version": "1.2.3"
+                })),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    assert!(
+        store.get_session_messages(&session.id).unwrap().is_empty(),
+        "initialization metadata must remain hidden from legacy transcript reads"
+    );
+
+    let metadata = store
+        .get_session_acp_initialization(&session.id)
+        .unwrap()
+        .expect("initialization metadata should be returned");
+    assert_eq!(metadata.acp_event_kind.as_deref(), Some("initialize"));
+    assert_eq!(metadata.acp_protocol_version.as_deref(), Some("1"));
+    assert_eq!(
+        metadata.acp_agent_capabilities.as_ref().unwrap()["promptCapabilities"]["image"],
+        true
+    );
+    assert_eq!(
+        metadata.acp_auth_methods.as_ref().unwrap()[0]["id"],
+        "default"
+    );
+    assert_eq!(
+        metadata.acp_agent_info.as_ref().unwrap()["version"],
+        "1.2.3"
+    );
+}
+
+#[test]
 fn test_count_assistant_messages_after() {
     let store = Store::in_memory().unwrap();
 

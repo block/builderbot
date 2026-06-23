@@ -696,6 +696,14 @@ pub struct AcpMessageMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp_event_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_protocol_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_agent_capabilities: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_auth_methods: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_agent_info: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp_message_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp_tool_call_id: Option<String>,

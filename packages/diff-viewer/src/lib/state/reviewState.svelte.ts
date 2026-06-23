@@ -59,7 +59,7 @@ export function createReviewState(
   branchId: string,
   commitSha: string,
   scope: 'branch' | 'commit',
-  reviewId?: string,
+  reviewId?: string
 ) {
   const state: ReviewState = $state({
     review: null,
@@ -147,15 +147,17 @@ export function createReviewState(
   /**
    * Add a comment. Creates the review if it doesn't exist yet.
    */
-  async function addComment(path: string, span: Span, content: string): Promise<void> {
+  async function addComment(path: string, span: Span, content: string): Promise<Comment | null> {
     const reviewId = await ensureReviewExists();
-    if (!reviewId) return;
+    if (!reviewId) return null;
 
     try {
       const comment = await commands.addComment(reviewId, path, span.start, span.end, content);
       state.comments = [...state.comments, comment];
+      return comment;
     } catch (e) {
       console.error('Failed to add comment:', e);
+      return null;
     }
   }
 
@@ -166,7 +168,11 @@ export function createReviewState(
     // Optimistic update — also mark GitHub sync as stale if previously posted
     state.comments = state.comments.map((c) =>
       c.id === commentId
-        ? { ...c, content, githubCommentStale: c.githubCommentId != null ? true : c.githubCommentStale }
+        ? {
+            ...c,
+            content,
+            githubCommentStale: c.githubCommentId != null ? true : c.githubCommentStale,
+          }
         : c
     );
 

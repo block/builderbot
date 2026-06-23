@@ -4,10 +4,17 @@
   import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
   import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
   import Spinner from '../../shared/Spinner.svelte';
-  import type { Comment, CommentSessionState, GithubButtonState } from '../../types';
+  import type {
+    Comment,
+    CommentSaveStatus,
+    CommentSessionState,
+    GithubButtonState,
+  } from '../../types';
 
   interface Props {
-    comment: Comment;
+    comment: Comment | null;
+    ensureSaved: () => Promise<Comment | null>;
+    saveStatus?: CommentSaveStatus;
     noteState: CommentSessionState;
     commitState: CommentSessionState;
     githubState: GithubButtonState;
@@ -17,21 +24,52 @@
     onGithub: (comment: Comment) => void;
   }
 
-  let { comment, noteState, commitState, githubState, hasPr, onNote, onCommit, onGithub }: Props =
-    $props();
+  let {
+    comment,
+    ensureSaved,
+    saveStatus = 'idle',
+    noteState,
+    commitState,
+    githubState,
+    hasPr,
+    onNote,
+    onCommit,
+    onGithub,
+  }: Props = $props();
+
+  let pendingAction = $state<'note' | 'commit' | 'github' | null>(null);
+
+  async function withSavedComment(
+    action: 'note' | 'commit' | 'github',
+    callback: (savedComment: Comment) => void
+  ) {
+    if (pendingAction) return;
+
+    pendingAction = action;
+    try {
+      const savedComment = await ensureSaved();
+      if (!savedComment) return;
+      callback(savedComment);
+    } finally {
+      pendingAction = null;
+    }
+  }
 </script>
 
 <button
   class="comment-action-btn note-btn"
   class:session-active={noteState !== 'idle'}
-  onclick={(event) => onNote(comment, event)}
-  title={noteState === 'running'
-    ? 'Note session in progress'
-    : noteState === 'completed'
-      ? 'Open note'
-      : 'New note (Option+click to skip dialog)'}
+  onclick={(event) => withSavedComment('note', (savedComment) => onNote(savedComment, event))}
+  title={!comment && saveStatus === 'idle'
+    ? 'Save comment and start note'
+    : noteState === 'running'
+      ? 'Note session in progress'
+      : noteState === 'completed'
+        ? 'Open note'
+        : 'New note (Option+click to skip dialog)'}
+  disabled={pendingAction !== null}
 >
-  {#if noteState === 'running'}
+  {#if pendingAction === 'note' || noteState === 'running'}
     <Spinner size={12} />
   {:else}
     <FileText size={12} />
@@ -42,14 +80,17 @@
 <button
   class="comment-action-btn commit-btn"
   class:session-active={commitState !== 'idle'}
-  onclick={(event) => onCommit(comment, event)}
-  title={commitState === 'running'
-    ? 'Commit session in progress'
-    : commitState === 'completed'
-      ? 'Show commit'
-      : 'New commit (Option+click to skip dialog)'}
+  onclick={(event) => withSavedComment('commit', (savedComment) => onCommit(savedComment, event))}
+  title={!comment && saveStatus === 'idle'
+    ? 'Save comment and start commit'
+    : commitState === 'running'
+      ? 'Commit session in progress'
+      : commitState === 'completed'
+        ? 'Show commit'
+        : 'New commit (Option+click to skip dialog)'}
+  disabled={pendingAction !== null}
 >
-  {#if commitState === 'running'}
+  {#if pendingAction === 'commit' || commitState === 'running'}
     <Spinner size={12} />
   {:else}
     <GitCommitVertical size={12} />
@@ -61,15 +102,17 @@
   <button
     class="comment-action-btn github-btn"
     class:github-btn-sent={githubState === 'sent'}
-    onclick={() => onGithub(comment)}
-    title={githubState === 'sent'
-      ? 'Open GitHub comment'
-      : githubState === 'stale'
-        ? 'Update on GitHub'
-        : 'Send to GitHub'}
-    disabled={githubState === 'sending'}
+    onclick={() => withSavedComment('github', onGithub)}
+    title={!comment && saveStatus === 'idle'
+      ? 'Save comment and send to GitHub'
+      : githubState === 'sent'
+        ? 'Open GitHub comment'
+        : githubState === 'stale'
+          ? 'Update on GitHub'
+          : 'Send to GitHub'}
+    disabled={pendingAction !== null || githubState === 'sending'}
   >
-    {#if githubState === 'sending'}
+    {#if pendingAction === 'github' || githubState === 'sending'}
       <Spinner size={12} />
     {:else if githubState === 'sent'}
       <Check size={12} class="github-sent-check" />
@@ -147,7 +190,7 @@
     background-color: var(--bg-hover);
   }
 
-  .comment-action-btn.github-btn:disabled {
+  .comment-action-btn:disabled {
     cursor: default;
     opacity: 0.7;
   }

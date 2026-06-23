@@ -5,9 +5,14 @@
   Handles its own visibility based on scroll position.
 -->
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { Trash2 } from 'lucide-svelte';
   import type { Snippet } from 'svelte';
   import type { Comment, CommentActionContext } from '../types';
+  import {
+    createCommentAutosaveController,
+    type CommentSaveStatus,
+  } from '../state/commentAutosave';
 
   interface Props {
     /** Position relative to the viewer container */
@@ -22,10 +27,10 @@
     readOnly?: boolean;
     /** Placeholder text */
     placeholder?: string;
-    /** Called when comment is submitted */
-    onSubmit: (content: string) => void;
-    /** Called when editing is cancelled */
-    onCancel: () => void;
+    /** Called when comment content should be persisted. */
+    onSave: (commentId: string | null, content: string) => Promise<Comment | null | void>;
+    /** Called when the editor should close after pending work is flushed. */
+    onClose: () => void;
     /** Called when comment is deleted (only shown if existingComment is set) */
     onDelete?: () => void;
     /** Host-rendered actions for existing comments. */
@@ -40,8 +45,8 @@
     existingComment = null,
     readOnly = false,
     placeholder = 'Add a comment...',
-    onSubmit,
-    onCancel,
+    onSave,
+    onClose,
     onDelete,
     commentActions,
   }: Props = $props();
@@ -49,38 +54,88 @@
   // Track current input value - initialized by effect when existingComment changes
   let currentValue = $state('');
   let textareaEl: HTMLTextAreaElement | null = null;
+  let persistedComment = $state<Comment | null>(null);
+  let saveStatus = $state<CommentSaveStatus>('idle');
+  let saveError = $state<unknown>(null);
+  let lastExternalCommentId: string | null | undefined = undefined;
+
+  const autosave = createCommentAutosaveController({
+    addComment: async (content) => {
+      return (await onSave(null, content)) ?? null;
+    },
+    updateComment: async (commentId, content) => {
+      await onSave(commentId, content);
+    },
+    onChange: ({ comment, status, error }) => {
+      persistedComment = comment;
+      saveStatus = status;
+      saveError = error;
+    },
+  });
 
   // Update value when existingComment changes (for editing mode). Reset scroll
   // on identity change so a previously-scrolled textarea doesn't leak its
   // offset into the next comment being viewed.
   $effect(() => {
-    existingComment?.id;
+    const nextCommentId = existingComment?.id ?? null;
+
+    if (nextCommentId === lastExternalCommentId) {
+      if (existingComment) {
+        autosave.updateExternalComment(existingComment);
+      }
+      return;
+    }
+
+    lastExternalCommentId = nextCommentId;
+
+    if (existingComment && autosave.getSnapshot().comment?.id === existingComment.id) {
+      autosave.updateExternalComment(existingComment);
+      return;
+    }
+
     currentValue = existingComment?.content ?? '';
+    autosave.reset(existingComment, currentValue);
     if (textareaEl) textareaEl.scrollTop = 0;
   });
+
+  onDestroy(() => {
+    autosave.dispose();
+  });
+
+  let saveStatusLabel = $derived.by(() => {
+    if (readOnly) return 'Read-only · Esc to close';
+    if (saveStatus === 'saving') return 'Saving...';
+    if (saveStatus === 'saved') return 'Saved';
+    if (saveStatus === 'error') return 'Unable to save';
+    return 'Autosaves · Esc to close';
+  });
+
+  export async function ensureSaved(): Promise<Comment | null> {
+    if (readOnly) return persistedComment;
+    return await autosave.flush();
+  }
+
+  export function getSaveStatus(): CommentSaveStatus {
+    return saveStatus;
+  }
+
+  async function flushAndClose() {
+    await ensureSaved();
+    if (saveStatus === 'error') return;
+    onClose();
+  }
 
   function handleInput(e: Event) {
     const target = e.target as HTMLTextAreaElement;
     currentValue = target.value;
+    autosave.setContent(currentValue);
   }
 
-  function handleKeydown(e: KeyboardEvent) {
+  async function handleKeydown(e: KeyboardEvent) {
     if (e.key === 'Escape') {
       e.preventDefault();
       e.stopPropagation();
-      onCancel();
-    } else if (e.key === 'Enter' && !e.shiftKey && !readOnly) {
-      e.preventDefault();
-      e.stopPropagation();
-      // Get value directly from event target as fallback
-      const target = e.target as HTMLTextAreaElement;
-      const content = (currentValue || target.value || '').trim();
-
-      if (content) {
-        onSubmit(content);
-      } else {
-        onCancel();
-      }
+      await flushAndClose();
     }
   }
 
@@ -112,15 +167,19 @@
     use:autoFocus
   ></textarea>
   <div class="comment-editor-hint">
-    <span class="comment-editor-help">
-      {readOnly ? 'Read-only · Esc to close' : 'Enter to save · Esc to cancel'}
+    <span
+      class="comment-editor-help"
+      class:comment-save-error={saveStatus === 'error'}
+      title={saveStatus === 'error' && saveError instanceof Error ? saveError.message : undefined}
+    >
+      {saveStatusLabel}
     </span>
-    {#if existingComment && commentActions}
+    {#if commentActions && (!readOnly || persistedComment)}
       <div class="comment-action-buttons">
-        {@render commentActions({ comment: existingComment })}
+        {@render commentActions({ comment: persistedComment, ensureSaved, saveStatus })}
       </div>
     {/if}
-    {#if existingComment && onDelete}
+    {#if persistedComment && onDelete}
       <button class="delete-comment-btn" onclick={handleDelete} title="Delete comment">
         <Trash2 size={12} />
       </button>

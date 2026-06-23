@@ -12,5 +12,12 @@ export {
   createSearchState,
   type SearchState,
   type FileSearchResult,
-  type SearchScope
+  type SearchScope,
 } from './searchState.svelte';
+
+export {
+  createCommentAutosaveController,
+  type CommentAutosaveController,
+  type CommentAutosaveSnapshot,
+  type CommentSaveStatus,
+} from './commentAutosave';

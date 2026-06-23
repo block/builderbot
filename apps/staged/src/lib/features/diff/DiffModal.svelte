@@ -1028,8 +1028,12 @@
   // Comment callbacks (wired to review state)
   // ==========================================================================
 
-  async function handleAddComment(path: string, span: Span, content: string): Promise<void> {
-    await reviewHandle?.addComment(path, span, content);
+  async function handleAddComment(
+    path: string,
+    span: Span,
+    content: string
+  ): Promise<Comment | null> {
+    return (await reviewHandle?.addComment(path, span, content)) ?? null;
   }
 
   async function handleUpdateComment(commentId: string, content: string): Promise<void> {
@@ -1530,9 +1534,11 @@
 {#snippet reviewCommentActions(context: CommentActionContext)}
   <ReviewCommentActions
     comment={context.comment}
-    noteState={getCommentNoteState(context.comment)}
-    commitState={getCommentCommitState(context.comment)}
-    githubState={getCommentGithubState(context.comment)}
+    ensureSaved={context.ensureSaved}
+    saveStatus={context.saveStatus}
+    noteState={context.comment ? getCommentNoteState(context.comment) : 'idle'}
+    commitState={context.comment ? getCommentCommitState(context.comment) : 'idle'}
+    githubState={context.comment ? getCommentGithubState(context.comment) : 'idle'}
     {hasPr}
     onNote={handleNewNote}
     onCommit={handleNewCommit}

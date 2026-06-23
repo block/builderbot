@@ -95,9 +95,13 @@ export interface Comment {
   commitSessionId: string | null;
 }
 
+export type CommentSaveStatus = 'idle' | 'saving' | 'saved' | 'error';
+
 /** Context passed to host-rendered comment action snippets. */
 export interface CommentActionContext {
-  comment: Comment;
+  comment: Comment | null;
+  ensureSaved: () => Promise<Comment | null>;
+  saveStatus?: CommentSaveStatus;
 }
 
 /** A review anchored to a branch + commit + scope. */

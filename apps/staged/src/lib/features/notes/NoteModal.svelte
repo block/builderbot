@@ -359,7 +359,7 @@
     overflow-y: auto;
     padding: 24px;
     min-height: 0;
-    background: color-mix(in srgb, var(--bg-elevated) 50%, var(--bg-primary) 50%);
+    background: var(--bg-primary);
   }
 
   .modal-content::-webkit-scrollbar {

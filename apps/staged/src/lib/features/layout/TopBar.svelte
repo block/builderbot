@@ -100,6 +100,7 @@
   .top-bar {
     position: relative;
     isolation: isolate;
+    z-index: var(--z-index-top-bar);
     display: flex;
     align-items: center;
     gap: 8px;

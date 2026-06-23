@@ -742,55 +742,63 @@
   {@render renderButton()}
 {/if}
 
-<AlertDialog.Root bind:open={showPrErrorDialog}>
-  <AlertDialog.Content>
-    <AlertDialog.Header>
-      <AlertDialog.Title>PR Creation Failed</AlertDialog.Title>
-      <AlertDialog.Description class="max-h-[42vh] overflow-auto whitespace-pre-line">
-        {prError ?? 'An unknown error occurred while creating the PR.'}
-      </AlertDialog.Description>
-    </AlertDialog.Header>
-    <AlertDialog.Footer>
-      <AlertDialog.Cancel onclick={handlePrErrorClose}>Cancel</AlertDialog.Cancel>
-      <AlertDialog.Action variant="outline" onclick={handlePrErrorRetry}>Retry</AlertDialog.Action>
-    </AlertDialog.Footer>
-  </AlertDialog.Content>
-</AlertDialog.Root>
+{#if showPrErrorDialog}
+  <AlertDialog.Root bind:open={showPrErrorDialog}>
+    <AlertDialog.Content>
+      <AlertDialog.Header>
+        <AlertDialog.Title>PR Creation Failed</AlertDialog.Title>
+        <AlertDialog.Description class="max-h-[42vh] overflow-auto whitespace-pre-line">
+          {prError ?? 'An unknown error occurred while creating the PR.'}
+        </AlertDialog.Description>
+      </AlertDialog.Header>
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel onclick={handlePrErrorClose}>Cancel</AlertDialog.Cancel>
+        <AlertDialog.Action variant="outline" onclick={handlePrErrorRetry}>
+          Retry
+        </AlertDialog.Action>
+      </AlertDialog.Footer>
+    </AlertDialog.Content>
+  </AlertDialog.Root>
+{/if}
 
-<AlertDialog.Root bind:open={showPushErrorDialog}>
-  <AlertDialog.Content>
-    <AlertDialog.Header>
-      <AlertDialog.Title>Push Failed</AlertDialog.Title>
-      <AlertDialog.Description class="max-h-[42vh] overflow-auto whitespace-pre-line">
-        {pushError ?? 'An unknown error occurred while pushing.'}
-      </AlertDialog.Description>
-    </AlertDialog.Header>
-    <AlertDialog.Footer>
-      <AlertDialog.Cancel onclick={handlePushErrorClose}>Cancel</AlertDialog.Cancel>
-      <AlertDialog.Action variant="outline" onclick={handlePushErrorRetry}>
-        Retry
-      </AlertDialog.Action>
-    </AlertDialog.Footer>
-  </AlertDialog.Content>
-</AlertDialog.Root>
+{#if showPushErrorDialog}
+  <AlertDialog.Root bind:open={showPushErrorDialog}>
+    <AlertDialog.Content>
+      <AlertDialog.Header>
+        <AlertDialog.Title>Push Failed</AlertDialog.Title>
+        <AlertDialog.Description class="max-h-[42vh] overflow-auto whitespace-pre-line">
+          {pushError ?? 'An unknown error occurred while pushing.'}
+        </AlertDialog.Description>
+      </AlertDialog.Header>
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel onclick={handlePushErrorClose}>Cancel</AlertDialog.Cancel>
+        <AlertDialog.Action variant="outline" onclick={handlePushErrorRetry}>
+          Retry
+        </AlertDialog.Action>
+      </AlertDialog.Footer>
+    </AlertDialog.Content>
+  </AlertDialog.Root>
+{/if}
 
-<AlertDialog.Root bind:open={showForcePushDialog}>
-  <AlertDialog.Content>
-    <AlertDialog.Header>
-      <AlertDialog.Title>Push Rejected</AlertDialog.Title>
-      <AlertDialog.Description>
-        The remote branch has commits that would be lost. Do you want to force push? This will
-        overwrite the remote branch with your local version.
-      </AlertDialog.Description>
-    </AlertDialog.Header>
-    <AlertDialog.Footer>
-      <AlertDialog.Cancel onclick={handleForcePushCancel}>Cancel</AlertDialog.Cancel>
-      <AlertDialog.Action variant="destructive" onclick={handleForcePushConfirm}>
-        Force Push
-      </AlertDialog.Action>
-    </AlertDialog.Footer>
-  </AlertDialog.Content>
-</AlertDialog.Root>
+{#if showForcePushDialog}
+  <AlertDialog.Root bind:open={showForcePushDialog}>
+    <AlertDialog.Content>
+      <AlertDialog.Header>
+        <AlertDialog.Title>Push Rejected</AlertDialog.Title>
+        <AlertDialog.Description>
+          The remote branch has commits that would be lost. Do you want to force push? This will
+          overwrite the remote branch with your local version.
+        </AlertDialog.Description>
+      </AlertDialog.Header>
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel onclick={handleForcePushCancel}>Cancel</AlertDialog.Cancel>
+        <AlertDialog.Action variant="destructive" onclick={handleForcePushConfirm}>
+          Force Push
+        </AlertDialog.Action>
+      </AlertDialog.Footer>
+    </AlertDialog.Content>
+  </AlertDialog.Root>
+{/if}
 
 <style>
   /* PR status indicator circle */

@@ -1040,6 +1040,44 @@
     }
   }
 
+  async function handleSessionModalClose() {
+    const closedSessionId = sessionMgr.openSessionId;
+    sessionMgr.openSessionId = null;
+    void loadTimeline();
+    // If the closed modal was the PR session, check if it finished while open
+    if (
+      prButton &&
+      closedSessionId &&
+      closedSessionId === prButton.getPrSessionId() &&
+      prButton.getPrCreatingState() === 'creating'
+    ) {
+      try {
+        const session = await commands.getSession(closedSessionId);
+        if (session && session.status !== 'running') {
+          prButton.handlePrSessionComplete(session.status);
+        }
+      } catch {
+        // Ignore — the polling fallback will catch it
+      }
+    }
+    // If the closed modal was the push session, check if it finished while open
+    if (
+      prButton &&
+      closedSessionId &&
+      closedSessionId === prButton.getPushSessionId() &&
+      prButton.getPushingState() === 'pushing'
+    ) {
+      try {
+        const session = await commands.getSession(closedSessionId);
+        if (session && session.status !== 'running') {
+          prButton.handlePushSessionComplete(session.status, session);
+        }
+      } catch {
+        // Ignore — the polling fallback will catch it
+      }
+    }
+  }
+
   function formatDiscardPreview(preview: WorktreeChangesPreview): string {
     const sections: string[] = [];
     if (preview.revertPaths.length > 0) {
@@ -1671,38 +1709,42 @@
   {/if}
 </div>
 
-<NoteModal
-  open={openNote !== null}
-  title={openNote?.title ?? ''}
-  content={openNote?.content ?? ''}
-  sessionId={openNote?.sessionId}
-  noteUpdatedAt={openNote?.noteUpdatedAt}
-  nextSteps={openNote?.nextSteps}
-  onClose={() => (openNote = null)}
-  onOpenSession={(sid) => {
-    openNote = null;
-    sessionMgr.openSessionId = sid;
-  }}
-  onStartSession={(mode, prefill) => {
-    const noteRef = openNote?.noteId ? `Re: #note:${openNote.noteId}` : '';
-    openNote = null;
-    void sessionMgr.startOrQueueSession(mode, noteRef ? `${noteRef}\n${prefill}` : prefill);
-  }}
-/>
+{#if openNote}
+  <NoteModal
+    open={true}
+    title={openNote.title}
+    content={openNote.content}
+    sessionId={openNote.sessionId}
+    noteUpdatedAt={openNote.noteUpdatedAt}
+    nextSteps={openNote.nextSteps}
+    onClose={() => (openNote = null)}
+    onOpenSession={(sid) => {
+      openNote = null;
+      sessionMgr.openSessionId = sid;
+    }}
+    onStartSession={(mode, prefill) => {
+      const noteRef = openNote?.noteId ? `Re: #note:${openNote.noteId}` : '';
+      openNote = null;
+      void sessionMgr.startOrQueueSession(mode, noteRef ? `${noteRef}\n${prefill}` : prefill);
+    }}
+  />
+{/if}
 
-<ImageViewerModal
-  open={viewImageId !== null}
-  imageId={viewImageId ?? ''}
-  filename={viewImageFilename}
-  onClose={() => {
-    viewImageId = null;
-  }}
-  onDelete={() => {
-    if (viewImageId) {
-      handleDeleteImage(viewImageId);
-    }
-  }}
-/>
+{#if viewImageId}
+  <ImageViewerModal
+    open={true}
+    imageId={viewImageId}
+    filename={viewImageFilename}
+    onClose={() => {
+      viewImageId = null;
+    }}
+    onDelete={() => {
+      if (viewImageId) {
+        handleDeleteImage(viewImageId);
+      }
+    }}
+  />
+{/if}
 
 {#if sessionMgr.showNewSession}
   {@const commitPrefillBase = suggestedPrefill.commit}
@@ -1753,101 +1795,71 @@
   />
 {/if}
 
-<SessionModal
-  open={sessionMgr.openSessionId !== null}
-  sessionId={sessionMgr.openSessionId ?? ''}
-  repoDir={branch.worktreePath}
-  branchId={branch.id}
-  projectId={branch.projectId}
-  {repoLabel}
-  noteInfo={sessionMgr.openSessionId ? findNoteForSession(sessionMgr.openSessionId) : null}
-  onOpenNote={(note) => {
-    const sid = sessionMgr.openSessionId;
-    sessionMgr.openSessionId = null;
-    openNote = {
-      noteId: note.id,
-      title: note.title,
-      content: note.content,
-      sessionId: sid ?? undefined,
-      noteUpdatedAt: note.updatedAt,
-      nextSteps: computeNoteNextSteps(note.id),
-    };
-  }}
-  onClose={async () => {
-    const closedSessionId = sessionMgr.openSessionId;
-    sessionMgr.openSessionId = null;
-    loadTimeline();
-    // If the closed modal was the PR session, check if it finished while open
-    if (
-      prButton &&
-      closedSessionId &&
-      closedSessionId === prButton.getPrSessionId() &&
-      prButton.getPrCreatingState() === 'creating'
-    ) {
-      try {
-        const session = await commands.getSession(closedSessionId);
-        if (session && session.status !== 'running') {
-          prButton.handlePrSessionComplete(session.status);
-        }
-      } catch {
-        // Ignore — the polling fallback will catch it
-      }
-    }
-    // If the closed modal was the push session, check if it finished while open
-    if (
-      prButton &&
-      closedSessionId &&
-      closedSessionId === prButton.getPushSessionId() &&
-      prButton.getPushingState() === 'pushing'
-    ) {
-      try {
-        const session = await commands.getSession(closedSessionId);
-        if (session && session.status !== 'running') {
-          prButton.handlePushSessionComplete(session.status, session);
-        }
-      } catch {
-        // Ignore — the polling fallback will catch it
-      }
-    }
-  }}
-/>
+{#if sessionMgr.openSessionId}
+  <SessionModal
+    open={true}
+    sessionId={sessionMgr.openSessionId}
+    repoDir={branch.worktreePath}
+    branchId={branch.id}
+    projectId={branch.projectId}
+    {repoLabel}
+    noteInfo={findNoteForSession(sessionMgr.openSessionId)}
+    onOpenNote={(note) => {
+      const sid = sessionMgr.openSessionId;
+      sessionMgr.openSessionId = null;
+      openNote = {
+        noteId: note.id,
+        title: note.title,
+        content: note.content,
+        sessionId: sid ?? undefined,
+        noteUpdatedAt: note.updatedAt,
+        nextSteps: computeNoteNextSteps(note.id),
+      };
+    }}
+    onClose={handleSessionModalClose}
+  />
+{/if}
 
-<AlertDialog.Root bind:open={showForcePushDialog}>
-  <AlertDialog.Content>
-    <AlertDialog.Header>
-      <AlertDialog.Title>Force Push</AlertDialog.Title>
-      <AlertDialog.Description>
-        The remote branch has commits that would be lost. Do you want to force push? This will
-        overwrite the remote branch with your local version.
-      </AlertDialog.Description>
-    </AlertDialog.Header>
-    <AlertDialog.Footer>
-      <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
-      <AlertDialog.Action variant="destructive" onclick={confirmForcePush}>
-        Force Push
-      </AlertDialog.Action>
-    </AlertDialog.Footer>
-  </AlertDialog.Content>
-</AlertDialog.Root>
+{#if showForcePushDialog}
+  <AlertDialog.Root bind:open={showForcePushDialog}>
+    <AlertDialog.Content>
+      <AlertDialog.Header>
+        <AlertDialog.Title>Force Push</AlertDialog.Title>
+        <AlertDialog.Description>
+          The remote branch has commits that would be lost. Do you want to force push? This will
+          overwrite the remote branch with your local version.
+        </AlertDialog.Description>
+      </AlertDialog.Header>
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+        <AlertDialog.Action variant="destructive" onclick={confirmForcePush}>
+          Force Push
+        </AlertDialog.Action>
+      </AlertDialog.Footer>
+    </AlertDialog.Content>
+  </AlertDialog.Root>
+{/if}
 
-<AlertDialog.Root bind:open={showResetToOriginDialog}>
-  <AlertDialog.Content>
-    <AlertDialog.Header>
-      <AlertDialog.Title>Reset to Origin</AlertDialog.Title>
-      <AlertDialog.Description>{resetToOriginDescription}</AlertDialog.Description>
-    </AlertDialog.Header>
-    <AlertDialog.Footer>
-      <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
-      <AlertDialog.Action variant="destructive" onclick={confirmResetToOrigin}>
-        Reset to Origin
-      </AlertDialog.Action>
-    </AlertDialog.Footer>
-  </AlertDialog.Content>
-</AlertDialog.Root>
+{#if showResetToOriginDialog}
+  <AlertDialog.Root bind:open={showResetToOriginDialog}>
+    <AlertDialog.Content>
+      <AlertDialog.Header>
+        <AlertDialog.Title>Reset to Origin</AlertDialog.Title>
+        <AlertDialog.Description>{resetToOriginDescription}</AlertDialog.Description>
+      </AlertDialog.Header>
+      <AlertDialog.Footer>
+        <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+        <AlertDialog.Action variant="destructive" onclick={confirmResetToOrigin}>
+          Reset to Origin
+        </AlertDialog.Action>
+      </AlertDialog.Footer>
+    </AlertDialog.Content>
+  </AlertDialog.Root>
+{/if}
 
-<AlertDialog.Root open={confirmDelete !== null} onOpenChange={(v) => !v && (confirmDelete = null)}>
-  <AlertDialog.Content>
-    {#if confirmDelete}
+{#if confirmDelete}
+  <AlertDialog.Root open={true} onOpenChange={(v) => !v && (confirmDelete = null)}>
+    <AlertDialog.Content>
       <AlertDialog.Header>
         <AlertDialog.Title>{confirmDelete.title}</AlertDialog.Title>
         <AlertDialog.Description>{confirmDelete.message}</AlertDialog.Description>
@@ -1858,9 +1870,9 @@
           {confirmDelete.confirmLabel ?? 'Delete'}
         </AlertDialog.Action>
       </AlertDialog.Footer>
-    {/if}
-  </AlertDialog.Content>
-</AlertDialog.Root>
+    </AlertDialog.Content>
+  </AlertDialog.Root>
+{/if}
 
 <style>
   .branch-card {

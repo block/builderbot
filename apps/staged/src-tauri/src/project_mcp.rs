@@ -17,7 +17,10 @@ use tauri::AppHandle;
 
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::session_runner::SessionRegistry;
-use crate::store::{Branch, CompletionReason, ProjectRepo, SessionStatus, Store};
+use crate::store::{
+    Branch, CompletionReason, MessageRole, ProjectRepo, Session, SessionMessage, SessionStatus,
+    Store,
+};
 use tokio_util::sync::CancellationToken;
 
 /// What outcome the caller expects from a `start_repo_session` call.
@@ -73,6 +76,31 @@ struct CancelRepoSessionParams {
 
 fn default_wait_for_completion_seconds() -> u64 {
     240
+}
+
+const REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS: usize = 240;
+
+#[derive(Debug, Default, serde::Serialize)]
+struct RepoSessionActivity {
+    last_activity_at: Option<i64>,
+    last_message: Option<RepoSessionActivityEntry>,
+    last_tool_call: Option<RepoSessionActivityEntry>,
+    last_tool_result: Option<RepoSessionActivityEntry>,
+    counts: RepoSessionActivityCounts,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct RepoSessionActivityEntry {
+    role: String,
+    created_at: i64,
+    preview: String,
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+struct RepoSessionActivityCounts {
+    assistant_messages: usize,
+    tool_calls: usize,
+    tool_results: usize,
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -203,6 +231,83 @@ impl ProjectToolsHandler {
             .unwrap_or_default()
     }
 
+    fn activity_preview(content: &str) -> String {
+        let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut chars = normalized.chars();
+        let mut preview = String::new();
+
+        for _ in 0..REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS {
+            match chars.next() {
+                Some(ch) => preview.push(ch),
+                None => return preview,
+            }
+        }
+
+        if chars.next().is_some() {
+            preview.push_str("...");
+        }
+
+        preview
+    }
+
+    fn activity_entry(message: &SessionMessage) -> RepoSessionActivityEntry {
+        RepoSessionActivityEntry {
+            role: message.role.as_str().to_string(),
+            created_at: message.created_at,
+            preview: Self::activity_preview(&message.content),
+        }
+    }
+
+    fn summarize_session_activity(
+        session: &Session,
+        messages: &[SessionMessage],
+    ) -> RepoSessionActivity {
+        let mut activity = RepoSessionActivity {
+            last_activity_at: Some(session.created_at.max(session.updated_at)),
+            ..Default::default()
+        };
+
+        for message in messages {
+            activity.last_activity_at = Some(
+                activity
+                    .last_activity_at
+                    .map_or(message.created_at, |at| at.max(message.created_at)),
+            );
+
+            let entry = Self::activity_entry(message);
+            activity.last_message = Some(RepoSessionActivityEntry {
+                role: entry.role.clone(),
+                created_at: entry.created_at,
+                preview: entry.preview.clone(),
+            });
+
+            match &message.role {
+                MessageRole::Assistant => {
+                    activity.counts.assistant_messages += 1;
+                }
+                MessageRole::ToolCall => {
+                    activity.counts.tool_calls += 1;
+                    activity.last_tool_call = Some(entry);
+                }
+                MessageRole::ToolResult => {
+                    activity.counts.tool_results += 1;
+                    activity.last_tool_result = Some(entry);
+                }
+                MessageRole::User => {}
+            }
+        }
+
+        activity
+    }
+
+    fn repo_session_activity(&self, session: &Session) -> Result<RepoSessionActivity, String> {
+        let messages = self
+            .store
+            .get_session_messages(&session.id)
+            .map_err(|e| format!("Error loading session messages: {e}"))?;
+        Ok(Self::summarize_session_activity(session, &messages))
+    }
+
     fn repo_session_payload(
         &self,
         repo_session_id: &str,
@@ -226,6 +331,8 @@ impl ProjectToolsHandler {
                 "id": handle.artifact_id,
             },
         });
+
+        payload["activity"] = serde_json::json!(self.repo_session_activity(&session)?);
 
         if state != "queued" {
             payload["session_id"] = serde_json::Value::String(handle.session_id.clone());
@@ -445,7 +552,7 @@ impl ProjectToolsHandler {
     }
 
     #[tool(
-        description = "Wait for a repo session started by `start_repo_session`. Returns the queued/running/completed/cancelled/failed state for the opaque `repo_session_id`. `wait_for_completion_seconds` defaults to 240."
+        description = "Wait for a repo session started by `start_repo_session`. Returns the queued/running/completed/cancelled/failed state for the opaque `repo_session_id`, plus `activity` progress fields (`last_activity_at`, `last_message`, `last_tool_call`, `last_tool_result`, and counts) so callers can distinguish active work from an idle session. `wait_for_completion_seconds` defaults to 240."
     )]
     async fn wait_for_repo_session(
         &self,
@@ -495,7 +602,7 @@ impl ProjectToolsHandler {
     }
 
     #[tool(
-        description = "Cancel a repo session started by `start_repo_session`. Cancels either the queued item or the running session behind the opaque `repo_session_id`."
+        description = "Abort a repo session started by `start_repo_session` when the user explicitly wants it stopped or there is strong evidence it is stuck. Do not use this merely because a repo session is taking a long time; call `wait_for_repo_session` again if its activity shows recent progress. Cancels either the queued item or the running session behind the opaque `repo_session_id`."
     )]
     async fn cancel_repo_session(
         &self,
@@ -891,7 +998,9 @@ pub async fn start_project_mcp_server(
 
 #[cfg(test)]
 mod tests {
-    use super::{ProjectToolsHandler, RepoArtifactKind};
+    use super::{ProjectToolsHandler, RepoArtifactKind, REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS};
+    use crate::store::{MessageRole, Session, SessionMessage};
+    use std::path::Path;
 
     #[test]
     fn repo_session_handles_round_trip() {
@@ -914,5 +1023,117 @@ mod tests {
         let err = ProjectToolsHandler::decode_repo_session_handle("session-123")
             .expect_err("invalid handle should fail");
         assert!(err.contains("Invalid repo_session_id"));
+    }
+
+    #[test]
+    fn repo_session_activity_summarizes_recent_messages() {
+        let mut session = Session::new_running("make progress", Path::new("/tmp"));
+        session.created_at = 100;
+        session.updated_at = 105;
+
+        let messages = vec![
+            SessionMessage {
+                id: 1,
+                session_id: session.id.clone(),
+                role: MessageRole::User,
+                content: "start".to_string(),
+                created_at: 106,
+                image_ids: vec![],
+            },
+            SessionMessage {
+                id: 2,
+                session_id: session.id.clone(),
+                role: MessageRole::Assistant,
+                content: "Working\nthrough   change".to_string(),
+                created_at: 107,
+                image_ids: vec![],
+            },
+            SessionMessage {
+                id: 3,
+                session_id: session.id.clone(),
+                role: MessageRole::ToolCall,
+                content: "cargo test".to_string(),
+                created_at: 108,
+                image_ids: vec![],
+            },
+            SessionMessage {
+                id: 4,
+                session_id: session.id.clone(),
+                role: MessageRole::ToolResult,
+                content: "tests still running\n123".to_string(),
+                created_at: 109,
+                image_ids: vec![],
+            },
+        ];
+
+        let activity = ProjectToolsHandler::summarize_session_activity(&session, &messages);
+
+        assert_eq!(activity.last_activity_at, Some(109));
+        assert_eq!(activity.counts.assistant_messages, 1);
+        assert_eq!(activity.counts.tool_calls, 1);
+        assert_eq!(activity.counts.tool_results, 1);
+
+        let last_message = activity.last_message.expect("last message");
+        assert_eq!(last_message.role, "tool_result");
+        assert_eq!(last_message.created_at, 109);
+        assert_eq!(last_message.preview, "tests still running 123");
+
+        let last_tool_call = activity.last_tool_call.expect("last tool call");
+        assert_eq!(last_tool_call.created_at, 108);
+        assert_eq!(last_tool_call.preview, "cargo test");
+
+        let last_tool_result = activity.last_tool_result.expect("last tool result");
+        assert_eq!(last_tool_result.created_at, 109);
+        assert_eq!(last_tool_result.preview, "tests still running 123");
+    }
+
+    #[test]
+    fn repo_session_activity_uses_session_timestamp_without_messages() {
+        let mut session = Session::new_running("queued work", Path::new("/tmp"));
+        session.created_at = 100;
+        session.updated_at = 150;
+
+        let activity = ProjectToolsHandler::summarize_session_activity(&session, &[]);
+
+        assert_eq!(activity.last_activity_at, Some(150));
+        assert!(activity.last_message.is_none());
+        assert!(activity.last_tool_call.is_none());
+        assert!(activity.last_tool_result.is_none());
+        assert_eq!(activity.counts.assistant_messages, 0);
+        assert_eq!(activity.counts.tool_calls, 0);
+        assert_eq!(activity.counts.tool_results, 0);
+    }
+
+    #[test]
+    fn repo_session_activity_preview_is_bounded() {
+        let content = "x".repeat(REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS + 1);
+        let preview = ProjectToolsHandler::activity_preview(&content);
+
+        assert_eq!(
+            preview.chars().count(),
+            REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS + 3
+        );
+        assert!(preview.ends_with("..."));
+    }
+
+    #[test]
+    fn repo_session_tool_descriptions_expose_progress_and_abort_guidance() {
+        let router = ProjectToolsHandler::tool_router();
+        let wait_description = router
+            .get("wait_for_repo_session")
+            .and_then(|tool| tool.description.as_deref())
+            .expect("wait tool description");
+        let cancel_description = router
+            .get("cancel_repo_session")
+            .and_then(|tool| tool.description.as_deref())
+            .expect("cancel tool description");
+
+        assert!(wait_description.contains("`activity` progress fields"));
+        assert!(wait_description.contains("`last_activity_at`"));
+        assert!(wait_description.contains("`last_tool_result`"));
+
+        assert!(cancel_description.contains("Abort a repo session"));
+        assert!(cancel_description.contains("Do not use this merely because"));
+        assert!(cancel_description.contains("activity shows recent progress"));
     }
 }

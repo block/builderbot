@@ -803,8 +803,12 @@ code changes/commits; commit sessions create signed-off conventional commits. Fo
 this subagent runs on the remote workspace, where file access, notes, and commits must happen.\n\
 - wait_for_repo_session: Use this to wait on a previously started repo session by passing the \
 `repo_session_id`. It returns the queue state (`queued`, `running`, `completed`, `cancelled`, \
-or `failed`) and any available artifacts.\n\
-- cancel_repo_session: Use this to cancel a queued or running repo session by `repo_session_id`."
+or `failed`), any available artifacts, and `activity` progress fields (`last_activity_at`, \
+`last_message`, `last_tool_call`, `last_tool_result`, and counts). Prefer another \
+`wait_for_repo_session` call when activity shows recent progress.\n\
+- cancel_repo_session: Use this to abort a queued or running repo session by `repo_session_id` \
+only when the user explicitly wants it stopped or you have strong evidence it is stuck. Do not \
+cancel merely because a repo session is taking a long time."
     } else {
         "- start_repo_session: Use this to make changes or run tasks in one of the project's \
 repositories. It enqueues work and returns a `repo_session_id` immediately. Use \
@@ -816,8 +820,12 @@ context. You MUST NOT write files directly — all file writes MUST go through s
 with expected_outcome=\"commit\".\n\
 - wait_for_repo_session: Use this to wait on a previously started repo session by passing the \
 `repo_session_id`. It returns the queue state (`queued`, `running`, `completed`, `cancelled`, \
-or `failed`) and any available artifacts.\n\
-- cancel_repo_session: Use this to cancel a queued or running repo session by `repo_session_id`."
+or `failed`), any available artifacts, and `activity` progress fields (`last_activity_at`, \
+`last_message`, `last_tool_call`, `last_tool_result`, and counts). Prefer another \
+`wait_for_repo_session` call when activity shows recent progress.\n\
+- cancel_repo_session: Use this to abort a queued or running repo session by `repo_session_id` \
+only when the user explicitly wants it stopped or you have strong evidence it is stuck. Do not \
+cancel merely because a repo session is taking a long time."
     };
 
     let coordinator_reminder = if is_remote {
@@ -4093,11 +4101,23 @@ mod tests {
         assert!(prompt.contains("Implement \"Step 5: unit tests\" from #note:123"));
     }
 
+    fn assert_project_session_repo_session_progress_guidance(prompt: &str) {
+        assert!(prompt.contains("`activity` progress fields"));
+        assert!(prompt.contains("`last_activity_at`"));
+        assert!(prompt.contains("`last_tool_call`"));
+        assert!(prompt.contains("Prefer another `wait_for_repo_session` call"));
+        assert!(prompt.contains("only when the user explicitly wants it stopped"));
+        assert!(
+            prompt.contains("Do not cancel merely because a repo session is taking a long time")
+        );
+    }
+
     #[test]
     fn local_project_session_prompt_includes_timeline_reference_guidance() {
         let prompt = build_project_session_action_instructions(false);
 
         assert_project_session_reference_guidance(&prompt);
+        assert_project_session_repo_session_progress_guidance(&prompt);
     }
 
     #[test]
@@ -4105,6 +4125,7 @@ mod tests {
         let prompt = build_project_session_action_instructions(true);
 
         assert_project_session_reference_guidance(&prompt);
+        assert_project_session_repo_session_progress_guidance(&prompt);
     }
 
     #[test]

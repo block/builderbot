@@ -1039,6 +1039,7 @@ mod tests {
                 content: "start".to_string(),
                 created_at: 106,
                 image_ids: vec![],
+                acp: Default::default(),
             },
             SessionMessage {
                 id: 2,
@@ -1047,6 +1048,7 @@ mod tests {
                 content: "Working\nthrough   change".to_string(),
                 created_at: 107,
                 image_ids: vec![],
+                acp: Default::default(),
             },
             SessionMessage {
                 id: 3,
@@ -1055,6 +1057,7 @@ mod tests {
                 content: "cargo test".to_string(),
                 created_at: 108,
                 image_ids: vec![],
+                acp: Default::default(),
             },
             SessionMessage {
                 id: 4,
@@ -1063,6 +1066,7 @@ mod tests {
                 content: "tests still running\n123".to_string(),
                 created_at: 109,
                 image_ids: vec![],
+                acp: Default::default(),
             },
         ];
 

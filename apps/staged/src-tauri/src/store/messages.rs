@@ -116,6 +116,28 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Return visible transcript rows plus hidden ACP rows that can identify
+    /// replay boundaries. This keeps resume matching on `session_messages`
+    /// without exposing metadata-only rows to the legacy transcript path.
+    pub fn get_session_replay_messages(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<SessionMessage>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let sql = format!(
+            "SELECT {SESSION_MESSAGE_COLUMNS}
+             FROM session_messages
+             WHERE session_id = ?1
+               AND ({VISIBLE_MESSAGE_FILTER}
+                    OR acp_message_id IS NOT NULL
+                    OR acp_tool_call_id IS NOT NULL)
+             ORDER BY id ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params![session_id], session_message_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Update the content of an existing message (used for streaming updates).
     pub fn update_message_content(&self, id: i64, content: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();

@@ -28,7 +28,7 @@ pub use agent_client_protocol::schema::v1::{
 };
 pub use driver::{
     strip_code_fences, AcpDriver, AcpEventMetadata, AcpInitializeMetadata, AcpToolCallMetadata,
-    AgentDriver, BasicMessageWriter, MessageWriter, Store,
+    AgentDriver, AgentRunOutcome, BasicMessageWriter, MessageWriter, ReplayBoundary, Store,
 };
 pub use simple::{run_acp_prompt, run_acp_prompt_with_interpreter_env_snapshot};
 pub use types::{

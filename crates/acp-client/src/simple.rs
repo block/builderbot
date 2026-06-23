@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use crate::driver::{AcpDriver, AgentDriver, BasicMessageWriter, MessageWriter};
+use crate::driver::{AcpDriver, AgentDriver, AgentRunOutcome, BasicMessageWriter, MessageWriter};
 use crate::types::AcpAgent;
 
 /// Minimal store implementation for simple prompting (no persistence).
@@ -57,7 +57,7 @@ impl AgentDriver for SimpleDriverWrapper {
         writer: &Arc<dyn MessageWriter>,
         cancel_token: &CancellationToken,
         agent_session_id: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<AgentRunOutcome, String> {
         if !images.is_empty() {
             log::debug!(
                 "SimpleDriverWrapper: discarding {} image(s) - not supported in simple mode",

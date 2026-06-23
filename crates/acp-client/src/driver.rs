@@ -18,13 +18,13 @@ use std::time::{Duration, Instant};
 use agent_client_protocol::{
     schema::{
         v1::{
-            AgentCapabilities, AuthMethod, AuthenticateRequest, ContentBlock as AcpContentBlock,
-            ContentChunk, ImageContent, Implementation, InitializeRequest, InitializeResponse,
-            LoadSessionRequest, McpCapabilities, McpServer, NewSessionRequest, PermissionOptionId,
-            PromptRequest, PromptResponse, RequestPermissionOutcome, RequestPermissionRequest,
-            RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigOption,
-            SessionInfoUpdate, SessionModeState, SessionNotification, SessionUpdate, TextContent,
-            ToolCallContent,
+            AgentCapabilities, AuthMethod, AuthenticateRequest, CancelNotification,
+            ContentBlock as AcpContentBlock, ContentChunk, ImageContent, Implementation,
+            InitializeRequest, InitializeResponse, LoadSessionRequest, McpCapabilities, McpServer,
+            NewSessionRequest, PermissionOptionId, PromptRequest, PromptResponse,
+            RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+            SelectedPermissionOutcome, SessionConfigOption, SessionInfoUpdate, SessionModeState,
+            SessionNotification, SessionUpdate, StopReason, TextContent, ToolCallContent,
         },
         ProtocolVersion,
     },
@@ -148,6 +148,44 @@ pub struct AcpEventMetadata {
     pub usage: Option<serde_json::Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayBoundary {
+    pub role: String,
+    pub content: String,
+    pub acp_message_id: Option<String>,
+    pub acp_tool_call_id: Option<String>,
+}
+
+impl ReplayBoundary {
+    pub fn legacy(role: String, content: String) -> Self {
+        Self {
+            role,
+            content,
+            acp_message_id: None,
+            acp_tool_call_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentRunOutcome {
+    Completed,
+    Cancelled,
+}
+
+impl AgentRunOutcome {
+    fn from_stop_reason(stop_reason: StopReason) -> Self {
+        match stop_reason {
+            StopReason::Cancelled => Self::Cancelled,
+            StopReason::EndTurn
+            | StopReason::MaxTokens
+            | StopReason::MaxTurnRequests
+            | StopReason::Refusal => Self::Completed,
+            _ => Self::Completed,
+        }
+    }
+}
+
 fn serialize_as_string<T: serde::Serialize>(value: &T) -> Option<String> {
     match serde_json::to_value(value).ok()? {
         serde_json::Value::String(s) => Some(s),
@@ -176,14 +214,29 @@ pub trait Store: Send + Sync {
     /// Save the agent's session ID for resumption.
     fn set_agent_session_id(&self, session_id: &str, agent_session_id: &str) -> Result<(), String>;
 
-    /// Retrieve existing session messages as `(role, content)` pairs.
+    /// Retrieve existing visible session messages as `(role, content)` pairs.
     ///
-    /// Used during session resumption to match replayed notifications
-    /// against previously persisted messages.  The default implementation
-    /// returns an empty list, which is correct for stores that do not
-    /// support message persistence (e.g. `NoOpStore`).
+    /// This is the legacy replay fallback for stores that do not expose ACP
+    /// message IDs via [`Store::get_session_replay_boundaries`].
     fn get_session_messages(&self, _session_id: &str) -> Result<Vec<(String, String)>, String> {
         Ok(vec![])
+    }
+
+    /// Retrieve replay boundaries for session resumption.
+    ///
+    /// Implementations should prefer ACP message IDs and tool-call IDs from
+    /// persisted metadata when available, while still including visible
+    /// transcript rows as a fallback.
+    fn get_session_replay_boundaries(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<ReplayBoundary>, String> {
+        self.get_session_messages(session_id).map(|messages| {
+            messages
+                .into_iter()
+                .map(|(role, content)| ReplayBoundary::legacy(role, content))
+                .collect()
+        })
     }
 }
 
@@ -209,7 +262,7 @@ pub trait AgentDriver {
         writer: &Arc<dyn MessageWriter>,
         cancel_token: &CancellationToken,
         agent_session_id: Option<&str>,
-    ) -> Result<(), String>;
+    ) -> Result<AgentRunOutcome, String>;
 }
 
 // =============================================================================
@@ -641,7 +694,7 @@ impl AgentDriver for AcpDriver {
         writer: &Arc<dyn MessageWriter>,
         cancel_token: &CancellationToken,
         agent_session_id: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<AgentRunOutcome, String> {
         let spawn_working_dir = resolve_spawn_working_dir(working_dir, self.is_remote);
         let acp_working_dir = resolve_acp_working_dir(
             working_dir,
@@ -852,66 +905,74 @@ impl AgentDriver for AcpDriver {
         let stdout_compat = incoming_reader.compat();
 
         let is_resuming = agent_session_id.is_some();
-        let db_messages = if is_resuming {
-            store.get_session_messages(session_id).unwrap_or_else(|e| {
-                log::warn!("Failed to load session messages for replay matching: {e}");
-                vec![]
-            })
+        let replay_boundaries = if is_resuming {
+            store
+                .get_session_replay_boundaries(session_id)
+                .unwrap_or_else(|e| {
+                    log::warn!("Failed to load session replay boundaries: {e}");
+                    vec![]
+                })
         } else {
             vec![]
         };
         let handler = Arc::new(AcpNotificationHandler::new(
             Arc::clone(writer),
             is_resuming,
-            db_messages,
+            replay_boundaries,
+            cancel_token.clone(),
         ));
         let transport = ByteStreams::new(stdin_compat, stdout_compat);
         let permission_handler = Arc::clone(&handler);
         let notification_handler = Arc::clone(&handler);
-        let protocol_result = tokio::select! {
-            _ = cancel_token.cancelled() => {
-                log::info!("Session {session_id} cancelled");
-                writer.finalize().await;
-                graceful_stop(&mut child, self.is_remote).await;
-                return Ok(());
-            }
-            result = Client.builder()
-                .name("staged-acp-client")
-                .on_receive_request(
-                    async move |args: RequestPermissionRequest, responder, _connection| {
-                        let response = permission_handler.request_permission(args).await?;
-                        responder.respond(response)
-                    },
-                    agent_client_protocol::on_receive_request!(),
+        let protocol_result = Client
+            .builder()
+            .name("staged-acp-client")
+            .on_receive_request(
+                async move |args: RequestPermissionRequest, responder, _connection| {
+                    let response = permission_handler.request_permission(args).await?;
+                    responder.respond(response)
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_notification(
+                async move |notification: SessionNotification, _connection| {
+                    notification_handler
+                        .session_notification(notification)
+                        .await
+                },
+                agent_client_protocol::on_receive_notification!(),
+            )
+            .connect_with(transport, async |connection| {
+                run_acp_protocol(
+                    &connection,
+                    &acp_working_dir,
+                    prompt,
+                    images,
+                    store,
+                    session_id,
+                    agent_session_id,
+                    &handler,
+                    &self.mcp_servers,
+                    &self.agent_label,
+                    cancel_token,
                 )
-                .on_receive_notification(
-                    async move |notification: SessionNotification, _connection| {
-                        notification_handler.session_notification(notification).await
-                    },
-                    agent_client_protocol::on_receive_notification!(),
-                )
-                .connect_with(transport, async |connection| {
-                    run_acp_protocol(
-                        &connection,
-                        &acp_working_dir,
-                        prompt,
-                        images,
-                        store,
-                        session_id,
-                        agent_session_id,
-                        &handler,
-                        &self.mcp_servers,
-                        &self.agent_label,
-                    )
-                    .await
-                    .map_err(agent_client_protocol::util::internal_error)
-                }) => result.map_err(|e| format!("ACP protocol failed: {e:?}")),
-        };
+                .await
+                .map_err(agent_client_protocol::util::internal_error)
+            })
+            .await
+            .map_err(|e| format!("ACP protocol failed: {e:?}"));
 
         writer.finalize().await;
         graceful_stop(&mut child, self.is_remote).await;
 
-        protocol_result
+        match protocol_result {
+            Ok(outcome) => Ok(outcome),
+            Err(e) if cancel_token.is_cancelled() => {
+                log::info!("Session {session_id} cancelled during ACP teardown: {e}");
+                Ok(AgentRunOutcome::Cancelled)
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -1152,9 +1213,9 @@ enum HandlerPhase {
 
 /// Accumulates replay notifications and matches them against DB messages.
 struct ReplayBuffer {
-    /// `(role, content)` pairs from the DB, in order.
-    db_messages: Vec<(String, String)>,
-    /// Index into `db_messages` of the next message to match.
+    /// Persisted replay boundaries from the DB, in order.
+    db_messages: Vec<ReplayBoundary>,
+    /// Index into `db_messages` of the next boundary to match.
     match_cursor: usize,
     /// Index of the last non-user message in `db_messages`.
     /// When the cursor passes this, replay is considered complete.
@@ -1163,6 +1224,9 @@ struct ReplayBuffer {
     current_text: String,
     /// Role of the current streaming message (`"user"` or `"assistant"`).
     current_role: Option<String>,
+    /// ACP message ID for the current streaming message, when the provider
+    /// includes one in message chunks.
+    current_message_id: Option<String>,
     /// Tool-call IDs observed during replay (used as a safety-net later).
     replayed_tool_call_ids: HashSet<String>,
     /// Timestamp of the last notification received during replay.
@@ -1172,13 +1236,13 @@ struct ReplayBuffer {
 }
 
 impl ReplayBuffer {
-    fn new(db_messages: Vec<(String, String)>) -> Self {
+    fn new(db_messages: Vec<ReplayBoundary>) -> Self {
         // Find index of last non-user message.
         let target_index = db_messages
             .iter()
             .enumerate()
             .rev()
-            .find(|(_, (role, _))| role != "user")
+            .find(|(_, message)| message.role != "user")
             .map(|(i, _)| i);
 
         Self {
@@ -1187,6 +1251,7 @@ impl ReplayBuffer {
             target_index,
             current_text: String::new(),
             current_role: None,
+            current_message_id: None,
             replayed_tool_call_ids: HashSet::new(),
             last_notification_at: Instant::now(),
             received_any: false,
@@ -1199,28 +1264,46 @@ impl ReplayBuffer {
     fn finalize_current(&mut self) -> bool {
         if let Some(role) = self.current_role.take() {
             if !self.current_text.is_empty() {
-                self.current_text.clear();
-                return self.try_match(&role);
+                let event = ReplayEvent {
+                    role,
+                    content: std::mem::take(&mut self.current_text),
+                    acp_message_id: self.current_message_id.take(),
+                    acp_tool_call_id: None,
+                };
+                return self.try_match(&event);
             }
         }
+        self.current_message_id = None;
         false
     }
 
-    /// Try to match a role against `db_messages[match_cursor]`.
+    /// Try to match a replay event against persisted replay boundaries.
     /// Returns `true` if replay is now considered complete.
-    fn try_match(&mut self, role: &str) -> bool {
+    fn try_match(&mut self, event: &ReplayEvent) -> bool {
         if self.match_cursor >= self.db_messages.len() {
             return self.is_complete();
         }
 
-        let (db_role, _) = &self.db_messages[self.match_cursor];
+        if let Some(idx) = self.find_id_match(event) {
+            self.match_cursor = idx + 1;
+            return self.is_complete();
+        }
 
-        if role == db_role {
+        let boundary = &self.db_messages[self.match_cursor];
+        if boundary.matches_fallback(event) {
             self.match_cursor += 1;
         }
-        // Don't advance cursor on role mismatch.
 
         self.is_complete()
+    }
+
+    fn find_id_match(&self, event: &ReplayEvent) -> Option<usize> {
+        self.db_messages
+            .iter()
+            .enumerate()
+            .skip(self.match_cursor)
+            .find(|(_, boundary)| boundary.matches_id(event))
+            .map(|(idx, _)| idx)
     }
 
     /// Returns `true` if the match cursor has passed the target index.
@@ -1232,18 +1315,59 @@ impl ReplayBuffer {
     }
 }
 
+struct ReplayEvent {
+    role: String,
+    content: String,
+    acp_message_id: Option<String>,
+    acp_tool_call_id: Option<String>,
+}
+
+impl ReplayBoundary {
+    fn matches_id(&self, event: &ReplayEvent) -> bool {
+        match (
+            self.acp_message_id.as_deref(),
+            event.acp_message_id.as_deref(),
+        ) {
+            (Some(boundary_id), Some(event_id)) if boundary_id == event_id => return true,
+            _ => {}
+        }
+
+        matches!(
+            (
+                self.acp_tool_call_id.as_deref(),
+                event.acp_tool_call_id.as_deref()
+            ),
+            (Some(boundary_id), Some(event_id)) if boundary_id == event_id
+        )
+    }
+
+    fn matches_fallback(&self, event: &ReplayEvent) -> bool {
+        if self.role != event.role {
+            return false;
+        }
+
+        if self.content.is_empty() || event.content.is_empty() {
+            return true;
+        }
+
+        self.content == event.content
+    }
+}
+
 struct AcpNotificationHandler {
     writer: Arc<dyn MessageWriter>,
     phase: Mutex<HandlerPhase>,
     /// Signalled when replay matching determines all DB messages have been replayed.
     replay_done: tokio::sync::Notify,
+    permission_cancel_token: CancellationToken,
 }
 
 impl AcpNotificationHandler {
     fn new(
         writer: Arc<dyn MessageWriter>,
         replaying: bool,
-        db_messages: Vec<(String, String)>,
+        db_messages: Vec<ReplayBoundary>,
+        permission_cancel_token: CancellationToken,
     ) -> Self {
         let phase = if replaying {
             HandlerPhase::Replaying(ReplayBuffer::new(db_messages))
@@ -1257,18 +1381,22 @@ impl AcpNotificationHandler {
             writer,
             phase: Mutex::new(phase),
             replay_done: tokio::sync::Notify::new(),
+            permission_cancel_token,
         }
     }
 
-    /// Check whether the replay phase has been idle for at least `timeout`.
-    /// Returns `false` if not in the Replaying phase or no notification received yet.
-    async fn is_replay_idle(&self, timeout: Duration) -> bool {
-        let phase = self.phase.lock().await;
-        if let HandlerPhase::Replaying(buf) = &*phase {
-            buf.received_any && buf.last_notification_at.elapsed() >= timeout
-        } else {
-            false
+    async fn finalize_replay_if_idle(&self, timeout: Duration) -> bool {
+        let mut phase = self.phase.lock().await;
+        if let HandlerPhase::Replaying(buf) = &mut *phase {
+            if buf.received_any && buf.last_notification_at.elapsed() >= timeout {
+                let completed = buf.finalize_current();
+                if completed {
+                    self.replay_done.notify_one();
+                }
+                return true;
+            }
         }
+        false
     }
 
     /// Transition from Replaying to WaitingForPrompt.
@@ -1276,7 +1404,13 @@ impl AcpNotificationHandler {
     async fn transition_to_waiting_for_prompt(&self) {
         let mut phase = self.phase.lock().await;
         let ids = match &mut *phase {
-            HandlerPhase::Replaying(buf) => std::mem::take(&mut buf.replayed_tool_call_ids),
+            HandlerPhase::Replaying(buf) => {
+                let completed = buf.finalize_current();
+                if completed {
+                    self.replay_done.notify_one();
+                }
+                std::mem::take(&mut buf.replayed_tool_call_ids)
+            }
             HandlerPhase::WaitingForPrompt { .. } | HandlerPhase::Live { .. } => return,
         };
         *phase = HandlerPhase::WaitingForPrompt {
@@ -1298,6 +1432,10 @@ impl AcpNotificationHandler {
             replayed_tool_call_ids: ids,
         };
     }
+
+    fn cancel_pending_permissions(&self) {
+        self.permission_cancel_token.cancel();
+    }
 }
 
 impl AcpNotificationHandler {
@@ -1305,14 +1443,9 @@ impl AcpNotificationHandler {
         &self,
         args: RequestPermissionRequest,
     ) -> agent_client_protocol::Result<RequestPermissionResponse> {
-        let option_id = args
-            .options
-            .first()
-            .map(|opt| opt.option_id.clone())
-            .unwrap_or_else(|| PermissionOptionId::new("approve"));
-
-        Ok(RequestPermissionResponse::new(
-            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
+        Ok(permission_response_for_options(
+            &args.options,
+            self.permission_cancel_token.is_cancelled(),
         ))
     }
 
@@ -1382,6 +1515,11 @@ impl AcpNotificationHandler {
                                 if buf.current_role.as_deref() != Some("assistant") {
                                     done = buf.finalize_current();
                                     buf.current_role = Some("assistant".to_string());
+                                    buf.current_message_id =
+                                        chunk.message_id.as_ref().map(|id| id.0.to_string());
+                                } else if buf.current_message_id.is_none() {
+                                    buf.current_message_id =
+                                        chunk.message_id.as_ref().map(|id| id.0.to_string());
                                 }
                                 buf.current_text.push_str(&text.text);
                                 done
@@ -1395,6 +1533,11 @@ impl AcpNotificationHandler {
                                 if buf.current_role.as_deref() != Some("user") {
                                     done = buf.finalize_current();
                                     buf.current_role = Some("user".to_string());
+                                    buf.current_message_id =
+                                        chunk.message_id.as_ref().map(|id| id.0.to_string());
+                                } else if buf.current_message_id.is_none() {
+                                    buf.current_message_id =
+                                        chunk.message_id.as_ref().map(|id| id.0.to_string());
                                 }
                                 buf.current_text.push_str(&text.text);
                                 done
@@ -1402,15 +1545,30 @@ impl AcpNotificationHandler {
                                 false
                             }
                         }
-                        SessionUpdate::ToolCall(_tc) => {
+                        SessionUpdate::ToolCall(tc) => {
                             buf.finalize_current();
-                            buf.try_match("tool_call")
+                            buf.try_match(&ReplayEvent {
+                                role: "tool_call".to_string(),
+                                content: tc.title.clone(),
+                                acp_message_id: None,
+                                acp_tool_call_id: Some(tc.tool_call_id.0.to_string()),
+                            })
                         }
                         SessionUpdate::ToolCallUpdate(update)
                             if update.fields.content.is_some() =>
                         {
                             buf.finalize_current();
-                            buf.try_match("tool_result")
+                            buf.try_match(&ReplayEvent {
+                                role: "tool_result".to_string(),
+                                content: update
+                                    .fields
+                                    .content
+                                    .as_ref()
+                                    .and_then(|content| extract_content_preview(content))
+                                    .unwrap_or_default(),
+                                acp_message_id: None,
+                                acp_tool_call_id: Some(update.tool_call_id.0.to_string()),
+                            })
                         }
                         SessionUpdate::AgentThoughtChunk(_) => {
                             // Thinking is not persisted — ignore.
@@ -1588,6 +1746,24 @@ impl AcpNotificationHandler {
     }
 }
 
+fn permission_response_for_options(
+    options: &[agent_client_protocol::schema::v1::PermissionOption],
+    cancelled: bool,
+) -> RequestPermissionResponse {
+    if cancelled {
+        return RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled);
+    }
+
+    let option_id = options
+        .first()
+        .map(|opt| opt.option_id.clone())
+        .unwrap_or_else(|| PermissionOptionId::new("approve"));
+
+    RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
+        SelectedPermissionOutcome::new(option_id),
+    ))
+}
+
 /// Extract the tool-call ID from a session update, if it carries one.
 fn notification_tool_call_id(update: &SessionUpdate) -> Option<String> {
     match update {
@@ -1629,6 +1805,15 @@ fn prompt_response_metadata(response: &PromptResponse) -> Option<AcpEventMetadat
     })
 }
 
+fn send_session_cancel(
+    connection: &ConnectionTo<Agent>,
+    acp_session_id: &str,
+) -> Result<(), String> {
+    connection
+        .send_notification(CancelNotification::new(acp_session_id.to_string()))
+        .map_err(|e| format!("Failed to send ACP session/cancel: {e:?}"))
+}
+
 // =============================================================================
 // Protocol helpers
 // =============================================================================
@@ -1645,8 +1830,9 @@ async fn run_acp_protocol(
     handler: &Arc<AcpNotificationHandler>,
     mcp_servers: &[McpServer],
     agent_label: &str,
-) -> Result<(), String> {
-    let setup = tokio::time::timeout(
+    cancel_token: &CancellationToken,
+) -> Result<AgentRunOutcome, String> {
+    let setup_task = tokio::time::timeout(
         ACP_SETUP_TIMEOUT,
         setup_acp_session(
             connection,
@@ -1658,14 +1844,22 @@ async fn run_acp_protocol(
             mcp_servers,
             agent_label,
         ),
-    )
-    .await
-    .map_err(|_| {
-        format!(
-            "Timed out waiting for ACP protocol startup after {}s",
-            ACP_SETUP_TIMEOUT.as_secs()
-        )
-    })??;
+    );
+    let setup = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            handler.cancel_pending_permissions();
+            return Ok(AgentRunOutcome::Cancelled);
+        }
+        result = setup_task => {
+            result
+                .map_err(|_| {
+                    format!(
+                        "Timed out waiting for ACP protocol startup after {}s",
+                        ACP_SETUP_TIMEOUT.as_secs()
+                    )
+                })??
+        }
+    };
 
     // If resuming, wait for replay to complete (content match OR idle timeout).
     // An absolute 10s timeout prevents a hang if the server sends zero replay
@@ -1674,6 +1868,13 @@ async fn run_acp_protocol(
         let absolute_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    handler.cancel_pending_permissions();
+                    if let Err(e) = send_session_cancel(connection, &setup.agent_session_id) {
+                        log::warn!("{e}");
+                    }
+                    return Ok(AgentRunOutcome::Cancelled);
+                }
                 _ = handler.replay_done.notified() => {
                     break;
                 }
@@ -1682,7 +1883,7 @@ async fn run_acp_protocol(
                     break;
                 }
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    if handler.is_replay_idle(Duration::from_secs(1)).await {
+                    if handler.finalize_replay_if_idle(Duration::from_secs(1)).await {
                         break;
                     }
                 }
@@ -1699,21 +1900,42 @@ async fn run_acp_protocol(
         );
     }
     let content_blocks = build_prompt_content_blocks(prompt, images, supports_images);
-    let prompt_request = PromptRequest::new(setup.agent_session_id, content_blocks);
+    let prompt_request = PromptRequest::new(setup.agent_session_id.clone(), content_blocks);
 
     handler.transition_to_live().await;
 
-    let prompt_response = connection
-        .send_request(prompt_request)
-        .block_task()
-        .await
-        .map_err(|e| format!("Prompt failed: {e:?}"))?;
+    let prompt_task = connection.send_request(prompt_request).block_task();
+    tokio::pin!(prompt_task);
+
+    let prompt_response = tokio::select! {
+        result = &mut prompt_task => {
+            result.map_err(|e| format!("Prompt failed: {e:?}"))?
+        }
+        _ = cancel_token.cancelled() => {
+            handler.cancel_pending_permissions();
+            if let Err(e) = send_session_cancel(connection, &setup.agent_session_id) {
+                log::warn!("{e}");
+            }
+
+            match tokio::time::timeout(Duration::from_secs(5), &mut prompt_task).await {
+                Ok(result) => result.map_err(|e| format!("Prompt failed after cancellation: {e:?}"))?,
+                Err(_) => {
+                    log::warn!(
+                        "Timed out waiting for ACP prompt response after session/cancel for session {our_session_id}"
+                    );
+                    return Ok(AgentRunOutcome::Cancelled);
+                }
+            }
+        }
+    };
 
     if let Some(metadata) = prompt_response_metadata(&prompt_response) {
         handler.writer.record_acp_event_metadata(metadata).await;
     }
 
-    Ok(())
+    Ok(AgentRunOutcome::from_stop_reason(
+        prompt_response.stop_reason,
+    ))
 }
 
 /// Whether the agent advertises support for the transport an MCP server needs.
@@ -2074,12 +2296,14 @@ mod tests {
         acp_spawn_command, build_prompt_content_blocks, consume_remote_acp_line,
         decode_remote_acp_line, env_shebang_interpreter, guarded_path_for_agent_binary,
         is_broad_toolchain_dir, mcp_server_transport_supported, path_with_inserted_agent_bin_dir,
-        remote_acp_segments, resolve_acp_working_dir, resolve_spawn_working_dir,
-        sanitize_remote_acp_chunk, shell_exec_line, shell_quote, AcpDriver, RemoteLineOutcome,
+        permission_response_for_options, remote_acp_segments, resolve_acp_working_dir,
+        resolve_spawn_working_dir, sanitize_remote_acp_chunk, shell_exec_line, shell_quote,
+        AcpDriver, AgentRunOutcome, RemoteLineOutcome, ReplayBoundary, ReplayBuffer, ReplayEvent,
     };
     use agent_client_protocol::schema::v1::{
         ContentBlock as AcpContentBlock, McpCapabilities, McpServer, McpServerHttp, McpServerSse,
-        McpServerStdio,
+        McpServerStdio, PermissionOption, PermissionOptionKind, RequestPermissionOutcome,
+        StopReason,
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -2621,5 +2845,98 @@ mod tests {
             .expect("read should succeed");
 
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn replay_boundary_prefers_acp_message_id_over_content() {
+        let mut buffer = ReplayBuffer::new(vec![ReplayBoundary {
+            role: "assistant".to_string(),
+            content: "persisted text".to_string(),
+            acp_message_id: Some("msg-1".to_string()),
+            acp_tool_call_id: None,
+        }]);
+
+        let completed = buffer.try_match(&ReplayEvent {
+            role: "assistant".to_string(),
+            content: "provider replayed different text".to_string(),
+            acp_message_id: Some("msg-1".to_string()),
+            acp_tool_call_id: None,
+        });
+
+        assert!(completed);
+        assert_eq!(buffer.match_cursor, 1);
+    }
+
+    #[test]
+    fn replay_boundary_falls_back_to_role_and_content_without_ids() {
+        let mut buffer = ReplayBuffer::new(vec![ReplayBoundary::legacy(
+            "assistant".to_string(),
+            "persisted text".to_string(),
+        )]);
+
+        let mismatch = buffer.try_match(&ReplayEvent {
+            role: "assistant".to_string(),
+            content: "different text".to_string(),
+            acp_message_id: None,
+            acp_tool_call_id: None,
+        });
+        assert!(!mismatch);
+        assert_eq!(buffer.match_cursor, 0);
+
+        let completed = buffer.try_match(&ReplayEvent {
+            role: "assistant".to_string(),
+            content: "persisted text".to_string(),
+            acp_message_id: None,
+            acp_tool_call_id: None,
+        });
+        assert!(completed);
+        assert_eq!(buffer.match_cursor, 1);
+    }
+
+    #[test]
+    fn cancelled_permission_response_uses_acp_cancelled_outcome() {
+        let options = vec![PermissionOption::new(
+            "approve",
+            "Approve",
+            PermissionOptionKind::AllowOnce,
+        )];
+
+        let response = permission_response_for_options(&options, true);
+
+        assert!(matches!(
+            response.outcome,
+            RequestPermissionOutcome::Cancelled
+        ));
+    }
+
+    #[test]
+    fn permission_response_selects_first_option_before_cancellation() {
+        let options = vec![PermissionOption::new(
+            "approve",
+            "Approve",
+            PermissionOptionKind::AllowOnce,
+        )];
+
+        let response = permission_response_for_options(&options, false);
+
+        match response.outcome {
+            RequestPermissionOutcome::Selected(outcome) => {
+                assert_eq!(outcome.option_id.0.as_ref(), "approve");
+            }
+            RequestPermissionOutcome::Cancelled => panic!("permission should be selected"),
+            _ => panic!("unexpected permission outcome"),
+        }
+    }
+
+    #[test]
+    fn stop_reason_cancelled_maps_to_cancelled_outcome() {
+        assert_eq!(
+            AgentRunOutcome::from_stop_reason(StopReason::Cancelled),
+            AgentRunOutcome::Cancelled
+        );
+        assert_eq!(
+            AgentRunOutcome::from_stop_reason(StopReason::EndTurn),
+            AgentRunOutcome::Completed
+        );
     }
 }

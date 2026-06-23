@@ -180,7 +180,7 @@ export function createReviewState(
       await commands.updateComment(commentId, content);
     } catch (e) {
       console.error('Failed to update comment:', e);
-      // Could reload from backend here, but for now just log.
+      throw e;
     }
   }
 

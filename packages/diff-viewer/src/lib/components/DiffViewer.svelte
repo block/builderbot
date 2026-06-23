@@ -1648,16 +1648,30 @@
     if (event.button !== 0) return;
     if (!commentingEnabled) return;
 
+    const previousLineSelection = lineSelection;
+    const pendingLineComment = commentingOnLines;
     event.preventDefault();
     window.getSelection()?.removeAllRanges();
 
     lineSelection = { pane, anchorLine: lineIndex, focusLine: lineIndex };
     isSelecting = true;
-
-    commentingOnLines = null;
-    lineCommentEditorStyle = null;
-
     document.addEventListener('mousemove', handleSelectionDragMove);
+
+    if (pendingLineComment) {
+      void flushLineCommentEditor().then((canClear) => {
+        if (commentingOnLines !== pendingLineComment) return;
+        if (!canClear) {
+          lineSelection = previousLineSelection;
+          isSelecting = false;
+          document.removeEventListener('mousemove', handleSelectionDragMove);
+          return;
+        }
+        clearLineCommentEditorState();
+      });
+      return;
+    }
+
+    clearLineCommentEditorState();
   }
 
   function handleSelectionDragMove(event: MouseEvent) {
@@ -1720,6 +1734,10 @@
   function clearLineSelection() {
     lineSelection = null;
     isSelecting = false;
+    clearLineCommentEditorState();
+  }
+
+  function clearLineCommentEditorState() {
     commentingOnLines = null;
     lineCommentEditorStyle = null;
     lineCommentPositionPreference = 'below';
@@ -1900,12 +1918,7 @@
 
   async function handleLineCommentCancel() {
     if (!(await flushLineCommentEditor())) return;
-    commentingOnLines = null;
-    lineCommentEditorStyle = null;
-    lineCommentPositionPreference = 'below';
-    editingCommentId = null;
-    activeLineComment = null;
-    lineCommentReadOnly = false;
+    clearLineCommentEditorState();
   }
 
   // Update toolbar/editor positions on scroll

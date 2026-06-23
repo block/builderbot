@@ -74,4 +74,38 @@ describe('createReviewState', () => {
     expect(reviewState.state.comments).toEqual([createdComment]);
     vi.unstubAllGlobals();
   });
+
+  it('rejects updateComment when persistence fails', async () => {
+    vi.stubGlobal('$state', <T>(value: T) => value);
+    const { createReviewState } = await import('./reviewState.svelte');
+    const existingComment = createComment();
+    const failure = new Error('write failed');
+    const commands: ReviewCommands & Pick<DiffCommands, 'getFileAtRef'> = {
+      ensureReview: vi.fn(async () => createReview({ comments: [existingComment] })),
+      findReview: vi.fn(async () => createReview({ comments: [existingComment] })),
+      getReview: vi.fn(async () => null),
+      addComment: vi.fn(async () => existingComment),
+      updateComment: vi.fn(async () => {
+        throw failure;
+      }),
+      deleteComment: vi.fn(async () => {}),
+      deleteAllComments: vi.fn(async () => {}),
+      restoreComment: vi.fn(async () => {}),
+      getDeletedComments: vi.fn(async () => []),
+      markReviewed: vi.fn(async () => {}),
+      unmarkReviewed: vi.fn(async () => {}),
+      addReferenceFile: vi.fn(async () => {}),
+      removeReferenceFile: vi.fn(async () => {}),
+      getFileAtRef: vi.fn(async () => ({
+        path: 'src/app.ts',
+        content: { type: 'Text', lines: [] },
+      })),
+    };
+    const reviewState = createReviewState(commands, 'branch-1', 'abc123', 'branch');
+    await Promise.resolve();
+
+    await expect(reviewState.updateComment('comment-1', 'Unsaved text')).rejects.toThrow(failure);
+    expect(reviewState.state.comments[0]?.content).toBe('Unsaved text');
+    vi.unstubAllGlobals();
+  });
 });

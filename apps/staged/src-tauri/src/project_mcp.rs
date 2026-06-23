@@ -552,7 +552,7 @@ impl ProjectToolsHandler {
     }
 
     #[tool(
-        description = "Wait for a repo session started by `start_repo_session`. Returns the queued/running/completed/cancelled/failed state for the opaque `repo_session_id`, plus `activity` progress fields (`last_activity_at`, `last_message`, `last_tool_call`, `last_tool_result`, and counts) so callers can distinguish active work from an idle session. `wait_for_completion_seconds` defaults to 240."
+        description = "Wait for a repo session started by `start_repo_session`. Returns the current state and any available artifacts for the opaque `repo_session_id`. `wait_for_completion_seconds` defaults to 240."
     )]
     async fn wait_for_repo_session(
         &self,
@@ -602,7 +602,7 @@ impl ProjectToolsHandler {
     }
 
     #[tool(
-        description = "Abort a repo session started by `start_repo_session` when the user explicitly wants it stopped or there is strong evidence it is stuck. Do not use this merely because a repo session is taking a long time; call `wait_for_repo_session` again if its activity shows recent progress. Cancels either the queued item or the running session behind the opaque `repo_session_id`."
+        description = "Abort a repo session started by `start_repo_session` when the user wants the session stopped. Cancellation is best used when the user wants to go down a different path rather than when you are surprised at how long the session is taking. Cancels either the queued item or the running session behind the opaque `repo_session_id`."
     )]
     async fn cancel_repo_session(
         &self,
@@ -1117,7 +1117,7 @@ mod tests {
     }
 
     #[test]
-    fn repo_session_tool_descriptions_expose_progress_and_abort_guidance() {
+    fn repo_session_tool_descriptions_avoid_field_names_and_explain_cancellation() {
         let router = ProjectToolsHandler::tool_router();
         let wait_description = router
             .get("wait_for_repo_session")
@@ -1128,12 +1128,16 @@ mod tests {
             .and_then(|tool| tool.description.as_deref())
             .expect("cancel tool description");
 
-        assert!(wait_description.contains("`activity` progress fields"));
-        assert!(wait_description.contains("`last_activity_at`"));
-        assert!(wait_description.contains("`last_tool_result`"));
+        assert!(wait_description.contains("Returns the current state"));
+        assert!(!wait_description.contains("`activity` progress fields"));
+        assert!(!wait_description.contains("`last_activity_at`"));
+        assert!(!wait_description.contains("`last_tool_result`"));
 
         assert!(cancel_description.contains("Abort a repo session"));
-        assert!(cancel_description.contains("Do not use this merely because"));
-        assert!(cancel_description.contains("activity shows recent progress"));
+        assert!(cancel_description.contains("when the user wants the session stopped"));
+        assert!(cancel_description.contains("go down a different path"));
+        assert!(cancel_description.contains("surprised at how long the session is taking"));
+        assert!(!cancel_description.contains("strong evidence"));
+        assert!(!cancel_description.contains("taking a long time"));
     }
 }

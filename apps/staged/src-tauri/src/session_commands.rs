@@ -3604,6 +3604,11 @@ pub(crate) fn build_full_prompt_with_pikchr_reference(
 You may use any tools needed to research and gather information, but do NOT create \
 any commits.
 
+Write the note as a standalone artifact. The original user prompt is not shown \
+when the note is displayed. Do not make the title or opening sentence a direct \
+answer to an implicit question, such as \"Yes, this is broken.\" Instead, name \
+the subject and conclusion clearly enough that the note makes sense by itself.
+
 To return the note, your final response must include the structure shown below. \
 Before the `---` separator, emit a `suggested-next-steps` fenced block that suggests \
 what the user might want to do next. The block must contain a single JSON object with \
@@ -4603,6 +4608,27 @@ mod tests {
             "Put only the JSON array inside the review-comments block (no prose or markdown)."
         ));
         assert!(prompt.contains("do not output any preamble, commentary, or thinking before it"));
+    }
+
+    #[test]
+    fn note_prompt_includes_standalone_output_guidance() {
+        let prompt = build_full_prompt(
+            "user prompt",
+            "project info",
+            "branch context",
+            &BranchSessionType::Note,
+            None,
+            None,
+        );
+
+        assert!(prompt.contains("Write the note as a standalone artifact."));
+        assert!(
+            prompt.contains("The original user prompt is not shown when the note is displayed.")
+        );
+        assert!(prompt.contains("Do not make the title or opening sentence a direct answer"));
+        assert!(prompt.contains("\"Yes, this is broken.\""));
+        assert!(prompt.contains("name the subject and conclusion clearly enough"));
+        assert!(prompt.contains("The opening fence line for suggested-next-steps must be exactly: ```suggested-next-steps"));
     }
 
     #[test]

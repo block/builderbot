@@ -19,7 +19,9 @@
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
   import { viewport } from '../../shared/viewport.svelte';
+  import { extractNoteDiagramFences } from './diagramFormats';
   import { noteMarkdownWithTitle, renderNoteMarkdown } from './noteMarkdown';
+  import { loadNotePikchrRenderer, type NotePikchrRenderer } from './pikchrRendering';
 
   interface Props {
     open: boolean;
@@ -54,6 +56,12 @@
   let canOpenSession = $derived(Boolean(sessionId && onOpenSession));
   let showChatInfo = $derived(canOpenSession && assistantMessagesAfterNote > 0);
   let noteMarkdown = $derived(noteMarkdownWithTitle(title, content));
+  let noteHasPikchr = $derived(
+    extractNoteDiagramFences(noteMarkdown).some((diagram) => diagram.language === 'pikchr')
+  );
+  let pikchrRenderer = $state<NotePikchrRenderer | null>(null);
+  let pikchrRendererLoadFailed = $state(false);
+  let renderedNoteHtml = $derived(renderNoteMarkdown(noteMarkdown, { pikchrRenderer }));
 
   // Search state
   let searchVisible = $state(false);
@@ -78,6 +86,23 @@
     return () => {
       unregister();
       unregisterSearchTarget = null;
+    };
+  });
+
+  $effect(() => {
+    if (!open || !noteHasPikchr || pikchrRenderer || pikchrRendererLoadFailed) return;
+
+    let stale = false;
+    loadNotePikchrRenderer()
+      .then((renderer) => {
+        if (!stale) pikchrRenderer = renderer;
+      })
+      .catch(() => {
+        if (!stale) pikchrRendererLoadFailed = true;
+      });
+
+    return () => {
+      stale = true;
     };
   });
 
@@ -268,7 +293,7 @@
       <div class="modal-content" bind:this={contentEl} onclick={handleExternalLinkClick}>
         {#if noteMarkdown.trim()}
           <div class="markdown-content">
-            {@html renderNoteMarkdown(noteMarkdown)}
+            {@html renderedNoteHtml}
           </div>
         {:else}
           <p class="empty-note">This note has no content.</p>
@@ -499,7 +524,21 @@
   }
 
   .markdown-content :global(.note-diagram-preview) {
+    display: flex;
+    justify-content: center;
+    padding: 16px;
     background: var(--bg-elevated, var(--bg-hover));
+    overflow-x: auto;
+  }
+
+  .markdown-content :global(.note-diagram-preview svg) {
+    display: block;
+    max-width: 100%;
+    height: auto;
+  }
+
+  .markdown-content :global(.note-diagram-source-wrap) {
+    border-top: 1px solid var(--border-subtle);
   }
 
   .markdown-content :global(.note-diagram .note-diagram-source) {

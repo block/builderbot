@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { noteMarkdownWithTitle, renderNoteMarkdown } from './noteMarkdown';
+import type { NotePikchrRenderer } from './pikchrRendering';
 
 describe('noteMarkdownWithTitle', () => {
   it('prepends the note title as a markdown H1', () => {
@@ -25,14 +26,13 @@ describe('noteMarkdownWithTitle', () => {
 });
 
 describe('renderNoteMarkdown', () => {
-  it('renders Pikchr fenced blocks as inert diagram previews with escaped source', () => {
+  it('renders Pikchr fenced blocks as escaped source while the renderer is unavailable', () => {
     const html = renderNoteMarkdown('```pikchr\nbox "Start" fit\n```');
 
-    expect(html).toContain('<figure class="note-diagram note-diagram-pikchr">');
-    expect(html).toContain('<figcaption class="note-diagram-caption">Pikchr</figcaption>');
-    expect(html).toContain('<div class="note-diagram-preview note-diagram-preview-pikchr">');
     expect(html).toContain('<pre class="note-diagram-source note-diagram-source-pikchr">');
     expect(html).toContain('box "Start" fit');
+    expect(html).not.toContain('<svg');
+    expect(html).not.toContain('note-diagram-preview');
   });
 
   it('leaves non-diagram fenced blocks as normal code blocks', () => {
@@ -52,14 +52,41 @@ describe('renderNoteMarkdown', () => {
     expect(html).not.toContain('note-diagram-preview');
   });
 
-  it('does not emit executable Pikchr preview surfaces before an SVG renderer exists', () => {
-    const html = renderNoteMarkdown('```pikchr\nbox "<script>alert(1)</script>" fit\n```');
+  it('renders Pikchr fenced blocks as sanitized SVG when a renderer is loaded', () => {
+    const html = renderNoteMarkdown('```pikchr\nbox "Start" fit\n```', {
+      pikchrRenderer: safePikchrRenderer,
+    });
 
-    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
-    expect(html).not.toContain('<script>');
+    expect(html).toContain('<figure class="note-diagram note-diagram-pikchr">');
+    expect(html).toContain('<figcaption class="note-diagram-caption">Pikchr</figcaption>');
+    expect(html).toContain('<div class="note-diagram-preview note-diagram-preview-pikchr">');
+    expect(html).toContain('<svg');
+    expect(html).toContain('class="note-pikchr-svg"');
+    expect(html).toContain('<path');
+    expect(html).toContain('stroke:rgb(0,0,0)');
+    expect(html).toContain('<div class="note-diagram-source-wrap">');
+    expect(html).toContain('<pre class="note-diagram-source note-diagram-source-pikchr">');
+    expect(html).toContain('box "Start" fit');
+    expect(html).not.toContain('STAGED_NOTE_TRUSTED_DIAGRAM_');
+  });
+
+  it('does not allow renderer SVG through the generic Markdown sanitizer', () => {
+    const html = renderNoteMarkdown('<svg><script>alert(1)</script></svg>');
+
     expect(html).not.toContain('<svg');
-    expect(html).not.toContain('<iframe');
-    expect(html).not.toContain('srcdoc');
+    expect(html).not.toContain('<script>');
+  });
+
+  it('falls back to escaped source when the Pikchr renderer rejects the SVG', () => {
+    const html = renderNoteMarkdown('```pikchr\nbox "Unsafe" fit\n```', {
+      pikchrRenderer: unsafePikchrRenderer,
+    });
+
+    expect(html).toContain('<pre class="note-diagram-source note-diagram-source-pikchr">');
+    expect(html).toContain('box "Unsafe" fit');
+    expect(html).not.toContain('<svg');
+    expect(html).not.toContain('<script>');
+    expect(html).not.toContain('onclick');
   });
 
   it('keeps raw SVG fences escaped as source for now', () => {
@@ -69,4 +96,21 @@ describe('renderNoteMarkdown', () => {
     expect(html).toContain('&lt;svg&gt;&lt;script&gt;alert(1)&lt;/script&gt;&lt;/svg&gt;');
     expect(html).not.toContain('<script>');
   });
+});
+
+const safePikchrRenderer: NotePikchrRenderer = () => ({
+  kind: 'svg',
+  width: 58,
+  height: 34,
+  svg: [
+    '<svg xmlns="http://www.w3.org/2000/svg" class="note-pikchr-svg" viewBox="0 0 58 34">',
+    '<path d="M2,32L56,32L56,2L2,2Z" style="fill:none;stroke-width:2.16;stroke:rgb(0,0,0);" />',
+    '<text x="29" y="17" text-anchor="middle" fill="rgb(0,0,0)" dominant-baseline="central">Start</text>',
+    '</svg>',
+  ].join(''),
+});
+
+const unsafePikchrRenderer: NotePikchrRenderer = () => ({
+  kind: 'error',
+  message: 'Pikchr rendered unsafe SVG.',
 });

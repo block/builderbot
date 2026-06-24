@@ -1,9 +1,11 @@
 declare module 'sanitize-html' {
   type AllowedAttributes = Record<string, string[]>;
+  type AllowedStyles = Record<string, Record<string, RegExp[]>>;
 
   interface SanitizeHtmlOptions {
     allowedTags?: string[];
     allowedAttributes?: AllowedAttributes;
+    allowedStyles?: AllowedStyles;
     allowedSchemes?: string[];
   }
 

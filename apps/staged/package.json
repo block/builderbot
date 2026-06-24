@@ -53,6 +53,7 @@
     "@tauri-apps/plugin-updater": "^2.10.0",
     "ansi-to-html": "^0.7.2",
     "marked": "^17.0.1",
+    "pikchr-js": "0.1.4",
     "sanitize-html": "^2.17.0",
     "shiki": "^3.20.0"
   },

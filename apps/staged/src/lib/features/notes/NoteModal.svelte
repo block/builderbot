@@ -533,7 +533,7 @@
     display: flex;
     justify-content: center;
     padding: 16px;
-    background: var(--bg-elevated, var(--bg-hover));
+    background: var(--diagram-canvas-bg);
     overflow-x: auto;
   }
 

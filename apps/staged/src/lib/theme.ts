@@ -88,6 +88,11 @@ export interface Theme {
     selection: string; // Selected items background (theme-derived)
   };
 
+  // Diagram previews
+  diagram: {
+    canvasBg: string; // Light canvas for rendered diagrams with default dark ink
+  };
+
   // Scrollbar
   scrollbar: {
     thumb: string;
@@ -468,6 +473,10 @@ export function createAdaptiveTheme(
       selection: overlay(syntaxFg, isDark ? 0.08 : 0.1),
     },
 
+    diagram: {
+      canvasBg: '#ffffff',
+    },
+
     scrollbar: {
       thumb: borderBase,
       thumbHover: mix(primaryBg, syntaxFg, 0.25),
@@ -559,6 +568,8 @@ export function themeToVarMap(t: Theme): Record<string, string> {
     '--ui-warning': t.ui.warning,
     '--ui-warning-bg': t.ui.warningBg,
     '--ui-selection': t.ui.selection,
+
+    '--diagram-canvas-bg': t.diagram.canvasBg,
 
     '--scrollbar-thumb': t.scrollbar.thumb,
     '--scrollbar-thumb-hover': t.scrollbar.thumbHover,

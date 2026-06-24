@@ -11,6 +11,17 @@ const CSS_LENGTH = new RegExp(`^(?:${CSS_NUMBER})(?:px|pt|pc|mm|cm|in|em|rem|%)?
 const CSS_COLOR =
   /^(?:none|transparent|currentColor|[a-zA-Z]+|#[0-9a-fA-F]{3,8}|rgba?\(\s*\d{1,3}\s*,\s*\d{1,3}\s*,\s*\d{1,3}(?:\s*,\s*(?:0|1|0?\.\d+))?\s*\))$/;
 const CSS_DASH_ARRAY = new RegExp(`^(?:${CSS_NUMBER})(?:\\s*,\\s*(?:${CSS_NUMBER}))*$`);
+const DIRECT_COLOR_ATTRIBUTES = ['fill', 'stroke'] as const;
+const DIRECT_COLOR_ATTRIBUTE_TAGS = new Set([
+  'path',
+  'text',
+  'rect',
+  'circle',
+  'ellipse',
+  'line',
+  'polyline',
+  'polygon',
+]);
 
 export type RenderedPikchrDiagram =
   | {
@@ -89,14 +100,25 @@ export function sanitizePikchrSvg(svg: string): string | null {
     allowedAttributes: {
       svg: ['xmlns', 'viewBox', 'viewbox', 'class', 'style', 'width', 'height'],
       g: ['class', 'transform', 'style'],
-      path: ['class', 'd', 'style'],
-      text: ['class', 'x', 'y', 'dx', 'dy', 'text-anchor', 'dominant-baseline', 'style'],
-      rect: ['class', 'x', 'y', 'width', 'height', 'rx', 'ry', 'style'],
-      circle: ['class', 'cx', 'cy', 'r', 'style'],
-      ellipse: ['class', 'cx', 'cy', 'rx', 'ry', 'style'],
-      line: ['class', 'x1', 'y1', 'x2', 'y2', 'style'],
-      polyline: ['class', 'points', 'style'],
-      polygon: ['class', 'points', 'style'],
+      path: ['class', 'd', 'fill', 'stroke', 'style'],
+      text: [
+        'class',
+        'x',
+        'y',
+        'dx',
+        'dy',
+        'text-anchor',
+        'dominant-baseline',
+        'fill',
+        'stroke',
+        'style',
+      ],
+      rect: ['class', 'x', 'y', 'width', 'height', 'rx', 'ry', 'fill', 'stroke', 'style'],
+      circle: ['class', 'cx', 'cy', 'r', 'fill', 'stroke', 'style'],
+      ellipse: ['class', 'cx', 'cy', 'rx', 'ry', 'fill', 'stroke', 'style'],
+      line: ['class', 'x1', 'y1', 'x2', 'y2', 'fill', 'stroke', 'style'],
+      polyline: ['class', 'points', 'fill', 'stroke', 'style'],
+      polygon: ['class', 'points', 'fill', 'stroke', 'style'],
     },
     allowedStyles: {
       '*': {
@@ -108,9 +130,33 @@ export function sanitizePikchrSvg(svg: string): string | null {
       },
     },
     allowedSchemes: [],
+    transformTags: {
+      '*': stripUnsafeDirectColorAttributes,
+    },
   });
 
   const normalized = sanitized.replace(/\sviewbox=/g, ' viewBox=');
   if (!PIKCHR_SVG_ROOT.test(normalized)) return null;
   return normalized;
+}
+
+function stripUnsafeDirectColorAttributes(tagName: string, attribs: Record<string, string>) {
+  const nextAttribs = { ...attribs };
+  if (!DIRECT_COLOR_ATTRIBUTE_TAGS.has(tagName.toLowerCase())) {
+    return { tagName, attribs: nextAttribs };
+  }
+
+  for (const attribute of DIRECT_COLOR_ATTRIBUTES) {
+    const value = nextAttribs[attribute];
+    if (value === undefined) continue;
+
+    const trimmedValue = value.trim();
+    if (CSS_COLOR.test(trimmedValue)) {
+      nextAttribs[attribute] = trimmedValue;
+    } else {
+      delete nextAttribs[attribute];
+    }
+  }
+
+  return { tagName, attribs: nextAttribs };
 }

@@ -18,7 +18,26 @@ describe('sanitizePikchrSvg', () => {
     expect(svg).toContain('<path');
     expect(svg).toContain('style="fill:none;stroke-width:2.16;stroke:rgb(0,0,0)"');
     expect(svg).toContain('<text');
+    expect(svg).toContain('fill="rgb(0,0,0)"');
     expect(svg).not.toContain('data-pikchr-date');
+  });
+
+  it('keeps safe direct SVG colors and strips unsafe direct SVG colors', () => {
+    const svg = sanitizePikchrSvg(
+      [
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">',
+        '<path d="M1,1L19,19" fill="none" stroke="#123456" />',
+        '<text x="10" y="10" fill="rgb(1, 2, 3)" stroke="url(https://example.com/stroke)">Label</text>',
+        '<rect x="1" y="1" width="4" height="4" fill="url(https://example.com/fill)" stroke="rgba(12, 34, 56, 0.5)" />',
+        '</svg>',
+      ].join('')
+    );
+
+    expect(svg).toContain('fill="none"');
+    expect(svg).toContain('stroke="#123456"');
+    expect(svg).toContain('fill="rgb(1, 2, 3)"');
+    expect(svg).toContain('stroke="rgba(12, 34, 56, 0.5)"');
+    expect(svg).not.toContain('url(');
   });
 
   it('strips executable and external-resource SVG surface', () => {

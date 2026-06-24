@@ -29,9 +29,6 @@ export function sanitize(dirty: string): string {
       th: ['align'],
       code: ['class'], // for syntax-highlight class names
       span: ['class'], // for syntax-highlight class names
-      div: ['class'],
-      figcaption: ['class'],
-      figure: ['class'],
       pre: ['class'],
     },
     // Only allow checkbox inputs (GFM task lists)

@@ -77,6 +77,16 @@ describe('renderNoteMarkdown', () => {
     expect(html).not.toContain('<script>');
   });
 
+  it('does not allow raw HTML to opt into note diagram classes', () => {
+    const html = renderNoteMarkdown(
+      '<div class="note-diagram-preview"><figcaption class="note-diagram-caption">Pikchr</figcaption></div>'
+    );
+
+    expect(html).not.toContain('class="note-diagram-preview"');
+    expect(html).not.toContain('class="note-diagram-caption"');
+    expect(html).toContain('Pikchr');
+  });
+
   it('falls back to escaped source when the Pikchr renderer rejects the SVG', () => {
     const html = renderNoteMarkdown('```pikchr\nbox "Unsafe" fit\n```', {
       pikchrRenderer: unsafePikchrRenderer,

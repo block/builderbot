@@ -47,7 +47,7 @@
           <Button
             variant="ghost"
             size="icon"
-            class="ml-auto size-auto shrink-0 rounded-[3px] p-0.5 text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/ref-item:opacity-100 [&_svg]:!size-3"
+            class="reference-remove-action ml-auto size-auto shrink-0 rounded-[3px] p-0.5 text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/ref-item:opacity-100 [&_svg]:!size-3"
             title="Remove reference file"
             aria-label="Remove reference file"
             onclick={(e: MouseEvent) => {
@@ -189,6 +189,17 @@
 
   .reference-item {
     position: relative;
+  }
+
+  .reference-item:focus-within :global(.reference-remove-action),
+  :global(.reference-remove-action:focus-visible) {
+    opacity: 1;
+  }
+
+  @media (hover: none), (pointer: coarse) {
+    :global(.reference-remove-action) {
+      opacity: 1;
+    }
   }
 
   .reference-icon {

@@ -1,7 +1,7 @@
 import { marked, Renderer, type Tokens } from 'marked';
 
 import { sanitize } from '../../shared/sanitize';
-import { getNoteDiagramFormat } from './diagramFormats';
+import { renderNoteDiagramCodeBlock } from './diagramRendering';
 
 const NOTE_MARKDOWN_RENDERER = createNoteMarkdownRenderer();
 
@@ -36,13 +36,7 @@ function createNoteMarkdownRenderer(): Renderer {
 
   renderer.code = (token: Tokens.Code) => {
     const rendered = renderCode(token);
-    const format = getNoteDiagramFormat(token.lang);
-    if (!format) return rendered;
-
-    return rendered.replace(
-      '<pre>',
-      `<pre class="note-diagram-source note-diagram-source-${format.language}">`
-    );
+    return renderNoteDiagramCodeBlock(token, rendered) ?? rendered;
   };
 
   return renderer;

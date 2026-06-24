@@ -25,12 +25,13 @@ describe('noteMarkdownWithTitle', () => {
 });
 
 describe('renderNoteMarkdown', () => {
-  it('marks Pikchr fenced blocks as note diagram sources', () => {
+  it('renders Pikchr fenced blocks as inert diagram previews with escaped source', () => {
     const html = renderNoteMarkdown('```pikchr\nbox "Start" fit\n```');
 
-    expect(html).toContain(
-      '<pre class="note-diagram-source note-diagram-source-pikchr"><code class="language-pikchr">'
-    );
+    expect(html).toContain('<figure class="note-diagram note-diagram-pikchr">');
+    expect(html).toContain('<figcaption class="note-diagram-caption">Pikchr</figcaption>');
+    expect(html).toContain('<div class="note-diagram-preview note-diagram-preview-pikchr">');
+    expect(html).toContain('<pre class="note-diagram-source note-diagram-source-pikchr">');
     expect(html).toContain('box "Start" fit');
   });
 
@@ -39,6 +40,26 @@ describe('renderNoteMarkdown', () => {
 
     expect(html).toContain('<pre><code class="language-ts">');
     expect(html).not.toContain('note-diagram-source');
+  });
+
+  it('preserves Mermaid fences as escaped diagram source blocks', () => {
+    const html = renderNoteMarkdown('```mermaid\nflowchart TD\nA-->B\n```');
+
+    expect(html).toContain(
+      '<pre class="note-diagram-source note-diagram-source-mermaid"><code class="language-mermaid">'
+    );
+    expect(html).toContain('flowchart TD');
+    expect(html).not.toContain('note-diagram-preview');
+  });
+
+  it('does not emit executable Pikchr preview surfaces before an SVG renderer exists', () => {
+    const html = renderNoteMarkdown('```pikchr\nbox "<script>alert(1)</script>" fit\n```');
+
+    expect(html).toContain('&lt;script&gt;alert(1)&lt;/script&gt;');
+    expect(html).not.toContain('<script>');
+    expect(html).not.toContain('<svg');
+    expect(html).not.toContain('<iframe');
+    expect(html).not.toContain('srcdoc');
   });
 
   it('keeps raw SVG fences escaped as source for now', () => {

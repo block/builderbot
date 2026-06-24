@@ -478,6 +478,36 @@
     font-size: 0.85em;
   }
 
+  .markdown-content :global(.note-diagram) {
+    margin: 0.9em 0;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--bg-primary);
+  }
+
+  .markdown-content :global(.note-diagram-caption) {
+    display: flex;
+    align-items: center;
+    min-height: 30px;
+    padding: 0 10px;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--text-secondary);
+    background: var(--bg-chrome);
+    font-size: var(--size-xs);
+    font-weight: 600;
+  }
+
+  .markdown-content :global(.note-diagram-preview) {
+    background: var(--bg-elevated, var(--bg-hover));
+  }
+
+  .markdown-content :global(.note-diagram .note-diagram-source) {
+    margin: 0;
+    border-radius: 0;
+    background: transparent;
+  }
+
   .markdown-content :global(blockquote) {
     margin: 0.5em 0;
     padding-left: 0.75em;

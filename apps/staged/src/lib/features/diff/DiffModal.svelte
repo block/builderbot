@@ -33,8 +33,7 @@
   import SessionModal from '../sessions/SessionModal.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
   import { onBranchSessionStatus } from '../../services/branchEventService';
-  import { getPreferredAgent, preferences } from '../settings/preferences.svelte';
-  import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
+  import { preferences } from '../settings/preferences.svelte';
   import { createDiffViewerState } from './diffViewerState.svelte';
   import { createReviewState } from './reviewState.svelte';
   import { createSearchState } from '@builderbot/diff-viewer/state';
@@ -58,6 +57,7 @@
   import type { DiffScope } from '../../commands';
   import { findFreshAutoReview, getSession } from '../../commands';
   import * as commands from '../../api/commands';
+  import { startOrQueueBranchSessionWithPending } from '../branches/branchSessionLaunch.svelte';
   import {
     buildFileEntries,
     buildTree,
@@ -502,24 +502,17 @@
       reviewId: activeReviewId ?? null,
     };
 
-    try {
-      const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
-      const provider = getPreferredAgent(agents) ?? undefined;
-      const result = await commands.startOrQueueBranchSession(
-        branchId,
-        prompt,
-        mode,
-        provider,
-        undefined,
-        launchContext
-      );
-
+    const result = await startOrQueueBranchSessionWithPending({
+      branchId,
+      isRemote,
+      mode,
+      prompt,
+      launchContext,
+      onTimelineRefresh: () => commands.invalidateBranchTimeline(branchId),
+      errorTitle: `Unable to start ${mode} session`,
+    });
+    if (result) {
       linkCommentToSession(comment, mode, result.sessionId, result.sessionStatus);
-    } catch (e) {
-      toast.error(`Unable to start ${mode} session`, {
-        description: e instanceof Error ? e.message : String(e),
-        duration: Infinity,
-      });
     }
   }
 
@@ -584,26 +577,19 @@
       reviewId: activeReviewId ?? null,
     };
 
-    try {
-      const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
-      const provider = getPreferredAgent(agents) ?? undefined;
-      const result = await commands.startOrQueueBranchSession(
-        branchId,
-        data.prompt,
-        data.mode,
-        provider,
-        data.imageIds,
-        launchContext
-      );
+    const result = await startOrQueueBranchSessionWithPending({
+      branchId,
+      isRemote,
+      mode: data.mode,
+      prompt: data.prompt,
+      imageIds: data.imageIds,
+      launchContext,
+      onTimelineRefresh: () => commands.invalidateBranchTimeline(branchId),
+      errorTitle: `Unable to start ${data.mode} session`,
+    });
 
-      if (originComment) {
-        linkCommentToSession(originComment, data.mode, result.sessionId, result.sessionStatus);
-      }
-    } catch (e) {
-      toast.error(`Unable to start ${data.mode} session`, {
-        description: e instanceof Error ? e.message : String(e),
-        duration: Infinity,
-      });
+    if (originComment && result) {
+      linkCommentToSession(originComment, data.mode, result.sessionId, result.sessionStatus);
     }
   }
 
@@ -1474,7 +1460,7 @@
           {subpath}
           {isRemote}
           onBeforeStart={prepareCommitSessionStart}
-          onStarted={closeDiffModal}
+          onRequestClose={onClose}
         />
       {/if}
     </div>

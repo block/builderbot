@@ -106,6 +106,12 @@
     };
   });
 
+  $effect(() => {
+    if (!open) {
+      pikchrRendererLoadFailed = false;
+    }
+  });
+
   onDestroy(() => {
     unregisterSearchTarget?.();
   });

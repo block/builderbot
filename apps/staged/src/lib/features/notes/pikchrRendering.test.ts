@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { loadNotePikchrRenderer, sanitizePikchrSvg } from './pikchrRendering';
 
@@ -63,5 +63,36 @@ describe('loadNotePikchrRenderer', () => {
     expect(rendered.svg).toContain('Start');
     expect(rendered.svg).not.toContain('<script');
     expect(rendered.svg).not.toContain('data-pikchr-date');
+  });
+
+  it('retries loading after renderer initialization fails', async () => {
+    const loadPikchr = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('initialization failed'))
+      .mockResolvedValueOnce({
+        render: () => ({
+          width: 10,
+          height: 10,
+          svg: '<svg xmlns="http://www.w3.org/2000/svg" class="note-pikchr-svg" viewBox="0 0 10 10"><path d="M0,0L10,10" /></svg>',
+        }),
+      });
+
+    vi.resetModules();
+    vi.doMock('pikchr-js', () => ({ default: loadPikchr }));
+
+    try {
+      const { loadNotePikchrRenderer } = await import('./pikchrRendering');
+
+      await expect(loadNotePikchrRenderer()).rejects.toThrow('initialization failed');
+
+      const renderPikchr = await loadNotePikchrRenderer();
+      const rendered = renderPikchr('box "Retry" fit');
+
+      expect(loadPikchr).toHaveBeenCalledTimes(2);
+      expect(rendered).toMatchObject({ kind: 'svg', width: 10, height: 10 });
+    } finally {
+      vi.doUnmock('pikchr-js');
+      vi.resetModules();
+    }
   });
 });

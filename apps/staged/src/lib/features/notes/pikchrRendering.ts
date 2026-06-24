@@ -33,6 +33,10 @@ export function loadNotePikchrRenderer(): Promise<NotePikchrRenderer> {
     .then(({ default: loadPikchr }) => loadPikchr())
     .then((pikchr) => {
       return (source: string) => renderPikchrSource(pikchr, source);
+    })
+    .catch((error) => {
+      rendererPromise = null;
+      throw error;
     });
   return rendererPromise;
 }

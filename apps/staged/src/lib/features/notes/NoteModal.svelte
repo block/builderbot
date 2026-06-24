@@ -11,19 +11,15 @@
   import Check from '@lucide/svelte/icons/check';
   import MessageCircle from '@lucide/svelte/icons/message-circle';
   import FileText from '@lucide/svelte/icons/file-text';
-  import { marked } from 'marked';
   import * as Dialog from '$lib/components/ui/dialog';
   import { Button } from '$lib/components/ui/button';
-  import { sanitize } from '../../shared/sanitize';
   import { countAssistantMessagesAfter, handleExternalLinkClick } from '../../api/commands';
   import { formatChatButtonLabel } from '../sessions/noteFreshness';
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
   import { viewport } from '../../shared/viewport.svelte';
-  import { noteMarkdownWithTitle } from './noteMarkdown';
-
-  marked.setOptions({ breaks: true, gfm: true });
+  import { noteMarkdownWithTitle, renderNoteMarkdown } from './noteMarkdown';
 
   interface Props {
     open: boolean;
@@ -112,10 +108,6 @@
       stale = true;
     };
   });
-
-  function renderMarkdown(text: string): string {
-    return sanitize(marked.parse(text) as string);
-  }
 
   async function handleShare() {
     try {
@@ -276,7 +268,7 @@
       <div class="modal-content" bind:this={contentEl} onclick={handleExternalLinkClick}>
         {#if noteMarkdown.trim()}
           <div class="markdown-content">
-            {@html renderMarkdown(noteMarkdown)}
+            {@html renderNoteMarkdown(noteMarkdown)}
           </div>
         {:else}
           <p class="empty-note">This note has no content.</p>

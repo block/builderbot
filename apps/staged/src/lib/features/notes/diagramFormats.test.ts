@@ -1,0 +1,101 @@
+import { describe, expect, it } from 'vitest';
+
+import {
+  extractNoteDiagramFences,
+  getNoteDiagramFormat,
+  isNoteDiagramFormat,
+  NOTE_DIAGRAM_FORMATS,
+  normalizeDiagramFenceLanguage,
+} from './diagramFormats';
+
+describe('note diagram format registry', () => {
+  it('registers Pikchr as the recommended general diagram format', () => {
+    expect(NOTE_DIAGRAM_FORMATS).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          language: 'pikchr',
+          displayName: 'Pikchr',
+          role: 'general',
+          recommended: true,
+        }),
+      ])
+    );
+  });
+
+  it('recognizes existing note diagram fence languages case-insensitively', () => {
+    expect(getNoteDiagramFormat('PIKCHR')?.language).toBe('pikchr');
+    expect(getNoteDiagramFormat('mermaid')?.language).toBe('mermaid');
+    expect(getNoteDiagramFormat('svg')?.language).toBe('svg');
+    expect(getNoteDiagramFormat('typescript')).toBeNull();
+  });
+
+  it('normalizes the first token from a fence info string', () => {
+    expect(normalizeDiagramFenceLanguage('  Pikchr title="draft"  ')).toBe('pikchr');
+    expect(normalizeDiagramFenceLanguage('')).toBeNull();
+  });
+
+  it('reports whether a fence language is a known note diagram format', () => {
+    expect(isNoteDiagramFormat('pikchr')).toBe(true);
+    expect(isNoteDiagramFormat('rust')).toBe(false);
+  });
+});
+
+describe('extractNoteDiagramFences', () => {
+  it('extracts Pikchr fence metadata and source', () => {
+    const diagrams = extractNoteDiagramFences(
+      [
+        '# Note',
+        '',
+        '```pikchr title="State flow"',
+        'box "Start" fit',
+        'arrow right 150%',
+        'circle "State" fit',
+        '```',
+      ].join('\n')
+    );
+
+    expect(diagrams).toEqual([
+      expect.objectContaining({
+        language: 'pikchr',
+        infoString: 'pikchr title="State flow"',
+        source: 'box "Start" fit\narrow right 150%\ncircle "State" fit',
+        startLine: 3,
+        endLine: 7,
+      }),
+    ]);
+  });
+
+  it('preserves Mermaid and SVG as recognized diagram formats', () => {
+    const diagrams = extractNoteDiagramFences(
+      ['```mermaid', 'flowchart TD', '```', '~~~svg', '<svg></svg>', '~~~'].join('\n')
+    );
+
+    expect(diagrams.map((diagram) => diagram.language)).toEqual(['mermaid', 'svg']);
+  });
+
+  it('ignores non-diagram fences while skipping their contents', () => {
+    const diagrams = extractNoteDiagramFences(
+      ['```ts', 'const sample = "```pikchr";', '```', '```pikchr', 'box "Done" fit', '```'].join(
+        '\n'
+      )
+    );
+
+    expect(diagrams).toHaveLength(1);
+    expect(diagrams[0].source).toBe('box "Done" fit');
+  });
+
+  it('handles an unclosed diagram fence through the end of the note', () => {
+    const diagrams = extractNoteDiagramFences(
+      ['Before', '```pikchr', 'box "Draft" fit'].join('\n')
+    );
+
+    expect(diagrams).toEqual([
+      expect.objectContaining({
+        language: 'pikchr',
+        source: 'box "Draft" fit',
+        startLine: 2,
+        endLine: null,
+      }),
+    ]);
+  });
+});

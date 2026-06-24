@@ -265,6 +265,7 @@
   let lineSelectionToolbarStyle: { top: number; left: number } | null = $state(null);
   let lastHandledJumpToken = $state<number | null>(null);
   let lastHandledJumpLineToken = $state<number | null>(null);
+  let commentFocusGeneration = 0;
   let lastAutoScrolledFile: string | null = null;
   let lineCommentEditorRaf: number | null = null;
   let lineSelectionToolbarRaf: number | null = null;
@@ -1392,25 +1393,31 @@
   // Comment highlight click (from spine)
   // ==========================================================================
 
-  function focusCommentInViewer(comment: Comment) {
-    if (!afterPane) return;
+  async function focusCommentInViewer(comment: Comment): Promise<boolean> {
+    const focusGeneration = ++commentFocusGeneration;
 
-    const displayRange = resolveDisplayRangeFromSpan(comment.span);
-    if (!displayRange) return;
+    if (!(await flushAndClearCommentEditors())) return false;
+    if (focusGeneration !== commentFocusGeneration) return false;
+    if (!afterPane) return false;
+
+    const latestComment = findCommentById(currentFileComments, comment.id) ?? comment;
+    const displayRange = resolveDisplayRangeFromSpan(latestComment.span);
+    if (!displayRange) return false;
     const { start, end } = displayRange;
 
     scrollController.scrollToRow(start, 'after');
 
     lineSelection = { pane: 'after', anchorLine: start, focusLine: end };
     commentingOnLines = { pane: 'after', start, end };
-    editingCommentId = comment.id;
-    activeLineComment = comment;
-    lineCommentReadOnly = comment.author === 'agent';
+    editingCommentId = latestComment.id;
+    activeLineComment = latestComment;
+    lineCommentReadOnly = latestComment.author === 'agent';
 
     // scrollToRow updates pane transforms, but the windowed body only renders the
     // target rows on a later frame — wait for the anchor to mount before deciding
     // the editor's side and positioning it.
     scheduleLineCommentEditorPositioning();
+    return true;
   }
 
   // Resolve the comment editor's side and screen position once the anchor rows are
@@ -1463,7 +1470,7 @@
     });
   }
 
-  function handleCommentHighlightClick(info: CommentHighlightInfo) {
+  async function handleCommentHighlightClick(info: CommentHighlightInfo) {
     if (!afterPane) return;
 
     const { span, commentId } = info;
@@ -1474,7 +1481,7 @@
     // Jump to exact comment when available.
     const comment = commentId ? findCommentById(comments, commentId) : null;
     if (comment) {
-      focusCommentInViewer(comment);
+      await focusCommentInViewer(comment);
       return;
     }
 
@@ -1484,10 +1491,20 @@
       return;
     }
 
-    scrollController.scrollToRow(start, 'after');
+    const focusGeneration = ++commentFocusGeneration;
 
-    lineSelection = { pane: 'after', anchorLine: start, focusLine: end };
-    commentingOnLines = { pane: 'after', start, end };
+    if (!(await flushAndClearCommentEditors())) return;
+    if (focusGeneration !== commentFocusGeneration) return;
+    if (!afterPane) return;
+
+    const latestDisplayRange = resolveDisplayRangeFromSpan(span);
+    if (!latestDisplayRange) return;
+    const { start: latestStart, end: latestEnd } = latestDisplayRange;
+
+    scrollController.scrollToRow(latestStart, 'after');
+
+    lineSelection = { pane: 'after', anchorLine: latestStart, focusLine: latestEnd };
+    commentingOnLines = { pane: 'after', start: latestStart, end: latestEnd };
     editingCommentId = commentId;
     activeLineComment = comment;
     lineCommentReadOnly = false;
@@ -1502,7 +1519,7 @@
     const comment = findCommentById(currentFileComments, request.id);
     if (!comment) return;
     lastHandledJumpToken = request.token;
-    focusCommentInViewer(comment);
+    void focusCommentInViewer(comment);
   });
 
   // Jump to a line requested by search results.

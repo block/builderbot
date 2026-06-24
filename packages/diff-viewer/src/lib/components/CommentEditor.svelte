@@ -11,6 +11,7 @@
   import type { Comment, CommentActionContext } from '../types';
   import {
     createCommentAutosaveController,
+    shouldDeleteCommentOnDismiss,
     type CommentSaveStatus,
   } from '../state/commentAutosave';
 
@@ -30,9 +31,11 @@
     /** Called when comment content should be persisted. */
     onSave: (commentId: string | null, content: string) => Promise<Comment | null | void>;
     /** Called when the editor should close after pending work is flushed. */
-    onClose: () => void;
+    onClose: () => void | Promise<void>;
     /** Called when comment is deleted (only shown if existingComment is set) */
     onDelete?: () => void | Promise<void>;
+    /** Called instead of onDelete when an empty persisted comment is dismissed. */
+    onDismissDelete?: () => void | Promise<void>;
     /** Host-rendered actions for existing comments. */
     commentActions?: Snippet<[CommentActionContext]>;
   }
@@ -48,6 +51,7 @@
     onSave,
     onClose,
     onDelete,
+    onDismissDelete,
     commentActions,
   }: Props = $props();
 
@@ -123,15 +127,34 @@
     return await autosave.flush();
   }
 
+  export async function dismiss(): Promise<boolean> {
+    if (readOnly) {
+      flushPendingOnDestroy = false;
+      autosave.dispose();
+      return true;
+    }
+
+    await autosave.flush();
+    const snapshot = autosave.getSnapshot();
+    if (snapshot.status === 'error') return false;
+
+    flushPendingOnDestroy = false;
+    autosave.dispose();
+
+    const dismissDelete = onDismissDelete ?? onDelete;
+    if (shouldDeleteCommentOnDismiss(snapshot.comment, currentValue) && dismissDelete) {
+      await dismissDelete();
+    }
+
+    return true;
+  }
+
   export function getSaveStatus(): CommentSaveStatus {
     return saveStatus;
   }
 
   async function flushAndClose() {
-    await ensureSaved();
-    if (saveStatus === 'error') return;
-    flushPendingOnDestroy = false;
-    onClose();
+    await onClose();
   }
 
   function handleInput(e: Event) {

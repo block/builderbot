@@ -99,6 +99,7 @@
 
   type CommentEditorHandle = {
     ensureSaved: () => Promise<Comment | null>;
+    dismiss: () => Promise<boolean>;
     getSaveStatus: () => 'idle' | 'saving' | 'saved' | 'error';
   };
 
@@ -1632,8 +1633,13 @@
     return rangeCommentEditor.getSaveStatus() !== 'error';
   }
 
+  async function dismissRangeCommentEditor(): Promise<boolean> {
+    if (!rangeCommentEditor) return true;
+    return await rangeCommentEditor.dismiss();
+  }
+
   async function handleCommentCancel() {
-    if (!(await flushRangeCommentEditor())) return;
+    if (!(await dismissRangeCommentEditor())) return;
     clearRangeSelection();
   }
 
@@ -1675,7 +1681,7 @@
     document.addEventListener('mousemove', handleSelectionDragMove);
 
     if (pendingLineComment) {
-      void flushLineCommentEditor().then((canClear) => {
+      void dismissLineCommentEditor().then((canClear) => {
         if (commentingOnLines !== pendingLineComment) return;
         if (!canClear) {
           lineSelection = previousLineSelection;
@@ -1775,8 +1781,13 @@
     return lineCommentEditor.getSaveStatus() !== 'error';
   }
 
+  async function dismissLineCommentEditor(): Promise<boolean> {
+    if (!lineCommentEditor) return true;
+    return await lineCommentEditor.dismiss();
+  }
+
   async function flushAndClearLineSelection() {
-    if (!(await flushLineCommentEditor())) return;
+    if (!(await dismissLineCommentEditor())) return;
     clearLineSelection();
   }
 
@@ -1787,7 +1798,8 @@
   }
 
   export async function flushAndClearCommentEditors(): Promise<boolean> {
-    if (!(await flushCommentEditors())) return false;
+    if (!(await dismissRangeCommentEditor())) return false;
+    if (!(await dismissLineCommentEditor())) return false;
     clearRangeSelection();
     clearLineSelection();
     return true;
@@ -1934,7 +1946,7 @@
   }
 
   async function handleLineCommentCancel() {
-    if (!(await flushLineCommentEditor())) return;
+    if (!(await dismissLineCommentEditor())) return;
     clearLineCommentEditorState();
   }
 
@@ -2656,6 +2668,9 @@
         }}
         onClose={handleCommentCancel}
         onDelete={existingComment ? () => handleRangeCommentDelete(existingComment.id) : undefined}
+        onDismissDelete={existingComment
+          ? () => handleCommentDelete(existingComment.id)
+          : undefined}
         {commentActions}
       />
     {/if}
@@ -2707,6 +2722,9 @@
         }}
         onClose={handleLineCommentCancel}
         onDelete={existingComment ? () => handleLineCommentDelete(existingComment.id) : undefined}
+        onDismissDelete={existingComment
+          ? () => handleCommentDelete(existingComment.id)
+          : undefined}
         {commentActions}
       />
     {/if}

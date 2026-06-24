@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createCommentAutosaveController } from './commentAutosave';
+import { createCommentAutosaveController, shouldDeleteCommentOnDismiss } from './commentAutosave';
 import type { Comment } from '../types';
 
 function createComment(overrides: Partial<Comment> = {}): Comment {
@@ -110,5 +110,27 @@ describe('createCommentAutosaveController', () => {
     await expect(controller.flush()).resolves.toBeNull();
     expect(addComment).not.toHaveBeenCalled();
     expect(controller.getSnapshot().status).toBe('idle');
+  });
+
+  it('keeps an existing comment when autosaving empty content', async () => {
+    const updateComment = vi.fn(async () => {});
+    const controller = createCommentAutosaveController({
+      initialComment: createComment(),
+      addComment: vi.fn(async (content: string) => createComment({ content })),
+      updateComment,
+    });
+
+    controller.setContent('');
+
+    await expect(controller.flush()).resolves.toMatchObject({ id: 'comment-1', content: '' });
+    expect(updateComment).toHaveBeenCalledWith('comment-1', '');
+    expect(controller.getSnapshot().comment).not.toBeNull();
+  });
+
+  it('only deletes persisted empty comments when the editor is dismissed', () => {
+    expect(shouldDeleteCommentOnDismiss(createComment(), '')).toBe(true);
+    expect(shouldDeleteCommentOnDismiss(createComment(), '   ')).toBe(true);
+    expect(shouldDeleteCommentOnDismiss(createComment(), 'Still editing')).toBe(false);
+    expect(shouldDeleteCommentOnDismiss(null, '')).toBe(false);
   });
 });

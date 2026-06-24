@@ -35,6 +35,10 @@ function locallyUpdatedComment(comment: Comment, content: string): Comment {
   };
 }
 
+export function shouldDeleteCommentOnDismiss(comment: Comment | null, content: string): boolean {
+  return comment !== null && content.trim().length === 0;
+}
+
 export function createCommentAutosaveController({
   initialComment = null,
   initialContent = initialComment?.content ?? '',

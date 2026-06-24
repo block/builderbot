@@ -1175,7 +1175,7 @@
                       <Button
                         variant="ghost"
                         size="icon"
-                        class="absolute top-1.5 right-1.5 size-auto rounded p-[3px] text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/bubble:opacity-100 [&_svg]:!size-3"
+                        class="message-copy-action absolute top-1.5 right-1.5 size-auto rounded p-[3px] text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/bubble:opacity-100 [&_svg]:!size-3"
                         title={copiedId === group.message.id ? 'Copied!' : 'Copy message'}
                         aria-label={copiedId === group.message.id ? 'Copied!' : 'Copy message'}
                         onclick={() => copyContent(group.message.content, group.message.id)}
@@ -1198,7 +1198,7 @@
                     <Button
                       variant="ghost"
                       size="icon"
-                      class="absolute top-0 right-0 size-auto rounded p-[3px] text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/assistant:opacity-100 [&_svg]:!size-3"
+                      class="message-copy-action absolute top-0 right-0 size-auto rounded p-[3px] text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/assistant:opacity-100 [&_svg]:!size-3"
                       title={copiedId === group.message.id ? 'Copied!' : 'Copy message'}
                       aria-label={copiedId === group.message.id ? 'Copied!' : 'Copy message'}
                       onclick={() => copyContent(group.message.content, group.message.id)}
@@ -1435,7 +1435,7 @@
                   <Button
                     variant="ghost"
                     size="icon"
-                    class="absolute top-0.5 right-0.5 size-4 rounded-full bg-[var(--bg-deepest)] text-muted-foreground opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-chrome)] hover:text-foreground group-hover/thumb:opacity-100 [&_svg]:!size-2.5"
+                    class="reply-image-remove-action absolute top-0.5 right-0.5 size-4 rounded-full bg-[var(--bg-deepest)] text-muted-foreground opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-chrome)] hover:text-foreground group-hover/thumb:opacity-100 [&_svg]:!size-2.5"
                     title="Remove image"
                     aria-label="Remove image"
                     onclick={() => removeReplyImage(imageId)}
@@ -1776,6 +1776,21 @@
     flex: 1;
     min-width: 0;
     padding-right: 28px;
+  }
+
+  .human-bubble:focus-within :global(.message-copy-action),
+  .assistant-content:focus-within :global(.message-copy-action),
+  .reply-image-thumb:focus-within :global(.reply-image-remove-action),
+  :global(.message-copy-action:focus-visible),
+  :global(.reply-image-remove-action:focus-visible) {
+    opacity: 1;
+  }
+
+  @media (hover: none), (pointer: coarse) {
+    :global(.message-copy-action),
+    :global(.reply-image-remove-action) {
+      opacity: 1;
+    }
   }
 
   /* ----- Tool calls ------------------------------------------------------ */

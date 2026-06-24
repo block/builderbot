@@ -171,7 +171,7 @@
           <Button
             variant="ghost"
             size="icon"
-            class="absolute top-1/2 right-3 z-10 size-auto -translate-y-1/2 rounded p-1 text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-primary)] hover:text-[var(--status-deleted)] group-hover/comment:opacity-100 [&_svg]:!size-3"
+            class="comment-row-action absolute top-1/2 right-3 z-10 size-auto -translate-y-1/2 rounded p-1 text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-primary)] hover:text-[var(--status-deleted)] group-hover/comment:opacity-100 [&_svg]:!size-3"
             title="Delete comment"
             aria-label="Delete comment"
             onclick={(e: MouseEvent) => {
@@ -213,7 +213,7 @@
             <Button
               variant="ghost"
               size="icon"
-              class="absolute top-1/2 right-3 z-10 size-auto -translate-y-1/2 rounded p-1 text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-primary)] hover:text-[var(--status-added)] group-hover/comment:opacity-100 [&_svg]:!size-3"
+              class="comment-row-action absolute top-1/2 right-3 z-10 size-auto -translate-y-1/2 rounded p-1 text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-primary)] hover:text-[var(--status-added)] group-hover/comment:opacity-100 [&_svg]:!size-3"
               title="Restore comment"
               aria-label="Restore comment"
               onclick={(e: MouseEvent) => {
@@ -342,6 +342,17 @@
   .comment-item-container {
     position: relative;
     width: 100%;
+  }
+
+  .comment-item-container:focus-within :global(.comment-row-action),
+  :global(.comment-row-action:focus-visible) {
+    opacity: 1;
+  }
+
+  @media (hover: none), (pointer: coarse) {
+    :global(.comment-row-action) {
+      opacity: 1;
+    }
   }
 
   .comment-item {

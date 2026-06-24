@@ -144,7 +144,7 @@
           <Button
             variant="ghost"
             size="icon"
-            class="absolute top-0.5 right-0.5 size-4 rounded-full bg-[var(--bg-deepest)] text-muted-foreground opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-chrome)] hover:text-foreground group-hover/thumb:opacity-100 [&_svg]:!size-2.5"
+            class="image-remove-action absolute top-0.5 right-0.5 size-4 rounded-full bg-[var(--bg-deepest)] text-muted-foreground opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-chrome)] hover:text-foreground group-hover/thumb:opacity-100 [&_svg]:!size-2.5"
             title="Remove image"
             aria-label="Remove image"
             onclick={() => removeImage(imageId)}
@@ -206,6 +206,17 @@
     width: 100%;
     height: 100%;
     object-fit: cover;
+  }
+
+  .image-thumb:focus-within :global(.image-remove-action),
+  :global(.image-remove-action:focus-visible) {
+    opacity: 1;
+  }
+
+  @media (hover: none), (pointer: coarse) {
+    :global(.image-remove-action) {
+      opacity: 1;
+    }
   }
 
   .image-placeholder {

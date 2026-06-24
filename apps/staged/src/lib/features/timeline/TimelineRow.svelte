@@ -849,7 +849,7 @@
     line-height: 1;
   }
 
-  /* Actions container — visible on row hover */
+  /* Actions container - visible on row hover/focus, always available on touch */
   .timeline-actions {
     display: flex;
     align-items: center;
@@ -860,8 +860,15 @@
   }
 
   .timeline-row:hover .timeline-actions,
+  .timeline-row:focus-within .timeline-actions,
   .timeline-actions.always-visible {
     opacity: 1;
+  }
+
+  @media (hover: none), (pointer: coarse) {
+    .timeline-actions {
+      opacity: 1;
+    }
   }
 
   @keyframes pulse {

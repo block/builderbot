@@ -157,7 +157,7 @@ export function createReviewState(
       return comment;
     } catch (e) {
       console.error('Failed to add comment:', e);
-      return null;
+      throw e;
     }
   }
 

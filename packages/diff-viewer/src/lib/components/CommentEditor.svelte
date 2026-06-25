@@ -134,6 +134,15 @@
       return true;
     }
 
+    const dismissDelete = onDismissDelete ?? onDelete;
+    const snapshotBeforeFlush = autosave.getSnapshot();
+    if (dismissDelete && shouldDeleteCommentOnDismiss(snapshotBeforeFlush.comment, currentValue)) {
+      flushPendingOnDestroy = false;
+      autosave.dispose();
+      await dismissDelete();
+      return true;
+    }
+
     await autosave.flush();
     const snapshot = autosave.getSnapshot();
     if (snapshot.status === 'error') return false;
@@ -141,7 +150,6 @@
     flushPendingOnDestroy = false;
     autosave.dispose();
 
-    const dismissDelete = onDismissDelete ?? onDelete;
     if (shouldDeleteCommentOnDismiss(snapshot.comment, currentValue) && dismissDelete) {
       await dismissDelete();
     }

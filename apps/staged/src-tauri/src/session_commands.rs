@@ -21,6 +21,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
+use tauri::path::BaseDirectory;
+use tauri::Manager;
 
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::agent::{self, AcpProviderInfo};
@@ -28,6 +30,17 @@ use crate::blox;
 use crate::git;
 use crate::session_runner::{self, SessionConfig};
 use crate::store::{self, Store};
+
+const PIKCHR_GRAMMAR_RESOURCE: &str = "resources/pikchr/grammar.md";
+const PIKCHR_GRAMMAR_REMOTE_PATH_PREFIX: &str = "/tmp/staged-pikchr-grammar-";
+const PIKCHR_GRAMMAR_REMOTE_PATH_SUFFIX: &str = ".md";
+pub(crate) const PIKCHR_GRAMMAR_URL: &str = "https://pikchr.org/home/doc/trunk/doc/grammar.md";
+
+enum RemotePikchrGrammarStaging {
+    NotNeeded,
+    Upload { bytes: Vec<u8>, remote_path: String },
+    FallbackUrl,
+}
 
 // =============================================================================
 // Helper — duplicated from lib.rs to avoid circular deps. If this grows,
@@ -64,6 +77,193 @@ where
         .await
         .map_err(|e| format!("blox task failed: {e}"))?
         .map_err(|e| e.to_string())
+}
+
+fn bundled_pikchr_grammar_path(app_handle: &tauri::AppHandle) -> Option<PathBuf> {
+    if let Ok(path) = app_handle
+        .path()
+        .resolve(PIKCHR_GRAMMAR_RESOURCE, BaseDirectory::Resource)
+    {
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    let source_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(PIKCHR_GRAMMAR_RESOURCE);
+    if source_path.is_file() {
+        return Some(source_path);
+    }
+
+    None
+}
+
+fn bundled_pikchr_grammar_bytes(app_handle: &tauri::AppHandle) -> Option<Vec<u8>> {
+    let Some(grammar_path) = bundled_pikchr_grammar_path(app_handle) else {
+        log::warn!("Bundled Pikchr grammar resource not found; falling back to public URL");
+        return None;
+    };
+
+    match std::fs::read(&grammar_path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) => {
+            log::warn!(
+                "Failed to read bundled Pikchr grammar at {}: {e}",
+                grammar_path.display()
+            );
+            None
+        }
+    }
+}
+
+fn generated_pikchr_grammar_remote_path() -> String {
+    format!(
+        "{PIKCHR_GRAMMAR_REMOTE_PATH_PREFIX}{}{PIKCHR_GRAMMAR_REMOTE_PATH_SUFFIX}",
+        uuid::Uuid::new_v4()
+    )
+}
+
+fn remote_pikchr_grammar_staging(
+    app_handle: &tauri::AppHandle,
+    session_type: &BranchSessionType,
+) -> RemotePikchrGrammarStaging {
+    if !matches!(session_type, BranchSessionType::Note) {
+        return RemotePikchrGrammarStaging::NotNeeded;
+    }
+
+    match bundled_pikchr_grammar_bytes(app_handle) {
+        Some(bytes) => RemotePikchrGrammarStaging::Upload {
+            bytes,
+            remote_path: generated_pikchr_grammar_remote_path(),
+        },
+        None => RemotePikchrGrammarStaging::FallbackUrl,
+    }
+}
+
+fn local_pikchr_grammar_reference_for_session(
+    app_handle: &tauri::AppHandle,
+    session_type: &BranchSessionType,
+) -> String {
+    if matches!(session_type, BranchSessionType::Note) {
+        resolve_pikchr_grammar_reference(app_handle, None)
+    } else {
+        PIKCHR_GRAMMAR_URL.to_string()
+    }
+}
+
+fn upload_pikchr_grammar_to_remote_with_writer<F>(
+    workspace_name: &str,
+    bytes: &[u8],
+    remote_path: String,
+    write: F,
+) -> String
+where
+    F: FnOnce(&str, &[u8], &str) -> Result<(), String>,
+{
+    match write(workspace_name, bytes, &remote_path) {
+        Ok(()) => remote_path,
+        Err(e) => {
+            log::warn!("Failed to copy Pikchr grammar to remote workspace {workspace_name}: {e}");
+            PIKCHR_GRAMMAR_URL.to_string()
+        }
+    }
+}
+
+fn upload_pikchr_grammar_to_remote(
+    workspace_name: &str,
+    bytes: &[u8],
+    remote_path: String,
+) -> String {
+    upload_pikchr_grammar_to_remote_with_writer(
+        workspace_name,
+        bytes,
+        remote_path,
+        write_bytes_to_remote,
+    )
+}
+
+pub(crate) fn resolve_pikchr_grammar_reference(
+    app_handle: &tauri::AppHandle,
+    workspace_name: Option<&str>,
+) -> String {
+    let Some(grammar_path) = bundled_pikchr_grammar_path(app_handle) else {
+        log::warn!("Bundled Pikchr grammar resource not found; falling back to public URL");
+        return PIKCHR_GRAMMAR_URL.to_string();
+    };
+
+    if let Some(workspace_name) = workspace_name {
+        return match std::fs::read(&grammar_path) {
+            Ok(bytes) => upload_pikchr_grammar_to_remote(
+                workspace_name,
+                &bytes,
+                generated_pikchr_grammar_remote_path(),
+            ),
+            Err(e) => {
+                log::warn!(
+                    "Failed to read bundled Pikchr grammar at {}: {e}",
+                    grammar_path.display()
+                );
+                PIKCHR_GRAMMAR_URL.to_string()
+            }
+        };
+    }
+
+    grammar_path.to_string_lossy().into_owned()
+}
+
+fn pikchr_note_guidance(reference: &str) -> String {
+    format!(
+        "Staged notes support rendered diagrams in fenced `pikchr` code blocks. \
+If you need the Pikchr grammar while writing a diagram, read the reference at: {reference}"
+    )
+}
+
+pub(crate) fn build_note_followup_message_with_pikchr_reference(
+    has_parsed_note: bool,
+    pikchr_grammar_reference: &str,
+) -> String {
+    let visible_request = if has_parsed_note {
+        "Please update the note to reflect the latest chat."
+    } else {
+        "Please write the note for this session."
+    };
+    let linked_note_action = if has_parsed_note {
+        "update the linked note"
+    } else {
+        "write the linked note"
+    };
+    let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference);
+
+    format!(
+        "<action>\n\
+The user is asking you to {linked_note_action} from the latest chat history.\n\
+\n\
+Use the existing conversation context. Do not create commits.\n\
+\n\
+{pikchr_guidance}\n\
+\n\
+Your final response must include a suggested-next-steps fenced block followed by the note content after a horizontal rule:\n\
+\n\
+```suggested-next-steps\n\
+{{\"suggestedNextCommitStep\": null, \"suggestedNextNoteStep\": null}}\n\
+```\n\
+\n\
+---\n\
+# <Title>\n\
+<Body>\n\
+\n\
+Formatting requirements:\n\
+- The opening fence line for suggested-next-steps must be exactly: ```suggested-next-steps\n\
+- The closing fence line must be exactly: ```\n\
+- Put only a JSON object inside the suggested-next-steps block.\n\
+- Include both nullable string fields: suggestedNextCommitStep and suggestedNextNoteStep.\n\
+- Keep suggested next steps concise; use null when there is no clear next action.\n\
+- The `---` separator must be on its own line.\n\
+- The note content must start immediately after `---` with a markdown H1.\n\
+- Do not wrap the note in code fences.\n\
+</action>\n\
+\n\
+{visible_request}"
+    )
 }
 
 // =============================================================================
@@ -404,6 +604,58 @@ pub(crate) fn infer_branch_resume_session_type(prompt: &str) -> Option<&'static 
     } else {
         None
     }
+}
+
+#[tauri::command]
+pub async fn build_note_followup_message(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
+    session_id: String,
+    branch_id: Option<String>,
+    has_parsed_note: bool,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .get_session(&session_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Session not found: {session_id}"))?;
+
+        let linked_commit = store.get_commit_by_session(&session_id).ok().flatten();
+        let linked_note = store.get_note_by_session(&session_id).ok().flatten();
+        let linked_review = store.get_review_by_session(&session_id).ok().flatten();
+
+        let branch_from_id = branch_id
+            .as_deref()
+            .and_then(|bid| store.get_branch(bid).ok().flatten());
+
+        let linked_branch = if branch_from_id.is_some() {
+            branch_from_id
+        } else if let Some(commit) = &linked_commit {
+            store.get_branch(&commit.branch_id).ok().flatten()
+        } else if let Some(note) = &linked_note {
+            store.get_branch(&note.branch_id).ok().flatten()
+        } else if let Some(review) = &linked_review {
+            store.get_branch(&review.branch_id).ok().flatten()
+        } else {
+            None
+        };
+
+        let pikchr_grammar_reference = resolve_pikchr_grammar_reference(
+            &app_handle,
+            linked_branch
+                .as_ref()
+                .and_then(|branch| branch.workspace_name.as_deref()),
+        );
+
+        Ok(build_note_followup_message_with_pikchr_reference(
+            has_parsed_note,
+            &pikchr_grammar_reference,
+        ))
+    })
+    .await
+    .map_err(|e| format!("Failed to build note follow-up message: {e}"))?
 }
 
 #[tauri::command]
@@ -786,7 +1038,10 @@ for example #note:123, #commit:<sha>, and #review:456. When starting a repo-leve
 note, do not paste or rewrite the note contents; reference the note and relevant section instead, \
 for example: `Implement \"Step 5: unit tests\" from #note:123`.";
 
-pub(crate) fn build_project_session_action_instructions(is_remote: bool) -> String {
+pub(crate) fn build_project_session_action_instructions_with_pikchr_reference(
+    is_remote: bool,
+    pikchr_grammar_reference: &str,
+) -> String {
     let preamble = if is_remote {
         "This top-level project session runs locally and acts as a coordinator. \
 For repository-specific execution, use MCP subagent tools.\n\n\
@@ -833,6 +1088,8 @@ repository edits directly here; use `start_repo_session` for implementation work
         ""
     };
 
+    let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference);
+
     format!(
         "The user is requesting work at the project level. Investigate and \
 fulfill the request below, then produce a project note summarizing what you found and any \
@@ -840,6 +1097,7 @@ actions taken.\n\n\
 {preamble}\n\n\
 {start_repo_session_desc}\n\n\
 {PROJECT_SESSION_TIMELINE_REFERENCE_GUIDANCE}\n\n\
+{pikchr_guidance}\n\n\
 - add_project_repo: Use this when the task requires a repository that isn't yet in the \
 project. Pass the GitHub repo slug to add it.\n\n\
 IMPORTANT: `add_project_repo` and `start_repo_session` are MCP tools, not shell commands. \
@@ -885,7 +1143,11 @@ pub async fn start_project_session(
     let project_context = build_project_session_context(&store, &project, None);
 
     let is_remote = project.location == store::ProjectLocation::Remote;
-    let action_instructions = build_project_session_action_instructions(is_remote);
+    let pikchr_grammar_reference = resolve_pikchr_grammar_reference(&app_handle, None);
+    let action_instructions = build_project_session_action_instructions_with_pikchr_reference(
+        is_remote,
+        &pikchr_grammar_reference,
+    );
 
     let full_prompt = format!(
         "<action>\n{action_instructions}\n\nProject information:\n{project_context}\n</action>\n\n{prompt}"
@@ -984,6 +1246,7 @@ fn resolve_branch_session_provider(
 #[allow(clippy::too_many_arguments)]
 async fn prepare_branch_session_start(
     store: &Arc<Store>,
+    app_handle: &tauri::AppHandle,
     branch_id: &str,
     prompt: &str,
     session_type: BranchSessionType,
@@ -1004,29 +1267,35 @@ async fn prepare_branch_session_start(
 
     // Resolve working directory and branch context.
     // Remote branches use ws_exec for git operations; local branches use the worktree directly.
-    let (working_dir, branch_context) = if is_remote {
+    let (working_dir, branch_context, pikchr_grammar_reference) = if is_remote {
         // For remote branches, use the derived clone path as a fallback working dir.
         // The actual work happens via ws_exec, not local filesystem.
         let fallback_dir = resolve_branch_repo_slug(store, &project, &branch)
             .and_then(|repo| crate::paths::repos_dir().map(|d| d.join(repo)))
             .unwrap_or_else(|| PathBuf::from("/tmp"));
         let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
+        let pikchr_grammar_staging = remote_pikchr_grammar_staging(app_handle, &session_type);
         let base_branch = branch.base_branch.clone();
         let store_for_context = Arc::clone(store);
         let branch_id_for_context = branch_id.to_string();
         let project_id_for_context = branch.project_id.clone();
-        let ctx = tauri::async_runtime::spawn_blocking(move || {
+        let remote_context = tauri::async_runtime::spawn_blocking(move || {
             build_remote_branch_context(
                 &workspace_name,
                 &base_branch,
                 &store_for_context,
                 &branch_id_for_context,
                 &project_id_for_context,
+                pikchr_grammar_staging,
             )
         })
         .await
         .map_err(|e| format!("Failed to build remote branch context: {e}"))?;
-        (fallback_dir, ctx)
+        (
+            fallback_dir,
+            remote_context.branch_context,
+            remote_context.pikchr_grammar_reference,
+        )
     } else {
         let workdir = store
             .get_workdir_for_branch(branch_id)
@@ -1057,7 +1326,9 @@ async fn prepare_branch_session_start(
             branch_id,
             &branch.project_id,
         );
-        (worktree_path, ctx)
+        let pikchr_grammar_reference =
+            local_pikchr_grammar_reference_for_session(app_handle, &session_type);
+        (worktree_path, ctx, pikchr_grammar_reference)
     };
 
     let pre_head_sha = if matches!(session_type, BranchSessionType::Commit) {
@@ -1101,13 +1372,14 @@ async fn prepare_branch_session_start(
 
     // Build the full prompt with action instructions + project information + branch context.
     let project_information = build_project_context(store, &project, &branch);
-    let full_prompt = build_full_prompt(
+    let full_prompt = build_full_prompt_with_pikchr_reference(
         prompt,
         &project_information,
         &branch_context,
         &session_type,
         launch_context,
         Some(&branch.base_branch),
+        &pikchr_grammar_reference,
     );
 
     // Resolve the actual workspace path for remote branches so the remote agent
@@ -1329,6 +1601,7 @@ pub async fn start_or_queue_branch_session_for_store(
 
     let prepared = prepare_branch_session_start(
         &store,
+        &app_handle,
         &branch_id,
         &prompt,
         session_type.clone(),
@@ -1614,27 +1887,33 @@ async fn start_queued_session_for_branch(
     };
 
     // Resolve working directory and branch context.
-    let (working_dir, branch_context) = if is_remote {
+    let (working_dir, branch_context, pikchr_grammar_reference) = if is_remote {
         let fallback_dir = resolve_branch_repo_slug(&store, &project, &branch)
             .and_then(|repo| crate::paths::repos_dir().map(|d| d.join(repo)))
             .unwrap_or_else(|| PathBuf::from("/tmp"));
         let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
+        let pikchr_grammar_staging = remote_pikchr_grammar_staging(&app_handle, &session_type);
         let base_branch = branch.base_branch.clone();
         let store_for_context = Arc::clone(&store);
         let branch_id_for_context = branch_id.clone();
         let project_id_for_context = branch.project_id.clone();
-        let ctx = tauri::async_runtime::spawn_blocking(move || {
+        let remote_context = tauri::async_runtime::spawn_blocking(move || {
             build_remote_branch_context(
                 &workspace_name,
                 &base_branch,
                 &store_for_context,
                 &branch_id_for_context,
                 &project_id_for_context,
+                pikchr_grammar_staging,
             )
         })
         .await
         .map_err(|e| format!("Failed to build remote branch context: {e}"))?;
-        (fallback_dir, ctx)
+        (
+            fallback_dir,
+            remote_context.branch_context,
+            remote_context.pikchr_grammar_reference,
+        )
     } else {
         let workdir = store
             .get_workdir_for_branch(&branch_id)
@@ -1662,18 +1941,21 @@ async fn start_queued_session_for_branch(
             &branch_id,
             &branch.project_id,
         );
-        (worktree_path, ctx)
+        let pikchr_grammar_reference =
+            local_pikchr_grammar_reference_for_session(&app_handle, &session_type);
+        (worktree_path, ctx, pikchr_grammar_reference)
     };
 
     // Build the full prompt with context.
     let project_information = build_project_context(&store, &project, &branch);
-    let full_prompt = build_full_prompt(
+    let full_prompt = build_full_prompt_with_pikchr_reference(
         &prompt,
         &project_information,
         &branch_context,
         &session_type,
         launch_context.as_ref(),
         Some(&branch.base_branch),
+        &pikchr_grammar_reference,
     );
 
     // Atomically transition session from queued to running.
@@ -1959,18 +2241,19 @@ pub async fn trigger_auto_review(
         let store_for_context = Arc::clone(&store);
         let branch_id_for_context = branch_id.clone();
         let project_id_for_context = branch.project_id.clone();
-        let ctx = tauri::async_runtime::spawn_blocking(move || {
+        let remote_context = tauri::async_runtime::spawn_blocking(move || {
             build_remote_branch_context(
                 &workspace_name,
                 &base_branch,
                 &store_for_context,
                 &branch_id_for_context,
                 &project_id_for_context,
+                RemotePikchrGrammarStaging::NotNeeded,
             )
         })
         .await
         .map_err(|e| format!("Failed to build remote branch context: {e}"))?;
-        (fallback_dir, ctx)
+        (fallback_dir, remote_context.branch_context)
     } else {
         let workdir = store
             .get_workdir_for_branch(&branch_id)
@@ -2266,13 +2549,19 @@ pub(crate) fn build_branch_context(
 ///
 /// Uses `blox ws_exec` to run git commands inside the remote workspace,
 /// and reads notes from the DB (which works regardless of worktree location).
-pub(crate) fn build_remote_branch_context(
+struct RemoteBranchContext {
+    branch_context: String,
+    pikchr_grammar_reference: String,
+}
+
+fn build_remote_branch_context(
     workspace_name: &str,
     base_branch: &str,
     store: &Arc<Store>,
     branch_id: &str,
     project_id: &str,
-) -> String {
+    pikchr_grammar_staging: RemotePikchrGrammarStaging,
+) -> RemoteBranchContext {
     let mut parts = vec![context_preamble()];
     let mut timeline: Vec<TimelineEntry> = Vec::new();
     let mut visible_shas: HashSet<String> = HashSet::new();
@@ -2310,9 +2599,11 @@ pub(crate) fn build_remote_branch_context(
         }
     }
 
-    // Notes, reviews, images, and project notes written to temp files inside
-    // the remote workspace via ws_exec — run in parallel to reduce round trips.
+    // Notes, reviews, images, project notes, and optional Pikchr grammar are
+    // written to remote temp files in parallel to reduce ws_exec round trips.
     let max_commit_ts = timeline.iter().map(|e| e.timestamp).max();
+    let mut pikchr_grammar_reference = PIKCHR_GRAMMAR_URL.to_string();
+
     std::thread::scope(|s| {
         let note_handle = s.spawn(|| note_timeline_entries(store, branch_id, Some(workspace_name)));
         let visible_shas = &visible_shas;
@@ -2329,6 +2620,15 @@ pub(crate) fn build_remote_branch_context(
             s.spawn(|| image_timeline_entries(store, branch_id, Some(workspace_name), project_id));
         let project_note_handle =
             s.spawn(|| project_note_timeline_entries(store, project_id, Some(workspace_name)));
+        let pikchr_grammar_handle = match &pikchr_grammar_staging {
+            RemotePikchrGrammarStaging::Upload { bytes, remote_path } => {
+                let remote_path = remote_path.clone();
+                Some(s.spawn(move || {
+                    upload_pikchr_grammar_to_remote(workspace_name, bytes.as_slice(), remote_path)
+                }))
+            }
+            RemotePikchrGrammarStaging::NotNeeded | RemotePikchrGrammarStaging::FallbackUrl => None,
+        };
 
         match note_handle.join() {
             Ok(entries) => timeline.extend(entries),
@@ -2346,10 +2646,19 @@ pub(crate) fn build_remote_branch_context(
             Ok(entries) => timeline.extend(entries),
             Err(_) => log::error!("project_note_timeline_entries thread panicked"),
         }
+        if let Some(handle) = pikchr_grammar_handle {
+            match handle.join() {
+                Ok(reference) => pikchr_grammar_reference = reference,
+                Err(_) => log::error!("Pikchr grammar upload thread panicked"),
+            }
+        }
     });
 
     parts.push(render_timeline(timeline, None));
-    parts.join("\n\n")
+    RemoteBranchContext {
+        branch_context: parts.join("\n\n"),
+        pikchr_grammar_reference,
+    }
 }
 
 /// Shared preamble for branch context blocks.
@@ -3265,7 +3574,27 @@ pub(crate) fn build_full_prompt(
     launch_context: Option<&BranchSessionLaunchContext>,
     base_branch: Option<&str>,
 ) -> String {
-    let action_instructions = match session_type {
+    build_full_prompt_with_pikchr_reference(
+        user_prompt,
+        project_information,
+        branch_context,
+        session_type,
+        launch_context,
+        base_branch,
+        PIKCHR_GRAMMAR_URL,
+    )
+}
+
+pub(crate) fn build_full_prompt_with_pikchr_reference(
+    user_prompt: &str,
+    project_information: &str,
+    branch_context: &str,
+    session_type: &BranchSessionType,
+    launch_context: Option<&BranchSessionLaunchContext>,
+    base_branch: Option<&str>,
+    pikchr_grammar_reference: &str,
+) -> String {
+    let mut action_instructions = match session_type {
         BranchSessionType::Note => {
             "The user is requesting a note. Generate a note based on their prompt below.
 
@@ -3410,6 +3739,11 @@ Rules:\n\
 - Be specific and actionable — reference the actual code, not generic advice.")
         }
     };
+
+    if matches!(session_type, BranchSessionType::Note) {
+        action_instructions.push_str("\n\n");
+        action_instructions.push_str(&pikchr_note_guidance(pikchr_grammar_reference));
+    }
 
     let action_tag = format!(
         "<action>\n{action_instructions}\n\nProject information:\n{project_information}\n</action>"
@@ -4113,20 +4447,134 @@ mod tests {
         assert!(!prompt.contains("repo session is taking a long time"));
     }
 
+    fn assert_pikchr_note_guidance(prompt: &str, reference: &str) {
+        assert!(prompt.contains("Staged notes support rendered diagrams"));
+        assert!(prompt.contains("fenced `pikchr` code blocks"));
+        assert!(prompt.contains("Pikchr grammar"));
+        assert!(prompt.contains(reference));
+    }
+
+    #[test]
+    fn generated_remote_pikchr_grammar_paths_are_unique_temp_markdown_files() {
+        let first = generated_pikchr_grammar_remote_path();
+        let second = generated_pikchr_grammar_remote_path();
+
+        assert_ne!(first, second);
+        for path in [first, second] {
+            assert!(path.starts_with(PIKCHR_GRAMMAR_REMOTE_PATH_PREFIX));
+            assert!(path.ends_with(PIKCHR_GRAMMAR_REMOTE_PATH_SUFFIX));
+
+            let uuid_part = path
+                .strip_prefix(PIKCHR_GRAMMAR_REMOTE_PATH_PREFIX)
+                .and_then(|path| path.strip_suffix(PIKCHR_GRAMMAR_REMOTE_PATH_SUFFIX))
+                .expect("generated path should contain a UUID between prefix and suffix");
+            uuid::Uuid::parse_str(uuid_part).expect("generated path should include a UUID");
+        }
+    }
+
+    #[test]
+    fn successful_remote_pikchr_grammar_upload_returns_generated_path() {
+        let expected_path = generated_pikchr_grammar_remote_path();
+        let returned_path = upload_pikchr_grammar_to_remote_with_writer(
+            "test-workspace",
+            b"grammar bytes",
+            expected_path.clone(),
+            |workspace_name, bytes, remote_path| {
+                assert_eq!(workspace_name, "test-workspace");
+                assert_eq!(bytes, b"grammar bytes");
+                assert_eq!(remote_path, expected_path);
+                Ok(())
+            },
+        );
+
+        assert_eq!(returned_path, expected_path);
+    }
+
+    #[test]
+    fn failed_remote_pikchr_grammar_upload_falls_back_to_public_url() {
+        let generated_path = generated_pikchr_grammar_remote_path();
+        let returned_path = upload_pikchr_grammar_to_remote_with_writer(
+            "test-workspace",
+            b"grammar bytes",
+            generated_path,
+            |_workspace_name, _bytes, _remote_path| Err("remote unavailable".to_string()),
+        );
+
+        assert_eq!(returned_path, PIKCHR_GRAMMAR_URL);
+    }
+
     #[test]
     fn local_project_session_prompt_includes_timeline_reference_guidance() {
-        let prompt = build_project_session_action_instructions(false);
+        let prompt = build_project_session_action_instructions_with_pikchr_reference(
+            false,
+            PIKCHR_GRAMMAR_URL,
+        );
 
         assert_project_session_reference_guidance(&prompt);
         assert_project_session_repo_session_progress_guidance(&prompt);
+        assert_pikchr_note_guidance(&prompt, PIKCHR_GRAMMAR_URL);
     }
 
     #[test]
     fn remote_project_session_prompt_includes_timeline_reference_guidance() {
-        let prompt = build_project_session_action_instructions(true);
+        let prompt = build_project_session_action_instructions_with_pikchr_reference(
+            true,
+            PIKCHR_GRAMMAR_URL,
+        );
 
         assert_project_session_reference_guidance(&prompt);
         assert_project_session_repo_session_progress_guidance(&prompt);
+        assert_pikchr_note_guidance(&prompt, PIKCHR_GRAMMAR_URL);
+    }
+
+    #[test]
+    fn project_session_prompt_uses_supplied_pikchr_reference() {
+        let prompt = build_project_session_action_instructions_with_pikchr_reference(
+            false,
+            "/tmp/staged/pikchr/grammar.md",
+        );
+
+        assert_pikchr_note_guidance(&prompt, "/tmp/staged/pikchr/grammar.md");
+    }
+
+    #[test]
+    fn note_prompt_uses_supplied_pikchr_reference() {
+        let prompt = build_full_prompt_with_pikchr_reference(
+            "user prompt",
+            "project info",
+            "branch context",
+            &BranchSessionType::Note,
+            None,
+            None,
+            "/tmp/staged/pikchr/grammar.md",
+        );
+
+        assert_pikchr_note_guidance(&prompt, "/tmp/staged/pikchr/grammar.md");
+    }
+
+    #[test]
+    fn note_followup_prompt_uses_supplied_local_pikchr_reference() {
+        let prompt = build_note_followup_message_with_pikchr_reference(
+            true,
+            "/Applications/Staged.app/Contents/Resources/resources/pikchr/grammar.md",
+        );
+
+        assert!(prompt.contains("The user is asking you to update the linked note"));
+        assert!(prompt.contains("Please update the note to reflect the latest chat."));
+        assert_pikchr_note_guidance(
+            &prompt,
+            "/Applications/Staged.app/Contents/Resources/resources/pikchr/grammar.md",
+        );
+    }
+
+    #[test]
+    fn note_followup_prompt_uses_supplied_remote_pikchr_reference() {
+        let remote_path = generated_pikchr_grammar_remote_path();
+        let prompt = build_note_followup_message_with_pikchr_reference(false, &remote_path);
+
+        assert!(prompt.contains("The user is asking you to write the linked note"));
+        assert!(prompt.contains("Please write the note for this session."));
+        assert_pikchr_note_guidance(&prompt, &remote_path);
     }
 
     #[test]

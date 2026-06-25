@@ -6,6 +6,7 @@ describe('browser-native command wrappers', () => {
   });
 
   afterEach(() => {
+    vi.doUnmock('./transport');
     vi.unstubAllGlobals();
   });
 
@@ -59,5 +60,24 @@ describe('browser-native command wrappers', () => {
     await expect(getAvailableOpeners()).resolves.toEqual([]);
     await expect(openInApp('/tmp/repo', 'finder')).rejects.toThrow('web mode');
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('builds note follow-up prompts through the backend command', async () => {
+    const invokeCommand = vi.fn().mockResolvedValue('backend prompt');
+    vi.doMock('./transport', () => ({
+      invokeCommand,
+      isTauri: true,
+    }));
+
+    const { buildNoteFollowupMessage } = await import('./commands');
+
+    await expect(buildNoteFollowupMessage('session-1', 'branch-1', true)).resolves.toBe(
+      'backend prompt'
+    );
+    expect(invokeCommand).toHaveBeenCalledWith('build_note_followup_message', {
+      sessionId: 'session-1',
+      branchId: 'branch-1',
+      hasParsedNote: true,
+    });
   });
 });

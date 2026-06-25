@@ -94,37 +94,3 @@ export function getNoteFollowupLabel(
     ? 'Ask for the note to be updated'
     : 'Ask for a note to be written';
 }
-
-export function buildNoteFollowupMessage(hasParsedNote: boolean): string {
-  const visibleRequest = hasParsedNote
-    ? 'Please update the note to reflect the latest chat.'
-    : 'Please write the note for this session.';
-
-  return `<action>
-The user is asking you to ${hasParsedNote ? 'update the linked note' : 'write the linked note'} from the latest chat history.
-
-Use the existing conversation context. Do not create commits.
-
-Your final response must include a suggested-next-steps fenced block followed by the note content after a horizontal rule:
-
-\`\`\`suggested-next-steps
-{"suggestedNextCommitStep": null, "suggestedNextNoteStep": null}
-\`\`\`
-
----
-# <Title>
-<Body>
-
-Formatting requirements:
-- The opening fence line for suggested-next-steps must be exactly: \`\`\`suggested-next-steps
-- The closing fence line must be exactly: \`\`\`
-- Put only a JSON object inside the suggested-next-steps block.
-- Include both nullable string fields: suggestedNextCommitStep and suggestedNextNoteStep.
-- Keep suggested next steps concise; use null when there is no clear next action.
-- The \`---\` separator must be on its own line.
-- The note content must start immediately after \`---\` with a markdown H1.
-- Do not wrap the note in code fences.
-</action>
-
-${visibleRequest}`;
-}

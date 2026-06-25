@@ -11,19 +11,18 @@
   import Check from '@lucide/svelte/icons/check';
   import MessageCircle from '@lucide/svelte/icons/message-circle';
   import FileText from '@lucide/svelte/icons/file-text';
-  import { marked } from 'marked';
   import * as Dialog from '$lib/components/ui/dialog';
   import { Button } from '$lib/components/ui/button';
-  import { sanitize } from '../../shared/sanitize';
   import { countAssistantMessagesAfter, handleExternalLinkClick } from '../../api/commands';
   import { formatChatButtonLabel } from '../sessions/noteFreshness';
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
   import { viewport } from '../../shared/viewport.svelte';
-  import { noteMarkdownWithTitle } from './noteMarkdown';
-
-  marked.setOptions({ breaks: true, gfm: true });
+  import '../../shared/markdown/diagramStyles.css';
+  import { extractMarkdownDiagramFences } from '../../shared/markdown/diagramFormats';
+  import { loadPikchrRenderer, type PikchrRenderer } from '../../shared/markdown/pikchrRendering';
+  import { noteMarkdownWithTitle, renderNoteMarkdown } from './noteMarkdown';
 
   interface Props {
     open: boolean;
@@ -58,6 +57,14 @@
   let canOpenSession = $derived(Boolean(sessionId && onOpenSession));
   let showChatInfo = $derived(canOpenSession && assistantMessagesAfterNote > 0);
   let noteMarkdown = $derived(noteMarkdownWithTitle(title, content));
+  let noteHasPikchr = $derived(
+    extractMarkdownDiagramFences(noteMarkdown).some((diagram) => diagram.language === 'pikchr')
+  );
+  let pikchrRenderer = $state<PikchrRenderer | null>(null);
+  let pikchrRendererLoadKey = $derived(noteMarkdown);
+  let pikchrRendererLoadFailedKey = $state<string | null>(null);
+  let pikchrRendererLoadFailed = $derived(pikchrRendererLoadFailedKey === pikchrRendererLoadKey);
+  let renderedNoteHtml = $derived(renderNoteMarkdown(noteMarkdown, { pikchrRenderer }));
 
   // Search state
   let searchVisible = $state(false);
@@ -83,6 +90,30 @@
       unregister();
       unregisterSearchTarget = null;
     };
+  });
+
+  $effect(() => {
+    if (!open || !noteHasPikchr || pikchrRenderer || pikchrRendererLoadFailed) return;
+
+    const loadKey = pikchrRendererLoadKey;
+    let stale = false;
+    loadPikchrRenderer()
+      .then((renderer) => {
+        if (!stale && pikchrRendererLoadKey === loadKey) pikchrRenderer = renderer;
+      })
+      .catch(() => {
+        if (!stale && pikchrRendererLoadKey === loadKey) pikchrRendererLoadFailedKey = loadKey;
+      });
+
+    return () => {
+      stale = true;
+    };
+  });
+
+  $effect(() => {
+    if (!open) {
+      pikchrRendererLoadFailedKey = null;
+    }
   });
 
   onDestroy(() => {
@@ -112,10 +143,6 @@
       stale = true;
     };
   });
-
-  function renderMarkdown(text: string): string {
-    return sanitize(marked.parse(text) as string);
-  }
 
   async function handleShare() {
     try {
@@ -276,7 +303,7 @@
       <div class="modal-content" bind:this={contentEl} onclick={handleExternalLinkClick}>
         {#if noteMarkdown.trim()}
           <div class="markdown-content">
-            {@html renderMarkdown(noteMarkdown)}
+            {@html renderedNoteHtml}
           </div>
         {:else}
           <p class="empty-note">This note has no content.</p>

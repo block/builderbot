@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { noteMarkdownWithTitle } from './noteMarkdown';
+import { noteMarkdownWithTitle, renderNoteMarkdown } from './noteMarkdown';
 
 describe('noteMarkdownWithTitle', () => {
   it('prepends the note title as a markdown H1', () => {
@@ -21,5 +21,14 @@ describe('noteMarkdownWithTitle', () => {
 
   it('leaves untitled note content unchanged', () => {
     expect(noteMarkdownWithTitle('', 'Body text.')).toBe('Body text.');
+  });
+});
+
+describe('renderNoteMarkdown', () => {
+  it('uses the shared markdown renderer', () => {
+    const html = renderNoteMarkdown('```pikchr\nbox "Start" fit\n```');
+
+    expect(html).toContain('<pre class="markdown-diagram-source markdown-diagram-source-pikchr">');
+    expect(html).toContain('box "Start" fit');
   });
 });

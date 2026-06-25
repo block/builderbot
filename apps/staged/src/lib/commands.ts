@@ -639,6 +639,18 @@ export function resumeSession(
   });
 }
 
+export function buildNoteFollowupMessage(
+  sessionId: string,
+  branchId: string | null | undefined,
+  hasParsedNote: boolean
+): Promise<string> {
+  return invokeCommand('build_note_followup_message', {
+    sessionId,
+    branchId: branchId ?? null,
+    hasParsedNote,
+  });
+}
+
 export function cancelSession(sessionId: string): Promise<void> {
   return invokeCommand('cancel_session', { sessionId });
 }

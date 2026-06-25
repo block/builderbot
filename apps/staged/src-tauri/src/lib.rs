@@ -2277,6 +2277,7 @@ pub fn run() {
             session_commands::count_assistant_messages_after,
             session_commands::start_session,
             session_commands::resume_session,
+            session_commands::build_note_followup_message,
             session_commands::cancel_session,
             session_commands::delete_session,
             session_commands::start_branch_session,

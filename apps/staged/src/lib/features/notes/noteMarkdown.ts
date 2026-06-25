@@ -1,3 +1,8 @@
+import {
+  renderMarkdown,
+  type MarkdownRenderingOptions,
+} from '../../shared/markdown/renderMarkdown';
+
 export function noteMarkdownWithTitle(title: string, content: string): string {
   const normalizedTitle = title.trim();
   if (!normalizedTitle) return content;
@@ -11,4 +16,8 @@ export function noteMarkdownWithTitle(title: string, content: string): string {
 
 function startsWithMarkdownH1(content: string): boolean {
   return /^#[ \t]+\S/.test(content);
+}
+
+export function renderNoteMarkdown(text: string, options: MarkdownRenderingOptions = {}): string {
+  return renderMarkdown(text, options);
 }

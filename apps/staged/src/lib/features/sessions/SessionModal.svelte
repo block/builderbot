@@ -42,11 +42,10 @@
   import ImagePlus from '@lucide/svelte/icons/image-plus';
   import Plus from '@lucide/svelte/icons/plus';
   import Spinner from '../../shared/Spinner.svelte';
-  import { marked } from 'marked';
-  import { sanitize } from '../../shared/sanitize';
   import { isResumableReason } from '../../types';
   import type { Session, SessionMessage, HashtagItem, ProjectRepo } from '../../types';
   import {
+    buildNoteFollowupMessage,
     cancelSession,
     createImage,
     createImageFromData,
@@ -92,14 +91,11 @@
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
   import { viewport } from '../../shared/viewport.svelte';
-  import {
-    buildNoteFollowupMessage,
-    getNoteFollowupLabel,
-    type LinkedNoteContext,
-  } from './noteFreshness';
-
-  // Configure marked
-  marked.setOptions({ breaks: true, gfm: true });
+  import '../../shared/markdown/diagramStyles.css';
+  import { extractMarkdownDiagramFences } from '../../shared/markdown/diagramFormats';
+  import { renderMarkdown as renderSharedMarkdown } from '../../shared/markdown/renderMarkdown';
+  import { loadPikchrRenderer, type PikchrRenderer } from '../../shared/markdown/pikchrRendering';
+  import { getNoteFollowupLabel, type LinkedNoteContext } from './noteFreshness';
 
   interface Props {
     open: boolean;
@@ -117,6 +113,11 @@
     noteInfo?: LinkedNoteContext | null;
     onOpenNote?: (note: LinkedNoteContext) => void;
   }
+
+  type SendMessageTarget = {
+    sessionId: string;
+    branchId: string | null;
+  };
 
   let {
     open,
@@ -156,6 +157,21 @@
   let isLive = $derived(session?.status === 'running');
   let hasQueuedMessages = $derived(messageQueue.length > 0);
   let noteFollowupLabel = $derived(getNoteFollowupLabel(session, messages, noteInfo));
+  let assistantMarkdownContent = $derived(
+    messages
+      .filter((message) => message.role === 'assistant')
+      .map((message) => message.content)
+      .join('\n\n')
+  );
+  let sessionHasPikchr = $derived(
+    extractMarkdownDiagramFences(assistantMarkdownContent).some(
+      (diagram) => diagram.language === 'pikchr'
+    )
+  );
+  let pikchrRenderer = $state<PikchrRenderer | null>(null);
+  let pikchrRendererLoadKey = $derived(`${sessionId}\0${assistantMarkdownContent}`);
+  let pikchrRendererLoadFailedKey = $state<string | null>(null);
+  let pikchrRendererLoadFailed = $derived(pikchrRendererLoadFailedKey === pikchrRendererLoadKey);
 
   const SLIDE_DURATION = 150;
 
@@ -561,12 +577,20 @@
   }
 
   /** Actually send a message to the backend and start the agent. */
-  async function sendMessage(text: string, imageIds?: string[]) {
-    if (!session || sending) return;
-    sending = true;
+  async function sendMessage(
+    text: string,
+    imageIds?: string[],
+    sendingLocked = false,
+    target: SendMessageTarget | null = null
+  ) {
+    const targetSessionId = target?.sessionId ?? session?.id;
+    const targetBranchId = target ? target.branchId : (branchId ?? null);
+    if (!targetSessionId || session?.id !== targetSessionId || (!sendingLocked && sending)) return;
+    if (!sendingLocked) sending = true;
     error = null;
     try {
-      await resumeSession(session.id, text, imageIds, branchId);
+      await resumeSession(targetSessionId, text, imageIds, targetBranchId);
+      if (session?.id !== targetSessionId) return;
       // Backend sets status to running and emits an event.
       // Force an immediate poll to pick up the new user message + status.
       session = { ...session, status: 'running' };
@@ -577,13 +601,30 @@
       // Clear the queue — don't keep trying to send if the session is broken
       messageQueue = [];
     } finally {
-      sending = false;
+      if (!sendingLocked) sending = false;
     }
   }
 
-  function handleNoteFollowupClick() {
-    if (!noteInfo || sending) return;
-    void sendMessage(buildNoteFollowupMessage(noteInfo.hasParsedNote));
+  async function handleNoteFollowupClick() {
+    if (!session || !noteInfo || sending) return;
+    const target: SendMessageTarget = { sessionId: session.id, branchId: branchId ?? null };
+    const hasParsedNote = noteInfo.hasParsedNote;
+    sending = true;
+    error = null;
+    try {
+      const prompt = await buildNoteFollowupMessage(
+        target.sessionId,
+        target.branchId,
+        hasParsedNote
+      );
+      if (session?.id !== target.sessionId || (branchId ?? null) !== target.branchId) return;
+      await sendMessage(prompt, undefined, true, target);
+    } catch (e) {
+      error = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
+      messageQueue = [];
+    } finally {
+      sending = false;
+    }
   }
 
   /** Process the next queued message when the session becomes idle. */
@@ -721,7 +762,7 @@
   }
 
   function renderMarkdown(content: string): string {
-    return sanitize(marked.parse(content) as string);
+    return renderSharedMarkdown(content, { pikchrRenderer });
   }
 
   /** Memoized wrapper around the shared renderHashtagTokens. */
@@ -900,6 +941,30 @@
         performSearch(searchQuery);
       }, 300);
       return () => clearTimeout(timer);
+    }
+  });
+
+  $effect(() => {
+    if (!open || !sessionHasPikchr || pikchrRenderer || pikchrRendererLoadFailed) return;
+
+    const loadKey = pikchrRendererLoadKey;
+    let stale = false;
+    loadPikchrRenderer()
+      .then((renderer) => {
+        if (!stale && pikchrRendererLoadKey === loadKey) pikchrRenderer = renderer;
+      })
+      .catch(() => {
+        if (!stale && pikchrRendererLoadKey === loadKey) pikchrRendererLoadFailedKey = loadKey;
+      });
+
+    return () => {
+      stale = true;
+    };
+  });
+
+  $effect(() => {
+    if (!open) {
+      pikchrRendererLoadFailedKey = null;
     }
   });
 

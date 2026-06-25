@@ -426,7 +426,11 @@
 
   let nextCommentId = 0;
 
-  async function handleAddComment(path: string, span: Span, content: string): Promise<void> {
+  async function handleAddComment(
+    path: string,
+    span: Span,
+    content: string
+  ): Promise<Comment | null> {
     const comment: Comment = {
       id: `local-${++nextCommentId}`,
       path,
@@ -443,6 +447,7 @@
       commitSessionId: null,
     };
     localComments = [...localComments, comment];
+    return comment;
   }
 
   async function handleUpdateComment(commentId: string, content: string): Promise<void> {

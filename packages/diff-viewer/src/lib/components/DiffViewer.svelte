@@ -102,6 +102,10 @@
     dismiss: () => Promise<boolean>;
     getSaveStatus: () => 'idle' | 'saving' | 'saved' | 'error';
   };
+  type CommentSaveContext = {
+    path: string;
+    span: Span;
+  };
 
   // ==========================================================================
   // Props
@@ -1611,17 +1615,37 @@
     );
   }
 
-  async function handleCommentSubmit(content: string): Promise<Comment | null> {
-    if (commentingOnRange === null || !currentFilePath || !onAddComment) return null;
+  function createRangeCommentSaveContext(): CommentSaveContext | null {
+    if (commentingOnRange === null || !currentFilePath) return null;
 
     const alignmentData = changedAlignments[commentingOnRange];
     if (!alignmentData) return null;
 
     const { alignment } = alignmentData;
-    const span: Span = { start: alignment.after.start, end: alignment.after.end };
+    return {
+      path: currentFilePath,
+      span: { start: alignment.after.start, end: alignment.after.end },
+    };
+  }
 
-    const comment = await onAddComment(currentFilePath, span, content);
-    if (comment) {
+  function isActiveRangeCommentSaveContext(context: CommentSaveContext): boolean {
+    const activeContext = createRangeCommentSaveContext();
+    return (
+      activeContext !== null &&
+      activeContext.path === context.path &&
+      activeContext.span.start === context.span.start &&
+      activeContext.span.end === context.span.end
+    );
+  }
+
+  async function handleCommentSubmit(
+    context: CommentSaveContext | null,
+    content: string
+  ): Promise<Comment | null> {
+    if (!context || !onAddComment) return null;
+
+    const comment = await onAddComment(context.path, context.span, content);
+    if (comment && isActiveRangeCommentSaveContext(context)) {
       editingRangeCommentId = comment.id;
     }
     return comment;
@@ -1929,16 +1953,36 @@
     );
   }
 
-  async function handleLineCommentSubmit(content: string): Promise<Comment | null> {
-    if (!commentingOnLines || !currentFilePath || !onAddComment) return null;
+  function createLineCommentSaveContext(): CommentSaveContext | null {
+    if (!commentingOnLines || !currentFilePath) return null;
 
-    const span: Span = {
-      start: commentingOnLines.start,
-      end: commentingOnLines.end + 1,
+    return {
+      path: currentFilePath,
+      span: {
+        start: commentingOnLines.start,
+        end: commentingOnLines.end + 1,
+      },
     };
+  }
 
-    const comment = await onAddComment(currentFilePath, span, content);
-    if (comment) {
+  function isActiveLineCommentSaveContext(context: CommentSaveContext): boolean {
+    const activeContext = createLineCommentSaveContext();
+    return (
+      activeContext !== null &&
+      activeContext.path === context.path &&
+      activeContext.span.start === context.span.start &&
+      activeContext.span.end === context.span.end
+    );
+  }
+
+  async function handleLineCommentSubmit(
+    context: CommentSaveContext | null,
+    content: string
+  ): Promise<Comment | null> {
+    if (!context || !onAddComment) return null;
+
+    const comment = await onAddComment(context.path, context.span, content);
+    if (comment && isActiveLineCommentSaveContext(context)) {
       editingCommentId = comment.id;
       activeLineComment = comment;
     }
@@ -2653,6 +2697,7 @@
     <!-- Range comment editor (two-pane mode only) -->
     {#if commentingOnRange !== null && commentEditorStyle && !activeRangeCommentState.missing}
       {@const existingComment = activeRangeCommentState.existingComment}
+      {@const saveContext = createRangeCommentSaveContext()}
       <CommentEditor
         bind:this={rangeCommentEditor}
         top={commentEditorStyle.top}
@@ -2664,7 +2709,7 @@
           if (commentId) {
             return handleCommentEdit(commentId, content);
           }
-          return handleCommentSubmit(content);
+          return handleCommentSubmit(saveContext, content);
         }}
         onClose={handleCommentCancel}
         onDelete={existingComment ? () => handleRangeCommentDelete(existingComment.id) : undefined}
@@ -2703,6 +2748,7 @@
     <!-- Line comment editor -->
     {#if commentingOnLines && lineCommentEditorStyle && !activeLineCommentState.missing}
       {@const existingComment = activeLineCommentState.existingComment}
+      {@const saveContext = createLineCommentSaveContext()}
       <CommentEditor
         bind:this={lineCommentEditor}
         top={lineCommentEditorStyle.top}
@@ -2718,7 +2764,7 @@
           if (commentId) {
             return handleCommentEdit(commentId, content);
           }
-          return handleLineCommentSubmit(content);
+          return handleLineCommentSubmit(saveContext, content);
         }}
         onClose={handleLineCommentCancel}
         onDelete={existingComment ? () => handleLineCommentDelete(existingComment.id) : undefined}

@@ -1,6 +1,5 @@
 import type { Tokens } from 'marked';
 
-import { sanitize } from '../../shared/sanitize';
 import { getNoteDiagramFormat, type NoteDiagramFormat } from './diagramFormats';
 import { sanitizePikchrSvg, type NotePikchrRenderer } from './pikchrRendering';
 
@@ -32,7 +31,7 @@ export function renderNoteDiagramCodeBlock(
   }
 
   return {
-    html: renderPikchrPreview(sanitize(renderedDiagramSource), renderedSvg),
+    html: renderPikchrPreview(renderedSvg),
     trustedHtml: true,
   };
 }
@@ -44,15 +43,12 @@ function withDiagramSourceClass(renderedSource: string, format: NoteDiagramForma
   );
 }
 
-function renderPikchrPreview(renderedSource: string, renderedSvg: string): string {
+function renderPikchrPreview(renderedSvg: string): string {
   return [
     '<figure class="note-diagram note-diagram-pikchr">',
     '<figcaption class="note-diagram-caption">Pikchr</figcaption>',
     '<div class="note-diagram-preview note-diagram-preview-pikchr">',
     renderedSvg,
-    '</div>',
-    '<div class="note-diagram-source-wrap">',
-    renderedSource,
     '</div>',
     '</figure>',
   ].join('');

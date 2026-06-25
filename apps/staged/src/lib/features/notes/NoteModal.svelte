@@ -543,16 +543,6 @@
     height: auto;
   }
 
-  .markdown-content :global(.note-diagram-source-wrap) {
-    border-top: 1px solid var(--border-subtle);
-  }
-
-  .markdown-content :global(.note-diagram .note-diagram-source) {
-    margin: 0;
-    border-radius: 0;
-    background: transparent;
-  }
-
   .markdown-content :global(blockquote) {
     margin: 0.5em 0;
     padding-left: 0.75em;

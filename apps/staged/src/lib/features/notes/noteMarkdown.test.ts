@@ -63,9 +63,10 @@ describe('renderNoteMarkdown', () => {
     expect(html).toContain('class="note-pikchr-svg"');
     expect(html).toContain('<path');
     expect(html).toContain('stroke:rgb(0,0,0)');
-    expect(html).toContain('<div class="note-diagram-source-wrap">');
-    expect(html).toContain('<pre class="note-diagram-source note-diagram-source-pikchr">');
-    expect(html).toContain('box "Start" fit');
+    expect(html).not.toContain('note-diagram-source-wrap');
+    expect(html).not.toContain('note-diagram-source-pikchr');
+    expect(html).not.toContain('box "Start" fit');
+    expect(html).not.toContain('box &quot;Start&quot; fit');
     expect(html).not.toContain('STAGED_NOTE_TRUSTED_DIAGRAM_');
   });
 

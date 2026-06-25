@@ -543,6 +543,10 @@
     height: auto;
   }
 
+  .markdown-content :global(.note-diagram-preview-pikchr .note-pikchr-svg) {
+    overflow: visible;
+  }
+
   .markdown-content :global(blockquote) {
     margin: 0.5em 0;
     padding-left: 0.75em;

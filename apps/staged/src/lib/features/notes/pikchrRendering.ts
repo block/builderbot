@@ -5,6 +5,7 @@ const PIKCHR_SVG_CLASS = 'note-pikchr-svg';
 const MAX_PIKCHR_SOURCE_LENGTH = 20_000;
 const MAX_PIKCHR_SVG_LENGTH = 250_000;
 const PIKCHR_SVG_ROOT = /^\s*<svg[\s>]/i;
+const PIKCHR_SIDE_LABEL_GAP = '0.35em';
 
 const CSS_NUMBER = String.raw`[-+]?(?:\d+(?:\.\d+)?|\.\d+)(?:e[-+]?\d+)?`;
 const CSS_LENGTH = new RegExp(`^(?:${CSS_NUMBER})(?:px|pt|pc|mm|cm|in|em|rem|%)?$`);
@@ -131,13 +132,35 @@ export function sanitizePikchrSvg(svg: string): string | null {
     },
     allowedSchemes: [],
     transformTags: {
-      '*': stripUnsafeDirectColorAttributes,
+      '*': normalizePikchrSvgAttributes,
     },
   });
 
   const normalized = sanitized.replace(/\sviewbox=/g, ' viewBox=');
   if (!PIKCHR_SVG_ROOT.test(normalized)) return null;
   return normalized;
+}
+
+function normalizePikchrSvgAttributes(tagName: string, attribs: Record<string, string>) {
+  const colorNormalized = stripUnsafeDirectColorAttributes(tagName, attribs);
+  if (tagName.toLowerCase() !== 'text') return colorNormalized;
+
+  return {
+    tagName,
+    attribs: addSideLabelGap(colorNormalized.attribs),
+  };
+}
+
+function addSideLabelGap(attribs: Record<string, string>) {
+  if (attribs.dx !== undefined) return attribs;
+
+  const anchor = attribs['text-anchor']?.trim().toLowerCase();
+  if (anchor !== 'start' && anchor !== 'end') return attribs;
+
+  return {
+    ...attribs,
+    dx: anchor === 'start' ? PIKCHR_SIDE_LABEL_GAP : `-${PIKCHR_SIDE_LABEL_GAP}`,
+  };
 }
 
 function stripUnsafeDirectColorAttributes(tagName: string, attribs: Record<string, string>) {

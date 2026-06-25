@@ -40,6 +40,32 @@ describe('sanitizePikchrSvg', () => {
     expect(svg).not.toContain('url(');
   });
 
+  it('adds breathing room to side-anchored Pikchr text labels', () => {
+    const svg = sanitizePikchrSvg(
+      [
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 80">',
+        '<text x="20" y="20" text-anchor="start">Right-side label</text>',
+        '<text x="20" y="40" text-anchor="end">Left-side label</text>',
+        '<text x="20" y="60" text-anchor="start" dx="1em">Custom label</text>',
+        '<text x="60" y="20" text-anchor="middle">Centered label</text>',
+        '</svg>',
+      ].join('')
+    );
+
+    expect(svg).toMatch(
+      /<text\b(?=[^>]*text-anchor="start")(?=[^>]*dx="0\.35em")[^>]*>Right-side label<\/text>/
+    );
+    expect(svg).toMatch(
+      /<text\b(?=[^>]*text-anchor="end")(?=[^>]*dx="-0\.35em")[^>]*>Left-side label<\/text>/
+    );
+    expect(svg).toMatch(
+      /<text\b(?=[^>]*text-anchor="start")(?=[^>]*dx="1em")[^>]*>Custom label<\/text>/
+    );
+    expect(svg).toMatch(
+      /<text\b(?=[^>]*text-anchor="middle")(?![^>]*\bdx=)[^>]*>Centered label<\/text>/
+    );
+  });
+
   it('strips executable and external-resource SVG surface', () => {
     const svg = sanitizePikchrSvg(
       [

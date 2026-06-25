@@ -607,7 +607,7 @@ pub(crate) fn infer_branch_resume_session_type(prompt: &str) -> Option<&'static 
 }
 
 #[tauri::command]
-pub fn build_note_followup_message(
+pub async fn build_note_followup_message(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     app_handle: tauri::AppHandle,
     session_id: String,
@@ -616,42 +616,46 @@ pub fn build_note_followup_message(
 ) -> Result<String, String> {
     let store = get_store(&store)?;
 
-    store
-        .get_session(&session_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Session not found: {session_id}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        store
+            .get_session(&session_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Session not found: {session_id}"))?;
 
-    let linked_commit = store.get_commit_by_session(&session_id).ok().flatten();
-    let linked_note = store.get_note_by_session(&session_id).ok().flatten();
-    let linked_review = store.get_review_by_session(&session_id).ok().flatten();
+        let linked_commit = store.get_commit_by_session(&session_id).ok().flatten();
+        let linked_note = store.get_note_by_session(&session_id).ok().flatten();
+        let linked_review = store.get_review_by_session(&session_id).ok().flatten();
 
-    let branch_from_id = branch_id
-        .as_deref()
-        .and_then(|bid| store.get_branch(bid).ok().flatten());
+        let branch_from_id = branch_id
+            .as_deref()
+            .and_then(|bid| store.get_branch(bid).ok().flatten());
 
-    let linked_branch = if branch_from_id.is_some() {
-        branch_from_id
-    } else if let Some(commit) = &linked_commit {
-        store.get_branch(&commit.branch_id).ok().flatten()
-    } else if let Some(note) = &linked_note {
-        store.get_branch(&note.branch_id).ok().flatten()
-    } else if let Some(review) = &linked_review {
-        store.get_branch(&review.branch_id).ok().flatten()
-    } else {
-        None
-    };
+        let linked_branch = if branch_from_id.is_some() {
+            branch_from_id
+        } else if let Some(commit) = &linked_commit {
+            store.get_branch(&commit.branch_id).ok().flatten()
+        } else if let Some(note) = &linked_note {
+            store.get_branch(&note.branch_id).ok().flatten()
+        } else if let Some(review) = &linked_review {
+            store.get_branch(&review.branch_id).ok().flatten()
+        } else {
+            None
+        };
 
-    let pikchr_grammar_reference = resolve_pikchr_grammar_reference(
-        &app_handle,
-        linked_branch
-            .as_ref()
-            .and_then(|branch| branch.workspace_name.as_deref()),
-    );
+        let pikchr_grammar_reference = resolve_pikchr_grammar_reference(
+            &app_handle,
+            linked_branch
+                .as_ref()
+                .and_then(|branch| branch.workspace_name.as_deref()),
+        );
 
-    Ok(build_note_followup_message_with_pikchr_reference(
-        has_parsed_note,
-        &pikchr_grammar_reference,
-    ))
+        Ok(build_note_followup_message_with_pikchr_reference(
+            has_parsed_note,
+            &pikchr_grammar_reference,
+        ))
+    })
+    .await
+    .map_err(|e| format!("Failed to build note follow-up message: {e}"))?
 }
 
 #[tauri::command]

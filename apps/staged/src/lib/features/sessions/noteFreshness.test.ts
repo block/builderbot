@@ -133,6 +133,8 @@ describe('note freshness', () => {
     expect(updateMessage).toContain('```suggested-next-steps');
     expect(updateMessage).toContain('\n---\n# <Title>');
     expect(updateMessage).toContain('Please update the note to reflect the latest chat.');
+    expect(updateMessage).toContain('fenced `pikchr` code blocks');
+    expect(updateMessage).toContain('https://pikchr.org/home/doc/trunk/doc/grammar.md');
     expect(writeMessage).toContain('Please write the note for this session.');
   });
 

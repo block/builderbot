@@ -21,6 +21,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
+use tauri::path::BaseDirectory;
+use tauri::Manager;
 
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::agent::{self, AcpProviderInfo};
@@ -28,6 +30,9 @@ use crate::blox;
 use crate::git;
 use crate::session_runner::{self, SessionConfig};
 use crate::store::{self, Store};
+
+const PIKCHR_GRAMMAR_RESOURCE: &str = "resources/pikchr/grammar.md";
+pub(crate) const PIKCHR_GRAMMAR_URL: &str = "https://pikchr.org/home/doc/trunk/doc/grammar.md";
 
 // =============================================================================
 // Helper — duplicated from lib.rs to avoid circular deps. If this grows,
@@ -64,6 +69,36 @@ where
         .await
         .map_err(|e| format!("blox task failed: {e}"))?
         .map_err(|e| e.to_string())
+}
+
+pub(crate) fn resolve_pikchr_grammar_reference(
+    app_handle: &tauri::AppHandle,
+    is_remote: bool,
+) -> String {
+    if !is_remote {
+        if let Ok(path) = app_handle
+            .path()
+            .resolve(PIKCHR_GRAMMAR_RESOURCE, BaseDirectory::Resource)
+        {
+            if path.is_file() {
+                return path.to_string_lossy().into_owned();
+            }
+        }
+
+        let source_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(PIKCHR_GRAMMAR_RESOURCE);
+        if source_path.is_file() {
+            return source_path.to_string_lossy().into_owned();
+        }
+    }
+
+    PIKCHR_GRAMMAR_URL.to_string()
+}
+
+fn pikchr_note_guidance(reference: &str) -> String {
+    format!(
+        "Staged notes support rendered diagrams in fenced `pikchr` code blocks. \
+If you need the Pikchr grammar while writing a diagram, read the reference at: {reference}"
+    )
 }
 
 // =============================================================================
@@ -786,7 +821,10 @@ for example #note:123, #commit:<sha>, and #review:456. When starting a repo-leve
 note, do not paste or rewrite the note contents; reference the note and relevant section instead, \
 for example: `Implement \"Step 5: unit tests\" from #note:123`.";
 
-pub(crate) fn build_project_session_action_instructions(is_remote: bool) -> String {
+pub(crate) fn build_project_session_action_instructions_with_pikchr_reference(
+    is_remote: bool,
+    pikchr_grammar_reference: &str,
+) -> String {
     let preamble = if is_remote {
         "This top-level project session runs locally and acts as a coordinator. \
 For repository-specific execution, use MCP subagent tools.\n\n\
@@ -833,6 +871,8 @@ repository edits directly here; use `start_repo_session` for implementation work
         ""
     };
 
+    let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference);
+
     format!(
         "The user is requesting work at the project level. Investigate and \
 fulfill the request below, then produce a project note summarizing what you found and any \
@@ -840,6 +880,7 @@ actions taken.\n\n\
 {preamble}\n\n\
 {start_repo_session_desc}\n\n\
 {PROJECT_SESSION_TIMELINE_REFERENCE_GUIDANCE}\n\n\
+{pikchr_guidance}\n\n\
 - add_project_repo: Use this when the task requires a repository that isn't yet in the \
 project. Pass the GitHub repo slug to add it.\n\n\
 IMPORTANT: `add_project_repo` and `start_repo_session` are MCP tools, not shell commands. \
@@ -885,7 +926,11 @@ pub async fn start_project_session(
     let project_context = build_project_session_context(&store, &project, None);
 
     let is_remote = project.location == store::ProjectLocation::Remote;
-    let action_instructions = build_project_session_action_instructions(is_remote);
+    let pikchr_grammar_reference = resolve_pikchr_grammar_reference(&app_handle, is_remote);
+    let action_instructions = build_project_session_action_instructions_with_pikchr_reference(
+        is_remote,
+        &pikchr_grammar_reference,
+    );
 
     let full_prompt = format!(
         "<action>\n{action_instructions}\n\nProject information:\n{project_context}\n</action>\n\n{prompt}"
@@ -984,6 +1029,7 @@ fn resolve_branch_session_provider(
 #[allow(clippy::too_many_arguments)]
 async fn prepare_branch_session_start(
     store: &Arc<Store>,
+    app_handle: &tauri::AppHandle,
     branch_id: &str,
     prompt: &str,
     session_type: BranchSessionType,
@@ -1101,13 +1147,15 @@ async fn prepare_branch_session_start(
 
     // Build the full prompt with action instructions + project information + branch context.
     let project_information = build_project_context(store, &project, &branch);
-    let full_prompt = build_full_prompt(
+    let pikchr_grammar_reference = resolve_pikchr_grammar_reference(app_handle, is_remote);
+    let full_prompt = build_full_prompt_with_pikchr_reference(
         prompt,
         &project_information,
         &branch_context,
         &session_type,
         launch_context,
         Some(&branch.base_branch),
+        &pikchr_grammar_reference,
     );
 
     // Resolve the actual workspace path for remote branches so the remote agent
@@ -1329,6 +1377,7 @@ pub async fn start_or_queue_branch_session_for_store(
 
     let prepared = prepare_branch_session_start(
         &store,
+        &app_handle,
         &branch_id,
         &prompt,
         session_type.clone(),
@@ -1667,13 +1716,15 @@ async fn start_queued_session_for_branch(
 
     // Build the full prompt with context.
     let project_information = build_project_context(&store, &project, &branch);
-    let full_prompt = build_full_prompt(
+    let pikchr_grammar_reference = resolve_pikchr_grammar_reference(&app_handle, is_remote);
+    let full_prompt = build_full_prompt_with_pikchr_reference(
         &prompt,
         &project_information,
         &branch_context,
         &session_type,
         launch_context.as_ref(),
         Some(&branch.base_branch),
+        &pikchr_grammar_reference,
     );
 
     // Atomically transition session from queued to running.
@@ -3265,7 +3316,27 @@ pub(crate) fn build_full_prompt(
     launch_context: Option<&BranchSessionLaunchContext>,
     base_branch: Option<&str>,
 ) -> String {
-    let action_instructions = match session_type {
+    build_full_prompt_with_pikchr_reference(
+        user_prompt,
+        project_information,
+        branch_context,
+        session_type,
+        launch_context,
+        base_branch,
+        PIKCHR_GRAMMAR_URL,
+    )
+}
+
+pub(crate) fn build_full_prompt_with_pikchr_reference(
+    user_prompt: &str,
+    project_information: &str,
+    branch_context: &str,
+    session_type: &BranchSessionType,
+    launch_context: Option<&BranchSessionLaunchContext>,
+    base_branch: Option<&str>,
+    pikchr_grammar_reference: &str,
+) -> String {
+    let mut action_instructions = match session_type {
         BranchSessionType::Note => {
             "The user is requesting a note. Generate a note based on their prompt below.
 
@@ -3410,6 +3481,11 @@ Rules:\n\
 - Be specific and actionable — reference the actual code, not generic advice.")
         }
     };
+
+    if matches!(session_type, BranchSessionType::Note) {
+        action_instructions.push_str("\n\n");
+        action_instructions.push_str(&pikchr_note_guidance(pikchr_grammar_reference));
+    }
 
     let action_tag = format!(
         "<action>\n{action_instructions}\n\nProject information:\n{project_information}\n</action>"
@@ -4113,20 +4189,60 @@ mod tests {
         assert!(!prompt.contains("repo session is taking a long time"));
     }
 
+    fn assert_pikchr_note_guidance(prompt: &str, reference: &str) {
+        assert!(prompt.contains("Staged notes support rendered diagrams"));
+        assert!(prompt.contains("fenced `pikchr` code blocks"));
+        assert!(prompt.contains("Pikchr grammar"));
+        assert!(prompt.contains(reference));
+    }
+
     #[test]
     fn local_project_session_prompt_includes_timeline_reference_guidance() {
-        let prompt = build_project_session_action_instructions(false);
+        let prompt = build_project_session_action_instructions_with_pikchr_reference(
+            false,
+            PIKCHR_GRAMMAR_URL,
+        );
 
         assert_project_session_reference_guidance(&prompt);
         assert_project_session_repo_session_progress_guidance(&prompt);
+        assert_pikchr_note_guidance(&prompt, PIKCHR_GRAMMAR_URL);
     }
 
     #[test]
     fn remote_project_session_prompt_includes_timeline_reference_guidance() {
-        let prompt = build_project_session_action_instructions(true);
+        let prompt = build_project_session_action_instructions_with_pikchr_reference(
+            true,
+            PIKCHR_GRAMMAR_URL,
+        );
 
         assert_project_session_reference_guidance(&prompt);
         assert_project_session_repo_session_progress_guidance(&prompt);
+        assert_pikchr_note_guidance(&prompt, PIKCHR_GRAMMAR_URL);
+    }
+
+    #[test]
+    fn project_session_prompt_uses_supplied_pikchr_reference() {
+        let prompt = build_project_session_action_instructions_with_pikchr_reference(
+            false,
+            "/tmp/staged/pikchr/grammar.md",
+        );
+
+        assert_pikchr_note_guidance(&prompt, "/tmp/staged/pikchr/grammar.md");
+    }
+
+    #[test]
+    fn note_prompt_uses_supplied_pikchr_reference() {
+        let prompt = build_full_prompt_with_pikchr_reference(
+            "user prompt",
+            "project info",
+            "branch context",
+            &BranchSessionType::Note,
+            None,
+            None,
+            "/tmp/staged/pikchr/grammar.md",
+        );
+
+        assert_pikchr_note_guidance(&prompt, "/tmp/staged/pikchr/grammar.md");
     }
 
     #[test]

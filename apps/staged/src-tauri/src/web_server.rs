@@ -2908,8 +2908,13 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 session_commands::build_project_session_context(&store, &project, None);
 
             let is_remote = project.location == store::ProjectLocation::Remote;
+            let pikchr_grammar_reference =
+                session_commands::resolve_pikchr_grammar_reference(&app_handle, is_remote);
             let action_instructions =
-                session_commands::build_project_session_action_instructions(is_remote);
+                session_commands::build_project_session_action_instructions_with_pikchr_reference(
+                    is_remote,
+                    &pikchr_grammar_reference,
+                );
 
             let full_prompt = format!(
                 "<action>\n{action_instructions}\n\nProject information:\n{project_context}\n</action>\n\n{prompt}"

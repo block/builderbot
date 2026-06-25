@@ -1,5 +1,9 @@
 import type { Session, SessionMessage } from '../../types';
 
+const PIKCHR_GRAMMAR_URL = 'https://pikchr.org/home/doc/trunk/doc/grammar.md';
+
+const PIKCHR_NOTE_GUIDANCE = `Staged notes support rendered diagrams in fenced \`pikchr\` code blocks. If you need the Pikchr grammar while writing a diagram, read the reference at: ${PIKCHR_GRAMMAR_URL}`;
+
 export interface LinkedNoteContext {
   id: string;
   title: string;
@@ -104,6 +108,8 @@ export function buildNoteFollowupMessage(hasParsedNote: boolean): string {
 The user is asking you to ${hasParsedNote ? 'update the linked note' : 'write the linked note'} from the latest chat history.
 
 Use the existing conversation context. Do not create commits.
+
+${PIKCHR_NOTE_GUIDANCE}
 
 Your final response must include a suggested-next-steps fenced block followed by the note content after a horizontal rule:
 

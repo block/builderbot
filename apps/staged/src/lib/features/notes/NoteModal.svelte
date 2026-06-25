@@ -107,6 +107,12 @@
   });
 
   $effect(() => {
+    // Keep transient renderer import failures scoped to the note that hit them.
+    noteMarkdown;
+    pikchrRendererLoadFailed = false;
+  });
+
+  $effect(() => {
     if (!open) {
       pikchrRendererLoadFailed = false;
     }

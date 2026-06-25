@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Session, SessionMessage, SessionStatus, CompletionReason } from '../../types';
 import {
-  buildNoteFollowupMessage,
   countAssistantMessagesAfterNote,
   formatChatButtonLabel,
   getNoteFollowupLabel,
@@ -125,21 +124,18 @@ describe('note freshness', () => {
     expect(latestAssistantMessage(messages)?.id).toBe(3);
   });
 
-  it('builds a structured follow-up prompt with a readable visible request', () => {
-    const updateMessage = buildNoteFollowupMessage(true);
-    const writeMessage = buildNoteFollowupMessage(false);
+  it('recognizes a backend-built follow-up prompt by marker text', () => {
+    const backendBuiltFollowup =
+      '<action>\nThe user is asking you to update the linked note from the latest chat history.\n</action>';
 
-    expect(updateMessage.startsWith('<action>')).toBe(true);
-    expect(updateMessage).toContain('```suggested-next-steps');
-    expect(updateMessage).toContain('\n---\n# <Title>');
-    expect(updateMessage).toContain('Please update the note to reflect the latest chat.');
-    expect(updateMessage).toContain('fenced `pikchr` code blocks');
-    expect(updateMessage).toContain('https://pikchr.org/home/doc/trunk/doc/grammar.md');
-    expect(writeMessage).toContain('Please write the note for this session.');
+    expect(hasNoteFollowupBeenSent([message(1, 'user', 2500, backendBuiltFollowup)], 2000)).toBe(
+      true
+    );
   });
 
   it('suppresses note followup CTA when a followup was already sent after note updatedAt', () => {
-    const followupContent = buildNoteFollowupMessage(true);
+    const followupContent =
+      '<action>\nThe user is asking you to update the linked note from the latest chat history.\n</action>';
     const messages = [
       message(1, 'assistant', 1500),
       message(2, 'user', 2500, followupContent),
@@ -162,7 +158,8 @@ describe('note freshness', () => {
   it('does not suppress CTA when followup was sent before note was updated', () => {
     // A followup was sent at t=1500, but the note was updated at t=2000 (after the followup).
     // New assistant messages at t=3000 should still trigger the CTA.
-    const followupContent = buildNoteFollowupMessage(true);
+    const followupContent =
+      '<action>\nThe user is asking you to update the linked note from the latest chat history.\n</action>';
     const messages = [
       message(1, 'assistant', 1000),
       message(2, 'user', 1500, followupContent),

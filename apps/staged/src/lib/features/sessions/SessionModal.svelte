@@ -45,6 +45,7 @@
   import { isResumableReason } from '../../types';
   import type { Session, SessionMessage, HashtagItem, ProjectRepo } from '../../types';
   import {
+    buildNoteFollowupMessage,
     cancelSession,
     createImage,
     createImageFromData,
@@ -94,11 +95,7 @@
   import { extractMarkdownDiagramFences } from '../../shared/markdown/diagramFormats';
   import { renderMarkdown as renderSharedMarkdown } from '../../shared/markdown/renderMarkdown';
   import { loadPikchrRenderer, type PikchrRenderer } from '../../shared/markdown/pikchrRendering';
-  import {
-    buildNoteFollowupMessage,
-    getNoteFollowupLabel,
-    type LinkedNoteContext,
-  } from './noteFreshness';
+  import { getNoteFollowupLabel, type LinkedNoteContext } from './noteFreshness';
 
   interface Props {
     open: boolean;
@@ -575,9 +572,9 @@
   }
 
   /** Actually send a message to the backend and start the agent. */
-  async function sendMessage(text: string, imageIds?: string[]) {
-    if (!session || sending) return;
-    sending = true;
+  async function sendMessage(text: string, imageIds?: string[], sendingLocked = false) {
+    if (!session || (!sendingLocked && sending)) return;
+    if (!sendingLocked) sending = true;
     error = null;
     try {
       await resumeSession(session.id, text, imageIds, branchId);
@@ -591,13 +588,23 @@
       // Clear the queue — don't keep trying to send if the session is broken
       messageQueue = [];
     } finally {
-      sending = false;
+      if (!sendingLocked) sending = false;
     }
   }
 
-  function handleNoteFollowupClick() {
-    if (!noteInfo || sending) return;
-    void sendMessage(buildNoteFollowupMessage(noteInfo.hasParsedNote));
+  async function handleNoteFollowupClick() {
+    if (!session || !noteInfo || sending) return;
+    sending = true;
+    error = null;
+    try {
+      const prompt = await buildNoteFollowupMessage(session.id, branchId, noteInfo.hasParsedNote);
+      await sendMessage(prompt, undefined, true);
+    } catch (e) {
+      error = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
+      messageQueue = [];
+    } finally {
+      sending = false;
+    }
   }
 
   /** Process the next queued message when the session becomes idle. */

@@ -2909,7 +2909,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
 
             let is_remote = project.location == store::ProjectLocation::Remote;
             let pikchr_grammar_reference =
-                session_commands::resolve_pikchr_grammar_reference(&app_handle, is_remote);
+                session_commands::resolve_pikchr_grammar_reference(&app_handle, None);
             let action_instructions =
                 session_commands::build_project_session_action_instructions_with_pikchr_reference(
                     is_remote,

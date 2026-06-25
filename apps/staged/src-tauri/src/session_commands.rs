@@ -32,6 +32,7 @@ use crate::session_runner::{self, SessionConfig};
 use crate::store::{self, Store};
 
 const PIKCHR_GRAMMAR_RESOURCE: &str = "resources/pikchr/grammar.md";
+const PIKCHR_GRAMMAR_REMOTE_PATH: &str = "/tmp/staged-pikchr-grammar.md";
 pub(crate) const PIKCHR_GRAMMAR_URL: &str = "https://pikchr.org/home/doc/trunk/doc/grammar.md";
 
 // =============================================================================
@@ -71,33 +72,110 @@ where
         .map_err(|e| e.to_string())
 }
 
-pub(crate) fn resolve_pikchr_grammar_reference(
-    app_handle: &tauri::AppHandle,
-    is_remote: bool,
-) -> String {
-    if !is_remote {
-        if let Ok(path) = app_handle
-            .path()
-            .resolve(PIKCHR_GRAMMAR_RESOURCE, BaseDirectory::Resource)
-        {
-            if path.is_file() {
-                return path.to_string_lossy().into_owned();
-            }
-        }
-
-        let source_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(PIKCHR_GRAMMAR_RESOURCE);
-        if source_path.is_file() {
-            return source_path.to_string_lossy().into_owned();
+fn bundled_pikchr_grammar_path(app_handle: &tauri::AppHandle) -> Option<PathBuf> {
+    if let Ok(path) = app_handle
+        .path()
+        .resolve(PIKCHR_GRAMMAR_RESOURCE, BaseDirectory::Resource)
+    {
+        if path.is_file() {
+            return Some(path);
         }
     }
 
-    PIKCHR_GRAMMAR_URL.to_string()
+    let source_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(PIKCHR_GRAMMAR_RESOURCE);
+    if source_path.is_file() {
+        return Some(source_path);
+    }
+
+    None
+}
+
+pub(crate) fn resolve_pikchr_grammar_reference(
+    app_handle: &tauri::AppHandle,
+    workspace_name: Option<&str>,
+) -> String {
+    let Some(grammar_path) = bundled_pikchr_grammar_path(app_handle) else {
+        log::warn!("Bundled Pikchr grammar resource not found; falling back to public URL");
+        return PIKCHR_GRAMMAR_URL.to_string();
+    };
+
+    if let Some(workspace_name) = workspace_name {
+        match std::fs::read(&grammar_path) {
+            Ok(bytes) => {
+                match write_bytes_to_remote(workspace_name, &bytes, PIKCHR_GRAMMAR_REMOTE_PATH) {
+                    Ok(()) => return PIKCHR_GRAMMAR_REMOTE_PATH.to_string(),
+                    Err(e) => log::warn!(
+                        "Failed to copy Pikchr grammar to remote workspace {workspace_name}: {e}"
+                    ),
+                }
+            }
+            Err(e) => {
+                log::warn!(
+                    "Failed to read bundled Pikchr grammar at {}: {e}",
+                    grammar_path.display()
+                );
+            }
+        }
+
+        return PIKCHR_GRAMMAR_URL.to_string();
+    }
+
+    grammar_path.to_string_lossy().into_owned()
 }
 
 fn pikchr_note_guidance(reference: &str) -> String {
     format!(
         "Staged notes support rendered diagrams in fenced `pikchr` code blocks. \
 If you need the Pikchr grammar while writing a diagram, read the reference at: {reference}"
+    )
+}
+
+pub(crate) fn build_note_followup_message_with_pikchr_reference(
+    has_parsed_note: bool,
+    pikchr_grammar_reference: &str,
+) -> String {
+    let visible_request = if has_parsed_note {
+        "Please update the note to reflect the latest chat."
+    } else {
+        "Please write the note for this session."
+    };
+    let linked_note_action = if has_parsed_note {
+        "update the linked note"
+    } else {
+        "write the linked note"
+    };
+    let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference);
+
+    format!(
+        "<action>\n\
+The user is asking you to {linked_note_action} from the latest chat history.\n\
+\n\
+Use the existing conversation context. Do not create commits.\n\
+\n\
+{pikchr_guidance}\n\
+\n\
+Your final response must include a suggested-next-steps fenced block followed by the note content after a horizontal rule:\n\
+\n\
+```suggested-next-steps\n\
+{{\"suggestedNextCommitStep\": null, \"suggestedNextNoteStep\": null}}\n\
+```\n\
+\n\
+---\n\
+# <Title>\n\
+<Body>\n\
+\n\
+Formatting requirements:\n\
+- The opening fence line for suggested-next-steps must be exactly: ```suggested-next-steps\n\
+- The closing fence line must be exactly: ```\n\
+- Put only a JSON object inside the suggested-next-steps block.\n\
+- Include both nullable string fields: suggestedNextCommitStep and suggestedNextNoteStep.\n\
+- Keep suggested next steps concise; use null when there is no clear next action.\n\
+- The `---` separator must be on its own line.\n\
+- The note content must start immediately after `---` with a markdown H1.\n\
+- Do not wrap the note in code fences.\n\
+</action>\n\
+\n\
+{visible_request}"
     )
 }
 
@@ -439,6 +517,54 @@ pub(crate) fn infer_branch_resume_session_type(prompt: &str) -> Option<&'static 
     } else {
         None
     }
+}
+
+#[tauri::command]
+pub fn build_note_followup_message(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    app_handle: tauri::AppHandle,
+    session_id: String,
+    branch_id: Option<String>,
+    has_parsed_note: bool,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
+
+    store
+        .get_session(&session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Session not found: {session_id}"))?;
+
+    let linked_commit = store.get_commit_by_session(&session_id).ok().flatten();
+    let linked_note = store.get_note_by_session(&session_id).ok().flatten();
+    let linked_review = store.get_review_by_session(&session_id).ok().flatten();
+
+    let branch_from_id = branch_id
+        .as_deref()
+        .and_then(|bid| store.get_branch(bid).ok().flatten());
+
+    let linked_branch = if branch_from_id.is_some() {
+        branch_from_id
+    } else if let Some(commit) = &linked_commit {
+        store.get_branch(&commit.branch_id).ok().flatten()
+    } else if let Some(note) = &linked_note {
+        store.get_branch(&note.branch_id).ok().flatten()
+    } else if let Some(review) = &linked_review {
+        store.get_branch(&review.branch_id).ok().flatten()
+    } else {
+        None
+    };
+
+    let pikchr_grammar_reference = resolve_pikchr_grammar_reference(
+        &app_handle,
+        linked_branch
+            .as_ref()
+            .and_then(|branch| branch.workspace_name.as_deref()),
+    );
+
+    Ok(build_note_followup_message_with_pikchr_reference(
+        has_parsed_note,
+        &pikchr_grammar_reference,
+    ))
 }
 
 #[tauri::command]
@@ -926,7 +1052,7 @@ pub async fn start_project_session(
     let project_context = build_project_session_context(&store, &project, None);
 
     let is_remote = project.location == store::ProjectLocation::Remote;
-    let pikchr_grammar_reference = resolve_pikchr_grammar_reference(&app_handle, is_remote);
+    let pikchr_grammar_reference = resolve_pikchr_grammar_reference(&app_handle, None);
     let action_instructions = build_project_session_action_instructions_with_pikchr_reference(
         is_remote,
         &pikchr_grammar_reference,
@@ -1147,7 +1273,8 @@ async fn prepare_branch_session_start(
 
     // Build the full prompt with action instructions + project information + branch context.
     let project_information = build_project_context(store, &project, &branch);
-    let pikchr_grammar_reference = resolve_pikchr_grammar_reference(app_handle, is_remote);
+    let pikchr_grammar_reference =
+        resolve_pikchr_grammar_reference(app_handle, branch.workspace_name.as_deref());
     let full_prompt = build_full_prompt_with_pikchr_reference(
         prompt,
         &project_information,
@@ -1716,7 +1843,8 @@ async fn start_queued_session_for_branch(
 
     // Build the full prompt with context.
     let project_information = build_project_context(&store, &project, &branch);
-    let pikchr_grammar_reference = resolve_pikchr_grammar_reference(&app_handle, is_remote);
+    let pikchr_grammar_reference =
+        resolve_pikchr_grammar_reference(&app_handle, branch.workspace_name.as_deref());
     let full_prompt = build_full_prompt_with_pikchr_reference(
         &prompt,
         &project_information,
@@ -4243,6 +4371,31 @@ mod tests {
         );
 
         assert_pikchr_note_guidance(&prompt, "/tmp/staged/pikchr/grammar.md");
+    }
+
+    #[test]
+    fn note_followup_prompt_uses_supplied_local_pikchr_reference() {
+        let prompt = build_note_followup_message_with_pikchr_reference(
+            true,
+            "/Applications/Staged.app/Contents/Resources/resources/pikchr/grammar.md",
+        );
+
+        assert!(prompt.contains("The user is asking you to update the linked note"));
+        assert!(prompt.contains("Please update the note to reflect the latest chat."));
+        assert_pikchr_note_guidance(
+            &prompt,
+            "/Applications/Staged.app/Contents/Resources/resources/pikchr/grammar.md",
+        );
+    }
+
+    #[test]
+    fn note_followup_prompt_uses_supplied_remote_pikchr_reference() {
+        let prompt =
+            build_note_followup_message_with_pikchr_reference(false, PIKCHR_GRAMMAR_REMOTE_PATH);
+
+        assert!(prompt.contains("The user is asking you to write the linked note"));
+        assert!(prompt.contains("Please write the note for this session."));
+        assert_pikchr_note_guidance(&prompt, PIKCHR_GRAMMAR_REMOTE_PATH);
     }
 
     #[test]

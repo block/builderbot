@@ -6,8 +6,13 @@
   - Exposes waitForValidation() so parent can validate on submit
 -->
 <script lang="ts" module>
+  export interface SubpathValidationResult {
+    valid: boolean;
+    error?: string;
+  }
+
   export interface SubpathInputApi {
-    waitForValidation(): Promise<boolean>;
+    waitForValidation(): Promise<SubpathValidationResult>;
   }
 </script>
 
@@ -44,6 +49,12 @@
 
   function normalize(val: string): string {
     return val.trim().replace(/^\/+|\/+$/g, '');
+  }
+
+  function validationErrorMessage(error: unknown): string {
+    const message =
+      typeof error === 'string' ? error : error instanceof Error ? error.message : String(error);
+    return message.replace(/^git command failed:\s*/i, '') || 'Invalid path in repo';
   }
 
   // Split the value into parent path and current segment for suggestions.
@@ -117,20 +128,20 @@
   }
 
   /**
-   * Returns a promise that resolves to true if the current subpath is valid,
-   * or false if validation fails. Called by the parent on submit.
+   * Returns a promise that resolves to a validation result for the current
+   * subpath. Called by the parent on submit.
    */
-  async function waitForValidation(): Promise<boolean> {
+  async function waitForValidation(): Promise<SubpathValidationResult> {
     const trimmed = normalize(value);
     if (!trimmed) {
-      return true;
+      return { valid: true };
     }
 
     try {
       await commands.validateSubpath(repo, trimmed);
-      return true;
-    } catch {
-      return false;
+      return { valid: true };
+    } catch (error) {
+      return { valid: false, error: validationErrorMessage(error) };
     }
   }
 

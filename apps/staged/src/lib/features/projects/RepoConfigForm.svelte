@@ -25,7 +25,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import RepoSearchInput from './RepoSearchInput.svelte';
   import SubpathInput from './SubpathInput.svelte';
-  import type { SubpathInputApi } from './SubpathInput.svelte';
+  import type { SubpathInputApi, SubpathValidationResult } from './SubpathInput.svelte';
   import BranchPicker, { type BranchSelection } from './BranchPicker.svelte';
   import type { RepoSelection } from '../../shared/githubUrl';
   import { viewport } from '../../shared/viewport.svelte';
@@ -58,7 +58,7 @@
 
     // Exposed API for parent validation and programmatic repo selection
     api?: {
-      waitForSubpathValidation: () => Promise<boolean>;
+      waitForSubpathValidation: () => Promise<SubpathValidationResult>;
       selectRepo: (selection: RepoSelection) => void;
       reset: () => void;
     };
@@ -79,7 +79,7 @@
     onBranchSelected,
     api = $bindable<
       | {
-          waitForSubpathValidation: () => Promise<boolean>;
+          waitForSubpathValidation: () => Promise<SubpathValidationResult>;
           selectRepo: (selection: RepoSelection) => void;
           reset: () => void;
         }
@@ -197,7 +197,7 @@
     api = {
       waitForSubpathValidation: subpathApi
         ? () => subpathApi!.waitForValidation()
-        : () => Promise.resolve(true),
+        : () => Promise.resolve({ valid: true }),
       selectRepo: handleRepoSelected,
       reset,
     };

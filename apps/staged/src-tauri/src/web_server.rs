@@ -1542,13 +1542,12 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let repo_slug = crate::branches::resolve_branch_repo_slug(&store, &project, &branch)?;
             let repo_path =
                 crate::git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?;
-            crate::git::fetch_for_worktree(
+            crate::branches::fetch_for_worktree_with_offline_fallback(
                 &repo_path,
                 &repo_slug,
                 &branch.branch_name,
                 &branch.base_branch,
-            )
-            .map_err(|e| e.to_string())?;
+            )?;
             let desired_worktree_path = crate::git::project_worktree_path_for(
                 &branch.project_id,
                 &repo_slug,
@@ -1596,13 +1595,12 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     crate::branches::resolve_branch_repo_slug(&store, &project, &branch)?;
                 let repo_path =
                     crate::git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?;
-                crate::git::fetch_for_worktree(
+                crate::branches::fetch_for_worktree_with_offline_fallback(
                     &repo_path,
                     &repo_slug,
                     &branch.branch_name,
                     &branch.base_branch,
-                )
-                .map_err(|e| e.to_string())?;
+                )?;
                 let desired_worktree_path = crate::git::project_worktree_path_for(
                     &branch.project_id,
                     &repo_slug,

@@ -8,7 +8,7 @@ use super::DiffSpec;
 use super::GitRef;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant};
@@ -2617,16 +2617,121 @@ pub async fn update_pull_request(
 // Subpath Validation
 // =============================================================================
 
+fn invalid_repo_path_error() -> GitError {
+    GitError::CommandFailed("Invalid path in repo".to_string())
+}
+
+fn is_github_not_found_error(msg: &str) -> bool {
+    msg.contains("Not Found") || msg.contains("HTTP 404")
+}
+
+fn normalize_repo_subpath(subpath: &str) -> Result<Option<PathBuf>, GitError> {
+    let trimmed = subpath.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.starts_with('/') || Path::new(trimmed).is_absolute() {
+        return Err(invalid_repo_path_error());
+    }
+
+    let trimmed = trimmed.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let mut normalized = PathBuf::new();
+    for segment in trimmed.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(invalid_repo_path_error());
+        }
+        normalized.push(segment);
+    }
+
+    Ok(Some(normalized))
+}
+
+fn normalized_repo_subpath_string(subpath: &str) -> Result<Option<String>, GitError> {
+    let Some(relative_path) = normalize_repo_subpath(subpath)? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        relative_path
+            .iter()
+            .map(|segment| segment.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/"),
+    ))
+}
+
+fn local_subpath_is_dir(clone_path: &Path, subpath: &str) -> Result<bool, GitError> {
+    let Some(relative_path) = normalize_repo_subpath(subpath)? else {
+        return Ok(true);
+    };
+    Ok(clone_path.join(relative_path).is_dir())
+}
+
+fn local_repo_subpath_is_dir(github_repo: &str, subpath: &str) -> Result<Option<bool>, GitError> {
+    let Some(clone_path) = crate::paths::clone_path_for(github_repo) else {
+        return Ok(None);
+    };
+    if !clone_path.join(".git").exists() {
+        return Ok(None);
+    }
+    local_subpath_is_dir(&clone_path, subpath).map(Some)
+}
+
+fn list_local_directories_at_clone(clone_path: &Path, path: &str) -> Result<Vec<String>, GitError> {
+    let target = match normalize_repo_subpath(path)? {
+        Some(relative_path) => clone_path.join(relative_path),
+        None => clone_path.to_path_buf(),
+    };
+
+    if !target.is_dir() {
+        return Ok(vec![]);
+    }
+
+    let entries = std::fs::read_dir(&target).map_err(|e| {
+        GitError::CommandFailed(format!(
+            "Failed to read local repo path '{}': {e}",
+            target.display()
+        ))
+    })?;
+
+    let mut dirs = entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| match entry.file_type() {
+            Ok(file_type) if file_type.is_dir() => entry.file_name().into_string().ok(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    dirs.sort();
+    Ok(dirs)
+}
+
+fn list_local_repo_directories(
+    github_repo: &str,
+    path: &str,
+) -> Result<Option<Vec<String>>, GitError> {
+    let Some(clone_path) = crate::paths::clone_path_for(github_repo) else {
+        return Ok(None);
+    };
+    if !clone_path.join(".git").exists() {
+        return Ok(None);
+    }
+    list_local_directories_at_clone(&clone_path, path).map(Some)
+}
+
 /// Validate that a subpath exists as a directory in a GitHub repository.
 ///
 /// Uses the GitHub contents API to check that the path exists and is a
-/// directory (the API returns an array for directories). Returns an error
-/// if the path does not exist or points to a file rather than a directory.
+/// directory (the API returns an array for directories). If GitHub cannot be
+/// reached, falls back to the existing local clone when one is available.
+/// Returns an error if the path does not exist or points to a file rather than
+/// a directory.
 pub fn validate_subpath_in_repo(github_repo: &str, subpath: &str) -> Result<(), GitError> {
-    let trimmed = subpath.trim_matches('/');
-    if trimmed.is_empty() {
+    let Some(trimmed) = normalized_repo_subpath_string(subpath)? else {
         return Ok(());
-    }
+    };
 
     let endpoint = format!("repos/{github_repo}/contents/{trimmed}");
     match run_gh_global(&["api", &endpoint]) {
@@ -2637,15 +2742,27 @@ pub fn validate_subpath_in_repo(github_repo: &str, subpath: &str) -> Result<(), 
             if body.starts_with('[') {
                 Ok(())
             } else {
-                Err(GitError::CommandFailed("Invalid path in repo".to_string()))
+                Err(invalid_repo_path_error())
             }
         }
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("Not Found") || msg.contains("HTTP 404") {
-                Err(GitError::CommandFailed("Invalid path in repo".to_string()))
-            } else {
-                Err(e)
+            if is_github_not_found_error(&msg) {
+                return Err(invalid_repo_path_error());
+            }
+
+            match local_repo_subpath_is_dir(github_repo, &trimmed)? {
+                Some(true) => {
+                    log::warn!(
+                        "validated '{}' in '{}' from local clone after GitHub validation failed: {}",
+                        trimmed,
+                        github_repo,
+                        msg
+                    );
+                    Ok(())
+                }
+                Some(false) => Err(invalid_repo_path_error()),
+                None => Err(e),
             }
         }
     }
@@ -2653,9 +2770,11 @@ pub fn validate_subpath_in_repo(github_repo: &str, subpath: &str) -> Result<(), 
 
 /// List directories at a given path in a GitHub repository.
 /// Returns a list of directory names (not files) at the specified path.
-/// If `path` is empty, lists directories at the repository root.
+/// If `path` is empty, lists directories at the repository root. If GitHub
+/// cannot be reached, falls back to the existing local clone when one is
+/// available.
 pub fn list_repo_directories(github_repo: &str, path: &str) -> Result<Vec<String>, GitError> {
-    let trimmed = path.trim_matches('/');
+    let trimmed = normalized_repo_subpath_string(path)?.unwrap_or_default();
     let endpoint = if trimmed.is_empty() {
         format!("repos/{github_repo}/contents")
     } else {
@@ -2690,10 +2809,21 @@ pub fn list_repo_directories(github_repo: &str, path: &str) -> Result<Vec<String
         }
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("Not Found") || msg.contains("HTTP 404") {
-                Ok(vec![])
-            } else {
-                Err(e)
+            if is_github_not_found_error(&msg) {
+                return Ok(vec![]);
+            }
+
+            match list_local_repo_directories(github_repo, &trimmed)? {
+                Some(dirs) => {
+                    log::warn!(
+                        "listed directories for '{}' in '{}' from local clone after GitHub listing failed: {}",
+                        trimmed,
+                        github_repo,
+                        msg
+                    );
+                    Ok(dirs)
+                }
+                None => Err(e),
             }
         }
     }
@@ -2800,6 +2930,46 @@ mod tests {
             details_url: None,
             target_url: target_url.map(ToString::to_string),
         }
+    }
+
+    #[test]
+    fn test_local_subpath_is_dir_accepts_relative_directory() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join("packages/app")).expect("create dirs");
+
+        assert!(local_subpath_is_dir(temp.path(), "packages/app").unwrap());
+        assert!(local_subpath_is_dir(temp.path(), "packages/app/").unwrap());
+        assert!(!local_subpath_is_dir(temp.path(), "packages/missing").unwrap());
+    }
+
+    #[test]
+    fn test_local_subpath_is_dir_rejects_unsafe_paths() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        for path in [
+            "/tmp",
+            ".",
+            "packages/.",
+            "..",
+            "../repo",
+            "packages/../app",
+            "packages//app",
+        ] {
+            let err = local_subpath_is_dir(temp.path(), path).unwrap_err();
+            assert_eq!(err.to_string(), "git command failed: Invalid path in repo");
+        }
+    }
+
+    #[test]
+    fn test_list_local_directories_at_clone_returns_sorted_child_dirs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(temp.path().join("packages/b")).expect("create b");
+        std::fs::create_dir_all(temp.path().join("packages/a")).expect("create a");
+        std::fs::write(temp.path().join("packages/file.txt"), "not a dir").expect("write file");
+
+        assert_eq!(
+            list_local_directories_at_clone(temp.path(), "packages").unwrap(),
+            vec!["a".to_string(), "b".to_string()]
+        );
     }
 
     #[test]

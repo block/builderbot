@@ -678,6 +678,40 @@ fn create_worktree_with_fallback(
     }
 }
 
+fn local_base_ref_for_worktree(repo_path: &Path, base_branch: &str) -> Option<String> {
+    let base_ref = git::origin_ref_for_branch(base_branch);
+    git::resolve_ref(repo_path, &base_ref).ok()?;
+    Some(base_ref)
+}
+
+pub(crate) fn fetch_for_worktree_with_offline_fallback(
+    repo_path: &Path,
+    repo_slug: &str,
+    branch_name: &str,
+    base_branch: &str,
+) -> Result<(), String> {
+    match git::fetch_for_worktree(repo_path, repo_slug, branch_name, base_branch) {
+        Ok(()) => Ok(()),
+        Err(fetch_err) => {
+            if let Some(base_ref) = local_base_ref_for_worktree(repo_path, base_branch) {
+                log::warn!(
+                    "fetch for worktree branch '{}' in '{}' failed; using stale local ref '{}': {}",
+                    branch_name,
+                    repo_slug,
+                    base_ref,
+                    fetch_err
+                );
+                Ok(())
+            } else {
+                let base_ref = git::origin_ref_for_branch(base_branch);
+                Err(format!(
+                    "GitHub is unavailable and the local clone for '{repo_slug}' does not have required base ref '{base_ref}': {fetch_err}"
+                ))
+            }
+        }
+    }
+}
+
 pub(crate) fn is_blox_onboarding_precondition_error(err: &blox::BloxError) -> bool {
     match err {
         blox::BloxError::CommandFailed(stderr) => {
@@ -1137,13 +1171,12 @@ pub async fn setup_worktree(
     // Ensure we have a local clone, then fetch the specific refs we need.
     let repo_slug = resolve_branch_repo_slug(&store, &project, &branch)?;
     let repo_path = git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?;
-    git::fetch_for_worktree(
+    fetch_for_worktree_with_offline_fallback(
         &repo_path,
         &repo_slug,
         &branch.branch_name,
         &branch.base_branch,
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     let desired_worktree_path =
         git::project_worktree_path_for(&branch.project_id, &repo_slug, &branch.branch_name)
             .map_err(|e| e.to_string())?;
@@ -2333,13 +2366,12 @@ pub(crate) fn setup_worktree_sync(
         crate::git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?
     };
     emit_progress("fetching", None);
-    crate::git::fetch_for_worktree(
+    fetch_for_worktree_with_offline_fallback(
         &repo_path,
         &repo_slug,
         &branch.branch_name,
         &branch.base_branch,
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     let desired_worktree_path =
         crate::git::project_worktree_path_for(&branch.project_id, &repo_slug, &branch.branch_name)
             .map_err(|e| e.to_string())?;
@@ -2539,4 +2571,39 @@ pub(crate) async fn run_prerun_actions_for_branch(
     }
 
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::TempGitRepo;
+
+    #[test]
+    fn local_base_ref_for_worktree_accepts_existing_origin_ref() {
+        let repo = TempGitRepo::new();
+        repo.write_file("README.md", "hello");
+        repo.commit("initial");
+        repo.run_git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+        assert_eq!(
+            local_base_ref_for_worktree(repo.path(), "origin/main"),
+            Some("origin/main".to_string())
+        );
+        assert_eq!(
+            local_base_ref_for_worktree(repo.path(), "main"),
+            Some("origin/main".to_string())
+        );
+    }
+
+    #[test]
+    fn local_base_ref_for_worktree_rejects_missing_origin_ref() {
+        let repo = TempGitRepo::new();
+        repo.write_file("README.md", "hello");
+        repo.commit("initial");
+
+        assert_eq!(
+            local_base_ref_for_worktree(repo.path(), "origin/main"),
+            None
+        );
+    }
 }

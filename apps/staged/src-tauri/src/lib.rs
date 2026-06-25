@@ -1432,12 +1432,50 @@ fn build_badge_prompt(
     prompt
 }
 
+fn badge_provider_id(
+    provider: Option<&str>,
+    available_ids: &[String],
+    recent_ids: &[String],
+) -> Option<String> {
+    provider
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| session_commands::select_preferred_provider(available_ids, recent_ids))
+}
+
+fn find_badge_agent(provider: Option<&str>) -> Option<acp_client::AcpAgent> {
+    if let Some(provider) = provider
+        .map(str::trim)
+        .filter(|provider| !provider.is_empty())
+    {
+        let agent = acp_client::find_acp_agent_by_id(provider);
+        if agent.is_none() {
+            log::warn!("[repo_badges] selected badge-name provider `{provider}` is unavailable");
+        }
+        return agent;
+    }
+
+    let available_ids: Vec<String> = agent::discover_providers()
+        .into_iter()
+        .map(|provider| provider.id)
+        .collect();
+    let provider = badge_provider_id(
+        None,
+        &available_ids,
+        &session_commands::read_recent_agent_ids(),
+    )?;
+
+    acp_client::find_acp_agent_by_id(&provider)
+}
+
 /// Try to generate short names via ACP. Returns a map from "repo" or "repo (subpath)" to short name.
 async fn ai_generate_short_names(
     existing_badges: &[store::RepoBadge],
     new_repos: &[(String, String)],
+    provider: Option<&str>,
 ) -> Option<std::collections::HashMap<String, String>> {
-    let agent = acp_client::find_acp_agent()?;
+    let agent = find_badge_agent(provider)?;
     let prompt = build_badge_prompt(existing_badges, new_repos);
     let working_dir = std::env::temp_dir();
 
@@ -1481,6 +1519,7 @@ async fn ai_generate_short_names(
 async fn ensure_repo_badges(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     repos: Vec<(String, String)>,
+    provider: Option<String>,
 ) -> Result<Vec<store::RepoBadge>, String> {
     let store = get_store(&store)?;
     let mut result = Vec::new();
@@ -1511,7 +1550,7 @@ async fn ensure_repo_badges(
     }
 
     // Try AI generation for all missing repos at once
-    let ai_names = ai_generate_short_names(&all_badges, &missing).await;
+    let ai_names = ai_generate_short_names(&all_badges, &missing, provider.as_deref()).await;
 
     for (github_repo, subpath) in &missing {
         let subpath_str = subpath.as_str();
@@ -2340,9 +2379,13 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::cleanup_project_branches_best_effort;
+    use super::{badge_provider_id, cleanup_project_branches_best_effort};
     use crate::store::{Branch, BranchType};
     use std::collections::HashMap;
+
+    fn ids(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
 
     fn remote_branch(
         project_id: &str,
@@ -2353,6 +2396,30 @@ mod tests {
         let mut branch = Branch::new_remote(project_id, branch_name, "main", workspace_name);
         branch.id = id.to_string();
         branch
+    }
+
+    #[test]
+    fn badge_provider_id_uses_explicit_provider() {
+        assert_eq!(
+            badge_provider_id(Some("codex"), &ids(&["goose", "claude"]), &ids(&["claude"])),
+            Some("codex".to_string())
+        );
+    }
+
+    #[test]
+    fn badge_provider_id_uses_recent_available_provider() {
+        assert_eq!(
+            badge_provider_id(None, &ids(&["goose", "claude"]), &ids(&["codex", "claude"])),
+            Some("claude".to_string())
+        );
+    }
+
+    #[test]
+    fn badge_provider_id_falls_back_to_first_available_provider() {
+        assert_eq!(
+            badge_provider_id(None, &ids(&["goose", "claude"]), &ids(&["codex"])),
+            Some("goose".to_string())
+        );
     }
 
     #[test]

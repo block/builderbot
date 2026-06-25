@@ -61,7 +61,6 @@
     getSessionMessages,
     getSessionMessagesSince,
     handleExternalLinkClick,
-    respondAcpPermission,
     resumeSession,
   } from '../../api/commands';
   import HashtagInput from './HashtagInput.svelte';
@@ -86,10 +85,6 @@
     displayLocations,
     formatJson,
     latestAvailableCommands,
-    permissionOptions,
-    permissionRequestId,
-    permissionStatus,
-    permissionToolTitle,
     simpleUnifiedDiff,
     terminalRefsFromAcpContent,
     toolResultText,
@@ -182,7 +177,6 @@
   let messageQueue = $state<string[]>([]);
   let copiedId = $state<number | string | null>(null);
   let expandedTools = $state<Set<string>>(new Set());
-  let permissionSubmitting = $state<Set<string>>(new Set());
   let displayRoots = $state<string[]>([]);
   let currentDisplayRootKey = '';
 
@@ -1107,33 +1101,6 @@
     });
   }
 
-  async function handlePermissionResponse(content: unknown, optionId: string | null) {
-    const requestId = permissionRequestId(content);
-    if (!requestId || permissionSubmitting.has(requestId)) return;
-    permissionSubmitting = new Set(permissionSubmitting).add(requestId);
-    try {
-      await respondAcpPermission(requestId, optionId);
-      acpMetadataMessages = await getSessionAcpMetadataMessages(sessionId);
-    } catch (e) {
-      error = `Failed to answer permission prompt: ${e instanceof Error ? e.message : String(e)}`;
-    } finally {
-      const next = new Set(permissionSubmitting);
-      next.delete(requestId);
-      permissionSubmitting = next;
-    }
-  }
-
-  function isPermissionSubmitting(content: unknown): boolean {
-    const requestId = permissionRequestId(content);
-    return !!requestId && permissionSubmitting.has(requestId);
-  }
-
-  function permissionOptionVariant(kind: string): 'outline' | 'destructive' | 'ghost' {
-    if (kind.startsWith('reject')) return 'destructive';
-    if (kind.startsWith('allow')) return 'outline';
-    return 'ghost';
-  }
-
   function acpEventSummary(event: AcpTranscriptEvent): string {
     if (event.kind === 'plan_update') {
       const entries = arrayProp(event.content, 'entries');
@@ -1142,11 +1109,6 @@
     if (event.kind === 'available_commands_update') {
       const commands = arrayProp(event.content, 'availableCommands');
       return commands.length === 1 ? '1 command' : `${commands.length} commands`;
-    }
-    if (event.kind === 'permission_request') {
-      return permissionStatus(event.content) === 'pending'
-        ? 'Waiting for response'
-        : sentenceCase(permissionStatus(event.content));
     }
     if (event.kind === 'config_options_update') {
       const options = Array.isArray(event.content) ? event.content : [];
@@ -1233,10 +1195,6 @@
   function compactJsonSummary(value: unknown): string {
     const text = formatJson(value).replace(/\s+/g, ' ').trim();
     return text.length > 72 ? `${text.slice(0, 72)}…` : text;
-  }
-
-  function sentenceCase(value: string): string {
-    return value ? value.slice(0, 1).toUpperCase() + value.slice(1).replaceAll('_', ' ') : '';
   }
 
   function groupKey(group: AcpTranscriptGroup): string {
@@ -1573,39 +1531,6 @@
                       <span class="acp-event-title">{event.title}</span>
                       <span class="tool-args-preview">{acpEventSummary(event)}</span>
                     </div>
-                    {#if event.kind === 'permission_request'}
-                      {@const status = permissionStatus(event.content)}
-                      {@const requestId = permissionRequestId(event.content)}
-                      {@const submitting = isPermissionSubmitting(event.content)}
-                      <div class="permission-card-body">
-                        <div class="permission-tool-title">
-                          {permissionToolTitle(event.content, displayRoots)}
-                        </div>
-                        {#if status === 'pending' && requestId}
-                          <div class="permission-actions">
-                            {#each permissionOptions(event.content) as option}
-                              <Button
-                                variant={permissionOptionVariant(option.kind)}
-                                size="xs"
-                                disabled={submitting}
-                                onclick={() =>
-                                  handlePermissionResponse(event.content, option.optionId)}
-                              >
-                                {option.name}
-                              </Button>
-                            {/each}
-                            <Button
-                              variant="ghost"
-                              size="xs"
-                              disabled={submitting}
-                              onclick={() => handlePermissionResponse(event.content, null)}
-                            >
-                              Cancel
-                            </Button>
-                          </div>
-                        {/if}
-                      </div>
-                    {/if}
                     {#if isExpanded}
                       <div class="acp-event-body" transition:slide={{ duration: SLIDE_DURATION }}>
                         {#if event.kind === 'plan_update'}
@@ -2381,8 +2306,7 @@
     font-weight: 500;
   }
 
-  .acp-event-body,
-  .permission-card-body {
+  .acp-event-body {
     margin-top: 4px;
     border: 1px solid var(--border-subtle);
     border-radius: 8px;
@@ -2400,20 +2324,6 @@
     font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
     font-size: calc(var(--size-xs) * 0.9);
     line-height: 1.5;
-  }
-
-  .permission-tool-title {
-    color: var(--text-primary);
-    font-size: var(--size-sm);
-    line-height: 1.4;
-    word-break: break-word;
-  }
-
-  .permission-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 8px;
   }
 
   .plan-list,

@@ -112,8 +112,8 @@ pub trait MessageWriter: Send + Sync {
 
     /// Ask the client UI to resolve an ACP permission request.
     ///
-    /// Implementations that cannot prompt should keep the legacy behavior by
-    /// selecting the first option unless the prompt turn has been cancelled.
+    /// Implementations that cannot prompt should automatically approve the
+    /// request unless the prompt turn has been cancelled.
     async fn request_permission(
         &self,
         request: AcpPermissionRequest,
@@ -122,17 +122,36 @@ pub trait MessageWriter: Send + Sync {
         if cancel_token.is_cancelled() {
             AcpPermissionDecision::Cancelled
         } else {
-            request
-                .options
-                .first()
-                .map(|option| AcpPermissionDecision::Selected {
-                    option_id: option.option_id.clone(),
-                })
-                .unwrap_or(AcpPermissionDecision::Selected {
-                    option_id: "approve".to_string(),
-                })
+            autoapprove_permission_decision(&request)
         }
     }
+}
+
+fn permission_option_is_approval(option: &AcpPermissionOption) -> bool {
+    let kind = option.kind.to_ascii_lowercase();
+    let option_id = option.option_id.to_ascii_lowercase();
+    let name = option.name.to_ascii_lowercase();
+
+    kind.starts_with("allow")
+        || kind.starts_with("approve")
+        || option_id.starts_with("allow")
+        || option_id.starts_with("approve")
+        || name.contains("allow")
+        || name.contains("approve")
+}
+
+fn autoapprove_permission_decision(request: &AcpPermissionRequest) -> AcpPermissionDecision {
+    request
+        .options
+        .iter()
+        .find(|option| permission_option_is_approval(option))
+        .or_else(|| request.options.first())
+        .map(|option| AcpPermissionDecision::Selected {
+            option_id: option.option_id.clone(),
+        })
+        .unwrap_or(AcpPermissionDecision::Selected {
+            option_id: "approve".to_string(),
+        })
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1841,6 +1860,17 @@ impl AcpNotificationHandler {
 }
 
 #[cfg(test)]
+fn schema_permission_option_is_approval(
+    option: &agent_client_protocol::schema::v1::PermissionOption,
+) -> bool {
+    matches!(
+        option.kind,
+        agent_client_protocol::schema::v1::PermissionOptionKind::AllowOnce
+            | agent_client_protocol::schema::v1::PermissionOptionKind::AllowAlways
+    )
+}
+
+#[cfg(test)]
 fn permission_decision_for_options(
     options: &[agent_client_protocol::schema::v1::PermissionOption],
     cancelled: bool,
@@ -1850,7 +1880,9 @@ fn permission_decision_for_options(
     }
 
     let option_id = options
-        .first()
+        .iter()
+        .find(|option| schema_permission_option_is_approval(option))
+        .or_else(|| options.first())
         .map(|opt| opt.option_id.clone())
         .unwrap_or_else(|| PermissionOptionId::new("approve"));
 
@@ -3065,12 +3097,11 @@ mod tests {
     }
 
     #[test]
-    fn permission_response_selects_first_option_before_cancellation() {
-        let options = vec![PermissionOption::new(
-            "approve",
-            "Approve",
-            PermissionOptionKind::AllowOnce,
-        )];
+    fn permission_response_autoapproves_allow_option_before_cancellation() {
+        let options = vec![
+            PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
+            PermissionOption::new("approve", "Approve", PermissionOptionKind::AllowOnce),
+        ];
 
         let response = permission_response_for_options(&options, false);
 

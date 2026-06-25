@@ -75,7 +75,7 @@ describe('buildAcpTranscriptGroups', () => {
     }
   });
 
-  it('uses permission responses to resolve pending permission request cards', () => {
+  it('does not surface permission metadata as transcript events', () => {
     const metadata = [
       message({
         id: 1,
@@ -100,14 +100,7 @@ describe('buildAcpTranscriptGroups', () => {
     ];
 
     const groups = buildAcpTranscriptGroups([], metadata);
-    expect(groups).toHaveLength(1);
-    expect(groups[0].type).toBe('acp');
-    if (groups[0].type === 'acp') {
-      expect(groups[0].event.content).toMatchObject({
-        requestId: 'perm-1',
-        status: 'selected',
-      });
-    }
+    expect(groups).toEqual([]);
   });
 });
 

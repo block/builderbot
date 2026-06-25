@@ -2041,7 +2041,6 @@ pub fn run() {
             let compat = store::check_db_compatibility(&db_path)
                 .map_err(|e| format!("Cannot check database: {e}"))?;
             let session_registry = Arc::new(session_runner::SessionRegistry::new());
-            let permission_registry = Arc::new(agent::PermissionRegistry::new());
             // Backend-owned PR-poll scheduler. Managed unconditionally so the
             // interest/hint commands resolve even before the store exists (e.g.
             // during the needs-reset prompt); the tick loop is only spawned once
@@ -2121,7 +2120,6 @@ pub fn run() {
 
             app.manage(store_slot);
             app.manage(session_registry);
-            app.manage(permission_registry);
             app.manage(pr_scheduler);
             app.manage(Arc::new(actions::ActionExecutor::new()));
             app.manage(Arc::new(actions::ActionRegistry::new()));
@@ -2317,7 +2315,6 @@ pub fn run() {
             session_commands::get_session_messages_since,
             session_commands::get_session_acp_metadata_messages,
             session_commands::get_session_acp_initialization,
-            session_commands::respond_acp_permission,
             session_commands::count_assistant_messages_after,
             session_commands::start_session,
             session_commands::resume_session,

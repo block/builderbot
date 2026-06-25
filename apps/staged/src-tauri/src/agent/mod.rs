@@ -5,11 +5,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-pub mod permissions;
 pub mod writer;
 
 pub use acp_client::{discover_providers, AcpDriver, AcpProviderInfo, AgentDriver};
-pub use permissions::{PermissionDecision, PermissionRegistry};
 
 use crate::store::{MessageRole, SessionMessage, Store};
 

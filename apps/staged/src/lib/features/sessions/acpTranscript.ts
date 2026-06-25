@@ -29,8 +29,7 @@ export type AcpTranscriptEventKind =
   | 'session_mode_state'
   | 'current_mode_update'
   | 'available_commands_update'
-  | 'session_info_update'
-  | 'permission_request';
+  | 'session_info_update';
 
 export interface AcpTranscriptEvent {
   id: number;
@@ -83,7 +82,6 @@ const STANDALONE_EVENT_KINDS = new Set<AcpTranscriptEventKind>([
   'current_mode_update',
   'available_commands_update',
   'session_info_update',
-  'permission_request',
 ]);
 
 export function buildAcpTranscriptGroups(
@@ -405,27 +403,15 @@ function buildTimelineEntries(
 }
 
 function standaloneEvents(metadataRows: SessionMessage[]): AcpTranscriptEvent[] {
-  const permissionResponses = new Map<string, unknown>();
-  for (const row of metadataRows) {
-    if (row.acpEventKind !== 'permission_response') continue;
-    const requestId = stringProp(row.acpContent, 'requestId');
-    if (requestId) permissionResponses.set(requestId, row.acpContent);
-  }
-
   const events: AcpTranscriptEvent[] = [];
   for (const row of metadataRows) {
     const kind = row.acpEventKind as AcpTranscriptEventKind | undefined;
     if (!kind || !STANDALONE_EVENT_KINDS.has(kind)) continue;
-    let content = eventContent(row);
-    if (kind === 'permission_request') {
-      const requestId = stringProp(row.acpContent, 'requestId');
-      content = (requestId && permissionResponses.get(requestId)) || row.acpContent;
-    }
     events.push({
       id: row.id,
       kind,
       title: eventTitle(kind),
-      content,
+      content: eventContent(row),
       message: row,
     });
   }
@@ -464,8 +450,6 @@ function eventTitle(kind: AcpTranscriptEventKind): string {
       return 'Slash commands';
     case 'session_info_update':
       return 'Session info';
-    case 'permission_request':
-      return 'Permission';
   }
 }
 
@@ -565,37 +549,6 @@ function stringProp(value: unknown, key: string): string | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const prop = (value as Record<string, unknown>)[key];
   return typeof prop === 'string' ? prop : null;
-}
-
-export function permissionStatus(content: unknown): string {
-  return stringProp(content, 'status') ?? 'pending';
-}
-
-export function permissionRequestId(content: unknown): string | null {
-  return stringProp(content, 'requestId');
-}
-
-export function permissionOptions(
-  content: unknown
-): { optionId: string; name: string; kind: string }[] {
-  const options = (
-    content && typeof content === 'object' ? (content as Record<string, unknown>).options : null
-  ) as unknown;
-  if (!Array.isArray(options)) return [];
-  return options
-    .map((option) => {
-      const optionId = stringProp(option, 'optionId');
-      const name = stringProp(option, 'name');
-      const kind = stringProp(option, 'kind') ?? '';
-      return optionId && name ? { optionId, name, kind } : null;
-    })
-    .filter(
-      (option): option is { optionId: string; name: string; kind: string } => option !== null
-    );
-}
-
-export function permissionToolTitle(content: unknown, displayRoots?: DisplayRootInput): string {
-  return makePathsRelative(stringProp(content, 'toolTitle') ?? '', displayRoots);
 }
 
 export function displayLocations(locations: unknown, displayRoots?: DisplayRootInput): string[] {

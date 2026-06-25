@@ -1,0 +1,25 @@
+.markdown-content .markdown-diagram {
+  margin: 0.9em 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-primary);
+}
+
+.markdown-content .markdown-diagram-preview {
+  display: flex;
+  justify-content: center;
+  padding: 16px;
+  background: var(--diagram-canvas-bg);
+  overflow-x: auto;
+}
+
+.markdown-content .markdown-diagram-preview svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.markdown-content .markdown-diagram-preview-pikchr .markdown-pikchr-svg {
+  overflow: visible;
+}

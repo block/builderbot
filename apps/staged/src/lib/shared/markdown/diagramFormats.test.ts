@@ -1,16 +1,16 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  extractNoteDiagramFences,
-  getNoteDiagramFormat,
-  isNoteDiagramFormat,
-  NOTE_DIAGRAM_FORMATS,
+  extractMarkdownDiagramFences,
+  getMarkdownDiagramFormat,
+  isMarkdownDiagramFormat,
+  MARKDOWN_DIAGRAM_FORMATS,
   normalizeDiagramFenceLanguage,
 } from './diagramFormats';
 
-describe('note diagram format registry', () => {
+describe('markdown diagram format registry', () => {
   it('registers only Pikchr as the recommended general diagram format', () => {
-    expect(NOTE_DIAGRAM_FORMATS).toEqual([
+    expect(MARKDOWN_DIAGRAM_FORMATS).toEqual([
       {
         language: 'pikchr',
         displayName: 'Pikchr',
@@ -21,10 +21,10 @@ describe('note diagram format registry', () => {
   });
 
   it('recognizes Pikchr fence languages case-insensitively', () => {
-    expect(getNoteDiagramFormat('PIKCHR')?.language).toBe('pikchr');
-    expect(getNoteDiagramFormat('mermaid')).toBeNull();
-    expect(getNoteDiagramFormat('svg')).toBeNull();
-    expect(getNoteDiagramFormat('typescript')).toBeNull();
+    expect(getMarkdownDiagramFormat('PIKCHR')?.language).toBe('pikchr');
+    expect(getMarkdownDiagramFormat('mermaid')).toBeNull();
+    expect(getMarkdownDiagramFormat('svg')).toBeNull();
+    expect(getMarkdownDiagramFormat('typescript')).toBeNull();
   });
 
   it('normalizes the first token from a fence info string', () => {
@@ -32,15 +32,15 @@ describe('note diagram format registry', () => {
     expect(normalizeDiagramFenceLanguage('')).toBeNull();
   });
 
-  it('reports whether a fence language is a known note diagram format', () => {
-    expect(isNoteDiagramFormat('pikchr')).toBe(true);
-    expect(isNoteDiagramFormat('rust')).toBe(false);
+  it('reports whether a fence language is a known markdown diagram format', () => {
+    expect(isMarkdownDiagramFormat('pikchr')).toBe(true);
+    expect(isMarkdownDiagramFormat('rust')).toBe(false);
   });
 });
 
-describe('extractNoteDiagramFences', () => {
+describe('extractMarkdownDiagramFences', () => {
   it('extracts Pikchr fence metadata and source', () => {
-    const diagrams = extractNoteDiagramFences(
+    const diagrams = extractMarkdownDiagramFences(
       [
         '# Note',
         '',
@@ -64,7 +64,7 @@ describe('extractNoteDiagramFences', () => {
   });
 
   it('ignores Mermaid and SVG fences as ordinary code fences', () => {
-    const diagrams = extractNoteDiagramFences(
+    const diagrams = extractMarkdownDiagramFences(
       ['```mermaid', 'flowchart TD', '```', '~~~svg', '<svg></svg>', '~~~'].join('\n')
     );
 
@@ -72,7 +72,7 @@ describe('extractNoteDiagramFences', () => {
   });
 
   it('ignores non-diagram fences while skipping their contents', () => {
-    const diagrams = extractNoteDiagramFences(
+    const diagrams = extractMarkdownDiagramFences(
       ['```ts', 'const sample = "```pikchr";', '```', '```pikchr', 'box "Done" fit', '```'].join(
         '\n'
       )
@@ -82,8 +82,8 @@ describe('extractNoteDiagramFences', () => {
     expect(diagrams[0].source).toBe('box "Done" fit');
   });
 
-  it('handles an unclosed diagram fence through the end of the note', () => {
-    const diagrams = extractNoteDiagramFences(
+  it('handles an unclosed diagram fence through the end of markdown', () => {
+    const diagrams = extractMarkdownDiagramFences(
       ['Before', '```pikchr', 'box "Draft" fit'].join('\n')
     );
 

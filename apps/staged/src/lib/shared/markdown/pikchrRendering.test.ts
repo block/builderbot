@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { loadNotePikchrRenderer, sanitizePikchrSvg } from './pikchrRendering';
+import { loadPikchrRenderer, sanitizePikchrSvg } from './pikchrRendering';
 
 describe('sanitizePikchrSvg', () => {
   it('keeps static Pikchr geometry and path styles', () => {
     const svg = sanitizePikchrSvg(
       [
-        '<svg xmlns="http://www.w3.org/2000/svg" class="note-pikchr-svg" viewBox="0 0 58 34" data-pikchr-date="20260403102956">',
+        '<svg xmlns="http://www.w3.org/2000/svg" class="markdown-pikchr-svg" viewBox="0 0 58 34" data-pikchr-date="20260403102956">',
         '<path d="M2,32L56,32L56,2L2,2Z" style="fill:none;stroke-width:2.16;stroke:rgb(0,0,0);" />',
         '<text x="29" y="17" text-anchor="middle" fill="rgb(0,0,0)" dominant-baseline="central">Start</text>',
         '</svg>',
@@ -92,9 +92,9 @@ describe('sanitizePikchrSvg', () => {
   });
 });
 
-describe('loadNotePikchrRenderer', () => {
+describe('loadPikchrRenderer', () => {
   it('loads the bundled renderer and returns sanitized SVG', async () => {
-    const renderPikchr = await loadNotePikchrRenderer();
+    const renderPikchr = await loadPikchrRenderer();
     const rendered = renderPikchr('box "Start" fit');
 
     expect(rendered.kind).toBe('svg');
@@ -103,7 +103,7 @@ describe('loadNotePikchrRenderer', () => {
     expect(rendered.width).toBeGreaterThan(0);
     expect(rendered.height).toBeGreaterThan(0);
     expect(rendered.svg).toContain('<svg');
-    expect(rendered.svg).toContain('class="note-pikchr-svg"');
+    expect(rendered.svg).toContain('class="markdown-pikchr-svg"');
     expect(rendered.svg).toContain('<path');
     expect(rendered.svg).toContain('Start');
     expect(rendered.svg).not.toContain('<script');
@@ -118,7 +118,7 @@ describe('loadNotePikchrRenderer', () => {
         render: () => ({
           width: 10,
           height: 10,
-          svg: '<svg xmlns="http://www.w3.org/2000/svg" class="note-pikchr-svg" viewBox="0 0 10 10"><path d="M0,0L10,10" /></svg>',
+          svg: '<svg xmlns="http://www.w3.org/2000/svg" class="markdown-pikchr-svg" viewBox="0 0 10 10"><path d="M0,0L10,10" /></svg>',
         }),
       });
 
@@ -126,11 +126,11 @@ describe('loadNotePikchrRenderer', () => {
     vi.doMock('pikchr-js', () => ({ default: loadPikchr }));
 
     try {
-      const { loadNotePikchrRenderer } = await import('./pikchrRendering');
+      const { loadPikchrRenderer } = await import('./pikchrRendering');
 
-      await expect(loadNotePikchrRenderer()).rejects.toThrow('initialization failed');
+      await expect(loadPikchrRenderer()).rejects.toThrow('initialization failed');
 
-      const renderPikchr = await loadNotePikchrRenderer();
+      const renderPikchr = await loadPikchrRenderer();
       const rendered = renderPikchr('box "Retry" fit');
 
       expect(loadPikchr).toHaveBeenCalledTimes(2);

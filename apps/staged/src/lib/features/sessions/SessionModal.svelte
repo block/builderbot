@@ -42,8 +42,6 @@
   import ImagePlus from '@lucide/svelte/icons/image-plus';
   import Plus from '@lucide/svelte/icons/plus';
   import Spinner from '../../shared/Spinner.svelte';
-  import { marked } from 'marked';
-  import { sanitize } from '../../shared/sanitize';
   import { isResumableReason } from '../../types';
   import type { Session, SessionMessage, HashtagItem, ProjectRepo } from '../../types';
   import {
@@ -92,14 +90,15 @@
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
   import { viewport } from '../../shared/viewport.svelte';
+  import '../../shared/markdown/diagramStyles.css';
+  import { extractMarkdownDiagramFences } from '../../shared/markdown/diagramFormats';
+  import { renderMarkdown as renderSharedMarkdown } from '../../shared/markdown/renderMarkdown';
+  import { loadPikchrRenderer, type PikchrRenderer } from '../../shared/markdown/pikchrRendering';
   import {
     buildNoteFollowupMessage,
     getNoteFollowupLabel,
     type LinkedNoteContext,
   } from './noteFreshness';
-
-  // Configure marked
-  marked.setOptions({ breaks: true, gfm: true });
 
   interface Props {
     open: boolean;
@@ -156,6 +155,21 @@
   let isLive = $derived(session?.status === 'running');
   let hasQueuedMessages = $derived(messageQueue.length > 0);
   let noteFollowupLabel = $derived(getNoteFollowupLabel(session, messages, noteInfo));
+  let assistantMarkdownContent = $derived(
+    messages
+      .filter((message) => message.role === 'assistant')
+      .map((message) => message.content)
+      .join('\n\n')
+  );
+  let sessionHasPikchr = $derived(
+    extractMarkdownDiagramFences(assistantMarkdownContent).some(
+      (diagram) => diagram.language === 'pikchr'
+    )
+  );
+  let pikchrRenderer = $state<PikchrRenderer | null>(null);
+  let pikchrRendererLoadKey = $derived(`${sessionId}\0${assistantMarkdownContent}`);
+  let pikchrRendererLoadFailedKey = $state<string | null>(null);
+  let pikchrRendererLoadFailed = $derived(pikchrRendererLoadFailedKey === pikchrRendererLoadKey);
 
   const SLIDE_DURATION = 150;
 
@@ -721,7 +735,7 @@
   }
 
   function renderMarkdown(content: string): string {
-    return sanitize(marked.parse(content) as string);
+    return renderSharedMarkdown(content, { pikchrRenderer });
   }
 
   /** Memoized wrapper around the shared renderHashtagTokens. */
@@ -900,6 +914,30 @@
         performSearch(searchQuery);
       }, 300);
       return () => clearTimeout(timer);
+    }
+  });
+
+  $effect(() => {
+    if (!open || !sessionHasPikchr || pikchrRenderer || pikchrRendererLoadFailed) return;
+
+    const loadKey = pikchrRendererLoadKey;
+    let stale = false;
+    loadPikchrRenderer()
+      .then((renderer) => {
+        if (!stale && pikchrRendererLoadKey === loadKey) pikchrRenderer = renderer;
+      })
+      .catch(() => {
+        if (!stale && pikchrRendererLoadKey === loadKey) pikchrRendererLoadFailedKey = loadKey;
+      });
+
+    return () => {
+      stale = true;
+    };
+  });
+
+  $effect(() => {
+    if (!open) {
+      pikchrRendererLoadFailedKey = null;
     }
   });
 

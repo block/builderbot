@@ -19,9 +19,10 @@
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
   import { viewport } from '../../shared/viewport.svelte';
-  import { extractNoteDiagramFences } from './diagramFormats';
+  import '../../shared/markdown/diagramStyles.css';
+  import { extractMarkdownDiagramFences } from '../../shared/markdown/diagramFormats';
+  import { loadPikchrRenderer, type PikchrRenderer } from '../../shared/markdown/pikchrRendering';
   import { noteMarkdownWithTitle, renderNoteMarkdown } from './noteMarkdown';
-  import { loadNotePikchrRenderer, type NotePikchrRenderer } from './pikchrRendering';
 
   interface Props {
     open: boolean;
@@ -57,10 +58,12 @@
   let showChatInfo = $derived(canOpenSession && assistantMessagesAfterNote > 0);
   let noteMarkdown = $derived(noteMarkdownWithTitle(title, content));
   let noteHasPikchr = $derived(
-    extractNoteDiagramFences(noteMarkdown).some((diagram) => diagram.language === 'pikchr')
+    extractMarkdownDiagramFences(noteMarkdown).some((diagram) => diagram.language === 'pikchr')
   );
-  let pikchrRenderer = $state<NotePikchrRenderer | null>(null);
-  let pikchrRendererLoadFailed = $state(false);
+  let pikchrRenderer = $state<PikchrRenderer | null>(null);
+  let pikchrRendererLoadKey = $derived(noteMarkdown);
+  let pikchrRendererLoadFailedKey = $state<string | null>(null);
+  let pikchrRendererLoadFailed = $derived(pikchrRendererLoadFailedKey === pikchrRendererLoadKey);
   let renderedNoteHtml = $derived(renderNoteMarkdown(noteMarkdown, { pikchrRenderer }));
 
   // Search state
@@ -92,13 +95,14 @@
   $effect(() => {
     if (!open || !noteHasPikchr || pikchrRenderer || pikchrRendererLoadFailed) return;
 
+    const loadKey = pikchrRendererLoadKey;
     let stale = false;
-    loadNotePikchrRenderer()
+    loadPikchrRenderer()
       .then((renderer) => {
-        if (!stale) pikchrRenderer = renderer;
+        if (!stale && pikchrRendererLoadKey === loadKey) pikchrRenderer = renderer;
       })
       .catch(() => {
-        if (!stale) pikchrRendererLoadFailed = true;
+        if (!stale && pikchrRendererLoadKey === loadKey) pikchrRendererLoadFailedKey = loadKey;
       });
 
     return () => {
@@ -107,14 +111,8 @@
   });
 
   $effect(() => {
-    // Keep transient renderer import failures scoped to the note that hit them.
-    noteMarkdown;
-    pikchrRendererLoadFailed = false;
-  });
-
-  $effect(() => {
     if (!open) {
-      pikchrRendererLoadFailed = false;
+      pikchrRendererLoadFailedKey = null;
     }
   });
 
@@ -513,32 +511,6 @@
     background: none;
     padding: 0;
     font-size: 0.85em;
-  }
-
-  .markdown-content :global(.note-diagram) {
-    margin: 0.9em 0;
-    border: 1px solid var(--border-subtle);
-    border-radius: 8px;
-    overflow: hidden;
-    background: var(--bg-primary);
-  }
-
-  .markdown-content :global(.note-diagram-preview) {
-    display: flex;
-    justify-content: center;
-    padding: 16px;
-    background: var(--diagram-canvas-bg);
-    overflow-x: auto;
-  }
-
-  .markdown-content :global(.note-diagram-preview svg) {
-    display: block;
-    max-width: 100%;
-    height: auto;
-  }
-
-  .markdown-content :global(.note-diagram-preview-pikchr .note-pikchr-svg) {
-    overflow: visible;
   }
 
   .markdown-content :global(blockquote) {

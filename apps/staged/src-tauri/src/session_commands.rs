@@ -1032,6 +1032,9 @@ pub struct ProjectSessionResponse {
     pub note_id: String,
 }
 
+const NOTE_STANDALONE_OUTPUT_GUIDANCE: &str =
+    include_str!("../../src/lib/shared/prompts/noteStandaloneGuidance.txt");
+
 const PROJECT_SESSION_TIMELINE_REFERENCE_GUIDANCE: &str = "When referring to existing timeline \
 items in notes or repo-session instructions, use hashtag references in the form #<type>:<id>, \
 for example #note:123, #commit:<sha>, and #review:456. When starting a repo-level session from a \
@@ -3598,18 +3601,13 @@ pub(crate) fn build_full_prompt_with_pikchr_reference(
     pikchr_grammar_reference: &str,
 ) -> String {
     let mut action_instructions = match session_type {
-        BranchSessionType::Note => {
+        BranchSessionType::Note => [
             "The user is requesting a note. Generate a note based on their prompt below.
 
 You may use any tools needed to research and gather information, but do NOT create \
-any commits.
-
-Write the note as a standalone artifact. The original user prompt is not shown \
-when the note is displayed. Do not make the title or opening sentence a direct \
-answer to an implicit question, such as \"Yes, this is broken.\" Instead, name \
-the subject and conclusion clearly enough that the note makes sense by itself.
-
-To return the note, your final response must include the structure shown below. \
+any commits.",
+            NOTE_STANDALONE_OUTPUT_GUIDANCE.trim(),
+            "To return the note, your final response must include the structure shown below. \
 Before the `---` separator, emit a `suggested-next-steps` fenced block that suggests \
 what the user might want to do next. The block must contain a single JSON object with \
 two nullable string fields:
@@ -3644,8 +3642,9 @@ Formatting requirements:
 - Do not wrap the block in any additional code fences.
 - `---` must be on its own line, with a newline immediately before and after it.
 - The note content must start immediately after `---` with a markdown H1 (`# Title`).
-- Do not wrap the note in code fences.".to_string()
-        }
+- Do not wrap the note in code fences.",
+        ]
+        .join("\n\n"),
         BranchSessionType::Commit => {
             "The user is requesting you make a commit based on the prompt below. Make the necessary \
 code changes, following any verification or formatting steps as instructed, and then \
@@ -4621,13 +4620,9 @@ mod tests {
             None,
         );
 
-        assert!(prompt.contains("Write the note as a standalone artifact."));
-        assert!(
-            prompt.contains("The original user prompt is not shown when the note is displayed.")
-        );
-        assert!(prompt.contains("Do not make the title or opening sentence a direct answer"));
-        assert!(prompt.contains("\"Yes, this is broken.\""));
-        assert!(prompt.contains("name the subject and conclusion clearly enough"));
+        let standalone_guidance = NOTE_STANDALONE_OUTPUT_GUIDANCE.trim();
+        assert!(!standalone_guidance.is_empty());
+        assert!(prompt.contains(standalone_guidance));
         assert!(prompt.contains("The opening fence line for suggested-next-steps must be exactly: ```suggested-next-steps"));
     }
 

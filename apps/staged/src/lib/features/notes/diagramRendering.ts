@@ -46,7 +46,6 @@ function withDiagramSourceClass(renderedSource: string, format: NoteDiagramForma
 function renderPikchrPreview(renderedSvg: string): string {
   return [
     '<figure class="note-diagram note-diagram-pikchr">',
-    '<figcaption class="note-diagram-caption">Pikchr</figcaption>',
     '<div class="note-diagram-preview note-diagram-preview-pikchr">',
     renderedSvg,
     '</div>',

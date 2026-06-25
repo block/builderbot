@@ -517,18 +517,6 @@
     background: var(--bg-primary);
   }
 
-  .markdown-content :global(.note-diagram-caption) {
-    display: flex;
-    align-items: center;
-    min-height: 30px;
-    padding: 0 10px;
-    border-bottom: 1px solid var(--border-subtle);
-    color: var(--text-secondary);
-    background: var(--bg-chrome);
-    font-size: var(--size-xs);
-    font-weight: 600;
-  }
-
   .markdown-content :global(.note-diagram-preview) {
     display: flex;
     justify-content: center;

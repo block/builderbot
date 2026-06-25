@@ -57,7 +57,7 @@ describe('renderNoteMarkdown', () => {
     });
 
     expect(html).toContain('<figure class="note-diagram note-diagram-pikchr">');
-    expect(html).toContain('<figcaption class="note-diagram-caption">Pikchr</figcaption>');
+    expect(html).not.toContain('note-diagram-caption');
     expect(html).toContain('<div class="note-diagram-preview note-diagram-preview-pikchr">');
     expect(html).toContain('<svg');
     expect(html).toContain('class="note-pikchr-svg"');

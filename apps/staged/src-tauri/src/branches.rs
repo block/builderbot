@@ -2606,4 +2606,46 @@ mod tests {
             None
         );
     }
+
+    #[test]
+    fn fetch_offline_fallback_allows_worktree_creation_from_existing_origin_ref() {
+        let repo = TempGitRepo::new();
+        repo.write_file("README.md", "hello");
+        repo.commit("initial");
+        repo.run_git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+        let github_repo = "owner/repo";
+        let https_url = format!("https://github.com/{github_repo}.git");
+        let missing_origin = repo.path().join("missing-origin");
+        let missing_url = format!("file://{}", missing_origin.display());
+        repo.run_git(&["remote", "add", "origin", &https_url]);
+        repo.run_git(&[
+            "config",
+            "--add",
+            &format!("url.{missing_url}.insteadOf"),
+            &https_url,
+        ]);
+
+        fetch_for_worktree_with_offline_fallback(
+            repo.path(),
+            github_repo,
+            "feature/offline",
+            "origin/main",
+        )
+        .expect("existing origin/main should allow offline fallback");
+
+        let worktree_parent = tempfile::tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_parent.path().join("feature-offline");
+        let created = create_worktree_with_fallback(
+            repo.path(),
+            "feature/offline",
+            "origin/main",
+            &worktree_path,
+            None,
+        )
+        .expect("worktree should be created from stale origin/main");
+
+        assert_eq!(created, worktree_path);
+        assert!(created.join("README.md").is_file());
+    }
 }

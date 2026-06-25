@@ -2680,6 +2680,18 @@ fn local_repo_subpath_is_dir(github_repo: &str, subpath: &str) -> Result<Option<
     local_subpath_is_dir(&clone_path, subpath).map(Some)
 }
 
+fn validation_result_after_github_error(
+    local_subpath_is_dir: Option<bool>,
+    github_error_msg: &str,
+) -> Option<Result<(), GitError>> {
+    match local_subpath_is_dir {
+        Some(true) => Some(Ok(())),
+        Some(false) => Some(Err(invalid_repo_path_error())),
+        None if is_github_not_found_error(github_error_msg) => Some(Err(invalid_repo_path_error())),
+        None => None,
+    }
+}
+
 fn list_local_directories_at_clone(clone_path: &Path, path: &str) -> Result<Vec<String>, GitError> {
     let target = match normalize_repo_subpath(path)? {
         Some(relative_path) => clone_path.join(relative_path),
@@ -2747,12 +2759,9 @@ pub fn validate_subpath_in_repo(github_repo: &str, subpath: &str) -> Result<(), 
         }
         Err(e) => {
             let msg = e.to_string();
-            if is_github_not_found_error(&msg) {
-                return Err(invalid_repo_path_error());
-            }
-
-            match local_repo_subpath_is_dir(github_repo, &trimmed)? {
-                Some(true) => {
+            let local_result = local_repo_subpath_is_dir(github_repo, &trimmed)?;
+            match validation_result_after_github_error(local_result, &msg) {
+                Some(Ok(())) => {
                     log::warn!(
                         "validated '{}' in '{}' from local clone after GitHub validation failed: {}",
                         trimmed,
@@ -2761,7 +2770,7 @@ pub fn validate_subpath_in_repo(github_repo: &str, subpath: &str) -> Result<(), 
                     );
                     Ok(())
                 }
-                Some(false) => Err(invalid_repo_path_error()),
+                Some(Err(err)) => Err(err),
                 None => Err(e),
             }
         }
@@ -2809,10 +2818,6 @@ pub fn list_repo_directories(github_repo: &str, path: &str) -> Result<Vec<String
         }
         Err(e) => {
             let msg = e.to_string();
-            if is_github_not_found_error(&msg) {
-                return Ok(vec![]);
-            }
-
             match list_local_repo_directories(github_repo, &trimmed)? {
                 Some(dirs) => {
                     log::warn!(
@@ -2823,6 +2828,7 @@ pub fn list_repo_directories(github_repo: &str, path: &str) -> Result<Vec<String
                     );
                     Ok(dirs)
                 }
+                None if is_github_not_found_error(&msg) => Ok(vec![]),
                 None => Err(e),
             }
         }
@@ -2969,6 +2975,15 @@ mod tests {
         assert_eq!(
             list_local_directories_at_clone(temp.path(), "packages").unwrap(),
             vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_validation_result_after_github_404_prefers_existing_local_dir() {
+        assert!(
+            validation_result_after_github_error(Some(true), "HTTP 404 Not Found")
+                .expect("local fallback should decide validation")
+                .is_ok()
         );
     }
 

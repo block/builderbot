@@ -32,13 +32,13 @@ use crate::session_runner::{self, SessionConfig};
 use crate::store::{self, Store};
 
 const PIKCHR_GRAMMAR_RESOURCE: &str = "resources/pikchr/grammar.md";
-const PIKCHR_GRAMMAR_REMOTE_PATH: &str = "/tmp/staged-pikchr-grammar.md";
+const PIKCHR_GRAMMAR_REMOTE_PATH_PREFIX: &str = "/tmp/staged-pikchr-grammar-";
+const PIKCHR_GRAMMAR_REMOTE_PATH_SUFFIX: &str = ".md";
 pub(crate) const PIKCHR_GRAMMAR_URL: &str = "https://pikchr.org/home/doc/trunk/doc/grammar.md";
 
 enum RemotePikchrGrammarStaging {
     NotNeeded,
-    UseRemotePath,
-    Upload(Vec<u8>),
+    Upload { bytes: Vec<u8>, remote_path: String },
     FallbackUrl,
 }
 
@@ -97,25 +97,6 @@ fn bundled_pikchr_grammar_path(app_handle: &tauri::AppHandle) -> Option<PathBuf>
     None
 }
 
-fn pikchr_grammar_remote_uploads() -> &'static Mutex<HashSet<String>> {
-    static UPLOADS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    UPLOADS.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
-fn has_uploaded_pikchr_grammar(workspace_name: &str) -> bool {
-    pikchr_grammar_remote_uploads()
-        .lock()
-        .unwrap()
-        .contains(workspace_name)
-}
-
-fn mark_pikchr_grammar_uploaded(workspace_name: &str) {
-    pikchr_grammar_remote_uploads()
-        .lock()
-        .unwrap()
-        .insert(workspace_name.to_string());
-}
-
 fn bundled_pikchr_grammar_bytes(app_handle: &tauri::AppHandle) -> Option<Vec<u8>> {
     let Some(grammar_path) = bundled_pikchr_grammar_path(app_handle) else {
         log::warn!("Bundled Pikchr grammar resource not found; falling back to public URL");
@@ -134,21 +115,26 @@ fn bundled_pikchr_grammar_bytes(app_handle: &tauri::AppHandle) -> Option<Vec<u8>
     }
 }
 
+fn generated_pikchr_grammar_remote_path() -> String {
+    format!(
+        "{PIKCHR_GRAMMAR_REMOTE_PATH_PREFIX}{}{PIKCHR_GRAMMAR_REMOTE_PATH_SUFFIX}",
+        uuid::Uuid::new_v4()
+    )
+}
+
 fn remote_pikchr_grammar_staging(
     app_handle: &tauri::AppHandle,
-    workspace_name: &str,
     session_type: &BranchSessionType,
 ) -> RemotePikchrGrammarStaging {
     if !matches!(session_type, BranchSessionType::Note) {
         return RemotePikchrGrammarStaging::NotNeeded;
     }
 
-    if has_uploaded_pikchr_grammar(workspace_name) {
-        return RemotePikchrGrammarStaging::UseRemotePath;
-    }
-
     match bundled_pikchr_grammar_bytes(app_handle) {
-        Some(bytes) => RemotePikchrGrammarStaging::Upload(bytes),
+        Some(bytes) => RemotePikchrGrammarStaging::Upload {
+            bytes,
+            remote_path: generated_pikchr_grammar_remote_path(),
+        },
         None => RemotePikchrGrammarStaging::FallbackUrl,
     }
 }
@@ -164,16 +150,17 @@ fn local_pikchr_grammar_reference_for_session(
     }
 }
 
-fn upload_pikchr_grammar_to_remote(workspace_name: &str, bytes: &[u8]) -> String {
-    if has_uploaded_pikchr_grammar(workspace_name) {
-        return PIKCHR_GRAMMAR_REMOTE_PATH.to_string();
-    }
-
-    match write_bytes_to_remote(workspace_name, bytes, PIKCHR_GRAMMAR_REMOTE_PATH) {
-        Ok(()) => {
-            mark_pikchr_grammar_uploaded(workspace_name);
-            PIKCHR_GRAMMAR_REMOTE_PATH.to_string()
-        }
+fn upload_pikchr_grammar_to_remote_with_writer<F>(
+    workspace_name: &str,
+    bytes: &[u8],
+    remote_path: String,
+    write: F,
+) -> String
+where
+    F: FnOnce(&str, &[u8], &str) -> Result<(), String>,
+{
+    match write(workspace_name, bytes, &remote_path) {
+        Ok(()) => remote_path,
         Err(e) => {
             log::warn!("Failed to copy Pikchr grammar to remote workspace {workspace_name}: {e}");
             PIKCHR_GRAMMAR_URL.to_string()
@@ -181,16 +168,23 @@ fn upload_pikchr_grammar_to_remote(workspace_name: &str, bytes: &[u8]) -> String
     }
 }
 
+fn upload_pikchr_grammar_to_remote(
+    workspace_name: &str,
+    bytes: &[u8],
+    remote_path: String,
+) -> String {
+    upload_pikchr_grammar_to_remote_with_writer(
+        workspace_name,
+        bytes,
+        remote_path,
+        write_bytes_to_remote,
+    )
+}
+
 pub(crate) fn resolve_pikchr_grammar_reference(
     app_handle: &tauri::AppHandle,
     workspace_name: Option<&str>,
 ) -> String {
-    if let Some(workspace_name) = workspace_name {
-        if has_uploaded_pikchr_grammar(workspace_name) {
-            return PIKCHR_GRAMMAR_REMOTE_PATH.to_string();
-        }
-    }
-
     let Some(grammar_path) = bundled_pikchr_grammar_path(app_handle) else {
         log::warn!("Bundled Pikchr grammar resource not found; falling back to public URL");
         return PIKCHR_GRAMMAR_URL.to_string();
@@ -198,7 +192,11 @@ pub(crate) fn resolve_pikchr_grammar_reference(
 
     if let Some(workspace_name) = workspace_name {
         return match std::fs::read(&grammar_path) {
-            Ok(bytes) => upload_pikchr_grammar_to_remote(workspace_name, &bytes),
+            Ok(bytes) => upload_pikchr_grammar_to_remote(
+                workspace_name,
+                &bytes,
+                generated_pikchr_grammar_remote_path(),
+            ),
             Err(e) => {
                 log::warn!(
                     "Failed to read bundled Pikchr grammar at {}: {e}",
@@ -1272,8 +1270,7 @@ async fn prepare_branch_session_start(
             .and_then(|repo| crate::paths::repos_dir().map(|d| d.join(repo)))
             .unwrap_or_else(|| PathBuf::from("/tmp"));
         let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
-        let pikchr_grammar_staging =
-            remote_pikchr_grammar_staging(app_handle, &workspace_name, &session_type);
+        let pikchr_grammar_staging = remote_pikchr_grammar_staging(app_handle, &session_type);
         let base_branch = branch.base_branch.clone();
         let store_for_context = Arc::clone(store);
         let branch_id_for_context = branch_id.to_string();
@@ -1891,8 +1888,7 @@ async fn start_queued_session_for_branch(
             .and_then(|repo| crate::paths::repos_dir().map(|d| d.join(repo)))
             .unwrap_or_else(|| PathBuf::from("/tmp"));
         let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
-        let pikchr_grammar_staging =
-            remote_pikchr_grammar_staging(&app_handle, &workspace_name, &session_type);
+        let pikchr_grammar_staging = remote_pikchr_grammar_staging(&app_handle, &session_type);
         let base_branch = branch.base_branch.clone();
         let store_for_context = Arc::clone(&store);
         let branch_id_for_context = branch_id.clone();
@@ -2602,12 +2598,7 @@ fn build_remote_branch_context(
     // Notes, reviews, images, project notes, and optional Pikchr grammar are
     // written to remote temp files in parallel to reduce ws_exec round trips.
     let max_commit_ts = timeline.iter().map(|e| e.timestamp).max();
-    let mut pikchr_grammar_reference = match &pikchr_grammar_staging {
-        RemotePikchrGrammarStaging::UseRemotePath => PIKCHR_GRAMMAR_REMOTE_PATH.to_string(),
-        RemotePikchrGrammarStaging::NotNeeded
-        | RemotePikchrGrammarStaging::Upload(_)
-        | RemotePikchrGrammarStaging::FallbackUrl => PIKCHR_GRAMMAR_URL.to_string(),
-    };
+    let mut pikchr_grammar_reference = PIKCHR_GRAMMAR_URL.to_string();
 
     std::thread::scope(|s| {
         let note_handle = s.spawn(|| note_timeline_entries(store, branch_id, Some(workspace_name)));
@@ -2625,15 +2616,15 @@ fn build_remote_branch_context(
             s.spawn(|| image_timeline_entries(store, branch_id, Some(workspace_name), project_id));
         let project_note_handle =
             s.spawn(|| project_note_timeline_entries(store, project_id, Some(workspace_name)));
-        let pikchr_grammar_handle =
-            match &pikchr_grammar_staging {
-                RemotePikchrGrammarStaging::Upload(bytes) => Some(s.spawn(move || {
-                    upload_pikchr_grammar_to_remote(workspace_name, bytes.as_slice())
-                })),
-                RemotePikchrGrammarStaging::NotNeeded
-                | RemotePikchrGrammarStaging::UseRemotePath
-                | RemotePikchrGrammarStaging::FallbackUrl => None,
-            };
+        let pikchr_grammar_handle = match &pikchr_grammar_staging {
+            RemotePikchrGrammarStaging::Upload { bytes, remote_path } => {
+                let remote_path = remote_path.clone();
+                Some(s.spawn(move || {
+                    upload_pikchr_grammar_to_remote(workspace_name, bytes.as_slice(), remote_path)
+                }))
+            }
+            RemotePikchrGrammarStaging::NotNeeded | RemotePikchrGrammarStaging::FallbackUrl => None,
+        };
 
         match note_handle.join() {
             Ok(entries) => timeline.extend(entries),
@@ -4460,6 +4451,55 @@ mod tests {
     }
 
     #[test]
+    fn generated_remote_pikchr_grammar_paths_are_unique_temp_markdown_files() {
+        let first = generated_pikchr_grammar_remote_path();
+        let second = generated_pikchr_grammar_remote_path();
+
+        assert_ne!(first, second);
+        for path in [first, second] {
+            assert!(path.starts_with(PIKCHR_GRAMMAR_REMOTE_PATH_PREFIX));
+            assert!(path.ends_with(PIKCHR_GRAMMAR_REMOTE_PATH_SUFFIX));
+
+            let uuid_part = path
+                .strip_prefix(PIKCHR_GRAMMAR_REMOTE_PATH_PREFIX)
+                .and_then(|path| path.strip_suffix(PIKCHR_GRAMMAR_REMOTE_PATH_SUFFIX))
+                .expect("generated path should contain a UUID between prefix and suffix");
+            uuid::Uuid::parse_str(uuid_part).expect("generated path should include a UUID");
+        }
+    }
+
+    #[test]
+    fn successful_remote_pikchr_grammar_upload_returns_generated_path() {
+        let expected_path = generated_pikchr_grammar_remote_path();
+        let returned_path = upload_pikchr_grammar_to_remote_with_writer(
+            "test-workspace",
+            b"grammar bytes",
+            expected_path.clone(),
+            |workspace_name, bytes, remote_path| {
+                assert_eq!(workspace_name, "test-workspace");
+                assert_eq!(bytes, b"grammar bytes");
+                assert_eq!(remote_path, expected_path);
+                Ok(())
+            },
+        );
+
+        assert_eq!(returned_path, expected_path);
+    }
+
+    #[test]
+    fn failed_remote_pikchr_grammar_upload_falls_back_to_public_url() {
+        let generated_path = generated_pikchr_grammar_remote_path();
+        let returned_path = upload_pikchr_grammar_to_remote_with_writer(
+            "test-workspace",
+            b"grammar bytes",
+            generated_path,
+            |_workspace_name, _bytes, _remote_path| Err("remote unavailable".to_string()),
+        );
+
+        assert_eq!(returned_path, PIKCHR_GRAMMAR_URL);
+    }
+
+    #[test]
     fn local_project_session_prompt_includes_timeline_reference_guidance() {
         let prompt = build_project_session_action_instructions_with_pikchr_reference(
             false,
@@ -4525,12 +4565,12 @@ mod tests {
 
     #[test]
     fn note_followup_prompt_uses_supplied_remote_pikchr_reference() {
-        let prompt =
-            build_note_followup_message_with_pikchr_reference(false, PIKCHR_GRAMMAR_REMOTE_PATH);
+        let remote_path = generated_pikchr_grammar_remote_path();
+        let prompt = build_note_followup_message_with_pikchr_reference(false, &remote_path);
 
         assert!(prompt.contains("The user is asking you to write the linked note"));
         assert!(prompt.contains("Please write the note for this session."));
-        assert_pikchr_note_guidance(&prompt, PIKCHR_GRAMMAR_REMOTE_PATH);
+        assert_pikchr_note_guidance(&prompt, &remote_path);
     }
 
     #[test]

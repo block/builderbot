@@ -35,6 +35,13 @@ const PIKCHR_GRAMMAR_RESOURCE: &str = "resources/pikchr/grammar.md";
 const PIKCHR_GRAMMAR_REMOTE_PATH: &str = "/tmp/staged-pikchr-grammar.md";
 pub(crate) const PIKCHR_GRAMMAR_URL: &str = "https://pikchr.org/home/doc/trunk/doc/grammar.md";
 
+enum RemotePikchrGrammarStaging {
+    NotNeeded,
+    UseRemotePath,
+    Upload(Vec<u8>),
+    FallbackUrl,
+}
+
 // =============================================================================
 // Helper — duplicated from lib.rs to avoid circular deps. If this grows,
 // consider extracting a shared `state.rs`.
@@ -90,34 +97,116 @@ fn bundled_pikchr_grammar_path(app_handle: &tauri::AppHandle) -> Option<PathBuf>
     None
 }
 
+fn pikchr_grammar_remote_uploads() -> &'static Mutex<HashSet<String>> {
+    static UPLOADS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    UPLOADS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn has_uploaded_pikchr_grammar(workspace_name: &str) -> bool {
+    pikchr_grammar_remote_uploads()
+        .lock()
+        .unwrap()
+        .contains(workspace_name)
+}
+
+fn mark_pikchr_grammar_uploaded(workspace_name: &str) {
+    pikchr_grammar_remote_uploads()
+        .lock()
+        .unwrap()
+        .insert(workspace_name.to_string());
+}
+
+fn bundled_pikchr_grammar_bytes(app_handle: &tauri::AppHandle) -> Option<Vec<u8>> {
+    let Some(grammar_path) = bundled_pikchr_grammar_path(app_handle) else {
+        log::warn!("Bundled Pikchr grammar resource not found; falling back to public URL");
+        return None;
+    };
+
+    match std::fs::read(&grammar_path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) => {
+            log::warn!(
+                "Failed to read bundled Pikchr grammar at {}: {e}",
+                grammar_path.display()
+            );
+            None
+        }
+    }
+}
+
+fn remote_pikchr_grammar_staging(
+    app_handle: &tauri::AppHandle,
+    workspace_name: &str,
+    session_type: &BranchSessionType,
+) -> RemotePikchrGrammarStaging {
+    if !matches!(session_type, BranchSessionType::Note) {
+        return RemotePikchrGrammarStaging::NotNeeded;
+    }
+
+    if has_uploaded_pikchr_grammar(workspace_name) {
+        return RemotePikchrGrammarStaging::UseRemotePath;
+    }
+
+    match bundled_pikchr_grammar_bytes(app_handle) {
+        Some(bytes) => RemotePikchrGrammarStaging::Upload(bytes),
+        None => RemotePikchrGrammarStaging::FallbackUrl,
+    }
+}
+
+fn local_pikchr_grammar_reference_for_session(
+    app_handle: &tauri::AppHandle,
+    session_type: &BranchSessionType,
+) -> String {
+    if matches!(session_type, BranchSessionType::Note) {
+        resolve_pikchr_grammar_reference(app_handle, None)
+    } else {
+        PIKCHR_GRAMMAR_URL.to_string()
+    }
+}
+
+fn upload_pikchr_grammar_to_remote(workspace_name: &str, bytes: &[u8]) -> String {
+    if has_uploaded_pikchr_grammar(workspace_name) {
+        return PIKCHR_GRAMMAR_REMOTE_PATH.to_string();
+    }
+
+    match write_bytes_to_remote(workspace_name, bytes, PIKCHR_GRAMMAR_REMOTE_PATH) {
+        Ok(()) => {
+            mark_pikchr_grammar_uploaded(workspace_name);
+            PIKCHR_GRAMMAR_REMOTE_PATH.to_string()
+        }
+        Err(e) => {
+            log::warn!("Failed to copy Pikchr grammar to remote workspace {workspace_name}: {e}");
+            PIKCHR_GRAMMAR_URL.to_string()
+        }
+    }
+}
+
 pub(crate) fn resolve_pikchr_grammar_reference(
     app_handle: &tauri::AppHandle,
     workspace_name: Option<&str>,
 ) -> String {
+    if let Some(workspace_name) = workspace_name {
+        if has_uploaded_pikchr_grammar(workspace_name) {
+            return PIKCHR_GRAMMAR_REMOTE_PATH.to_string();
+        }
+    }
+
     let Some(grammar_path) = bundled_pikchr_grammar_path(app_handle) else {
         log::warn!("Bundled Pikchr grammar resource not found; falling back to public URL");
         return PIKCHR_GRAMMAR_URL.to_string();
     };
 
     if let Some(workspace_name) = workspace_name {
-        match std::fs::read(&grammar_path) {
-            Ok(bytes) => {
-                match write_bytes_to_remote(workspace_name, &bytes, PIKCHR_GRAMMAR_REMOTE_PATH) {
-                    Ok(()) => return PIKCHR_GRAMMAR_REMOTE_PATH.to_string(),
-                    Err(e) => log::warn!(
-                        "Failed to copy Pikchr grammar to remote workspace {workspace_name}: {e}"
-                    ),
-                }
-            }
+        return match std::fs::read(&grammar_path) {
+            Ok(bytes) => upload_pikchr_grammar_to_remote(workspace_name, &bytes),
             Err(e) => {
                 log::warn!(
                     "Failed to read bundled Pikchr grammar at {}: {e}",
                     grammar_path.display()
                 );
+                PIKCHR_GRAMMAR_URL.to_string()
             }
-        }
-
-        return PIKCHR_GRAMMAR_URL.to_string();
+        };
     }
 
     grammar_path.to_string_lossy().into_owned()
@@ -1176,29 +1265,36 @@ async fn prepare_branch_session_start(
 
     // Resolve working directory and branch context.
     // Remote branches use ws_exec for git operations; local branches use the worktree directly.
-    let (working_dir, branch_context) = if is_remote {
+    let (working_dir, branch_context, pikchr_grammar_reference) = if is_remote {
         // For remote branches, use the derived clone path as a fallback working dir.
         // The actual work happens via ws_exec, not local filesystem.
         let fallback_dir = resolve_branch_repo_slug(store, &project, &branch)
             .and_then(|repo| crate::paths::repos_dir().map(|d| d.join(repo)))
             .unwrap_or_else(|| PathBuf::from("/tmp"));
         let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
+        let pikchr_grammar_staging =
+            remote_pikchr_grammar_staging(app_handle, &workspace_name, &session_type);
         let base_branch = branch.base_branch.clone();
         let store_for_context = Arc::clone(store);
         let branch_id_for_context = branch_id.to_string();
         let project_id_for_context = branch.project_id.clone();
-        let ctx = tauri::async_runtime::spawn_blocking(move || {
+        let remote_context = tauri::async_runtime::spawn_blocking(move || {
             build_remote_branch_context(
                 &workspace_name,
                 &base_branch,
                 &store_for_context,
                 &branch_id_for_context,
                 &project_id_for_context,
+                pikchr_grammar_staging,
             )
         })
         .await
         .map_err(|e| format!("Failed to build remote branch context: {e}"))?;
-        (fallback_dir, ctx)
+        (
+            fallback_dir,
+            remote_context.branch_context,
+            remote_context.pikchr_grammar_reference,
+        )
     } else {
         let workdir = store
             .get_workdir_for_branch(branch_id)
@@ -1229,7 +1325,9 @@ async fn prepare_branch_session_start(
             branch_id,
             &branch.project_id,
         );
-        (worktree_path, ctx)
+        let pikchr_grammar_reference =
+            local_pikchr_grammar_reference_for_session(app_handle, &session_type);
+        (worktree_path, ctx, pikchr_grammar_reference)
     };
 
     let pre_head_sha = if matches!(session_type, BranchSessionType::Commit) {
@@ -1273,8 +1371,6 @@ async fn prepare_branch_session_start(
 
     // Build the full prompt with action instructions + project information + branch context.
     let project_information = build_project_context(store, &project, &branch);
-    let pikchr_grammar_reference =
-        resolve_pikchr_grammar_reference(app_handle, branch.workspace_name.as_deref());
     let full_prompt = build_full_prompt_with_pikchr_reference(
         prompt,
         &project_information,
@@ -1790,27 +1886,34 @@ async fn start_queued_session_for_branch(
     };
 
     // Resolve working directory and branch context.
-    let (working_dir, branch_context) = if is_remote {
+    let (working_dir, branch_context, pikchr_grammar_reference) = if is_remote {
         let fallback_dir = resolve_branch_repo_slug(&store, &project, &branch)
             .and_then(|repo| crate::paths::repos_dir().map(|d| d.join(repo)))
             .unwrap_or_else(|| PathBuf::from("/tmp"));
         let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
+        let pikchr_grammar_staging =
+            remote_pikchr_grammar_staging(&app_handle, &workspace_name, &session_type);
         let base_branch = branch.base_branch.clone();
         let store_for_context = Arc::clone(&store);
         let branch_id_for_context = branch_id.clone();
         let project_id_for_context = branch.project_id.clone();
-        let ctx = tauri::async_runtime::spawn_blocking(move || {
+        let remote_context = tauri::async_runtime::spawn_blocking(move || {
             build_remote_branch_context(
                 &workspace_name,
                 &base_branch,
                 &store_for_context,
                 &branch_id_for_context,
                 &project_id_for_context,
+                pikchr_grammar_staging,
             )
         })
         .await
         .map_err(|e| format!("Failed to build remote branch context: {e}"))?;
-        (fallback_dir, ctx)
+        (
+            fallback_dir,
+            remote_context.branch_context,
+            remote_context.pikchr_grammar_reference,
+        )
     } else {
         let workdir = store
             .get_workdir_for_branch(&branch_id)
@@ -1838,13 +1941,13 @@ async fn start_queued_session_for_branch(
             &branch_id,
             &branch.project_id,
         );
-        (worktree_path, ctx)
+        let pikchr_grammar_reference =
+            local_pikchr_grammar_reference_for_session(&app_handle, &session_type);
+        (worktree_path, ctx, pikchr_grammar_reference)
     };
 
     // Build the full prompt with context.
     let project_information = build_project_context(&store, &project, &branch);
-    let pikchr_grammar_reference =
-        resolve_pikchr_grammar_reference(&app_handle, branch.workspace_name.as_deref());
     let full_prompt = build_full_prompt_with_pikchr_reference(
         &prompt,
         &project_information,
@@ -2138,18 +2241,19 @@ pub async fn trigger_auto_review(
         let store_for_context = Arc::clone(&store);
         let branch_id_for_context = branch_id.clone();
         let project_id_for_context = branch.project_id.clone();
-        let ctx = tauri::async_runtime::spawn_blocking(move || {
+        let remote_context = tauri::async_runtime::spawn_blocking(move || {
             build_remote_branch_context(
                 &workspace_name,
                 &base_branch,
                 &store_for_context,
                 &branch_id_for_context,
                 &project_id_for_context,
+                RemotePikchrGrammarStaging::NotNeeded,
             )
         })
         .await
         .map_err(|e| format!("Failed to build remote branch context: {e}"))?;
-        (fallback_dir, ctx)
+        (fallback_dir, remote_context.branch_context)
     } else {
         let workdir = store
             .get_workdir_for_branch(&branch_id)
@@ -2445,13 +2549,19 @@ pub(crate) fn build_branch_context(
 ///
 /// Uses `blox ws_exec` to run git commands inside the remote workspace,
 /// and reads notes from the DB (which works regardless of worktree location).
-pub(crate) fn build_remote_branch_context(
+struct RemoteBranchContext {
+    branch_context: String,
+    pikchr_grammar_reference: String,
+}
+
+fn build_remote_branch_context(
     workspace_name: &str,
     base_branch: &str,
     store: &Arc<Store>,
     branch_id: &str,
     project_id: &str,
-) -> String {
+    pikchr_grammar_staging: RemotePikchrGrammarStaging,
+) -> RemoteBranchContext {
     let mut parts = vec![context_preamble()];
     let mut timeline: Vec<TimelineEntry> = Vec::new();
     let mut visible_shas: HashSet<String> = HashSet::new();
@@ -2489,9 +2599,16 @@ pub(crate) fn build_remote_branch_context(
         }
     }
 
-    // Notes, reviews, images, and project notes written to temp files inside
-    // the remote workspace via ws_exec — run in parallel to reduce round trips.
+    // Notes, reviews, images, project notes, and optional Pikchr grammar are
+    // written to remote temp files in parallel to reduce ws_exec round trips.
     let max_commit_ts = timeline.iter().map(|e| e.timestamp).max();
+    let mut pikchr_grammar_reference = match &pikchr_grammar_staging {
+        RemotePikchrGrammarStaging::UseRemotePath => PIKCHR_GRAMMAR_REMOTE_PATH.to_string(),
+        RemotePikchrGrammarStaging::NotNeeded
+        | RemotePikchrGrammarStaging::Upload(_)
+        | RemotePikchrGrammarStaging::FallbackUrl => PIKCHR_GRAMMAR_URL.to_string(),
+    };
+
     std::thread::scope(|s| {
         let note_handle = s.spawn(|| note_timeline_entries(store, branch_id, Some(workspace_name)));
         let visible_shas = &visible_shas;
@@ -2508,6 +2625,15 @@ pub(crate) fn build_remote_branch_context(
             s.spawn(|| image_timeline_entries(store, branch_id, Some(workspace_name), project_id));
         let project_note_handle =
             s.spawn(|| project_note_timeline_entries(store, project_id, Some(workspace_name)));
+        let pikchr_grammar_handle =
+            match &pikchr_grammar_staging {
+                RemotePikchrGrammarStaging::Upload(bytes) => Some(s.spawn(move || {
+                    upload_pikchr_grammar_to_remote(workspace_name, bytes.as_slice())
+                })),
+                RemotePikchrGrammarStaging::NotNeeded
+                | RemotePikchrGrammarStaging::UseRemotePath
+                | RemotePikchrGrammarStaging::FallbackUrl => None,
+            };
 
         match note_handle.join() {
             Ok(entries) => timeline.extend(entries),
@@ -2525,10 +2651,19 @@ pub(crate) fn build_remote_branch_context(
             Ok(entries) => timeline.extend(entries),
             Err(_) => log::error!("project_note_timeline_entries thread panicked"),
         }
+        if let Some(handle) = pikchr_grammar_handle {
+            match handle.join() {
+                Ok(reference) => pikchr_grammar_reference = reference,
+                Err(_) => log::error!("Pikchr grammar upload thread panicked"),
+            }
+        }
     });
 
     parts.push(render_timeline(timeline, None));
-    parts.join("\n\n")
+    RemoteBranchContext {
+        branch_context: parts.join("\n\n"),
+        pikchr_grammar_reference,
+    }
 }
 
 /// Shared preamble for branch context blocks.

@@ -56,6 +56,7 @@
   import { onBranchActionStatus, onBranchRunPhaseChanged } from '../../services/branchEventService';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import { Button } from '$lib/components/ui/button';
+  import RenameBranchDialog from './RenameBranchDialog.svelte';
 
   type MenuIconComponent = typeof MoreVertical;
   type ActionMenuItem = {
@@ -85,7 +86,7 @@
     isSettingUp: boolean;
     remoteWorkspaceStatus: string | null;
     onDelete?: () => void;
-    onRename?: (branchName: string) => void;
+    onRename?: (branchName: string) => void | Promise<void>;
     onNoteCreated?: () => void;
     onRebaseBranch?: () => void;
     onSquashCommits?: () => void;
@@ -202,6 +203,7 @@
     actionName: string;
     isStopping: boolean;
   } | null>(null);
+  let renameDialogOpen = $state(false);
   let stoppingExecutions = $state<Set<string>>(new Set());
 
   // Run phase tracking for run actions (building, running, endpoint detection)
@@ -477,11 +479,7 @@
   }
 
   function handleRenameFromMenu() {
-    const next = window.prompt('Rename branch', branch.branchName);
-    if (!next) return;
-    const trimmed = next.trim();
-    if (!trimmed || trimmed === branch.branchName) return;
-    onRename?.(trimmed);
+    renameDialogOpen = true;
   }
 
   function getActionIcon(actionType: string) {
@@ -940,6 +938,8 @@
     </DropdownMenu.Item>
   </DropdownMenu.Content>
 </DropdownMenu.Root>
+
+<RenameBranchDialog bind:open={renameDialogOpen} branchName={branch.branchName} {onRename} />
 
 <ActionOutputModal
   open={actionOutputModal !== null}

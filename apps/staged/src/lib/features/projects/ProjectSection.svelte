@@ -44,7 +44,7 @@
     worktreeErrors?: Map<string, string>;
     workspaceErrors?: Map<string, string>;
     onDeleteBranch?: (branchId: string) => void;
-    onRenameBranch?: (branchId: string, branchName: string) => void;
+    onRenameBranch?: (branchId: string, branchName: string) => void | Promise<void>;
     onProjectTitleElement?: (element: HTMLHeadingElement | null) => void;
     onRepoSelected?: (selection: RepoPickerSelection) => void | Promise<void>;
     onRetryWorktree?: (branchId: string) => void;

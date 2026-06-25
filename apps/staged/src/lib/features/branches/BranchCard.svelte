@@ -95,7 +95,7 @@
     worktreeError?: string;
     workspaceError?: string;
     onDelete?: () => void;
-    onRename?: (branchName: string) => void;
+    onRename?: (branchName: string) => void | Promise<void>;
     onRetryWorktree?: () => void;
   }
 

@@ -148,6 +148,11 @@
     canScrollX: (side: 'before' | 'after') => boolean;
   };
 
+  type DiffViewerComponentHandle = {
+    flushCommentEditors: () => Promise<boolean>;
+    flushAndClearCommentEditors: () => Promise<boolean>;
+  };
+
   type MobileDiffGestureMode = 'pending' | 'vertical-scroll' | 'horizontal-scroll' | 'pane-drag';
 
   // Create review state once we have a resolved commitSha (skip in readonly mode).
@@ -205,6 +210,7 @@
 
     // No-op if already on this context
     if (newScope === activeScope && newCommitSha === activeCommitSha) return;
+    if (!(await flushActiveCommentEditors())) return;
 
     const thisGeneration = ++contextSwitchGeneration;
     switchingContext = true;
@@ -280,7 +286,7 @@
     dropdownFocusIndex = -1;
   }
 
-  function handleDropdownKeydown(event: KeyboardEvent) {
+  async function handleDropdownKeydown(event: KeyboardEvent) {
     if (!showContextDropdown) return;
 
     if (event.key === 'ArrowDown') {
@@ -293,10 +299,10 @@
       event.preventDefault();
       const commitCount = reversedCommits.length;
       if (dropdownFocusIndex === commitCount) {
-        switchDiffContext('branch');
+        await switchDiffContext('branch');
       } else if (dropdownFocusIndex >= 0 && dropdownFocusIndex < commitCount) {
         const commit = reversedCommits[dropdownFocusIndex];
-        if (commit) switchDiffContext('commit', commit.sha);
+        if (commit) await switchDiffContext('commit', commit.sha);
       }
     } else if (event.key === 'Escape') {
       // Let the main keydown handler close the dropdown
@@ -336,11 +342,29 @@
   let mobileDiffMarkdownScrollEl: HTMLElement | null = null;
   let mobileDiffLastY = 0;
   let diffViewerScrollApi: DiffViewerScrollApi | null = $state(null);
+  let diffViewerComponent: DiffViewerComponentHandle | null = $state(null);
   let mobileDiffStyle = $derived(
     `--mobile-diff-drag-x: ${mobileDiffDragX}px;` +
       `--mobile-diff-rest-offset: ${MOBILE_DIFF_REST_OFFSET}px;` +
       `--mobile-diff-edge-peek: ${MOBILE_DIFF_EDGE_PEEK}px;`
   );
+
+  async function flushActiveCommentEditors(): Promise<boolean> {
+    return (await diffViewerComponent?.flushAndClearCommentEditors()) ?? true;
+  }
+
+  function flushCommentEditorsOnDestroy() {
+    void diffViewerComponent?.flushCommentEditors();
+  }
+
+  async function closeDiffModal() {
+    if (!(await flushActiveCommentEditors())) return;
+    onClose();
+  }
+
+  async function prepareCommitSessionStart(): Promise<boolean> {
+    return await flushActiveCommentEditors();
+  }
 
   // (No confirmation dialogs — soft delete is reversible)
 
@@ -412,6 +436,7 @@
   }
 
   onDestroy(() => {
+    flushCommentEditorsOnDestroy();
     stopAutoReviewPolling();
   });
 
@@ -918,12 +943,28 @@
     getFiles: () => diffViewer.state.files,
   });
 
-  function selectFile(file: FileEntry) {
+  async function selectFilePath(path: string): Promise<boolean> {
+    if (!(await flushActiveCommentEditors())) return false;
+    selectedCommentId = null;
+    if (isSmallDiffViewport) showMobileSidebar = false;
+    await diffViewer.selectFile(path);
+    return true;
+  }
+
+  async function selectFile(file: FileEntry): Promise<boolean> {
+    if (!(await flushActiveCommentEditors())) return false;
     selectedCommentId = null;
     if (isSmallDiffViewport) showMobileSidebar = false;
     handleSearchOnFileSelect(file.path);
-    diffViewer.selectFile(file.path);
+    await diffViewer.selectFile(file.path);
+    return true;
   }
+
+  let diffViewerForFileTree = $derived({
+    state: diffViewer.state,
+    getCurrentDiff: () => diffViewer.getCurrentDiff(),
+    selectFile: selectFilePath,
+  });
 
   async function toggleReviewed(event: MouseEvent | KeyboardEvent, file: FileEntry) {
     event.stopPropagation();
@@ -1002,6 +1043,7 @@
   }
 
   async function handleSelectComment(comment: Comment) {
+    if (!(await flushActiveCommentEditors())) return;
     selectedCommentId = comment.id;
     if (isSmallDiffViewport) showMobileSidebar = false;
     const resolvedPath = resolveCommentPath(comment.path);
@@ -1028,8 +1070,12 @@
   // Comment callbacks (wired to review state)
   // ==========================================================================
 
-  async function handleAddComment(path: string, span: Span, content: string): Promise<void> {
-    await reviewHandle?.addComment(path, span, content);
+  async function handleAddComment(
+    path: string,
+    span: Span,
+    content: string
+  ): Promise<Comment | null> {
+    return (await reviewHandle?.addComment(path, span, content)) ?? null;
   }
 
   async function handleUpdateComment(commentId: string, content: string): Promise<void> {
@@ -1054,14 +1100,14 @@
     );
   }
 
-  function handleKeydown(event: KeyboardEvent) {
+  async function handleKeydown(event: KeyboardEvent) {
     const inInput = isEditableTarget(event.target);
 
     // Command+Left Arrow to go back
     if (event.key === 'ArrowLeft' && event.metaKey && !inInput) {
       event.preventDefault();
       event.stopPropagation();
-      onClose();
+      await closeDiffModal();
       return;
     }
     // Command+Up/Down Arrow to navigate between files
@@ -1071,9 +1117,9 @@
       const currentPath = diffViewer.state.selectedFile;
       const idx = orderedFiles.findIndex((f) => f.path === currentPath);
       if (event.key === 'ArrowUp' && idx > 0) {
-        selectFile(orderedFiles[idx - 1]);
+        await selectFile(orderedFiles[idx - 1]);
       } else if (event.key === 'ArrowDown' && idx < orderedFiles.length - 1) {
-        selectFile(orderedFiles[idx + 1]);
+        await selectFile(orderedFiles[idx + 1]);
       }
       return;
     }
@@ -1107,7 +1153,7 @@
       }
       event.preventDefault();
       event.stopPropagation();
-      onClose();
+      await closeDiffModal();
       return;
     }
     // Hold A to reveal AI annotations
@@ -1147,7 +1193,7 @@
     // Create search navigation handlers
     const { onNextSearchResult, onPrevSearchResult } = createSearchNavigationHandlers({
       searchState,
-      selectFile: (path: string) => diffViewer.selectFile(path),
+      selectFile: selectFilePath,
       getFiles: () => diffViewer.state.files,
       onJumpToLine: (lineIndex: number) => {
         lineJumpToken += 1;
@@ -1390,17 +1436,13 @@
           onToggleReviewed={toggleReviewed}
           onJumpToLine={handleJumpToLine}
           {searchState}
-          diffViewerState={diffViewer}
+          diffViewerState={diffViewerForFileTree}
         />
         {#if !readonly}
           <DiffReferenceSection
             referenceFiles={reviewHandle?.state.referenceFiles ?? []}
             selectedFile={diffViewer.state.selectedFile}
-            onSelectFile={(path) => {
-              selectedCommentId = null;
-              if (isSmallDiffViewport) showMobileSidebar = false;
-              diffViewer.selectFile(path);
-            }}
+            onSelectFile={selectFilePath}
             onRemoveReferenceFile={handleRemoveReferenceFile}
           />
 
@@ -1431,7 +1473,8 @@
           {githubRepo}
           {subpath}
           {isRemote}
-          onStarted={onClose}
+          onBeforeStart={prepareCommitSessionStart}
+          onStarted={closeDiffModal}
         />
       {/if}
     </div>
@@ -1530,9 +1573,10 @@
 {#snippet reviewCommentActions(context: CommentActionContext)}
   <ReviewCommentActions
     comment={context.comment}
-    noteState={getCommentNoteState(context.comment)}
-    commitState={getCommentCommitState(context.comment)}
-    githubState={getCommentGithubState(context.comment)}
+    ensureSaved={context.ensureSaved}
+    noteState={context.comment ? getCommentNoteState(context.comment) : 'idle'}
+    commitState={context.comment ? getCommentCommitState(context.comment) : 'idle'}
+    githubState={context.comment ? getCommentGithubState(context.comment) : 'idle'}
     {hasPr}
     onNote={handleNewNote}
     onCommit={handleNewCommit}
@@ -1556,6 +1600,7 @@
       onmousedowncapture={handleMobileDiffMouseDownCapture}
     >
       <DiffViewer
+        bind:this={diffViewerComponent}
         diff={currentDiff}
         comments={readonly ? [] : currentComments}
         {jumpToComment}

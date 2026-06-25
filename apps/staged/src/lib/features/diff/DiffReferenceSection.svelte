@@ -10,7 +10,7 @@
   interface Props {
     referenceFiles: ReferenceFile[];
     selectedFile: string | null;
-    onSelectFile: (path: string) => void;
+    onSelectFile: (path: string) => boolean | void | Promise<boolean | void>;
     onRemoveReferenceFile: (path: string) => void;
   }
 

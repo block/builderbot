@@ -486,6 +486,7 @@ export type {
   CommentAuthor,
   CommentType,
   Comment,
+  CommentSaveStatus,
   CommentActionContext,
   Review,
   LineSpan,

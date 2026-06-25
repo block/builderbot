@@ -97,6 +97,16 @@
     canScrollX: (side: 'before' | 'after') => boolean;
   };
 
+  type CommentEditorHandle = {
+    ensureSaved: () => Promise<Comment | null>;
+    dismiss: () => Promise<boolean>;
+    getSaveStatus: () => 'idle' | 'saving' | 'saved' | 'error';
+  };
+  type CommentSaveContext = {
+    path: string;
+    span: Span;
+  };
+
   // ==========================================================================
   // Props
   // ==========================================================================
@@ -132,7 +142,7 @@
     clickDismissBoundary?: HTMLElement | null;
 
     // -- Comment callbacks (all optional; without them commenting is disabled) --
-    onAddComment?: (path: string, span: Span, content: string) => Promise<void>;
+    onAddComment?: (path: string, span: Span, content: string) => Promise<Comment | null>;
     onUpdateComment?: (commentId: string, content: string) => Promise<void>;
     onDeleteComment?: (commentId: string) => Promise<void>;
 
@@ -260,9 +270,12 @@
   let lineSelectionToolbarStyle: { top: number; left: number } | null = $state(null);
   let lastHandledJumpToken = $state<number | null>(null);
   let lastHandledJumpLineToken = $state<number | null>(null);
+  let commentFocusGeneration = 0;
   let lastAutoScrolledFile: string | null = null;
   let lineCommentEditorRaf: number | null = null;
   let lineSelectionToolbarRaf: number | null = null;
+  let rangeCommentEditor: CommentEditorHandle | null = $state(null);
+  let lineCommentEditor: CommentEditorHandle | null = $state(null);
 
   // Markdown preview mode
   let markdownPreview = $state(false);
@@ -1385,25 +1398,31 @@
   // Comment highlight click (from spine)
   // ==========================================================================
 
-  function focusCommentInViewer(comment: Comment) {
-    if (!afterPane) return;
+  async function focusCommentInViewer(comment: Comment): Promise<boolean> {
+    const focusGeneration = ++commentFocusGeneration;
 
-    const displayRange = resolveDisplayRangeFromSpan(comment.span);
-    if (!displayRange) return;
+    if (!(await flushAndClearCommentEditors())) return false;
+    if (focusGeneration !== commentFocusGeneration) return false;
+    if (!afterPane) return false;
+
+    const latestComment = findCommentById(currentFileComments, comment.id) ?? comment;
+    const displayRange = resolveDisplayRangeFromSpan(latestComment.span);
+    if (!displayRange) return false;
     const { start, end } = displayRange;
 
     scrollController.scrollToRow(start, 'after');
 
     lineSelection = { pane: 'after', anchorLine: start, focusLine: end };
     commentingOnLines = { pane: 'after', start, end };
-    editingCommentId = comment.id;
-    activeLineComment = comment;
-    lineCommentReadOnly = comment.author === 'agent';
+    editingCommentId = latestComment.id;
+    activeLineComment = latestComment;
+    lineCommentReadOnly = latestComment.author === 'agent';
 
     // scrollToRow updates pane transforms, but the windowed body only renders the
     // target rows on a later frame — wait for the anchor to mount before deciding
     // the editor's side and positioning it.
     scheduleLineCommentEditorPositioning();
+    return true;
   }
 
   // Resolve the comment editor's side and screen position once the anchor rows are
@@ -1456,7 +1475,7 @@
     });
   }
 
-  function handleCommentHighlightClick(info: CommentHighlightInfo) {
+  async function handleCommentHighlightClick(info: CommentHighlightInfo) {
     if (!afterPane) return;
 
     const { span, commentId } = info;
@@ -1467,7 +1486,7 @@
     // Jump to exact comment when available.
     const comment = commentId ? findCommentById(comments, commentId) : null;
     if (comment) {
-      focusCommentInViewer(comment);
+      await focusCommentInViewer(comment);
       return;
     }
 
@@ -1477,10 +1496,20 @@
       return;
     }
 
-    scrollController.scrollToRow(start, 'after');
+    const focusGeneration = ++commentFocusGeneration;
 
-    lineSelection = { pane: 'after', anchorLine: start, focusLine: end };
-    commentingOnLines = { pane: 'after', start, end };
+    if (!(await flushAndClearCommentEditors())) return;
+    if (focusGeneration !== commentFocusGeneration) return;
+    if (!afterPane) return;
+
+    const latestDisplayRange = resolveDisplayRangeFromSpan(span);
+    if (!latestDisplayRange) return;
+    const { start: latestStart, end: latestEnd } = latestDisplayRange;
+
+    scrollController.scrollToRow(latestStart, 'after');
+
+    lineSelection = { pane: 'after', anchorLine: latestStart, focusLine: latestEnd };
+    commentingOnLines = { pane: 'after', start: latestStart, end: latestEnd };
     editingCommentId = commentId;
     activeLineComment = comment;
     lineCommentReadOnly = false;
@@ -1495,7 +1524,7 @@
     const comment = findCommentById(currentFileComments, request.id);
     if (!comment) return;
     lastHandledJumpToken = request.token;
-    focusCommentInViewer(comment);
+    void focusCommentInViewer(comment);
   });
 
   // Jump to a line requested by search results.
@@ -1586,20 +1615,55 @@
     );
   }
 
-  async function handleCommentSubmit(content: string) {
-    if (commentingOnRange === null || !currentFilePath || !onAddComment) return;
+  function createRangeCommentSaveContext(): CommentSaveContext | null {
+    if (commentingOnRange === null || !currentFilePath) return null;
 
     const alignmentData = changedAlignments[commentingOnRange];
-    if (!alignmentData) return;
+    if (!alignmentData) return null;
 
     const { alignment } = alignmentData;
-    const span: Span = { start: alignment.after.start, end: alignment.after.end };
-
-    await onAddComment(currentFilePath, span, content);
-    clearRangeSelection();
+    return {
+      path: currentFilePath,
+      span: { start: alignment.after.start, end: alignment.after.end },
+    };
   }
 
-  function handleCommentCancel() {
+  function isActiveRangeCommentSaveContext(context: CommentSaveContext): boolean {
+    const activeContext = createRangeCommentSaveContext();
+    return (
+      activeContext !== null &&
+      activeContext.path === context.path &&
+      activeContext.span.start === context.span.start &&
+      activeContext.span.end === context.span.end
+    );
+  }
+
+  async function handleCommentSubmit(
+    context: CommentSaveContext | null,
+    content: string
+  ): Promise<Comment | null> {
+    if (!context || !onAddComment) return null;
+
+    const comment = await onAddComment(context.path, context.span, content);
+    if (comment && isActiveRangeCommentSaveContext(context)) {
+      editingRangeCommentId = comment.id;
+    }
+    return comment;
+  }
+
+  async function flushRangeCommentEditor(): Promise<boolean> {
+    if (!rangeCommentEditor) return true;
+    await rangeCommentEditor.ensureSaved();
+    return rangeCommentEditor.getSaveStatus() !== 'error';
+  }
+
+  async function dismissRangeCommentEditor(): Promise<boolean> {
+    if (!rangeCommentEditor) return true;
+    return await rangeCommentEditor.dismiss();
+  }
+
+  async function handleCommentCancel() {
+    if (!(await dismissRangeCommentEditor())) return;
     clearRangeSelection();
   }
 
@@ -1609,6 +1673,16 @@
 
   async function handleCommentDelete(id: string) {
     await onDeleteComment?.(id);
+  }
+
+  async function handleRangeCommentDelete(id: string) {
+    clearRangeSelection();
+    await handleCommentDelete(id);
+  }
+
+  async function handleLineCommentDelete(id: string) {
+    clearLineSelection();
+    await handleCommentDelete(id);
   }
 
   // ==========================================================================
@@ -1621,16 +1695,30 @@
     if (event.button !== 0) return;
     if (!commentingEnabled) return;
 
+    const previousLineSelection = lineSelection;
+    const pendingLineComment = commentingOnLines;
     event.preventDefault();
     window.getSelection()?.removeAllRanges();
 
     lineSelection = { pane, anchorLine: lineIndex, focusLine: lineIndex };
     isSelecting = true;
-
-    commentingOnLines = null;
-    lineCommentEditorStyle = null;
-
     document.addEventListener('mousemove', handleSelectionDragMove);
+
+    if (pendingLineComment) {
+      void dismissLineCommentEditor().then((canClear) => {
+        if (commentingOnLines !== pendingLineComment) return;
+        if (!canClear) {
+          lineSelection = previousLineSelection;
+          isSelecting = false;
+          document.removeEventListener('mousemove', handleSelectionDragMove);
+          return;
+        }
+        clearLineCommentEditorState();
+      });
+      return;
+    }
+
+    clearLineCommentEditorState();
   }
 
   function handleSelectionDragMove(event: MouseEvent) {
@@ -1693,6 +1781,10 @@
   function clearLineSelection() {
     lineSelection = null;
     isSelecting = false;
+    clearLineCommentEditorState();
+  }
+
+  function clearLineCommentEditorState() {
     commentingOnLines = null;
     lineCommentEditorStyle = null;
     lineCommentPositionPreference = 'below';
@@ -1705,6 +1797,41 @@
     commentingOnRange = null;
     commentEditorStyle = null;
     editingRangeCommentId = null;
+  }
+
+  async function flushLineCommentEditor(): Promise<boolean> {
+    if (!lineCommentEditor) return true;
+    await lineCommentEditor.ensureSaved();
+    return lineCommentEditor.getSaveStatus() !== 'error';
+  }
+
+  async function dismissLineCommentEditor(): Promise<boolean> {
+    if (!lineCommentEditor) return true;
+    return await lineCommentEditor.dismiss();
+  }
+
+  async function flushAndClearLineSelection() {
+    if (!(await dismissLineCommentEditor())) return;
+    clearLineSelection();
+  }
+
+  export async function flushCommentEditors(): Promise<boolean> {
+    if (!(await flushRangeCommentEditor())) return false;
+    if (!(await flushLineCommentEditor())) return false;
+    return true;
+  }
+
+  export async function flushAndClearCommentEditors(): Promise<boolean> {
+    if (!(await dismissRangeCommentEditor())) return false;
+    if (!(await dismissLineCommentEditor())) return false;
+    clearRangeSelection();
+    clearLineSelection();
+    return true;
+  }
+
+  export function clearCommentEditors() {
+    clearRangeSelection();
+    clearLineSelection();
   }
 
   // Store the initial left position for line selection toolbar
@@ -1826,25 +1953,45 @@
     );
   }
 
-  async function handleLineCommentSubmit(content: string) {
-    if (!commentingOnLines || !currentFilePath || !onAddComment) return;
+  function createLineCommentSaveContext(): CommentSaveContext | null {
+    if (!commentingOnLines || !currentFilePath) return null;
 
-    const span: Span = {
-      start: commentingOnLines.start,
-      end: commentingOnLines.end + 1,
+    return {
+      path: currentFilePath,
+      span: {
+        start: commentingOnLines.start,
+        end: commentingOnLines.end + 1,
+      },
     };
-
-    await onAddComment(currentFilePath, span, content);
-    clearLineSelection();
   }
 
-  function handleLineCommentCancel() {
-    commentingOnLines = null;
-    lineCommentEditorStyle = null;
-    lineCommentPositionPreference = 'below';
-    editingCommentId = null;
-    activeLineComment = null;
-    lineCommentReadOnly = false;
+  function isActiveLineCommentSaveContext(context: CommentSaveContext): boolean {
+    const activeContext = createLineCommentSaveContext();
+    return (
+      activeContext !== null &&
+      activeContext.path === context.path &&
+      activeContext.span.start === context.span.start &&
+      activeContext.span.end === context.span.end
+    );
+  }
+
+  async function handleLineCommentSubmit(
+    context: CommentSaveContext | null,
+    content: string
+  ): Promise<Comment | null> {
+    if (!context || !onAddComment) return null;
+
+    const comment = await onAddComment(context.path, context.span, content);
+    if (comment && isActiveLineCommentSaveContext(context)) {
+      editingCommentId = comment.id;
+      activeLineComment = comment;
+    }
+    return comment;
+  }
+
+  async function handleLineCommentCancel() {
+    if (!(await dismissLineCommentEditor())) return;
+    clearLineCommentEditorState();
   }
 
   // Update toolbar/editor positions on scroll
@@ -1870,7 +2017,7 @@
     }
   }
 
-  function handleGlobalClick(event: MouseEvent) {
+  async function handleGlobalClick(event: MouseEvent) {
     if (justFinishedSelecting) {
       justFinishedSelecting = false;
       return;
@@ -1898,12 +2045,22 @@
       return;
     }
 
+    if (commentingOnRange !== null) {
+      await handleCommentCancel();
+      return;
+    }
+
+    if (commentingOnLines) {
+      await handleLineCommentCancel();
+      return;
+    }
+
     if (lineSelection && !isSelecting) {
-      clearLineSelection();
+      await flushAndClearLineSelection();
     }
   }
 
-  function handleLineSelectionKeydown(event: KeyboardEvent) {
+  async function handleLineSelectionKeydown(event: KeyboardEvent) {
     const target = event.target as HTMLElement;
     if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') return;
 
@@ -1918,19 +2075,19 @@
       if (commentingOnLines) {
         event.preventDefault();
         event.stopPropagation();
-        handleLineCommentCancel();
+        await handleLineCommentCancel();
         return;
       }
       if (commentingOnRange !== null) {
         event.preventDefault();
         event.stopPropagation();
-        clearRangeSelection();
+        await handleCommentCancel();
         return;
       }
       if (selectedLineRange) {
         event.preventDefault();
         event.stopPropagation();
-        clearLineSelection();
+        await flushAndClearLineSelection();
         return;
       }
     }
@@ -2540,26 +2697,24 @@
     <!-- Range comment editor (two-pane mode only) -->
     {#if commentingOnRange !== null && commentEditorStyle && !activeRangeCommentState.missing}
       {@const existingComment = activeRangeCommentState.existingComment}
+      {@const saveContext = createRangeCommentSaveContext()}
       <CommentEditor
+        bind:this={rangeCommentEditor}
         top={commentEditorStyle.top}
         left={commentEditorStyle.left}
         width={commentEditorStyle.width}
         visible={commentEditorStyle.visible}
         existingComment={existingComment ?? null}
-        onSubmit={(content) => {
-          if (existingComment) {
-            handleCommentEdit(existingComment.id, content);
-          } else {
-            handleCommentSubmit(content);
+        onSave={(commentId, content) => {
+          if (commentId) {
+            return handleCommentEdit(commentId, content);
           }
-          handleCommentCancel();
+          return handleCommentSubmit(saveContext, content);
         }}
-        onCancel={handleCommentCancel}
-        onDelete={existingComment
-          ? () => {
-              handleCommentDelete(existingComment.id);
-              handleCommentCancel();
-            }
+        onClose={handleCommentCancel}
+        onDelete={existingComment ? () => handleRangeCommentDelete(existingComment.id) : undefined}
+        onDismissDelete={existingComment
+          ? () => handleCommentDelete(existingComment.id)
           : undefined}
         {commentActions}
       />
@@ -2593,7 +2748,9 @@
     <!-- Line comment editor -->
     {#if commentingOnLines && lineCommentEditorStyle && !activeLineCommentState.missing}
       {@const existingComment = activeLineCommentState.existingComment}
+      {@const saveContext = createLineCommentSaveContext()}
       <CommentEditor
+        bind:this={lineCommentEditor}
         top={lineCommentEditorStyle.top}
         left={lineCommentEditorStyle.left}
         width={lineCommentEditorStyle.width}
@@ -2603,20 +2760,16 @@
         placeholder="Add a comment on {commentingOnLines.end -
           commentingOnLines.start +
           1} line{commentingOnLines.end !== commentingOnLines.start ? 's' : ''}..."
-        onSubmit={(content) => {
-          if (existingComment) {
-            handleCommentEdit(existingComment.id, content);
-            clearLineSelection();
-          } else {
-            handleLineCommentSubmit(content);
+        onSave={(commentId, content) => {
+          if (commentId) {
+            return handleCommentEdit(commentId, content);
           }
+          return handleLineCommentSubmit(saveContext, content);
         }}
-        onCancel={handleLineCommentCancel}
-        onDelete={existingComment
-          ? () => {
-              handleCommentDelete(existingComment.id);
-              clearLineSelection();
-            }
+        onClose={handleLineCommentCancel}
+        onDelete={existingComment ? () => handleLineCommentDelete(existingComment.id) : undefined}
+        onDismissDelete={existingComment
+          ? () => handleCommentDelete(existingComment.id)
           : undefined}
         {commentActions}
       />

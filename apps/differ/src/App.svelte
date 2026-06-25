@@ -96,6 +96,9 @@
   // ==========================================================================
 
   type DiffMode = 'all' | 'staged' | 'branch' | 'commit' | 'stack';
+  type DiffViewerHandle = {
+    flushCommentEditors: () => Promise<boolean>;
+  };
 
   let diffMode = $state<DiffMode>('all');
   let diffSpec = $state<DiffSpec>(commands.specUncommitted());
@@ -122,6 +125,7 @@
   let loading = $state(true);
   let loadingFile = $state<string | null>(null);
   let error = $state<string | null>(null);
+  let diffViewer = $state<DiffViewerHandle | null>(null);
 
   let localComments = $state<Comment[]>([]);
   let copiedFeedback = $state(false);
@@ -255,7 +259,21 @@
   // Diff mode switching
   // ==========================================================================
 
-  function setMode(mode: DiffMode, commit?: CommitInfo) {
+  async function flushCommentEditorsForDiffChange(): Promise<boolean> {
+    return (await diffViewer?.flushCommentEditors()) ?? true;
+  }
+
+  function resetDiffState() {
+    files = [];
+    diffCache = new Map();
+    selectedFile = null;
+    localComments = [];
+    error = null;
+  }
+
+  async function setMode(mode: DiffMode, commit?: CommitInfo): Promise<boolean> {
+    if (!(await flushCommentEditorsForDiffChange())) return false;
+
     showCommitPicker = false;
     showStackPicker = false;
     diffMode = mode;
@@ -299,26 +317,22 @@
         break;
     }
 
-    files = [];
-    diffCache = new Map();
-    selectedFile = null;
-    localComments = [];
-    error = null;
+    resetDiffState();
     loadDiff();
+    return true;
   }
 
-  function selectCommitBySha(sha: string) {
+  async function selectCommitBySha(sha: string): Promise<boolean> {
+    if (!(await flushCommentEditorsForDiffChange())) return false;
+
     diffMode = 'commit';
     diffSpec = commands.specCommit(sha);
     diffLabel = `Commit ${sha.slice(0, 7)}`;
     selectedCommit = null;
 
-    files = [];
-    diffCache = new Map();
-    selectedFile = null;
-    localComments = [];
-    error = null;
+    resetDiffState();
     loadDiff();
+    return true;
   }
 
   async function toggleCommitPicker() {
@@ -341,35 +355,33 @@
     showStackPicker = !showStackPicker;
   }
 
-  function selectStackBranch(branch: StackBranchInfo) {
+  async function selectStackBranch(branch: StackBranchInfo): Promise<boolean> {
+    if (!(await flushCommentEditorsForDiffChange())) return false;
+
     stackViewTarget = branch;
     diffSpec = commands.specStackBranch(branch.name, branch.parentRef);
     diffLabel = `Stack: ${branch.name.split('/').pop()}`;
     diffMode = 'stack';
     showStackPicker = false;
 
-    files = [];
-    diffCache = new Map();
-    selectedFile = null;
-    localComments = [];
-    error = null;
+    resetDiffState();
     loadDiff();
+    return true;
   }
 
-  function selectStackCommittedOnly() {
-    if (!stackInfo) return;
+  async function selectStackCommittedOnly(): Promise<boolean> {
+    if (!stackInfo) return false;
+    if (!(await flushCommentEditorsForDiffChange())) return false;
+
     stackViewTarget = null;
     diffSpec = commands.specStackCommitted(stackInfo.parentBranch);
     diffLabel = `Stack vs ${stackInfo.parentBranch.split('/').pop()} (committed)`;
     diffMode = 'stack';
     showStackPicker = false;
 
-    files = [];
-    diffCache = new Map();
-    selectedFile = null;
-    localComments = [];
-    error = null;
+    resetDiffState();
     loadDiff();
+    return true;
   }
 
   // ==========================================================================
@@ -377,6 +389,8 @@
   // ==========================================================================
 
   async function loadDiff() {
+    if (!(await flushCommentEditorsForDiffChange())) return;
+
     loading = true;
     error = null;
     try {
@@ -394,7 +408,10 @@
     }
   }
 
-  async function selectFile(path: string | null) {
+  async function selectFile(path: string | null): Promise<boolean> {
+    if (path === selectedFile) return true;
+    if (!(await flushCommentEditorsForDiffChange())) return false;
+
     const thisGeneration = ++selectionGeneration;
 
     // Handle search-related behavior (expand and select first result)
@@ -408,7 +425,7 @@
       loadingFile = path;
       try {
         const diff = await commands.getFileDiff(diffSpec, path);
-        if (selectionGeneration !== thisGeneration) return;
+        if (selectionGeneration !== thisGeneration) return false;
         const newCache = new Map(diffCache);
         newCache.set(path, diff);
         diffCache = newCache;
@@ -418,6 +435,8 @@
         loadingFile = null;
       }
     }
+
+    return true;
   }
 
   // ==========================================================================
@@ -426,7 +445,11 @@
 
   let nextCommentId = 0;
 
-  async function handleAddComment(path: string, span: Span, content: string): Promise<void> {
+  async function handleAddComment(
+    path: string,
+    span: Span,
+    content: string
+  ): Promise<Comment | null> {
     const comment: Comment = {
       id: `local-${++nextCommentId}`,
       path,
@@ -443,6 +466,7 @@
       commitSessionId: null,
     };
     localComments = [...localComments, comment];
+    return comment;
   }
 
   async function handleUpdateComment(commentId: string, content: string): Promise<void> {
@@ -475,7 +499,7 @@
   // ==========================================================================
 
   function handleSelectFile(file: FileEntry) {
-    selectFile(file.path);
+    void selectFile(file.path);
   }
 
   // Load a file's diff without changing the selection (for search)
@@ -514,6 +538,8 @@
   // ==========================================================================
 
   async function handleFolderSelect(path: string) {
+    if (!(await flushCommentEditorsForDiffChange())) return;
+
     showFolderPicker = false;
     try {
       await commands.setRepoPath(path);
@@ -527,11 +553,7 @@
       diffMode = 'all';
       diffSpec = commands.specUncommitted();
       diffLabel = 'All Changes';
-      files = [];
-      diffCache = new Map();
-      selectedFile = null;
-      localComments = [];
-      error = null;
+      resetDiffState();
 
       // Fetch repo info without triggering a diff load yet —
       // we need to check for a Graphite stack first to avoid a race
@@ -543,7 +565,7 @@
       const si = await commands.getStackInfo();
       stackInfo = si;
       if (si) {
-        setMode('stack');
+        await setMode('stack');
       } else {
         loadDiff();
       }
@@ -602,7 +624,7 @@
     }
 
     // Select the file and scroll to the match
-    await selectFile(filePath);
+    if (!(await selectFile(filePath))) return;
     // Scroll to the specific line
     lineJumpToken += 1;
     jumpToLine = { lineIndex: match.lineIndex, token: lineJumpToken };
@@ -936,6 +958,7 @@
           </div>
         {:else}
           <DiffViewer
+            bind:this={diffViewer}
             diff={currentDiff}
             comments={localComments.filter((c) => c.path === selectedFile)}
             {jumpToLine}

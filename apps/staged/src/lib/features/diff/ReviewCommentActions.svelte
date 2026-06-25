@@ -4,17 +4,11 @@
   import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
   import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
   import Spinner from '../../shared/Spinner.svelte';
-  import type {
-    Comment,
-    CommentSaveStatus,
-    CommentSessionState,
-    GithubButtonState,
-  } from '../../types';
+  import type { Comment, CommentSessionState, GithubButtonState } from '../../types';
 
   interface Props {
     comment: Comment | null;
     ensureSaved: () => Promise<Comment | null>;
-    saveStatus?: CommentSaveStatus;
     noteState: CommentSessionState;
     commitState: CommentSessionState;
     githubState: GithubButtonState;
@@ -27,7 +21,6 @@
   let {
     comment,
     ensureSaved,
-    saveStatus = 'idle',
     noteState,
     commitState,
     githubState,
@@ -60,13 +53,11 @@
   class="comment-action-btn note-btn"
   class:session-active={noteState !== 'idle'}
   onclick={(event) => withSavedComment('note', (savedComment) => onNote(savedComment, event))}
-  title={!comment && saveStatus === 'idle'
-    ? 'Save comment and start note'
-    : noteState === 'running'
-      ? 'Note session in progress'
-      : noteState === 'completed'
-        ? 'Open note'
-        : 'New note (Option+click to skip dialog)'}
+  title={noteState === 'running'
+    ? 'Note session in progress'
+    : noteState === 'completed'
+      ? 'Open note'
+      : 'New note (Option+click to skip dialog)'}
   disabled={pendingAction !== null}
 >
   {#if pendingAction === 'note' || noteState === 'running'}
@@ -81,13 +72,11 @@
   class="comment-action-btn commit-btn"
   class:session-active={commitState !== 'idle'}
   onclick={(event) => withSavedComment('commit', (savedComment) => onCommit(savedComment, event))}
-  title={!comment && saveStatus === 'idle'
-    ? 'Save comment and start commit'
-    : commitState === 'running'
-      ? 'Commit session in progress'
-      : commitState === 'completed'
-        ? 'Show commit'
-        : 'New commit (Option+click to skip dialog)'}
+  title={commitState === 'running'
+    ? 'Commit session in progress'
+    : commitState === 'completed'
+      ? 'Show commit'
+      : 'New commit (Option+click to skip dialog)'}
   disabled={pendingAction !== null}
 >
   {#if pendingAction === 'commit' || commitState === 'running'}
@@ -103,13 +92,11 @@
     class="comment-action-btn github-btn"
     class:github-btn-sent={githubState === 'sent'}
     onclick={() => withSavedComment('github', onGithub)}
-    title={!comment && saveStatus === 'idle'
-      ? 'Save comment and send to GitHub'
-      : githubState === 'sent'
-        ? 'Open GitHub comment'
-        : githubState === 'stale'
-          ? 'Update on GitHub'
-          : 'Send to GitHub'}
+    title={githubState === 'sent'
+      ? 'Open GitHub comment'
+      : githubState === 'stale'
+        ? 'Update on GitHub'
+        : 'Send to GitHub'}
     disabled={pendingAction !== null || githubState === 'sending'}
   >
     {#if pendingAction === 'github' || githubState === 'sending'}

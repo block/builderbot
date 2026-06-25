@@ -1574,7 +1574,6 @@
   <ReviewCommentActions
     comment={context.comment}
     ensureSaved={context.ensureSaved}
-    saveStatus={context.saveStatus}
     noteState={context.comment ? getCommentNoteState(context.comment) : 'idle'}
     commitState={context.comment ? getCommentCommitState(context.comment) : 'idle'}
     githubState={context.comment ? getCommentGithubState(context.comment) : 'idle'}

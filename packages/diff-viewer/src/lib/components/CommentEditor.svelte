@@ -114,14 +114,6 @@
     });
   });
 
-  let saveStatusLabel = $derived.by(() => {
-    if (readOnly) return 'Read-only · Esc to close';
-    if (saveStatus === 'saving') return 'Saving...';
-    if (saveStatus === 'saved') return 'Saved';
-    if (saveStatus === 'error') return 'Unable to save';
-    return 'Autosaves · Esc to close';
-  });
-
   export async function ensureSaved(): Promise<Comment | null> {
     if (readOnly) return persistedComment;
     return await autosave.flush();
@@ -208,25 +200,28 @@
     onkeydown={handleKeydown}
     use:autoFocus
   ></textarea>
-  <div class="comment-editor-hint">
-    <span
-      class="comment-editor-help"
-      class:comment-save-error={saveStatus === 'error'}
-      title={saveStatus === 'error' && saveError instanceof Error ? saveError.message : undefined}
-    >
-      {saveStatusLabel}
-    </span>
-    {#if commentActions && (!readOnly || persistedComment)}
-      <div class="comment-action-buttons">
-        {@render commentActions({ comment: persistedComment, ensureSaved, saveStatus })}
-      </div>
-    {/if}
-    {#if persistedComment && onDelete}
-      <button class="delete-comment-btn" onclick={handleDelete} title="Delete comment">
-        <Trash2 size={12} />
-      </button>
-    {/if}
-  </div>
+  {#if saveStatus === 'error' || (commentActions && (!readOnly || persistedComment)) || (persistedComment && onDelete)}
+    <div class="comment-editor-hint">
+      {#if saveStatus === 'error'}
+        <span
+          class="comment-editor-error"
+          title={saveError instanceof Error ? saveError.message : undefined}
+        >
+          Unable to save
+        </span>
+      {/if}
+      {#if commentActions && (!readOnly || persistedComment)}
+        <div class="comment-action-buttons">
+          {@render commentActions({ comment: persistedComment, ensureSaved, saveStatus })}
+        </div>
+      {/if}
+      {#if persistedComment && onDelete}
+        <button class="delete-comment-btn" onclick={handleDelete} title="Delete comment">
+          <Trash2 size={12} />
+        </button>
+      {/if}
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -276,14 +271,16 @@
   .comment-editor-hint {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 6px;
     padding: 4px 12px 8px;
     font-size: var(--size-xs);
     color: var(--text-faint);
   }
 
-  .comment-editor-help {
+  .comment-editor-error {
     margin-right: auto;
+    color: var(--status-deleted);
   }
 
   .comment-action-buttons {

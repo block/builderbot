@@ -114,6 +114,11 @@
     onOpenNote?: (note: LinkedNoteContext) => void;
   }
 
+  type SendMessageTarget = {
+    sessionId: string;
+    branchId: string | null;
+  };
+
   let {
     open,
     sessionId,
@@ -572,12 +577,20 @@
   }
 
   /** Actually send a message to the backend and start the agent. */
-  async function sendMessage(text: string, imageIds?: string[], sendingLocked = false) {
-    if (!session || (!sendingLocked && sending)) return;
+  async function sendMessage(
+    text: string,
+    imageIds?: string[],
+    sendingLocked = false,
+    target: SendMessageTarget | null = null
+  ) {
+    const targetSessionId = target?.sessionId ?? session?.id;
+    const targetBranchId = target ? target.branchId : (branchId ?? null);
+    if (!targetSessionId || session?.id !== targetSessionId || (!sendingLocked && sending)) return;
     if (!sendingLocked) sending = true;
     error = null;
     try {
-      await resumeSession(session.id, text, imageIds, branchId);
+      await resumeSession(targetSessionId, text, imageIds, targetBranchId);
+      if (session?.id !== targetSessionId) return;
       // Backend sets status to running and emits an event.
       // Force an immediate poll to pick up the new user message + status.
       session = { ...session, status: 'running' };
@@ -594,11 +607,18 @@
 
   async function handleNoteFollowupClick() {
     if (!session || !noteInfo || sending) return;
+    const target: SendMessageTarget = { sessionId: session.id, branchId: branchId ?? null };
+    const hasParsedNote = noteInfo.hasParsedNote;
     sending = true;
     error = null;
     try {
-      const prompt = await buildNoteFollowupMessage(session.id, branchId, noteInfo.hasParsedNote);
-      await sendMessage(prompt, undefined, true);
+      const prompt = await buildNoteFollowupMessage(
+        target.sessionId,
+        target.branchId,
+        hasParsedNote
+      );
+      if (session?.id !== target.sessionId || (branchId ?? null) !== target.branchId) return;
+      await sendMessage(prompt, undefined, true, target);
     } catch (e) {
       error = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
       messageQueue = [];

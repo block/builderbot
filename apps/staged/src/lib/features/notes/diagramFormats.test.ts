@@ -9,23 +9,21 @@ import {
 } from './diagramFormats';
 
 describe('note diagram format registry', () => {
-  it('registers Pikchr as the recommended general diagram format', () => {
-    expect(NOTE_DIAGRAM_FORMATS).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          language: 'pikchr',
-          displayName: 'Pikchr',
-          role: 'general',
-          recommended: true,
-        }),
-      ])
-    );
+  it('registers only Pikchr as the recommended general diagram format', () => {
+    expect(NOTE_DIAGRAM_FORMATS).toEqual([
+      {
+        language: 'pikchr',
+        displayName: 'Pikchr',
+        role: 'general',
+        recommended: true,
+      },
+    ]);
   });
 
-  it('recognizes existing note diagram fence languages case-insensitively', () => {
+  it('recognizes Pikchr fence languages case-insensitively', () => {
     expect(getNoteDiagramFormat('PIKCHR')?.language).toBe('pikchr');
-    expect(getNoteDiagramFormat('mermaid')?.language).toBe('mermaid');
-    expect(getNoteDiagramFormat('svg')?.language).toBe('svg');
+    expect(getNoteDiagramFormat('mermaid')).toBeNull();
+    expect(getNoteDiagramFormat('svg')).toBeNull();
     expect(getNoteDiagramFormat('typescript')).toBeNull();
   });
 
@@ -65,12 +63,12 @@ describe('extractNoteDiagramFences', () => {
     ]);
   });
 
-  it('preserves Mermaid and SVG as recognized diagram formats', () => {
+  it('ignores Mermaid and SVG fences as ordinary code fences', () => {
     const diagrams = extractNoteDiagramFences(
       ['```mermaid', 'flowchart TD', '```', '~~~svg', '<svg></svg>', '~~~'].join('\n')
     );
 
-    expect(diagrams.map((diagram) => diagram.language)).toEqual(['mermaid', 'svg']);
+    expect(diagrams).toEqual([]);
   });
 
   it('ignores non-diagram fences while skipping their contents', () => {

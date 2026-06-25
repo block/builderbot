@@ -5,18 +5,6 @@ export const NOTE_DIAGRAM_FORMATS = [
     role: 'general',
     recommended: true,
   },
-  {
-    language: 'mermaid',
-    displayName: 'Mermaid',
-    role: 'compatibility',
-    recommended: false,
-  },
-  {
-    language: 'svg',
-    displayName: 'SVG',
-    role: 'fallback',
-    recommended: false,
-  },
 ] as const;
 
 export type NoteDiagramFormat = (typeof NOTE_DIAGRAM_FORMATS)[number];

@@ -42,13 +42,12 @@ describe('renderNoteMarkdown', () => {
     expect(html).not.toContain('note-diagram-source');
   });
 
-  it('preserves Mermaid fences as escaped diagram source blocks', () => {
+  it('leaves Mermaid fenced blocks as normal code blocks', () => {
     const html = renderNoteMarkdown('```mermaid\nflowchart TD\nA-->B\n```');
 
-    expect(html).toContain(
-      '<pre class="note-diagram-source note-diagram-source-mermaid"><code class="language-mermaid">'
-    );
+    expect(html).toContain('<pre><code class="language-mermaid">');
     expect(html).toContain('flowchart TD');
+    expect(html).not.toContain('note-diagram-source');
     expect(html).not.toContain('note-diagram-preview');
   });
 
@@ -99,11 +98,12 @@ describe('renderNoteMarkdown', () => {
     expect(html).not.toContain('onclick');
   });
 
-  it('keeps raw SVG fences escaped as source for now', () => {
+  it('leaves raw SVG fenced blocks as normal escaped code blocks', () => {
     const html = renderNoteMarkdown('```svg\n<svg><script>alert(1)</script></svg>\n```');
 
-    expect(html).toContain('note-diagram-source-svg');
+    expect(html).toContain('<pre><code class="language-svg">');
     expect(html).toContain('&lt;svg&gt;&lt;script&gt;alert(1)&lt;/script&gt;&lt;/svg&gt;');
+    expect(html).not.toContain('note-diagram-source');
     expect(html).not.toContain('<script>');
   });
 });

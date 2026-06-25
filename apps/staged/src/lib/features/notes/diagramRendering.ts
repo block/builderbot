@@ -22,10 +22,6 @@ export function renderNoteDiagramCodeBlock(
   if (!format) return null;
 
   const renderedDiagramSource = withDiagramSourceClass(renderedSource, format);
-  if (format.language !== 'pikchr') {
-    return { html: renderedDiagramSource, trustedHtml: false };
-  }
-
   const renderedPikchr = options.pikchrRenderer?.(token.text);
   if (!renderedPikchr || renderedPikchr.kind !== 'svg') {
     return { html: renderedDiagramSource, trustedHtml: false };

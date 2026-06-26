@@ -1312,9 +1312,10 @@ export function getAllRepoBadges(): Promise<import('./types').RepoBadge[]> {
 /** Ensure badges exist for the given (githubRepo, subpath) pairs.
  *  Generates missing badges (fallback names + hues) and returns all requested. */
 export function ensureRepoBadges(
-  repos: [string, string][]
+  repos: [string, string][],
+  provider?: string
 ): Promise<import('./types').RepoBadge[]> {
-  return invokeCommand('ensure_repo_badges', { repos });
+  return invokeCommand('ensure_repo_badges', { repos, provider: provider ?? null });
 }
 
 /** Update the short name and hue of an existing repo badge. */

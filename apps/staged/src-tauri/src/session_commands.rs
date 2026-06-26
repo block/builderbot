@@ -2119,7 +2119,7 @@ fn available_provider_ids(is_remote: bool) -> Vec<String> {
     }
 }
 
-fn read_recent_agent_ids() -> Vec<String> {
+pub(crate) fn read_recent_agent_ids() -> Vec<String> {
     crate::preferences_store_path_buf()
         .and_then(|path| std::fs::read_to_string(&path).ok())
         .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
@@ -2130,7 +2130,10 @@ fn read_recent_agent_ids() -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn select_preferred_provider(available_ids: &[String], recent_ids: &[String]) -> Option<String> {
+pub(crate) fn select_preferred_provider(
+    available_ids: &[String],
+    recent_ids: &[String],
+) -> Option<String> {
     for agent_id in recent_ids {
         if available_ids.contains(agent_id) {
             return Some(agent_id.clone());

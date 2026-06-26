@@ -6,6 +6,8 @@
  */
 
 import { getAllRepoBadges, ensureRepoBadges, updateRepoBadge } from '../commands';
+import { agentState } from '../features/agents/agent.svelte';
+import { getPreferredAgent } from '../features/settings/preferences.svelte';
 import type { RepoBadge } from '../types';
 
 function badgeKey(githubRepo: string, subpath: string): string {
@@ -76,7 +78,8 @@ class RepoBadgeStore {
 
     try {
       const pairs: [string, string][] = missing.map((r) => [r.githubRepo, r.subpath ?? '']);
-      const newBadges = await ensureRepoBadges(pairs);
+      const provider = getPreferredAgent(agentState.providers) ?? undefined;
+      const newBadges = await ensureRepoBadges(pairs, provider);
       const next = new Map(this.badges);
       for (const badge of newBadges) {
         next.set(badgeKey(badge.githubRepo, badge.subpath), badge);

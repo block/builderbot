@@ -1,39 +1,29 @@
 /**
  * BranchCardSessionManager — reactive session creation logic for BranchCard
  *
- * Manages new session modal state, pending session items, auto review
- * adoption/cancellation, and session start orchestration.
+ * Manages new session modal state, auto review adoption/cancellation, and
+ * branch-card session start orchestration.
  *
  * Instantiated with a reactive branch reference. Exposes state as reactive
- * properties and methods. The parent calls prunePendingSessionItems() when
- * the timeline refreshes and reads pendingSessionItems to pass to BranchTimeline.
+ * properties and methods. Shared branch-scoped pending session state lives in
+ * branchSessionLaunch.svelte.ts so diff-launched sessions and branch-card
+ * launches render through the same timeline rows.
  */
 
 import type { Branch, BranchTimeline as BranchTimelineData, BranchSessionType } from '../../types';
 import * as commands from '../../api/commands';
 import { getPreferredAgent } from '../settings/preferences.svelte';
 import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
-import { toast } from 'svelte-sonner';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
 import { buildReferringPrompt } from '../../shared/buildReferringPrompt';
 import { shouldQueueBranchSession } from './branchSessionQueue';
-
-type PendingSessionItemType =
-  | 'pending-commit'
-  | 'generating-note'
-  | 'generating-review'
-  | 'queued-commit'
-  | 'queued-note'
-  | 'queued-review';
-
-export type PendingSessionItem = {
-  key: string;
-  type: PendingSessionItemType;
-  title: string;
-  secondaryMeta?: string;
-  sessionId?: string;
-};
+import {
+  getPendingSessionItems,
+  hasPendingQueuedSession,
+  hasPendingSessionStart,
+  startOrQueueBranchSessionWithPending,
+} from './branchSessionLaunch.svelte';
 
 export default class BranchCardSessionManager {
   // Private callback refs — declared first so $derived fields can reference them
@@ -49,16 +39,14 @@ export default class BranchCardSessionManager {
   newSessionMode = $state<BranchSessionType>('commit');
   draftPrompt = $state('');
   draftImageIds = $state<string[]>([]);
-  pendingSessionItems = $state<PendingSessionItem[]>([]);
-  isSessionStartPending = $derived(this.pendingSessionItems.some((item) => !item.sessionId));
-  private hasPendingQueuedSession = $derived(
-    this.pendingSessionItems.some(
-      (item) =>
-        item.type === 'queued-commit' ||
-        item.type === 'queued-note' ||
-        item.type === 'queued-review'
-    )
-  );
+  isSessionStartPending = $derived.by(() => {
+    const branch = this.getBranch?.();
+    return branch ? hasPendingSessionStart(branch.id) : false;
+  });
+  private hasPendingQueuedSession = $derived.by(() => {
+    const branch = this.getBranch?.();
+    return branch ? hasPendingQueuedSession(branch.id) : false;
+  });
 
   // Auto review state — tracks a background review started after each commit
   autoReviewSessionId = $state<string | null>(null);
@@ -78,8 +66,10 @@ export default class BranchCardSessionManager {
 
   /** True when a commit session is pending, queued, or actively running. */
   hasCommitSessionInProgress = $derived.by(() => {
+    const branch = this.getBranch?.();
     if (
-      this.pendingSessionItems.some(
+      branch &&
+      getPendingSessionItems(branch.id).some(
         (item) => item.type === 'pending-commit' || item.type === 'queued-commit'
       )
     ) {
@@ -112,69 +102,6 @@ export default class BranchCardSessionManager {
       hasPendingSessionStart: this.isSessionStartPending,
       hasPendingQueuedSession: this.hasPendingQueuedSession,
     });
-  }
-
-  prunePendingSessionItems(nextTimeline: BranchTimelineData): Set<string> {
-    const persistedSessionIds = new Set<string>();
-    for (const commit of nextTimeline.commits) {
-      if (commit.sessionId) persistedSessionIds.add(commit.sessionId);
-    }
-    for (const note of nextTimeline.notes) {
-      if (note.sessionId) persistedSessionIds.add(note.sessionId);
-    }
-    for (const review of nextTimeline.reviews) {
-      if (review.sessionId) persistedSessionIds.add(review.sessionId);
-    }
-
-    const prunedSessionIds = new Set<string>();
-    this.pendingSessionItems = this.pendingSessionItems.filter((item) => {
-      if (item.sessionId && persistedSessionIds.has(item.sessionId)) {
-        prunedSessionIds.add(item.sessionId);
-        return false;
-      }
-      return true;
-    });
-    return prunedSessionIds;
-  }
-
-  private pendingSessionTypeForMode(mode: BranchSessionType): PendingSessionItemType {
-    switch (mode) {
-      case 'note':
-        return 'generating-note';
-      case 'review':
-        return 'generating-review';
-      default:
-        return 'pending-commit';
-    }
-  }
-
-  private queuedSessionTypeForMode(mode: BranchSessionType): PendingSessionItemType {
-    switch (mode) {
-      case 'note':
-        return 'queued-note';
-      case 'review':
-        return 'queued-review';
-      default:
-        return 'queued-commit';
-    }
-  }
-
-  private pendingSessionTitleForMode(mode: BranchSessionType, prompt: string): string {
-    const trimmed = prompt.trim();
-    if (mode === 'review') return 'Code Review';
-    if (trimmed) return trimmed;
-    return mode === 'note' ? 'Untitled note' : 'Pending commit';
-  }
-
-  private pendingSessionMetaForMode(mode: BranchSessionType): string {
-    switch (mode) {
-      case 'note':
-        return 'Starting note session...';
-      case 'review':
-        return 'Starting review session...';
-      default:
-        return 'Starting commit session...';
-    }
   }
 
   /** Register a session on the frontend and mark it as running. */
@@ -279,65 +206,20 @@ export default class BranchCardSessionManager {
   async startOrQueueSession(mode: BranchSessionType, prompt: string, imageIds: string[] = []) {
     const branch = this.getBranch();
     const isRemote = this.getIsRemote();
-    const willQueue = this.willQueueForMode(mode);
 
     if (this.autoReviewSessionId && mode !== 'note') {
       this.cancelAutoReview();
     }
 
-    const pendingKey = `session-start-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const queueMeta = this.getTimeline()
-      ? 'Queued \u2014 waiting for current session\u2026'
-      : 'Queued \u2014 waiting for workspace\u2026';
-
-    this.pendingSessionItems = [
-      ...this.pendingSessionItems,
-      {
-        key: pendingKey,
-        type: willQueue
-          ? this.queuedSessionTypeForMode(mode)
-          : this.pendingSessionTypeForMode(mode),
-        title: this.pendingSessionTitleForMode(mode, prompt),
-        secondaryMeta: willQueue ? queueMeta : this.pendingSessionMetaForMode(mode),
-      },
-    ];
-
-    try {
-      const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
-      const result = await commands.startOrQueueBranchSession(
-        branch.id,
-        prompt,
-        mode,
-        getPreferredAgent(agents) ?? undefined,
-        imageIds.length > 0 ? imageIds : undefined
-      );
-
-      if (!result || !result.sessionId) {
-        throw new Error('Failed to start session: no session ID returned');
-      }
-
-      const queued = result.sessionStatus === 'queued';
-      this.pendingSessionItems = this.pendingSessionItems.map((item) =>
-        item.key === pendingKey
-          ? {
-              ...item,
-              type: queued
-                ? this.queuedSessionTypeForMode(mode)
-                : this.pendingSessionTypeForMode(mode),
-              sessionId: result.sessionId,
-              secondaryMeta: queued ? queueMeta : undefined,
-            }
-          : item
-      );
-
-      this.loadTimeline();
-    } catch (e) {
-      this.pendingSessionItems = this.pendingSessionItems.filter((item) => item.key !== pendingKey);
-      toast.error('Unable to start session', {
-        description: e instanceof Error ? e.message : String(e),
-        duration: Infinity,
-      });
-    }
+    await startOrQueueBranchSessionWithPending({
+      branchId: branch.id,
+      isRemote,
+      mode,
+      prompt,
+      imageIds,
+      getTimeline: () => this.getTimeline(),
+      onTimelineRefresh: () => this.loadTimeline(),
+    });
   }
 
   openNewSession(mode: BranchSessionType, e?: MouseEvent) {

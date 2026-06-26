@@ -276,3 +276,9 @@ export function popDetailRoute(): void {
     persistLastProject(nextRoute.projectId);
   }
 }
+
+/** Pop the diff route only if the provided route is still the current route. */
+export function closeDiffRouteIfCurrent(expectedRoute: DiffDetailRoute): void {
+  if (currentRoute() !== expectedRoute) return;
+  popDetailRoute();
+}

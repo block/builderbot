@@ -30,6 +30,7 @@
   import {
     navigation,
     initNavigation,
+    closeDiffRouteIfCurrent,
     openSettings,
     popDetailRoute,
     selectPreviousProject,
@@ -519,22 +520,23 @@
         {:else if navigation.activeView === 'settings'}
           <SettingsPage />
         {:else if navigation.currentRoute.kind === 'diff'}
+          {@const diffRoute = navigation.currentRoute}
           <DiffModal
-            branchId={navigation.currentRoute.branchId}
-            projectId={navigation.currentRoute.projectId}
-            commitSha={navigation.currentRoute.commitSha}
-            scope={navigation.currentRoute.scope}
-            reviewId={navigation.currentRoute.reviewId}
-            beforeLabel={navigation.currentRoute.beforeLabel}
-            afterLabel={navigation.currentRoute.afterLabel}
-            readonly={navigation.currentRoute.readonly}
-            commits={navigation.currentRoute.commits}
-            baseBranchLabel={navigation.currentRoute.baseBranchLabel}
-            branchLabel={navigation.currentRoute.branchLabel}
-            projectName={navigation.currentRoute.projectName}
-            githubRepo={navigation.currentRoute.githubRepo}
-            subpath={navigation.currentRoute.subpath}
-            onClose={popDetailRoute}
+            branchId={diffRoute.branchId}
+            projectId={diffRoute.projectId}
+            commitSha={diffRoute.commitSha}
+            scope={diffRoute.scope}
+            reviewId={diffRoute.reviewId}
+            beforeLabel={diffRoute.beforeLabel}
+            afterLabel={diffRoute.afterLabel}
+            readonly={diffRoute.readonly}
+            commits={diffRoute.commits}
+            baseBranchLabel={diffRoute.baseBranchLabel}
+            branchLabel={diffRoute.branchLabel}
+            projectName={diffRoute.projectName}
+            githubRepo={diffRoute.githubRepo}
+            subpath={diffRoute.subpath}
+            onClose={() => closeDiffRouteIfCurrent(diffRoute)}
           />
         {:else if reposUiEnabled && navigation.showReposList}
           <ReposListView />

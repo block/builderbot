@@ -9,11 +9,13 @@
   import type { HashtagItem } from '../../types';
   import HashtagInput from '../sessions/HashtagInput.svelte';
   import { buildBranchHashtagItems } from '../sessions/hashtagItems';
-  import { getPreferredAgent } from '../settings/preferences.svelte';
-  import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
   import { viewport } from '../../shared/viewport.svelte';
   import { onBranchSessionStatus } from '../../services/branchEventService';
   import { shouldQueueBranchSession } from '../branches/branchSessionQueue';
+  import {
+    queuedSessionMeta,
+    startOrQueueBranchSessionWithPending,
+  } from '../branches/branchSessionLaunch.svelte';
 
   interface Props {
     branchId: string;
@@ -26,7 +28,7 @@
     subpath?: string | null;
     isRemote: boolean;
     onBeforeStart?: () => boolean | Promise<boolean>;
-    onStarted: () => void | Promise<void>;
+    onRequestClose: () => void | Promise<void>;
   }
 
   let {
@@ -40,7 +42,7 @@
     subpath,
     isRemote,
     onBeforeStart = () => true,
-    onStarted,
+    onRequestClose,
   }: Props = $props();
 
   let draftPrompt = $state('');
@@ -48,6 +50,7 @@
   let starting = $state(false);
   let timelineLoading = $state(true);
   let shouldQueueCommitSession = $state(true);
+  let latestTimeline = $state<Awaited<ReturnType<typeof commands.getBranchTimeline>> | null>(null);
   let textareaElement = $state<HTMLElement | null>(null);
 
   // Hashtag reference items
@@ -85,9 +88,11 @@
   async function refreshQueueState(force = false): Promise<boolean> {
     try {
       const timeline = await commands.getBranchTimeline(branchId, { force });
+      latestTimeline = timeline;
       shouldQueueCommitSession = shouldQueueBranchSession({ mode: 'commit', timeline });
     } catch (e) {
       console.error('[DiffCommitSessionLauncher] Failed to load timeline:', e);
+      latestTimeline = null;
       shouldQueueCommitSession = true;
     } finally {
       timelineLoading = false;
@@ -146,6 +151,7 @@
     if (starting || !draftPrompt.trim()) return;
 
     starting = true;
+    let sessionLaunchSubmitted = false;
     try {
       if (!(await onBeforeStart())) return;
       await tick();
@@ -167,26 +173,30 @@
         reviewId: reviewId ?? null,
       };
 
-      const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
-      const provider = getPreferredAgent(agents) ?? undefined;
-
-      await commands.startOrQueueBranchSession(
+      void startOrQueueBranchSessionWithPending({
         branchId,
-        finalPrompt,
-        'commit',
-        provider,
-        undefined,
-        launchContext
-      );
+        isRemote,
+        mode: 'commit',
+        prompt: finalPrompt,
+        launchContext,
+        getTimeline: () => latestTimeline,
+        onTimelineRefresh: () => commands.invalidateBranchTimeline(branchId),
+        willQueueHint: shouldQueueCommitSession,
+        queueMeta: queuedSessionMeta(latestTimeline),
+        errorTitle: 'Unable to start commit session',
+      }).finally(() => {
+        starting = false;
+      });
+      sessionLaunchSubmitted = true;
 
-      await onStarted();
+      await onRequestClose();
     } catch (e) {
       toast.error('Unable to start commit session', {
         description: e instanceof Error ? e.message : String(e),
         duration: Infinity,
       });
     } finally {
-      starting = false;
+      if (!sessionLaunchSubmitted) starting = false;
     }
   }
 </script>

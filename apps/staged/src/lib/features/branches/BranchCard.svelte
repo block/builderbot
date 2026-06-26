@@ -69,6 +69,11 @@
   import BranchCardActionsBar from './BranchCardActionsBar.svelte';
   import BranchCardPrButton from './BranchCardPrButton.svelte';
   import BranchCardSessionManager from './BranchCardSessionManager.svelte';
+  import {
+    addPendingSession,
+    getPendingSessionItems,
+    prunePendingSessionItems,
+  } from './branchSessionLaunch.svelte';
   import RemoteWorkspaceStatusBadge from './RemoteWorkspaceStatusBadge.svelte';
   import RemoteWorkspaceStatusView from './RemoteWorkspaceStatusView.svelte';
   import { branchTimelineReadyKey } from './branchTimelineReady';
@@ -305,10 +310,7 @@
       // Add a pending session item so the session stub appears instantly
       // instead of waiting for the full timeline refresh.
       const title = kind === 'rebase' ? 'Rebasing…' : 'Squashing…';
-      sessionMgr.pendingSessionItems = [
-        ...sessionMgr.pendingSessionItems,
-        { key: pendingKey, type: 'pending-commit', title, sessionId },
-      ];
+      addPendingSession(branch.id, { key: pendingKey, type: 'pending-commit', title, sessionId });
       await loadTimeline();
     } catch (e) {
       notifyError(kind === 'rebase' ? 'Rebase failed' : 'Squash failed', e);
@@ -508,7 +510,7 @@
     timeline = cached;
     loadedTimelineKey = timelineKey;
     loading = false;
-    prunedSessionIds = sessionMgr.prunePendingSessionItems(cached);
+    prunedSessionIds = prunePendingSessionItems(branch.id, cached);
     if (fresh) {
       const version = ++revalidationVersion;
       fresh
@@ -519,7 +521,7 @@
           error = null;
           timeline = next;
           loadedTimelineKey = timelineKey;
-          prunedSessionIds = sessionMgr.prunePendingSessionItems(next);
+          prunedSessionIds = prunePendingSessionItems(branch.id, next);
           void loadTimelineReviewDetails(next.reviews);
         })
         .catch((e) => {
@@ -741,7 +743,7 @@
       if (!isCurrentTimelineLoad(loadVersion, timelineKey)) return;
       timeline = nextTimeline;
       loadedTimelineKey = timelineKey;
-      prunedSessionIds = sessionMgr.prunePendingSessionItems(nextTimeline);
+      prunedSessionIds = prunePendingSessionItems(branch.id, nextTimeline);
       void loadTimelineReviewDetails(nextTimeline.reviews);
     } catch (e) {
       if (!isCurrentTimelineLoad(loadVersion, timelineKey)) return;
@@ -1591,7 +1593,7 @@
               repoDir={branch.worktreePath}
               {hashtagItems}
               pendingDropNotes={isLocal ? pendingDropNotes : undefined}
-              pendingItems={sessionMgr.pendingSessionItems}
+              pendingItems={getPendingSessionItems(branch.id)}
               {prunedSessionIds}
               {error}
               gitActionDisabledReason={branchIdentityWarning}

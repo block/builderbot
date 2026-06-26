@@ -555,6 +555,7 @@
   // =========================================================================
 
   let sending = $state(false);
+  let noteFollowupSending = $state(false);
 
   async function handleSend() {
     const text = inputText.trim();
@@ -606,10 +607,11 @@
   }
 
   async function handleNoteFollowupClick() {
-    if (!session || !noteInfo || sending) return;
+    if (!session || !noteInfo || sending || noteFollowupSending) return;
     const target: SendMessageTarget = { sessionId: session.id, branchId: branchId ?? null };
     const hasParsedNote = noteInfo.hasParsedNote;
     sending = true;
+    noteFollowupSending = true;
     error = null;
     try {
       const prompt = await buildNoteFollowupMessage(
@@ -623,6 +625,7 @@
       error = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
       messageQueue = [];
     } finally {
+      noteFollowupSending = false;
       sending = false;
     }
   }
@@ -1402,7 +1405,7 @@
                 onclick={handleNoteFollowupClick}
                 disabled={sending}
               >
-                {#if sending}
+                {#if noteFollowupSending}
                   <Spinner size={13} />
                 {:else}
                   <FileText size={13} />

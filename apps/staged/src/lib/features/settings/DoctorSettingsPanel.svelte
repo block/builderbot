@@ -27,12 +27,12 @@
   });
 
   /** Run checks, then refresh the agent selector if still mounted. */
-  async function runChecksAndRefresh() {
+  async function runChecksAndRefresh(options: { forceProviderRefresh?: boolean } = {}) {
     await runChecks();
     if (mounted) {
       // Re-discover providers so newly-installed agents are immediately
       // available in the agent selector without requiring an app reload.
-      refreshProviders();
+      refreshProviders({ force: options.forceProviderRefresh });
     }
   }
 
@@ -111,7 +111,7 @@
           variant="outline"
           size="sm"
           disabled={doctorState.updatingAll}
-          onclick={runChecksAndRefresh}
+          onclick={() => runChecksAndRefresh({ forceProviderRefresh: true })}
         >
           <RefreshCw size={14} />
           Re-run

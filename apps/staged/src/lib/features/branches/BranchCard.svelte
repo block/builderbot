@@ -709,6 +709,17 @@
     return () => window.removeEventListener('project-notes-invalidated', handler);
   });
 
+  // Re-fetch timeline when page resumes from a freeze (cache-stale event)
+  $effect(() => {
+    const handler = () => {
+      if (branchTimelineReadyKey(branch)) {
+        void loadTimeline();
+      }
+    };
+    window.addEventListener('cache-stale', handler);
+    return () => window.removeEventListener('cache-stale', handler);
+  });
+
   async function loadTimeline({
     timelineKey = branchTimelineReadyKey(branch),
     force = false,

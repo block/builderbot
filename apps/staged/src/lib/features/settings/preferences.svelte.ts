@@ -235,6 +235,12 @@ export async function initPreferences(): Promise<void> {
   ensureSystemModeListener();
   applyChromeTheme();
 
+  // Unblock the UI as soon as size + chrome theme are applied. Everything below
+  // (diff/Shiki theme, recent agents, auto-review) only feeds the diff viewer and
+  // settings, not the first paint of the project view — so gating the whole app
+  // on it just lengthens the staged reveal on resume. Loading continues below.
+  preferences.loaded = true;
+
   // Load diff theme (migrating from the legacy combined `syntax-theme` key).
   let savedDiffTheme = await getStoreValue<string>(DIFF_THEME_STORE_KEY);
   if (!savedDiffTheme) {
@@ -266,8 +272,6 @@ export async function initPreferences(): Promise<void> {
   } else {
     preferences.autoReviewMode = (await loadSqAvailabilityForDefault()) ? 'after-changes' : 'never';
   }
-
-  preferences.loaded = true;
 }
 
 // =============================================================================

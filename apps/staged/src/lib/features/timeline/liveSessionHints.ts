@@ -231,7 +231,7 @@ export function createLiveSessionHints(
 
       const updatedMessages =
         tracker.lastMessageId === null
-          ? await commands.getSessionMessages(sessionId)
+          ? (await commands.getSessionMessages(sessionId)).data
           : await commands.getSessionMessagesSince(sessionId, tracker.lastMessageId);
 
       if (destroyed || !hintTrackers.has(sessionId)) return;

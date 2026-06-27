@@ -5,6 +5,14 @@
  */
 
 import { invokeCommand, isTauri } from './transport';
+import {
+  cachedCommand,
+  cachedInvoke,
+  invalidateCacheByCommand,
+  invalidateCache,
+  type SwrResult,
+} from './cache';
+import { readSnapshot, writeSnapshot, SNAPSHOT_KEYS } from './shared/webSnapshot';
 import type {
   Project,
   ProjectRepo,
@@ -60,11 +68,11 @@ export function confirmResetStore(): Promise<void> {
 // Projects
 // =============================================================================
 
-export function listProjects(): Promise<Project[]> {
-  return invokeCommand('list_projects');
+export function listProjects(): Promise<SwrResult<Project[]>> {
+  return cachedCommand('list_projects', undefined, { ttl: 5 * 60_000 });
 }
 
-export function createProject(
+export async function createProject(
   name: string,
   location: 'local' | 'remote',
   githubRepo?: string,
@@ -74,7 +82,7 @@ export function createProject(
   defaultBranch?: string,
   headRepo?: string
 ): Promise<Project> {
-  return invokeCommand('create_project', {
+  const project = await invokeCommand<Project>('create_project', {
     name,
     location,
     githubRepo: githubRepo ?? null,
@@ -84,21 +92,28 @@ export function createProject(
     defaultBranch: defaultBranch ?? null,
     headRepo: headRepo ?? null,
   });
+  await invalidateCacheByCommand('list_projects');
+  return project;
 }
 
-export function deleteProject(id: string): Promise<void> {
-  return invokeCommand('delete_project', { id });
+export async function deleteProject(id: string): Promise<void> {
+  await invokeCommand('delete_project', { id });
+  await Promise.all([
+    invalidateCacheByCommand('list_projects'),
+    invalidateCacheByCommand('list_branches_for_project'),
+    invalidateCacheByCommand('list_project_repos'),
+  ]);
 }
 
-export function listProjectRepos(projectId: string): Promise<ProjectRepo[]> {
-  return invokeCommand('list_project_repos', { projectId });
+export function listProjectRepos(projectId: string): Promise<SwrResult<ProjectRepo[]>> {
+  return cachedCommand('list_project_repos', { projectId }, { ttl: 10 * 60_000 });
 }
 
 export function listRecentRepos(limit?: number): Promise<RecentRepo[]> {
   return invokeCommand('list_recent_repos', { limit: limit ?? 10 });
 }
 
-export function addProjectRepo(
+export async function addProjectRepo(
   projectId: string,
   githubRepo: string,
   branchName?: string,
@@ -108,7 +123,7 @@ export function addProjectRepo(
   defaultBranch?: string,
   headRepo?: string
 ): Promise<ProjectRepo> {
-  return invokeCommand('add_project_repo', {
+  const repo = await invokeCommand<ProjectRepo>('add_project_repo', {
     projectId,
     githubRepo,
     branchName: branchName ?? null,
@@ -118,6 +133,8 @@ export function addProjectRepo(
     defaultBranch: defaultBranch ?? null,
     headRepo: headRepo ?? null,
   });
+  await invalidateCache('list_project_repos', { projectId });
+  return repo;
 }
 
 export function updateProjectRepoBranchName(
@@ -128,12 +145,17 @@ export function updateProjectRepoBranchName(
   return invokeCommand('update_project_repo_branch_name', { projectId, projectRepoId, branchName });
 }
 
-export function removeProjectRepo(projectId: string, projectRepoId: string): Promise<void> {
-  return invokeCommand('remove_project_repo', { projectId, projectRepoId });
+export async function removeProjectRepo(projectId: string, projectRepoId: string): Promise<void> {
+  await invokeCommand('remove_project_repo', { projectId, projectRepoId });
+  await invalidateCache('list_project_repos', { projectId });
 }
 
-export function setPrimaryProjectRepo(projectId: string, projectRepoId: string): Promise<void> {
-  return invokeCommand('set_primary_project_repo', { projectId, projectRepoId });
+export async function setPrimaryProjectRepo(
+  projectId: string,
+  projectRepoId: string
+): Promise<void> {
+  await invokeCommand('set_primary_project_repo', { projectId, projectRepoId });
+  await invalidateCache('list_project_repos', { projectId });
 }
 
 export function getSuggestedRepos(projectId: string, limit?: number): Promise<SuggestedRepo[]> {
@@ -227,8 +249,8 @@ export function startProjectSession(
 // Branches
 // =============================================================================
 
-export function listBranchesForProject(projectId: string): Promise<Branch[]> {
-  return invokeCommand('list_branches_for_project', { projectId });
+export function listBranchesForProject(projectId: string): Promise<SwrResult<Branch[]>> {
+  return cachedCommand('list_branches_for_project', { projectId }, { ttl: 2 * 60_000 });
 }
 
 /** Get a single branch by ID. */
@@ -239,13 +261,20 @@ export function getBranch(branchId: string): Promise<Branch | null> {
 /** Create a local branch record (DB only — no git worktree yet).
  *  Returns immediately with worktreePath = null.
  *  Call `setupWorktree` separately to create the git worktree. */
-export function createBranch(
+export async function createBranch(
   projectId: string,
   branchName: string,
   baseBranch?: string,
   projectRepoId?: string
 ): Promise<Branch> {
-  return invokeCommand('create_branch', { projectId, branchName, baseBranch, projectRepoId });
+  const branch = await invokeCommand<Branch>('create_branch', {
+    projectId,
+    branchName,
+    baseBranch,
+    projectRepoId,
+  });
+  await invalidateCacheByCommand('list_branches_for_project');
+  return branch;
 }
 
 /** Create the git worktree for a local branch and record its workdir.
@@ -306,8 +335,12 @@ export function resumeWorkspace(workspaceName: string): Promise<string[]> {
   return invokeCommand('resume_workspace', { workspaceName });
 }
 
-export function deleteBranch(branchId: string): Promise<void> {
-  return invokeCommand('delete_branch', { branchId });
+export async function deleteBranch(branchId: string): Promise<void> {
+  await invokeCommand('delete_branch', { branchId });
+  await Promise.all([
+    invalidateCacheByCommand('list_branches_for_project'),
+    invalidateCache('get_branch_timeline', { branchId }),
+  ]);
 }
 
 export function renameBranch(branchId: string, branchName: string): Promise<Branch> {
@@ -341,12 +374,73 @@ export function pollAllWorkspaceStatuses(
 // =============================================================================
 
 const TIMELINE_FRESH_MS = 10_000;
+const TIMELINE_CACHE_TTL = 30_000;
 const timelineCache = new Map<string, { timeline: BranchTimeline; fetchedAt: number }>();
 const inFlightTimelines = new Map<string, Promise<BranchTimeline>>();
+
+/** Cap snapshot size so it stays comfortably under the localStorage quota. */
+const MAX_SNAPSHOT_TIMELINES = 40;
+
+type TimelineCacheEntry = { timeline: BranchTimeline; fetchedAt: number };
+
+/**
+ * Seed the in-memory timeline cache synchronously from the previous session's
+ * localStorage snapshot. This runs at module init (before any BranchCard mounts)
+ * so cached timelines can paint on the first frame of a cold iOS reload, instead
+ * of each card awaiting its own asynchronous IndexedDB read. IndexedDB remains
+ * the source of truth; the snapshot is only a paint-on-first-frame accelerator.
+ * The seeded entries carry their original `fetchedAt`, so they read as stale and
+ * `getBranchTimelineWithRevalidation` still kicks off a fresh fetch.
+ */
+function seedTimelineCacheFromSnapshot(): void {
+  const snapshot = readSnapshot<Record<string, TimelineCacheEntry>>(SNAPSHOT_KEYS.timelines);
+  if (!snapshot) return;
+  for (const [branchId, entry] of Object.entries(snapshot)) {
+    if (entry?.timeline && !timelineCache.has(branchId)) {
+      timelineCache.set(branchId, entry);
+    }
+  }
+}
+seedTimelineCacheFromSnapshot();
+
+/**
+ * Persist a compact snapshot of the in-memory timeline cache to localStorage so
+ * the next cold boot can re-seed it synchronously. Called from the page
+ * lifecycle listener right before the tab is hidden/torn down (the last moment
+ * we can capture state synchronously on iOS). Keeps only the most recently
+ * fetched entries to bound the serialized size.
+ */
+export function persistTimelineSnapshot(): void {
+  if (isTauri || timelineCache.size === 0) return;
+  const snapshot: Record<string, TimelineCacheEntry> = Object.fromEntries(
+    [...timelineCache.entries()]
+      .sort((a, b) => b[1].fetchedAt - a[1].fetchedAt)
+      .slice(0, MAX_SNAPSHOT_TIMELINES)
+  );
+  writeSnapshot(SNAPSHOT_KEYS.timelines, snapshot);
+}
+
+/**
+ * Eagerly warm the in-memory timeline cache for every branch of a project, in
+ * parallel. Called during boot for the restored project so cards find data
+ * ready instead of each kicking off its own serialized IndexedDB read after
+ * `ProjectHome` mounts. Requests dedupe against `inFlightTimelines`, so this is
+ * safe to run alongside the per-card reads.
+ */
+export async function warmProjectTimelines(projectId: string): Promise<void> {
+  if (isTauri) return;
+  try {
+    const { data: branches } = await listBranchesForProject(projectId);
+    await Promise.allSettled(branches.map((b) => getBranchTimeline(b.id)));
+  } catch {
+    // Best-effort warm — cards fall back to their own lazy reads.
+  }
+}
 
 export function invalidateBranchTimeline(branchId: string): void {
   timelineCache.delete(branchId);
   inFlightTimelines.delete(branchId);
+  invalidateCache('get_branch_timeline', { branchId });
   window.dispatchEvent(
     new CustomEvent('timeline-invalidated', { detail: { branchIds: [branchId] } })
   );
@@ -372,18 +466,30 @@ export function getBranchTimeline(
     }
   }
 
-  const request = invokeCommand<BranchTimeline>('get_branch_timeline', { branchId })
-    .then((timeline) => {
-      if (inFlightTimelines.get(branchId) === request) {
-        timelineCache.set(branchId, { timeline, fetchedAt: Date.now() });
+  // Use cachedInvoke so IndexedDB serves data on cold start while the network
+  // fetch runs in parallel (SWR). The first yield may be cached; the last is
+  // always the freshest available value.
+  let request: Promise<BranchTimeline> | undefined;
+  const timelineRequest = (async () => {
+    let timeline: BranchTimeline | undefined;
+    for await (const { data, fetchedAt } of cachedInvoke<BranchTimeline>(
+      'get_branch_timeline',
+      { branchId },
+      { ttl: TIMELINE_CACHE_TTL, bypassRead: force }
+    )) {
+      timeline = data;
+      if (request && inFlightTimelines.get(branchId) === request) {
+        timelineCache.set(branchId, { timeline, fetchedAt });
       }
-      return timeline;
-    })
-    .finally(() => {
-      if (inFlightTimelines.get(branchId) === request) {
-        inFlightTimelines.delete(branchId);
-      }
-    });
+    }
+    return timeline!;
+  })();
+
+  request = timelineRequest.finally(() => {
+    if (request && inFlightTimelines.get(branchId) === request) {
+      inFlightTimelines.delete(branchId);
+    }
+  });
 
   inFlightTimelines.set(branchId, request);
   return request;
@@ -431,6 +537,7 @@ export function invalidateProjectBranchTimelines(branchIds: string[]): void {
   for (const id of branchIds) {
     timelineCache.delete(id);
     inFlightTimelines.delete(id);
+    invalidateCache('get_branch_timeline', { branchId: id });
   }
   window.dispatchEvent(new CustomEvent('timeline-invalidated', { detail: { branchIds } }));
 }
@@ -583,9 +690,19 @@ export interface AcpProviderInfo {
   label: string;
 }
 
+export interface DiscoverAcpProvidersOptions {
+  force?: boolean;
+}
+
+const ACP_PROVIDER_CACHE_TTL = 30 * 60_000;
+
 /** Scan the system for installed ACP-compatible agents. */
-export function discoverAcpProviders(): Promise<AcpProviderInfo[]> {
-  return invokeCommand('discover_acp_providers');
+export function discoverAcpProviders(
+  options: DiscoverAcpProvidersOptions = {}
+): Promise<SwrResult<AcpProviderInfo[]>> {
+  return cachedCommand('discover_acp_providers', undefined, {
+    ttl: options.force ? 0 : ACP_PROVIDER_CACHE_TTL,
+  });
 }
 
 // =============================================================================
@@ -596,7 +713,12 @@ export function getSession(sessionId: string): Promise<Session | null> {
   return invokeCommand('get_session', { sessionId });
 }
 
-export function getSessionMessages(sessionId: string): Promise<SessionMessage[]> {
+export function getSessionMessages(sessionId: string): Promise<SwrResult<SessionMessage[]>> {
+  return cachedCommand('get_session_messages', { sessionId }, { ttl: 5 * 60_000 });
+}
+
+/** Fetch session messages without SWR cache, for terminal status handlers. */
+export function getFreshSessionMessages(sessionId: string): Promise<SessionMessage[]> {
   return invokeCommand('get_session_messages', { sessionId });
 }
 
@@ -793,8 +915,8 @@ export function getDiffFiles(
   branchId: string,
   commitSha?: string,
   scope: DiffScope = 'branch'
-): Promise<DiffFilesResponse> {
-  return invokeCommand('get_diff_files', { branchId, commitSha, scope });
+): Promise<SwrResult<DiffFilesResponse>> {
+  return cachedCommand('get_diff_files', { branchId, commitSha, scope }, { ttl: 2 * 60_000 });
 }
 
 /** Get the full diff content for a single file. */
@@ -803,8 +925,8 @@ export function getFileDiff(
   commitSha: string,
   scope: DiffScope,
   path: string
-): Promise<FileDiff> {
-  return invokeCommand('get_file_diff', { branchId, commitSha, scope, path });
+): Promise<SwrResult<FileDiff>> {
+  return cachedCommand('get_file_diff', { branchId, commitSha, scope, path }, { ttl: 2 * 60_000 });
 }
 
 /** Get file content at a specific ref (for reference files). */

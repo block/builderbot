@@ -473,14 +473,26 @@
     loading = true;
     error = null;
     try {
-      const [s, msgs] = await Promise.all([getSession(sessionId), getSessionMessages(sessionId)]);
+      const [s, msgsResult] = await Promise.all([
+        getSession(sessionId),
+        getSessionMessages(sessionId),
+      ]);
       if (closed) return;
       if (!s) {
         error = 'Session not found';
         return;
       }
       session = s;
-      messages = msgs;
+      messages = msgsResult.data;
+      if (msgsResult.revalidating) {
+        msgsResult.revalidating
+          .then((fresh) => {
+            if (closed) return;
+            messages = fresh;
+            scrollToBottomIfNear(true);
+          })
+          .catch(() => {});
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -506,7 +518,7 @@
 
       // Incremental message fetch
       if (messages.length === 0) {
-        const msgs = await getSessionMessages(sessionId);
+        const { data: msgs } = await getSessionMessages(sessionId);
         if (closed) return;
         if (msgs.length > 0) {
           messages = msgs;

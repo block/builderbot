@@ -10,6 +10,7 @@
  */
 
 import { listenToEvent, type UnlistenFn } from '../transport';
+import { invalidateBranchTimeline } from '../commands';
 import * as commands from '../api/commands';
 import {
   classifyCompletedPushSession,
@@ -49,6 +50,10 @@ export function listenForSessionStatus(): UnlistenFn {
     }
 
     if (status === 'completed' || status === 'error' || status === 'cancelled') {
+      // Invalidate cached timeline for the branch affected by this session
+      if (eventBranchId) {
+        invalidateBranchTimeline(eventBranchId);
+      }
       handleSessionEnd(sessionId, status);
     }
   });
@@ -91,7 +96,7 @@ async function handlePrCompletion(sessionId: string, branchId: string, status: S
   if (status === 'completed') {
     try {
       // Try session messages first (AI session writes PR_URL: marker).
-      const messages = await commands.getSessionMessages(sessionId);
+      const messages = await commands.getFreshSessionMessages(sessionId);
       let foundUrl = extractPrUrl(messages);
 
       // Also check pipeline step outputs for older or partially migrated PR sessions.
@@ -150,7 +155,7 @@ async function handlePushCompletion(sessionId: string, branchId: string, status:
     try {
       const session = await commands.getSession(sessionId);
       const pipeline = session?.pipeline;
-      const messages = await commands.getSessionMessages(sessionId);
+      const messages = await commands.getFreshSessionMessages(sessionId);
       const outcome = classifyCompletedPushSession(pipeline, messages);
 
       if (outcome === 'rejected_non_fast_forward') {

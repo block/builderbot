@@ -9,6 +9,12 @@
  */
 
 import { getStoreValue, setStoreValue } from '../../shared/persistentStore';
+import {
+  readSnapshot,
+  writeSnapshot,
+  clearSnapshot,
+  SNAPSHOT_KEYS,
+} from '../../shared/webSnapshot';
 import * as commands from '../../api/commands';
 import type { DiffScope } from '../../commands';
 import type { CommitTimelineItem } from '../../types';
@@ -52,7 +58,10 @@ function rootRoute(): DetailRoute {
 
 export const navigation = $state({
   activeView: 'workspace' as 'workspace' | 'settings',
-  selectedProjectId: null as string | null,
+  // Web-only: seed synchronously from the localStorage mirror so <ProjectHome>
+  // can paint on the first frame of a cold iOS reload, before the async
+  // persistent store and `listProjects()` validation resolve (see initNavigation).
+  selectedProjectId: readSnapshot<string>(SNAPSHOT_KEYS.lastProject),
   showReposList: false,
   settingsSection: 'general' as SettingsSection,
   detailStack: [rootRoute()] as DetailRoute[],
@@ -120,6 +129,9 @@ function pushOrReplaceRoute(route: DetailRoute): void {
  */
 function persistLastProject(projectId: string | null): void {
   setStoreValue(LAST_PROJECT_STORE_KEY, projectId);
+  // Mirror to localStorage for the synchronous cold-boot restore (web only).
+  if (projectId) writeSnapshot(SNAPSHOT_KEYS.lastProject, projectId);
+  else clearSnapshot(SNAPSHOT_KEYS.lastProject);
 }
 
 /**
@@ -130,25 +142,33 @@ function persistLastProject(projectId: string | null): void {
  * user is sent to the home screen instead.
  */
 export async function initNavigation(): Promise<void> {
-  const lastProjectId = await getStoreValue<string | null>(LAST_PROJECT_STORE_KEY);
+  // `selectedProjectId` may already be set synchronously from the localStorage
+  // mirror (web cold boot). Fall back to the async persistent store otherwise —
+  // it is the source of truth in Tauri mode. Either way we render immediately
+  // and only *correct* the route here if the project turns out to be gone.
+  const lastProjectId =
+    navigation.selectedProjectId ?? (await getStoreValue<string | null>(LAST_PROJECT_STORE_KEY));
   if (!lastProjectId) return;
 
-  // Validate the project still exists before navigating to it
+  // Validate the project still exists; this runs in the background relative to
+  // the first paint, which already shows the restored project.
   try {
-    const projects = await commands.listProjects();
+    const { data: projects } = await commands.listProjects();
     projectsList.current = projects;
     const existingIds = new Set(projects.map((p) => p.id));
     if (existingIds.has(lastProjectId)) {
       setDetailStack([rootRoute(), { kind: 'project', projectId: lastProjectId }]);
     } else {
-      // Project was deleted — clear the stale value
+      // Project was deleted — back out to home and clear the persisted values.
+      navigation.selectedProjectId = null;
       await setStoreValue(LAST_PROJECT_STORE_KEY, null);
+      clearSnapshot(SNAPSHOT_KEYS.lastProject);
     }
     // Remove unread entries for projects that no longer exist
     await projectStateStore.pruneDeletedProjects(existingIds);
   } catch {
-    // If we can't list projects (e.g. store error), stay on home
-    console.warn('[Navigation] Could not verify last project, falling back to home');
+    // If we can't list projects (e.g. store error), keep whatever we restored.
+    console.warn('[Navigation] Could not verify last project, keeping restored route');
   }
 }
 

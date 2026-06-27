@@ -8,6 +8,8 @@ describe('browser-native command wrappers', () => {
   afterEach(() => {
     vi.doUnmock('./transport');
     vi.unstubAllGlobals();
+    vi.doUnmock('./transport');
+    vi.doUnmock('./cache');
   });
 
   it('opens URLs with browser navigation in web mode', async () => {
@@ -79,5 +81,148 @@ describe('browser-native command wrappers', () => {
       branchId: 'branch-1',
       hasParsedNote: true,
     });
+  });
+});
+
+describe('cached mutation command wrappers', () => {
+  function deferred() {
+    let resolve!: () => void;
+    const promise = new Promise<void>((res) => {
+      resolve = res;
+    });
+    return { promise, resolve };
+  }
+
+  let invokeCommand: ReturnType<typeof vi.fn>;
+  let cachedCommand: ReturnType<typeof vi.fn>;
+  let invalidateCache: ReturnType<typeof vi.fn>;
+  let invalidateCacheByCommand: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    vi.resetModules();
+    invokeCommand = vi.fn();
+    cachedCommand = vi.fn();
+    invalidateCache = vi.fn();
+    invalidateCacheByCommand = vi.fn();
+
+    vi.doMock('./transport', () => ({
+      isTauri: false,
+      invokeCommand,
+    }));
+    vi.doMock('./cache', () => ({
+      cachedCommand,
+      cachedInvoke: vi.fn(),
+      invalidateCache,
+      invalidateCacheByCommand,
+    }));
+  });
+
+  afterEach(() => {
+    vi.doUnmock('./transport');
+    vi.doUnmock('./cache');
+  });
+
+  it('waits for repo list invalidation before resolving addProjectRepo', async () => {
+    const repo = { id: 'repo-1' };
+    const invalidated = deferred();
+    invokeCommand.mockResolvedValue(repo);
+    invalidateCache.mockReturnValue(invalidated.promise);
+
+    const { addProjectRepo } = await import('./commands');
+
+    let settled = false;
+    const result = addProjectRepo('project-1', 'block/builderbot').then((value) => {
+      settled = true;
+      return value;
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(invalidateCache).toHaveBeenCalledWith('list_project_repos', { projectId: 'project-1' });
+    expect(settled).toBe(false);
+
+    invalidated.resolve();
+
+    await expect(result).resolves.toBe(repo);
+  });
+
+  it('waits for all project cache invalidations before resolving deleteProject', async () => {
+    const projectsInvalidated = deferred();
+    const branchesInvalidated = deferred();
+    const reposInvalidated = deferred();
+    invokeCommand.mockResolvedValue(undefined);
+    invalidateCacheByCommand
+      .mockReturnValueOnce(projectsInvalidated.promise)
+      .mockReturnValueOnce(branchesInvalidated.promise)
+      .mockReturnValueOnce(reposInvalidated.promise);
+
+    const { deleteProject } = await import('./commands');
+
+    let settled = false;
+    const result = deleteProject('project-1').then(() => {
+      settled = true;
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(invalidateCacheByCommand.mock.calls).toEqual([
+      ['list_projects'],
+      ['list_branches_for_project'],
+      ['list_project_repos'],
+    ]);
+    expect(settled).toBe(false);
+
+    projectsInvalidated.resolve();
+    branchesInvalidated.resolve();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    reposInvalidated.resolve();
+
+    await expect(result).resolves.toBeUndefined();
+  });
+
+  it('bypasses the SWR cache when fetching fresh session messages', async () => {
+    const messages = [{ id: 1, sessionId: 'session-1', role: 'assistant', content: 'done' }];
+    invokeCommand.mockResolvedValue(messages);
+
+    const { getFreshSessionMessages } = await import('./commands');
+
+    await expect(getFreshSessionMessages('session-1')).resolves.toBe(messages);
+    expect(invokeCommand).toHaveBeenCalledWith('get_session_messages', {
+      sessionId: 'session-1',
+    });
+    expect(cachedCommand).not.toHaveBeenCalled();
+  });
+
+  it('uses the standard provider discovery cache by default', async () => {
+    const providers = [{ id: 'goose', label: 'Goose' }];
+    cachedCommand.mockResolvedValue({ data: providers, revalidating: null });
+
+    const { discoverAcpProviders } = await import('./commands');
+
+    await expect(discoverAcpProviders()).resolves.toEqual({
+      data: providers,
+      revalidating: null,
+    });
+    expect(cachedCommand).toHaveBeenCalledWith('discover_acp_providers', undefined, {
+      ttl: 30 * 60_000,
+    });
+  });
+
+  it('forces provider discovery revalidation without bypassing the cached value', async () => {
+    const providers = [{ id: 'goose', label: 'Goose' }];
+    const revalidating = Promise.resolve([{ id: 'codex', label: 'Codex' }]);
+    cachedCommand.mockResolvedValue({ data: providers, revalidating });
+
+    const { discoverAcpProviders } = await import('./commands');
+
+    await expect(discoverAcpProviders({ force: true })).resolves.toEqual({
+      data: providers,
+      revalidating,
+    });
+    expect(cachedCommand).toHaveBeenCalledWith('discover_acp_providers', undefined, { ttl: 0 });
   });
 });

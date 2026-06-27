@@ -2,12 +2,15 @@
   import type { Snippet } from 'svelte';
   import Copy from '@lucide/svelte/icons/copy';
   import MessageSquarePlus from '@lucide/svelte/icons/message-square-plus';
+  import Trash2 from '@lucide/svelte/icons/trash-2';
   import * as ContextMenu from '$lib/components/ui/context-menu';
 
   export type TimelineContextMenuAction = {
     key: string;
     commitSha?: string;
     hashtagRef?: string;
+    deleteDisabledReason?: string;
+    onDelete?: (opts?: { altKey: boolean }) => void;
   };
 
   interface Props {
@@ -22,7 +25,12 @@
   let activeActionKey = $state<string | null>(null);
 
   function hasVisibleAction(action: TimelineContextMenuAction): boolean {
-    return !!action.commitSha || (!!action.hashtagRef && !!onNewSessionReferring);
+    return (
+      !!action.commitSha ||
+      (!!action.hashtagRef && !!onNewSessionReferring) ||
+      !!action.onDelete ||
+      !!action.deleteDisabledReason
+    );
   }
 
   let actionByKey = $derived.by(() => {
@@ -96,6 +104,10 @@
     }
   }
 
+  function handleDelete() {
+    activeAction?.onDelete?.({ altKey: false });
+  }
+
   $effect(() => {
     if (activeActionKey && !actionByKey.has(activeActionKey)) {
       activeActionKey = null;
@@ -123,6 +135,16 @@
         {#if activeAction.hashtagRef && onNewSessionReferring}
           <ContextMenu.Item onSelect={handleNewSessionReferring}>
             <MessageSquarePlus size={14} /> New session referring to this
+          </ContextMenu.Item>
+        {/if}
+        {#if activeAction.onDelete || activeAction.deleteDisabledReason}
+          <ContextMenu.Item
+            variant="destructive"
+            disabled={!!activeAction.deleteDisabledReason}
+            title={activeAction.deleteDisabledReason ?? 'Delete'}
+            onSelect={handleDelete}
+          >
+            <Trash2 size={14} /> Delete
           </ContextMenu.Item>
         {/if}
       {/if}

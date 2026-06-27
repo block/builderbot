@@ -600,9 +600,9 @@
     display: flex;
     align-items: flex-start;
     gap: 10px;
-    padding: 8px;
-    margin: 0 -8px;
-    border-radius: 6px;
+    padding: 8px var(--timeline-row-padding-inline, 12px);
+    margin: 0 calc(-1 * var(--timeline-row-bleed, 16px));
+    border-radius: 0;
     position: relative;
     transition: background-color 0.15s ease;
   }
@@ -620,7 +620,7 @@
   }
 
   .timeline-row.compact {
-    padding: 6px 8px;
+    padding: 6px var(--timeline-row-padding-inline, 12px);
   }
 
   .timeline-row.failed {

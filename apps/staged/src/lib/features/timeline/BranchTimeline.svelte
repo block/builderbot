@@ -1195,8 +1195,8 @@
     align-items: center;
     justify-content: space-between;
     gap: 6px;
-    padding: 6px 8px;
-    margin: 0 -8px;
+    padding: 6px var(--timeline-row-padding-inline, 12px);
+    margin: 0 calc(-1 * var(--timeline-row-bleed, 16px));
     position: relative;
     z-index: 1;
     transition:

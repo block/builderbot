@@ -514,10 +514,12 @@
   }
 
   .project-overview-card {
+    --project-card-padding-inline: 16px;
+
     display: flex;
     flex-direction: column;
     gap: 14px;
-    padding: 18px 16px 14px;
+    padding: 18px var(--project-card-padding-inline) 14px;
     border: 1px solid var(--border-subtle);
     border-radius: 8px;
     background-color: var(--bg-primary);
@@ -534,9 +536,10 @@
   }
 
   .notes-timeline {
+    --timeline-row-bleed: var(--project-card-padding-inline);
+
     display: flex;
     flex-direction: column;
-    padding: 0 8px;
   }
 
   .project-session-footer {
@@ -571,7 +574,9 @@
     }
 
     .project-overview-card {
-      padding: 16px 14px 12px;
+      --project-card-padding-inline: 14px;
+
+      padding: 16px var(--project-card-padding-inline) 12px;
     }
 
     .project-title {

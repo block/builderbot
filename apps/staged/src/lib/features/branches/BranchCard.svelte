@@ -1981,6 +1981,8 @@
 
   /* Content */
   .card-content {
+    --timeline-row-bleed: 16px;
+
     padding: 16px;
     min-height: 80px;
   }

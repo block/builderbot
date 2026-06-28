@@ -603,10 +603,12 @@
   }
 
   .projects-list {
+    --project-row-bleed: 8px;
+
     display: flex;
     flex-direction: column;
     gap: 4px;
-    padding: 10px 8px;
+    padding: 10px var(--project-row-bleed);
   }
 
   .project-row {
@@ -614,15 +616,18 @@
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    width: 100%;
+    width: calc(100% + (2 * var(--project-row-bleed)));
+    margin: 0 calc(-1 * var(--project-row-bleed));
     border: none;
-    border-radius: 8px;
+    border-radius: 0;
     background-color: transparent;
     color: var(--text-primary);
     cursor: pointer;
     padding: 8px 10px;
     text-align: left;
-    transition: all 0.15s ease;
+    transition:
+      background-color 0.15s ease,
+      color 0.15s ease;
   }
 
   .project-row:hover {

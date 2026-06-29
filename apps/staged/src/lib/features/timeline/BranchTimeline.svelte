@@ -1154,7 +1154,7 @@
                       'hidden',
                       !actionButtonsEnlarged &&
                         '@max-3xl/timeline:inline @max-[480px]/timeline:hidden',
-                    ]}>Code review</span
+                    ]}>Review</span
                   >
                 </Button>
               </span>

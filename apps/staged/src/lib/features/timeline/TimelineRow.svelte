@@ -352,15 +352,13 @@
         {#if meta || secondaryMeta || tertiaryMeta || (badges && badges.length > 0)}
           <div class="timeline-meta">
             {#if meta}
-              <span class="meta-item" title={meta}>{meta}</span>
+              <span class="meta-item">{meta}</span>
             {/if}
             {#if secondaryMeta}
-              <span class="meta-item meta-sha" class:failed-meta={isFailed} title={secondaryMeta}
-                >{secondaryMeta}</span
-              >
+              <span class="meta-item meta-sha" class:failed-meta={isFailed}>{secondaryMeta}</span>
             {/if}
             {#if tertiaryMeta}
-              <span class="meta-item" title={tertiaryMeta}>{tertiaryMeta}</span>
+              <span class="meta-item">{tertiaryMeta}</span>
             {/if}
             {#if badges}
               {#each badges as badge}

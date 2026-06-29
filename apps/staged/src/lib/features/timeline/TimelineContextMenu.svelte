@@ -9,7 +9,6 @@
     key: string;
     commitSha?: string;
     hashtagRef?: string;
-    deleteDisabledReason?: string;
     onDelete?: (opts?: { altKey: boolean }) => void;
   };
 
@@ -26,10 +25,7 @@
 
   function hasVisibleAction(action: TimelineContextMenuAction): boolean {
     return (
-      !!action.commitSha ||
-      (!!action.hashtagRef && !!onNewSessionReferring) ||
-      !!action.onDelete ||
-      !!action.deleteDisabledReason
+      !!action.commitSha || (!!action.hashtagRef && !!onNewSessionReferring) || !!action.onDelete
     );
   }
 
@@ -137,13 +133,8 @@
             <MessageSquarePlus size={14} /> New session referring to this
           </ContextMenu.Item>
         {/if}
-        {#if activeAction.onDelete || activeAction.deleteDisabledReason}
-          <ContextMenu.Item
-            variant="destructive"
-            disabled={!!activeAction.deleteDisabledReason}
-            title={activeAction.deleteDisabledReason ?? 'Delete'}
-            onSelect={handleDelete}
-          >
+        {#if activeAction.onDelete}
+          <ContextMenu.Item variant="destructive" onSelect={handleDelete}>
             <Trash2 size={14} /> Delete
           </ContextMenu.Item>
         {/if}

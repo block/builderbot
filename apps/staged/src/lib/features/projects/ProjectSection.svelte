@@ -259,7 +259,6 @@
       actions.push({
         key: projectNoteContextMenuKey(note),
         hashtagRef: isCompletedProjectNote(note) ? `#project-note:${note.id}` : undefined,
-        deleteDisabledReason: deleting ? 'Deleting...' : undefined,
         onDelete: deleting ? undefined : () => handleDeleteNote(note.id),
       });
     }

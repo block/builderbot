@@ -816,7 +816,6 @@
       key: item.key,
       commitSha: item.commitSha,
       hashtagRef: item.hashtagRef,
-      deleteDisabledReason,
       onDelete:
         isDeletable(item) && !deleteDisabledReason
           ? (opts) => handleDeleteClick(item, opts)

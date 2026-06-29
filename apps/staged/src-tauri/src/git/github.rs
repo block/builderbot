@@ -2663,28 +2663,37 @@ fn normalized_repo_subpath_string(subpath: &str) -> Result<Option<String>, GitEr
     ))
 }
 
-fn local_subpath_is_dir(clone_path: &Path, subpath: &str) -> Result<bool, GitError> {
-    let Some(relative_path) = normalize_repo_subpath(subpath)? else {
+fn local_subpath_is_tracked_dir(clone_path: &Path, subpath: &str) -> Result<bool, GitError> {
+    let Some(git_path) = normalized_repo_subpath_string(subpath)? else {
         return Ok(true);
     };
-    Ok(clone_path.join(relative_path).is_dir())
+
+    let object = format!("HEAD:{git_path}");
+    match super::cli::run_lite(clone_path, &["cat-file", "-t", &object]) {
+        Ok(kind) => Ok(kind.trim() == "tree"),
+        Err(GitError::CommandFailed(_)) => Ok(false),
+        Err(err) => Err(err),
+    }
 }
 
-fn local_repo_subpath_is_dir(github_repo: &str, subpath: &str) -> Result<Option<bool>, GitError> {
+fn local_repo_subpath_is_tracked_dir(
+    github_repo: &str,
+    subpath: &str,
+) -> Result<Option<bool>, GitError> {
     let Some(clone_path) = crate::paths::clone_path_for(github_repo) else {
         return Ok(None);
     };
     if !clone_path.join(".git").exists() {
         return Ok(None);
     }
-    local_subpath_is_dir(&clone_path, subpath).map(Some)
+    local_subpath_is_tracked_dir(&clone_path, subpath).map(Some)
 }
 
 fn validation_result_after_github_error(
-    local_subpath_is_dir: Option<bool>,
+    local_subpath_is_tracked_dir: Option<bool>,
     github_error_msg: &str,
 ) -> Option<Result<(), GitError>> {
-    match local_subpath_is_dir {
+    match local_subpath_is_tracked_dir {
         Some(true) => Some(Ok(())),
         Some(false) => Some(Err(invalid_repo_path_error())),
         None if is_github_not_found_error(github_error_msg) => Some(Err(invalid_repo_path_error())),
@@ -2737,7 +2746,8 @@ fn list_local_repo_directories(
 ///
 /// Uses the GitHub contents API to check that the path exists and is a
 /// directory (the API returns an array for directories). If GitHub cannot be
-/// reached, falls back to the existing local clone when one is available.
+/// reached, falls back to the existing local clone's HEAD tree when one is
+/// available.
 /// Returns an error if the path does not exist or points to a file rather than
 /// a directory.
 pub fn validate_subpath_in_repo(github_repo: &str, subpath: &str) -> Result<(), GitError> {
@@ -2759,7 +2769,7 @@ pub fn validate_subpath_in_repo(github_repo: &str, subpath: &str) -> Result<(), 
         }
         Err(e) => {
             let msg = e.to_string();
-            let local_result = local_repo_subpath_is_dir(github_repo, &trimmed)?;
+            let local_result = local_repo_subpath_is_tracked_dir(github_repo, &trimmed)?;
             match validation_result_after_github_error(local_result, &msg) {
                 Some(Ok(())) => {
                     log::warn!(
@@ -2939,17 +2949,19 @@ mod tests {
     }
 
     #[test]
-    fn test_local_subpath_is_dir_accepts_relative_directory() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        std::fs::create_dir_all(temp.path().join("packages/app")).expect("create dirs");
+    fn test_local_subpath_is_tracked_dir_accepts_tracked_relative_directory() {
+        let repo = crate::test_utils::TempGitRepo::new();
+        std::fs::create_dir_all(repo.path().join("packages/app")).expect("create dirs");
+        std::fs::write(repo.path().join("packages/app/file.txt"), "tracked").expect("write file");
+        repo.commit("init");
 
-        assert!(local_subpath_is_dir(temp.path(), "packages/app").unwrap());
-        assert!(local_subpath_is_dir(temp.path(), "packages/app/").unwrap());
-        assert!(!local_subpath_is_dir(temp.path(), "packages/missing").unwrap());
+        assert!(local_subpath_is_tracked_dir(repo.path(), "packages/app").unwrap());
+        assert!(local_subpath_is_tracked_dir(repo.path(), "packages/app/").unwrap());
+        assert!(!local_subpath_is_tracked_dir(repo.path(), "packages/missing").unwrap());
     }
 
     #[test]
-    fn test_local_subpath_is_dir_rejects_unsafe_paths() {
+    fn test_local_subpath_is_tracked_dir_rejects_unsafe_paths() {
         let temp = tempfile::tempdir().expect("tempdir");
         for path in [
             "/tmp",
@@ -2960,9 +2972,36 @@ mod tests {
             "packages/../app",
             "packages//app",
         ] {
-            let err = local_subpath_is_dir(temp.path(), path).unwrap_err();
+            let err = local_subpath_is_tracked_dir(temp.path(), path).unwrap_err();
             assert_eq!(err.to_string(), "git command failed: Invalid path in repo");
         }
+    }
+
+    #[test]
+    fn test_local_subpath_is_tracked_dir_rejects_untracked_git_and_files() {
+        let repo = crate::test_utils::TempGitRepo::new();
+        std::fs::create_dir_all(repo.path().join("packages/app")).expect("create app dir");
+        std::fs::write(repo.path().join("packages/app/file.txt"), "tracked").expect("write file");
+        repo.commit("init");
+
+        std::fs::create_dir_all(repo.path().join("node_modules/pkg"))
+            .expect("create untracked dir");
+
+        assert!(!local_subpath_is_tracked_dir(repo.path(), "node_modules").unwrap());
+        assert!(!local_subpath_is_tracked_dir(repo.path(), ".git").unwrap());
+        assert!(!local_subpath_is_tracked_dir(repo.path(), "packages/app/file.txt").unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_local_subpath_is_tracked_dir_rejects_symlinked_directory() {
+        let repo = crate::test_utils::TempGitRepo::new();
+        let external = tempfile::tempdir().expect("external tempdir");
+        std::os::unix::fs::symlink(external.path(), repo.path().join("external-link"))
+            .expect("create symlink");
+        repo.commit("init");
+
+        assert!(!local_subpath_is_tracked_dir(repo.path(), "external-link").unwrap());
     }
 
     #[test]

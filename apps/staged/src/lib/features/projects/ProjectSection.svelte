@@ -400,6 +400,7 @@
               onSessionClick={(sid) => {
                 openSessionId = sid;
               }}
+              deleteDisabledReason={deletingNoteIds.has(note.id) ? 'Deleting...' : undefined}
               onDeleteClick={() => handleDeleteNote(note.id)}
               contextMenuKey={projectNoteContextMenuKey(note)}
             />

@@ -1194,9 +1194,11 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
     gap: 6px;
     padding: 6px var(--timeline-row-padding-inline, 12px);
     margin: 0 calc(-1 * var(--timeline-row-bleed, 16px));
+    min-width: 0;
     position: relative;
     z-index: 1;
     transition:
@@ -1214,8 +1216,22 @@
   .footer-left-actions {
     display: flex;
     align-items: center;
+    flex: 1 1 auto;
+    flex-wrap: wrap;
     gap: 6px;
+    min-width: 0;
     transition: gap 0.3s ease;
+  }
+
+  .footer-left-actions > span {
+    min-width: 0;
+    flex-shrink: 1;
+  }
+
+  .footer-left-actions :global([data-slot='button']) {
+    min-width: 0;
+    max-width: 100%;
+    flex-shrink: 1;
   }
 
   .footer-left-actions-enlarged {

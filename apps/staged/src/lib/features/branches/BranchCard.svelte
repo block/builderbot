@@ -1696,10 +1696,10 @@
                             afterLabel: branch.branchName,
                           });
                         }}
-                        class="text-xs"
+                        class="min-w-0 max-w-full !shrink text-xs"
                       >
                         <FileDiff size={13} />
-                        <span>Diff</span>
+                        <span class="truncate">Diff</span>
                       </Button>
                     {/if}
                   </div>
@@ -1891,6 +1891,8 @@
   .branch-card {
     display: flex;
     flex-direction: column;
+    min-width: 0;
+    max-width: 100%;
     background-color: var(--bg-primary);
     border-radius: 8px;
     border: 1px solid var(--border-subtle);
@@ -1984,7 +1986,13 @@
     --timeline-row-bleed: 16px;
 
     padding: 16px;
+    min-width: 0;
     min-height: 80px;
+  }
+
+  .timeline-interior,
+  .timeline-placeholder {
+    min-width: 0;
   }
 
   .loading {
@@ -2030,6 +2038,23 @@
   .footer-right-actions {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
+    flex: 0 1 auto;
+    flex-wrap: wrap;
     gap: 4px;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .footer-right-actions :global(.inline-flex) {
+    min-width: 0;
+    max-width: 100%;
+    flex: 0 1 auto;
+  }
+
+  .footer-right-actions :global([data-slot='button']) {
+    min-width: 0;
+    max-width: 100%;
+    flex-shrink: 1;
   }
 </style>

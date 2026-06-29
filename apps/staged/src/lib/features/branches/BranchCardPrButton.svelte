@@ -666,12 +666,12 @@
 </script>
 
 {#snippet prButton(props: Record<string, unknown>)}
-  <span {...props} class="inline-flex">
+  <span {...props} class="inline-flex min-w-0 max-w-full">
     <Button
       variant="outline"
       size="sm"
       class={[
-        'gap-1.5 whitespace-nowrap text-xs font-medium [&_svg]:!size-3.5',
+        'min-w-0 max-w-full !shrink gap-1.5 whitespace-nowrap text-xs font-medium [&_svg]:!size-3.5',
         prState === 'creating' && 'border-[var(--border-muted)]',
         (prState === 'error' || pushState === 'error') &&
           'border-destructive text-destructive hover:bg-[var(--ui-danger-bg)] hover:text-destructive',
@@ -698,7 +698,7 @@
       {:else}
         <GitPullRequestCreateArrow size={13} />
       {/if}
-      <span>
+      <span class="min-w-0 truncate">
         {#if pushState === 'pushing'}
           Pushing…
         {:else if pushState === 'error'}

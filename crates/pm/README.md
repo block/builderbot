@@ -36,6 +36,16 @@ pm new my-feature
 cd my-feature
 ```
 
+To bootstrap agent instructions into the project root:
+
+```sh
+# Copy ./AGENTS.md into the new project and link CLAUDE.md to it
+pm new my-feature --agents-md
+
+# Or copy a specific AGENTS.md file
+pm new my-feature --agents-md path/to/AGENTS.md
+```
+
 ### Add repos
 
 ```sh

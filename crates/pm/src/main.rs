@@ -27,6 +27,11 @@ enum Commands {
     New {
         /// Project name
         name: String,
+
+        /// Copy AGENTS.md into the project and symlink CLAUDE.md to it.
+        /// When passed without a path, uses AGENTS.md from the current directory.
+        #[arg(long, value_name = "PATH", num_args = 0..=1)]
+        agents_md: Option<Option<PathBuf>>,
     },
 
     /// Add a repo to the current project
@@ -131,7 +136,11 @@ fn main() -> Result<()> {
     }
 
     match cli.command {
-        Commands::New { name } => cmd::new(&base, &name),
+        Commands::New { name, agents_md } => {
+            let agents_md =
+                agents_md.map(|path| path.unwrap_or_else(|| PathBuf::from("AGENTS.md")));
+            cmd::new(&base, &name, agents_md.as_deref())
+        }
         Commands::Add {
             repo,
             branch,

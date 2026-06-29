@@ -37,8 +37,12 @@ pub fn init(base: &Path) -> Result<()> {
 
 // ── new ─────────────────────────────────────────────────────────────────
 
-pub fn new(base: &Path, name: &str) -> Result<()> {
+pub fn new(base: &Path, name: &str, agents_md: Option<&Path>) -> Result<()> {
     let mut state = State::load_or_err(base)?;
+    let agents_md = match agents_md {
+        Some(path) => Some(resolve_agents_md(path)?),
+        None => None,
+    };
 
     // Handle orphaned state: project in state but dir is gone
     if state.projects.contains_key(name) {
@@ -62,6 +66,10 @@ pub fn new(base: &Path, name: &str) -> Result<()> {
     std::fs::create_dir_all(&project_dir)
         .with_context(|| format!("Failed to create {}", project_dir.display()))?;
 
+    if let Some(agents_md) = agents_md {
+        install_agents_md(&project_dir, &agents_md)?;
+    }
+
     state.projects.insert(
         name.to_string(),
         state::Project {
@@ -80,6 +88,46 @@ pub fn new(base: &Path, name: &str) -> Result<()> {
         "\n  cd into it and run {} to add repos.",
         "pm add <repo>".cyan()
     );
+    Ok(())
+}
+
+fn resolve_agents_md(path: &Path) -> Result<PathBuf> {
+    if !path.exists() {
+        bail!(
+            "AGENTS.md file '{}' was not found. Provide an AGENTS.md file with --agents-md <path>.",
+            path.display(),
+        );
+    }
+    if !path.is_file() {
+        bail!("AGENTS.md path '{}' is not a file.", path.display());
+    }
+    Ok(path.to_path_buf())
+}
+
+fn install_agents_md(project_dir: &Path, source: &Path) -> Result<()> {
+    let agents_md = project_dir.join("AGENTS.md");
+    std::fs::copy(source, &agents_md).with_context(|| {
+        format!(
+            "Failed to copy {} to {}",
+            source.display(),
+            agents_md.display()
+        )
+    })?;
+
+    let claude_md = project_dir.join("CLAUDE.md");
+    if claude_md.is_symlink() || claude_md.exists() {
+        std::fs::remove_file(&claude_md)
+            .with_context(|| format!("Failed to remove {}", claude_md.display()))?;
+    }
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("AGENTS.md", &claude_md)
+        .with_context(|| format!("symlink {} → AGENTS.md", claude_md.display()))?;
+
+    #[cfg(not(unix))]
+    std::os::windows::fs::symlink_file("AGENTS.md", &claude_md)
+        .with_context(|| format!("symlink {} → AGENTS.md", claude_md.display()))?;
+
     Ok(())
 }
 

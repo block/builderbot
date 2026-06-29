@@ -255,10 +255,12 @@
   let projectNoteContextMenuActions = $derived.by(() => {
     const actions: TimelineContextMenuAction[] = [];
     for (const note of timelineNotes) {
-      const key = projectNoteContextMenuKey(note);
-      if (key) {
-        actions.push({ key, hashtagRef: `#project-note:${note.id}` });
-      }
+      const deleting = deletingNoteIds.has(note.id);
+      actions.push({
+        key: projectNoteContextMenuKey(note),
+        hashtagRef: isCompletedProjectNote(note) ? `#project-note:${note.id}` : undefined,
+        onDelete: deleting ? undefined : () => handleDeleteNote(note.id),
+      });
     }
     return actions;
   });
@@ -277,8 +279,8 @@
     return !isRunning && !isFailed;
   }
 
-  function projectNoteContextMenuKey(note: ProjectNote): string | undefined {
-    return isCompletedProjectNote(note) ? `project-note-${note.id}` : undefined;
+  function projectNoteContextMenuKey(note: ProjectNote): string {
+    return `project-note-${note.id}`;
   }
 
   function handleProjectNoteNewSessionReferring(ref: string) {
@@ -397,6 +399,7 @@
               onSessionClick={(sid) => {
                 openSessionId = sid;
               }}
+              deleteDisabledReason={deletingNoteIds.has(note.id) ? 'Deleting...' : undefined}
               onDeleteClick={() => handleDeleteNote(note.id)}
               contextMenuKey={projectNoteContextMenuKey(note)}
             />

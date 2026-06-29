@@ -805,15 +805,21 @@
   }
 
   function hasContextMenuAction(item: DisplayItem): boolean {
-    return !!item.commitSha || (!!item.hashtagRef && !!onNewSessionReferring);
+    return !!item.commitSha || (!!item.hashtagRef && !!onNewSessionReferring) || isDeletable(item);
   }
 
   function contextMenuActionForItem(item: DisplayItem): TimelineContextMenuAction | null {
     if (!hasContextMenuAction(item)) return null;
+    const deleteDisabledReason = isDeletable(item) ? item.deleteDisabledReason : undefined;
+
     return {
       key: item.key,
       commitSha: item.commitSha,
       hashtagRef: item.hashtagRef,
+      onDelete:
+        isDeletable(item) && !deleteDisabledReason
+          ? (opts) => handleDeleteClick(item, opts)
+          : undefined,
     };
   }
 

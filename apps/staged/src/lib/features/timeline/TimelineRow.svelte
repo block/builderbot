@@ -568,13 +568,17 @@
             onclick={handleSessionClick}
             title="View session"
             aria-label="View session"
-            class="size-[22px] text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-[var(--ui-accent)] [&_svg]:!size-3"
+            class="session-action size-[22px] text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-[var(--ui-accent)] [&_svg]:!size-3"
           >
             <MessageSquare size={12} />
           </Button>
         {/if}
         {#if onDeleteClick || deleteDisabledReason}
-          <span class="inline-flex" title={deleteTitle}>
+          <span
+            class="inline-flex delete-action"
+            class:context-menu-only={!!contextMenuKey}
+            title={deleteTitle}
+          >
             <Button
               variant="ghost"
               size="icon-xs"
@@ -868,6 +872,15 @@
   @media (hover: none), (pointer: coarse) {
     .timeline-actions {
       opacity: 1;
+    }
+
+    .timeline-actions :global(.session-action) {
+      width: 44px;
+      min-width: 44px;
+    }
+
+    .delete-action.context-menu-only {
+      display: none;
     }
   }
 

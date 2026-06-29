@@ -4,7 +4,6 @@ use libc::{c_int, c_void, free};
 use pikchr::PikchrFlags;
 
 const PIKCHR_SVG_CLASS: &str = "markdown-pikchr-svg";
-const MAX_PIKCHR_SOURCE_LENGTH: usize = 20_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PikchrBlock {
@@ -61,17 +60,11 @@ pub(crate) fn validate_pikchr_blocks(markdown: &str) -> Vec<PikchrValidationErro
 }
 
 fn validate_pikchr_block(block: PikchrBlock) -> Option<PikchrValidationError> {
-    let message = if block.source.len() > MAX_PIKCHR_SOURCE_LENGTH {
-        "Pikchr source is too large to validate safely.".to_string()
-    } else if let Err(error) = render_pikchr_for_validation(&block.source) {
-        error
-    } else {
-        return None;
-    };
+    let error = render_pikchr_for_validation(&block.source).err()?;
 
     Some(PikchrValidationError {
         line_number: block.start_line,
-        message,
+        message: error,
     })
 }
 

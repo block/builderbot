@@ -51,8 +51,7 @@ fn new_with_agents_md_path_copies_agents_and_links_claude() {
     let output = pm()
         .arg("new")
         .arg("feature")
-        .arg("--agents-md")
-        .arg(&source)
+        .arg(format!("--agents-md={}", source.display()))
         .current_dir(workspace.path())
         .output()
         .unwrap();
@@ -84,6 +83,51 @@ fn new_with_agents_md_without_path_uses_cwd_agents_md() {
     assert_eq!(
         fs::read_to_string(project_dir.join("AGENTS.md")).unwrap(),
         "# Local agents\n"
+    );
+    assert_symlink_to_agents(&project_dir);
+}
+
+#[test]
+fn new_with_agents_md_before_name_uses_cwd_agents_md() {
+    let workspace = TempDir::new().unwrap();
+    fs::write(workspace.path().join("AGENTS.md"), "# Local agents\n").unwrap();
+
+    let output = pm()
+        .arg("new")
+        .arg("--agents-md")
+        .arg("feature")
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert_success(output);
+    let project_dir = workspace.path().join("feature");
+    assert_eq!(
+        fs::read_to_string(project_dir.join("AGENTS.md")).unwrap(),
+        "# Local agents\n"
+    );
+    assert_symlink_to_agents(&project_dir);
+}
+
+#[test]
+fn new_with_agents_md_source_matching_destination_preserves_agents_md() {
+    let workspace = TempDir::new().unwrap();
+    let project_dir = workspace.path().join("feature");
+    fs::create_dir(&project_dir).unwrap();
+    fs::write(project_dir.join("AGENTS.md"), "# Existing agents\n").unwrap();
+
+    let output = pm()
+        .arg("new")
+        .arg("feature")
+        .arg("--agents-md=feature/AGENTS.md")
+        .current_dir(workspace.path())
+        .output()
+        .unwrap();
+
+    assert_success(output);
+    assert_eq!(
+        fs::read_to_string(project_dir.join("AGENTS.md")).unwrap(),
+        "# Existing agents\n"
     );
     assert_symlink_to_agents(&project_dir);
 }

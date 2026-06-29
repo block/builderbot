@@ -43,7 +43,7 @@ To bootstrap agent instructions into the project root:
 pm new my-feature --agents-md
 
 # Or copy a specific AGENTS.md file
-pm new my-feature --agents-md path/to/AGENTS.md
+pm new my-feature --agents-md=path/to/AGENTS.md
 ```
 
 ### Add repos

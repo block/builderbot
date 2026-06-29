@@ -30,7 +30,7 @@ enum Commands {
 
         /// Copy AGENTS.md into the project and symlink CLAUDE.md to it.
         /// When passed without a path, uses AGENTS.md from the current directory.
-        #[arg(long, value_name = "PATH", num_args = 0..=1)]
+        #[arg(long, value_name = "PATH", num_args = 0..=1, require_equals = true)]
         agents_md: Option<Option<PathBuf>>,
     },
 

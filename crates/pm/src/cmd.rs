@@ -94,25 +94,33 @@ pub fn new(base: &Path, name: &str, agents_md: Option<&Path>) -> Result<()> {
 fn resolve_agents_md(path: &Path) -> Result<PathBuf> {
     if !path.exists() {
         bail!(
-            "AGENTS.md file '{}' was not found. Provide an AGENTS.md file with --agents-md <path>.",
+            "AGENTS.md file '{}' was not found. Provide an AGENTS.md file with --agents-md=<path>.",
             path.display(),
         );
     }
     if !path.is_file() {
         bail!("AGENTS.md path '{}' is not a file.", path.display());
     }
-    Ok(path.to_path_buf())
+    path.canonicalize()
+        .with_context(|| format!("Failed to resolve {}", path.display()))
 }
 
 fn install_agents_md(project_dir: &Path, source: &Path) -> Result<()> {
     let agents_md = project_dir.join("AGENTS.md");
-    std::fs::copy(source, &agents_md).with_context(|| {
-        format!(
-            "Failed to copy {} to {}",
-            source.display(),
-            agents_md.display()
-        )
-    })?;
+    let already_installed = agents_md
+        .canonicalize()
+        .map(|destination| destination == source)
+        .unwrap_or(false);
+
+    if !already_installed {
+        std::fs::copy(source, &agents_md).with_context(|| {
+            format!(
+                "Failed to copy {} to {}",
+                source.display(),
+                agents_md.display()
+            )
+        })?;
+    }
 
     let claude_md = project_dir.join("CLAUDE.md");
     if claude_md.is_symlink() || claude_md.exists() {

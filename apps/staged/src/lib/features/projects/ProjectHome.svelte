@@ -115,6 +115,9 @@
   let branchToDelete = $state<{ branch: Branch; project: Project } | null>(null);
   let deletingBranches = $state<Set<string>>(new Set());
   let deletingProjectNames = $state<Map<string, string>>(new Map());
+  // Guards the delete shortcut while the async safe-to-delete check is in flight,
+  // before projectToDelete/deletingProjectNames are set, so a held key only deletes once.
+  let deleteShortcutPending = $state(false);
 
   // Setup errors come from the shared workspace lifecycle orchestrator.
   let worktreeErrors = $derived(workspaceLifecycle.getWorktreeErrors());
@@ -877,6 +880,7 @@
   function handleDeleteCurrentProjectShortcut(event: Event) {
     if (
       !selectedProject ||
+      deleteShortcutPending ||
       selectedProjectDeleting ||
       projectToDelete ||
       branchToDelete ||
@@ -887,7 +891,10 @@
     }
 
     event.preventDefault();
-    void handleDeleteProjectRequest(selectedProject);
+    deleteShortcutPending = true;
+    void handleDeleteProjectRequest(selectedProject).finally(() => {
+      deleteShortcutPending = false;
+    });
   }
 
   async function confirmDeleteProject() {

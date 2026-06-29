@@ -1930,6 +1930,13 @@ pub fn run() {
                     true,
                     Some("CmdOrCtrl+Shift+G"),
                 )?;
+                let delete_project_item = MenuItem::with_id(
+                    handle,
+                    "delete_project",
+                    "Delete Project",
+                    true,
+                    Some("CmdOrCtrl+Backspace"),
+                )?;
                 let zoom_in_item =
                     MenuItem::with_id(handle, "zoom_in", "Zoom In", true, Some("CmdOrCtrl+="))?;
                 let zoom_out_item =
@@ -1982,6 +1989,7 @@ pub fn run() {
                         &PredefinedMenuItem::cut(handle, None)?,
                         &PredefinedMenuItem::copy(handle, None)?,
                         &PredefinedMenuItem::paste(handle, None)?,
+                        &delete_project_item,
                         &PredefinedMenuItem::select_all(handle, None)?,
                         &PredefinedMenuItem::separator(handle)?,
                         &find_item,
@@ -2169,6 +2177,7 @@ pub fn run() {
                 "find" => Some("menu:find"),
                 "find_next" => Some("menu:find-next"),
                 "find_previous" => Some("menu:find-previous"),
+                "delete_project" => Some("menu:delete-project"),
                 "zoom_in" => Some("menu:zoom-in"),
                 "zoom_out" => Some("menu:zoom-out"),
                 "zoom_reset" => Some("menu:zoom-reset"),

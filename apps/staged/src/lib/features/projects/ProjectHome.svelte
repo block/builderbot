@@ -115,6 +115,9 @@
   let branchToDelete = $state<{ branch: Branch; project: Project } | null>(null);
   let deletingBranches = $state<Set<string>>(new Set());
   let deletingProjectNames = $state<Map<string, string>>(new Map());
+  // Guards the delete shortcut while the async safe-to-delete check is in flight,
+  // before projectToDelete/deletingProjectNames are set, so a held key only deletes once.
+  let deleteShortcutPending = $state(false);
 
   // Setup errors come from the shared workspace lifecycle orchestrator.
   let worktreeErrors = $derived(workspaceLifecycle.getWorktreeErrors());
@@ -138,6 +141,8 @@
     const onCacheStale = () => loadData();
     window.addEventListener('staged:new-project', onNewProject);
     window.addEventListener('cache-stale', onCacheStale);
+    const onDeleteCurrentProject = (event: Event) => handleDeleteCurrentProjectShortcut(event);
+    window.addEventListener('staged:delete-current-project', onDeleteCurrentProject);
 
     const unlistenDetection = listenToRepoActionsDetection((event) => {
       const matchingProjectIds = projects
@@ -273,6 +278,7 @@
       loadGeneration++;
       window.removeEventListener('staged:new-project', onNewProject);
       window.removeEventListener('cache-stale', onCacheStale);
+      window.removeEventListener('staged:delete-current-project', onDeleteCurrentProject);
       unlistenDetection();
       unlistenProjectRepoAdded();
       unlistenPrStatus();
@@ -869,6 +875,26 @@
       // Show confirmation dialog
       projectToDelete = project;
     }
+  }
+
+  function handleDeleteCurrentProjectShortcut(event: Event) {
+    if (
+      !selectedProject ||
+      deleteShortcutPending ||
+      selectedProjectDeleting ||
+      projectToDelete ||
+      branchToDelete ||
+      showNewProjectModal ||
+      showAddRepoModal
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    deleteShortcutPending = true;
+    void handleDeleteProjectRequest(selectedProject).finally(() => {
+      deleteShortcutPending = false;
+    });
   }
 
   async function confirmDeleteProject() {

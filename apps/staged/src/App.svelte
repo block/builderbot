@@ -60,6 +60,7 @@
   let unlistenFind: UnlistenFn | undefined;
   let unlistenFindNext: UnlistenFn | undefined;
   let unlistenFindPrevious: UnlistenFn | undefined;
+  let unlistenDeleteProject: UnlistenFn | undefined;
   let unlistenZoomIn: UnlistenFn | undefined;
   let unlistenZoomOut: UnlistenFn | undefined;
   let unlistenZoomReset: UnlistenFn | undefined;
@@ -136,6 +137,24 @@
     if (!navigation.canGoBack) return false;
     popDetailRoute();
     return true;
+  }
+
+  function isTextInputActive(): boolean {
+    const target = document.activeElement;
+    if (!(target instanceof HTMLElement)) return false;
+    if (target.isContentEditable) return true;
+    return (
+      target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT'
+    );
+  }
+
+  function requestDeleteCurrentProject(): boolean {
+    if (isTextInputActive()) return false;
+    if (navigation.currentRoute.kind !== 'project') return false;
+
+    const event = new CustomEvent('staged:delete-current-project', { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
   }
 
   async function logUpdater(message: string) {
@@ -261,6 +280,9 @@
     unlistenFindPrevious = listenToEvent('menu:find-previous', () => {
       if (!triggerShortcut('search-find-previous')) runSearchShortcut('previous');
     });
+    unlistenDeleteProject = listenToEvent('menu:delete-project', () => {
+      triggerShortcut('app-delete-project');
+    });
     unlistenZoomIn = listenToEvent('menu:zoom-in', () => {
       if (!triggerShortcut('view-increase-size')) increaseSize();
     });
@@ -339,6 +361,14 @@
         keys: ['ArrowLeft'],
         modifiers: { meta: true },
         handler: navigateBack,
+      },
+      {
+        id: 'app-delete-project',
+        description: 'Remove current project',
+        category: 'app',
+        keys: ['Backspace', 'Delete'],
+        modifiers: { meta: true },
+        handler: requestDeleteCurrentProject,
       },
       {
         id: 'search-find',
@@ -449,6 +479,7 @@
     unlistenFind?.();
     unlistenFindNext?.();
     unlistenFindPrevious?.();
+    unlistenDeleteProject?.();
     unlistenZoomIn?.();
     unlistenZoomOut?.();
     unlistenZoomReset?.();

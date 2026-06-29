@@ -678,6 +678,50 @@ fn create_worktree_with_fallback(
     }
 }
 
+fn local_base_ref_for_worktree(repo_path: &Path, base_branch: &str) -> Option<String> {
+    let base_ref = git::origin_ref_for_branch(base_branch);
+    git::resolve_ref(repo_path, &base_ref).ok()?;
+    Some(base_ref)
+}
+
+fn is_missing_remote_ref_fetch_error(fetch_err: &str) -> bool {
+    let lower = fetch_err.to_ascii_lowercase();
+    lower.contains("couldn't find remote ref") || lower.contains("could not find remote ref")
+}
+
+pub(crate) fn fetch_for_worktree_with_offline_fallback(
+    repo_path: &Path,
+    repo_slug: &str,
+    branch_name: &str,
+    base_branch: &str,
+) -> Result<(), String> {
+    match git::fetch_for_worktree(repo_path, repo_slug, branch_name, base_branch) {
+        Ok(()) => Ok(()),
+        Err(fetch_err) => {
+            let fetch_err = fetch_err.to_string();
+            if is_missing_remote_ref_fetch_error(&fetch_err) {
+                return Err(fetch_err);
+            }
+
+            if let Some(base_ref) = local_base_ref_for_worktree(repo_path, base_branch) {
+                log::warn!(
+                    "fetch for worktree branch '{}' in '{}' failed; using stale local ref '{}': {}",
+                    branch_name,
+                    repo_slug,
+                    base_ref,
+                    fetch_err
+                );
+                Ok(())
+            } else {
+                let base_ref = git::origin_ref_for_branch(base_branch);
+                Err(format!(
+                    "GitHub is unavailable and the local clone for '{repo_slug}' does not have required base ref '{base_ref}': {fetch_err}"
+                ))
+            }
+        }
+    }
+}
+
 pub(crate) fn is_blox_onboarding_precondition_error(err: &blox::BloxError) -> bool {
     match err {
         blox::BloxError::CommandFailed(stderr) => {
@@ -1137,13 +1181,12 @@ pub async fn setup_worktree(
     // Ensure we have a local clone, then fetch the specific refs we need.
     let repo_slug = resolve_branch_repo_slug(&store, &project, &branch)?;
     let repo_path = git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?;
-    git::fetch_for_worktree(
+    fetch_for_worktree_with_offline_fallback(
         &repo_path,
         &repo_slug,
         &branch.branch_name,
         &branch.base_branch,
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     let desired_worktree_path =
         git::project_worktree_path_for(&branch.project_id, &repo_slug, &branch.branch_name)
             .map_err(|e| e.to_string())?;
@@ -2333,13 +2376,12 @@ pub(crate) fn setup_worktree_sync(
         crate::git::ensure_local_clone(&repo_slug).map_err(|e| e.to_string())?
     };
     emit_progress("fetching", None);
-    crate::git::fetch_for_worktree(
+    fetch_for_worktree_with_offline_fallback(
         &repo_path,
         &repo_slug,
         &branch.branch_name,
         &branch.base_branch,
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     let desired_worktree_path =
         crate::git::project_worktree_path_for(&branch.project_id, &repo_slug, &branch.branch_name)
             .map_err(|e| e.to_string())?;
@@ -2539,4 +2581,117 @@ pub(crate) async fn run_prerun_actions_for_branch(
     }
 
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::TempGitRepo;
+
+    #[test]
+    fn local_base_ref_for_worktree_accepts_existing_origin_ref() {
+        let repo = TempGitRepo::new();
+        repo.write_file("README.md", "hello");
+        repo.commit("initial");
+        repo.run_git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+        assert_eq!(
+            local_base_ref_for_worktree(repo.path(), "origin/main"),
+            Some("origin/main".to_string())
+        );
+        assert_eq!(
+            local_base_ref_for_worktree(repo.path(), "main"),
+            Some("origin/main".to_string())
+        );
+    }
+
+    #[test]
+    fn local_base_ref_for_worktree_rejects_missing_origin_ref() {
+        let repo = TempGitRepo::new();
+        repo.write_file("README.md", "hello");
+        repo.commit("initial");
+
+        assert_eq!(
+            local_base_ref_for_worktree(repo.path(), "origin/main"),
+            None
+        );
+    }
+
+    #[test]
+    fn fetch_offline_fallback_allows_worktree_creation_from_existing_origin_ref() {
+        let repo = TempGitRepo::new();
+        repo.write_file("README.md", "hello");
+        repo.commit("initial");
+        repo.run_git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+        let github_repo = "owner/repo";
+        let https_url = format!("https://github.com/{github_repo}.git");
+        let missing_origin = repo.path().join("missing-origin");
+        let missing_url = format!("file://{}", missing_origin.display());
+        repo.run_git(&["remote", "add", "origin", &https_url]);
+        repo.run_git(&[
+            "config",
+            "--add",
+            &format!("url.{missing_url}.insteadOf"),
+            &https_url,
+        ]);
+
+        fetch_for_worktree_with_offline_fallback(
+            repo.path(),
+            github_repo,
+            "feature/offline",
+            "origin/main",
+        )
+        .expect("existing origin/main should allow offline fallback");
+
+        let worktree_parent = tempfile::tempdir().expect("worktree tempdir");
+        let worktree_path = worktree_parent.path().join("feature-offline");
+        let created = create_worktree_with_fallback(
+            repo.path(),
+            "feature/offline",
+            "origin/main",
+            &worktree_path,
+            None,
+        )
+        .expect("worktree should be created from stale origin/main");
+
+        assert_eq!(created, worktree_path);
+        assert!(created.join("README.md").is_file());
+    }
+
+    #[test]
+    fn fetch_offline_fallback_rejects_deleted_remote_base_ref() {
+        let remote = TempGitRepo::new();
+        remote.write_file("README.md", "hello from remote");
+        remote.commit("initial");
+
+        let repo = TempGitRepo::new();
+        repo.write_file("README.md", "hello");
+        repo.commit("initial");
+        repo.run_git(&["update-ref", "refs/remotes/origin/deleted-base", "HEAD"]);
+
+        let github_repo = "owner/repo";
+        let https_url = format!("https://github.com/{github_repo}.git");
+        let remote_url = format!("file://{}", remote.path().display());
+        repo.run_git(&["remote", "add", "origin", &remote_url]);
+        repo.run_git(&[
+            "config",
+            "--add",
+            &format!("url.{remote_url}.insteadOf"),
+            &https_url,
+        ]);
+
+        let err = fetch_for_worktree_with_offline_fallback(
+            repo.path(),
+            github_repo,
+            "feature/offline",
+            "origin/deleted-base",
+        )
+        .expect_err("missing remote base ref should not use stale origin/deleted-base");
+
+        assert!(
+            is_missing_remote_ref_fetch_error(&err),
+            "expected missing remote ref error, got: {err}"
+        );
+    }
 }

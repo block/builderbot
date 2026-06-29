@@ -32,7 +32,7 @@
   let error = $state<string | null>(null);
   let repoConfigApi = $state<
     | {
-        waitForSubpathValidation: () => Promise<boolean>;
+        waitForSubpathValidation: () => Promise<{ valid: boolean; error?: string }>;
         selectRepo: (selection: RepoSelection) => void;
         reset: () => void;
       }
@@ -74,9 +74,9 @@
     try {
       // Validate subpath if non-empty
       if (subpath.trim() && repoConfigApi) {
-        const isValid = await repoConfigApi.waitForSubpathValidation();
-        if (!isValid) {
-          error = 'Invalid path in repo';
+        const validation = await repoConfigApi.waitForSubpathValidation();
+        if (!validation.valid) {
+          error = validation.error ?? 'Invalid path in repo';
           saving = false;
           return;
         }

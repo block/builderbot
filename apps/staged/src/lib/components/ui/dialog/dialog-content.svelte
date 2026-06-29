@@ -2,11 +2,13 @@
   import { Dialog as DialogPrimitive } from 'bits-ui';
   import DialogPortal from './dialog-portal.svelte';
   import type { Snippet } from 'svelte';
+  import { onMount } from 'svelte';
   import * as Dialog from './index.js';
   import { cn, type WithoutChildrenOrChild } from '$lib/components/utils.js';
   import type { ComponentProps } from 'svelte';
   import { Button } from '$lib/components/ui/button/index.js';
   import XIcon from '@lucide/svelte/icons/x';
+  import { viewport, watchViewport } from '$lib/shared/viewport.svelte';
 
   let {
     ref = $bindable(null),
@@ -14,12 +16,26 @@
     portalProps,
     children,
     showCloseButton = true,
+    fullScreenOnMobile = true,
     ...restProps
   }: WithoutChildrenOrChild<DialogPrimitive.ContentProps> & {
     portalProps?: WithoutChildrenOrChild<ComponentProps<typeof DialogPortal>>;
     children: Snippet;
     showCloseButton?: boolean;
+    fullScreenOnMobile?: boolean;
   } = $props();
+
+  // Keep `viewport.isMobile` live even when the host screen never subscribed.
+  onMount(() => watchViewport());
+
+  const fullScreen = $derived(fullScreenOnMobile && viewport.isMobile);
+
+  // Edge-to-edge geometry applied as inline style so it cleanly overrides any
+  // per-modal sizing classes the caller passes (e.g. `sm:max-w-[580px]`,
+  // `max-h-[calc(100vh-16vh)]`) without specificity fights. Safe-area padding
+  // keeps the header/footer clear of notches and home indicators.
+  const fullScreenStyle =
+    'position:fixed;inset:0;top:0;left:0;width:100%;max-width:none;height:100dvh;max-height:none;transform:none;border-radius:0;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);';
 </script>
 
 <DialogPortal {...portalProps}>
@@ -28,9 +44,13 @@
     bind:ref
     data-slot="dialog-content"
     class={cn(
-      'bg-card text-card-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 data-closed:zoom-out-95 data-open:zoom-in-95 ring-foreground/10 grid max-w-[calc(100%-2rem)] gap-6 rounded-xl p-6 text-sm ring-1 duration-100 sm:max-w-md fixed top-1/2 left-1/2 z-(--z-index-overlay) w-full -translate-x-1/2 -translate-y-1/2 outline-none',
+      'bg-card text-card-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 ring-foreground/10 grid max-w-[calc(100%-2rem)] gap-6 rounded-xl p-6 text-sm ring-1 duration-100 sm:max-w-md fixed top-1/2 left-1/2 z-(--z-index-overlay) w-full -translate-x-1/2 -translate-y-1/2 outline-none',
+      fullScreen
+        ? 'data-open:slide-in-from-bottom data-closed:slide-out-to-bottom'
+        : 'data-closed:zoom-out-95 data-open:zoom-in-95',
       className
     )}
+    style={fullScreen ? fullScreenStyle : undefined}
     onOpenAutoFocus={(e) => e.preventDefault()}
     {...restProps}
   >

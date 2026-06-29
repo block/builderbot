@@ -1589,7 +1589,7 @@
     width: 100%;
     max-width: 900px;
     margin: 0 auto;
-    padding: 16px 24px 24px;
+    padding: 16px;
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
@@ -1620,7 +1620,7 @@
     }
 
     .projects-list {
-      padding: 12px 16px 16px;
+      padding: 12px;
       gap: 20px;
     }
   }

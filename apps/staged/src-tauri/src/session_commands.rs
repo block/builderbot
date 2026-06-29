@@ -210,16 +210,27 @@ pub(crate) fn resolve_pikchr_grammar_reference(
     grammar_path.to_string_lossy().into_owned()
 }
 
-fn pikchr_note_guidance(reference: &str) -> String {
-    format!(
+fn pikchr_note_guidance(reference: &str, preview_available: bool) -> String {
+    let mut guidance = format!(
         "Staged notes support rendered diagrams in fenced `pikchr` code blocks. \
 If you need the Pikchr grammar while writing a diagram, read the reference at: {reference}"
-    )
+    );
+    // Phrased conditionally so it stays truthful even when the optional preview
+    // MCP server is dropped (e.g. on a provider without HTTP MCP support).
+    if preview_available {
+        guidance.push_str(
+            " If a `preview_pikchr` tool is available to you, use it to render your Pikchr \
+source to an image and check the layout — box overlaps, label collisions, arrow targets — \
+then iterate before finalizing the diagram.",
+        );
+    }
+    guidance
 }
 
 pub(crate) fn build_note_followup_message_with_pikchr_reference(
     has_parsed_note: bool,
     pikchr_grammar_reference: &str,
+    preview_available: bool,
 ) -> String {
     let visible_request = if has_parsed_note {
         "Please update the note to reflect the latest chat."
@@ -231,7 +242,7 @@ pub(crate) fn build_note_followup_message_with_pikchr_reference(
     } else {
         "write the linked note"
     };
-    let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference);
+    let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference, preview_available);
     let standalone_guidance = NOTE_STANDALONE_OUTPUT_GUIDANCE.trim();
 
     format!(
@@ -377,6 +388,7 @@ pub async fn start_session(
             image_ids: vec![],
             branch_id: None,
             project_id: None,
+            expose_pikchr_preview: false,
         },
         store,
         app_handle,
@@ -540,6 +552,10 @@ pub async fn resume_session(
 
     let config_branch_id = event_branch_id.clone();
     let config_project_id = event_project_id.clone().or(mcp_project_id.clone());
+    // Note follow-ups (project notes or local branch notes) get the preview
+    // tool; remote branch notes can't reach localhost.
+    let expose_pikchr_preview =
+        (project_note.is_some() || linked_note.is_some()) && workspace_name.is_none();
 
     crate::web_server::emit_to_all(
         &app_handle,
@@ -585,6 +601,7 @@ pub async fn resume_session(
             image_ids: image_ids.unwrap_or_default(),
             branch_id: config_branch_id,
             project_id: config_project_id,
+            expose_pikchr_preview,
         },
         store,
         app_handle,
@@ -652,9 +669,16 @@ pub async fn build_note_followup_message(
                 .and_then(|branch| branch.workspace_name.as_deref()),
         );
 
+        // Note follow-ups expose the preview tool on local sessions only. A
+        // project-note follow-up has no linked branch and always runs locally.
+        let preview_available = linked_branch
+            .as_ref()
+            .map_or(true, |branch| branch.workspace_name.is_none());
+
         Ok(build_note_followup_message_with_pikchr_reference(
             has_parsed_note,
             &pikchr_grammar_reference,
+            preview_available,
         ))
     })
     .await
@@ -1094,7 +1118,9 @@ repository edits directly here; use `start_repo_session` for implementation work
         ""
     };
 
-    let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference);
+    // Project sessions always execute locally and are restricted to
+    // MCP-capable providers, so the preview tool is always attached.
+    let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference, true);
     let standalone_guidance = NOTE_STANDALONE_OUTPUT_GUIDANCE.trim();
 
     format!(
@@ -1201,6 +1227,8 @@ pub async fn start_project_session(
             image_ids: image_ids.unwrap_or_default(),
             branch_id: None,
             project_id: Some(project_id),
+            // Project sessions are always local and write project notes.
+            expose_pikchr_preview: true,
         },
         store,
         app_handle,
@@ -1388,6 +1416,7 @@ async fn prepare_branch_session_start(
         launch_context,
         Some(&branch.base_branch),
         &pikchr_grammar_reference,
+        branch.workspace_name.is_none(),
     );
 
     // Resolve the actual workspace path for remote branches so the remote agent
@@ -1529,6 +1558,10 @@ fn launch_running_branch_session(
     let branch_id = branch.id.clone();
     let project_id = branch.project_id.clone();
     let workspace_name = branch.workspace_name.clone();
+    // Local branch note sessions get the preview tool; commit/review sessions
+    // and remote sessions do not.
+    let expose_pikchr_preview =
+        matches!(session_type, BranchSessionType::Note) && workspace_name.is_none();
 
     session_runner::emit_session_running(
         &app_handle,
@@ -1555,6 +1588,7 @@ fn launch_running_branch_session(
             image_ids,
             branch_id: Some(branch_id),
             project_id: Some(project_id),
+            expose_pikchr_preview,
         },
         store,
         app_handle,
@@ -1964,6 +1998,7 @@ async fn start_queued_session_for_branch(
         launch_context.as_ref(),
         Some(&branch.base_branch),
         &pikchr_grammar_reference,
+        branch.workspace_name.is_none(),
     );
 
     // Atomically transition session from queued to running.
@@ -2096,6 +2131,8 @@ async fn start_queued_session_for_branch(
             image_ids,
             branch_id: Some(branch_id),
             project_id: Some(branch.project_id.clone()),
+            expose_pikchr_preview: matches!(session_type, BranchSessionType::Note)
+                && branch.workspace_name.is_none(),
         },
         store,
         app_handle,
@@ -2386,6 +2423,8 @@ pub async fn trigger_auto_review(
             image_ids: vec![],
             branch_id: Some(branch_id.clone()),
             project_id: Some(branch.project_id.clone()),
+            // Auto-review sessions don't write notes.
+            expose_pikchr_preview: false,
         },
         store,
         app_handle,
@@ -3593,9 +3632,11 @@ pub(crate) fn build_full_prompt(
         launch_context,
         base_branch,
         PIKCHR_GRAMMAR_URL,
+        false,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_full_prompt_with_pikchr_reference(
     user_prompt: &str,
     project_information: &str,
@@ -3604,6 +3645,7 @@ pub(crate) fn build_full_prompt_with_pikchr_reference(
     launch_context: Option<&BranchSessionLaunchContext>,
     base_branch: Option<&str>,
     pikchr_grammar_reference: &str,
+    preview_available: bool,
 ) -> String {
     let mut action_instructions = match session_type {
         BranchSessionType::Note => [
@@ -3754,7 +3796,10 @@ Rules:\n\
 
     if matches!(session_type, BranchSessionType::Note) {
         action_instructions.push_str("\n\n");
-        action_instructions.push_str(&pikchr_note_guidance(pikchr_grammar_reference));
+        action_instructions.push_str(&pikchr_note_guidance(
+            pikchr_grammar_reference,
+            preview_available,
+        ));
     }
 
     let action_tag = format!(
@@ -4567,9 +4612,11 @@ mod tests {
             None,
             None,
             "/tmp/staged/pikchr/grammar.md",
+            true,
         );
 
         assert_pikchr_note_guidance(&prompt, "/tmp/staged/pikchr/grammar.md");
+        assert!(prompt.contains("preview_pikchr"));
     }
 
     #[test]
@@ -4577,6 +4624,7 @@ mod tests {
         let prompt = build_note_followup_message_with_pikchr_reference(
             true,
             "/Applications/Staged.app/Contents/Resources/resources/pikchr/grammar.md",
+            true,
         );
 
         assert!(prompt.contains("The user is asking you to update the linked note"));
@@ -4586,17 +4634,20 @@ mod tests {
             "/Applications/Staged.app/Contents/Resources/resources/pikchr/grammar.md",
         );
         assert_note_standalone_output_guidance(&prompt);
+        assert!(prompt.contains("preview_pikchr"));
     }
 
     #[test]
     fn note_followup_prompt_uses_supplied_remote_pikchr_reference() {
         let remote_path = generated_pikchr_grammar_remote_path();
-        let prompt = build_note_followup_message_with_pikchr_reference(false, &remote_path);
+        let prompt = build_note_followup_message_with_pikchr_reference(false, &remote_path, false);
 
         assert!(prompt.contains("The user is asking you to write the linked note"));
         assert!(prompt.contains("Please write the note for this session."));
         assert_pikchr_note_guidance(&prompt, &remote_path);
         assert_note_standalone_output_guidance(&prompt);
+        // Remote note sessions can't reach the preview server, so it isn't mentioned.
+        assert!(!prompt.contains("preview_pikchr"));
     }
 
     #[test]

@@ -15,10 +15,11 @@ use std::time::{Duration, Instant};
 
 use agent_client_protocol::{
     Agent, ClientSideConnection, ContentBlock as AcpContentBlock, ImageContent, Implementation,
-    InitializeRequest, LoadSessionRequest, McpServer, NewSessionRequest, PermissionOptionId,
-    PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
-    RequestPermissionResponse, SelectedPermissionOutcome, SessionConfigOption, SessionInfoUpdate,
-    SessionModelState, SessionNotification, SessionUpdate, TextContent,
+    InitializeRequest, LoadSessionRequest, McpCapabilities, McpServer, NewSessionRequest,
+    PermissionOptionId, PromptRequest, ProtocolVersion, RequestPermissionOutcome,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
+    SessionConfigOption, SessionInfoUpdate, SessionModelState, SessionNotification, SessionUpdate,
+    TextContent,
 };
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -147,7 +148,13 @@ pub struct AcpDriver {
     /// Extra environment variables to pass to the agent process.
     extra_env: Vec<(String, String)>,
     /// MCP servers to inject into the session via NewSessionRequest.
+    /// These are *required*: if the agent doesn't support a server's transport,
+    /// the session fails.
     mcp_servers: Vec<McpServer>,
+    /// Optional MCP servers — additive niceties (e.g. the pikchr preview tool).
+    /// If the agent doesn't advertise the transport these need, they are
+    /// silently dropped instead of failing the session.
+    optional_mcp_servers: Vec<McpServer>,
     /// Override the working directory sent to the remote agent.
     /// When set, this path is used in the `NewSessionRequest` instead of the
     /// local `working_dir` passed to `run()`. This is needed because the
@@ -173,6 +180,7 @@ impl AcpDriver {
                 is_remote: false,
                 extra_env: Vec::new(),
                 mcp_servers: Vec::new(),
+                optional_mcp_servers: Vec::new(),
                 remote_working_dir: None,
             })
             .ok_or_else(|| format!("Unknown or unavailable agent provider: {provider_id}"))
@@ -188,6 +196,7 @@ impl AcpDriver {
                 is_remote: false,
                 extra_env: Vec::new(),
                 mcp_servers: Vec::new(),
+                optional_mcp_servers: Vec::new(),
                 remote_working_dir: None,
             })
             .ok_or_else(|| {
@@ -212,6 +221,7 @@ impl AcpDriver {
             is_remote: true,
             extra_env: Vec::new(),
             mcp_servers: Vec::new(),
+            optional_mcp_servers: Vec::new(),
             remote_working_dir: None,
         })
     }
@@ -225,6 +235,16 @@ impl AcpDriver {
     /// Set MCP servers to inject into the session via `NewSessionRequest` or `LoadSessionRequest`.
     pub fn with_mcp_servers(mut self, servers: Vec<McpServer>) -> Self {
         self.mcp_servers = servers;
+        self
+    }
+
+    /// Set *optional* MCP servers. These are attached only if the agent
+    /// advertises support for their transport; otherwise they are dropped and
+    /// the session proceeds without them (rather than failing). Use this for
+    /// purely additive tools that must never break a session on providers that
+    /// don't support MCP over HTTP/SSE.
+    pub fn with_optional_mcp_servers(mut self, servers: Vec<McpServer>) -> Self {
+        self.optional_mcp_servers = servers;
         self
     }
 
@@ -480,6 +500,7 @@ impl AgentDriver for AcpDriver {
             result = run_acp_protocol(
                 &connection, &acp_working_dir, prompt, images, store,
                 session_id, agent_session_id, &handler, &self.mcp_servers,
+                &self.optional_mcp_servers,
             ) => result,
         };
 
@@ -1118,6 +1139,7 @@ async fn run_acp_protocol(
     acp_session_id: Option<&str>,
     handler: &Arc<AcpNotificationHandler>,
     mcp_servers: &[McpServer],
+    optional_mcp_servers: &[McpServer],
 ) -> Result<(), String> {
     let agent_session_id = tokio::time::timeout(
         ACP_SETUP_TIMEOUT,
@@ -1129,6 +1151,7 @@ async fn run_acp_protocol(
             our_session_id,
             acp_session_id,
             mcp_servers,
+            optional_mcp_servers,
         ),
     )
     .await
@@ -1182,6 +1205,19 @@ async fn run_acp_protocol(
     Ok(())
 }
 
+/// Whether the agent advertises support for the transport an MCP server needs.
+/// Stdio is always supported per the ACP spec.
+fn mcp_server_transport_supported(server: &McpServer, caps: &McpCapabilities) -> bool {
+    match server {
+        McpServer::Http(_) => caps.http,
+        McpServer::Sse(_) => caps.sse,
+        McpServer::Stdio(_) => true,
+        // `McpServer` is non_exhaustive. A transport we don't recognize can't be
+        // reasoned about, so we conservatively drop the optional server.
+        _ => false,
+    }
+}
+
 async fn setup_acp_session(
     connection: &ClientSideConnection,
     working_dir: &Path,
@@ -1190,6 +1226,7 @@ async fn setup_acp_session(
     our_session_id: &str,
     acp_session_id: Option<&str>,
     mcp_servers: &[McpServer],
+    optional_mcp_servers: &[McpServer],
 ) -> Result<String, String> {
     let client_info = Implementation::new("acp-client", env!("CARGO_PKG_VERSION"));
     let init_request = InitializeRequest::new(ProtocolVersion::LATEST).client_info(client_info);
@@ -1199,8 +1236,10 @@ async fn setup_acp_session(
         .await
         .map_err(|e| format!("ACP init failed: {e:?}"))?;
 
+    let mcp_caps = &init_response.agent_capabilities.mcp_capabilities;
+
+    // Required servers must have a supported transport, or the session fails.
     if !mcp_servers.is_empty() {
-        let mcp_caps = &init_response.agent_capabilities.mcp_capabilities;
         let requires_http = mcp_servers
             .iter()
             .any(|server| matches!(server, McpServer::Http(_)));
@@ -1218,6 +1257,24 @@ async fn setup_acp_session(
             ));
         }
     }
+
+    // Optional servers are purely additive: keep only those whose transport the
+    // agent supports, and drop the rest instead of failing the session. This is
+    // what lets the pikchr preview tool attach on MCP-capable providers while
+    // staying silently absent on providers that don't support HTTP/SSE MCP.
+    let mut effective_servers = mcp_servers.to_vec();
+    for server in optional_mcp_servers {
+        if mcp_server_transport_supported(server, mcp_caps) {
+            effective_servers.push(server.clone());
+        } else {
+            log::info!(
+                "Dropping optional MCP server (transport unsupported by agent: http={}, sse={})",
+                mcp_caps.http,
+                mcp_caps.sse
+            );
+        }
+    }
+    let mcp_servers = effective_servers;
 
     match acp_session_id {
         Some(existing_id) => {

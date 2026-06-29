@@ -21,6 +21,7 @@ dependencies = [
  "include_dir",
  "libc",
  "log",
+ "pikchr",
  "rand 0.9.4",
  "regex",
  "reqwest",
@@ -3614,6 +3615,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e57fef6bc5981e38c2ce2d63bfa546861309f875b8a75f092d1d54ae2d64f266"
 dependencies = [
  "siphasher 1.0.2",
+]
+
+[[package]]
+name = "pikchr"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13680336a9060974d823f15053decc0ae5380eebf6f82abf17608523a7d71826"
+dependencies = [
+ "cc",
+ "libc",
 ]
 
 [[package]]

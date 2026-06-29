@@ -53,10 +53,12 @@ use crate::git::Span;
 use crate::shell_env::ShellEnvCache;
 use crate::store::{
     Comment, CommentAuthor, CommentType, CompletionReason, FailureStrategy, MessageRole,
-    PipelineExecution, PipelineKind, PipelineStep, SessionStatus, StepStatus, StepType, Store,
+    PipelineExecution, PipelineKind, PipelineStep, SessionMessage, SessionStatus, StepStatus,
+    StepType, Store,
 };
 
 const PIPELINE_STEP_PROMPT_OUTPUT_MAX_CHARS: usize = 30_000;
+const PIKCHR_VALIDATION_MAX_REPAIR_ATTEMPTS: usize = 2;
 
 pub fn git_identity_env_from_global_config() -> Vec<(String, String)> {
     let Some(name) = global_git_config_value("user.name") else {
@@ -463,11 +465,6 @@ pub fn start_session(
                 (driver.with_extra_env(env), None)
             };
 
-            let writer = Arc::new(MessageWriter::new(
-                config.session_id.clone(),
-                Arc::clone(&store),
-            ));
-
             // Read and base64-encode images for the prompt content blocks.
             let mut image_data: Vec<(String, String)> = Vec::new();
             for image_id in &config.image_ids {
@@ -505,30 +502,91 @@ pub fn start_session(
                 }
             }
 
-            // Cast to trait objects for the driver
-            let store_trait: Arc<dyn acp_client::Store> = store;
-            let writer_trait: Arc<dyn acp_client::MessageWriter> = writer;
+            let mut prompt = config.prompt.clone();
+            let mut agent_session_id = config.agent_session_id.clone();
+            let mut repair_attempts = 0;
+            let mut include_images = true;
 
-            driver
-                .run(
-                    &config.session_id,
-                    &config.prompt,
-                    &image_data,
-                    &config.working_dir,
-                    &store_trait,
-                    &writer_trait,
-                    &cancel_token,
-                    config.agent_session_id.as_deref(),
-                )
-                .await
+            loop {
+                let writer = Arc::new(MessageWriter::new(
+                    config.session_id.clone(),
+                    Arc::clone(&store),
+                ));
+                let store_trait: Arc<dyn acp_client::Store> = store.clone();
+                let writer_trait: Arc<dyn acp_client::MessageWriter> = writer;
+                let images = if include_images {
+                    image_data.as_slice()
+                } else {
+                    &[]
+                };
+                include_images = false;
+
+                let turn_result = driver
+                    .run(
+                        &config.session_id,
+                        &prompt,
+                        images,
+                        &config.working_dir,
+                        &store_trait,
+                        &writer_trait,
+                        &cancel_token,
+                        agent_session_id.as_deref(),
+                    )
+                    .await;
+
+                if !should_validate_pikchr_after_turn(&turn_result, cancel_token.is_cancelled()) {
+                    return turn_result;
+                }
+
+                match validate_latest_session_pikchr(&store, &config.session_id)? {
+                    LatestAssistantPikchrValidation::SkippedFinalMessage
+                    | LatestAssistantPikchrValidation::NoPikchr
+                    | LatestAssistantPikchrValidation::Valid => return Ok(()),
+                    LatestAssistantPikchrValidation::Invalid(error) => {
+                        if repair_attempts >= PIKCHR_VALIDATION_MAX_REPAIR_ATTEMPTS {
+                            return Err(format!(
+                                "Pikchr validation failed after {} repair attempts: block starting at line {}: {}",
+                                PIKCHR_VALIDATION_MAX_REPAIR_ATTEMPTS,
+                                error.line_number,
+                                error.message
+                            ));
+                        }
+
+                        repair_attempts += 1;
+                        let prompt_is_for_note =
+                            session_has_note_artifact(&store, &config.session_id);
+                        let corrective_prompt =
+                            build_pikchr_correction_prompt(&error, prompt_is_for_note);
+                        store
+                            .add_session_message(
+                                &config.session_id,
+                                MessageRole::User,
+                                &corrective_prompt,
+                            )
+                            .map_err(|e| {
+                                format!("Failed to persist Pikchr correction prompt: {e}")
+                            })?;
+
+                        if let Some(stored_id) =
+                            stored_agent_session_id(&store, &config.session_id)?
+                        {
+                            agent_session_id = Some(stored_id);
+                        }
+                        if agent_session_id.is_none() {
+                            return Err(
+                                "Pikchr validation failed but no agent session id is available for correction"
+                                    .to_string(),
+                            );
+                        }
+                        prompt = corrective_prompt;
+                    }
+                }
+            }
         });
 
         let cancellation_completion_reason = registry
             .cancellation_completion_reason(&session_id_for_status)
             .unwrap_or(CompletionReason::Interrupted);
-
-        // Always deregister, regardless of outcome.
-        registry.deregister(&session_id_for_status);
 
         // Transition the session to its terminal state, but only if it is
         // still "running". This prevents a late-arriving "completed" from
@@ -556,12 +614,16 @@ pub fn start_session(
             }
         };
 
+        // Always deregister after validation, so a corrective Pikchr follow-up
+        // can keep using the active cancellation token.
+        registry.deregister(&session_id_for_status);
+
         // Run post-completion hooks before transitioning status.
         // These detect artifacts produced by the session (commits, notes).
         // Returns the branch_id when a new commit was detected.
         let committed_branch_id = if new_status == "completed" {
             run_post_completion_hooks(
-                &session_id_for_status,
+                &config.session_id,
                 &config.working_dir,
                 config.pre_head_sha.as_deref(),
                 config.workspace_name.as_deref(),
@@ -673,6 +735,101 @@ pub fn start_session(
     });
 
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LatestAssistantPikchrValidation {
+    SkippedFinalMessage,
+    NoPikchr,
+    Valid,
+    Invalid(crate::pikchr_validation::PikchrValidationError),
+}
+
+fn should_validate_pikchr_after_turn(result: &Result<(), String>, is_cancelled: bool) -> bool {
+    result.is_ok() && !is_cancelled
+}
+
+fn validate_latest_session_pikchr(
+    store: &Store,
+    session_id: &str,
+) -> Result<LatestAssistantPikchrValidation, String> {
+    let messages = store
+        .get_session_messages(session_id)
+        .map_err(|e| format!("Failed to load session messages for Pikchr validation: {e}"))?;
+    Ok(validate_latest_message_pikchr(&messages))
+}
+
+fn validate_latest_message_pikchr(messages: &[SessionMessage]) -> LatestAssistantPikchrValidation {
+    let Some(message) = messages.last() else {
+        return LatestAssistantPikchrValidation::SkippedFinalMessage;
+    };
+    if message.role != MessageRole::Assistant {
+        return LatestAssistantPikchrValidation::SkippedFinalMessage;
+    }
+
+    let blocks = crate::pikchr_validation::extract_pikchr_blocks(&message.content);
+    if blocks.is_empty() {
+        return LatestAssistantPikchrValidation::NoPikchr;
+    }
+
+    match crate::pikchr_validation::validate_pikchr_blocks(&message.content)
+        .into_iter()
+        .next()
+    {
+        Some(error) => LatestAssistantPikchrValidation::Invalid(error),
+        None => LatestAssistantPikchrValidation::Valid,
+    }
+}
+
+fn stored_agent_session_id(store: &Store, session_id: &str) -> Result<Option<String>, String> {
+    store
+        .get_session(session_id)
+        .map_err(|e| format!("Failed to load session agent id for Pikchr correction: {e}"))
+        .map(|session| session.and_then(|s| s.agent_id))
+}
+
+fn session_has_note_artifact(store: &Store, session_id: &str) -> bool {
+    store
+        .get_note_by_session(session_id)
+        .ok()
+        .flatten()
+        .is_some()
+        || store
+            .get_project_note_by_session(session_id)
+            .ok()
+            .flatten()
+            .is_some()
+}
+
+fn build_pikchr_correction_prompt(
+    error: &crate::pikchr_validation::PikchrValidationError,
+    note_format_required: bool,
+) -> String {
+    let note_format = if note_format_required {
+        "\n\nThis session is producing a Staged note. Preserve the required final response format:\n\
+- Start with a fenced block whose opening line is exactly: ```suggested-next-steps\n\
+- Put only a JSON object in that block, with nullable string fields `suggestedNextCommitStep` and `suggestedNextNoteStep`.\n\
+- After that block, include a `---` separator on its own line.\n\
+- Start the note content immediately after `---` with a markdown H1 (`# <Title>`).\n\
+- Do not wrap the note content in code fences."
+    } else {
+        ""
+    };
+
+    format!(
+        "<action>\n\
+The final assistant response contains an invalid fenced `pikchr` code block.\n\
+\n\
+The Pikchr block starting at line {} failed to parse:\n\
+{}\n\
+\n\
+Return a complete corrected final response. Fix the Pikchr code so every fenced `pikchr` block parses successfully.\n\
+\n\
+Do not edit files, run git operations, create commits, or change repository state.\
+{note_format}\n\
+</action>",
+        error.line_number, error.message
+    )
 }
 
 // =============================================================================
@@ -2564,6 +2721,105 @@ pub fn emit_session_running(
 mod tests {
     use super::*;
     use crate::git::strip_git_env;
+
+    fn session_message(role: MessageRole, content: &str) -> SessionMessage {
+        SessionMessage {
+            id: 0,
+            session_id: "session-1".to_string(),
+            role,
+            content: content.to_string(),
+            created_at: 0,
+            image_ids: vec![],
+        }
+    }
+
+    #[test]
+    fn pikchr_validation_skips_when_latest_message_is_not_assistant() {
+        let messages = vec![session_message(MessageRole::User, "Thanks")];
+
+        assert_eq!(
+            validate_latest_message_pikchr(&messages),
+            LatestAssistantPikchrValidation::SkippedFinalMessage
+        );
+    }
+
+    #[test]
+    fn pikchr_validation_allows_assistant_message_without_pikchr() {
+        let messages = vec![session_message(
+            MessageRole::Assistant,
+            "Done. No diagrams in this response.",
+        )];
+
+        assert_eq!(
+            validate_latest_message_pikchr(&messages),
+            LatestAssistantPikchrValidation::NoPikchr
+        );
+    }
+
+    #[test]
+    fn pikchr_validation_allows_valid_pikchr_in_latest_assistant_message() {
+        let messages = vec![session_message(
+            MessageRole::Assistant,
+            "```pikchr\nbox \"Start\" fit\n```",
+        )];
+
+        assert_eq!(
+            validate_latest_message_pikchr(&messages),
+            LatestAssistantPikchrValidation::Valid
+        );
+    }
+
+    #[test]
+    fn pikchr_validation_reports_invalid_pikchr_for_corrective_prompt() {
+        let messages = vec![session_message(
+            MessageRole::Assistant,
+            "Intro\n```pikchr\nbox \"unterminated\n```",
+        )];
+
+        let outcome = validate_latest_message_pikchr(&messages);
+        match outcome {
+            LatestAssistantPikchrValidation::Invalid(error) => {
+                assert_eq!(error.line_number, 2);
+                assert!(!error.message.is_empty());
+
+                let prompt = build_pikchr_correction_prompt(&error, true);
+                assert!(prompt.contains("line 2"));
+                assert!(prompt.contains(&error.message));
+                assert!(prompt.contains("complete corrected final response"));
+                assert!(prompt.contains("Do not edit files"));
+                assert!(prompt.contains("run git operations"));
+                assert!(prompt.contains("create commits"));
+                assert!(prompt.contains("```suggested-next-steps"));
+                assert!(prompt.contains("`---` separator"));
+                assert!(prompt.contains("# <Title>"));
+            }
+            other => panic!("expected invalid Pikchr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pikchr_validation_skips_failed_cancelled_and_interrupted_turns() {
+        let ok = Ok(());
+        let failed = Err("agent crashed".to_string());
+
+        assert!(should_validate_pikchr_after_turn(&ok, false));
+        assert!(!should_validate_pikchr_after_turn(&failed, false));
+        assert!(!should_validate_pikchr_after_turn(&ok, true));
+        assert!(!should_validate_pikchr_after_turn(&failed, true));
+    }
+
+    #[test]
+    fn pikchr_validation_ignores_older_assistant_when_final_message_is_non_assistant() {
+        let messages = vec![
+            session_message(MessageRole::Assistant, "```pikchr\nbox \"unterminated\n```"),
+            session_message(MessageRole::User, "Please continue"),
+        ];
+
+        assert_eq!(
+            validate_latest_message_pikchr(&messages),
+            LatestAssistantPikchrValidation::SkippedFinalMessage
+        );
+    }
 
     #[cfg(unix)]
     #[tokio::test]

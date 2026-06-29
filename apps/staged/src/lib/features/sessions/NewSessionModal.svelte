@@ -792,6 +792,9 @@
     line-height: 1.5;
     flex: 1;
     overflow-y: auto;
+    /* Keep scroll momentum inside the prompt editor so it doesn't chain to the
+       page behind the keyboard-shrunk full-screen dialog. */
+    overscroll-behavior: contain;
     transition: border-color 0.15s;
   }
 
@@ -807,6 +810,9 @@
     justify-content: space-between;
     gap: 8px;
     margin-top: 4px;
+    /* Stay pinned at the bottom of the keyboard-shrunk dialog while the prompt
+       editor above is the only scroller. */
+    flex-shrink: 0;
   }
 
   .form-actions-left {

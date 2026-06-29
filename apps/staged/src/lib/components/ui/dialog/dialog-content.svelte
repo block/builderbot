@@ -9,6 +9,7 @@
   import { Button } from '$lib/components/ui/button/index.js';
   import XIcon from '@lucide/svelte/icons/x';
   import { viewport, watchViewport } from '$lib/shared/viewport.svelte';
+  import { watchKeyboardInset } from '$lib/shared/keyboardInset.svelte';
 
   let {
     ref = $bindable(null),
@@ -25,17 +26,28 @@
     fullScreenOnMobile?: boolean;
   } = $props();
 
-  // Keep `viewport.isMobile` live even when the host screen never subscribed.
-  onMount(() => watchViewport());
+  // Keep `viewport.isMobile` live even when the host screen never subscribed,
+  // and keep `--keyboard-inset` updated so the full-screen height shrinks to
+  // the space above the on-screen keyboard.
+  onMount(() => {
+    const unwatchViewport = watchViewport();
+    const unwatchKeyboard = watchKeyboardInset();
+    return () => {
+      unwatchViewport();
+      unwatchKeyboard();
+    };
+  });
 
   const fullScreen = $derived(fullScreenOnMobile && viewport.isMobile);
 
   // Edge-to-edge geometry applied as inline style so it cleanly overrides any
   // per-modal sizing classes the caller passes (e.g. `sm:max-w-[580px]`,
   // `max-h-[calc(100vh-16vh)]`) without specificity fights. Safe-area padding
-  // keeps the header/footer clear of notches and home indicators.
+  // keeps the header/footer clear of notches and home indicators. The height
+  // subtracts `--keyboard-inset` so the dialog shrinks to the space above the
+  // on-screen keyboard, pinning its footer to the keyboard's top edge.
   const fullScreenStyle =
-    'position:fixed;inset:0;top:0;left:0;width:100%;max-width:none;height:100dvh;max-height:none;transform:none;border-radius:0;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);';
+    'position:fixed;inset:0;top:0;left:0;width:100%;max-width:none;height:calc(100dvh - var(--keyboard-inset, 0px));max-height:none;transform:none;border-radius:0;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);';
 </script>
 
 <DialogPortal {...portalProps}>

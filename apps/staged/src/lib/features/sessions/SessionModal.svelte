@@ -2018,6 +2018,9 @@
     flex: 1;
     overflow-x: hidden;
     overflow-y: auto;
+    /* Keep scroll momentum inside the transcript so it doesn't chain to the
+       page behind the keyboard-shrunk full-screen dialog. */
+    overscroll-behavior: contain;
     padding: 16px;
     min-height: 0;
     background: var(--bg-primary);

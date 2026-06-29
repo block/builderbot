@@ -17,6 +17,7 @@ pub mod image_commands;
 pub mod migrations;
 pub mod note_commands;
 pub mod paths;
+pub(crate) mod pikchr_validation;
 pub mod pr_poll_scheduler;
 pub mod project_commands;
 pub mod project_mcp;

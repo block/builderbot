@@ -72,6 +72,7 @@ rand = "0.9"
 hex = "0.4"
 subtle = "2.6"
 time = "0.3"
+pikchr = "0.1.4"
 
 # Debug binaries archived — uncomment when needed
 # [[bin]]

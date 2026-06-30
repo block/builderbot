@@ -1086,9 +1086,12 @@ const NOTE_STANDALONE_OUTPUT_GUIDANCE: &str =
 
 const PROJECT_SESSION_TIMELINE_REFERENCE_GUIDANCE: &str = "When referring to existing timeline \
 items in notes or repo-session instructions, use hashtag references in the form #<type>:<id>, \
-for example #note:123, #commit:<sha>, and #review:456. When starting a repo-level session from a \
-note, do not paste or rewrite the note contents; reference the note and relevant section instead, \
-for example: `Implement \"Step 5: unit tests\" from #note:123`.";
+for example #note:123, #commit:<sha>, and #review:456. When you start a repo-level session from a \
+note, reference the note (and the relevant section) and state the session's goal in your own short \
+and concise words — but do NOT repeat or paraphrase the note itself. The repo session will \
+automatically be told where to read all notes, so a reference is enough. For example: \
+`Implement \"Step 5: unit tests\" from #note:123`. This restriction applies only when a note is \
+being referenced.";
 
 pub(crate) fn build_project_session_action_instructions_with_pikchr_reference(
     is_remote: bool,
@@ -4626,8 +4629,13 @@ mod tests {
         assert!(prompt.contains("#note:123"));
         assert!(prompt.contains("#commit:<sha>"));
         assert!(prompt.contains("#review:456"));
-        assert!(prompt.contains("do not paste or rewrite the note contents"));
-        assert!(prompt.contains("reference the note and relevant section instead"));
+        assert!(prompt.contains("do NOT repeat or paraphrase the note itself"));
+        assert!(
+            prompt.contains("The repo session will automatically be told where to read all notes")
+        );
+        assert!(prompt.contains("state the session's goal in your own short and concise words"));
+        assert!(prompt.contains("reference the note (and the relevant section)"));
+        assert!(prompt.contains("This restriction applies only when a note is being referenced"));
         assert!(prompt.contains("Implement \"Step 5: unit tests\" from #note:123"));
     }
 

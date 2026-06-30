@@ -1218,6 +1218,7 @@ fn mcp_server_transport_supported(server: &McpServer, caps: &McpCapabilities) ->
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn setup_acp_session(
     connection: &ClientSideConnection,
     working_dir: &Path,
@@ -1238,8 +1239,14 @@ async fn setup_acp_session(
 
     let mcp_caps = &init_response.agent_capabilities.mcp_capabilities;
 
-    // Required servers must have a supported transport, or the session fails.
-    if !mcp_servers.is_empty() {
+    // Required servers must all have a supported transport, or the session
+    // fails. Route the decision through the same helper as the optional path so
+    // the transport->capability mapping lives in exactly one place — a newly
+    // added transport stays validated here instead of silently slipping through.
+    if mcp_servers
+        .iter()
+        .any(|server| !mcp_server_transport_supported(server, mcp_caps))
+    {
         let requires_http = mcp_servers
             .iter()
             .any(|server| matches!(server, McpServer::Http(_)));
@@ -1247,15 +1254,13 @@ async fn setup_acp_session(
             .iter()
             .any(|server| matches!(server, McpServer::Sse(_)));
 
-        if (requires_http && !mcp_caps.http) || (requires_sse && !mcp_caps.sse) {
-            return Err(format!(
-                "Agent does not support required MCP transports (required: http={}, sse={}; agent: http={}, sse={}). Select a provider with MCP support for project tools.",
-                requires_http,
-                requires_sse,
-                mcp_caps.http,
-                mcp_caps.sse
-            ));
-        }
+        return Err(format!(
+            "Agent does not support required MCP transports (required: http={}, sse={}; agent: http={}, sse={}). Select a provider with MCP support for project tools.",
+            requires_http,
+            requires_sse,
+            mcp_caps.http,
+            mcp_caps.sse
+        ));
     }
 
     // Optional servers are purely additive: keep only those whose transport the
@@ -1450,9 +1455,11 @@ impl MessageWriter for BasicMessageWriter {
 #[cfg(test)]
 mod tests {
     use super::{
-        consume_remote_acp_line, decode_remote_acp_line, remote_acp_segments,
-        resolve_spawn_working_dir, sanitize_remote_acp_chunk, shell_quote, RemoteLineOutcome,
+        consume_remote_acp_line, decode_remote_acp_line, mcp_server_transport_supported,
+        remote_acp_segments, resolve_spawn_working_dir, sanitize_remote_acp_chunk, shell_quote,
+        McpCapabilities, McpServer, RemoteLineOutcome,
     };
+    use agent_client_protocol::{McpServerHttp, McpServerSse, McpServerStdio};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1578,6 +1585,28 @@ mod tests {
     #[test]
     fn shell_quote_preserves_spaces() {
         assert_eq!(shell_quote("/path/with space"), "'/path/with space'");
+    }
+
+    #[test]
+    fn mcp_transport_support_maps_each_transport_to_its_capability() {
+        let stdio = McpServer::Stdio(McpServerStdio::new("local", "/usr/bin/server"));
+        let http = McpServer::Http(McpServerHttp::new("remote", "https://example.com"));
+        let sse = McpServer::Sse(McpServerSse::new("remote", "https://example.com/events"));
+
+        // Stdio needs no capability — it is always supported, even with all caps off.
+        let none = McpCapabilities::new();
+        assert!(mcp_server_transport_supported(&stdio, &none));
+        assert!(!mcp_server_transport_supported(&http, &none));
+        assert!(!mcp_server_transport_supported(&sse, &none));
+
+        // Each remote transport is gated on its own capability.
+        let http_only = McpCapabilities::new().http(true);
+        assert!(mcp_server_transport_supported(&http, &http_only));
+        assert!(!mcp_server_transport_supported(&sse, &http_only));
+
+        let sse_only = McpCapabilities::new().sse(true);
+        assert!(mcp_server_transport_supported(&sse, &sse_only));
+        assert!(!mcp_server_transport_supported(&http, &sse_only));
     }
 
     #[tokio::test]

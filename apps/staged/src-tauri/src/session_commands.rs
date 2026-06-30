@@ -2160,11 +2160,18 @@ pub(crate) fn resolve_preferred_provider_id(
     available_ids: &[String],
     recent_ids: &[String],
 ) -> Option<String> {
+    explicit_provider_id(provider).or_else(|| select_preferred_provider(available_ids, recent_ids))
+}
+
+/// The usable explicit provider id, if any: the trimmed `provider` when it is
+/// non-blank, otherwise `None`. Shared by [`resolve_preferred_provider_id`] and
+/// [`discover_preferred_provider_id`] so the "non-blank explicit id wins"
+/// parsing has a single definition and can't drift between them.
+fn explicit_provider_id(provider: Option<&str>) -> Option<String> {
     provider
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .map(ToOwned::to_owned)
-        .or_else(|| select_preferred_provider(available_ids, recent_ids))
 }
 
 /// [`resolve_preferred_provider_id`] sourcing `available_ids` from the installed
@@ -2173,12 +2180,24 @@ pub(crate) fn resolve_preferred_provider_id(
 /// Centralizes the `discover_providers` + `read_recent_agent_ids` scaffolding
 /// shared by the badge and action-detection callers so they all discover
 /// providers and consult the preference the same way.
+///
+/// A non-blank explicit `provider` short-circuits before any discovery: it
+/// always wins regardless of what's installed, so probing every known agent
+/// (each spawns a login shell that sources the user's full profile) and reading
+/// the preferences file would only compute results that are immediately
+/// discarded. This matters because the action-detection poller resolves the
+/// provider on every poll iteration; only the `provider: None` fallback paths
+/// pay the discovery cost.
 pub(crate) fn discover_preferred_provider_id(provider: Option<&str>) -> Option<String> {
+    if let Some(id) = explicit_provider_id(provider) {
+        return Some(id);
+    }
+
     let available_ids: Vec<String> = agent::discover_providers()
         .into_iter()
         .map(|p| p.id)
         .collect();
-    resolve_preferred_provider_id(provider, &available_ids, &read_recent_agent_ids())
+    resolve_preferred_provider_id(None, &available_ids, &read_recent_agent_ids())
 }
 
 fn missing_review_provider_error(is_remote: bool) -> String {

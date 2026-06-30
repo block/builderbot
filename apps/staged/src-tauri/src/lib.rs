@@ -1433,18 +1433,6 @@ fn build_badge_prompt(
     prompt
 }
 
-fn badge_provider_id(
-    provider: Option<&str>,
-    available_ids: &[String],
-    recent_ids: &[String],
-) -> Option<String> {
-    provider
-        .map(str::trim)
-        .filter(|provider| !provider.is_empty())
-        .map(ToOwned::to_owned)
-        .or_else(|| session_commands::select_preferred_provider(available_ids, recent_ids))
-}
-
 fn find_badge_agent(provider: Option<&str>) -> Option<acp_client::AcpAgent> {
     if let Some(provider) = provider
         .map(str::trim)
@@ -1457,16 +1445,7 @@ fn find_badge_agent(provider: Option<&str>) -> Option<acp_client::AcpAgent> {
         return agent;
     }
 
-    let available_ids: Vec<String> = agent::discover_providers()
-        .into_iter()
-        .map(|provider| provider.id)
-        .collect();
-    let provider = badge_provider_id(
-        None,
-        &available_ids,
-        &session_commands::read_recent_agent_ids(),
-    )?;
-
+    let provider = session_commands::discover_preferred_provider_id(None)?;
     acp_client::find_acp_agent_by_id(&provider)
 }
 
@@ -2390,13 +2369,9 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{badge_provider_id, cleanup_project_branches_best_effort};
+    use super::cleanup_project_branches_best_effort;
     use crate::store::{Branch, BranchType};
     use std::collections::HashMap;
-
-    fn ids(values: &[&str]) -> Vec<String> {
-        values.iter().map(|value| value.to_string()).collect()
-    }
 
     fn remote_branch(
         project_id: &str,
@@ -2407,30 +2382,6 @@ mod tests {
         let mut branch = Branch::new_remote(project_id, branch_name, "main", workspace_name);
         branch.id = id.to_string();
         branch
-    }
-
-    #[test]
-    fn badge_provider_id_uses_explicit_provider() {
-        assert_eq!(
-            badge_provider_id(Some("codex"), &ids(&["goose", "claude"]), &ids(&["claude"])),
-            Some("codex".to_string())
-        );
-    }
-
-    #[test]
-    fn badge_provider_id_uses_recent_available_provider() {
-        assert_eq!(
-            badge_provider_id(None, &ids(&["goose", "claude"]), &ids(&["codex", "claude"])),
-            Some("claude".to_string())
-        );
-    }
-
-    #[test]
-    fn badge_provider_id_falls_back_to_first_available_provider() {
-        assert_eq!(
-            badge_provider_id(None, &ids(&["goose", "claude"]), &ids(&["codex"])),
-            Some("goose".to_string())
-        );
     }
 
     #[test]

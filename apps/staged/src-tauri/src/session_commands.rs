@@ -232,6 +232,7 @@ pub(crate) fn build_note_followup_message_with_pikchr_reference(
         "write the linked note"
     };
     let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference);
+    let standalone_guidance = NOTE_STANDALONE_OUTPUT_GUIDANCE.trim();
 
     format!(
         "<action>\n\
@@ -240,6 +241,8 @@ The user is asking you to {linked_note_action} from the latest chat history.\n\
 Use the existing conversation context. Do not create commits.\n\
 \n\
 {pikchr_guidance}\n\
+\n\
+{standalone_guidance}\n\
 \n\
 Your final response must include a suggested-next-steps fenced block followed by the note content after a horizontal rule:\n\
 \n\
@@ -1092,6 +1095,7 @@ repository edits directly here; use `start_repo_session` for implementation work
     };
 
     let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference);
+    let standalone_guidance = NOTE_STANDALONE_OUTPUT_GUIDANCE.trim();
 
     format!(
         "The user is requesting work at the project level. Investigate and \
@@ -1110,6 +1114,7 @@ error and the next action needed.\
 {coordinator_reminder}\n\n\
 To discover repositories that might be relevant, use `gh` to explore repos in the user's \
 GitHub organizations. Only add repos from organizations the user already belongs to.\n\n\
+{standalone_guidance}\n\n\
 To return the note, include a horizontal rule (---) followed by the note content. \
 Begin the note with a markdown H1 heading as the title.\n\n"
     )
@@ -4461,6 +4466,12 @@ mod tests {
         assert!(prompt.contains(reference));
     }
 
+    fn assert_note_standalone_output_guidance(prompt: &str) {
+        let standalone_guidance = NOTE_STANDALONE_OUTPUT_GUIDANCE.trim();
+        assert!(!standalone_guidance.is_empty());
+        assert!(prompt.contains(standalone_guidance));
+    }
+
     #[test]
     fn generated_remote_pikchr_grammar_paths_are_unique_temp_markdown_files() {
         let first = generated_pikchr_grammar_remote_path();
@@ -4520,6 +4531,7 @@ mod tests {
         assert_project_session_reference_guidance(&prompt);
         assert_project_session_repo_session_progress_guidance(&prompt);
         assert_pikchr_note_guidance(&prompt, PIKCHR_GRAMMAR_URL);
+        assert_note_standalone_output_guidance(&prompt);
     }
 
     #[test]
@@ -4532,6 +4544,7 @@ mod tests {
         assert_project_session_reference_guidance(&prompt);
         assert_project_session_repo_session_progress_guidance(&prompt);
         assert_pikchr_note_guidance(&prompt, PIKCHR_GRAMMAR_URL);
+        assert_note_standalone_output_guidance(&prompt);
     }
 
     #[test]
@@ -4572,6 +4585,7 @@ mod tests {
             &prompt,
             "/Applications/Staged.app/Contents/Resources/resources/pikchr/grammar.md",
         );
+        assert_note_standalone_output_guidance(&prompt);
     }
 
     #[test]
@@ -4582,6 +4596,7 @@ mod tests {
         assert!(prompt.contains("The user is asking you to write the linked note"));
         assert!(prompt.contains("Please write the note for this session."));
         assert_pikchr_note_guidance(&prompt, &remote_path);
+        assert_note_standalone_output_guidance(&prompt);
     }
 
     #[test]
@@ -4620,9 +4635,7 @@ mod tests {
             None,
         );
 
-        let standalone_guidance = NOTE_STANDALONE_OUTPUT_GUIDANCE.trim();
-        assert!(!standalone_guidance.is_empty());
-        assert!(prompt.contains(standalone_guidance));
+        assert_note_standalone_output_guidance(&prompt);
         assert!(prompt.contains("The opening fence line for suggested-next-steps must be exactly: ```suggested-next-steps"));
     }
 

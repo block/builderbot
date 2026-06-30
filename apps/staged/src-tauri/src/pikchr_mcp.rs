@@ -29,9 +29,6 @@ use rmcp::transport::streamable_http_server::{
 };
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, ServerHandler};
 
-/// Frontend parity: reject oversized source like `pikchrRendering.ts`
-/// (`MAX_PIKCHR_SOURCE_LENGTH`).
-const MAX_PIKCHR_SOURCE_LENGTH: usize = 20_000;
 /// Cap the rasterized PNG so a runaway diagram can't allocate a huge pixmap.
 const MAX_RENDER_DIMENSION: u32 = 4096;
 /// Default rasterization scale — 2× keeps labels legible.
@@ -548,18 +545,6 @@ fn run_preview(source: &str, scale: f32) -> PreviewOutcome {
             is_error: true,
         };
     }
-    if source.len() > MAX_PIKCHR_SOURCE_LENGTH {
-        return PreviewOutcome {
-            png: None,
-            summary: format!(
-                "Pikchr source is too large to render safely ({} chars; limit {}).",
-                source.len(),
-                MAX_PIKCHR_SOURCE_LENGTH
-            ),
-            is_error: true,
-        };
-    }
-
     let rendered = match render_pikchr_svg(source) {
         Ok(rendered) => rendered,
         Err(err) => {
@@ -768,14 +753,6 @@ arrow from COLL.e to SNOW.w"#;
         let outcome = run_preview("   \n  ", DEFAULT_SCALE);
         assert!(outcome.is_error);
         assert!(outcome.png.is_none());
-    }
-
-    #[test]
-    fn oversized_source_is_rejected() {
-        let big = "box\n".repeat(MAX_PIKCHR_SOURCE_LENGTH);
-        let outcome = run_preview(&big, DEFAULT_SCALE);
-        assert!(outcome.is_error);
-        assert!(outcome.summary.contains("too large"));
     }
 
     #[test]

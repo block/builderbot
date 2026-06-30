@@ -1044,8 +1044,7 @@ for example #note:123, #commit:<sha>, and #review:456. When you start a repo-lev
 note, reference the note (and the relevant section) and state the goal in your own words — but do \
 NOT repeat or paraphrase the note itself. For example: \
 `Implement \"Step 5: unit tests\" from #note:123`. This restriction applies only when a note is \
-being referenced; when there is no note to point to, make the instructions as detailed and \
-self-contained as the task requires.";
+being referenced.";
 
 pub(crate) fn build_project_session_action_instructions_with_pikchr_reference(
     is_remote: bool,
@@ -4445,7 +4444,7 @@ mod tests {
         assert!(prompt.contains("#review:456"));
         assert!(prompt.contains("do NOT repeat or paraphrase the note itself"));
         assert!(prompt.contains("reference the note (and the relevant section)"));
-        assert!(prompt.contains("when there is no note to point to"));
+        assert!(prompt.contains("This restriction applies only when a note is being referenced"));
         assert!(prompt.contains("Implement \"Step 5: unit tests\" from #note:123"));
     }
 

@@ -5,6 +5,7 @@ use builderbot_actions::{
     ActionDetector, ActionExecutor, ActionMetadata, ActionType, FileExplorationMode,
     RunDetectionMode, StopOptions, SuggestedAction,
 };
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, State};
 use tokio::sync::watch;
@@ -32,6 +33,31 @@ struct DetectingActionsEvent {
     github_repo: String,
     subpath: Option<String>,
     detecting: bool,
+}
+
+/// Build an [`AcpAiProvider`] for action detection, honoring the user's
+/// preferred agent when `provider_id` is `None`.
+///
+/// An explicit `provider_id` always wins. When it is `None` — which the
+/// automatic first-touch worktree setup and the project-MCP `add_project_repo`
+/// path both pass — detection resolves the user's most-recently-used available
+/// agent via
+/// [`discover_preferred_provider_id`](crate::session_commands::discover_preferred_provider_id),
+/// the shared helper behind the badge and action-detection fallbacks, instead
+/// of silently picking the first installed agent in `KNOWN_AGENTS` order
+/// (Goose).
+///
+/// Falls back to [`AcpAiProvider::new`] (first installed agent) only when no
+/// provider can be resolved at all — i.e. no agents are installed, in which
+/// case construction would fail regardless.
+pub(crate) fn build_action_provider(
+    provider_id: Option<&str>,
+    working_dir: PathBuf,
+) -> Result<AcpAiProvider> {
+    match crate::session_commands::discover_preferred_provider_id(provider_id) {
+        Some(id) => AcpAiProvider::with_agent(&id, working_dir),
+        None => AcpAiProvider::new(working_dir),
+    }
 }
 
 pub(crate) async fn detect_actions_for_repo_context(
@@ -65,11 +91,8 @@ pub(crate) async fn detect_actions_for_repo_context(
         None => std::env::temp_dir(),
     };
 
-    let provider = match provider_id {
-        Some(id) => AcpAiProvider::with_agent(id, provider_dir.clone()),
-        None => AcpAiProvider::new(provider_dir.clone()),
-    }
-    .map_err(|e| format!("Failed to create AI provider: {e}"))?;
+    let provider = build_action_provider(provider_id, provider_dir.clone())
+        .map_err(|e| format!("Failed to create AI provider: {e}"))?;
 
     let detector = ActionDetector::new(Box::new(provider));
 

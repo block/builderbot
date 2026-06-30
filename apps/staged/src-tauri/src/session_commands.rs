@@ -2220,6 +2220,63 @@ pub(crate) fn select_preferred_provider(
     available_ids.first().cloned()
 }
 
+/// Resolve a provider id from an optional explicit selection.
+///
+/// A non-blank explicit `provider` always wins (after trimming whitespace);
+/// blank or whitespace-only values are ignored. When no usable explicit
+/// provider is given — the `provider: None` path taken by repo badges, action
+/// detection, and any future caller — fall back to the user's preferred
+/// available agent via [`select_preferred_provider`]. Returns `None` only when
+/// nothing can be resolved at all (no explicit provider and no available
+/// agent).
+///
+/// This is the single shared shape behind every `provider: None` resolution
+/// path so the fallback logic can't drift between call sites over time.
+pub(crate) fn resolve_preferred_provider_id(
+    provider: Option<&str>,
+    available_ids: &[String],
+    recent_ids: &[String],
+) -> Option<String> {
+    explicit_provider_id(provider).or_else(|| select_preferred_provider(available_ids, recent_ids))
+}
+
+/// The usable explicit provider id, if any: the trimmed `provider` when it is
+/// non-blank, otherwise `None`. Shared by [`resolve_preferred_provider_id`] and
+/// [`discover_preferred_provider_id`] so the "non-blank explicit id wins"
+/// parsing has a single definition and can't drift between them.
+fn explicit_provider_id(provider: Option<&str>) -> Option<String> {
+    provider
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+/// [`resolve_preferred_provider_id`] sourcing `available_ids` from the installed
+/// providers and `recent_ids` from the saved `recent-agents` preference.
+///
+/// Centralizes the `discover_providers` + `read_recent_agent_ids` scaffolding
+/// shared by the badge and action-detection callers so they all discover
+/// providers and consult the preference the same way.
+///
+/// A non-blank explicit `provider` short-circuits before any discovery: it
+/// always wins regardless of what's installed, so probing every known agent
+/// (each spawns a login shell that sources the user's full profile) and reading
+/// the preferences file would only compute results that are immediately
+/// discarded. This matters because the action-detection poller resolves the
+/// provider on every poll iteration; only the `provider: None` fallback paths
+/// pay the discovery cost.
+pub(crate) fn discover_preferred_provider_id(provider: Option<&str>) -> Option<String> {
+    if let Some(id) = explicit_provider_id(provider) {
+        return Some(id);
+    }
+
+    let available_ids: Vec<String> = agent::discover_providers()
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+    resolve_preferred_provider_id(None, &available_ids, &read_recent_agent_ids())
+}
+
 fn missing_review_provider_error(is_remote: bool) -> String {
     if is_remote {
         "No remote ACP provider is configured for review sessions.".to_string()
@@ -4459,6 +4516,58 @@ mod tests {
             select_preferred_provider(&available, &recent),
             Some("goose".to_string())
         );
+    }
+
+    #[test]
+    fn resolve_preferred_provider_id_uses_explicit_provider() {
+        assert_eq!(
+            resolve_preferred_provider_id(
+                Some("codex"),
+                &ids(&["goose", "claude"]),
+                &ids(&["claude"])
+            ),
+            Some("codex".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_preferred_provider_id_uses_recent_available_provider() {
+        // Goose is first in KNOWN_AGENTS order, but the user's recent preference
+        // is `claude` — the resolver must pick the preference, not first-installed.
+        assert_eq!(
+            resolve_preferred_provider_id(
+                None,
+                &ids(&["goose", "claude"]),
+                &ids(&["codex", "claude"])
+            ),
+            Some("claude".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_preferred_provider_id_falls_back_to_first_available_provider() {
+        // No recent agent is available, so fall back to the first available.
+        assert_eq!(
+            resolve_preferred_provider_id(None, &ids(&["goose", "claude"]), &ids(&["codex"])),
+            Some("goose".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_preferred_provider_id_ignores_blank_explicit_provider() {
+        assert_eq!(
+            resolve_preferred_provider_id(
+                Some("   "),
+                &ids(&["goose", "claude"]),
+                &ids(&["claude"])
+            ),
+            Some("claude".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_preferred_provider_id_returns_none_when_nothing_available() {
+        assert_eq!(resolve_preferred_provider_id(None, &[], &[]), None);
     }
 
     #[test]

@@ -14,7 +14,7 @@ use tauri::AppHandle;
 use tokio::sync::watch;
 use tokio::time::{self, Duration};
 
-use builderbot_actions::{AcpAiProvider, AiProvider, RunDetectionMode};
+use builderbot_actions::{AiProvider, RunDetectionMode};
 
 use super::events::emit_run_phase_changed;
 use super::events::RunPhaseChangedEvent;
@@ -275,10 +275,10 @@ If still building, set regex and has_endpoint_capture to null/false."#,
             );
 
             let ai_response = {
-                let provider_result = match provider_id.as_deref() {
-                    Some(id) => AcpAiProvider::with_agent(id, working_dir.clone()),
-                    None => AcpAiProvider::new(working_dir.clone()),
-                };
+                let provider_result = super::commands::build_action_provider(
+                    provider_id.as_deref(),
+                    working_dir.clone(),
+                );
                 let provider = match provider_result {
                     Ok(p) => p,
                     Err(e) => {

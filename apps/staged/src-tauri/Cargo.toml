@@ -74,6 +74,12 @@ subtle = "2.6"
 time = "0.3"
 pikchr = "0.1.4"
 
+# Pikchr preview MCP tool: render Pikchr source to SVG (same C engine as the
+# frontend's pikchr-js) and rasterize to PNG for the note-writing agent.
+resvg = "0.47"
+usvg = "0.47"
+tiny-skia = "0.12"
+
 # Debug binaries archived — uncomment when needed
 # [[bin]]
 # name = "debug_diff"

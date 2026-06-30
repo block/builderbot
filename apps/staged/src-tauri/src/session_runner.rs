@@ -338,6 +338,14 @@ pub struct SessionConfig {
     /// Project that owns this session. Set for both project-note sessions
     /// (directly) and branch-level sessions (via the branch's project).
     pub project_id: Option<String>,
+    /// Expose the `preview_pikchr` MCP tool to this session. Set for local,
+    /// note-writing sessions (project notes and local branch notes) so the
+    /// agent can render its Pikchr diagrams and check for overlaps before
+    /// finalizing a note. The server is attached as a *required* MCP server,
+    /// so a provider that doesn't support HTTP MCP fails the session rather
+    /// than silently dropping the tool. Only honored for local sessions
+    /// (`workspace_name.is_none()`); remote sessions can't reach localhost.
+    pub expose_pikchr_preview: bool,
 }
 
 /// Start a session: persist the user message, spawn the agent, stream to DB.
@@ -427,8 +435,21 @@ pub fn start_session(
 
         let local = tokio::task::LocalSet::new();
         let result = local.block_on(&rt, async {
-            // Start MCP server for project sessions, injecting it via the ACP NewSessionRequest.
-            let (driver, _mcp_handle) = if let Some(ref proj_id) = config.mcp_project_id {
+            let driver = driver.with_extra_env(config.extra_env.clone());
+
+            // Accumulate every *required* MCP server into a single vec and
+            // attach them in one with_mcp_servers call below. with_mcp_servers
+            // replaces the driver's server list, so calling it per-block would
+            // clobber earlier additions — and a project note sets both
+            // mcp_project_id and expose_pikchr_preview, so that collision is
+            // real.
+            let mut required_mcp_servers: Vec<McpServer> = Vec::new();
+
+            // Start MCP server for project sessions, injecting it via the ACP
+            // NewSessionRequest. This is a *required* server: project sessions
+            // are restricted to MCP-capable providers, so a missing transport
+            // is a hard error.
+            let _mcp_handle = if let Some(ref proj_id) = config.mcp_project_id {
                 match crate::project_mcp::start_project_mcp_server(
                     proj_id.clone(),
                     Arc::clone(&store),
@@ -446,14 +467,11 @@ pub fn start_session(
                             "Session {}: MCP server started on port {port}",
                             config.session_id
                         );
-                        let mcp_server = McpServer::Http(McpServerHttp::new(
+                        required_mcp_servers.push(McpServer::Http(McpServerHttp::new(
                             "builderbot",
                             format!("http://127.0.0.1:{port}/mcp"),
-                        ));
-                        let driver = driver
-                            .with_extra_env(config.extra_env.clone())
-                            .with_mcp_servers(vec![mcp_server]);
-                        (driver, Some(handle))
+                        )));
+                        Some(handle)
                     }
                     Err(e) => {
                         log::error!("Failed to start MCP server: {e}");
@@ -461,8 +479,49 @@ pub fn start_session(
                     }
                 }
             } else {
-                let env = config.extra_env.clone();
-                (driver.with_extra_env(env), None)
+                None
+            };
+
+            // For local note-writing sessions, additionally attach the pikchr
+            // preview tool so the agent can render its diagrams and catch
+            // overlaps. This is a *required* server too: a local note session
+            // assumes its provider speaks HTTP MCP, so an unsupported transport
+            // fails the session (via the required-transport check) rather than
+            // silently dropping the tool. Skipped for remote sessions, which
+            // can't reach a localhost server. A *startup* failure (port bind)
+            // is a local infra hiccup orthogonal to provider capability, so it
+            // stays non-fatal: log and continue without the preview aid.
+            let _pikchr_handle = if config.expose_pikchr_preview && config.workspace_name.is_none()
+            {
+                match crate::pikchr_mcp::start_pikchr_mcp_server().await {
+                    Ok((port, handle)) => {
+                        log::info!(
+                            "Session {}: pikchr preview MCP server started on port {port}",
+                            config.session_id
+                        );
+                        required_mcp_servers.push(McpServer::Http(McpServerHttp::new(
+                            "pikchr",
+                            format!("http://127.0.0.1:{port}/mcp"),
+                        )));
+                        Some(handle)
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Session {}: failed to start pikchr preview MCP server \
+                                 (continuing without it): {e}",
+                            config.session_id
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            let driver = if required_mcp_servers.is_empty() {
+                driver
+            } else {
+                driver.with_mcp_servers(required_mcp_servers)
             };
 
             // Read and base64-encode images for the prompt content blocks.
@@ -993,6 +1052,9 @@ pub fn start_pipeline_session(
                     image_ids: vec![],
                     branch_id: config.branch_id.clone(),
                     project_id: config.project_id.clone(),
+                    // Deterministic pipelines hand off to a code-focused AI step,
+                    // not a note-writing session.
+                    expose_pikchr_preview: false,
                 };
                 if let Err(e) = start_session(
                     ai_config,

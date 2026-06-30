@@ -218,9 +218,17 @@
         for (const [projectId, branches] of next) {
           const branchIndex = branches.findIndex((b) => b.id === payload.branchId);
           if (branchIndex !== -1) {
+            const existing = branches[branchIndex];
+            // A live `prState` flip (e.g. OPEN → MERGED) is a genuine, user-
+            // visible transition rather than a poller re-confirming the same
+            // value. Flag it so the safe-to-delete effect recomputes promptly
+            // instead of waiting out its idle window (see prStateTransitionPending).
+            if (existing.prState !== payload.prState) {
+              prStateTransitionPending = true;
+            }
             const updatedBranches = [...branches];
             updatedBranches[branchIndex] = {
-              ...updatedBranches[branchIndex],
+              ...existing,
               prState: payload.prState,
               prChecksStatus: payload.prChecksStatus,
               prReviewDecision: payload.prReviewDecision,
@@ -740,6 +748,13 @@
   // depends on are unchanged; deduping on the signature keeps the expensive
   // per-branch git work from re-firing on every reassignment.
   let lastSafeSignature: string | null = null;
+  // Set by `flushPrStatusEvents` when a buffered `pr-status-changed` actually
+  // flips a branch's `prState` (e.g. → MERGED). A live transition while parked
+  // on a project is not a switch-time hydration storm, so the recompute below
+  // takes a prompt (next-tick) path instead of the idle window — keeping the
+  // delete button in step with the branch card's badge. Consumed (reset) by the
+  // effect once it acts on it.
+  let prStateTransitionPending = false;
   $effect(() => {
     // Read reactive deps synchronously so the effect re-subscribes correctly.
     const projectsSnapshot = visibleProjects;
@@ -749,8 +764,16 @@
     const signature = computeSafeToDeleteSignature(projectsSnapshot, branches, repoCounts);
     if (signature === lastSafeSignature) {
       // Inputs relevant to the result are unchanged — skip the git work.
+      // Leave any pending fast-path signal intact so the next genuine recompute
+      // still picks it up.
       return;
     }
+
+    // Consume the fast-path signal here (after the dedup gate) so a no-op
+    // re-fire never burns it. A live PR-state transition recomputes promptly;
+    // every other input change stays on the idle path that protects switches.
+    const fastPath = prStateTransitionPending;
+    prStateTransitionPending = false;
 
     // Bail out of stale work: if the effect re-fires (or the component tears
     // down) before this run resolves, `stale` flips so we neither spawn the
@@ -795,19 +818,20 @@
       lastSafeSignature = signature;
     };
 
-    // Defer off the critical render path: let the switch's keyed-block swap
+    // A live PR-state transition (fast path) settles on the next tick so the
+    // delete button keeps pace with the branch card's badge. Everything else
+    // defers off the critical render path: let the switch's keyed-block swap
     // flush first, then settle the cosmetic styling during idle. The timeout
     // guarantees the check still runs even while the main thread stays busy
     // through the post-switch hydration window (otherwise an idle callback can
     // be deferred indefinitely under sustained load).
-    const schedule =
-      typeof requestIdleCallback === 'function'
-        ? (cb: () => void) => requestIdleCallback(cb, { timeout: 2000 })
-        : (cb: () => void) => setTimeout(cb, 0) as unknown as number;
-    const cancel =
-      typeof cancelIdleCallback === 'function'
-        ? (handle: number) => cancelIdleCallback(handle)
-        : (handle: number) => clearTimeout(handle);
+    const useIdle = !fastPath && typeof requestIdleCallback === 'function';
+    const schedule = useIdle
+      ? (cb: () => void) => requestIdleCallback(cb, { timeout: 2000 })
+      : (cb: () => void) => setTimeout(cb, 0) as unknown as number;
+    const cancel = useIdle
+      ? (handle: number) => cancelIdleCallback(handle)
+      : (handle: number) => clearTimeout(handle);
 
     idleHandle = schedule(() => {
       void updateSafeStatus();

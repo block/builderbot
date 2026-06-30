@@ -5,6 +5,7 @@ use builderbot_actions::{
     ActionDetector, ActionExecutor, ActionMetadata, ActionType, FileExplorationMode,
     RunDetectionMode, StopOptions, SuggestedAction,
 };
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, State};
 use tokio::sync::watch;
@@ -32,6 +33,52 @@ struct DetectingActionsEvent {
     github_repo: String,
     subpath: Option<String>,
     detecting: bool,
+}
+
+/// Resolve the provider id to use for action detection.
+///
+/// An explicit `provider_id` always wins. When it is `None` — which the
+/// automatic first-touch worktree setup and the project-MCP `add_project_repo`
+/// path both pass — we mirror the frontend's `getPreferredAgent` logic via
+/// [`select_preferred_provider`](crate::session_commands::select_preferred_provider)
+/// so detection honors the user's most-recently-used available agent instead of
+/// silently picking the first installed agent in `KNOWN_AGENTS` order (Goose).
+/// This matches the `badge_provider_id` fallback added in #823.
+fn resolve_action_provider_id(
+    provider_id: Option<&str>,
+    available_ids: &[String],
+    recent_ids: &[String],
+) -> Option<String> {
+    provider_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| crate::session_commands::select_preferred_provider(available_ids, recent_ids))
+}
+
+/// Build an [`AcpAiProvider`] for action detection, honoring the user's
+/// preferred agent when `provider_id` is `None`.
+///
+/// Falls back to [`AcpAiProvider::new`] (first installed agent) only when no
+/// provider can be resolved at all — i.e. no agents are installed, in which
+/// case construction would fail regardless.
+pub(crate) fn build_action_provider(
+    provider_id: Option<&str>,
+    working_dir: PathBuf,
+) -> Result<AcpAiProvider> {
+    let available_ids: Vec<String> = crate::agent::discover_providers()
+        .into_iter()
+        .map(|provider| provider.id)
+        .collect();
+    let resolved = resolve_action_provider_id(
+        provider_id,
+        &available_ids,
+        &crate::session_commands::read_recent_agent_ids(),
+    );
+    match resolved {
+        Some(id) => AcpAiProvider::with_agent(&id, working_dir),
+        None => AcpAiProvider::new(working_dir),
+    }
 }
 
 pub(crate) async fn detect_actions_for_repo_context(
@@ -65,11 +112,8 @@ pub(crate) async fn detect_actions_for_repo_context(
         None => std::env::temp_dir(),
     };
 
-    let provider = match provider_id {
-        Some(id) => AcpAiProvider::with_agent(id, provider_dir.clone()),
-        None => AcpAiProvider::new(provider_dir.clone()),
-    }
-    .map_err(|e| format!("Failed to create AI provider: {e}"))?;
+    let provider = build_action_provider(provider_id, provider_dir.clone())
+        .map_err(|e| format!("Failed to create AI provider: {e}"))?;
 
     let detector = ActionDetector::new(Box::new(provider));
 
@@ -796,4 +840,61 @@ pub async fn update_run_detection_mode(
 ) -> Result<(), String> {
     let store = get_store(&store)?;
     update_run_detection_mode_impl(store, action_id, mode)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_action_provider_id;
+
+    fn ids(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn resolve_action_provider_id_uses_explicit_provider() {
+        assert_eq!(
+            resolve_action_provider_id(
+                Some("codex"),
+                &ids(&["goose", "claude"]),
+                &ids(&["claude"])
+            ),
+            Some("codex".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_action_provider_id_uses_recent_available_provider() {
+        // Goose is first in KNOWN_AGENTS order, but the user's recent preference
+        // is `claude` — the resolver must pick the preference, not first-installed.
+        assert_eq!(
+            resolve_action_provider_id(
+                None,
+                &ids(&["goose", "claude"]),
+                &ids(&["codex", "claude"])
+            ),
+            Some("claude".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_action_provider_id_falls_back_to_first_available_provider() {
+        // No recent agent is available, so fall back to the first available.
+        assert_eq!(
+            resolve_action_provider_id(None, &ids(&["goose", "claude"]), &ids(&["codex"])),
+            Some("goose".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_action_provider_id_ignores_blank_explicit_provider() {
+        assert_eq!(
+            resolve_action_provider_id(Some("   "), &ids(&["goose", "claude"]), &ids(&["claude"])),
+            Some("claude".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_action_provider_id_returns_none_when_nothing_available() {
+        assert_eq!(resolve_action_provider_id(None, &[], &[]), None);
+    }
 }

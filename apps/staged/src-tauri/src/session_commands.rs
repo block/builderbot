@@ -231,13 +231,14 @@ fn pikchr_note_guidance(reference: &str, preview_available: bool) -> String {
         "Staged notes support rendered diagrams in fenced `pikchr` code blocks. \
 If you need the Pikchr grammar while writing a diagram, read the reference at: {reference}"
     );
-    // Phrased conditionally so it stays truthful even when the optional preview
-    // MCP server is dropped (e.g. on a provider without HTTP MCP support).
+    // The preview server is a *required* MCP server for local note sessions, so
+    // when preview_available is true the tool is guaranteed present — phrase the
+    // guidance assertively rather than hedging on the tool's existence.
     if preview_available {
         guidance.push_str(
-            " If a `preview_pikchr` tool is available to you, use it to render your Pikchr \
-source to an image and check the layout — box overlaps, label collisions, arrow targets — \
-then iterate before finalizing the diagram.",
+            " Use the `preview_pikchr` tool to render your Pikchr source to an image and check \
+the layout — box overlaps, label collisions, arrow targets — then iterate before finalizing \
+the diagram.",
         );
     }
     guidance

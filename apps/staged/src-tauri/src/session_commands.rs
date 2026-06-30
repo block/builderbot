@@ -210,6 +210,22 @@ pub(crate) fn resolve_pikchr_grammar_reference(
     grammar_path.to_string_lossy().into_owned()
 }
 
+/// Whether the local Pikchr `preview_pikchr` tool applies to a session.
+///
+/// The preview MCP server binds to loopback, so it's only reachable from
+/// sessions running on the local machine (`workspace_name.is_none()`), and it's
+/// only useful while writing a note. Both the prompt mention
+/// (`pikchr_note_guidance`) and the actual server attachment
+/// (`SessionConfig::expose_pikchr_preview`) must agree on this condition, so
+/// every call site derives it here rather than re-encoding it independently —
+/// that way a change like enabling remote previews only has to happen once.
+pub(crate) fn local_note_pikchr_preview_available(
+    is_note_session: bool,
+    workspace_name: Option<&str>,
+) -> bool {
+    is_note_session && workspace_name.is_none()
+}
+
 fn pikchr_note_guidance(reference: &str, preview_available: bool) -> String {
     let mut guidance = format!(
         "Staged notes support rendered diagrams in fenced `pikchr` code blocks. \
@@ -554,8 +570,10 @@ pub async fn resume_session(
     let config_project_id = event_project_id.clone().or(mcp_project_id.clone());
     // Note follow-ups (project notes or local branch notes) get the preview
     // tool; remote branch notes can't reach localhost.
-    let expose_pikchr_preview =
-        (project_note.is_some() || linked_note.is_some()) && workspace_name.is_none();
+    let expose_pikchr_preview = local_note_pikchr_preview_available(
+        project_note.is_some() || linked_note.is_some(),
+        workspace_name.as_deref(),
+    );
 
     crate::web_server::emit_to_all(
         &app_handle,
@@ -671,9 +689,12 @@ pub async fn build_note_followup_message(
 
         // Note follow-ups expose the preview tool on local sessions only. A
         // project-note follow-up has no linked branch and always runs locally.
-        let preview_available = linked_branch
-            .as_ref()
-            .map_or(true, |branch| branch.workspace_name.is_none());
+        let preview_available = local_note_pikchr_preview_available(
+            true,
+            linked_branch
+                .as_ref()
+                .and_then(|branch| branch.workspace_name.as_deref()),
+        );
 
         Ok(build_note_followup_message_with_pikchr_reference(
             has_parsed_note,
@@ -1416,7 +1437,10 @@ async fn prepare_branch_session_start(
         launch_context,
         Some(&branch.base_branch),
         &pikchr_grammar_reference,
-        branch.workspace_name.is_none(),
+        local_note_pikchr_preview_available(
+            matches!(session_type, BranchSessionType::Note),
+            branch.workspace_name.as_deref(),
+        ),
     );
 
     // Resolve the actual workspace path for remote branches so the remote agent
@@ -1560,8 +1584,10 @@ fn launch_running_branch_session(
     let workspace_name = branch.workspace_name.clone();
     // Local branch note sessions get the preview tool; commit/review sessions
     // and remote sessions do not.
-    let expose_pikchr_preview =
-        matches!(session_type, BranchSessionType::Note) && workspace_name.is_none();
+    let expose_pikchr_preview = local_note_pikchr_preview_available(
+        matches!(session_type, BranchSessionType::Note),
+        workspace_name.as_deref(),
+    );
 
     session_runner::emit_session_running(
         &app_handle,
@@ -1998,7 +2024,10 @@ async fn start_queued_session_for_branch(
         launch_context.as_ref(),
         Some(&branch.base_branch),
         &pikchr_grammar_reference,
-        branch.workspace_name.is_none(),
+        local_note_pikchr_preview_available(
+            matches!(session_type, BranchSessionType::Note),
+            branch.workspace_name.as_deref(),
+        ),
     );
 
     // Atomically transition session from queued to running.
@@ -2131,8 +2160,10 @@ async fn start_queued_session_for_branch(
             image_ids,
             branch_id: Some(branch_id),
             project_id: Some(branch.project_id.clone()),
-            expose_pikchr_preview: matches!(session_type, BranchSessionType::Note)
-                && branch.workspace_name.is_none(),
+            expose_pikchr_preview: local_note_pikchr_preview_available(
+                matches!(session_type, BranchSessionType::Note),
+                branch.workspace_name.as_deref(),
+            ),
         },
         store,
         app_handle,
@@ -4648,6 +4679,23 @@ mod tests {
         assert_note_standalone_output_guidance(&prompt);
         // Remote note sessions can't reach the preview server, so it isn't mentioned.
         assert!(!prompt.contains("preview_pikchr"));
+    }
+
+    #[test]
+    fn local_note_pikchr_preview_available_requires_note_and_local() {
+        // Available only for note sessions running on the local machine.
+        assert!(local_note_pikchr_preview_available(true, None));
+        // Remote note sessions can't reach the loopback preview server.
+        assert!(!local_note_pikchr_preview_available(
+            true,
+            Some("some-workspace")
+        ));
+        // Non-note sessions never get the note-writing preview tool.
+        assert!(!local_note_pikchr_preview_available(false, None));
+        assert!(!local_note_pikchr_preview_available(
+            false,
+            Some("some-workspace")
+        ));
     }
 
     #[test]

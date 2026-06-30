@@ -2819,8 +2819,10 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let config_project_id = event_project_id.clone().or(mcp_project_id.clone());
             // Note follow-ups (project notes or local branch notes) get the
             // preview tool; remote branch notes can't reach localhost.
-            let expose_pikchr_preview =
-                (project_note.is_some() || linked_note.is_some()) && workspace_name.is_none();
+            let expose_pikchr_preview = session_commands::local_note_pikchr_preview_available(
+                project_note.is_some() || linked_note.is_some(),
+                workspace_name.as_deref(),
+            );
 
             emit_to_all(
                 app_handle,

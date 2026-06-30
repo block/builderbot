@@ -1042,9 +1042,7 @@ const PROJECT_SESSION_TIMELINE_REFERENCE_GUIDANCE: &str = "When referring to exi
 items in notes or repo-session instructions, use hashtag references in the form #<type>:<id>, \
 for example #note:123, #commit:<sha>, and #review:456. When you start a repo-level session from a \
 note, reference the note (and the relevant section) and state the goal in your own words — but do \
-NOT restate, paraphrase, summarize, or copy the note's plan, recommended approach, file paths, \
-line numbers, or step-by-step instructions. The repo session is handed the note and reads it \
-itself, so duplicating its contents only adds length and risks drift. For example: \
+NOT repeat or paraphrase the note itself. For example: \
 `Implement \"Step 5: unit tests\" from #note:123`. This restriction applies only when a note is \
 being referenced; when there is no note to point to, make the instructions as detailed and \
 self-contained as the task requires.";
@@ -4445,7 +4443,7 @@ mod tests {
         assert!(prompt.contains("#note:123"));
         assert!(prompt.contains("#commit:<sha>"));
         assert!(prompt.contains("#review:456"));
-        assert!(prompt.contains("do NOT restate, paraphrase, summarize, or copy the note's plan"));
+        assert!(prompt.contains("do NOT repeat or paraphrase the note itself"));
         assert!(prompt.contains("reference the note (and the relevant section)"));
         assert!(prompt.contains("when there is no note to point to"));
         assert!(prompt.contains("Implement \"Step 5: unit tests\" from #note:123"));

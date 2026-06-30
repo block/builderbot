@@ -332,9 +332,13 @@ fn extract_labels(svg: &str) -> Vec<SvgLabel> {
 /// Read a numeric SVG attribute value out of an attribute substring.
 fn attr_f64(attrs: &str, name: &str) -> Option<f64> {
     use regex::Regex;
-    let re = Regex::new(&format!(r#"\b{name}="([^"]*)""#)).ok()?;
-    re.captures(attrs)?
-        .get(1)?
+    static ATTR_RE: OnceLock<Regex> = OnceLock::new();
+    let attr_re = ATTR_RE.get_or_init(|| Regex::new(r#"\b([\w-]+)="([^"]*)""#).unwrap());
+
+    attr_re
+        .captures_iter(attrs)
+        .find(|caps| &caps[1] == name)?
+        .get(2)?
         .as_str()
         .trim()
         .parse::<f64>()

@@ -1,0 +1,1 @@
+Write the note as a standalone artifact. The original user prompt is not shown when the note is displayed. Do not make the title or opening sentence a direct answer to an implicit question, such as "Yes, this is broken." Instead, name the subject and conclusion clearly enough that the note makes sense by itself.

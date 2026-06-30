@@ -232,6 +232,7 @@ pub(crate) fn build_note_followup_message_with_pikchr_reference(
         "write the linked note"
     };
     let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference);
+    let standalone_guidance = NOTE_STANDALONE_OUTPUT_GUIDANCE.trim();
 
     format!(
         "<action>\n\
@@ -240,6 +241,8 @@ The user is asking you to {linked_note_action} from the latest chat history.\n\
 Use the existing conversation context. Do not create commits.\n\
 \n\
 {pikchr_guidance}\n\
+\n\
+{standalone_guidance}\n\
 \n\
 Your final response must include a suggested-next-steps fenced block followed by the note content after a horizontal rule:\n\
 \n\
@@ -1032,6 +1035,9 @@ pub struct ProjectSessionResponse {
     pub note_id: String,
 }
 
+const NOTE_STANDALONE_OUTPUT_GUIDANCE: &str =
+    include_str!("../../src/lib/shared/prompts/noteStandaloneGuidance.txt");
+
 const PROJECT_SESSION_TIMELINE_REFERENCE_GUIDANCE: &str = "When referring to existing timeline \
 items in notes or repo-session instructions, use hashtag references in the form #<type>:<id>, \
 for example #note:123, #commit:<sha>, and #review:456. When starting a repo-level session from a \
@@ -1089,6 +1095,7 @@ repository edits directly here; use `start_repo_session` for implementation work
     };
 
     let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference);
+    let standalone_guidance = NOTE_STANDALONE_OUTPUT_GUIDANCE.trim();
 
     format!(
         "The user is requesting work at the project level. Investigate and \
@@ -1107,6 +1114,7 @@ error and the next action needed.\
 {coordinator_reminder}\n\n\
 To discover repositories that might be relevant, use `gh` to explore repos in the user's \
 GitHub organizations. Only add repos from organizations the user already belongs to.\n\n\
+{standalone_guidance}\n\n\
 To return the note, include a horizontal rule (---) followed by the note content. \
 Begin the note with a markdown H1 heading as the title.\n\n"
     )
@@ -3598,13 +3606,13 @@ pub(crate) fn build_full_prompt_with_pikchr_reference(
     pikchr_grammar_reference: &str,
 ) -> String {
     let mut action_instructions = match session_type {
-        BranchSessionType::Note => {
+        BranchSessionType::Note => [
             "The user is requesting a note. Generate a note based on their prompt below.
 
 You may use any tools needed to research and gather information, but do NOT create \
-any commits.
-
-To return the note, your final response must include the structure shown below. \
+any commits.",
+            NOTE_STANDALONE_OUTPUT_GUIDANCE.trim(),
+            "To return the note, your final response must include the structure shown below. \
 Before the `---` separator, emit a `suggested-next-steps` fenced block that suggests \
 what the user might want to do next. The block must contain a single JSON object with \
 two nullable string fields:
@@ -3639,8 +3647,9 @@ Formatting requirements:
 - Do not wrap the block in any additional code fences.
 - `---` must be on its own line, with a newline immediately before and after it.
 - The note content must start immediately after `---` with a markdown H1 (`# Title`).
-- Do not wrap the note in code fences.".to_string()
-        }
+- Do not wrap the note in code fences.",
+        ]
+        .join("\n\n"),
         BranchSessionType::Commit => {
             "The user is requesting you make a commit based on the prompt below. Make the necessary \
 code changes, following any verification or formatting steps as instructed, and then \
@@ -4457,6 +4466,12 @@ mod tests {
         assert!(prompt.contains(reference));
     }
 
+    fn assert_note_standalone_output_guidance(prompt: &str) {
+        let standalone_guidance = NOTE_STANDALONE_OUTPUT_GUIDANCE.trim();
+        assert!(!standalone_guidance.is_empty());
+        assert!(prompt.contains(standalone_guidance));
+    }
+
     #[test]
     fn generated_remote_pikchr_grammar_paths_are_unique_temp_markdown_files() {
         let first = generated_pikchr_grammar_remote_path();
@@ -4516,6 +4531,7 @@ mod tests {
         assert_project_session_reference_guidance(&prompt);
         assert_project_session_repo_session_progress_guidance(&prompt);
         assert_pikchr_note_guidance(&prompt, PIKCHR_GRAMMAR_URL);
+        assert_note_standalone_output_guidance(&prompt);
     }
 
     #[test]
@@ -4528,6 +4544,7 @@ mod tests {
         assert_project_session_reference_guidance(&prompt);
         assert_project_session_repo_session_progress_guidance(&prompt);
         assert_pikchr_note_guidance(&prompt, PIKCHR_GRAMMAR_URL);
+        assert_note_standalone_output_guidance(&prompt);
     }
 
     #[test]
@@ -4568,6 +4585,7 @@ mod tests {
             &prompt,
             "/Applications/Staged.app/Contents/Resources/resources/pikchr/grammar.md",
         );
+        assert_note_standalone_output_guidance(&prompt);
     }
 
     #[test]
@@ -4578,6 +4596,7 @@ mod tests {
         assert!(prompt.contains("The user is asking you to write the linked note"));
         assert!(prompt.contains("Please write the note for this session."));
         assert_pikchr_note_guidance(&prompt, &remote_path);
+        assert_note_standalone_output_guidance(&prompt);
     }
 
     #[test]
@@ -4603,6 +4622,21 @@ mod tests {
             "Put only the JSON array inside the review-comments block (no prose or markdown)."
         ));
         assert!(prompt.contains("do not output any preamble, commentary, or thinking before it"));
+    }
+
+    #[test]
+    fn note_prompt_includes_standalone_output_guidance() {
+        let prompt = build_full_prompt(
+            "user prompt",
+            "project info",
+            "branch context",
+            &BranchSessionType::Note,
+            None,
+            None,
+        );
+
+        assert_note_standalone_output_guidance(&prompt);
+        assert!(prompt.contains("The opening fence line for suggested-next-steps must be exactly: ```suggested-next-steps"));
     }
 
     #[test]

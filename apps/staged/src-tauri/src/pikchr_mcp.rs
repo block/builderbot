@@ -495,9 +495,13 @@ fn rasterize_svg_to_png(svg: &str, scale: f32) -> Option<Vec<u8>> {
     let (w, h) = (size.width().max(1.0), size.height().max(1.0));
 
     let mut s = scale.clamp(MIN_SCALE, MAX_SCALE);
+    // Scale down to fit within MAX_RENDER_DIMENSION. We let `fit` go below
+    // MIN_SCALE here (rather than flooring it) so an oversized diagram is shown
+    // whole — shrunk but uncropped — which keeps the overlap layout visible
+    // instead of clipping it to the top-left corner.
     let fit = (MAX_RENDER_DIMENSION as f32 / w).min(MAX_RENDER_DIMENSION as f32 / h);
     if s > fit {
-        s = fit.max(MIN_SCALE / 2.0);
+        s = fit;
     }
 
     let px_w = ((w * s).ceil() as u32).clamp(1, MAX_RENDER_DIMENSION);

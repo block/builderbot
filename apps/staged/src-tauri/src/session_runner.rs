@@ -341,9 +341,9 @@ pub struct SessionConfig {
     /// Expose the `preview_pikchr` MCP tool to this session. Set for local,
     /// note-writing sessions (project notes and local branch notes) so the
     /// agent can render its Pikchr diagrams and check for overlaps before
-    /// finalizing a note. The server is attached as an *optional* MCP server,
-    /// so it is silently dropped on providers that don't support HTTP MCP and
-    /// never breaks a session. Only honored for local sessions
+    /// finalizing a note. The server is attached as a *required* MCP server,
+    /// so a provider that doesn't support HTTP MCP fails the session rather
+    /// than silently dropping the tool. Only honored for local sessions
     /// (`workspace_name.is_none()`); remote sessions can't reach localhost.
     pub expose_pikchr_preview: bool,
 }

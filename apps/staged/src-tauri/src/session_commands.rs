@@ -232,13 +232,17 @@ fn pikchr_note_guidance(reference: &str, preview_available: bool) -> String {
 If you need the Pikchr grammar while writing a diagram, read the reference at: {reference}"
     );
     // The preview server is a *required* MCP server for local note sessions, so
-    // when preview_available is true the tool is guaranteed present — phrase the
-    // guidance assertively rather than hedging on the tool's existence.
+    // when preview_available is true the tools are guaranteed present — phrase
+    // the guidance assertively rather than hedging on their existence.
     if preview_available {
         guidance.push_str(
-            " Use the `preview_pikchr` tool to render your Pikchr source to an image and check \
-the layout — box overlaps, label collisions, arrow targets — then iterate before finalizing \
-the diagram.",
+            " To create or revise a diagram, call the `generate_pikchr` tool with a `description` \
+of the diagram you want (boxes, arrows, labels, layout, relationships); when revising an existing \
+diagram, also pass its current Pikchr source as `previous_pikchr`. It returns validated Pikchr \
+source plus a rendered preview — place the returned source in a fenced `pikchr` code block. To \
+check or hand-tweak source yourself, use `preview_pikchr` to render it to an image and inspect the \
+layout — box overlaps, label collisions, arrow targets — then iterate before finalizing the \
+diagram.",
         );
     }
     guidance

@@ -1,10 +1,18 @@
-//! Stateless MCP server exposing a single `preview_pikchr` tool.
+//! MCP server exposing the `preview_pikchr` and `generate_pikchr` tools.
 //!
-//! Note-writing sessions (project notes and local branch notes) use this to
-//! *see* their Pikchr diagrams before shipping them: the tool renders the
-//! supplied source to a PNG and reports any box overlaps it detects, so the
-//! agent can catch bad layouts (overlapping boxes, colliding labels) and
-//! iterate instead of silently shipping a broken diagram.
+//! Note-writing sessions (project notes and local branch notes) use these to
+//! author and validate their Pikchr diagrams before shipping them:
+//!
+//! - `preview_pikchr` renders supplied source to a PNG and reports any box
+//!   overlaps it detects, so the agent can catch bad layouts (overlapping
+//!   boxes, colliding labels) and iterate instead of silently shipping a broken
+//!   diagram.
+//! - `generate_pikchr` turns a natural-language description into validated
+//!   Pikchr by running a focused internal agent sub-session that renders and
+//!   repairs its own output (via [`crate::pikchr_subsession`]) before returning
+//!   the final source plus a preview. Revisions pass the current diagram's
+//!   source back in so the sub-agent edits real Pikchr rather than
+//!   re-describing from scratch.
 //!
 //! Fidelity: rendering goes through the `pikchr` crate, which bundles the same
 //! official `pikchr.c` that the frontend's `pikchr-js` compiles to WASM. The
@@ -14,11 +22,15 @@
 //! font metrics exactly, so label spacing may differ by a hair; that is
 //! acceptable for a preview.
 //!
-//! Unlike `project_mcp`, this handler holds no state: it never touches the
-//! store, registry, or project, so it is safe to attach to any local session.
+//! Unlike `project_mcp`, this handler touches no store, registry, or project.
+//! It carries only the provider id and `AppHandle` that `generate_pikchr` needs
+//! to spin up its sub-session, so it remains safe to attach to any local
+//! session.
 
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use axum::Router;
 use base64::Engine;
@@ -28,6 +40,13 @@ use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, ServerHandler};
+
+use crate::agent::AcpDriver;
+
+/// Wall-clock cap for one `generate_pikchr` call. Each call spins a provider
+/// subprocess and runs several turns; the cap keeps a stuck sub-agent from
+/// running indefinitely. Enforced by cancelling the sub-session's token.
+const GENERATE_PIKCHR_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Cap the rasterized PNG so a runaway diagram can't allocate a huge pixmap.
 const MAX_RENDER_DIMENSION: u32 = 4096;
@@ -48,6 +67,23 @@ struct PreviewPikchrParams {
     pub source: String,
     /// Rasterization scale for the returned PNG. Higher values produce a
     /// larger image with more legible labels. Defaults to 2.0; clamped to
+    /// the range [0.5, 4.0].
+    pub scale: Option<f32>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct GeneratePikchrParams {
+    /// Fine-grained, freeform description of the desired diagram: what boxes,
+    /// arrows, and labels it has, how they're laid out, and how they relate.
+    /// The more specific, the closer the result.
+    pub description: String,
+    /// When revising an existing diagram, the current diagram's Pikchr source
+    /// (the contents of its ```pikchr block, without the fences). The
+    /// sub-agent edits this instead of starting from scratch, so intent drifts
+    /// less across iterations.
+    pub previous_pikchr: Option<String>,
+    /// Rasterization scale for the returned PNG preview. Higher values produce
+    /// a larger image with more legible labels. Defaults to 2.0; clamped to
     /// the range [0.5, 4.0].
     pub scale: Option<f32>,
 }
@@ -532,16 +568,19 @@ fn rasterize_svg_to_png(svg: &str, scale: f32) -> Option<Vec<u8>> {
 // =============================================================================
 
 /// Outcome of a `preview_pikchr` call, ready to turn into a `CallToolResult`.
-struct PreviewOutcome {
-    png: Option<Vec<u8>>,
-    summary: String,
-    is_error: bool,
+///
+/// `pub(crate)` so the `generate_pikchr` sub-session loop can render and
+/// inspect candidate diagrams through the same code path as the preview tool.
+pub(crate) struct PreviewOutcome {
+    pub(crate) png: Option<Vec<u8>>,
+    pub(crate) summary: String,
+    pub(crate) is_error: bool,
 }
 
 /// Render + analyze, producing the content blocks for the tool result.
 /// Synchronous and self-contained so it can run on a blocking thread and be
 /// unit-tested directly. `scale` is taken as-is and clamped internally.
-fn run_preview(source: &str, scale: f32) -> PreviewOutcome {
+pub(crate) fn run_preview(source: &str, scale: f32) -> PreviewOutcome {
     if source.trim().is_empty() {
         return PreviewOutcome {
             png: None,
@@ -577,12 +616,20 @@ fn run_preview(source: &str, scale: f32) -> PreviewOutcome {
 
 #[derive(Clone)]
 struct PikchrToolsHandler {
+    /// Provider id the `generate_pikchr` sub-session runs under (the parent
+    /// session's agent, so the sub-agent matches what the user chose).
+    provider_id: String,
+    /// Handle used to resolve the bundled Pikchr grammar reference for the
+    /// sub-agent's prompt.
+    app_handle: tauri::AppHandle,
     tool_router: ToolRouter<Self>,
 }
 
 impl PikchrToolsHandler {
-    fn new() -> Self {
+    fn new(provider_id: String, app_handle: tauri::AppHandle) -> Self {
         Self {
+            provider_id,
+            app_handle,
             tool_router: Self::tool_router(),
         }
     }
@@ -621,6 +668,91 @@ error, returns the Pikchr error message so you can fix the source and try again.
             Ok(CallToolResult::success(content))
         }
     }
+
+    #[tool(
+        description = "Generate a validated Pikchr diagram from a natural-language description. \
+An internal Pikchr specialist writes the diagram, renders it, and repairs syntax errors and box \
+overlaps on its own before returning. Prefer this over hand-writing Pikchr. Pass a fine-grained \
+`description` (boxes, arrows, labels, layout, relationships). To revise an existing diagram, also \
+pass its current source as `previous_pikchr` so it is edited rather than redrawn. Returns the \
+validated Pikchr source (drop it into a ```pikchr fenced code block) plus a rendered PNG preview. \
+If overlaps or intent can't be fully resolved, returns the best diagram reached with a note."
+    )]
+    async fn generate_pikchr(
+        &self,
+        Parameters(p): Parameters<GeneratePikchrParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let scale = p.scale.unwrap_or(DEFAULT_SCALE);
+        let provider_id = self.provider_id.clone();
+        // The sub-session always runs locally, so resolve a local grammar path
+        // (workspace_name = None).
+        let grammar_reference =
+            crate::session_commands::resolve_pikchr_grammar_reference(&self.app_handle, None);
+
+        // The ACP driver spawns tasks via `spawn_local`, which requires a
+        // `LocalSet`; the MCP server's request tasks don't run inside one. So
+        // drive the whole generation loop on a dedicated thread with its own
+        // current-thread runtime + LocalSet, mirroring `session_runner`.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    let _ = tx.send(Err(format!(
+                        "Failed to create runtime for generate_pikchr: {e}"
+                    )));
+                    return;
+                }
+            };
+            let local = tokio::task::LocalSet::new();
+            let result = local.block_on(&rt, async move {
+                let driver = AcpDriver::new(&provider_id)?;
+                // Enforce the wall-clock cap by cancelling the sub-session's
+                // token; the driver shuts its subprocess down gracefully.
+                let cancel = CancellationToken::new();
+                let timeout_cancel = cancel.clone();
+                tokio::task::spawn_local(async move {
+                    tokio::time::sleep(GENERATE_PIKCHR_TIMEOUT).await;
+                    timeout_cancel.cancel();
+                });
+                crate::pikchr_subsession::generate_pikchr_source(
+                    &driver,
+                    &grammar_reference,
+                    &p.description,
+                    p.previous_pikchr.as_deref(),
+                    scale,
+                    &cancel,
+                )
+                .await
+            });
+            let _ = tx.send(result);
+        });
+
+        let outcome = rx
+            .await
+            .map_err(|e| {
+                ErrorData::internal_error(format!("generate_pikchr worker dropped: {e}"), None)
+            })?
+            .map_err(|e| ErrorData::internal_error(e, None))?;
+
+        let mut content = Vec::new();
+        if let Some(png) = &outcome.png {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(png);
+            content.push(Content::image(b64, "image/png"));
+        }
+        content.push(Content::text(outcome.source));
+        if outcome.gave_up {
+            content.push(Content::text(format!(
+                "Note: returning the best diagram reached — it renders, but the layout may still \
+have overlaps or not fully match the request. Refine the description or hand-edit as needed.\n{}",
+                outcome.summary
+            )));
+        }
+        Ok(CallToolResult::success(content))
+    }
 }
 
 #[tool_handler]
@@ -633,12 +765,19 @@ impl ServerHandler for PikchrToolsHandler {
     }
 }
 
-/// Start a local MCP HTTP server exposing the `preview_pikchr` tool.
+/// Start a local MCP HTTP server exposing the `preview_pikchr` and
+/// `generate_pikchr` tools.
 ///
 /// Returns the bound port and a `JoinHandle`. The server runs until the handle
-/// (and its parent `LocalSet`) is dropped. Mirrors `start_project_mcp_server`
-/// but carries no state.
-pub async fn start_pikchr_mcp_server() -> Result<(u16, JoinHandle<()>), String> {
+/// (and its parent `LocalSet`) is dropped. `provider_id` is the parent
+/// session's agent, used by `generate_pikchr` to run its sub-session (an empty
+/// string is tolerated — `generate_pikchr` then fails per-call while
+/// `preview_pikchr` keeps working). `app_handle` resolves the bundled Pikchr
+/// grammar reference for the sub-agent.
+pub async fn start_pikchr_mcp_server(
+    provider_id: String,
+    app_handle: tauri::AppHandle,
+) -> Result<(u16, JoinHandle<()>), String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .map_err(|e| format!("Failed to bind pikchr MCP listener: {e}"))?;
@@ -648,7 +787,12 @@ pub async fn start_pikchr_mcp_server() -> Result<(u16, JoinHandle<()>), String> 
         .port();
 
     let service = StreamableHttpService::new(
-        || Ok(PikchrToolsHandler::new()),
+        move || {
+            Ok(PikchrToolsHandler::new(
+                provider_id.clone(),
+                app_handle.clone(),
+            ))
+        },
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     );

@@ -1,18 +1,16 @@
-//! MCP server exposing the `preview_pikchr` and `generate_pikchr` tools.
+//! MCP server exposing the `generate_pikchr` tool.
 //!
-//! Note-writing sessions (project notes and local branch notes) use these to
+//! Note-writing sessions (project notes and local branch notes) use it to
 //! author and validate their Pikchr diagrams before shipping them:
 //!
-//! - `preview_pikchr` renders supplied source to a PNG and reports any box
-//!   overlaps it detects, so the agent can catch bad layouts (overlapping
-//!   boxes, colliding labels) and iterate instead of silently shipping a broken
-//!   diagram.
-//! - `generate_pikchr` turns a natural-language description into validated
-//!   Pikchr by running a focused internal agent sub-session that renders and
-//!   repairs its own output (via [`crate::pikchr_subsession`]) before returning
-//!   the final source plus a preview. Revisions pass the current diagram's
-//!   source back in so the sub-agent edits real Pikchr rather than
-//!   re-describing from scratch.
+//! `generate_pikchr` turns a natural-language description into validated Pikchr
+//! by running a focused internal agent sub-session that renders and repairs its
+//! own output (via [`crate::pikchr_subsession`]) before returning the final
+//! source plus a preview. Revisions pass the current diagram's source back in
+//! so the sub-agent edits real Pikchr rather than re-describing from scratch.
+//! The sub-session renders and inspects candidate diagrams through the internal
+//! [`run_preview`] path — the same engine the tool ultimately hands back — so
+//! the agent never has to hand-write Pikchr or drive a separate preview step.
 //!
 //! Fidelity: rendering goes through the `pikchr` crate, which bundles the same
 //! official `pikchr.c` that the frontend's `pikchr-js` compiles to WASM. The
@@ -59,17 +57,6 @@ const MAX_SCALE: f32 = 4.0;
 const MIN_OVERLAP_PX: f64 = 1.0;
 /// Truncate derived shape labels in the overlap summary.
 const MAX_LABEL_CHARS: usize = 48;
-
-#[derive(serde::Deserialize, schemars::JsonSchema)]
-struct PreviewPikchrParams {
-    /// The Pikchr source to render — the contents of a ```pikchr fenced code
-    /// block, without the fences.
-    pub source: String,
-    /// Rasterization scale for the returned PNG. Higher values produce a
-    /// larger image with more legible labels. Defaults to 2.0; clamped to
-    /// the range [0.5, 4.0].
-    pub scale: Option<f32>,
-}
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct GeneratePikchrParams {
@@ -567,10 +554,12 @@ fn rasterize_svg_to_png(svg: &str, scale: f32) -> Option<Vec<u8>> {
 // Tool orchestration
 // =============================================================================
 
-/// Outcome of a `preview_pikchr` call, ready to turn into a `CallToolResult`.
+/// Outcome of rendering a candidate diagram: the PNG (if rasterization
+/// succeeded), a text summary of dimensions and overlaps, and whether the
+/// source failed to render at all.
 ///
 /// `pub(crate)` so the `generate_pikchr` sub-session loop can render and
-/// inspect candidate diagrams through the same code path as the preview tool.
+/// inspect candidate diagrams through this shared render/overlap path.
 pub(crate) struct PreviewOutcome {
     pub(crate) png: Option<Vec<u8>>,
     pub(crate) summary: String,
@@ -637,38 +626,6 @@ impl PikchrToolsHandler {
 
 #[tool_router]
 impl PikchrToolsHandler {
-    #[tool(
-        description = "Render Pikchr diagram source to an image so you can check the layout before \
-finalizing a note. Pass the contents of a ```pikchr fenced code block as `source`. Returns a PNG \
-preview plus a text summary with the diagram's pixel dimensions and any box overlaps detected \
-(overlapping or colliding boxes are the most common Pikchr layout mistake). On a syntax or layout \
-error, returns the Pikchr error message so you can fix the source and try again."
-    )]
-    async fn preview_pikchr(
-        &self,
-        Parameters(p): Parameters<PreviewPikchrParams>,
-    ) -> Result<CallToolResult, ErrorData> {
-        let scale = p.scale.unwrap_or(DEFAULT_SCALE);
-        let outcome = tokio::task::spawn_blocking(move || run_preview(&p.source, scale))
-            .await
-            .map_err(|e| {
-                ErrorData::internal_error(format!("preview_pikchr task failed: {e}"), None)
-            })?;
-
-        let mut content = Vec::new();
-        if let Some(png) = outcome.png {
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
-            content.push(Content::image(b64, "image/png"));
-        }
-        content.push(Content::text(outcome.summary));
-
-        if outcome.is_error {
-            Ok(CallToolResult::error(content))
-        } else {
-            Ok(CallToolResult::success(content))
-        }
-    }
-
     #[tool(
         description = "Generate a validated Pikchr diagram from a natural-language description. \
 An internal Pikchr specialist writes the diagram, renders it, and repairs syntax errors and box \
@@ -776,15 +733,14 @@ impl ServerHandler for PikchrToolsHandler {
     }
 }
 
-/// Start a local MCP HTTP server exposing the `preview_pikchr` and
-/// `generate_pikchr` tools.
+/// Start a local MCP HTTP server exposing the `generate_pikchr` tool.
 ///
 /// Returns the bound port and a `JoinHandle`. The server runs until the handle
 /// (and its parent `LocalSet`) is dropped. `provider_id` is the parent
 /// session's agent, used by `generate_pikchr` to run its sub-session (an empty
-/// string is tolerated — `generate_pikchr` then fails per-call while
-/// `preview_pikchr` keeps working). `app_handle` resolves the bundled Pikchr
-/// grammar reference for the sub-agent.
+/// string is tolerated — the server still starts and `generate_pikchr` then
+/// fails per-call rather than failing session startup). `app_handle` resolves
+/// the bundled Pikchr grammar reference for the sub-agent.
 pub async fn start_pikchr_mcp_server(
     provider_id: String,
     app_handle: tauri::AppHandle,

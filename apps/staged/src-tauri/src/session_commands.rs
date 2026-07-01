@@ -210,39 +210,38 @@ pub(crate) fn resolve_pikchr_grammar_reference(
     grammar_path.to_string_lossy().into_owned()
 }
 
-/// Whether the local Pikchr `preview_pikchr` tool applies to a session.
+/// Whether the local Pikchr `generate_pikchr` tool applies to a session.
 ///
-/// The preview MCP server binds to loopback, so it's only reachable from
+/// The pikchr MCP server binds to loopback, so it's only reachable from
 /// sessions running on the local machine (`workspace_name.is_none()`), and it's
 /// only useful while writing a note. Both the prompt mention
 /// (`pikchr_note_guidance`) and the actual server attachment
-/// (`SessionConfig::expose_pikchr_preview`) must agree on this condition, so
+/// (`SessionConfig::expose_pikchr_tools`) must agree on this condition, so
 /// every call site derives it here rather than re-encoding it independently —
-/// that way a change like enabling remote previews only has to happen once.
-pub(crate) fn local_note_pikchr_preview_available(
+/// that way a change like enabling remote generation only has to happen once.
+pub(crate) fn local_note_pikchr_tools_available(
     is_note_session: bool,
     workspace_name: Option<&str>,
 ) -> bool {
     is_note_session && workspace_name.is_none()
 }
 
-fn pikchr_note_guidance(reference: &str, preview_available: bool) -> String {
+fn pikchr_note_guidance(reference: &str, pikchr_tools_available: bool) -> String {
     let mut guidance = format!(
         "Staged notes support rendered diagrams in fenced `pikchr` code blocks. \
 If you need the Pikchr grammar while writing a diagram, read the reference at: {reference}"
     );
-    // The preview server is a *required* MCP server for local note sessions, so
-    // when preview_available is true the tools are guaranteed present — phrase
-    // the guidance assertively rather than hedging on their existence.
-    if preview_available {
+    // The pikchr server is a *required* MCP server for local note sessions, so
+    // when pikchr_tools_available is true the tool is guaranteed present — phrase
+    // the guidance assertively rather than hedging on its existence.
+    if pikchr_tools_available {
         guidance.push_str(
             " To create or revise a diagram, call the `generate_pikchr` tool with a `description` \
 of the diagram you want (boxes, arrows, labels, layout, relationships); when revising an existing \
-diagram, also pass its current Pikchr source as `previous_pikchr`. It returns validated Pikchr \
-source plus a rendered preview — place the returned source in a fenced `pikchr` code block. To \
-check or hand-tweak source yourself, use `preview_pikchr` to render it to an image and inspect the \
-layout — box overlaps, label collisions, arrow targets — then iterate before finalizing the \
-diagram.",
+diagram, or when you want existing source validated or repaired, also pass its current Pikchr \
+source as `previous_pikchr`. It writes the diagram, renders it, and fixes syntax errors and box \
+overlaps on its own before returning validated Pikchr source plus a rendered preview — place the \
+returned source in a fenced `pikchr` code block. Prefer this over hand-writing Pikchr.",
         );
     }
     guidance
@@ -251,7 +250,7 @@ diagram.",
 pub(crate) fn build_note_followup_message_with_pikchr_reference(
     has_parsed_note: bool,
     pikchr_grammar_reference: &str,
-    preview_available: bool,
+    pikchr_tools_available: bool,
 ) -> String {
     let visible_request = if has_parsed_note {
         "Please update the note to reflect the latest chat."
@@ -263,7 +262,7 @@ pub(crate) fn build_note_followup_message_with_pikchr_reference(
     } else {
         "write the linked note"
     };
-    let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference, preview_available);
+    let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference, pikchr_tools_available);
     let standalone_guidance = NOTE_STANDALONE_OUTPUT_GUIDANCE.trim();
 
     format!(
@@ -409,7 +408,7 @@ pub async fn start_session(
             image_ids: vec![],
             branch_id: None,
             project_id: None,
-            expose_pikchr_preview: false,
+            expose_pikchr_tools: false,
         },
         store,
         app_handle,
@@ -573,9 +572,9 @@ pub async fn resume_session(
 
     let config_branch_id = event_branch_id.clone();
     let config_project_id = event_project_id.clone().or(mcp_project_id.clone());
-    // Note follow-ups (project notes or local branch notes) get the preview
+    // Note follow-ups (project notes or local branch notes) get the pikchr
     // tool; remote branch notes can't reach localhost.
-    let expose_pikchr_preview = local_note_pikchr_preview_available(
+    let expose_pikchr_tools = local_note_pikchr_tools_available(
         project_note.is_some() || linked_note.is_some(),
         workspace_name.as_deref(),
     );
@@ -624,7 +623,7 @@ pub async fn resume_session(
             image_ids: image_ids.unwrap_or_default(),
             branch_id: config_branch_id,
             project_id: config_project_id,
-            expose_pikchr_preview,
+            expose_pikchr_tools,
         },
         store,
         app_handle,
@@ -711,9 +710,9 @@ pub(crate) fn build_note_followup_message_impl(
             .and_then(|branch| branch.workspace_name.as_deref()),
     );
 
-    // Note follow-ups expose the preview tool on local sessions only. A
+    // Note follow-ups expose the pikchr tool on local sessions only. A
     // project-note follow-up has no linked branch and always runs locally.
-    let preview_available = local_note_pikchr_preview_available(
+    let pikchr_tools_available = local_note_pikchr_tools_available(
         true,
         linked_branch
             .as_ref()
@@ -723,7 +722,7 @@ pub(crate) fn build_note_followup_message_impl(
     Ok(build_note_followup_message_with_pikchr_reference(
         has_parsed_note,
         &pikchr_grammar_reference,
-        preview_available,
+        pikchr_tools_available,
     ))
 }
 
@@ -1164,7 +1163,7 @@ repository edits directly here; use `start_repo_session` for implementation work
     };
 
     // Project sessions always execute locally and are restricted to
-    // MCP-capable providers, so the preview tool is always attached.
+    // MCP-capable providers, so the pikchr tool is always attached.
     let pikchr_guidance = pikchr_note_guidance(pikchr_grammar_reference, true);
     let standalone_guidance = NOTE_STANDALONE_OUTPUT_GUIDANCE.trim();
 
@@ -1273,7 +1272,7 @@ pub async fn start_project_session(
             branch_id: None,
             project_id: Some(project_id),
             // Project sessions are always local and write project notes.
-            expose_pikchr_preview: true,
+            expose_pikchr_tools: true,
         },
         store,
         app_handle,
@@ -1461,7 +1460,7 @@ async fn prepare_branch_session_start(
         launch_context,
         Some(&branch.base_branch),
         &pikchr_grammar_reference,
-        local_note_pikchr_preview_available(
+        local_note_pikchr_tools_available(
             matches!(session_type, BranchSessionType::Note),
             branch.workspace_name.as_deref(),
         ),
@@ -1606,9 +1605,9 @@ fn launch_running_branch_session(
     let branch_id = branch.id.clone();
     let project_id = branch.project_id.clone();
     let workspace_name = branch.workspace_name.clone();
-    // Local branch note sessions get the preview tool; commit/review sessions
+    // Local branch note sessions get the pikchr tool; commit/review sessions
     // and remote sessions do not.
-    let expose_pikchr_preview = local_note_pikchr_preview_available(
+    let expose_pikchr_tools = local_note_pikchr_tools_available(
         matches!(session_type, BranchSessionType::Note),
         workspace_name.as_deref(),
     );
@@ -1638,7 +1637,7 @@ fn launch_running_branch_session(
             image_ids,
             branch_id: Some(branch_id),
             project_id: Some(project_id),
-            expose_pikchr_preview,
+            expose_pikchr_tools,
         },
         store,
         app_handle,
@@ -2048,7 +2047,7 @@ async fn start_queued_session_for_branch(
         launch_context.as_ref(),
         Some(&branch.base_branch),
         &pikchr_grammar_reference,
-        local_note_pikchr_preview_available(
+        local_note_pikchr_tools_available(
             matches!(session_type, BranchSessionType::Note),
             branch.workspace_name.as_deref(),
         ),
@@ -2184,7 +2183,7 @@ async fn start_queued_session_for_branch(
             image_ids,
             branch_id: Some(branch_id),
             project_id: Some(branch.project_id.clone()),
-            expose_pikchr_preview: local_note_pikchr_preview_available(
+            expose_pikchr_tools: local_note_pikchr_tools_available(
                 matches!(session_type, BranchSessionType::Note),
                 branch.workspace_name.as_deref(),
             ),
@@ -2536,7 +2535,7 @@ pub async fn trigger_auto_review(
             branch_id: Some(branch_id.clone()),
             project_id: Some(branch.project_id.clone()),
             // Auto-review sessions don't write notes.
-            expose_pikchr_preview: false,
+            expose_pikchr_tools: false,
         },
         store,
         app_handle,
@@ -3757,7 +3756,7 @@ pub(crate) fn build_full_prompt_with_pikchr_reference(
     launch_context: Option<&BranchSessionLaunchContext>,
     base_branch: Option<&str>,
     pikchr_grammar_reference: &str,
-    preview_available: bool,
+    pikchr_tools_available: bool,
 ) -> String {
     let mut action_instructions = match session_type {
         BranchSessionType::Note => [
@@ -3910,7 +3909,7 @@ Rules:\n\
         action_instructions.push_str("\n\n");
         action_instructions.push_str(&pikchr_note_guidance(
             pikchr_grammar_reference,
-            preview_available,
+            pikchr_tools_available,
         ));
     }
 
@@ -4785,7 +4784,7 @@ mod tests {
         );
 
         assert_pikchr_note_guidance(&prompt, "/tmp/staged/pikchr/grammar.md");
-        assert!(prompt.contains("preview_pikchr"));
+        assert!(prompt.contains("generate_pikchr"));
     }
 
     #[test]
@@ -4803,7 +4802,7 @@ mod tests {
             "/Applications/Staged.app/Contents/Resources/resources/pikchr/grammar.md",
         );
         assert_note_standalone_output_guidance(&prompt);
-        assert!(prompt.contains("preview_pikchr"));
+        assert!(prompt.contains("generate_pikchr"));
     }
 
     #[test]
@@ -4815,22 +4814,22 @@ mod tests {
         assert!(prompt.contains("Please write the note for this session."));
         assert_pikchr_note_guidance(&prompt, &remote_path);
         assert_note_standalone_output_guidance(&prompt);
-        // Remote note sessions can't reach the preview server, so it isn't mentioned.
-        assert!(!prompt.contains("preview_pikchr"));
+        // Remote note sessions can't reach the pikchr server, so it isn't mentioned.
+        assert!(!prompt.contains("generate_pikchr"));
     }
 
     #[test]
-    fn local_note_pikchr_preview_available_requires_note_and_local() {
+    fn local_note_pikchr_tools_available_requires_note_and_local() {
         // Available only for note sessions running on the local machine.
-        assert!(local_note_pikchr_preview_available(true, None));
-        // Remote note sessions can't reach the loopback preview server.
-        assert!(!local_note_pikchr_preview_available(
+        assert!(local_note_pikchr_tools_available(true, None));
+        // Remote note sessions can't reach the loopback pikchr server.
+        assert!(!local_note_pikchr_tools_available(
             true,
             Some("some-workspace")
         ));
-        // Non-note sessions never get the note-writing preview tool.
-        assert!(!local_note_pikchr_preview_available(false, None));
-        assert!(!local_note_pikchr_preview_available(
+        // Non-note sessions never get the note-writing pikchr tool.
+        assert!(!local_note_pikchr_tools_available(false, None));
+        assert!(!local_note_pikchr_tools_available(
             false,
             Some("some-workspace")
         ));

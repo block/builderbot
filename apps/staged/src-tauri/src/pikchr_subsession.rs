@@ -2,8 +2,8 @@
 //! validated Pikchr source, used by the `generate_pikchr` MCP tool.
 //!
 //! A focused ACP sub-agent is asked for a single fenced ```pikchr block, whose
-//! source is rendered through the same engine as `preview_pikchr`
-//! ([`crate::pikchr_mcp::run_preview`]). On a parse error or a detected box
+//! source is rendered and inspected through the internal
+//! [`crate::pikchr_mcp::run_preview`] path. On a parse error or a detected box
 //! overlap the sub-agent is re-prompted with the specific failure, resuming the
 //! *same* sub-session so the grammar and prior attempts stay in context. The
 //! loop is bounded: parse errors always block (they can't be shipped), while

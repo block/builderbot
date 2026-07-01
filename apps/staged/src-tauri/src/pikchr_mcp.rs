@@ -689,6 +689,16 @@ If overlaps or intent can't be fully resolved, returns the best diagram reached 
         let grammar_reference =
             crate::session_commands::resolve_pikchr_grammar_reference(&self.app_handle, None);
 
+        // Cancellation token owned by *this* future (the parent MCP request).
+        // The worker gets a clone; the parent keeps the token alive through a
+        // `DropGuard`. If the MCP client abandons this tool call, the future is
+        // dropped, the guard cancels the token, and the sub-session's provider
+        // subprocess is torn down promptly — rather than running detached until
+        // the wall-clock timeout. The worker arms this same token on timeout.
+        let cancel = CancellationToken::new();
+        let worker_cancel = cancel.clone();
+        let _cancel_on_drop = cancel.drop_guard();
+
         // The ACP driver spawns tasks via `spawn_local`, which requires a
         // `LocalSet`; the MCP server's request tasks don't run inside one. So
         // drive the whole generation loop on a dedicated thread with its own
@@ -711,9 +721,10 @@ If overlaps or intent can't be fully resolved, returns the best diagram reached 
             let result = local.block_on(&rt, async move {
                 let driver = AcpDriver::new(&provider_id)?;
                 // Enforce the wall-clock cap by cancelling the sub-session's
-                // token; the driver shuts its subprocess down gracefully.
-                let cancel = CancellationToken::new();
-                let timeout_cancel = cancel.clone();
+                // token; the driver shuts its subprocess down gracefully. The
+                // parent's `DropGuard` cancels this same token if the MCP
+                // client abandons the call before the timeout fires.
+                let timeout_cancel = worker_cancel.clone();
                 tokio::task::spawn_local(async move {
                     tokio::time::sleep(GENERATE_PIKCHR_TIMEOUT).await;
                     timeout_cancel.cancel();
@@ -724,7 +735,7 @@ If overlaps or intent can't be fully resolved, returns the best diagram reached 
                     &p.description,
                     p.previous_pikchr.as_deref(),
                     scale,
-                    &cancel,
+                    &worker_cancel,
                 )
                 .await
             });

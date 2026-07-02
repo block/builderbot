@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { loadPikchrRenderer, sanitizePikchrSvg } from './pikchrRendering';
 
 describe('sanitizePikchrSvg', () => {
-  it('keeps static Pikchr geometry and path styles', () => {
+  it('keeps static Pikchr geometry and applies the themed default ink', () => {
     const svg = sanitizePikchrSvg(
       [
         '<svg xmlns="http://www.w3.org/2000/svg" class="markdown-pikchr-svg" viewBox="0 0 58 34" data-pikchr-date="20260403102956">',
@@ -16,9 +16,9 @@ describe('sanitizePikchrSvg', () => {
     expect(svg).toContain('<svg');
     expect(svg).toContain('viewBox="0 0 58 34"');
     expect(svg).toContain('<path');
-    expect(svg).toContain('style="fill:none;stroke-width:2.16;stroke:rgb(0,0,0)"');
+    expect(svg).toContain('style="fill:none;stroke-width:2.16;stroke:var(--pikchr-ink)"');
     expect(svg).toContain('<text');
-    expect(svg).toContain('fill="rgb(0,0,0)"');
+    expect(svg).toContain('fill="var(--pikchr-ink)"');
     expect(svg).not.toContain('data-pikchr-date');
   });
 
@@ -38,6 +38,55 @@ describe('sanitizePikchrSvg', () => {
     expect(svg).toContain('fill="rgb(1, 2, 3)"');
     expect(svg).toContain('stroke="rgba(12, 34, 56, 0.5)"');
     expect(svg).not.toContain('url(');
+  });
+
+  it('maps common Pikchr colors onto the themed palette', () => {
+    const svg = sanitizePikchrSvg(
+      [
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 40">',
+        '<path d="M1,1L119,1" style="stroke:rgb(255,0,0);fill:white" />',
+        '<rect x="1" y="1" width="10" height="10" fill="yellow" stroke="green" />',
+        '<text x="20" y="20" fill="blue">Label</text>',
+        '</svg>',
+      ].join('')
+    );
+
+    expect(svg).toContain('stroke:var(--pikchr-red)');
+    expect(svg).toContain('fill:var(--pikchr-surface)');
+    expect(svg).toContain('fill="var(--pikchr-yellow)"');
+    expect(svg).toContain('stroke="var(--pikchr-green)"');
+    expect(svg).toContain('fill="var(--pikchr-blue)"');
+  });
+
+  it('preserves numeric Pikchr colors from the source', () => {
+    const svg = sanitizePikchrSvg(
+      [
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 40">',
+        '<path d="M1,1L119,1" style="stroke:rgb(255,0,0);fill:rgb(255,255,255)" />',
+        '<text x="20" y="20" fill="rgb(0,0,0)">Label</text>',
+        '</svg>',
+      ].join(''),
+      {
+        source: 'box "Numeric colors" color 0xff0000 fill 0xffffff',
+      }
+    );
+
+    expect(svg).toContain('stroke:rgb(255,0,0)');
+    expect(svg).toContain('fill:rgb(255,255,255)');
+    expect(svg).toContain('fill="var(--pikchr-ink)"');
+  });
+
+  it('keeps fill none as no paint', () => {
+    const svg = sanitizePikchrSvg(
+      [
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">',
+        '<path d="M1,1L19,19" fill="none" stroke="rgb(0,0,0)" />',
+        '</svg>',
+      ].join('')
+    );
+
+    expect(svg).toContain('fill="none"');
+    expect(svg).toContain('stroke="var(--pikchr-ink)"');
   });
 
   it('adds breathing room to side-anchored Pikchr text labels', () => {
@@ -106,6 +155,7 @@ describe('loadPikchrRenderer', () => {
     expect(rendered.svg).toContain('class="markdown-pikchr-svg"');
     expect(rendered.svg).toContain('<path');
     expect(rendered.svg).toContain('Start');
+    expect(rendered.svg).toContain('var(--pikchr-ink)');
     expect(rendered.svg).not.toContain('<script');
     expect(rendered.svg).not.toContain('data-pikchr-date');
   });

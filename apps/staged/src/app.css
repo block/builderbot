@@ -90,7 +90,17 @@
   --ui-danger-bg: rgba(248, 81, 73, 0.1);
   --ui-selection: rgba(255, 255, 255, 0.08);
 
-  --diagram-canvas-bg: #ffffff;
+  --diagram-canvas-bg: #2f2936;
+  --pikchr-ink: #ffffff;
+  --pikchr-surface: #38333f;
+  --pikchr-muted: #91889b;
+  --pikchr-red: #f85149;
+  --pikchr-green: #3fb950;
+  --pikchr-blue: #58a6ff;
+  --pikchr-yellow: #d29922;
+  --pikchr-orange: #d29922;
+  --pikchr-purple: #a78bfa;
+  --pikchr-cyan: #22d3ee;
 
   --scrollbar-thumb: #47424d;
   --scrollbar-thumb-hover: #5d5962;

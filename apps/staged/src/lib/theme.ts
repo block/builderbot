@@ -90,7 +90,17 @@ export interface Theme {
 
   // Diagram previews
   diagram: {
-    canvasBg: string; // Light canvas for rendered diagrams with default dark ink
+    canvasBg: string; // Canvas behind rendered diagrams
+    pikchrInk: string; // Default Pikchr stroke/text color
+    pikchrSurface: string; // Themed replacement for white Pikchr fills
+    pikchrMuted: string; // Themed replacement for gray/silver Pikchr colors
+    pikchrRed: string;
+    pikchrGreen: string;
+    pikchrBlue: string;
+    pikchrYellow: string;
+    pikchrOrange: string;
+    pikchrPurple: string;
+    pikchrCyan: string;
   };
 
   // Scrollbar
@@ -381,6 +391,10 @@ export function createAdaptiveTheme(
 
   // Border that's visible but not harsh
   const borderBase = mix(primaryBg, syntaxFg, isDark ? 0.15 : 0.12);
+  const diagramCanvasBg = isDark
+    ? mix(primaryBg, syntaxFg, 0.035)
+    : mix(primaryBg, syntaxFg, 0.015);
+  const diagramSurface = isDark ? mix(primaryBg, syntaxFg, 0.08) : mix(primaryBg, syntaxFg, 0.035);
 
   return {
     isDark,
@@ -474,7 +488,17 @@ export function createAdaptiveTheme(
     },
 
     diagram: {
-      canvasBg: '#ffffff',
+      canvasBg: diagramCanvasBg,
+      pikchrInk: syntaxFg,
+      pikchrSurface: diagramSurface,
+      pikchrMuted: syntaxComment,
+      pikchrRed: accentRed,
+      pikchrGreen: accentGreen,
+      pikchrBlue: accentPrimary,
+      pikchrYellow: accentOrange,
+      pikchrOrange: accentOrange,
+      pikchrPurple: accentPurple,
+      pikchrCyan: accentCyan,
     },
 
     scrollbar: {
@@ -570,6 +594,16 @@ export function themeToVarMap(t: Theme): Record<string, string> {
     '--ui-selection': t.ui.selection,
 
     '--diagram-canvas-bg': t.diagram.canvasBg,
+    '--pikchr-ink': t.diagram.pikchrInk,
+    '--pikchr-surface': t.diagram.pikchrSurface,
+    '--pikchr-muted': t.diagram.pikchrMuted,
+    '--pikchr-red': t.diagram.pikchrRed,
+    '--pikchr-green': t.diagram.pikchrGreen,
+    '--pikchr-blue': t.diagram.pikchrBlue,
+    '--pikchr-yellow': t.diagram.pikchrYellow,
+    '--pikchr-orange': t.diagram.pikchrOrange,
+    '--pikchr-purple': t.diagram.pikchrPurple,
+    '--pikchr-cyan': t.diagram.pikchrCyan,
 
     '--scrollbar-thumb': t.scrollbar.thumb,
     '--scrollbar-thumb-hover': t.scrollbar.thumbHover,

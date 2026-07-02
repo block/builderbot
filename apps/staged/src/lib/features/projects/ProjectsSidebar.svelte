@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, onMount } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import { quintIn } from 'svelte/easing';
   import { fade } from 'svelte/transition';
   import House from '@lucide/svelte/icons/house';
@@ -32,6 +32,7 @@
   import {
     hydrateProjectsSidebarState,
     projectsSidebarState,
+    setProjectsSidebarScrollTop,
     setProjectsSidebarWidth,
     SIDEBAR_DEFAULT_WIDTH,
     SIDEBAR_MAX_WIDTH,
@@ -72,7 +73,12 @@
     onRemoveProject,
   }: Props = $props();
 
-  let lastNavigationKey = `${navigation.activeView}:${navigation.selectedProjectId ?? ''}`;
+  let sidebarBodyEl = $state<HTMLDivElement | null>(null);
+  let activeProjectRowEl = $state<HTMLElement | null>(null);
+  let sidebarScrollRestored = $state(false);
+  let restoreInProgress = false;
+  let restoreToken = 0;
+  let trackedSidebarBodyEl: HTMLDivElement | null = null;
 
   // ── Pinned repos ──
   let pinnedRepos = $state<RepoHomeItem[]>([]);
@@ -156,12 +162,88 @@
   }
 
   function scrollIfActive(node: HTMLElement, active: boolean) {
-    if (active) node.scrollIntoView({ block: 'nearest' });
+    let currentActive = active;
+    if (active) {
+      activeProjectRowEl = node;
+    }
     return {
-      update(active: boolean) {
-        if (active) node.scrollIntoView({ block: 'nearest' });
+      update(nextActive: boolean) {
+        if (currentActive === nextActive) return;
+        currentActive = nextActive;
+        if (nextActive) {
+          activeProjectRowEl = node;
+          if (sidebarScrollRestored) {
+            node.scrollIntoView({ block: 'nearest' });
+          }
+        } else if (activeProjectRowEl === node) {
+          activeProjectRowEl = null;
+        }
+      },
+      destroy() {
+        if (activeProjectRowEl === node) {
+          activeProjectRowEl = null;
+        }
       },
     };
+  }
+
+  function handleSidebarScroll() {
+    if (!sidebarBodyEl) return;
+    setProjectsSidebarScrollTop(sidebarBodyEl.scrollTop);
+  }
+
+  function trackSidebarBody(node: HTMLDivElement) {
+    sidebarBodyEl = node;
+    trackedSidebarBodyEl = node;
+    sidebarScrollRestored = false;
+
+    return {
+      destroy() {
+        setProjectsSidebarScrollTop(node.scrollTop);
+        if (sidebarBodyEl === node) {
+          sidebarBodyEl = null;
+          sidebarScrollRestored = false;
+        }
+        if (trackedSidebarBodyEl === node) {
+          trackedSidebarBodyEl = null;
+        }
+      },
+    };
+  }
+
+  function isFullyVisibleInSidebar(node: HTMLElement): boolean {
+    if (!sidebarBodyEl) return true;
+
+    const sidebarRect = sidebarBodyEl.getBoundingClientRect();
+    const nodeRect = node.getBoundingClientRect();
+    return nodeRect.top >= sidebarRect.top && nodeRect.bottom <= sidebarRect.bottom;
+  }
+
+  async function restoreSidebarScrollPosition() {
+    if (!sidebarBodyEl || restoreInProgress) return;
+
+    restoreInProgress = true;
+    sidebarScrollRestored = false;
+    const token = ++restoreToken;
+
+    try {
+      await tick();
+      if (token !== restoreToken || !sidebarBodyEl) return;
+
+      sidebarBodyEl.scrollTop = projectsSidebarState.scrollTop;
+      await tick();
+      if (token !== restoreToken || !sidebarBodyEl) return;
+
+      if (activeProjectRowEl && !isFullyVisibleInSidebar(activeProjectRowEl)) {
+        activeProjectRowEl.scrollIntoView({ block: 'nearest' });
+      }
+      setProjectsSidebarScrollTop(sidebarBodyEl.scrollTop);
+    } finally {
+      if (token === restoreToken) {
+        restoreInProgress = false;
+        sidebarScrollRestored = true;
+      }
+    }
   }
 
   function repoCountForProject(project: Project): number {
@@ -224,6 +306,9 @@
   });
 
   onDestroy(() => {
+    if (trackedSidebarBodyEl) {
+      setProjectsSidebarScrollTop(trackedSidebarBodyEl.scrollTop);
+    }
     stopResize();
   });
 
@@ -296,10 +381,11 @@
   }
 
   $effect(() => {
-    const nextNavigationKey = `${navigation.activeView}:${navigation.selectedProjectId ?? ''}`;
-    if (nextNavigationKey !== lastNavigationKey) {
-      lastNavigationKey = nextNavigationKey;
-    }
+    const readyToRestore =
+      sidebarVisible && sidebarBodyEl && !sidebarScrollRestored && !loading && !error;
+
+    if (!readyToRestore) return;
+    void restoreSidebarScrollPosition();
   });
 </script>
 
@@ -317,7 +403,7 @@
       </div>
     </div>
 
-    <div class="sidebar-body">
+    <div class="sidebar-body" use:trackSidebarBody onscroll={handleSidebarScroll}>
       {#if loading}
         <div class="state">Loading projects…</div>
       {:else if error}

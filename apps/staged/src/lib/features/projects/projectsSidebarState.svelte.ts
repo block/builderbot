@@ -25,6 +25,7 @@ export const projectsSidebarState = $state({
   collapsed: false,
   hydrated: false,
   hasProjects: true,
+  scrollTop: 0,
 });
 
 export async function hydrateProjectsSidebarState(): Promise<void> {
@@ -58,6 +59,11 @@ export function setProjectsSidebarWidth(width: number, persist = true): void {
 export function setProjects(projects: Project[]): void {
   projectsList.current = projects;
   projectsSidebarState.hasProjects = projects.length > 0;
+}
+
+export function setProjectsSidebarScrollTop(scrollTop: number): void {
+  if (!Number.isFinite(scrollTop)) return;
+  projectsSidebarState.scrollTop = Math.max(0, scrollTop);
 }
 
 export function setProjectsSidebarCollapsed(collapsed: boolean): void {

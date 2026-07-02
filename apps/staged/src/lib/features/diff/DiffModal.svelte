@@ -49,6 +49,7 @@
     BranchSessionLaunchStatus,
     Comment,
     CommentActionContext,
+    CommentSessionState,
     CommitTimelineItem,
     SessionStatus,
     SmartDiffAnnotation,
@@ -517,10 +518,10 @@
   }
 
   function handleNewNote(comment: Comment, event: MouseEvent) {
-    // Route by the linked note session's state (idle → start, running → open
-    // session, completed → open note).
+    // Route by the linked note session's state (idle → start, queued/running →
+    // open session, completed → open note).
     const state = getCommentNoteState(comment);
-    if (state === 'running' && comment.noteSessionId) {
+    if ((state === 'queued' || state === 'running') && comment.noteSessionId) {
       openSessionId = comment.noteSessionId;
       return;
     }
@@ -539,10 +540,10 @@
   }
 
   function handleNewCommit(comment: Comment, event: MouseEvent) {
-    // Route by the linked commit session's state (idle → start, running → open
-    // session, completed → show the commit in the open diff viewer).
+    // Route by the linked commit session's state (idle → start, queued/running →
+    // open session, completed → show the commit in the open diff viewer).
     const state = getCommentCommitState(comment);
-    if (state === 'running' && comment.commitSessionId) {
+    if ((state === 'queued' || state === 'running') && comment.commitSessionId) {
       openSessionId = comment.commitSessionId;
       return;
     }
@@ -699,10 +700,13 @@
   }
 
   /** Map a linked session id's status to the Note/Commit button state. */
-  function sessionStateFor(sessionId: string | null): 'idle' | 'running' | 'completed' {
+  function sessionStateFor(sessionId: string | null): CommentSessionState {
     if (!sessionId) return 'idle';
     switch (sessionStatusById.get(sessionId)) {
+      // Keep `queued` distinct from `running` so the UI can show the same
+      // Clock icon the timeline rows use for queued sessions.
       case 'queued':
+        return 'queued';
       case 'running':
         return 'running';
       case 'completed':
@@ -714,11 +718,11 @@
     }
   }
 
-  function getCommentNoteState(comment: Comment): 'idle' | 'running' | 'completed' {
+  function getCommentNoteState(comment: Comment): CommentSessionState {
     return sessionStateFor(comment.noteSessionId);
   }
 
-  function getCommentCommitState(comment: Comment): 'idle' | 'running' | 'completed' {
+  function getCommentCommitState(comment: Comment): CommentSessionState {
     return sessionStateFor(comment.commitSessionId);
   }
 

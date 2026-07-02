@@ -4,14 +4,12 @@
   import Check from '@lucide/svelte/icons/check';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Copy from '@lucide/svelte/icons/copy';
-  import FileText from '@lucide/svelte/icons/file-text';
-  import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
   import MessageSquare from '@lucide/svelte/icons/message-square';
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import Undo2 from '@lucide/svelte/icons/undo-2';
   import { Button } from '$lib/components/ui/button';
   import type { Comment, CommentSessionState } from '../../types';
-  import Spinner from '../../shared/Spinner.svelte';
+  import { getCommentSessionDisplay } from './commentSessionDisplay';
   import { formatLineRange, truncateText } from './diffModalHelpers';
 
   interface Props {
@@ -61,27 +59,17 @@
          warning/message icons, mirroring the stateful inline-diff buttons. -->
     <span class="comment-session-badges">
       {#if noteState !== 'idle'}
-        <span
-          class="comment-session-badge note"
-          title={noteState === 'running' ? 'Note session in progress' : 'Note ready'}
-        >
-          {#if noteState === 'running'}
-            <Spinner size={12} />
-          {:else}
-            <FileText size={12} />
-          {/if}
+        {@const noteDisplay = getCommentSessionDisplay('note', noteState, 'badge')}
+        {@const NoteIcon = noteDisplay.icon}
+        <span class="comment-session-badge note" title={noteDisplay.title}>
+          <NoteIcon size={12} />
         </span>
       {/if}
       {#if commitState !== 'idle'}
-        <span
-          class="comment-session-badge commit"
-          title={commitState === 'running' ? 'Commit session in progress' : 'Commit ready'}
-        >
-          {#if commitState === 'running'}
-            <Spinner size={12} />
-          {:else}
-            <GitCommitVertical size={12} />
-          {/if}
+        {@const commitDisplay = getCommentSessionDisplay('commit', commitState, 'badge')}
+        {@const CommitIcon = commitDisplay.icon}
+        <span class="comment-session-badge commit" title={commitDisplay.title}>
+          <CommitIcon size={12} />
         </span>
       {/if}
     </span>

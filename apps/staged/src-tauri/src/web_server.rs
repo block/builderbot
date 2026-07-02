@@ -2760,7 +2760,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     image_ids: vec![],
                     branch_id: None,
                     project_id: None,
-                    expose_pikchr_preview: false,
+                    expose_pikchr_tools: false,
                 },
                 store,
                 app_handle.clone(),
@@ -2893,8 +2893,8 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let config_branch_id = event_branch_id.clone();
             let config_project_id = event_project_id.clone().or(mcp_project_id.clone());
             // Note follow-ups (project notes or local branch notes) get the
-            // preview tool; remote branch notes can't reach localhost.
-            let expose_pikchr_preview = session_commands::local_note_pikchr_preview_available(
+            // pikchr tool; remote branch notes can't reach localhost.
+            let expose_pikchr_tools = session_commands::local_note_pikchr_tools_available(
                 project_note.is_some() || linked_note.is_some(),
                 workspace_name.as_deref(),
             );
@@ -2939,7 +2939,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     image_ids: image_ids.unwrap_or_default(),
                     branch_id: config_branch_id,
                     project_id: config_project_id,
-                    expose_pikchr_preview,
+                    expose_pikchr_tools,
                 },
                 store,
                 app_handle.clone(),
@@ -3053,7 +3053,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     branch_id: None,
                     project_id: Some(project_id),
                     // Project sessions are always local and write project notes.
-                    expose_pikchr_preview: true,
+                    expose_pikchr_tools: true,
                 },
                 store,
                 app_handle.clone(),

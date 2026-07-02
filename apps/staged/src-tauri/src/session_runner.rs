@@ -338,14 +338,14 @@ pub struct SessionConfig {
     /// Project that owns this session. Set for both project-note sessions
     /// (directly) and branch-level sessions (via the branch's project).
     pub project_id: Option<String>,
-    /// Expose the `preview_pikchr` MCP tool to this session. Set for local,
+    /// Expose the `generate_pikchr` MCP tool to this session. Set for local,
     /// note-writing sessions (project notes and local branch notes) so the
-    /// agent can render its Pikchr diagrams and check for overlaps before
-    /// finalizing a note. The server is attached as a *required* MCP server,
-    /// so a provider that doesn't support HTTP MCP fails the session rather
-    /// than silently dropping the tool. Only honored for local sessions
+    /// agent can generate validated Pikchr diagrams (rendered and overlap-checked
+    /// for it) before finalizing a note. The server is attached as a *required*
+    /// MCP server, so a provider that doesn't support HTTP MCP fails the session
+    /// rather than silently dropping the tool. Only honored for local sessions
     /// (`workspace_name.is_none()`); remote sessions can't reach localhost.
-    pub expose_pikchr_preview: bool,
+    pub expose_pikchr_tools: bool,
 }
 
 /// Start a session: persist the user message, spawn the agent, stream to DB.
@@ -366,30 +366,35 @@ pub fn start_session(
     // Local sessions without an explicit provider resolve the first available
     // provider and persist it on the session. Review-producing callers resolve
     // a concrete provider before creating their session/review rows.
-    let driver = if let Some(ref ws_name) = config.workspace_name {
+    // Also track the provider id the driver actually resolved to. The pikchr
+    // sub-session (`generate_pikchr`) reuses it so its sub-agent matches the
+    // agent the user chose, without re-running the (login-shell) discovery.
+    let (driver, resolved_provider_id): (AcpDriver, Option<String>) = if let Some(ref ws_name) =
+        config.workspace_name
+    {
         let mut d = AcpDriver::for_workspace(ws_name, config.provider.as_deref())?;
         if let Some(ref remote_dir) = config.remote_working_dir {
             d = d.with_remote_working_dir(remote_dir.clone());
         }
-        d
+        (d, config.provider.clone())
     } else {
         match &config.provider {
-            Some(id) => AcpDriver::new(id)?,
+            Some(id) => (AcpDriver::new(id)?, Some(id.clone())),
             None => {
-                // Resolve the first available provider and backfill it on the
-                // local session record so consumers see the provider that
-                // actually ran the agent.
+                // Resolve the first available provider and backfill it on
+                // the local session record so consumers see the provider
+                // that actually ran the agent.
                 let providers = crate::agent::discover_providers();
                 let first = providers.first().ok_or_else(|| {
-                    "No ACP agent found. Install Goose, Claude Code, Codex, Pi, or Amp and ensure it's on your PATH.".to_string()
-                })?;
+                        "No ACP agent found. Install Goose, Claude Code, Codex, Pi, or Amp and ensure it's on your PATH.".to_string()
+                    })?;
                 if let Err(e) = store.set_session_provider(&config.session_id, &first.id) {
                     log::warn!(
                         "Failed to backfill provider on session {}: {e}",
                         config.session_id
                     );
                 }
-                AcpDriver::new(&first.id)?
+                (AcpDriver::new(&first.id)?, Some(first.id.clone()))
             }
         }
     };
@@ -441,7 +446,7 @@ pub fn start_session(
             // attach them in one with_mcp_servers call below. with_mcp_servers
             // replaces the driver's server list, so calling it per-block would
             // clobber earlier additions — and a project note sets both
-            // mcp_project_id and expose_pikchr_preview, so that collision is
+            // mcp_project_id and expose_pikchr_tools, so that collision is
             // real.
             let mut required_mcp_servers: Vec<McpServer> = Vec::new();
 
@@ -483,20 +488,30 @@ pub fn start_session(
             };
 
             // For local note-writing sessions, additionally attach the pikchr
-            // preview tool so the agent can render its diagrams and catch
-            // overlaps. This is a *required* server too: a local note session
-            // assumes its provider speaks HTTP MCP, so an unsupported transport
-            // fails the session (via the required-transport check) rather than
-            // silently dropping the tool. Skipped for remote sessions, which
-            // can't reach a localhost server. A *startup* failure (port bind)
-            // is a local infra hiccup orthogonal to provider capability, so it
-            // stays non-fatal: log and continue without the preview aid.
-            let _pikchr_handle = if config.expose_pikchr_preview && config.workspace_name.is_none()
+            // MCP server so the agent can generate validated diagrams (rendered
+            // and overlap-checked for it). This is a *required* server too: a
+            // local note session assumes its provider speaks HTTP MCP, so an
+            // unsupported transport fails the session (via the required-transport
+            // check) rather than silently dropping the tool. Skipped for remote
+            // sessions, which can't reach a localhost server. A *startup* failure
+            // (port bind) is a local infra hiccup orthogonal to provider
+            // capability, so it stays non-fatal: log and continue without the aid.
+            let _pikchr_handle = if config.expose_pikchr_tools && config.workspace_name.is_none()
             {
-                match crate::pikchr_mcp::start_pikchr_mcp_server().await {
+                // `generate_pikchr` runs a sub-agent under the same provider the
+                // session resolved. An empty id is tolerated: the server still
+                // starts and `generate_pikchr` errors per-call rather than
+                // failing session startup.
+                let pikchr_provider = resolved_provider_id.clone().unwrap_or_default();
+                match crate::pikchr_mcp::start_pikchr_mcp_server(
+                    pikchr_provider,
+                    app_handle.clone(),
+                )
+                .await
+                {
                     Ok((port, handle)) => {
                         log::info!(
-                            "Session {}: pikchr preview MCP server started on port {port}",
+                            "Session {}: pikchr MCP server started on port {port}",
                             config.session_id
                         );
                         required_mcp_servers.push(McpServer::Http(McpServerHttp::new(
@@ -507,7 +522,7 @@ pub fn start_session(
                     }
                     Err(e) => {
                         log::warn!(
-                            "Session {}: failed to start pikchr preview MCP server \
+                            "Session {}: failed to start pikchr MCP server \
                                  (continuing without it): {e}",
                             config.session_id
                         );
@@ -1054,7 +1069,7 @@ pub fn start_pipeline_session(
                     project_id: config.project_id.clone(),
                     // Deterministic pipelines hand off to a code-focused AI step,
                     // not a note-writing session.
-                    expose_pikchr_preview: false,
+                    expose_pikchr_tools: false,
                 };
                 if let Err(e) = start_session(
                     ai_config,

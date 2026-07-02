@@ -90,7 +90,17 @@ export interface Theme {
 
   // Diagram previews
   diagram: {
-    canvasBg: string; // Light canvas for rendered diagrams with default dark ink
+    canvasBg: string; // Canvas behind rendered diagrams
+    pikchrInk: string; // Default Pikchr stroke/text color
+    pikchrSurface: string; // Themed replacement for white Pikchr fills
+    pikchrMuted: string; // Themed replacement for gray/silver Pikchr colors
+    pikchrRed: string;
+    pikchrGreen: string;
+    pikchrBlue: string;
+    pikchrYellow: string;
+    pikchrOrange: string;
+    pikchrPurple: string;
+    pikchrCyan: string;
   };
 
   // Scrollbar
@@ -255,6 +265,34 @@ const CONTRAST_OFFSET = 0.0135;
 // mid-gray. Dark themes are unaffected (scale = 1).
 const LIGHT_CHROME_CONTRAST_SCALE = 0.85;
 
+const DARK_PIKCHR_PALETTE: Theme['diagram'] = {
+  canvasBg: '#f2edf8',
+  pikchrInk: '#241a2f',
+  pikchrSurface: '#fffaff',
+  pikchrMuted: '#74677f',
+  pikchrRed: '#ec91a0',
+  pikchrGreen: '#80cd99',
+  pikchrBlue: '#8bbaed',
+  pikchrYellow: '#ecd285',
+  pikchrOrange: '#ebae7f',
+  pikchrPurple: '#c4a6f4',
+  pikchrCyan: '#80d5e1',
+};
+
+const LIGHT_PIKCHR_PALETTE: Theme['diagram'] = {
+  canvasBg: '#fbf8ff',
+  pikchrInk: '#24292e',
+  pikchrSurface: '#ffffff',
+  pikchrMuted: '#6e7781',
+  pikchrRed: '#e18593',
+  pikchrGreen: '#71b68b',
+  pikchrBlue: '#81abdd',
+  pikchrYellow: '#d5b462',
+  pikchrOrange: '#da9a6f',
+  pikchrPurple: '#af91e2',
+  pikchrCyan: '#6abec8',
+};
+
 /**
  * Calculate target luminance difference using logFloor algorithm.
  * This provides gentle scaling that works across all theme luminances,
@@ -381,6 +419,7 @@ export function createAdaptiveTheme(
 
   // Border that's visible but not harsh
   const borderBase = mix(primaryBg, syntaxFg, isDark ? 0.15 : 0.12);
+  const pikchrPalette = isDark ? DARK_PIKCHR_PALETTE : LIGHT_PIKCHR_PALETTE;
 
   return {
     isDark,
@@ -473,9 +512,7 @@ export function createAdaptiveTheme(
       selection: overlay(syntaxFg, isDark ? 0.08 : 0.1),
     },
 
-    diagram: {
-      canvasBg: '#ffffff',
-    },
+    diagram: pikchrPalette,
 
     scrollbar: {
       thumb: borderBase,
@@ -570,6 +607,16 @@ export function themeToVarMap(t: Theme): Record<string, string> {
     '--ui-selection': t.ui.selection,
 
     '--diagram-canvas-bg': t.diagram.canvasBg,
+    '--pikchr-ink': t.diagram.pikchrInk,
+    '--pikchr-surface': t.diagram.pikchrSurface,
+    '--pikchr-muted': t.diagram.pikchrMuted,
+    '--pikchr-red': t.diagram.pikchrRed,
+    '--pikchr-green': t.diagram.pikchrGreen,
+    '--pikchr-blue': t.diagram.pikchrBlue,
+    '--pikchr-yellow': t.diagram.pikchrYellow,
+    '--pikchr-orange': t.diagram.pikchrOrange,
+    '--pikchr-purple': t.diagram.pikchrPurple,
+    '--pikchr-cyan': t.diagram.pikchrCyan,
 
     '--scrollbar-thumb': t.scrollbar.thumb,
     '--scrollbar-thumb-hover': t.scrollbar.thumbHover,

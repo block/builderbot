@@ -25,7 +25,7 @@ export function renderMarkdownDiagramCodeBlock(
   if (!renderedPikchr || renderedPikchr.kind !== 'svg') {
     return { html: renderedDiagramSource, trustedHtml: false };
   }
-  const renderedSvg = sanitizePikchrSvg(renderedPikchr.svg);
+  const renderedSvg = sanitizePikchrSvg(renderedPikchr.svg, { source: token.text });
   if (!renderedSvg) {
     return { html: renderedDiagramSource, trustedHtml: false };
   }

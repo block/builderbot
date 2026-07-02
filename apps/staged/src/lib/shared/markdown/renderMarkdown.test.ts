@@ -42,12 +42,21 @@ describe('renderMarkdown', () => {
     expect(html).toContain('<svg');
     expect(html).toContain('class="markdown-pikchr-svg"');
     expect(html).toContain('<path');
-    expect(html).toContain('stroke:rgb(0,0,0)');
+    expect(html).toContain('stroke:var(--pikchr-ink)');
     expect(html).not.toContain('markdown-diagram-source-wrap');
     expect(html).not.toContain('markdown-diagram-source-pikchr');
     expect(html).not.toContain('box "Start" fit');
     expect(html).not.toContain('box &quot;Start&quot; fit');
     expect(html).not.toContain('STAGED_MARKDOWN_TRUSTED_DIAGRAM_');
+  });
+
+  it('preserves numeric Pikchr colors through the Markdown rendering path', () => {
+    const html = renderMarkdown('```pikchr\nbox "Exact" color 0xff0000 fill 0xffffff\n```', {
+      pikchrRenderer: numericColorPikchrRenderer,
+    });
+
+    expect(html).toContain('stroke:rgb(255,0,0)');
+    expect(html).toContain('fill:rgb(255,255,255)');
   });
 
   it('does not allow renderer SVG through the generic Markdown sanitizer', () => {
@@ -97,6 +106,18 @@ const safePikchrRenderer: PikchrRenderer = () => ({
     '<svg xmlns="http://www.w3.org/2000/svg" class="markdown-pikchr-svg" viewBox="0 0 58 34">',
     '<path d="M2,32L56,32L56,2L2,2Z" style="fill:none;stroke-width:2.16;stroke:rgb(0,0,0);" />',
     '<text x="29" y="17" text-anchor="middle" fill="rgb(0,0,0)" dominant-baseline="central">Start</text>',
+    '</svg>',
+  ].join(''),
+});
+
+const numericColorPikchrRenderer: PikchrRenderer = () => ({
+  kind: 'svg',
+  width: 58,
+  height: 34,
+  svg: [
+    '<svg xmlns="http://www.w3.org/2000/svg" class="markdown-pikchr-svg" viewBox="0 0 58 34">',
+    '<path d="M2,32L56,32L56,2L2,2Z" style="fill:rgb(255,255,255);stroke-width:2.16;stroke:rgb(255,0,0);" />',
+    '<text x="29" y="17" text-anchor="middle" fill="rgb(255,0,0)" dominant-baseline="central">Exact</text>',
     '</svg>',
   ].join(''),
 });

@@ -270,13 +270,13 @@ const DARK_PIKCHR_PALETTE: Theme['diagram'] = {
   pikchrInk: '#241a2f',
   pikchrSurface: '#fffaff',
   pikchrMuted: '#74677f',
-  pikchrRed: '#e76f82',
-  pikchrGreen: '#58bd7a',
-  pikchrBlue: '#68a5e8',
-  pikchrYellow: '#e6c45f',
-  pikchrOrange: '#e49557',
-  pikchrPurple: '#b28af0',
-  pikchrCyan: '#58c9d8',
+  pikchrRed: '#e97d8f',
+  pikchrGreen: '#69c487',
+  pikchrBlue: '#77aeea',
+  pikchrYellow: '#e9ca6f',
+  pikchrOrange: '#e7a068',
+  pikchrPurple: '#ba96f2',
+  pikchrCyan: '#69cedc',
 };
 
 const LIGHT_PIKCHR_PALETTE: Theme['diagram'] = {
@@ -284,13 +284,13 @@ const LIGHT_PIKCHR_PALETTE: Theme['diagram'] = {
   pikchrInk: '#24292e',
   pikchrSurface: '#ffffff',
   pikchrMuted: '#6e7781',
-  pikchrRed: '#d85f72',
-  pikchrGreen: '#459f67',
-  pikchrBlue: '#5b91d2',
-  pikchrYellow: '#c99d31',
-  pikchrOrange: '#cf7b42',
-  pikchrPurple: '#9670d9',
-  pikchrCyan: '#3da9b7',
+  pikchrRed: '#dc6f80',
+  pikchrGreen: '#58a976',
+  pikchrBlue: '#6b9cd7',
+  pikchrYellow: '#cea746',
+  pikchrOrange: '#d48855',
+  pikchrPurple: '#a17edd',
+  pikchrCyan: '#50b2be',
 };
 
 /**

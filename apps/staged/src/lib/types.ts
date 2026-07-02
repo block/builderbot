@@ -500,10 +500,10 @@ export type GithubButtonState = 'idle' | 'sending' | 'sent' | 'stale';
 
 /**
  * State of a review comment's "Note"/"Commit" action, derived from the linked
- * session's status. `queued` is treated as `running`, and `error`/`cancelled`
- * collapse back to `idle` so the user can retry.
+ * session's status. `queued` mirrors the timeline's queued state (Clock icon),
+ * and `error`/`cancelled` collapse back to `idle` so the user can retry.
  */
-export type CommentSessionState = 'idle' | 'running' | 'completed';
+export type CommentSessionState = 'idle' | 'queued' | 'running' | 'completed';
 
 // =============================================================================
 // Hashtag references

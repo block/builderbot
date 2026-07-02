@@ -3,6 +3,7 @@
   import Bot from '@lucide/svelte/icons/bot';
   import Check from '@lucide/svelte/icons/check';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
+  import Clock from '@lucide/svelte/icons/clock';
   import Copy from '@lucide/svelte/icons/copy';
   import FileText from '@lucide/svelte/icons/file-text';
   import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
@@ -63,9 +64,15 @@
       {#if noteState !== 'idle'}
         <span
           class="comment-session-badge note"
-          title={noteState === 'running' ? 'Note session in progress' : 'Note ready'}
+          title={noteState === 'queued'
+            ? 'Note session queued'
+            : noteState === 'running'
+              ? 'Note session in progress'
+              : 'Note ready'}
         >
-          {#if noteState === 'running'}
+          {#if noteState === 'queued'}
+            <Clock size={12} />
+          {:else if noteState === 'running'}
             <Spinner size={12} />
           {:else}
             <FileText size={12} />
@@ -75,9 +82,15 @@
       {#if commitState !== 'idle'}
         <span
           class="comment-session-badge commit"
-          title={commitState === 'running' ? 'Commit session in progress' : 'Commit ready'}
+          title={commitState === 'queued'
+            ? 'Commit session queued'
+            : commitState === 'running'
+              ? 'Commit session in progress'
+              : 'Commit ready'}
         >
-          {#if commitState === 'running'}
+          {#if commitState === 'queued'}
+            <Clock size={12} />
+          {:else if commitState === 'running'}
             <Spinner size={12} />
           {:else}
             <GitCommitVertical size={12} />

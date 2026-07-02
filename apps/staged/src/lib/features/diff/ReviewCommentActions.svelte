@@ -1,5 +1,6 @@
 <script lang="ts">
   import Check from '@lucide/svelte/icons/check';
+  import Clock from '@lucide/svelte/icons/clock';
   import FileText from '@lucide/svelte/icons/file-text';
   import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
   import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
@@ -53,15 +54,19 @@
   class="comment-action-btn note-btn"
   class:session-active={noteState !== 'idle'}
   onclick={(event) => withSavedComment('note', (savedComment) => onNote(savedComment, event))}
-  title={noteState === 'running'
-    ? 'Note session in progress'
-    : noteState === 'completed'
-      ? 'Open note'
-      : 'New note (Option+click to skip dialog)'}
+  title={noteState === 'queued'
+    ? 'Note session queued'
+    : noteState === 'running'
+      ? 'Note session in progress'
+      : noteState === 'completed'
+        ? 'Open note'
+        : 'New note (Option+click to skip dialog)'}
   disabled={pendingAction !== null}
 >
   {#if pendingAction === 'note' || noteState === 'running'}
     <Spinner size={12} />
+  {:else if noteState === 'queued'}
+    <Clock size={12} />
   {:else}
     <FileText size={12} />
   {/if}
@@ -72,15 +77,19 @@
   class="comment-action-btn commit-btn"
   class:session-active={commitState !== 'idle'}
   onclick={(event) => withSavedComment('commit', (savedComment) => onCommit(savedComment, event))}
-  title={commitState === 'running'
-    ? 'Commit session in progress'
-    : commitState === 'completed'
-      ? 'Show commit'
-      : 'New commit (Option+click to skip dialog)'}
+  title={commitState === 'queued'
+    ? 'Commit session queued'
+    : commitState === 'running'
+      ? 'Commit session in progress'
+      : commitState === 'completed'
+        ? 'Show commit'
+        : 'New commit (Option+click to skip dialog)'}
   disabled={pendingAction !== null}
 >
   {#if pendingAction === 'commit' || commitState === 'running'}
     <Spinner size={12} />
+  {:else if commitState === 'queued'}
+    <Clock size={12} />
   {:else}
     <GitCommitVertical size={12} />
   {/if}

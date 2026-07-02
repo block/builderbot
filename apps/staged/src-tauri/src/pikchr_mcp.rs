@@ -476,9 +476,10 @@ fn build_summary(width: i64, height: i64, shapes: &[LabeledShape], overlaps: &[O
         ));
     }
     out.push_str(
-        "\nFix overlaps by setting an explicit flow direction, using named nodes \
-with explicit anchors (e.g. `with .w at …`, `arrow from A.e to B.w`), and avoiding \
-percentage-length arrows between `fit` boxes.",
+        "\nIf these overlaps aren't intended, call `generate_pikchr` again passing this source as \
+`previous_pikchr` with a description that separates the shapes — e.g. set an explicit flow \
+direction, use named nodes with explicit anchors (`with .w at …`, `arrow from A.e to B.w`), and \
+avoid percentage-length arrows between `fit` boxes. Otherwise the diagram is fine to keep.",
     );
     out
 }
@@ -628,12 +629,13 @@ impl PikchrToolsHandler {
 impl PikchrToolsHandler {
     #[tool(
         description = "Generate a validated Pikchr diagram from a natural-language description. \
-An internal Pikchr specialist writes the diagram, renders it, and repairs syntax errors and box \
-overlaps on its own before returning. Prefer this over hand-writing Pikchr. Pass a fine-grained \
-`description` (boxes, arrows, labels, layout, relationships). To revise an existing diagram, also \
-pass its current source as `previous_pikchr` so it is edited rather than redrawn. Returns the \
-validated Pikchr source (drop it into a ```pikchr fenced code block) plus a rendered PNG preview. \
-If overlaps or intent can't be fully resolved, returns the best diagram reached with a note."
+An internal Pikchr specialist writes the diagram, renders it, and repairs syntax errors on its own \
+before returning. Prefer this over hand-writing Pikchr. Pass a fine-grained `description` (boxes, \
+arrows, labels, layout, relationships). To revise an existing diagram, also pass its current source \
+as `previous_pikchr` so it is edited rather than redrawn. Returns the validated Pikchr source (drop \
+it into a ```pikchr fenced code block), a rendered PNG preview, and a summary that reports any \
+overlapping shapes. Review the preview and the summary: if the layout needs work, call this again \
+passing the returned source as `previous_pikchr` with a description that adjusts it."
     )]
     async fn generate_pikchr(
         &self,
@@ -712,13 +714,10 @@ If overlaps or intent can't be fully resolved, returns the best diagram reached 
             content.push(Content::image(b64, "image/png"));
         }
         content.push(Content::text(outcome.source));
-        if outcome.gave_up {
-            content.push(Content::text(format!(
-                "Note: returning the best diagram reached — it renders, but the layout may still \
-have overlaps or not fully match the request. Refine the description or hand-edit as needed.\n{}",
-                outcome.summary
-            )));
-        }
+        // Always hand back the render summary — "No box overlaps detected." or
+        // the ⚠ overlap report — so the calling agent can review the layout and
+        // decide whether to keep the diagram or re-call to adjust it.
+        content.push(Content::text(outcome.summary));
         Ok(CallToolResult::success(content))
     }
 }

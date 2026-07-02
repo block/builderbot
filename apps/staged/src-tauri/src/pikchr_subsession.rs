@@ -2,13 +2,13 @@
 //! validated Pikchr source, used by the `generate_pikchr` MCP tool.
 //!
 //! A focused ACP sub-agent is asked for a single fenced ```pikchr block, whose
-//! source is rendered and inspected through the internal
-//! [`crate::pikchr_mcp::run_preview`] path. On a parse error or a detected box
-//! overlap the sub-agent is re-prompted with the specific failure, resuming the
-//! *same* sub-session so the grammar and prior attempts stay in context. The
-//! loop is bounded: parse errors always block (they can't be shipped), while
-//! overlaps are advisory and accepted after a couple of retries so a diagram
-//! with deliberately touching shapes still returns.
+//! source is rendered through the internal [`crate::pikchr_mcp::run_preview`]
+//! path. On a parse error the sub-agent is re-prompted with the specific
+//! failure, resuming the *same* sub-session so the grammar and prior attempts
+//! stay in context — a diagram that doesn't render is useless to hand back. The
+//! loop is bounded by [`MAX_ATTEMPTS`]. Overlaps are *not* repaired here: the
+//! first diagram that renders is returned as-is, its summary carrying any
+//! overlap warnings for the calling note agent to review and decide on.
 //!
 //! The sub-session is deliberately **not** persisted: it uses in-memory `Store`
 //! and `MessageWriter` stubs so its transcript never pollutes the user's
@@ -24,14 +24,10 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::AgentDriver;
 use crate::pikchr_mcp::run_preview;
 
-/// Total sub-agent turns before giving up. Parse errors and overlaps each
-/// consume one. 5 leaves room for a couple of repair rounds without letting a
+/// Total sub-agent turns before giving up. Each parse error or empty reply
+/// consumes one. 5 leaves room for a couple of repair rounds without letting a
 /// hopeless request run the provider subprocess forever.
 const MAX_ATTEMPTS: usize = 5;
-/// How many overlap-only re-prompts to send before accepting the diagram.
-/// Overlaps are advisory (touching shapes can be intentional), so we nudge a
-/// couple of times and then take the best rendering rather than looping.
-const MAX_OVERLAP_RETRIES: usize = 2;
 /// Synthetic session id for the sub-session. The in-memory store keys nothing
 /// meaningful on it; any stable string is fine.
 const SUBSESSION_ID: &str = "pikchr-subsession";
@@ -42,11 +38,10 @@ pub(crate) struct GenOutcome {
     pub(crate) source: String,
     /// Rendered PNG preview, if rasterization succeeded.
     pub(crate) png: Option<Vec<u8>>,
-    /// Render summary (dimensions + any overlap report) for the returned source.
+    /// Render summary (dimensions + any overlap warnings) for the returned
+    /// source. Overlaps are advisory: the caller reviews the summary and the
+    /// PNG and decides whether to keep the diagram or re-call to adjust it.
     pub(crate) summary: String,
-    /// True when we returned a best-effort diagram (still-overlapping or after
-    /// exhausting attempts) rather than a fully clean render.
-    pub(crate) gave_up: bool,
 }
 
 /// Drive the sub-agent to produce validated Pikchr for `description`.
@@ -68,9 +63,6 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
 
     let mut prompt = initial_prompt(grammar_reference, description, previous_pikchr);
     let mut agent_session_id: Option<String> = None;
-    // Best render-valid diagram seen so far (used if we never reach a clean one).
-    let mut best: Option<GenOutcome> = None;
-    let mut overlap_retries = 0usize;
 
     for _ in 0..MAX_ATTEMPTS {
         if cancel_token.is_cancelled() {
@@ -119,34 +111,17 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
             continue;
         }
 
-        let has_overlaps = summary_reports_overlaps(&preview.summary);
-        best = Some(GenOutcome {
-            source: source.clone(),
+        // It renders — return it as-is. Overlaps are advisory warnings carried
+        // in the summary; the calling agent decides on them, so we don't loop
+        // or re-prompt here.
+        return Ok(GenOutcome {
+            source,
             png: preview.png,
-            summary: preview.summary.clone(),
-            gave_up: has_overlaps,
+            summary: preview.summary,
         });
-
-        if !has_overlaps {
-            return Ok(best.expect("best was just set"));
-        }
-
-        overlap_retries += 1;
-        if overlap_retries >= MAX_OVERLAP_RETRIES {
-            break;
-        }
-        prompt = overlap_prompt(&preview.summary);
     }
 
-    best.ok_or_else(|| {
-        "The Pikchr specialist could not produce a diagram that renders successfully.".to_string()
-    })
-}
-
-/// Whether a `run_preview` summary flags overlapping shapes. Mirrors the phrase
-/// `build_preview` emits in `pikchr_mcp` (`"N overlapping shape pair(s)"`).
-fn summary_reports_overlaps(summary: &str) -> bool {
-    summary.contains("overlapping shape pair")
+    Err("The Pikchr specialist could not produce a diagram that renders successfully.".to_string())
 }
 
 /// Pull the Pikchr source out of a sub-agent reply. Prefers a real
@@ -192,13 +167,6 @@ fn parse_error_prompt(error: &str) -> String {
     format!(
         "That failed to render. Pikchr reported:\n{error}\n\
 Fix it and resend ONLY the ```pikchr code block."
-    )
-}
-
-fn overlap_prompt(summary: &str) -> String {
-    format!(
-        "It rendered, but shapes overlap:\n{summary}\n\
-Adjust spacing/positions to remove the overlaps and resend ONLY the ```pikchr code block."
     )
 }
 
@@ -352,11 +320,32 @@ box "Sink = NO-OP (default / external clone)" "no socket, no Block deps → buil
     }
 
     #[tokio::test]
-    async fn converges_from_parse_error_through_overlap_to_clean() {
+    async fn returns_immediately_on_overlapping_render() {
+        let driver = FakeDriver::new(vec![fenced(OVERLAPPING_SOURCE)]);
+
+        let outcome = generate_pikchr_source(
+            &driver,
+            "/tmp/grammar.md",
+            "a busy diagram",
+            None,
+            2.0,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("should return the first renderable diagram");
+
+        // Renders with overlaps — returned as-is, no retries spent on overlap.
+        assert_eq!(outcome.source, OVERLAPPING_SOURCE);
+        assert!(outcome.png.is_some());
+        assert!(outcome.summary.contains("overlapping shape pair"));
+        assert_eq!(*driver.calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn repairs_parse_error_then_returns_overlapping_render() {
         let driver = FakeDriver::new(vec![
-            fenced("box \"unterminated"), // parse error
-            fenced(OVERLAPPING_SOURCE),   // renders, overlaps
-            fenced("box \"hello\""),      // clean
+            fenced("box \"unterminated"), // parse error, repaired
+            fenced(OVERLAPPING_SOURCE),   // renders with overlaps, kept
         ]);
 
         let outcome = generate_pikchr_source(
@@ -368,43 +357,19 @@ box "Sink = NO-OP (default / external clone)" "no socket, no Block deps → buil
             &CancellationToken::new(),
         )
         .await
-        .expect("should converge");
+        .expect("should repair the parse error and return the overlapping render");
 
-        assert!(!outcome.gave_up);
-        assert_eq!(outcome.source, "box \"hello\"");
+        // Parse error repaired; overlap left for the caller to decide on.
+        assert_eq!(outcome.source, OVERLAPPING_SOURCE);
         assert!(outcome.png.is_some());
+        assert!(outcome.summary.contains("overlapping shape pair"));
+        assert_eq!(*driver.calls.lock().unwrap(), 2);
 
-        // First turn starts a session; subsequent turns resume it.
+        // First turn starts a session; the repair turn resumes it.
         let seen = driver.seen_session_ids.lock().unwrap();
-        assert_eq!(seen.len(), 3);
+        assert_eq!(seen.len(), 2);
         assert_eq!(seen[0], None);
         assert_eq!(seen[1].as_deref(), Some("fake-agent-session"));
-        assert_eq!(seen[2].as_deref(), Some("fake-agent-session"));
-    }
-
-    #[tokio::test]
-    async fn accepts_best_effort_when_overlaps_persist() {
-        let driver = FakeDriver::new(vec![
-            fenced(OVERLAPPING_SOURCE),
-            fenced(OVERLAPPING_SOURCE),
-            fenced(OVERLAPPING_SOURCE),
-        ]);
-
-        let outcome = generate_pikchr_source(
-            &driver,
-            "/tmp/grammar.md",
-            "a busy diagram",
-            None,
-            2.0,
-            &CancellationToken::new(),
-        )
-        .await
-        .expect("should return best-effort");
-
-        assert!(outcome.gave_up);
-        assert!(summary_reports_overlaps(&outcome.summary));
-        // Only MAX_OVERLAP_RETRIES turns are spent before accepting.
-        assert_eq!(*driver.calls.lock().unwrap(), MAX_OVERLAP_RETRIES);
     }
 
     #[tokio::test]

@@ -25,7 +25,7 @@
     "@tailwindcss/vite": "^4.3.2",
     "@tauri-apps/cli": "^2.11.4",
     "@tsconfig/svelte": "^5.0.8",
-    "@types/node": "^26.0.1",
+    "@types/node": "^24.11.0",
     "bits-ui": "^2.18.1",
     "clsx": "^2.1.1",
     "fake-indexeddb": "^6.2.5",

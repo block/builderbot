@@ -34,14 +34,14 @@
     }
   },
   "peerDependencies": {
-    "svelte": "^5.0.0",
-    "lucide-svelte": ">=0.300.0",
+    "@lucide/svelte": ">=1.0.0",
     "marked": ">=12.0.0",
     "sanitize-html": ">=2.0.0",
-    "shiki": ">=1.0.0"
+    "shiki": ">=1.0.0",
+    "svelte": "^5.0.0"
   },
   "devDependencies": {
-    "svelte": "^5.46.4",
+    "svelte": "^5.56.4",
     "typescript": "~5.9.3"
   }
 }

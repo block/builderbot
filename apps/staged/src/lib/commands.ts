@@ -1207,14 +1207,7 @@ export function squashCommits(branchId: string, provider?: string): Promise<stri
 export type DoctorFixType = 'command' | 'bridge' | 'auth' | 'updateMain' | 'updateBridge';
 
 export type DoctorInstallSource =
-  | 'brew'
-  | 'npm'
-  | 'cargo'
-  | 'mise'
-  | 'asdf'
-  | 'curlPipe'
-  | 'system'
-  | 'unknown';
+  'brew' | 'npm' | 'cargo' | 'mise' | 'asdf' | 'curlPipe' | 'system' | 'unknown';
 
 /**
  * Version + install-source readout for one binary behind an agent check.

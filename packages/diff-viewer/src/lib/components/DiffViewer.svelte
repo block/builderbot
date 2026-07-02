@@ -17,7 +17,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import type { Snippet } from 'svelte';
-  import { MessageSquarePlus, MessageSquare, X, FileText, Code } from 'lucide-svelte';
+  import { MessageSquarePlus, MessageSquare, X, FileText, Code } from '@lucide/svelte';
   import { marked } from 'marked';
   import { sanitize } from '../utils/sanitize';
   import type {

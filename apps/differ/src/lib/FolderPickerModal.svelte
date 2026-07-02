@@ -8,7 +8,7 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Folder, X, ChevronRight, Home, GitBranch, Search, Loader2 } from 'lucide-svelte';
+  import { Folder, X, ChevronRight, Home, GitBranch, Search, Loader2 } from '@lucide/svelte';
   import * as commands from './commands';
   import type { DirEntry, RecentRepo } from './commands';
 

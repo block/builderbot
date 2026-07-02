@@ -5,7 +5,7 @@
   syntax themes with search, keyboard navigation, and light/dark indicators.
 -->
 <script lang="ts">
-  import { Search, Sun, Moon } from 'lucide-svelte';
+  import { Search, Sun, Moon } from '@lucide/svelte';
   import {
     preferences,
     getAvailableSyntaxThemes,

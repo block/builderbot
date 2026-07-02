@@ -28,8 +28,8 @@
   "dependencies": {
     "@builderbot/diff-viewer": "workspace:*",
     "@tauri-apps/api": "^2.10.0",
+    "@lucide/svelte": "^1.22.0",
     "@tauri-apps/plugin-store": "^2.2.0",
-    "lucide-svelte": "^0.577.0",
     "marked": "^17.0.1",
     "sanitize-html": "^2.17.0",
     "shiki": "^3.20.0"

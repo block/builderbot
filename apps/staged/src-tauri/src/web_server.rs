@@ -44,6 +44,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
 use crate::actions::{ActionExecutor, ActionRegistry};
+use crate::pr_poll_scheduler::PrPollScheduler;
 use crate::session_commands;
 use crate::session_runner::{self, SessionConfig, SessionRegistry};
 use crate::store::{self, Store};
@@ -389,6 +390,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
     let session_registry: &Arc<SessionRegistry> = &app_handle.state::<Arc<SessionRegistry>>();
     let action_executor: &Arc<ActionExecutor> = &app_handle.state::<Arc<ActionExecutor>>();
     let action_registry: &Arc<ActionRegistry> = &app_handle.state::<Arc<ActionRegistry>>();
+    let pr_scheduler: &Arc<PrPollScheduler> = &app_handle.state::<Arc<PrPollScheduler>>();
 
     match command {
         // =====================================================================
@@ -3431,6 +3433,42 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         }
 
         // =====================================================================
+        // PR poll scheduler
+        // =====================================================================
+        "set_foreground_project" => {
+            let client_id: String = arg(&args, "clientId")?;
+            let project_id: Option<String> = opt_arg(&args, "projectId")?;
+            pr_scheduler.set_foreground(client_id, project_id);
+            Ok(Value::Null)
+        }
+        "set_focus" => {
+            let client_id: String = arg(&args, "clientId")?;
+            let focused: bool = arg(&args, "focused")?;
+            pr_scheduler.set_focus(client_id, focused);
+            Ok(Value::Null)
+        }
+        "set_branch_pending" => {
+            let client_id: String = arg(&args, "clientId")?;
+            let branch_id: String = arg(&args, "branchId")?;
+            let project_id: String = arg(&args, "projectId")?;
+            let pending: bool = arg(&args, "pending")?;
+            pr_scheduler.set_branch_pending(client_id, branch_id, project_id, pending);
+            Ok(Value::Null)
+        }
+        "refresh_now" => {
+            let client_id: String = arg(&args, "clientId")?;
+            let project_id: String = arg(&args, "projectId")?;
+            pr_scheduler.touch(client_id);
+            pr_scheduler.force(project_id);
+            Ok(Value::Null)
+        }
+        "disconnect_client" => {
+            let client_id: String = arg(&args, "clientId")?;
+            pr_scheduler.disconnect_client(client_id);
+            Ok(Value::Null)
+        }
+
+        // =====================================================================
         // Utilities
         // =====================================================================
         "open_url" => {
@@ -3503,5 +3541,133 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         }
 
         _ => Err(format!("Unknown command: {command}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    const INTENTIONALLY_UNSUPPORTED_WEB_COMMANDS: &[&str] = &[];
+
+    #[test]
+    fn web_dispatch_covers_tauri_commands() {
+        let tauri_commands = extract_generate_handler_commands(include_str!("lib.rs"));
+        let dispatch_commands = extract_dispatch_commands(include_str!("web_server.rs"));
+        let intentionally_unsupported = INTENTIONALLY_UNSUPPORTED_WEB_COMMANDS
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+
+        let missing = tauri_commands
+            .difference(&dispatch_commands)
+            .filter(|command| !intentionally_unsupported.contains(command.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        assert!(
+            missing.is_empty(),
+            "web_server::dispatch is missing command arms for: {missing:#?}"
+        );
+    }
+
+    fn extract_generate_handler_commands(source: &str) -> BTreeSet<String> {
+        let marker = "tauri::generate_handler![";
+        let start = source
+            .find(marker)
+            .expect("generate_handler! command list should exist")
+            + marker.len();
+        let end = source[start..]
+            .find("])")
+            .expect("generate_handler! command list should end")
+            + start;
+
+        source[start..end]
+            .lines()
+            .filter_map(|line| {
+                let entry = line.split("//").next()?.trim().trim_end_matches(',').trim();
+                if entry.is_empty() {
+                    None
+                } else {
+                    Some(entry.rsplit("::").next().unwrap_or(entry).to_string())
+                }
+            })
+            .collect()
+    }
+
+    fn extract_dispatch_commands(source: &str) -> BTreeSet<String> {
+        let marker = "match command {";
+        let start = source
+            .find(marker)
+            .expect("dispatch command match should exist")
+            + marker.len();
+        let mut depth = 1isize;
+        let mut commands = BTreeSet::new();
+
+        for line in source[start..].lines() {
+            if depth == 1 {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("_ =>") {
+                    break;
+                }
+                commands.extend(extract_match_pattern_strings(trimmed));
+            }
+
+            depth += brace_delta_ignoring_strings(line);
+            if depth == 0 {
+                break;
+            }
+        }
+
+        commands
+    }
+
+    fn extract_match_pattern_strings(line: &str) -> Vec<String> {
+        let Some((patterns, _)) = line.split_once("=>") else {
+            return Vec::new();
+        };
+
+        let mut names = Vec::new();
+        let mut rest = patterns;
+        while let Some(start) = rest.find('"') {
+            rest = &rest[start + 1..];
+            let Some(end) = rest.find('"') else {
+                break;
+            };
+            names.push(rest[..end].to_string());
+            rest = &rest[end + 1..];
+        }
+
+        names
+    }
+
+    fn brace_delta_ignoring_strings(line: &str) -> isize {
+        let mut delta = 0;
+        let mut chars = line.chars().peekable();
+        let mut in_string = false;
+        let mut escaped = false;
+
+        while let Some(ch) = chars.next() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+
+            match ch {
+                '"' => in_string = true,
+                '/' if chars.peek() == Some(&'/') => break,
+                '{' => delta += 1,
+                '}' => delta -= 1,
+                _ => {}
+            }
+        }
+
+        delta
     }
 }

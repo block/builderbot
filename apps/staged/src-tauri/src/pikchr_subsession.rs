@@ -337,7 +337,7 @@ box "Sink = NO-OP (default / external clone)" "no socket, no Block deps → buil
         // Renders with overlaps — returned as-is, no retries spent on overlap.
         assert_eq!(outcome.source, OVERLAPPING_SOURCE);
         assert!(outcome.png.is_some());
-        assert!(outcome.summary.contains("overlapping shape pair"));
+        assert!(outcome.summary.contains("overlapping pair"));
         assert_eq!(*driver.calls.lock().unwrap(), 1);
     }
 
@@ -362,7 +362,7 @@ box "Sink = NO-OP (default / external clone)" "no socket, no Block deps → buil
         // Parse error repaired; overlap left for the caller to decide on.
         assert_eq!(outcome.source, OVERLAPPING_SOURCE);
         assert!(outcome.png.is_some());
-        assert!(outcome.summary.contains("overlapping shape pair"));
+        assert!(outcome.summary.contains("overlapping pair"));
         assert_eq!(*driver.calls.lock().unwrap(), 2);
 
         // First turn starts a session; the repair turn resumes it.

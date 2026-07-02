@@ -14,11 +14,14 @@
 //!
 //! Fidelity: rendering goes through the `pikchr` crate, which bundles the same
 //! official `pikchr.c` that the frontend's `pikchr-js` compiles to WASM. The
-//! geometry — the part that matters for overlap detection — is therefore
-//! identical to what the user eventually sees. Native rasterization via
-//! `resvg` won't reproduce the frontend's side-label gap transform or browser
-//! font metrics exactly, so label spacing may differ by a hair; that is
-//! acceptable for a preview.
+//! shape geometry — the part that matters most for overlap detection — is
+//! therefore identical to what the user eventually sees. Overlap detection then
+//! reads the shape and text rectangles straight off the `usvg` tree that also
+//! rasterizes the preview, so labels are checked with real, shaped extents
+//! rather than bare anchor points. `usvg`/`resvg` lay text out with native
+//! system fonts, not the frontend's browser metrics, so text extents differ by
+//! a hair (and font fallback can differ); label-overlap thresholds are kept
+//! forgiving to match, and this is acceptable for a preview.
 //!
 //! Unlike `project_mcp`, this handler touches no store, registry, or project.
 //! It carries only the provider id and `AppHandle` that `generate_pikchr` needs
@@ -55,6 +58,11 @@ const MAX_SCALE: f32 = 4.0;
 /// Ignore overlaps thinner than this (px in Pikchr's coordinate space) so that
 /// shapes which merely share an edge or corner aren't flagged.
 const MIN_OVERLAP_PX: f64 = 1.0;
+/// Overlaps involving a text label use a more forgiving threshold: usvg lays
+/// text out with native fonts rather than the frontend's browser metrics, and
+/// its text bounding boxes are the generous SVG line boxes, so a label may
+/// nudge a neighbour by a hair without being a real collision.
+const MIN_TEXT_OVERLAP_PX: f64 = 3.0;
 /// Truncate derived shape labels in the overlap summary.
 const MAX_LABEL_CHARS: usize = 48;
 
@@ -85,12 +93,28 @@ struct BBox {
 }
 
 impl BBox {
+    /// Build a `BBox` from a usvg canvas-space rectangle. Pikchr emits a 1:1
+    /// `viewBox`, so usvg's canvas coordinates are the same numbers as the raw
+    /// SVG path coordinates.
+    fn from_rect(r: usvg::Rect) -> Self {
+        BBox {
+            min_x: r.left() as f64,
+            min_y: r.top() as f64,
+            max_x: r.right() as f64,
+            max_y: r.bottom() as f64,
+        }
+    }
+
     fn width(&self) -> f64 {
         self.max_x - self.min_x
     }
 
     fn height(&self) -> f64 {
         self.max_y - self.min_y
+    }
+
+    fn area(&self) -> f64 {
+        self.width().max(0.0) * self.height().max(0.0)
     }
 
     fn center(&self) -> (f64, f64) {
@@ -113,28 +137,32 @@ impl BBox {
     }
 }
 
-/// A box-like shape and the label text rendered inside it (if any).
-#[derive(Clone, Debug)]
-struct LabeledShape {
-    bounds: BBox,
-    label: Option<String>,
+/// Whether an [`Element`] is a container shape or a rendered text label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ElementKind {
+    Box,
+    Text,
 }
 
-/// One detected overlap between two box-like shapes.
+/// One piece of rendered geometry with a real rectangle in Pikchr's coordinate
+/// space. Both box-like shapes and text labels are represented uniformly so
+/// overlaps can be checked between any pair — box↔box, label↔box, label↔label.
+#[derive(Clone, Debug)]
+struct Element {
+    kind: ElementKind,
+    bounds: BBox,
+    /// A `Text` element's rendered content, or a `Box`'s derived label (the
+    /// text sitting inside it, joined). `None` for an unlabeled box.
+    text: Option<String>,
+}
+
+/// One detected overlap between two elements, by index into the element list.
 #[derive(Clone, Debug)]
 struct Overlap {
     a: usize,
     b: usize,
     overlap_w: f64,
     overlap_h: f64,
-}
-
-/// A `<text>` element with its anchor point and rendered content.
-#[derive(Clone, Debug)]
-struct SvgLabel {
-    x: f64,
-    y: f64,
-    text: String,
 }
 
 // =============================================================================
@@ -167,241 +195,78 @@ fn render_pikchr_svg(source: &str) -> Result<RenderedSvg, String> {
 // Overlap detection
 // =============================================================================
 
-/// Split an SVG path `d` attribute into command letters and numbers.
-enum PathToken {
-    Cmd(char),
-    Num(f64),
-}
-
-fn tokenize_path(d: &str) -> Vec<PathToken> {
-    let bytes = d.as_bytes();
-    let mut tokens = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i] as char;
-        if c.is_ascii_alphabetic() {
-            tokens.push(PathToken::Cmd(c));
-            i += 1;
-        } else if c.is_ascii_digit() || c == '+' || c == '-' || c == '.' {
-            let start = i;
-            i += 1;
-            while i < bytes.len() {
-                let n = bytes[i] as char;
-                if n.is_ascii_digit() || n == '.' {
-                    i += 1;
-                } else if (n == '+' || n == '-') && matches!(bytes[i - 1] as char, 'e' | 'E') {
-                    // sign of an exponent
-                    i += 1;
-                } else if n == 'e' || n == 'E' {
-                    i += 1;
-                } else {
-                    break;
-                }
-            }
-            if let Ok(num) = d[start..i].parse::<f64>() {
-                tokens.push(PathToken::Num(num));
-            }
-        } else {
-            // whitespace, comma, or other separator
-            i += 1;
-        }
-    }
-    tokens
-}
-
-/// Compute the bounding box of an SVG path `d` string.
+/// Extract every box-like shape and text label from the rendered SVG tree.
 ///
-/// Pikchr emits absolute `M`, `L`, `A` (arc) and `Z` commands. Only segment
-/// endpoints contribute to the box; arc radii and flags do not, so those are
-/// skipped. Control points of any (unexpected) curve commands are included,
-/// which only ever *over*-estimates the box — safe for overlap detection.
-fn path_bounds(d: &str) -> Option<BBox> {
-    let tokens = tokenize_path(d);
-    let mut bx = BBox {
-        min_x: f64::MAX,
-        min_y: f64::MAX,
-        max_x: f64::MIN,
-        max_y: f64::MIN,
-    };
-    let mut any = false;
-    let mut add = |x: f64, y: f64| {
-        bx.min_x = bx.min_x.min(x);
-        bx.min_y = bx.min_y.min(y);
-        bx.max_x = bx.max_x.max(x);
-        bx.max_y = bx.max_y.max(y);
-        any = true;
-    };
-
-    let mut i = 0;
-    let mut cmd = ' ';
-    while i < tokens.len() {
-        match tokens[i] {
-            PathToken::Cmd(c) => {
-                cmd = c;
-                i += 1;
-            }
-            PathToken::Num(_) => {
-                // Collect the run of numbers following the current command.
-                let mut nums = Vec::new();
-                while i < tokens.len() {
-                    if let PathToken::Num(n) = tokens[i] {
-                        nums.push(n);
-                        i += 1;
-                    } else {
-                        break;
+/// The tree is walked recursively (Pikchr may nest elements in groups).
+/// Box-like shapes are *closed, stroked* paths: Pikchr draws boxes/ovals/
+/// diamonds as closed outlined paths, while arrow shafts are open paths and
+/// arrowheads are filled (stroke-less) polygons — so both arrow parts fall out
+/// naturally. Text labels take their true, shaped rectangle from usvg's
+/// `abs_bounding_box`, computed with the same fonts that draw the PNG, so a
+/// label finally has a real extent instead of a bare anchor point.
+fn extract_elements(tree: &usvg::Tree) -> Vec<Element> {
+    fn walk(group: &usvg::Group, out: &mut Vec<Element>) {
+        for node in group.children() {
+            match node {
+                usvg::Node::Group(g) => walk(g, out),
+                usvg::Node::Path(p) => {
+                    if let Some(bounds) = box_path_bounds(p) {
+                        out.push(Element {
+                            kind: ElementKind::Box,
+                            bounds,
+                            text: None,
+                        });
                     }
                 }
-                match cmd.to_ascii_uppercase() {
-                    'A' => {
-                        // groups of 7: (rx ry rot large sweep x y) — endpoint only
-                        for g in nums.chunks(7) {
-                            if g.len() == 7 {
-                                add(g[5], g[6]);
-                            }
-                        }
-                    }
-                    'Z' => {}
-                    // M, L and any other command: treat as coordinate pairs.
-                    _ => {
-                        for pair in nums.chunks(2) {
-                            if pair.len() == 2 {
-                                add(pair[0], pair[1]);
-                            }
-                        }
+                usvg::Node::Text(t) => {
+                    let text = normalize_label(&text_content(t));
+                    if !text.is_empty() {
+                        out.push(Element {
+                            kind: ElementKind::Text,
+                            bounds: BBox::from_rect(t.abs_bounding_box()),
+                            text: Some(text),
+                        });
                     }
                 }
+                usvg::Node::Image(_) => {}
             }
         }
     }
 
-    if any {
-        Some(bx)
-    } else {
-        None
+    let mut elements = Vec::new();
+    walk(tree.root(), &mut elements);
+    elements
+}
+
+/// Bounds of a path when it is a container shape — a closed, stroked outline —
+/// else `None`. Degenerate hairline shapes are dropped.
+fn box_path_bounds(path: &usvg::Path) -> Option<BBox> {
+    // Only outlined (stroked) shapes are containers; a fill-only path is an
+    // arrowhead polygon.
+    path.stroke()?;
+    let closed = path
+        .data()
+        .segments()
+        .any(|seg| seg == tiny_skia::PathSegment::Close);
+    if !closed {
+        return None;
     }
+    let bounds = BBox::from_rect(path.abs_bounding_box());
+    (bounds.width() > MIN_OVERLAP_PX && bounds.height() > MIN_OVERLAP_PX).then_some(bounds)
 }
 
-/// Extract closed box-like shapes from a Pikchr SVG.
-///
-/// Boxes/ovals render as *closed* `<path>` elements (the `d` ends in `Z`);
-/// arrow shafts are open paths and arrowheads are `<polygon>`, so both are
-/// naturally excluded. Plain `<rect>` elements are included too.
-fn extract_shapes(svg: &str) -> Vec<BBox> {
-    use regex::Regex;
-    static PATH_RE: OnceLock<Regex> = OnceLock::new();
-    static RECT_RE: OnceLock<Regex> = OnceLock::new();
-    let path_re = PATH_RE.get_or_init(|| Regex::new(r#"<path\b[^>]*\bd="([^"]*)"[^>]*>"#).unwrap());
-    let rect_re = RECT_RE.get_or_init(|| Regex::new(r#"<rect\b([^>]*)>"#).unwrap());
-
-    let mut shapes = Vec::new();
-
-    for caps in path_re.captures_iter(svg) {
-        let d = &caps[1];
-        let closed = d.trim_end().ends_with(['Z', 'z']);
-        if !closed {
-            continue;
-        }
-        if let Some(b) = path_bounds(d) {
-            if b.width() > MIN_OVERLAP_PX && b.height() > MIN_OVERLAP_PX {
-                shapes.push(b);
-            }
-        }
-    }
-
-    for caps in rect_re.captures_iter(svg) {
-        let attrs = &caps[1];
-        let x = attr_f64(attrs, "x").unwrap_or(0.0);
-        let y = attr_f64(attrs, "y").unwrap_or(0.0);
-        let (Some(w), Some(h)) = (attr_f64(attrs, "width"), attr_f64(attrs, "height")) else {
-            continue;
-        };
-        if w > MIN_OVERLAP_PX && h > MIN_OVERLAP_PX {
-            shapes.push(BBox {
-                min_x: x,
-                min_y: y,
-                max_x: x + w,
-                max_y: y + h,
-            });
-        }
-    }
-
-    shapes
-}
-
-/// Extract `<text>` labels (anchor point + content) from a Pikchr SVG.
-fn extract_labels(svg: &str) -> Vec<SvgLabel> {
-    use regex::Regex;
-    static TEXT_RE: OnceLock<Regex> = OnceLock::new();
-    let text_re = TEXT_RE.get_or_init(|| Regex::new(r#"<text\b([^>]*)>([^<]*)</text>"#).unwrap());
-
-    let mut labels = Vec::new();
-    for caps in text_re.captures_iter(svg) {
-        let attrs = &caps[1];
-        let (Some(x), Some(y)) = (attr_f64(attrs, "x"), attr_f64(attrs, "y")) else {
-            continue;
-        };
-        let text = decode_xml_entities(caps[2].trim());
-        if text.is_empty() {
-            continue;
-        }
-        labels.push(SvgLabel { x, y, text });
-    }
-    labels
-}
-
-/// Read a numeric SVG attribute value out of an attribute substring.
-fn attr_f64(attrs: &str, name: &str) -> Option<f64> {
-    use regex::Regex;
-    static ATTR_RE: OnceLock<Regex> = OnceLock::new();
-    let attr_re = ATTR_RE.get_or_init(|| Regex::new(r#"\b([\w-]+)="([^"]*)""#).unwrap());
-
-    attr_re
-        .captures_iter(attrs)
-        .find(|caps| &caps[1] == name)?
-        .get(2)?
-        .as_str()
-        .trim()
-        .parse::<f64>()
-        .ok()
-}
-
-fn decode_xml_entities(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'")
-}
-
-/// Attach a label to each shape by collecting the `<text>` elements whose
-/// anchor falls inside the shape, in document order.
-fn label_shapes(shapes: Vec<BBox>, labels: &[SvgLabel]) -> Vec<LabeledShape> {
-    shapes
-        .into_iter()
-        .map(|bounds| {
-            let mut parts: Vec<&str> = labels
-                .iter()
-                .filter(|l| bounds.contains(l.x, l.y))
-                .map(|l| l.text.as_str())
-                .collect();
-            // A label inside two overlapping boxes is most likely owned by the
-            // smaller / nearer one, but keeping it on both is fine for a hint.
-            let label = if parts.is_empty() {
-                None
-            } else {
-                let mut joined = String::new();
-                for (idx, p) in parts.drain(..).enumerate() {
-                    if idx > 0 {
-                        joined.push(' ');
-                    }
-                    joined.push_str(p);
-                }
-                Some(truncate_label(&joined))
-            };
-            LabeledShape { bounds, label }
-        })
+/// Concatenate a text node's chunks into a single string.
+fn text_content(text: &usvg::Text) -> String {
+    text.chunks()
+        .iter()
+        .flat_map(|chunk| chunk.text().chars())
         .collect()
+}
+
+/// Collapse whitespace into single ASCII spaces and trim. Pikchr separates
+/// label words with non-breaking spaces, which `split_whitespace` handles.
+fn normalize_label(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn truncate_label(s: &str) -> String {
@@ -413,41 +278,142 @@ fn truncate_label(s: &str) -> String {
     out
 }
 
-/// Find pairs of box-like shapes that overlap by more than a hairline.
-fn find_overlaps(shapes: &[LabeledShape]) -> Vec<Overlap> {
-    let mut overlaps = Vec::new();
-    for a in 0..shapes.len() {
-        for b in (a + 1)..shapes.len() {
-            let (w, h) = shapes[a].bounds.overlap_extent(&shapes[b].bounds);
-            if w > MIN_OVERLAP_PX && h > MIN_OVERLAP_PX {
-                overlaps.push(Overlap {
-                    a,
-                    b,
-                    overlap_w: w,
-                    overlap_h: h,
-                });
+/// For each text element, the index of its "home" box — the smallest box whose
+/// bounds contain the label's centre — or `None` when it sits in no box. Box
+/// elements map to `None`. This both attributes labels to boxes and tells a
+/// label resting inside its box apart from one straying onto a neighbour.
+fn home_boxes(elements: &[Element]) -> Vec<Option<usize>> {
+    elements
+        .iter()
+        .map(|element| {
+            if element.kind != ElementKind::Text {
+                return None;
             }
+            let (cx, cy) = element.bounds.center();
+            elements
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| b.kind == ElementKind::Box && b.bounds.contains(cx, cy))
+                .min_by(|(_, a), (_, b)| {
+                    a.bounds
+                        .area()
+                        .partial_cmp(&b.bounds.area())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(i, _)| i)
+        })
+        .collect()
+}
+
+/// Fill each box's `text` with the labels whose home is that box, joined in
+/// document order, so overlaps can name boxes by their label.
+fn assign_box_labels(elements: &mut [Element], homes: &[Option<usize>]) {
+    // Gather each box's label first, then write, so we're not reading and
+    // mutating `elements` at the same time.
+    let labels: Vec<Option<String>> = elements
+        .iter()
+        .enumerate()
+        .map(|(bi, element)| {
+            if element.kind != ElementKind::Box {
+                return None;
+            }
+            let parts: Vec<&str> = elements
+                .iter()
+                .zip(homes)
+                .filter(|(_, home)| **home == Some(bi))
+                .filter_map(|(e, _)| e.text.as_deref())
+                .collect();
+            (!parts.is_empty()).then(|| truncate_label(&parts.join(" ")))
+        })
+        .collect();
+    for (element, label) in elements.iter_mut().zip(labels) {
+        if label.is_some() {
+            element.text = label;
+        }
+    }
+}
+
+/// Find pairs of elements that overlap by more than a hairline.
+///
+/// Box↔box overlaps are layout collisions, as before. Overlaps involving a
+/// label are the new, text-aware cases: two labels colliding (text↔text), or a
+/// label straying onto a box it doesn't belong to (text↔box). A label sitting
+/// inside its own — or an enclosing — box is the normal case and is not
+/// reported, and the separate lines of one multi-line label (which share a home
+/// box) don't flag each other.
+fn find_overlaps(elements: &[Element], homes: &[Option<usize>]) -> Vec<Overlap> {
+    let mut overlaps = Vec::new();
+    for a in 0..elements.len() {
+        for b in (a + 1)..elements.len() {
+            let ea = &elements[a];
+            let eb = &elements[b];
+            let (w, h) = ea.bounds.overlap_extent(&eb.bounds);
+            let both_boxes = ea.kind == ElementKind::Box && eb.kind == ElementKind::Box;
+            let threshold = if both_boxes {
+                MIN_OVERLAP_PX
+            } else {
+                MIN_TEXT_OVERLAP_PX
+            };
+            if w <= threshold || h <= threshold {
+                continue;
+            }
+            match (ea.kind, eb.kind) {
+                (ElementKind::Box, ElementKind::Box) => {}
+                (ElementKind::Text, ElementKind::Text) => {
+                    // Separate lines of the same label share a home box and are
+                    // stacked by design — don't flag them against each other.
+                    if let (Some(ha), Some(hb)) = (homes[a], homes[b]) {
+                        if ha == hb {
+                            continue;
+                        }
+                    }
+                }
+                _ => {
+                    // A label inside a box (its own or an enclosing one) is
+                    // expected; only flag it when the box does not contain the
+                    // label's centre.
+                    let (text, boxel) = if ea.kind == ElementKind::Text {
+                        (ea, eb)
+                    } else {
+                        (eb, ea)
+                    };
+                    let (cx, cy) = text.bounds.center();
+                    if boxel.bounds.contains(cx, cy) {
+                        continue;
+                    }
+                }
+            }
+            overlaps.push(Overlap {
+                a,
+                b,
+                overlap_w: w,
+                overlap_h: h,
+            });
         }
     }
     overlaps
 }
 
-/// Run the full overlap analysis on a rendered Pikchr SVG.
-fn analyze_overlaps(svg: &str) -> (Vec<LabeledShape>, Vec<Overlap>) {
-    let shapes = extract_shapes(svg);
-    let labels = extract_labels(svg);
-    let labeled = label_shapes(shapes, &labels);
-    let overlaps = find_overlaps(&labeled);
-    (labeled, overlaps)
+/// Run the full overlap analysis on a parsed Pikchr SVG tree.
+fn analyze_overlaps(tree: &usvg::Tree) -> (Vec<Element>, Vec<Overlap>) {
+    let mut elements = extract_elements(tree);
+    let homes = home_boxes(&elements);
+    assign_box_labels(&mut elements, &homes);
+    let overlaps = find_overlaps(&elements, &homes);
+    (elements, overlaps)
 }
 
-/// Human-readable description of one shape for the overlap summary.
-fn describe_shape(shape: &LabeledShape) -> String {
-    match &shape.label {
-        Some(label) => format!("\"{label}\""),
+/// Human-readable description of one element for the overlap summary.
+fn describe_element(element: &Element) -> String {
+    let noun = match element.kind {
+        ElementKind::Box => "box",
+        ElementKind::Text => "label",
+    };
+    match &element.text {
+        Some(text) => format!("{noun} \"{text}\""),
         None => {
-            let (cx, cy) = shape.bounds.center();
-            format!("box near ({:.0}, {:.0})", cx, cy)
+            let (cx, cy) = element.bounds.center();
+            format!("{noun} near ({cx:.0}, {cy:.0})")
         }
     }
 }
@@ -455,31 +421,32 @@ fn describe_shape(shape: &LabeledShape) -> String {
 /// Build the text summary returned alongside the image. Text matters because
 /// not every provider forwards image content to the model, and even
 /// vision-less models can act on a textual overlap report.
-fn build_summary(width: i64, height: i64, shapes: &[LabeledShape], overlaps: &[Overlap]) -> String {
+fn build_summary(width: i64, height: i64, elements: &[Element], overlaps: &[Overlap]) -> String {
     let mut out = format!("Rendered Pikchr diagram: {width}×{height} px.");
     if overlaps.is_empty() {
-        out.push_str("\nNo box overlaps detected.");
+        out.push_str("\nNo overlaps detected.");
         return out;
     }
 
     out.push_str(&format!(
-        "\n⚠ {} overlapping shape pair(s) detected:",
+        "\n⚠ {} overlapping pair(s) detected:",
         overlaps.len()
     ));
     for o in overlaps {
         out.push_str(&format!(
             "\n- {} overlaps {} (≈ {:.0}×{:.0} px)",
-            describe_shape(&shapes[o.a]),
-            describe_shape(&shapes[o.b]),
+            describe_element(&elements[o.a]),
+            describe_element(&elements[o.b]),
             o.overlap_w,
             o.overlap_h
         ));
     }
     out.push_str(
         "\nIf these overlaps aren't intended, call `generate_pikchr` again passing this source as \
-`previous_pikchr` with a description that separates the shapes — e.g. set an explicit flow \
-direction, use named nodes with explicit anchors (`with .w at …`, `arrow from A.e to B.w`), and \
-avoid percentage-length arrows between `fit` boxes. Otherwise the diagram is fine to keep.",
+`previous_pikchr` with a description that separates the shapes/labels — e.g. set an explicit flow \
+direction, use named nodes with explicit anchors (`with .w at …`, `arrow from A.e to B.w`), give \
+long labels room or shorten them, and avoid percentage-length arrows between `fit` boxes. \
+Otherwise the diagram is fine to keep.",
     );
     out
 }
@@ -499,22 +466,28 @@ fn font_database() -> Arc<usvg::fontdb::Database> {
     .clone()
 }
 
-/// Rasterize a Pikchr SVG to a PNG, scaled by `scale` (clamped, and reduced
-/// further if needed to stay within `MAX_RENDER_DIMENSION`). Returns the PNG
-/// bytes, or `None` if rasterization fails (the caller degrades to text-only).
-fn rasterize_svg_to_png(svg: &str, scale: f32) -> Option<Vec<u8>> {
+/// Parse a rendered Pikchr SVG into a usvg tree, loading system fonts so text
+/// is shaped. `run_preview` parses once and reuses the tree for both overlap
+/// analysis (which reads path + text bounding boxes off it) and rasterization.
+fn parse_svg_tree(svg: &str) -> Option<usvg::Tree> {
     let options = usvg::Options {
         fontdb: font_database(),
         ..Default::default()
     };
-    let tree = match usvg::Tree::from_str(svg, &options) {
-        Ok(tree) => tree,
+    match usvg::Tree::from_str(svg, &options) {
+        Ok(tree) => Some(tree),
         Err(e) => {
             log::warn!("[pikchr_mcp] usvg failed to parse rendered SVG: {e}");
-            return None;
+            None
         }
-    };
+    }
+}
 
+/// Rasterize a parsed Pikchr SVG tree to a PNG, scaled by `scale` (clamped, and
+/// reduced further if needed to stay within `MAX_RENDER_DIMENSION`). Returns the
+/// PNG bytes, or `None` if rasterization fails (the caller degrades to
+/// text-only).
+fn rasterize_tree_to_png(tree: &usvg::Tree, scale: f32) -> Option<Vec<u8>> {
     let size = tree.size();
     let (w, h) = (size.width().max(1.0), size.height().max(1.0));
 
@@ -537,7 +510,7 @@ fn rasterize_svg_to_png(svg: &str, scale: f32) -> Option<Vec<u8>> {
     pixmap.fill(tiny_skia::Color::WHITE);
 
     resvg::render(
-        &tree,
+        tree,
         tiny_skia::Transform::from_scale(s, s),
         &mut pixmap.as_mut(),
     );
@@ -589,10 +562,26 @@ pub(crate) fn run_preview(source: &str, scale: f32) -> PreviewOutcome {
         }
     };
 
-    let (shapes, overlaps) = analyze_overlaps(&rendered.svg);
-    let mut summary = build_summary(rendered.width, rendered.height, &shapes, &overlaps);
+    // Parse the rendered SVG once; both overlap analysis and rasterization read
+    // geometry from the same tree, and both need text laid out with the same
+    // fonts. If usvg can't parse Pikchr's own output (rare), degrade to
+    // dimensions only rather than failing the whole call.
+    let Some(tree) = parse_svg_tree(&rendered.svg) else {
+        return PreviewOutcome {
+            png: None,
+            summary: format!(
+                "Rendered Pikchr diagram: {}×{} px.\n(Diagram analysis and preview unavailable: \
+the rendered SVG could not be parsed.)",
+                rendered.width, rendered.height
+            ),
+            is_error: false,
+        };
+    };
 
-    let png = rasterize_svg_to_png(&rendered.svg, scale);
+    let (elements, overlaps) = analyze_overlaps(&tree);
+    let mut summary = build_summary(rendered.width, rendered.height, &elements, &overlaps);
+
+    let png = rasterize_tree_to_png(&tree, scale);
     if png.is_none() {
         summary.push_str("\n(Image rasterization unavailable; reporting geometry only.)");
     }
@@ -634,8 +623,8 @@ before returning. Prefer this over hand-writing Pikchr. Pass a fine-grained `des
 arrows, labels, layout, relationships). To revise an existing diagram, also pass its current source \
 as `previous_pikchr` so it is edited rather than redrawn. Returns the validated Pikchr source (drop \
 it into a ```pikchr fenced code block), a rendered PNG preview, and a summary that reports any \
-overlapping shapes. Review the preview and the summary: if the layout needs work, call this again \
-passing the returned source as `previous_pikchr` with a description that adjusts it."
+overlapping shapes or labels. Review the preview and the summary: if the layout needs work, call \
+this again passing the returned source as `previous_pikchr` with a description that adjusts it."
     )]
     async fn generate_pikchr(
         &self,
@@ -714,8 +703,8 @@ passing the returned source as `previous_pikchr` with a description that adjusts
             content.push(Content::image(b64, "image/png"));
         }
         content.push(Content::text(outcome.source));
-        // Always hand back the render summary — "No box overlaps detected." or
-        // the ⚠ overlap report — so the calling agent can review the layout and
+        // Always hand back the render summary — "No overlaps detected." or the
+        // ⚠ overlap report — so the calling agent can review the layout and
         // decide whether to keep the diagram or re-call to adjust it.
         content.push(Content::text(outcome.summary));
         Ok(CallToolResult::success(content))
@@ -812,23 +801,58 @@ arrow from OTLP.e to COLL.w "OTLP /v1/logs + auth" above
 SNOW: box "unifiedevents/batch" "→ Snowflake (UAP unchanged)" fit fill 0xffd6d6 with .w at 0.6 right of COLL.e
 arrow from COLL.e to SNOW.w"#;
 
+    /// Render `source` and parse it into a usvg tree the way `run_preview` does,
+    /// so geometry tests read the exact same rectangles the tool reports.
+    fn tree_for(source: &str) -> usvg::Tree {
+        let rendered = render_pikchr_svg(source).expect("source should render");
+        let options = usvg::Options {
+            fontdb: font_database(),
+            ..Default::default()
+        };
+        usvg::Tree::from_str(&rendered.svg, &options).expect("usvg should parse")
+    }
+
+    fn count_boxes(elements: &[Element]) -> usize {
+        elements
+            .iter()
+            .filter(|e| e.kind == ElementKind::Box)
+            .count()
+    }
+
     #[test]
-    fn tokenize_handles_commas_and_arcs() {
-        // From pikchr's own box output: a closed rounded rectangle.
-        let d = "M161,72L309,72A15 15 0 0 0 324 57L324,17A15 15 0 0 0 309 2L161,2A15 15 0 0 0 161 17L161,57A15 15 0 0 0 161 72Z";
-        let b = path_bounds(d).expect("closed path should have bounds");
-        // The arc radii (15) and flags (0) must not leak into the box bounds.
-        assert!((b.min_x - 161.0).abs() < 0.5, "min_x was {}", b.min_x);
-        assert!((b.min_y - 2.0).abs() < 0.5, "min_y was {}", b.min_y);
-        assert!((b.max_x - 324.0).abs() < 0.5, "max_x was {}", b.max_x);
-        assert!((b.max_y - 72.0).abs() < 0.5, "max_y was {}", b.max_y);
+    fn box_bounds_match_raw_path_coordinates() {
+        // usvg canvas coordinates line up 1:1 with Pikchr's raw SVG coordinates
+        // (Pikchr emits a 1:1 viewBox), so a box's bounds equal its `<path>`
+        // geometry — the invariant the overlap check relies on.
+        let tree = tree_for(r#"box "Start" fit"#);
+        let (elements, _) = analyze_overlaps(&tree);
+        let boxes: Vec<_> = elements
+            .iter()
+            .filter(|e| e.kind == ElementKind::Box)
+            .collect();
+        assert_eq!(boxes.len(), 1, "expected a single box");
+        let b = boxes[0].bounds;
+        // From the emitted path `M2.16,2.16 … 55.84,32.4Z`.
+        assert!((b.min_x - 2.16).abs() < 0.5, "min_x was {}", b.min_x);
+        assert!((b.min_y - 2.16).abs() < 0.5, "min_y was {}", b.min_y);
+        assert!((b.max_x - 55.84).abs() < 0.5, "max_x was {}", b.max_x);
+        assert!((b.max_y - 32.4).abs() < 0.5, "max_y was {}", b.max_y);
+    }
+
+    #[test]
+    fn arrowheads_and_shafts_are_not_counted_as_boxes() {
+        // An arrow renders as an open shaft path plus a filled (stroke-less)
+        // arrowhead polygon; neither is a container, so only the two boxes count.
+        let tree = tree_for(r#"box "A" fit; arrow right; box "B" fit"#);
+        let (elements, _) = analyze_overlaps(&tree);
+        assert_eq!(count_boxes(&elements), 2, "expected exactly two boxes");
     }
 
     #[test]
     fn overlap_detector_flags_known_overlapping_source() {
-        let rendered = render_pikchr_svg(OVERLAPPING_SOURCE).expect("source should render");
-        let (shapes, overlaps) = analyze_overlaps(&rendered.svg);
-        assert_eq!(shapes.len(), 5, "expected five boxes");
+        let tree = tree_for(OVERLAPPING_SOURCE);
+        let (elements, overlaps) = analyze_overlaps(&tree);
+        assert_eq!(count_boxes(&elements), 5, "expected five boxes");
         assert!(
             !overlaps.is_empty(),
             "expected overlaps for the cascade diagram, found none"
@@ -837,11 +861,42 @@ arrow from COLL.e to SNOW.w"#;
 
     #[test]
     fn overlap_detector_passes_corrected_source() {
-        let rendered = render_pikchr_svg(CORRECTED_SOURCE).expect("source should render");
-        let (_shapes, overlaps) = analyze_overlaps(&rendered.svg);
+        let tree = tree_for(CORRECTED_SOURCE);
+        let (_elements, overlaps) = analyze_overlaps(&tree);
         assert!(
             overlaps.is_empty(),
             "corrected diagram should have no overlaps, found {overlaps:?}"
+        );
+    }
+
+    #[test]
+    fn label_inside_its_box_is_not_flagged() {
+        // The common case: a box with a label centered inside it. The label
+        // rectangle sits within the box, so it must not be reported as an
+        // overlap even though the two rectangles intersect.
+        let tree = tree_for(r#"box "Contained label" fit"#);
+        let (elements, overlaps) = analyze_overlaps(&tree);
+        assert_eq!(count_boxes(&elements), 1);
+        assert!(
+            overlaps.is_empty(),
+            "a label inside its own box is not an overlap, found {overlaps:?}"
+        );
+    }
+
+    #[test]
+    fn colliding_free_labels_are_flagged() {
+        // Two free-standing labels stacked on the same point collide. Box-vs-box
+        // geometry can't see this; text bounding boxes can.
+        let tree =
+            tree_for("text \"first wide label\" at (0,0)\ntext \"second wide label\" at (0,0)");
+        let (elements, overlaps) = analyze_overlaps(&tree);
+        assert_eq!(count_boxes(&elements), 0, "no boxes in this diagram");
+        assert!(
+            overlaps
+                .iter()
+                .any(|o| elements[o.a].kind == ElementKind::Text
+                    && elements[o.b].kind == ElementKind::Text),
+            "expected a text-vs-text overlap, found {overlaps:?}"
         );
     }
 
@@ -872,9 +927,10 @@ arrow from COLL.e to SNOW.w"#;
     #[test]
     fn summary_lists_overlap_count() {
         let rendered = render_pikchr_svg(OVERLAPPING_SOURCE).unwrap();
-        let (shapes, overlaps) = analyze_overlaps(&rendered.svg);
-        let summary = build_summary(rendered.width, rendered.height, &shapes, &overlaps);
-        assert!(summary.contains("overlapping shape pair"));
+        let tree = tree_for(OVERLAPPING_SOURCE);
+        let (elements, overlaps) = analyze_overlaps(&tree);
+        let summary = build_summary(rendered.width, rendered.height, &elements, &overlaps);
+        assert!(summary.contains("overlapping pair"));
         assert!(summary.contains('⚠'));
     }
 }

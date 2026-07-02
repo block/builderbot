@@ -24,6 +24,7 @@ export interface Theme {
     chrome: string; // Unified chrome background (header, sidebar, spine)
     deepest: string; // Deepest level (tab bar) - pure black/white
     elevated: string; // Floating elements (cards, dialogs)
+    alertDialog: string; // Compact confirmation surfaces
     menu: string; // Menu/popover surfaces (context menu, dropdown, select, popover)
     hover: string; // Hover states
   };
@@ -440,6 +441,10 @@ export function createAdaptiveTheme(
       // without going gray, with the ring/shadow the shadcn primitives apply
       // carrying the rest of the lift.
       elevated: isDark ? elevate(0.08) : adjust(primaryBg, -0.04),
+      // Alert dialogs are compact decision prompts rather than full interface
+      // surfaces. Keep them crisp white in light themes, with the equivalent
+      // lifted surface in dark themes.
+      alertDialog: isDark ? elevate(0.08) : '#ffffff',
       // Menu/popover surfaces (context menu, dropdown, select, popover) sit on
       // top of content like other floating surfaces, but unlike cards/dialogs
       // they read best as a crisp panel rather than a tinted one. Dark themes
@@ -567,6 +572,7 @@ export function themeToVarMap(t: Theme): Record<string, string> {
     '--bg-chrome': t.bg.chrome,
     '--bg-deepest': t.bg.deepest,
     '--bg-elevated': t.bg.elevated,
+    '--bg-alert-dialog': t.bg.alertDialog,
     '--bg-menu': t.bg.menu,
     '--bg-hover': t.bg.hover,
 

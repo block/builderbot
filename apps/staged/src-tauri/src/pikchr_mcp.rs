@@ -819,6 +819,33 @@ arrow from COLL.e to SNOW.w"#;
             .count()
     }
 
+    /// Build a synthetic element with an explicit rectangle. Overlaps that
+    /// involve a label depend on the *shaped* text rectangle usvg computes, and
+    /// usvg silently drops any text it can't find a font for — so a round trip
+    /// through the render/parse pipeline only reports a label collision when the
+    /// host happens to have a matching font (dev macOS does; a lean CI box may
+    /// not). Feeding the pure detection logic (`home_boxes` + `find_overlaps`)
+    /// fixed geometry keeps these cases deterministic across environments.
+    fn element(
+        kind: ElementKind,
+        text: &str,
+        min_x: f64,
+        min_y: f64,
+        max_x: f64,
+        max_y: f64,
+    ) -> Element {
+        Element {
+            kind,
+            bounds: BBox {
+                min_x,
+                min_y,
+                max_x,
+                max_y,
+            },
+            text: (!text.is_empty()).then(|| text.to_string()),
+        }
+    }
+
     #[test]
     fn box_bounds_match_raw_path_coordinates() {
         // usvg canvas coordinates line up 1:1 with Pikchr's raw SVG coordinates
@@ -874,9 +901,12 @@ arrow from COLL.e to SNOW.w"#;
         // The common case: a box with a label centered inside it. The label
         // rectangle sits within the box, so it must not be reported as an
         // overlap even though the two rectangles intersect.
-        let tree = tree_for(r#"box "Contained label" fit"#);
-        let (elements, overlaps) = analyze_overlaps(&tree);
-        assert_eq!(count_boxes(&elements), 1);
+        let elements = vec![
+            element(ElementKind::Box, "", 0.0, 0.0, 100.0, 40.0),
+            element(ElementKind::Text, "Contained label", 20.0, 12.0, 80.0, 28.0),
+        ];
+        let homes = home_boxes(&elements);
+        let overlaps = find_overlaps(&elements, &homes);
         assert!(
             overlaps.is_empty(),
             "a label inside its own box is not an overlap, found {overlaps:?}"
@@ -886,11 +916,28 @@ arrow from COLL.e to SNOW.w"#;
     #[test]
     fn colliding_free_labels_are_flagged() {
         // Two free-standing labels stacked on the same point collide. Box-vs-box
-        // geometry can't see this; text bounding boxes can.
-        let tree =
-            tree_for("text \"first wide label\" at (0,0)\ntext \"second wide label\" at (0,0)");
-        let (elements, overlaps) = analyze_overlaps(&tree);
-        assert_eq!(count_boxes(&elements), 0, "no boxes in this diagram");
+        // geometry can't see this; text bounding boxes can. The rectangles below
+        // are the ones usvg shapes for these labels on a font-equipped host.
+        let elements = vec![
+            element(
+                ElementKind::Text,
+                "first wide label",
+                47.0,
+                10.6,
+                119.0,
+                23.9,
+            ),
+            element(
+                ElementKind::Text,
+                "second wide label",
+                40.0,
+                10.6,
+                126.0,
+                23.9,
+            ),
+        ];
+        let homes = home_boxes(&elements);
+        let overlaps = find_overlaps(&elements, &homes);
         assert!(
             overlaps
                 .iter()

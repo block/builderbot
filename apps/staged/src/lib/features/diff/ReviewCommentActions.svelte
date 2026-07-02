@@ -1,11 +1,9 @@
 <script lang="ts">
   import Check from '@lucide/svelte/icons/check';
-  import Clock from '@lucide/svelte/icons/clock';
-  import FileText from '@lucide/svelte/icons/file-text';
-  import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
   import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
   import Spinner from '../../shared/Spinner.svelte';
   import type { Comment, CommentSessionState, GithubButtonState } from '../../types';
+  import { getCommentSessionDisplay } from './commentSessionDisplay';
 
   interface Props {
     comment: Comment | null;
@@ -32,6 +30,10 @@
   }: Props = $props();
 
   let pendingAction = $state<'note' | 'commit' | 'github' | null>(null);
+  let noteDisplay = $derived(getCommentSessionDisplay('note', noteState, 'action'));
+  let NoteIcon = $derived(noteDisplay.icon);
+  let commitDisplay = $derived(getCommentSessionDisplay('commit', commitState, 'action'));
+  let CommitIcon = $derived(commitDisplay.icon);
 
   async function withSavedComment(
     action: 'note' | 'commit' | 'github',
@@ -54,21 +56,13 @@
   class="comment-action-btn note-btn"
   class:session-active={noteState !== 'idle'}
   onclick={(event) => withSavedComment('note', (savedComment) => onNote(savedComment, event))}
-  title={noteState === 'queued'
-    ? 'Note session queued'
-    : noteState === 'running'
-      ? 'Note session in progress'
-      : noteState === 'completed'
-        ? 'Open note'
-        : 'New note (Option+click to skip dialog)'}
+  title={noteDisplay.title}
   disabled={pendingAction !== null}
 >
-  {#if pendingAction === 'note' || noteState === 'running'}
+  {#if pendingAction === 'note'}
     <Spinner size={12} />
-  {:else if noteState === 'queued'}
-    <Clock size={12} />
   {:else}
-    <FileText size={12} />
+    <NoteIcon size={12} />
   {/if}
   <span>Note</span>
 </button>
@@ -77,21 +71,13 @@
   class="comment-action-btn commit-btn"
   class:session-active={commitState !== 'idle'}
   onclick={(event) => withSavedComment('commit', (savedComment) => onCommit(savedComment, event))}
-  title={commitState === 'queued'
-    ? 'Commit session queued'
-    : commitState === 'running'
-      ? 'Commit session in progress'
-      : commitState === 'completed'
-        ? 'Show commit'
-        : 'New commit (Option+click to skip dialog)'}
+  title={commitDisplay.title}
   disabled={pendingAction !== null}
 >
-  {#if pendingAction === 'commit' || commitState === 'running'}
+  {#if pendingAction === 'commit'}
     <Spinner size={12} />
-  {:else if commitState === 'queued'}
-    <Clock size={12} />
   {:else}
-    <GitCommitVertical size={12} />
+    <CommitIcon size={12} />
   {/if}
   <span>Commit</span>
 </button>

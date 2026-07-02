@@ -21,6 +21,11 @@
   import { viewport } from '../../shared/viewport.svelte';
   import '../../shared/markdown/diagramStyles.css';
   import { extractMarkdownDiagramFences } from '../../shared/markdown/diagramFormats';
+  import DiagramViewerModal from '../../shared/markdown/DiagramViewerModal.svelte';
+  import {
+    getMarkdownDiagramSvgMarkup,
+    isMarkdownDiagramActivationKey,
+  } from '../../shared/markdown/diagramViewer';
   import { loadPikchrRenderer, type PikchrRenderer } from '../../shared/markdown/pikchrRendering';
   import { noteMarkdownWithTitle, renderNoteMarkdown } from './noteMarkdown';
 
@@ -65,6 +70,7 @@
   let pikchrRendererLoadFailedKey = $state<string | null>(null);
   let pikchrRendererLoadFailed = $derived(pikchrRendererLoadFailedKey === pikchrRendererLoadKey);
   let renderedNoteHtml = $derived(renderNoteMarkdown(noteMarkdown, { pikchrRenderer }));
+  let diagramViewerSvg = $state<string | null>(null);
 
   // Search state
   let searchVisible = $state(false);
@@ -217,6 +223,26 @@
     matchElements[currentMatchIndex].classList.add('search-match-current');
     scrollToMatch(matchElements[currentMatchIndex]);
   }
+
+  function openDiagramViewerFromEvent(event: MouseEvent | KeyboardEvent): boolean {
+    const svgMarkup = getMarkdownDiagramSvgMarkup(event.target);
+    if (!svgMarkup) return false;
+
+    event.preventDefault();
+    event.stopPropagation();
+    diagramViewerSvg = svgMarkup;
+    return true;
+  }
+
+  function handleContentClick(event: MouseEvent) {
+    if (openDiagramViewerFromEvent(event)) return;
+    handleExternalLinkClick(event);
+  }
+
+  function handleContentKeydown(event: KeyboardEvent) {
+    if (!isMarkdownDiagramActivationKey(event)) return;
+    openDiagramViewerFromEvent(event);
+  }
 </script>
 
 <Dialog.Root
@@ -300,7 +326,12 @@
     <div class="modal-body">
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="modal-content" bind:this={contentEl} onclick={handleExternalLinkClick}>
+      <div
+        class="modal-content"
+        bind:this={contentEl}
+        onclick={handleContentClick}
+        onkeydown={handleContentKeydown}
+      >
         {#if noteMarkdown.trim()}
           <div class="markdown-content">
             {@html renderedNoteHtml}
@@ -354,6 +385,12 @@
     {/if}
   </Dialog.Content>
 </Dialog.Root>
+
+<DiagramViewerModal
+  open={diagramViewerSvg !== null}
+  svgMarkup={diagramViewerSvg}
+  onClose={() => (diagramViewerSvg = null)}
+/>
 
 <style>
   .header-content {

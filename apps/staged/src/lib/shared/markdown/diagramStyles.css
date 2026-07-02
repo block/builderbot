@@ -1,9 +1,53 @@
 .markdown-content .markdown-diagram {
+  position: relative;
   margin: 0.9em 0;
   border: 1px solid var(--border-subtle);
   border-radius: 8px;
   overflow: hidden;
   background: var(--bg-primary);
+  cursor: zoom-in;
+}
+
+.markdown-content .markdown-diagram:focus-visible {
+  outline: 2px solid var(--ui-accent);
+  outline-offset: 2px;
+}
+
+.markdown-content .markdown-diagram::after {
+  content: '';
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border-muted);
+  border-radius: 6px;
+  background:
+    linear-gradient(currentColor, currentColor) right 6px top 6px / 8px 1px no-repeat,
+    linear-gradient(currentColor, currentColor) right 6px top 6px / 1px 8px no-repeat,
+    linear-gradient(currentColor, currentColor) left 6px bottom 6px / 8px 1px no-repeat,
+    linear-gradient(currentColor, currentColor) left 6px bottom 6px / 1px 8px no-repeat,
+    var(--bg-chrome);
+  color: var(--text-muted);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.12s ease,
+    color 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.markdown-content .markdown-diagram:hover::after,
+.markdown-content .markdown-diagram:focus-visible::after {
+  opacity: 1;
+}
+
+.markdown-content .markdown-diagram:hover::after {
+  border-color: var(--text-muted);
+  color: var(--text-primary);
 }
 
 .markdown-content .markdown-diagram-preview {
@@ -11,12 +55,14 @@
   justify-content: center;
   padding: 16px;
   background: var(--diagram-canvas-bg);
-  overflow-x: auto;
+  overflow: hidden;
 }
 
 .markdown-content .markdown-diagram-preview svg {
   display: block;
   max-width: 100%;
+  max-height: min(55vh, 380px);
+  width: auto;
   height: auto;
 }
 

@@ -44,7 +44,7 @@ use crate::agent::AcpDriver;
 /// Wall-clock cap for one `generate_pikchr` call. Each call spins a provider
 /// subprocess and runs several turns; the cap keeps a stuck sub-agent from
 /// running indefinitely. Enforced by cancelling the sub-session's token.
-const GENERATE_PIKCHR_TIMEOUT: Duration = Duration::from_secs(180);
+const GENERATE_PIKCHR_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Cap the rasterized PNG so a runaway diagram can't allocate a huge pixmap.
 const MAX_RENDER_DIMENSION: u32 = 4096;

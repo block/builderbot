@@ -656,55 +656,71 @@ pub async fn build_note_followup_message(
     let store = get_store(&store)?;
 
     tauri::async_runtime::spawn_blocking(move || {
-        store
-            .get_session(&session_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Session not found: {session_id}"))?;
-
-        let linked_commit = store.get_commit_by_session(&session_id).ok().flatten();
-        let linked_note = store.get_note_by_session(&session_id).ok().flatten();
-        let linked_review = store.get_review_by_session(&session_id).ok().flatten();
-
-        let branch_from_id = branch_id
-            .as_deref()
-            .and_then(|bid| store.get_branch(bid).ok().flatten());
-
-        let linked_branch = if branch_from_id.is_some() {
-            branch_from_id
-        } else if let Some(commit) = &linked_commit {
-            store.get_branch(&commit.branch_id).ok().flatten()
-        } else if let Some(note) = &linked_note {
-            store.get_branch(&note.branch_id).ok().flatten()
-        } else if let Some(review) = &linked_review {
-            store.get_branch(&review.branch_id).ok().flatten()
-        } else {
-            None
-        };
-
-        let pikchr_grammar_reference = resolve_pikchr_grammar_reference(
+        build_note_followup_message_impl(
+            &store,
             &app_handle,
-            linked_branch
-                .as_ref()
-                .and_then(|branch| branch.workspace_name.as_deref()),
-        );
-
-        // Note follow-ups expose the preview tool on local sessions only. A
-        // project-note follow-up has no linked branch and always runs locally.
-        let preview_available = local_note_pikchr_preview_available(
-            true,
-            linked_branch
-                .as_ref()
-                .and_then(|branch| branch.workspace_name.as_deref()),
-        );
-
-        Ok(build_note_followup_message_with_pikchr_reference(
+            &session_id,
+            branch_id.as_deref(),
             has_parsed_note,
-            &pikchr_grammar_reference,
-            preview_available,
-        ))
+        )
     })
     .await
     .map_err(|e| format!("Failed to build note follow-up message: {e}"))?
+}
+
+/// Synchronous body of [`build_note_followup_message`], shared with the web-mode
+/// `dispatch()` arm. Callers run it inside `spawn_blocking`.
+pub(crate) fn build_note_followup_message_impl(
+    store: &Arc<Store>,
+    app_handle: &tauri::AppHandle,
+    session_id: &str,
+    branch_id: Option<&str>,
+    has_parsed_note: bool,
+) -> Result<String, String> {
+    store
+        .get_session(session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Session not found: {session_id}"))?;
+
+    let linked_commit = store.get_commit_by_session(session_id).ok().flatten();
+    let linked_note = store.get_note_by_session(session_id).ok().flatten();
+    let linked_review = store.get_review_by_session(session_id).ok().flatten();
+
+    let branch_from_id = branch_id.and_then(|bid| store.get_branch(bid).ok().flatten());
+
+    let linked_branch = if branch_from_id.is_some() {
+        branch_from_id
+    } else if let Some(commit) = &linked_commit {
+        store.get_branch(&commit.branch_id).ok().flatten()
+    } else if let Some(note) = &linked_note {
+        store.get_branch(&note.branch_id).ok().flatten()
+    } else if let Some(review) = &linked_review {
+        store.get_branch(&review.branch_id).ok().flatten()
+    } else {
+        None
+    };
+
+    let pikchr_grammar_reference = resolve_pikchr_grammar_reference(
+        app_handle,
+        linked_branch
+            .as_ref()
+            .and_then(|branch| branch.workspace_name.as_deref()),
+    );
+
+    // Note follow-ups expose the preview tool on local sessions only. A
+    // project-note follow-up has no linked branch and always runs locally.
+    let preview_available = local_note_pikchr_preview_available(
+        true,
+        linked_branch
+            .as_ref()
+            .and_then(|branch| branch.workspace_name.as_deref()),
+    );
+
+    Ok(build_note_followup_message_with_pikchr_reference(
+        has_parsed_note,
+        &pikchr_grammar_reference,
+        preview_available,
+    ))
 }
 
 #[tauri::command]

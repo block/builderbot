@@ -44,6 +44,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
 use crate::actions::{ActionExecutor, ActionRegistry};
+use crate::pr_poll_scheduler::PrPollScheduler;
 use crate::session_commands;
 use crate::session_runner::{self, SessionConfig, SessionRegistry};
 use crate::store::{self, Store};
@@ -389,6 +390,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
     let session_registry: &Arc<SessionRegistry> = &app_handle.state::<Arc<SessionRegistry>>();
     let action_executor: &Arc<ActionExecutor> = &app_handle.state::<Arc<ActionExecutor>>();
     let action_registry: &Arc<ActionRegistry> = &app_handle.state::<Arc<ActionRegistry>>();
+    let pr_scheduler: &Arc<PrPollScheduler> = &app_handle.state::<Arc<PrPollScheduler>>();
 
     match command {
         // =====================================================================
@@ -2222,6 +2224,70 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             .map_err(|e| format!("Timeline task failed: {e}"))??;
             Ok(serde_json::to_value(timeline).unwrap())
         }
+        "refresh_branch_git_state" => {
+            let store = get_store(store_mutex)?;
+            let branch_id: String = arg(&args, "branchId")?;
+            let force: Option<bool> = opt_arg(&args, "force")?;
+            let app = app_handle.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::timeline::refresh_branch_git_state_impl(&app, &store, &branch_id, force)
+            })
+            .await
+            .map_err(|e| format!("Git state refresh task failed: {e}"))??;
+            Ok(Value::Null)
+        }
+        "list_parent_branch_commits" => {
+            let store = get_store(store_mutex)?;
+            let branch_id: String = arg(&args, "branchId")?;
+            let commits = tauri::async_runtime::spawn_blocking(move || {
+                crate::timeline::list_parent_branch_commits_impl(&store, &branch_id)
+            })
+            .await
+            .map_err(|e| format!("List parent branch commits task failed: {e}"))??;
+            Ok(serde_json::to_value(commits).unwrap())
+        }
+        "pull_branch_ff_only" => {
+            let store = get_store(store_mutex)?;
+            let branch_id: String = arg(&args, "branchId")?;
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::timeline::pull_branch_ff_only_impl(&store, &branch_id)
+            })
+            .await
+            .map_err(|e| format!("Pull task failed: {e}"))??;
+            Ok(Value::Null)
+        }
+        "reset_branch_to_remote" => {
+            let store = get_store(store_mutex)?;
+            let branch_id: String = arg(&args, "branchId")?;
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::timeline::reset_branch_to_remote_impl(&store, &branch_id)
+            })
+            .await
+            .map_err(|e| format!("Reset task failed: {e}"))??;
+            Ok(Value::Null)
+        }
+        "get_worktree_changes_preview" => {
+            let store = get_store(store_mutex)?;
+            let branch_id: String = arg(&args, "branchId")?;
+            let preview = tauri::async_runtime::spawn_blocking(move || {
+                crate::timeline::get_worktree_changes_preview_impl(&store, &branch_id)
+            })
+            .await
+            .map_err(|e| format!("Worktree preview task failed: {e}"))??;
+            Ok(serde_json::to_value(preview).unwrap())
+        }
+        "discard_worktree_changes" => {
+            let store = get_store(store_mutex)?;
+            let branch_id: String = arg(&args, "branchId")?;
+            let expected_preview: Option<crate::timeline::WorktreeChangesPreview> =
+                opt_arg(&args, "expectedPreview")?;
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::timeline::discard_worktree_changes_impl(&store, &branch_id, expected_preview)
+            })
+            .await
+            .map_err(|e| format!("Discard task failed: {e}"))??;
+            Ok(Value::Null)
+        }
 
         // =====================================================================
         // Notes
@@ -2655,6 +2721,15 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(messages).unwrap())
         }
+        "count_assistant_messages_after" => {
+            let store = get_store(store_mutex)?;
+            let session_id: String = arg(&args, "sessionId")?;
+            let after_timestamp: i64 = arg(&args, "afterTimestamp")?;
+            let count = store
+                .count_assistant_messages_after(&session_id, after_timestamp)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(count).unwrap())
+        }
         "start_session" => {
             let store = get_store(store_mutex)?;
             let prompt: String = arg(&args, "prompt")?;
@@ -2872,6 +2947,25 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             )?;
 
             Ok(Value::Null)
+        }
+        "build_note_followup_message" => {
+            let store = get_store(store_mutex)?;
+            let session_id: String = arg(&args, "sessionId")?;
+            let branch_id: Option<String> = opt_arg(&args, "branchId")?;
+            let has_parsed_note: bool = arg(&args, "hasParsedNote")?;
+            let app = app_handle.clone();
+            let message = tauri::async_runtime::spawn_blocking(move || {
+                session_commands::build_note_followup_message_impl(
+                    &store,
+                    &app,
+                    &session_id,
+                    branch_id.as_deref(),
+                    has_parsed_note,
+                )
+            })
+            .await
+            .map_err(|e| format!("Failed to build note follow-up message: {e}"))??;
+            Ok(serde_json::to_value(message).unwrap())
         }
         "start_branch_session" | "start_or_queue_branch_session" => {
             let store = get_store(store_mutex)?;
@@ -3339,6 +3433,42 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         }
 
         // =====================================================================
+        // PR poll scheduler
+        // =====================================================================
+        "set_foreground_project" => {
+            let client_id: String = arg(&args, "clientId")?;
+            let project_id: Option<String> = opt_arg(&args, "projectId")?;
+            pr_scheduler.set_foreground(client_id, project_id);
+            Ok(Value::Null)
+        }
+        "set_focus" => {
+            let client_id: String = arg(&args, "clientId")?;
+            let focused: bool = arg(&args, "focused")?;
+            pr_scheduler.set_focus(client_id, focused);
+            Ok(Value::Null)
+        }
+        "set_branch_pending" => {
+            let client_id: String = arg(&args, "clientId")?;
+            let branch_id: String = arg(&args, "branchId")?;
+            let project_id: String = arg(&args, "projectId")?;
+            let pending: bool = arg(&args, "pending")?;
+            pr_scheduler.set_branch_pending(client_id, branch_id, project_id, pending);
+            Ok(Value::Null)
+        }
+        "refresh_now" => {
+            let client_id: String = arg(&args, "clientId")?;
+            let project_id: String = arg(&args, "projectId")?;
+            pr_scheduler.touch(client_id);
+            pr_scheduler.force(project_id);
+            Ok(Value::Null)
+        }
+        "disconnect_client" => {
+            let client_id: String = arg(&args, "clientId")?;
+            pr_scheduler.disconnect_client(client_id);
+            Ok(Value::Null)
+        }
+
+        // =====================================================================
         // Utilities
         // =====================================================================
         "open_url" => {
@@ -3411,5 +3541,133 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         }
 
         _ => Err(format!("Unknown command: {command}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    const INTENTIONALLY_UNSUPPORTED_WEB_COMMANDS: &[&str] = &[];
+
+    #[test]
+    fn web_dispatch_covers_tauri_commands() {
+        let tauri_commands = extract_generate_handler_commands(include_str!("lib.rs"));
+        let dispatch_commands = extract_dispatch_commands(include_str!("web_server.rs"));
+        let intentionally_unsupported = INTENTIONALLY_UNSUPPORTED_WEB_COMMANDS
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+
+        let missing = tauri_commands
+            .difference(&dispatch_commands)
+            .filter(|command| !intentionally_unsupported.contains(command.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        assert!(
+            missing.is_empty(),
+            "web_server::dispatch is missing command arms for: {missing:#?}"
+        );
+    }
+
+    fn extract_generate_handler_commands(source: &str) -> BTreeSet<String> {
+        let marker = "tauri::generate_handler![";
+        let start = source
+            .find(marker)
+            .expect("generate_handler! command list should exist")
+            + marker.len();
+        let end = source[start..]
+            .find("])")
+            .expect("generate_handler! command list should end")
+            + start;
+
+        source[start..end]
+            .lines()
+            .filter_map(|line| {
+                let entry = line.split("//").next()?.trim().trim_end_matches(',').trim();
+                if entry.is_empty() {
+                    None
+                } else {
+                    Some(entry.rsplit("::").next().unwrap_or(entry).to_string())
+                }
+            })
+            .collect()
+    }
+
+    fn extract_dispatch_commands(source: &str) -> BTreeSet<String> {
+        let marker = "match command {";
+        let start = source
+            .find(marker)
+            .expect("dispatch command match should exist")
+            + marker.len();
+        let mut depth = 1isize;
+        let mut commands = BTreeSet::new();
+
+        for line in source[start..].lines() {
+            if depth == 1 {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("_ =>") {
+                    break;
+                }
+                commands.extend(extract_match_pattern_strings(trimmed));
+            }
+
+            depth += brace_delta_ignoring_strings(line);
+            if depth == 0 {
+                break;
+            }
+        }
+
+        commands
+    }
+
+    fn extract_match_pattern_strings(line: &str) -> Vec<String> {
+        let Some((patterns, _)) = line.split_once("=>") else {
+            return Vec::new();
+        };
+
+        let mut names = Vec::new();
+        let mut rest = patterns;
+        while let Some(start) = rest.find('"') {
+            rest = &rest[start + 1..];
+            let Some(end) = rest.find('"') else {
+                break;
+            };
+            names.push(rest[..end].to_string());
+            rest = &rest[end + 1..];
+        }
+
+        names
+    }
+
+    fn brace_delta_ignoring_strings(line: &str) -> isize {
+        let mut delta = 0;
+        let mut chars = line.chars().peekable();
+        let mut in_string = false;
+        let mut escaped = false;
+
+        while let Some(ch) = chars.next() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+
+            match ch {
+                '"' => in_string = true,
+                '/' if chars.peek() == Some(&'/') => break,
+                '{' => delta += 1,
+                '}' => delta -= 1,
+                _ => {}
+            }
+        }
+
+        delta
     }
 }

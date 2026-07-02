@@ -594,74 +594,85 @@ pub async fn refresh_branch_git_state(
     force: Option<bool>,
 ) -> Result<(), String> {
     let store = crate::get_store(&store)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        refresh_branch_git_state_impl(&app, &store, &branch_id, force)
+    })
+    .await
+    .map_err(|e| format!("Git state refresh task failed: {e}"))?
+}
+
+/// Synchronous body of [`refresh_branch_git_state`], shared verbatim with the
+/// web-mode `dispatch()` arm. Callers run it inside `spawn_blocking`.
+pub(crate) fn refresh_branch_git_state_impl(
+    app: &tauri::AppHandle,
+    store: &Arc<Store>,
+    branch_id: &str,
+    force: Option<bool>,
+) -> Result<(), String> {
     let fetch_mode = if force.unwrap_or(false) {
         git::FetchMode::Force
     } else {
         git::FetchMode::Ttl
     };
 
-    tauri::async_runtime::spawn_blocking(move || {
-        let branch = store
-            .get_branch(&branch_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+    let branch = store
+        .get_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
-        let workdir = store
-            .get_workdir_for_branch(&branch_id)
-            .map_err(|e| e.to_string())?;
+    let workdir = store
+        .get_workdir_for_branch(branch_id)
+        .map_err(|e| e.to_string())?;
 
-        let git_state = if let Some(ref ws_name) = branch.workspace_name {
-            let repo_subpath = branches::resolve_branch_workspace_subpath(&store, &branch)?;
-            let cache_key = remote_git_state_cache_key(
-                ws_name,
-                repo_subpath.as_deref(),
-                &branch.branch_name,
-                &branch.base_branch,
-            );
-            let resolved_path = resolve_repo_path(ws_name, repo_subpath.as_deref())?;
+    let git_state = if let Some(ref ws_name) = branch.workspace_name {
+        let repo_subpath = branches::resolve_branch_workspace_subpath(store, &branch)?;
+        let cache_key = remote_git_state_cache_key(
+            ws_name,
+            repo_subpath.as_deref(),
+            &branch.branch_name,
+            &branch.base_branch,
+        );
+        let resolved_path = resolve_repo_path(ws_name, repo_subpath.as_deref())?;
 
-            Some(git::compute_branch_git_state_batched(
-                &cache_key,
-                |script, args| {
-                    branches::run_workspace_shell(ws_name, script, args).map_err(|e| e.to_string())
-                },
-                &resolved_path,
+        Some(git::compute_branch_git_state_batched(
+            &cache_key,
+            |script, args| {
+                branches::run_workspace_shell(ws_name, script, args).map_err(|e| e.to_string())
+            },
+            &resolved_path,
+            &branch.branch_name,
+            &branch.base_branch,
+            fetch_mode,
+            git::WorktreeStatusScope::Full,
+        ))
+    } else if let Some(ref wd) = workdir {
+        let worktree_path = Path::new(&wd.path);
+        if worktree_path.exists() {
+            Some(git::compute_local_branch_git_state(
+                worktree_path,
                 &branch.branch_name,
                 &branch.base_branch,
                 fetch_mode,
                 git::WorktreeStatusScope::Full,
+                git::EnvSource::Captured,
             ))
-        } else if let Some(ref wd) = workdir {
-            let worktree_path = Path::new(&wd.path);
-            if worktree_path.exists() {
-                Some(git::compute_local_branch_git_state(
-                    worktree_path,
-                    &branch.branch_name,
-                    &branch.base_branch,
-                    fetch_mode,
-                    git::WorktreeStatusScope::Full,
-                    git::EnvSource::Captured,
-                ))
-            } else {
-                None
-            }
         } else {
             None
-        };
-
-        if let Some(state) = git_state {
-            let _ = app.emit(
-                "git-state-updated",
-                GitStateUpdatedPayload {
-                    branch_id: branch_id.to_string(),
-                    git_state: state,
-                },
-            );
         }
-        Ok(())
-    })
-    .await
-    .map_err(|e| format!("Git state refresh task failed: {e}"))?
+    } else {
+        None
+    };
+
+    if let Some(state) = git_state {
+        let _ = app.emit(
+            "git-state-updated",
+            GitStateUpdatedPayload {
+                branch_id: branch_id.to_string(),
+                git_state: state,
+            },
+        );
+    }
+    Ok(())
 }
 
 /// Return the commits on the parent branch that aren't yet in this branch's
@@ -677,57 +688,39 @@ pub async fn list_parent_branch_commits(
     let store = crate::get_store(&store)?;
 
     tauri::async_runtime::spawn_blocking(move || {
-        let branch = store
-            .get_branch(&branch_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+        list_parent_branch_commits_impl(&store, &branch_id)
+    })
+    .await
+    .map_err(|e| format!("List parent branch commits task failed: {e}"))?
+}
 
-        let base_ref = git::origin_ref_for_branch(&branch.base_branch);
-        let format_arg = "--format=%H|%h|%s|%an|%ae|%ct";
+/// Synchronous body of [`list_parent_branch_commits`], shared verbatim with the
+/// web-mode `dispatch()` arm. Callers run it inside `spawn_blocking`.
+pub(crate) fn list_parent_branch_commits_impl(
+    store: &Arc<Store>,
+    branch_id: &str,
+) -> Result<Vec<ParentBranchCommit>, String> {
+    let branch = store
+        .get_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
-        if let Some(ref ws_name) = branch.workspace_name {
-            let repo_subpath = branches::resolve_branch_workspace_subpath(&store, &branch)?;
-            let range = match branches::run_workspace_git(
-                ws_name,
-                repo_subpath.as_deref(),
-                &["merge-base", &base_ref, "HEAD"],
-            ) {
-                Ok(mb_output) => format!("{}..{base_ref}", mb_output.trim()),
-                Err(_) => base_ref.clone(),
-            };
-            let output = match branches::run_workspace_git(
-                ws_name,
-                repo_subpath.as_deref(),
-                &["log", "--max-count=26", format_arg, &range],
-            ) {
-                Ok(o) => o,
-                Err(_) => return Ok(Vec::new()),
-            };
-            let lines: Vec<String> = output
-                .lines()
-                .filter(|l| !l.is_empty())
-                .map(|l| l.to_string())
-                .collect();
-            return Ok(parse_parent_commit_lines(&lines));
-        }
+    let base_ref = git::origin_ref_for_branch(&branch.base_branch);
+    let format_arg = "--format=%H|%h|%s|%an|%ae|%ct";
 
-        let workdir = store
-            .get_workdir_for_branch(&branch_id)
-            .map_err(|e| e.to_string())?;
-        let Some(wd) = workdir else {
-            return Ok(Vec::new());
-        };
-        let worktree_path = Path::new(&wd.path);
-        if !worktree_path.exists() {
-            return Ok(Vec::new());
-        }
-
-        let range = match git::cli_run_smart(worktree_path, &["merge-base", &base_ref, "HEAD"]) {
+    if let Some(ref ws_name) = branch.workspace_name {
+        let repo_subpath = branches::resolve_branch_workspace_subpath(store, &branch)?;
+        let range = match branches::run_workspace_git(
+            ws_name,
+            repo_subpath.as_deref(),
+            &["merge-base", &base_ref, "HEAD"],
+        ) {
             Ok(mb_output) => format!("{}..{base_ref}", mb_output.trim()),
             Err(_) => base_ref.clone(),
         };
-        let output = match git::cli_run_smart(
-            worktree_path,
+        let output = match branches::run_workspace_git(
+            ws_name,
+            repo_subpath.as_deref(),
             &["log", "--max-count=26", format_arg, &range],
         ) {
             Ok(o) => o,
@@ -738,10 +731,37 @@ pub async fn list_parent_branch_commits(
             .filter(|l| !l.is_empty())
             .map(|l| l.to_string())
             .collect();
-        Ok(parse_parent_commit_lines(&lines))
-    })
-    .await
-    .map_err(|e| format!("List parent branch commits task failed: {e}"))?
+        return Ok(parse_parent_commit_lines(&lines));
+    }
+
+    let workdir = store
+        .get_workdir_for_branch(branch_id)
+        .map_err(|e| e.to_string())?;
+    let Some(wd) = workdir else {
+        return Ok(Vec::new());
+    };
+    let worktree_path = Path::new(&wd.path);
+    if !worktree_path.exists() {
+        return Ok(Vec::new());
+    }
+
+    let range = match git::cli_run_smart(worktree_path, &["merge-base", &base_ref, "HEAD"]) {
+        Ok(mb_output) => format!("{}..{base_ref}", mb_output.trim()),
+        Err(_) => base_ref.clone(),
+    };
+    let output = match git::cli_run_smart(
+        worktree_path,
+        &["log", "--max-count=26", format_arg, &range],
+    ) {
+        Ok(o) => o,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let lines: Vec<String> = output
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.to_string())
+        .collect();
+    Ok(parse_parent_commit_lines(&lines))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -751,61 +771,65 @@ pub async fn pull_branch_ff_only(
 ) -> Result<(), String> {
     let store = crate::get_store(&store)?;
 
-    tauri::async_runtime::spawn_blocking(move || {
-        let branch = store
-            .get_branch(&branch_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+    tauri::async_runtime::spawn_blocking(move || pull_branch_ff_only_impl(&store, &branch_id))
+        .await
+        .map_err(|e| format!("Pull task failed: {e}"))?
+}
 
-        if let Some(ref ws_name) = branch.workspace_name {
-            let repo_subpath = branches::resolve_branch_workspace_subpath(&store, &branch)?;
-            let resolved_path = resolve_repo_path(ws_name, repo_subpath.as_deref())?;
-            let cache_key = remote_git_state_cache_key(
-                ws_name,
-                repo_subpath.as_deref(),
-                &branch.branch_name,
-                &branch.base_branch,
-            );
-            let state = git::compute_branch_git_state_batched(
-                &cache_key,
-                |script, args| {
-                    branches::run_workspace_shell(ws_name, script, args).map_err(|e| e.to_string())
-                },
-                &resolved_path,
-                &branch.branch_name,
-                &branch.base_branch,
-                git::FetchMode::Force,
-                git::WorktreeStatusScope::Full,
-            );
-            git::ensure_fast_forward_pullable(&state)?;
-            branches::run_workspace_git(
-                ws_name,
-                repo_subpath.as_deref(),
-                &["merge", "--ff-only", &state.upstream.r#ref],
-            )
-            .map_err(|e| e.to_string())?;
-            return Ok(());
-        }
+/// Synchronous body of [`pull_branch_ff_only`], shared verbatim with the
+/// web-mode `dispatch()` arm. Callers run it inside `spawn_blocking`.
+pub(crate) fn pull_branch_ff_only_impl(store: &Arc<Store>, branch_id: &str) -> Result<(), String> {
+    let branch = store
+        .get_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
-        let workdir = store
-            .get_workdir_for_branch(&branch_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
-        let worktree = Path::new(&workdir.path);
-        let state = git::compute_local_branch_git_state(
-            worktree,
+    if let Some(ref ws_name) = branch.workspace_name {
+        let repo_subpath = branches::resolve_branch_workspace_subpath(store, &branch)?;
+        let resolved_path = resolve_repo_path(ws_name, repo_subpath.as_deref())?;
+        let cache_key = remote_git_state_cache_key(
+            ws_name,
+            repo_subpath.as_deref(),
+            &branch.branch_name,
+            &branch.base_branch,
+        );
+        let state = git::compute_branch_git_state_batched(
+            &cache_key,
+            |script, args| {
+                branches::run_workspace_shell(ws_name, script, args).map_err(|e| e.to_string())
+            },
+            &resolved_path,
             &branch.branch_name,
             &branch.base_branch,
             git::FetchMode::Force,
             git::WorktreeStatusScope::Full,
-            git::EnvSource::Captured,
         );
         git::ensure_fast_forward_pullable(&state)?;
-        git::fast_forward_to_ref(worktree, &state.upstream.r#ref).map_err(|e| e.to_string())?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| format!("Pull task failed: {e}"))?
+        branches::run_workspace_git(
+            ws_name,
+            repo_subpath.as_deref(),
+            &["merge", "--ff-only", &state.upstream.r#ref],
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+
+    let workdir = store
+        .get_workdir_for_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
+    let worktree = Path::new(&workdir.path);
+    let state = git::compute_local_branch_git_state(
+        worktree,
+        &branch.branch_name,
+        &branch.base_branch,
+        git::FetchMode::Force,
+        git::WorktreeStatusScope::Full,
+        git::EnvSource::Captured,
+    );
+    git::ensure_fast_forward_pullable(&state)?;
+    git::fast_forward_to_ref(worktree, &state.upstream.r#ref).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -893,7 +917,10 @@ fn ensure_reset_to_remote_allowed(state: &git::BranchGitState) -> Result<(), Str
     Ok(())
 }
 
-fn reset_branch_to_remote_impl(store: &Arc<Store>, branch_id: &str) -> Result<(), String> {
+pub(crate) fn reset_branch_to_remote_impl(
+    store: &Arc<Store>,
+    branch_id: &str,
+) -> Result<(), String> {
     let branch = store
         .get_branch(branch_id)
         .map_err(|e| e.to_string())?
@@ -1009,27 +1036,36 @@ pub async fn get_worktree_changes_preview(
     let store = crate::get_store(&store)?;
 
     tauri::async_runtime::spawn_blocking(move || {
-        let branch = store
-            .get_branch(&branch_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-
-        if let Some(ref ws_name) = branch.workspace_name {
-            let repo_subpath = branches::resolve_branch_workspace_subpath(&store, &branch)?;
-            return remote_worktree_change_paths(ws_name, repo_subpath.as_deref())
-                .map(preview_from_change_paths);
-        }
-
-        let workdir = store
-            .get_workdir_for_branch(&branch_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
-        let paths =
-            git::list_worktree_change_paths(Path::new(&workdir.path)).map_err(|e| e.to_string())?;
-        Ok(preview_from_change_paths(paths))
+        get_worktree_changes_preview_impl(&store, &branch_id)
     })
     .await
     .map_err(|e| format!("Worktree preview task failed: {e}"))?
+}
+
+/// Synchronous body of [`get_worktree_changes_preview`], shared verbatim with
+/// the web-mode `dispatch()` arm. Callers run it inside `spawn_blocking`.
+pub(crate) fn get_worktree_changes_preview_impl(
+    store: &Arc<Store>,
+    branch_id: &str,
+) -> Result<WorktreeChangesPreview, String> {
+    let branch = store
+        .get_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    if let Some(ref ws_name) = branch.workspace_name {
+        let repo_subpath = branches::resolve_branch_workspace_subpath(store, &branch)?;
+        return remote_worktree_change_paths(ws_name, repo_subpath.as_deref())
+            .map(preview_from_change_paths);
+    }
+
+    let workdir = store
+        .get_workdir_for_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
+    let paths =
+        git::list_worktree_change_paths(Path::new(&workdir.path)).map_err(|e| e.to_string())?;
+    Ok(preview_from_change_paths(paths))
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1041,58 +1077,46 @@ pub async fn discard_worktree_changes(
     let store = crate::get_store(&store)?;
 
     tauri::async_runtime::spawn_blocking(move || {
-        let branch = store
-            .get_branch(&branch_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+        discard_worktree_changes_impl(&store, &branch_id, expected_preview)
+    })
+    .await
+    .map_err(|e| format!("Discard task failed: {e}"))?
+}
 
-        if let Some(ref ws_name) = branch.workspace_name {
-            let repo_subpath = branches::resolve_branch_workspace_subpath(&store, &branch)?;
-            let resolved_path = resolve_repo_path(ws_name, repo_subpath.as_deref())?;
-            let cache_key = remote_git_state_cache_key(
-                ws_name,
-                repo_subpath.as_deref(),
-                &branch.branch_name,
-                &branch.base_branch,
-            );
-            let state = git::compute_branch_git_state_batched(
-                &cache_key,
-                |script, args| {
-                    branches::run_workspace_shell(ws_name, script, args).map_err(|e| e.to_string())
-                },
-                &resolved_path,
-                &branch.branch_name,
-                &branch.base_branch,
-                git::FetchMode::Never,
-                git::WorktreeStatusScope::Full,
-            );
-            ensure_worktree_discardable(&state)?;
-            let changes = remote_worktree_change_paths(ws_name, repo_subpath.as_deref())?;
-            ensure_preview_matches(&changes, expected_preview.as_ref())?;
-            if changes.is_empty() {
-                return Ok(());
-            }
-            if !changes.conflicted_paths.is_empty() {
-                return Err("Resolve merge conflicts before discarding changes".to_string());
-            }
-            return discard_remote_worktree_changes(ws_name, repo_subpath.as_deref(), &changes);
-        }
+/// Synchronous body of [`discard_worktree_changes`], shared verbatim with the
+/// web-mode `dispatch()` arm. Callers run it inside `spawn_blocking`.
+pub(crate) fn discard_worktree_changes_impl(
+    store: &Arc<Store>,
+    branch_id: &str,
+    expected_preview: Option<WorktreeChangesPreview>,
+) -> Result<(), String> {
+    let branch = store
+        .get_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
 
-        let workdir = store
-            .get_workdir_for_branch(&branch_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
-        let worktree = Path::new(&workdir.path);
-        let state = git::compute_local_branch_git_state(
-            worktree,
+    if let Some(ref ws_name) = branch.workspace_name {
+        let repo_subpath = branches::resolve_branch_workspace_subpath(store, &branch)?;
+        let resolved_path = resolve_repo_path(ws_name, repo_subpath.as_deref())?;
+        let cache_key = remote_git_state_cache_key(
+            ws_name,
+            repo_subpath.as_deref(),
+            &branch.branch_name,
+            &branch.base_branch,
+        );
+        let state = git::compute_branch_git_state_batched(
+            &cache_key,
+            |script, args| {
+                branches::run_workspace_shell(ws_name, script, args).map_err(|e| e.to_string())
+            },
+            &resolved_path,
             &branch.branch_name,
             &branch.base_branch,
             git::FetchMode::Never,
             git::WorktreeStatusScope::Full,
-            git::EnvSource::Captured,
         );
         ensure_worktree_discardable(&state)?;
-        let changes = git::list_worktree_change_paths(worktree).map_err(|e| e.to_string())?;
+        let changes = remote_worktree_change_paths(ws_name, repo_subpath.as_deref())?;
         ensure_preview_matches(&changes, expected_preview.as_ref())?;
         if changes.is_empty() {
             return Ok(());
@@ -1100,11 +1124,33 @@ pub async fn discard_worktree_changes(
         if !changes.conflicted_paths.is_empty() {
             return Err("Resolve merge conflicts before discarding changes".to_string());
         }
-        git::discard_worktree_changes(worktree, &changes).map_err(|e| e.to_string())?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| format!("Discard task failed: {e}"))?
+        return discard_remote_worktree_changes(ws_name, repo_subpath.as_deref(), &changes);
+    }
+
+    let workdir = store
+        .get_workdir_for_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
+    let worktree = Path::new(&workdir.path);
+    let state = git::compute_local_branch_git_state(
+        worktree,
+        &branch.branch_name,
+        &branch.base_branch,
+        git::FetchMode::Never,
+        git::WorktreeStatusScope::Full,
+        git::EnvSource::Captured,
+    );
+    ensure_worktree_discardable(&state)?;
+    let changes = git::list_worktree_change_paths(worktree).map_err(|e| e.to_string())?;
+    ensure_preview_matches(&changes, expected_preview.as_ref())?;
+    if changes.is_empty() {
+        return Ok(());
+    }
+    if !changes.conflicted_paths.is_empty() {
+        return Err("Resolve merge conflicts before discarding changes".to_string());
+    }
+    git::discard_worktree_changes(worktree, &changes).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Cancel and delete any reviews (auto or manual) created at or after a commit's

@@ -2268,6 +2268,24 @@
     border-top: 1px solid var(--border-subtle);
   }
 
+  .markdown-content :global(table) {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 0.75em 0;
+  }
+
+  .markdown-content :global(th),
+  .markdown-content :global(td) {
+    border: 1px solid var(--border-subtle);
+    padding: 6px 12px;
+    text-align: left;
+  }
+
+  .markdown-content :global(th) {
+    background: var(--bg-primary);
+    font-weight: 600;
+  }
+
   @media (max-width: 700px) {
     .modal-header {
       padding: 12px;

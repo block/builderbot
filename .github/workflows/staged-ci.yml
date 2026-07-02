@@ -10,6 +10,7 @@ on:
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
       - "package.json"
+      - "rust-toolchain.toml"
       - ".github/workflows/staged-ci.yml"
   push:
     branches: [main]
@@ -20,6 +21,7 @@ on:
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
       - "package.json"
+      - "rust-toolchain.toml"
       - ".github/workflows/staged-ci.yml"
   workflow_dispatch:
 

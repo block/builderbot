@@ -5,7 +5,7 @@
   All changes apply immediately via the preferences store.
 -->
 <script lang="ts">
-  import { Settings, Type, Minus, Plus, Search } from 'lucide-svelte';
+  import { Settings, Type, Minus, Plus, Search } from '@lucide/svelte';
   import {
     preferences,
     setCodeFontFamily,

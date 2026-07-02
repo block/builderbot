@@ -31,7 +31,7 @@
     AlertTriangle,
     ArrowUp,
     ArrowDown,
-  } from 'lucide-svelte';
+  } from '@lucide/svelte';
   import {
     DiffViewer,
     CrossFileSearchBar,

@@ -192,6 +192,17 @@
     setProjectsSidebarScrollTop(sidebarBodyEl.scrollTop);
   }
 
+  function saveSidebarScrollTopFromNode(node: HTMLDivElement) {
+    const scrollTop = node.scrollTop;
+    const canTrustScrollTop = scrollTop > 0 || node.clientHeight > 0 || node.scrollHeight > 0;
+
+    if (!canTrustScrollTop) {
+      return;
+    }
+
+    setProjectsSidebarScrollTop(scrollTop);
+  }
+
   function trackSidebarBody(node: HTMLDivElement) {
     sidebarBodyEl = node;
     trackedSidebarBodyEl = node;
@@ -199,7 +210,7 @@
 
     return {
       destroy() {
-        setProjectsSidebarScrollTop(node.scrollTop);
+        saveSidebarScrollTopFromNode(node);
         if (sidebarBodyEl === node) {
           sidebarBodyEl = null;
           sidebarScrollRestored = false;
@@ -225,16 +236,25 @@
     restoreInProgress = true;
     sidebarScrollRestored = false;
     const token = ++restoreToken;
+    const requestedScrollTop = projectsSidebarState.scrollTop;
 
     try {
       await tick();
-      if (token !== restoreToken || !sidebarBodyEl) return;
+      if (token !== restoreToken || !sidebarBodyEl) {
+        return;
+      }
 
-      sidebarBodyEl.scrollTop = projectsSidebarState.scrollTop;
+      sidebarBodyEl.scrollTop = requestedScrollTop;
       await tick();
-      if (token !== restoreToken || !sidebarBodyEl) return;
+      if (token !== restoreToken || !sidebarBodyEl) {
+        return;
+      }
 
-      if (activeProjectRowEl && !isFullyVisibleInSidebar(activeProjectRowEl)) {
+      const activeRowVisible = activeProjectRowEl
+        ? isFullyVisibleInSidebar(activeProjectRowEl)
+        : null;
+
+      if (activeProjectRowEl && !activeRowVisible) {
         activeProjectRowEl.scrollIntoView({ block: 'nearest' });
       }
       setProjectsSidebarScrollTop(sidebarBodyEl.scrollTop);
@@ -307,7 +327,7 @@
 
   onDestroy(() => {
     if (trackedSidebarBodyEl) {
-      setProjectsSidebarScrollTop(trackedSidebarBodyEl.scrollTop);
+      saveSidebarScrollTopFromNode(trackedSidebarBodyEl);
     }
     stopResize();
   });
@@ -382,7 +402,12 @@
 
   $effect(() => {
     const readyToRestore =
-      sidebarVisible && sidebarBodyEl && !sidebarScrollRestored && !loading && !error;
+      sidebarVisible &&
+      sidebarBodyEl &&
+      !sidebarScrollRestored &&
+      !restoreInProgress &&
+      !loading &&
+      !error;
 
     if (!readyToRestore) return;
     void restoreSidebarScrollPosition();

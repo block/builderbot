@@ -8,6 +8,7 @@
 //! - Cancellation support
 
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -279,6 +280,130 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+fn env_shebang_interpreter(binary_path: &Path) -> Option<String> {
+    let mut file = std::fs::File::open(binary_path).ok()?;
+    let mut buf = [0_u8; 512];
+    let len = file.read(&mut buf).ok()?;
+    let first_line = std::str::from_utf8(&buf[..len]).ok()?.lines().next()?;
+    let shebang = first_line.strip_prefix("#!")?.trim();
+
+    let mut parts = shebang.split_whitespace();
+    let command = parts.next()?;
+    let command_name = Path::new(command).file_name()?.to_str()?;
+    if command_name != "env" {
+        return None;
+    }
+
+    for part in parts {
+        if part == "-S" || part.starts_with('-') || part.contains('=') {
+            continue;
+        }
+        if part.contains('/') {
+            return None;
+        }
+        return Some(part.to_string());
+    }
+
+    None
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn path_contains_executable(path_value: &str, executable: &str) -> bool {
+    std::env::split_paths(path_value).any(|dir| is_executable_file(&dir.join(executable)))
+}
+
+fn is_broad_toolchain_dir(path: &Path) -> bool {
+    matches!(
+        path.to_str(),
+        Some("/opt/homebrew/bin" | "/usr/local/bin" | "/usr/bin" | "/bin" | "/opt/local/bin")
+    )
+}
+
+fn path_with_inserted_agent_bin_dir(existing_path: &str, bin_dir: &Path) -> Option<String> {
+    let mut entries: Vec<PathBuf> = if existing_path.is_empty() {
+        Vec::new()
+    } else {
+        std::env::split_paths(existing_path).collect()
+    };
+
+    if entries.iter().any(|entry| entry == bin_dir) {
+        return None;
+    }
+
+    if is_broad_toolchain_dir(bin_dir) {
+        entries.push(bin_dir.to_path_buf());
+    } else {
+        entries.insert(0, bin_dir.to_path_buf());
+    }
+
+    std::env::join_paths(entries).ok()?.into_string().ok()
+}
+
+fn guarded_path_for_agent_binary(binary_path: &Path, existing_path: &str) -> Option<String> {
+    let interpreter = env_shebang_interpreter(binary_path)?;
+    if path_contains_executable(existing_path, &interpreter) {
+        return None;
+    }
+
+    let bin_dir = binary_path.parent()?;
+    if !is_executable_file(&bin_dir.join(&interpreter)) {
+        return None;
+    }
+
+    path_with_inserted_agent_bin_dir(existing_path, bin_dir)
+}
+
+fn shell_path_guard_for_agent_binary(binary_path: &Path) -> Option<String> {
+    let interpreter = env_shebang_interpreter(binary_path)?;
+    let bin_dir = binary_path.parent()?;
+    if !is_executable_file(&bin_dir.join(&interpreter)) {
+        return None;
+    }
+
+    let quoted_interpreter = shell_quote(&interpreter);
+    let quoted_bin_dir = shell_quote(&bin_dir.to_string_lossy());
+    let path_assignment = if is_broad_toolchain_dir(bin_dir) {
+        format!("if [ -n \"$PATH\" ]; then PATH=\"$PATH\":{quoted_bin_dir}; else PATH={quoted_bin_dir}; fi")
+    } else {
+        format!("if [ -n \"$PATH\" ]; then PATH={quoted_bin_dir}:\"$PATH\"; else PATH={quoted_bin_dir}; fi")
+    };
+
+    Some(format!(
+        "command -v {quoted_interpreter} >/dev/null 2>&1 || {{ {path_assignment}; export PATH; }}; "
+    ))
+}
+
+fn shell_exec_line(binary_path: &Path, acp_args: &[String]) -> String {
+    let quoted_binary = shell_quote(&binary_path.to_string_lossy());
+    let quoted_args = acp_args
+        .iter()
+        .map(|a| shell_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let guard = shell_path_guard_for_agent_binary(binary_path).unwrap_or_default();
+
+    format!("{guard}exec {quoted_binary} {quoted_args}\n")
+}
+
 fn resolve_spawn_working_dir(working_dir: &Path, is_remote: bool) -> PathBuf {
     // Remote ACP sessions proxy through `sq blox acp` and don't execute against
     // the local filesystem. Use a guaranteed-existing cwd when the recorded
@@ -364,21 +489,16 @@ impl AgentDriver for AcpDriver {
                     }
                     c.env(k, v);
                 }
-                // Prepend the agent binary's own directory to PATH, the same
-                // robustness the shell path's `exec env PATH=<bin_dir>:$PATH`
-                // provided. Many agents (e.g. `claude-agent-acp`) are
-                // `#!/usr/bin/env node` scripts whose interpreter ships beside
-                // the binary; if the captured PATH doesn't expose a compatible
-                // `node`, the shebang fails with `env: node: No such file or
-                // directory` and the agent dies before responding. Pinning the
-                // binary's dir keeps the bundled interpreter findable while
-                // leaving the Hermit-first ordering of the rest intact.
-                if let Some(bin_dir) = self.binary_path.parent() {
-                    let bin_dir = bin_dir.to_string_lossy();
-                    let new_path = match snapshot_path {
-                        Some(existing) if !existing.is_empty() => format!("{bin_dir}:{existing}"),
-                        _ => bin_dir.into_owned(),
-                    };
+                // Preserve the captured PATH unless an env-shebang launcher
+                // (for example `#!/usr/bin/env node`) cannot find its
+                // interpreter from the snapshot. Only then add the agent bin
+                // dir as a targeted fallback; broad toolchain dirs are appended
+                // so they cannot jump ahead of Hermit or other project-managed
+                // paths.
+                let existing_path = snapshot_path.as_deref().unwrap_or_default();
+                if let Some(new_path) =
+                    guarded_path_for_agent_binary(&self.binary_path, existing_path)
+                {
                     c.env("PATH", new_path);
                 }
             }
@@ -450,31 +570,11 @@ impl AgentDriver for AcpDriver {
         // agent binary is already the child process, so there is nothing to
         // exec.
         if use_shell_spawn {
-            let quoted_binary = shell_quote(&self.binary_path.to_string_lossy());
-            let quoted_args = self
-                .acp_args
-                .iter()
-                .map(|a| shell_quote(a))
-                .collect::<Vec<_>>()
-                .join(" ");
-            // Prepend the agent binary's own directory to PATH for the exec.
-            // Many agents (e.g. `claude-agent-acp`) are `#!/usr/bin/env node`
-            // scripts whose interpreter lives alongside the binary. The session
-            // working directory's shell init may not expose a compatible `node`
-            // (Hermit/direnv can replace PATH, nvm may not activate), in which
-            // case the shebang fails with `env: node: No such file or directory`
-            // and the agent dies before responding — surfacing only as "server
-            // shut down unexpectedly". Pinning the binary's dir on PATH ensures
-            // the interpreter that ships with the agent is always found.
-            let exec_line = match self.binary_path.parent() {
-                Some(bin_dir) => format!(
-                    "exec env PATH={}:\"$PATH\" {} {}\n",
-                    shell_quote(&bin_dir.to_string_lossy()),
-                    quoted_binary,
-                    quoted_args
-                ),
-                None => format!("exec {quoted_binary} {quoted_args}\n"),
-            };
+            // If the fallback shell's initialized PATH already provides an
+            // env-shebang interpreter, keep it unchanged. Otherwise add the
+            // agent bin dir only as an interpreter fallback, preserving broad
+            // toolchain dirs behind project-managed PATH entries.
+            let exec_line = shell_exec_line(&self.binary_path, &self.acp_args);
             stdin
                 .write_all(exec_line.as_bytes())
                 .await
@@ -1497,12 +1597,47 @@ impl MessageWriter for BasicMessageWriter {
 #[cfg(test)]
 mod tests {
     use super::{
-        consume_remote_acp_line, decode_remote_acp_line, mcp_server_transport_supported,
-        remote_acp_segments, resolve_spawn_working_dir, sanitize_remote_acp_chunk, shell_quote,
-        McpCapabilities, McpServer, RemoteLineOutcome,
+        consume_remote_acp_line, decode_remote_acp_line, env_shebang_interpreter,
+        guarded_path_for_agent_binary, is_broad_toolchain_dir, mcp_server_transport_supported,
+        path_with_inserted_agent_bin_dir, remote_acp_segments, resolve_spawn_working_dir,
+        sanitize_remote_acp_chunk, shell_exec_line, shell_quote, McpCapabilities, McpServer,
+        RemoteLineOutcome,
     };
     use agent_client_protocol::{McpServerHttp, McpServerSse, McpServerStdio};
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock must be after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        dir
+    }
+
+    fn write_executable(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create executable parent");
+        }
+        std::fs::write(path, content).expect("write executable");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms).expect("chmod executable");
+        }
+    }
+
+    fn join_path_entries(entries: &[PathBuf]) -> String {
+        std::env::join_paths(entries)
+            .expect("join path entries")
+            .into_string()
+            .expect("path entries should be utf8")
+    }
 
     #[test]
     fn consumes_wrapped_json_line_across_multiple_chunks() {
@@ -1627,6 +1762,106 @@ mod tests {
     #[test]
     fn shell_quote_preserves_spaces() {
         assert_eq!(shell_quote("/path/with space"), "'/path/with space'");
+    }
+
+    #[test]
+    fn env_shebang_interpreter_detects_env_launcher() {
+        let dir = unique_test_dir("acp-env-shebang");
+        let launcher = dir.join("codex-acp");
+        write_executable(&launcher, "#!/usr/bin/env node\n");
+
+        assert_eq!(env_shebang_interpreter(&launcher).as_deref(), Some("node"));
+
+        std::fs::remove_dir_all(dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn guarded_path_keeps_snapshot_when_interpreter_is_already_available() {
+        let dir = unique_test_dir("acp-guarded-path-present");
+        let project_bin = dir.join("project-bin");
+        let agent_bin = dir.join("agent-bin");
+        let launcher = agent_bin.join("codex-acp");
+        write_executable(&project_bin.join("node"), "#!/bin/sh\n");
+        write_executable(&agent_bin.join("node"), "#!/bin/sh\n");
+        write_executable(&launcher, "#!/usr/bin/env node\n");
+
+        let snapshot_path = join_path_entries(&[project_bin.clone(), PathBuf::from("/usr/bin")]);
+
+        assert_eq!(
+            guarded_path_for_agent_binary(&launcher, &snapshot_path),
+            None,
+            "agent bin dir must not be inserted ahead of a snapshot PATH that already provides node"
+        );
+
+        std::fs::remove_dir_all(dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn guarded_path_prepends_private_agent_dir_when_interpreter_is_missing() {
+        let dir = unique_test_dir("acp-guarded-path-missing");
+        let snapshot_bin = dir.join("snapshot-bin");
+        let agent_bin = dir.join("agent-bin");
+        let launcher = agent_bin.join("claude-agent-acp");
+        std::fs::create_dir_all(&snapshot_bin).expect("create snapshot bin");
+        write_executable(&agent_bin.join("node"), "#!/bin/sh\n");
+        write_executable(&launcher, "#!/usr/bin/env node\n");
+
+        let snapshot_path = join_path_entries(std::slice::from_ref(&snapshot_bin));
+        let updated = guarded_path_for_agent_binary(&launcher, &snapshot_path)
+            .expect("missing interpreter should add agent bin dir");
+        let entries: Vec<PathBuf> = std::env::split_paths(&updated).collect();
+
+        assert_eq!(entries, vec![agent_bin, snapshot_bin]);
+
+        std::fs::remove_dir_all(dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn broad_toolchain_dirs_are_appended_not_prepended() {
+        let hermit_bin = PathBuf::from("/repo/bin");
+        let existing_path = join_path_entries(std::slice::from_ref(&hermit_bin));
+        let updated =
+            path_with_inserted_agent_bin_dir(&existing_path, Path::new("/opt/homebrew/bin"))
+                .expect("broad dir should still be added as a fallback");
+        let entries: Vec<PathBuf> = std::env::split_paths(&updated).collect();
+
+        assert!(is_broad_toolchain_dir(Path::new("/opt/homebrew/bin")));
+        assert_eq!(
+            entries,
+            vec![hermit_bin, PathBuf::from("/opt/homebrew/bin")]
+        );
+    }
+
+    #[test]
+    fn shell_exec_line_guards_interpreter_before_mutating_path() {
+        let dir = unique_test_dir("acp-shell-guard");
+        let agent_bin = dir.join("agent-bin");
+        let launcher = agent_bin.join("amp-acp");
+        write_executable(&agent_bin.join("node"), "#!/bin/sh\n");
+        write_executable(&launcher, "#!/usr/bin/env node\n");
+
+        let line = shell_exec_line(&launcher, &[String::from("--stdio")]);
+
+        assert!(
+            line.starts_with(
+                "command -v 'node' >/dev/null 2>&1 || { if [ -n \"$PATH\" ]; then PATH='"
+            ),
+            "shell fallback should check the initialized PATH before adding the agent dir: {line}"
+        );
+        assert!(
+            line.contains(":\"$PATH\"; else PATH='"),
+            "private agent dir should be prepended only inside the missing-interpreter guard: {line}"
+        );
+        assert!(
+            line.contains("; fi; export PATH; }; exec '"),
+            "shell fallback should export the guarded PATH before exec: {line}"
+        );
+        assert!(
+            line.ends_with("' '--stdio'\n"),
+            "exec should preserve the binary and args after the guard: {line}"
+        );
+
+        std::fs::remove_dir_all(dir).expect("cleanup test dir");
     }
 
     #[test]

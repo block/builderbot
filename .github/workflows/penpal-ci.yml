@@ -8,6 +8,7 @@ on:
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
       - "package.json"
+      - "rust-toolchain.toml"
       - ".github/workflows/penpal-ci.yml"
   push:
     branches: [main]
@@ -16,6 +17,7 @@ on:
       - "pnpm-lock.yaml"
       - "pnpm-workspace.yaml"
       - "package.json"
+      - "rust-toolchain.toml"
       - ".github/workflows/penpal-ci.yml"
   workflow_dispatch:
 

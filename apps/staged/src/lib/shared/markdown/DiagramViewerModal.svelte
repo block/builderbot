@@ -6,6 +6,7 @@
   import * as Dialog from '$lib/components/ui/dialog';
   import { Button } from '$lib/components/ui/button';
   import { viewport } from '../../shared/viewport.svelte';
+  import { createDiagramZoomController, type DiagramZoomController } from './diagramZoom';
 
   interface Props {
     open: boolean;
@@ -20,18 +21,40 @@
   const ZOOM_STEP = 1.25;
 
   let viewportEl: HTMLDivElement;
+  let zoomController: DiagramZoomController | null = null;
   let scale = $state(1);
   let offsetX = $state(0);
   let offsetY = $state(0);
   let dragging = $state(false);
-  let activePointerId = $state<number | null>(null);
-  let lastPointerX = 0;
-  let lastPointerY = 0;
 
   let transformStyle = $derived(
     `transform: matrix(${scale}, 0, 0, ${scale}, ${offsetX}, ${offsetY});`
   );
   let resetKey = $derived(`${open}\0${svgMarkup ?? ''}`);
+  let hasCustomTransform = $derived(scale !== 1 || offsetX !== 0 || offsetY !== 0);
+
+  $effect(() => {
+    if (!viewportEl) return;
+
+    zoomController = createDiagramZoomController(viewportEl, {
+      minScale: MIN_SCALE,
+      maxScale: MAX_SCALE,
+      isEnabled: () => svgMarkup !== null,
+      onTransform: (transform) => {
+        scale = transform.scale;
+        offsetX = transform.offsetX;
+        offsetY = transform.offsetY;
+      },
+      onDraggingChange: (isDragging) => {
+        dragging = isDragging;
+      },
+    });
+
+    return () => {
+      zoomController?.destroy();
+      zoomController = null;
+    };
+  });
 
   $effect(() => {
     resetKey;
@@ -39,82 +62,18 @@
   });
 
   function resetView() {
-    if (activePointerId !== null && viewportEl?.hasPointerCapture(activePointerId)) {
-      viewportEl.releasePointerCapture(activePointerId);
+    if (zoomController) {
+      zoomController.reset();
+    } else {
+      scale = 1;
+      offsetX = 0;
+      offsetY = 0;
+      dragging = false;
     }
-    scale = 1;
-    offsetX = 0;
-    offsetY = 0;
-    dragging = false;
-    activePointerId = null;
-  }
-
-  function clampScale(value: number): number {
-    return Math.min(MAX_SCALE, Math.max(MIN_SCALE, value));
   }
 
   function zoomBy(multiplier: number) {
-    const rect = viewportEl?.getBoundingClientRect();
-    if (!rect) {
-      scale = clampScale(scale * multiplier);
-      return;
-    }
-
-    zoomAt(multiplier, rect.left + rect.width / 2, rect.top + rect.height / 2);
-  }
-
-  function zoomAt(multiplier: number, clientX: number, clientY: number) {
-    const currentScale = scale;
-    const nextScale = clampScale(currentScale * multiplier);
-    if (nextScale === currentScale) return;
-
-    const rect = viewportEl?.getBoundingClientRect();
-    if (!rect) {
-      scale = nextScale;
-      return;
-    }
-
-    const pointerX = clientX - rect.left - rect.width / 2;
-    const pointerY = clientY - rect.top - rect.height / 2;
-
-    offsetX = pointerX - ((pointerX - offsetX) / currentScale) * nextScale;
-    offsetY = pointerY - ((pointerY - offsetY) / currentScale) * nextScale;
-    scale = nextScale;
-  }
-
-  function handleWheel(event: WheelEvent) {
-    if (!svgMarkup) return;
-    event.preventDefault();
-    zoomAt(event.deltaY > 0 ? 1 / ZOOM_STEP : ZOOM_STEP, event.clientX, event.clientY);
-  }
-
-  function handlePointerDown(event: PointerEvent) {
-    if (event.button !== 0 || !svgMarkup) return;
-    event.preventDefault();
-    dragging = true;
-    activePointerId = event.pointerId;
-    lastPointerX = event.clientX;
-    lastPointerY = event.clientY;
-    viewportEl?.setPointerCapture(event.pointerId);
-  }
-
-  function handlePointerMove(event: PointerEvent) {
-    if (!dragging || activePointerId !== event.pointerId) return;
-    event.preventDefault();
-
-    offsetX += event.clientX - lastPointerX;
-    offsetY += event.clientY - lastPointerY;
-    lastPointerX = event.clientX;
-    lastPointerY = event.clientY;
-  }
-
-  function finishPointerPan(event: PointerEvent) {
-    if (activePointerId !== event.pointerId) return;
-    if (viewportEl?.hasPointerCapture(event.pointerId)) {
-      viewportEl.releasePointerCapture(event.pointerId);
-    }
-    dragging = false;
-    activePointerId = null;
+    zoomController?.zoomBy(multiplier);
   }
 
   function closeViewer() {
@@ -125,7 +84,7 @@
 
 <Dialog.Root {open} onOpenChange={(v) => !v && closeViewer()}>
   <Dialog.Content
-    class="h-screen max-h-none w-screen max-w-none rounded-none border-0 bg-background p-0 gap-0 overflow-hidden flex flex-col"
+    class="h-screen max-h-none w-screen max-w-none sm:max-w-none rounded-none border-0 bg-background p-0 gap-0 overflow-hidden flex flex-col"
     showCloseButton={false}
     onOpenAutoFocus={(e) => e.preventDefault()}
   >
@@ -154,7 +113,7 @@
           size="icon-sm"
           title="Reset zoom"
           aria-label="Reset zoom"
-          disabled={!svgMarkup || (scale === 1 && offsetX === 0 && offsetY === 0)}
+          disabled={!svgMarkup || !hasCustomTransform}
           onclick={resetView}
           class="size-8 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
         >
@@ -184,17 +143,7 @@
       </div>
     </Dialog.Header>
 
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="viewer-stage"
-      class:dragging
-      bind:this={viewportEl}
-      onwheel={handleWheel}
-      onpointerdown={handlePointerDown}
-      onpointermove={handlePointerMove}
-      onpointerup={finishPointerPan}
-      onpointercancel={finishPointerPan}
-    >
+    <div class="viewer-stage" class:dragging bind:this={viewportEl}>
       {#if svgMarkup}
         <div class="diagram-surface" style={transformStyle}>
           {@html svgMarkup}
@@ -234,7 +183,6 @@
 
   .diagram-surface {
     transform-origin: center center;
-    will-change: transform;
   }
 
   .diagram-surface :global(svg) {

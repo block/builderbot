@@ -437,6 +437,35 @@ pub fn start_session(
         let result = local.block_on(&rt, async {
             let driver = driver.with_extra_env(config.extra_env.clone());
 
+            // For local sessions, hand the agent the captured
+            // interactive-login-shell env snapshot for its working directory
+            // (Hermit-activated, so hermit-first PATH). This is the *same*
+            // cached snapshot pipeline steps and git ops draw from via
+            // `shell_env_cache()`, so the agent — and every per-command shell
+            // it spawns — resolves the same toolchain instead of whatever
+            // (possibly Homebrew-first) environment Staged happened to inherit.
+            // Without it the driver falls back to spawning `$SHELL -ils` and
+            // exec'ing the agent, whose ordering has proven unreliable.
+            // Remote/workspace sessions proxy through `sq blox acp` and don't
+            // execute locally, so they keep the fallback. A capture failure is
+            // non-fatal: log it and let the driver fall back.
+            let driver = if config.workspace_name.is_none() {
+                match shell_env_cache().get(&config.working_dir).await {
+                    Ok(snapshot) => driver.with_env_snapshot(snapshot.vars().to_vec()),
+                    Err(e) => {
+                        log::warn!(
+                            "Session {}: failed to capture shell env snapshot for {} \
+                             (falling back to interactive-login-shell spawn): {e}",
+                            config.session_id,
+                            config.working_dir.display()
+                        );
+                        driver
+                    }
+                }
+            } else {
+                driver
+            };
+
             // Accumulate every *required* MCP server into a single vec and
             // attach them in one with_mcp_servers call below. with_mcp_servers
             // replaces the driver's server list, so calling it per-block would

@@ -147,6 +147,18 @@ pub struct AcpDriver {
     is_remote: bool,
     /// Extra environment variables to pass to the agent process.
     extra_env: Vec<(String, String)>,
+    /// Captured interactive-login-shell environment for local sessions.
+    ///
+    /// When set, the agent binary is spawned *directly* with this environment
+    /// (env-cleared first, then these vars applied — the same Hermit-activated
+    /// snapshot the caller's `ShellEnvCache` hands pipeline steps and git ops)
+    /// instead of launching an interactive `$SHELL -ils` and piping `exec
+    /// <binary>` to it. This keeps the agent, its per-command shells, pipeline
+    /// steps, and git ops all drawing from one env so their resolved
+    /// toolchains can't diverge, and skips the per-session interactive-shell
+    /// spawn. `None` (remote sessions, or when the caller couldn't capture a
+    /// snapshot) falls back to the `$SHELL -ils` + `exec` spawn.
+    env_snapshot: Option<Vec<(String, String)>>,
     /// MCP servers to inject into the session via NewSessionRequest.
     /// These are *required*: if the agent doesn't support a server's transport,
     /// the session fails.
@@ -175,6 +187,7 @@ impl AcpDriver {
                 agent_label: agent.label,
                 is_remote: false,
                 extra_env: Vec::new(),
+                env_snapshot: None,
                 mcp_servers: Vec::new(),
                 remote_working_dir: None,
             })
@@ -190,6 +203,7 @@ impl AcpDriver {
                 agent_label: agent.label,
                 is_remote: false,
                 extra_env: Vec::new(),
+                env_snapshot: None,
                 mcp_servers: Vec::new(),
                 remote_working_dir: None,
             })
@@ -214,6 +228,7 @@ impl AcpDriver {
             agent_label: "Blox".to_string(),
             is_remote: true,
             extra_env: Vec::new(),
+            env_snapshot: None,
             mcp_servers: Vec::new(),
             remote_working_dir: None,
         })
@@ -222,6 +237,20 @@ impl AcpDriver {
     /// Set extra environment variables to pass to the agent process.
     pub fn with_extra_env(mut self, vars: Vec<(String, String)>) -> Self {
         self.extra_env = vars;
+        self
+    }
+
+    /// Set the captured interactive-login-shell environment for a local session.
+    ///
+    /// `vars` is a fully-captured env snapshot (e.g. from the caller's
+    /// `ShellEnvCache`, the same one pipeline steps and git ops draw from).
+    /// When provided, [`AgentDriver::run`] spawns the agent binary directly
+    /// with this environment instead of launching an interactive `$SHELL -ils`
+    /// and `exec`-ing the binary — so the agent and its per-command shells
+    /// resolve the same Hermit-activated toolchain as everything else, without
+    /// paying the per-session shell-spawn cost. Ignored for remote sessions.
+    pub fn with_env_snapshot(mut self, vars: Vec<(String, String)>) -> Self {
+        self.env_snapshot = Some(vars);
         self
     }
 
@@ -282,18 +311,32 @@ impl AgentDriver for AcpDriver {
             );
         }
 
-        // For local sessions we need Hermit (and similar directory-based shell
-        // hooks) to activate before the agent binary runs. We match the
-        // approach used by the actions executor: spawn an interactive login
+        // Local sessions need Hermit (and similar directory-based shell hooks)
+        // to have activated before the agent binary runs, so the agent — and
+        // every per-command shell it later spawns — resolves the same
+        // toolchain as pipeline steps and git ops.
+        //
+        // The reliable way to get that is to apply a captured
+        // interactive-login-shell env snapshot (`env_snapshot`, produced by the
+        // caller's `ShellEnvCache` — the very snapshot pipeline steps and git
+        // ops use) directly to the agent binary. That starting env is the
+        // single determinant for everything the agent runs, so a Hermit-first
+        // snapshot propagates into its per-command shells too. It also skips
+        // the per-session shell spawn entirely.
+        //
+        // When no snapshot is supplied (remote sessions, or a capture failure
+        // upstream) we fall back to the older dance: spawn an interactive login
         // shell with `-s` (stdin mode) in the working directory with a clean
         // environment. The shell initialises fully (`.zshrc` installs hooks),
         // `precmd` fires in the working directory (activating Hermit), then we
         // write an `exec <binary>` command to stdin. `exec` replaces the shell
         // with the agent binary so all subsequent stdin/stdout traffic is the
-        // JSON-RPC protocol.
-        let is_local_shell = !self.is_remote;
+        // JSON-RPC protocol. This path is fragile (it depends on `precmd`
+        // firing inside an attached interactive shell), which is exactly why
+        // the snapshot path is preferred when available.
+        let use_shell_spawn = !self.is_remote && self.env_snapshot.is_none();
 
-        let mut cmd = if is_local_shell {
+        let mut cmd = if use_shell_spawn {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
             let mut c = Command::new(&shell);
             c.current_dir(&spawn_working_dir) // start in project dir so precmd sees hermit config
@@ -308,6 +351,37 @@ impl AgentDriver for AcpDriver {
         } else {
             let mut c = Command::new(&self.binary_path);
             c.args(&self.acp_args).current_dir(&spawn_working_dir);
+            if let Some(ref snapshot) = self.env_snapshot {
+                // Local session with a captured env: start the agent from the
+                // Hermit-activated snapshot. env_clear first so nothing from
+                // Staged's own (possibly Homebrew-first) environment leaks in,
+                // then apply the captured vars — mirroring `ShellEnv::apply_to`.
+                c.env_clear();
+                let mut snapshot_path: Option<String> = None;
+                for (k, v) in snapshot {
+                    if k == "PATH" {
+                        snapshot_path = Some(v.clone());
+                    }
+                    c.env(k, v);
+                }
+                // Prepend the agent binary's own directory to PATH, the same
+                // robustness the shell path's `exec env PATH=<bin_dir>:$PATH`
+                // provided. Many agents (e.g. `claude-agent-acp`) are
+                // `#!/usr/bin/env node` scripts whose interpreter ships beside
+                // the binary; if the captured PATH doesn't expose a compatible
+                // `node`, the shebang fails with `env: node: No such file or
+                // directory` and the agent dies before responding. Pinning the
+                // binary's dir keeps the bundled interpreter findable while
+                // leaving the Hermit-first ordering of the rest intact.
+                if let Some(bin_dir) = self.binary_path.parent() {
+                    let bin_dir = bin_dir.to_string_lossy();
+                    let new_path = match snapshot_path {
+                        Some(existing) if !existing.is_empty() => format!("{bin_dir}:{existing}"),
+                        _ => bin_dir.into_owned(),
+                    };
+                    c.env("PATH", new_path);
+                }
+            }
             c
         };
 
@@ -331,8 +405,10 @@ impl AgentDriver for AcpDriver {
             #[cfg(unix)]
             cmd.process_group(0);
         }
-        // For local shells extra_env is set on the clean environment; for
-        // remote spawns it augments the inherited environment.
+        // extra_env is applied last so per-session overrides always win: over
+        // the shell's clean environment (shell-spawn path), over the captured
+        // snapshot (local direct-spawn path), and over the inherited
+        // environment (remote spawns).
         for (k, v) in &self.extra_env {
             cmd.env(k, v);
         }
@@ -366,12 +442,14 @@ impl AgentDriver for AcpDriver {
             .take()
             .ok_or_else(|| "Failed to get stdin".to_string())?;
 
-        // For local shells, write the exec command to stdin. By the time the
-        // shell reads from stdin, init is complete and `precmd` has fired in
-        // the working directory (activating Hermit). `exec` replaces the shell
-        // with the agent binary — from this point on, stdin belongs to the
-        // agent's JSON-RPC transport.
-        if is_local_shell {
+        // For the shell-spawn fallback, write the exec command to stdin. By the
+        // time the shell reads from stdin, init is complete and `precmd` has
+        // fired in the working directory (activating Hermit). `exec` replaces
+        // the shell with the agent binary — from this point on, stdin belongs
+        // to the agent's JSON-RPC transport. When a snapshot was applied the
+        // agent binary is already the child process, so there is nothing to
+        // exec.
+        if use_shell_spawn {
             let quoted_binary = shell_quote(&self.binary_path.to_string_lossy());
             let quoted_args = self
                 .acp_args
@@ -423,9 +501,11 @@ impl AgentDriver for AcpDriver {
             });
             Box::new(normalized_stdout_reader)
         } else {
-            // Local shell init (.zshrc, plugin banners, Hermit activation) may
-            // write to stdout before `exec` replaces the shell. Filter out any
-            // non-JSON lines so they don't reach the JSON-RPC parser.
+            // On the shell-spawn fallback, shell init (.zshrc, plugin banners,
+            // Hermit activation) may write to stdout before `exec` replaces the
+            // shell. Filter out any non-JSON lines so they don't reach the
+            // JSON-RPC parser. On the direct-spawn (snapshot) path there is no
+            // shell banner, so this is a harmless passthrough.
             let (normalized_stdout_writer, normalized_stdout_reader) = tokio::io::duplex(64 * 1024);
             tokio::task::spawn_local(async move {
                 if let Err(error) =

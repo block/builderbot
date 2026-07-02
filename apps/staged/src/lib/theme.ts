@@ -265,6 +265,34 @@ const CONTRAST_OFFSET = 0.0135;
 // mid-gray. Dark themes are unaffected (scale = 1).
 const LIGHT_CHROME_CONTRAST_SCALE = 0.85;
 
+const DARK_PIKCHR_PALETTE: Theme['diagram'] = {
+  canvasBg: '#f2edf8',
+  pikchrInk: '#241a2f',
+  pikchrSurface: '#fffaff',
+  pikchrMuted: '#74677f',
+  pikchrRed: '#e76f82',
+  pikchrGreen: '#58bd7a',
+  pikchrBlue: '#68a5e8',
+  pikchrYellow: '#e6c45f',
+  pikchrOrange: '#e49557',
+  pikchrPurple: '#b28af0',
+  pikchrCyan: '#58c9d8',
+};
+
+const LIGHT_PIKCHR_PALETTE: Theme['diagram'] = {
+  canvasBg: '#fbf8ff',
+  pikchrInk: '#24292e',
+  pikchrSurface: '#ffffff',
+  pikchrMuted: '#6e7781',
+  pikchrRed: '#d85f72',
+  pikchrGreen: '#459f67',
+  pikchrBlue: '#5b91d2',
+  pikchrYellow: '#c99d31',
+  pikchrOrange: '#cf7b42',
+  pikchrPurple: '#9670d9',
+  pikchrCyan: '#3da9b7',
+};
+
 /**
  * Calculate target luminance difference using logFloor algorithm.
  * This provides gentle scaling that works across all theme luminances,
@@ -391,10 +419,7 @@ export function createAdaptiveTheme(
 
   // Border that's visible but not harsh
   const borderBase = mix(primaryBg, syntaxFg, isDark ? 0.15 : 0.12);
-  const diagramCanvasBg = isDark
-    ? mix(primaryBg, syntaxFg, 0.035)
-    : mix(primaryBg, syntaxFg, 0.015);
-  const diagramSurface = isDark ? mix(primaryBg, syntaxFg, 0.08) : mix(primaryBg, syntaxFg, 0.035);
+  const pikchrPalette = isDark ? DARK_PIKCHR_PALETTE : LIGHT_PIKCHR_PALETTE;
 
   return {
     isDark,
@@ -487,19 +512,7 @@ export function createAdaptiveTheme(
       selection: overlay(syntaxFg, isDark ? 0.08 : 0.1),
     },
 
-    diagram: {
-      canvasBg: diagramCanvasBg,
-      pikchrInk: syntaxFg,
-      pikchrSurface: diagramSurface,
-      pikchrMuted: syntaxComment,
-      pikchrRed: accentRed,
-      pikchrGreen: accentGreen,
-      pikchrBlue: accentPrimary,
-      pikchrYellow: accentOrange,
-      pikchrOrange: accentOrange,
-      pikchrPurple: accentPurple,
-      pikchrCyan: accentCyan,
-    },
+    diagram: pikchrPalette,
 
     scrollbar: {
       thumb: borderBase,

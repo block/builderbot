@@ -16,11 +16,11 @@ describe('createAdaptiveTheme', () => {
     expect(vars['--pikchr-ink']).toBe('#241a2f');
     expect(vars['--pikchr-surface']).toBe('#fffaff');
     expect(vars['--pikchr-muted']).toBe('#74677f');
-    expect(vars['--pikchr-red']).toBe('#e97d8f');
-    expect(vars['--pikchr-green']).toBe('#69c487');
-    expect(vars['--pikchr-blue']).toBe('#77aeea');
-    expect(vars['--pikchr-yellow']).toBe('#e9ca6f');
-    expect(vars['--pikchr-orange']).toBe('#e7a068');
+    expect(vars['--pikchr-red']).toBe('#ec91a0');
+    expect(vars['--pikchr-green']).toBe('#80cd99');
+    expect(vars['--pikchr-blue']).toBe('#8bbaed');
+    expect(vars['--pikchr-yellow']).toBe('#ecd285');
+    expect(vars['--pikchr-orange']).toBe('#ebae7f');
     expect(vars['--pikchr-yellow']).not.toBe(vars['--pikchr-orange']);
   });
 
@@ -36,8 +36,8 @@ describe('createAdaptiveTheme', () => {
     expect(vars['--diagram-canvas-bg']).toBe('#fbf8ff');
     expect(vars['--pikchr-surface']).toBe('#ffffff');
     expect(vars['--pikchr-ink']).toBe('#24292e');
-    expect(vars['--pikchr-blue']).toBe('#6b9cd7');
-    expect(vars['--pikchr-orange']).toBe('#d48855');
+    expect(vars['--pikchr-blue']).toBe('#81abdd');
+    expect(vars['--pikchr-orange']).toBe('#da9a6f');
     expect(vars['--pikchr-yellow']).not.toBe(vars['--pikchr-orange']);
   });
 });

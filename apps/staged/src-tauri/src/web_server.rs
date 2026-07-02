@@ -2222,6 +2222,70 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             .map_err(|e| format!("Timeline task failed: {e}"))??;
             Ok(serde_json::to_value(timeline).unwrap())
         }
+        "refresh_branch_git_state" => {
+            let store = get_store(store_mutex)?;
+            let branch_id: String = arg(&args, "branchId")?;
+            let force: Option<bool> = opt_arg(&args, "force")?;
+            let app = app_handle.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::timeline::refresh_branch_git_state_impl(&app, &store, &branch_id, force)
+            })
+            .await
+            .map_err(|e| format!("Git state refresh task failed: {e}"))??;
+            Ok(Value::Null)
+        }
+        "list_parent_branch_commits" => {
+            let store = get_store(store_mutex)?;
+            let branch_id: String = arg(&args, "branchId")?;
+            let commits = tauri::async_runtime::spawn_blocking(move || {
+                crate::timeline::list_parent_branch_commits_impl(&store, &branch_id)
+            })
+            .await
+            .map_err(|e| format!("List parent branch commits task failed: {e}"))??;
+            Ok(serde_json::to_value(commits).unwrap())
+        }
+        "pull_branch_ff_only" => {
+            let store = get_store(store_mutex)?;
+            let branch_id: String = arg(&args, "branchId")?;
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::timeline::pull_branch_ff_only_impl(&store, &branch_id)
+            })
+            .await
+            .map_err(|e| format!("Pull task failed: {e}"))??;
+            Ok(Value::Null)
+        }
+        "reset_branch_to_remote" => {
+            let store = get_store(store_mutex)?;
+            let branch_id: String = arg(&args, "branchId")?;
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::timeline::reset_branch_to_remote_impl(&store, &branch_id)
+            })
+            .await
+            .map_err(|e| format!("Reset task failed: {e}"))??;
+            Ok(Value::Null)
+        }
+        "get_worktree_changes_preview" => {
+            let store = get_store(store_mutex)?;
+            let branch_id: String = arg(&args, "branchId")?;
+            let preview = tauri::async_runtime::spawn_blocking(move || {
+                crate::timeline::get_worktree_changes_preview_impl(&store, &branch_id)
+            })
+            .await
+            .map_err(|e| format!("Worktree preview task failed: {e}"))??;
+            Ok(serde_json::to_value(preview).unwrap())
+        }
+        "discard_worktree_changes" => {
+            let store = get_store(store_mutex)?;
+            let branch_id: String = arg(&args, "branchId")?;
+            let expected_preview: Option<crate::timeline::WorktreeChangesPreview> =
+                opt_arg(&args, "expectedPreview")?;
+            tauri::async_runtime::spawn_blocking(move || {
+                crate::timeline::discard_worktree_changes_impl(&store, &branch_id, expected_preview)
+            })
+            .await
+            .map_err(|e| format!("Discard task failed: {e}"))??;
+            Ok(Value::Null)
+        }
 
         // =====================================================================
         // Notes
@@ -2655,6 +2719,15 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(messages).unwrap())
         }
+        "count_assistant_messages_after" => {
+            let store = get_store(store_mutex)?;
+            let session_id: String = arg(&args, "sessionId")?;
+            let after_timestamp: i64 = arg(&args, "afterTimestamp")?;
+            let count = store
+                .count_assistant_messages_after(&session_id, after_timestamp)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(count).unwrap())
+        }
         "start_session" => {
             let store = get_store(store_mutex)?;
             let prompt: String = arg(&args, "prompt")?;
@@ -2872,6 +2945,25 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             )?;
 
             Ok(Value::Null)
+        }
+        "build_note_followup_message" => {
+            let store = get_store(store_mutex)?;
+            let session_id: String = arg(&args, "sessionId")?;
+            let branch_id: Option<String> = opt_arg(&args, "branchId")?;
+            let has_parsed_note: bool = arg(&args, "hasParsedNote")?;
+            let app = app_handle.clone();
+            let message = tauri::async_runtime::spawn_blocking(move || {
+                session_commands::build_note_followup_message_impl(
+                    &store,
+                    &app,
+                    &session_id,
+                    branch_id.as_deref(),
+                    has_parsed_note,
+                )
+            })
+            .await
+            .map_err(|e| format!("Failed to build note follow-up message: {e}"))??;
+            Ok(serde_json::to_value(message).unwrap())
         }
         "start_branch_session" | "start_or_queue_branch_session" => {
             let store = get_store(store_mutex)?;

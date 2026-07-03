@@ -8,6 +8,8 @@
 //! Checks not listed here (or with no matching source) skip the latest-version
 //! probe.
 
+use std::path::Path;
+
 use crate::types::InstallSource;
 
 /// How to fetch the "latest available" version for a package.
@@ -238,9 +240,91 @@ pub(crate) fn lookup_package_id(
     None
 }
 
+/// Pick the package id and latest-version source for a resolved binary.
+///
+/// Most entries are static. Claude Code's Homebrew casks are the exception:
+/// both `claude-code` and `claude-code@latest` expose the same `claude`
+/// command, so the command name alone cannot distinguish the installed cask
+/// channel. When the resolved binary points into Homebrew's Caskroom, preserve
+/// the owning Claude cask token, but only for the known allowlisted tokens.
+pub(crate) fn lookup_package_id_for_binary(
+    check_id: &str,
+    source: InstallSource,
+    role: Role,
+    binary_path: Option<&Path>,
+) -> Option<(String, LatestSource)> {
+    if let Some(package_id) = path_package_id_override(check_id, source.clone(), role, binary_path)
+    {
+        return Some((package_id.to_string(), LatestSource::Brew));
+    }
+
+    lookup_package_id(check_id, source, role)
+        .map(|(package_id, latest)| (package_id.to_string(), latest))
+}
+
+fn path_package_id_override(
+    check_id: &str,
+    source: InstallSource,
+    role: Role,
+    binary_path: Option<&Path>,
+) -> Option<&'static str> {
+    if check_id != "ai-agent-claude" || source != InstallSource::Brew || role != Role::Main {
+        return None;
+    }
+
+    let binary_path = binary_path?;
+    claude_code_cask_token_from_path(binary_path)
+}
+
+fn claude_code_cask_token_from_path(path: &Path) -> Option<&'static str> {
+    if let Ok(canonical) = path.canonicalize() {
+        if let Some(token) = claude_code_cask_token_from_caskroom_path(&canonical) {
+            return Some(token);
+        }
+    }
+
+    claude_code_cask_token_from_caskroom_path(path)
+}
+
+fn claude_code_cask_token_from_caskroom_path(path: &Path) -> Option<&'static str> {
+    let mut components = path.components().filter_map(|c| c.as_os_str().to_str());
+    while let Some(component) = components.next() {
+        if !component.eq_ignore_ascii_case("Caskroom") {
+            continue;
+        }
+
+        return allowed_claude_code_cask_token(components.next()?);
+    }
+
+    None
+}
+
+fn allowed_claude_code_cask_token(token: &str) -> Option<&'static str> {
+    match token {
+        "claude-code" => Some("claude-code"),
+        "claude-code@latest" => Some("claude-code@latest"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "doctor-package-ids-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     #[test]
     fn lookup_matches_source_with_any_role() {
@@ -301,6 +385,60 @@ mod tests {
         assert_eq!(
             lookup_package_id("ai-agent-claude", InstallSource::Brew, Role::Main),
             Some(("claude-code", LatestSource::Brew)),
+        );
+    }
+
+    #[test]
+    fn claude_main_brew_preserves_latest_cask_token_from_caskroom_path() {
+        let path = Path::new("/opt/homebrew/Caskroom/claude-code@latest/2.1.153/claude");
+
+        assert_eq!(
+            lookup_package_id_for_binary(
+                "ai-agent-claude",
+                InstallSource::Brew,
+                Role::Main,
+                Some(path),
+            ),
+            Some(("claude-code@latest".to_string(), LatestSource::Brew)),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_main_brew_preserves_latest_cask_token_through_bin_symlink() {
+        let root = scratch_dir("claude-cask-symlink");
+        let target = root.join("Caskroom/claude-code@latest/2.1.153/claude");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        fs::write(&target, "#!/bin/sh\n").unwrap();
+        fs::create_dir_all(root.join("bin")).unwrap();
+        let link = root.join("bin/claude");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert_eq!(
+            lookup_package_id_for_binary(
+                "ai-agent-claude",
+                InstallSource::Brew,
+                Role::Main,
+                Some(&link),
+            ),
+            Some(("claude-code@latest".to_string(), LatestSource::Brew)),
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn claude_main_brew_ignores_unallowlisted_caskroom_token() {
+        let path = Path::new("/opt/homebrew/Caskroom/not-claude/1.0.0/claude");
+
+        assert_eq!(
+            lookup_package_id_for_binary(
+                "ai-agent-claude",
+                InstallSource::Brew,
+                Role::Main,
+                Some(path),
+            ),
+            Some(("claude-code".to_string(), LatestSource::Brew)),
         );
     }
 

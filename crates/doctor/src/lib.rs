@@ -18,7 +18,7 @@ pub use environment::DoctorEnv;
 pub use types::{AgentVersionInfo, CheckStatus, DoctorCheck, DoctorReport, FixType};
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use agents::{check_single_ai_agent, derive_update_command, lookup_fix_command, AI_AGENT_CHECKS};
@@ -30,7 +30,7 @@ use freshness::{
     fetch_version_info, is_self_updating, load_cache, save_cache, select_installed_probe,
     FetchVersionInfoOptions,
 };
-use package_ids::{lookup_package_id, LatestSource, Role};
+use package_ids::{lookup_package_id_for_binary, LatestSource, Role};
 use resolve::resolve_binary_with_diagnostics;
 use types::{InstallSource, ResolvedBinary};
 
@@ -379,11 +379,12 @@ fn resolve_package(
     check_id: &str,
     source: Option<&InstallSource>,
     role: Role,
+    binary_path: Option<&Path>,
 ) -> (Option<String>, Option<LatestSource>) {
     source
         .cloned()
-        .and_then(|src| lookup_package_id(check_id, src, role))
-        .map(|(pkg, latest)| (Some(pkg.to_string()), Some(latest)))
+        .and_then(|src| lookup_package_id_for_binary(check_id, src, role, binary_path))
+        .map(|(pkg, latest)| (Some(pkg), Some(latest)))
         .unwrap_or((None, None))
 }
 
@@ -489,24 +490,34 @@ async fn populate_freshness(
         let is_agent = check.main.is_some() || check.bridge.is_some();
         if is_agent {
             if let (Some(readout), Some(path)) = (&check.main, check.path.as_deref()) {
-                let (package_id, latest_source) =
-                    resolve_package(&check.id, readout.install_source.as_ref(), Role::Main);
+                let path = PathBuf::from(path);
+                let (package_id, latest_source) = resolve_package(
+                    &check.id,
+                    readout.install_source.as_ref(),
+                    Role::Main,
+                    Some(&path),
+                );
                 targets.push(FreshnessTarget {
                     id: check.id.clone(),
                     slot: ReadoutSlot::Main,
-                    path: PathBuf::from(path),
+                    path,
                     latest_source,
                     package_id,
                     install_source: readout.install_source.clone(),
                 });
             }
             if let (Some(readout), Some(path)) = (&check.bridge, check.bridge_path.as_deref()) {
-                let (package_id, latest_source) =
-                    resolve_package(&check.id, readout.install_source.as_ref(), Role::Bridge);
+                let path = PathBuf::from(path);
+                let (package_id, latest_source) = resolve_package(
+                    &check.id,
+                    readout.install_source.as_ref(),
+                    Role::Bridge,
+                    Some(&path),
+                );
                 targets.push(FreshnessTarget {
                     id: check.id.clone(),
                     slot: ReadoutSlot::Bridge,
-                    path: PathBuf::from(path),
+                    path,
                     latest_source,
                     package_id,
                     install_source: readout.install_source.clone(),
@@ -517,12 +528,17 @@ async fn populate_freshness(
             // install_source the check carries — see check_single_ai_agent).
             let path_str = check.bridge_path.as_deref().or(check.path.as_deref());
             let Some(path_str) = path_str else { continue };
-            let (package_id, latest_source) =
-                resolve_package(&check.id, check.install_source.as_ref(), Role::Any);
+            let path = PathBuf::from(path_str);
+            let (package_id, latest_source) = resolve_package(
+                &check.id,
+                check.install_source.as_ref(),
+                Role::Any,
+                Some(&path),
+            );
             targets.push(FreshnessTarget {
                 id: check.id.clone(),
                 slot: ReadoutSlot::Flat,
-                path: PathBuf::from(path_str),
+                path,
                 latest_source,
                 package_id,
                 install_source: check.install_source.clone(),
@@ -1292,6 +1308,33 @@ mod tests {
         assert_eq!(
             readout.update_command.as_deref(),
             Some("brew upgrade claude-code"),
+        );
+        assert_eq!(readout.update_fix_type, Some(FixType::UpdateMain));
+    }
+
+    /// The Homebrew latest-channel cask should keep its token all the way
+    /// through to the generated update command.
+    #[tokio::test]
+    async fn apply_freshness_brew_main_emits_claude_code_latest_update_command() {
+        let mut readout = AgentVersionInfo {
+            install_source: Some(InstallSource::Brew),
+            ..AgentVersionInfo::default()
+        };
+        let info = freshness::VersionInfo {
+            installed: Some("2.1.152".into()),
+            latest: Some("2.1.153".into()),
+            update_available: Some(true),
+            command_timeouts: Vec::new(),
+        };
+        apply_freshness(
+            &mut readout,
+            &info,
+            ReadoutSlot::Main,
+            Some("claude-code@latest"),
+        );
+        assert_eq!(
+            readout.update_command.as_deref(),
+            Some("brew upgrade claude-code@latest"),
         );
         assert_eq!(readout.update_fix_type, Some(FixType::UpdateMain));
     }

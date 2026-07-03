@@ -11,12 +11,15 @@
   import { navigation, popDetailRoute } from './navigation.svelte';
   import { topBar } from './topBarState.svelte';
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
+  import { getTrafficLightSpacerWidth, watchWindowChrome } from '../../shared/windowChrome.svelte';
   import { Button } from '$lib/components/ui/button';
 
   onMount(() => {
     const stopWatchingViewport = watchViewport();
+    const stopWatchingWindowChrome = watchWindowChrome();
     return () => {
       stopWatchingViewport();
+      stopWatchingWindowChrome();
     };
   });
 
@@ -33,10 +36,15 @@
   let hasTitle = $derived(
     !!topBar.title || !!topBar.subtitle || !!topBar.leading || !!topBar.badges
   );
+  let trafficLightSpacerWidth = $derived(getTrafficLightSpacerWidth(viewport.isMobile));
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="top-bar" onpointerdown={startDrag}>
+<div
+  class="top-bar"
+  style={`--traffic-light-spacer-width: ${trafficLightSpacerWidth}px`}
+  onpointerdown={startDrag}
+>
   <div class="traffic-light-spacer"></div>
   <div class="left-actions">
     {#if navigation.canGoBack}
@@ -112,7 +120,7 @@
   }
 
   .traffic-light-spacer {
-    width: 70px;
+    width: var(--traffic-light-spacer-width);
     flex-shrink: 0;
     align-self: stretch;
   }
@@ -214,11 +222,6 @@
     .top-bar {
       padding: 6px 8px;
     }
-
-    .traffic-light-spacer {
-      width: 58px;
-    }
-
     .title-content {
       max-width: min(46vw, 420px);
     }

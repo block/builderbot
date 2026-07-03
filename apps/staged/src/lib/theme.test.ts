@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { createAdaptiveTheme, themeToVarMap } from './theme';
 
 describe('createAdaptiveTheme', () => {
-  it('exposes a soft themed Pikchr palette for dark chrome', () => {
+  it('exposes a white Pikchr canvas with a soft themed palette for dark chrome', () => {
     const vars = themeToVarMap(
       createAdaptiveTheme('#27212e', '#ffffff', '#91889b', {
         added: '#3fb950',
@@ -12,7 +12,7 @@ describe('createAdaptiveTheme', () => {
       })
     );
 
-    expect(vars['--diagram-canvas-bg']).toBe('#f2edf8');
+    expect(vars['--diagram-canvas-bg']).toBe('#ffffff');
     expect(vars['--pikchr-ink']).toBe('#241a2f');
     expect(vars['--pikchr-surface']).toBe('#fffaff');
     expect(vars['--pikchr-muted']).toBe('#74677f');
@@ -24,7 +24,7 @@ describe('createAdaptiveTheme', () => {
     expect(vars['--pikchr-yellow']).not.toBe(vars['--pikchr-orange']);
   });
 
-  it('uses a quiet light Pikchr palette for light chrome', () => {
+  it('uses a white Pikchr canvas with a quiet light palette for light chrome', () => {
     const vars = themeToVarMap(
       createAdaptiveTheme('#ffffff', '#24292e', '#6e7781', {
         added: '#28a745',
@@ -33,7 +33,7 @@ describe('createAdaptiveTheme', () => {
       })
     );
 
-    expect(vars['--diagram-canvas-bg']).toBe('#fbf8ff');
+    expect(vars['--diagram-canvas-bg']).toBe('#ffffff');
     expect(vars['--pikchr-surface']).toBe('#ffffff');
     expect(vars['--pikchr-ink']).toBe('#24292e');
     expect(vars['--pikchr-blue']).toBe('#81abdd');

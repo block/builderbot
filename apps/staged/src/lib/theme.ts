@@ -266,7 +266,7 @@ const CONTRAST_OFFSET = 0.0135;
 const LIGHT_CHROME_CONTRAST_SCALE = 0.85;
 
 const DARK_PIKCHR_PALETTE: Theme['diagram'] = {
-  canvasBg: '#f2edf8',
+  canvasBg: '#ffffff',
   pikchrInk: '#241a2f',
   pikchrSurface: '#fffaff',
   pikchrMuted: '#74677f',
@@ -280,7 +280,7 @@ const DARK_PIKCHR_PALETTE: Theme['diagram'] = {
 };
 
 const LIGHT_PIKCHR_PALETTE: Theme['diagram'] = {
-  canvasBg: '#fbf8ff',
+  canvasBg: '#ffffff',
   pikchrInk: '#24292e',
   pikchrSurface: '#ffffff',
   pikchrMuted: '#6e7781',

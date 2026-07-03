@@ -6,18 +6,36 @@ use std::process::Command;
 use crate::command::{
     format_duration, run_command_with_timeout, CommandError, CommandTimeout, DEFAULT_PROBE_TIMEOUT,
 };
+use crate::environment::{apply_doctor_env, DoctorEnv};
 
 use super::types::{InstallSource, ResolvedBinary};
 
 /// Resolve a binary by trying login shell path lookup, common install paths,
 /// then npm global install dirs.
 pub fn resolve_binary(cmd: &str) -> ResolvedBinary {
-    resolve_binary_with_diagnostics(cmd).0
+    resolve_binary_with_diagnostics(cmd, None).0
 }
 
-pub(crate) fn resolve_binary_with_diagnostics(cmd: &str) -> (ResolvedBinary, Vec<CommandTimeout>) {
+/// Resolve a binary using a caller-provided environment snapshot.
+pub fn resolve_binary_with_env(cmd: &str, env: &DoctorEnv) -> ResolvedBinary {
+    resolve_binary_with_diagnostics(cmd, Some(env)).0
+}
+
+pub(crate) fn resolve_binary_with_diagnostics(
+    cmd: &str,
+    env: Option<&DoctorEnv>,
+) -> (ResolvedBinary, Vec<CommandTimeout>) {
     let mut lines = vec![format!("resolve '{cmd}':")];
     let mut timeouts = Vec::new();
+
+    if let Some(path_value) = env.and_then(|env| env.get("PATH")) {
+        lines.push("  strategy 0 — caller environment PATH:".to_string());
+        if let Some(path) = resolve_from_path(cmd, path_value) {
+            lines.push(format!("    PATH => {} (resolved)", path.display()));
+            return resolved_binary(path, &lines, timeouts, env);
+        }
+        lines.push("    PATH => not found".to_string());
+    }
 
     // Strategy 1: Login shell path lookup (primary)
     lines.push("  strategy 1 — login shell path lookup:".to_string());
@@ -25,6 +43,7 @@ pub(crate) fn resolve_binary_with_diagnostics(cmd: &str) -> (ResolvedBinary, Vec
         let display_command = format!("{shell} -l -c '{lookup_cmd}'");
         let mut command = Command::new(shell);
         command.args(["-l", "-c", &lookup_cmd]);
+        apply_doctor_env(&mut command, env);
         match run_command_with_timeout(command, &display_command, DEFAULT_PROBE_TIMEOUT) {
             Ok(output) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -43,7 +62,7 @@ pub(crate) fn resolve_binary_with_diagnostics(cmd: &str) -> (ResolvedBinary, Vec
                         "    {shell} -l -c '{lookup_cmd}' => {} (resolved)",
                         path.display()
                     ));
-                    return resolved_binary(path.clone(), &lines, timeouts);
+                    return resolved_binary(path.clone(), &lines, timeouts, env);
                 }
 
                 if let Some(path) = candidate_paths.first() {
@@ -88,7 +107,7 @@ pub(crate) fn resolve_binary_with_diagnostics(cmd: &str) -> (ResolvedBinary, Vec
         let path = PathBuf::from(dir).join(cmd);
         if is_executable_file(&path) {
             lines.push(format!("    {} => found (resolved)", path.display()));
-            return resolved_binary(path, &lines, timeouts);
+            return resolved_binary(path, &lines, timeouts, env);
         }
         lines.push(format!("    {} => not found", path.display()));
     }
@@ -101,13 +120,15 @@ pub(crate) fn resolve_binary_with_diagnostics(cmd: &str) -> (ResolvedBinary, Vec
     // npm-only installs are "found" by goose-internal's ACP inventory but
     // reported missing by doctor.
     lines.push("  strategy 3 — npm global install dirs:".to_string());
-    let home = std::env::home_dir();
+    let home = env
+        .and_then(|env| env.get("HOME").map(PathBuf::from))
+        .or_else(std::env::home_dir);
     if let Some(home) = home.as_deref() {
         for dir in npm_search_dirs(home) {
             let path = dir.join(cmd);
             if path.exists() {
                 lines.push(format!("    {} => found (resolved)", path.display()));
-                return resolved_binary(path, &lines, timeouts);
+                return resolved_binary(path, &lines, timeouts, env);
             }
             lines.push(format!("    {} => not found", path.display()));
         }
@@ -119,11 +140,11 @@ pub(crate) fn resolve_binary_with_diagnostics(cmd: &str) -> (ResolvedBinary, Vec
     // but costs one subprocess — only invoked when the static probes above
     // didn't find the binary). `npm prefix -g` is the version-stable
     // equivalent of the older `npm bin -g`; the bin dir is `<prefix>/bin`.
-    if let Some(npm_bin_dir) = npm_global_bin_dir(&mut lines, &mut timeouts) {
+    if let Some(npm_bin_dir) = npm_global_bin_dir(&mut lines, &mut timeouts, env) {
         let path = npm_bin_dir.join(cmd);
         if path.exists() {
             lines.push(format!("    {} => found (resolved)", path.display()));
-            return resolved_binary(path, &lines, timeouts);
+            return resolved_binary(path, &lines, timeouts, env);
         }
         lines.push(format!("    {} => not found", path.display()));
     }
@@ -139,12 +160,19 @@ pub(crate) fn resolve_binary_with_diagnostics(cmd: &str) -> (ResolvedBinary, Vec
     )
 }
 
+fn resolve_from_path(cmd: &str, path_value: &str) -> Option<PathBuf> {
+    std::env::split_paths(path_value)
+        .map(|dir| dir.join(cmd))
+        .find(|path| is_executable_file(path))
+}
+
 fn resolved_binary(
     path: PathBuf,
     lines: &[String],
     timeouts: Vec<CommandTimeout>,
+    env: Option<&DoctorEnv>,
 ) -> (ResolvedBinary, Vec<CommandTimeout>) {
-    let install_source = Some(detect_install_source(&path));
+    let install_source = Some(detect_install_source_with_env(&path, env));
     (
         ResolvedBinary {
             path: Some(path),
@@ -153,6 +181,28 @@ fn resolved_binary(
         },
         timeouts,
     )
+}
+
+/// Infer how a binary was installed. First applies path-prefix heuristics (no
+/// subprocess or network probes) covering Brew, Cargo, Mise, Asdf, Npm
+/// (mirroring the dirs in [`npm_search_dirs`]), and the System dirs. When those
+/// fall through to [`InstallSource::Unknown`] for a binary in a user-local bin
+/// dir, a cheap filesystem fingerprint (see [`fingerprint_curl_pipe`]) is
+/// attempted to recognise curl/native installers (Claude native, Cursor, Amp),
+/// using the caller snapshot's `HOME` when one is supplied.
+fn detect_install_source_with_env(path: &Path, env: Option<&DoctorEnv>) -> InstallSource {
+    let home = env
+        .and_then(|env| env.get("HOME").map(PathBuf::from))
+        .or_else(std::env::home_dir);
+    let base = detect_install_source_with_home(path, home.as_deref());
+    if base == InstallSource::Unknown {
+        if let Some(home) = home.as_deref() {
+            if fingerprint_curl_pipe(path, home) {
+                return InstallSource::CurlPipe;
+            }
+        }
+    }
+    base
 }
 
 fn shell_lookup_commands(cmd: &str) -> [(&'static str, String); 2] {
@@ -241,9 +291,11 @@ fn read_subdirs(parent: &Path) -> Vec<PathBuf> {
 fn npm_global_bin_dir(
     lines: &mut Vec<String>,
     timeouts: &mut Vec<CommandTimeout>,
+    env: Option<&DoctorEnv>,
 ) -> Option<PathBuf> {
     let mut command = Command::new("npm");
     command.args(["prefix", "-g"]);
+    apply_doctor_env(&mut command, env);
     let output = match run_command_with_timeout(command, "npm prefix -g", DEFAULT_PROBE_TIMEOUT) {
         Ok(output) => output,
         Err(CommandError::Timeout { command, timeout }) => {
@@ -271,27 +323,6 @@ fn npm_global_bin_dir(
     let bin = PathBuf::from(prefix).join("bin");
     lines.push(format!("    npm prefix -g => {}", bin.display()));
     Some(bin)
-}
-
-/// Infer how a binary was installed. First applies path-prefix heuristics (no
-/// subprocess or network probes) covering Brew, Cargo, Mise, Asdf, Npm
-/// (mirroring the dirs in [`npm_search_dirs`]), and the System dirs. When those
-/// fall through to [`InstallSource::Unknown`] for a binary in a user-local bin
-/// dir, a cheap filesystem fingerprint (see [`fingerprint_curl_pipe`]) is
-/// attempted to recognise curl/native installers (Claude native, Cursor, Amp),
-/// which land in `~/.local/bin`/`~/bin`. [`InstallSource::Unknown`] remains the
-/// honest fallback when no fingerprint matches.
-pub(crate) fn detect_install_source(path: &Path) -> InstallSource {
-    let home = std::env::home_dir();
-    let base = detect_install_source_with_home(path, home.as_deref());
-    if base == InstallSource::Unknown {
-        if let Some(home) = home.as_deref() {
-            if fingerprint_curl_pipe(path, home) {
-                return InstallSource::CurlPipe;
-            }
-        }
-    }
-    base
 }
 
 /// A known curl/native installer footprint for a binary that lands in a
@@ -569,6 +600,38 @@ mod tests {
         }
 
         assert!(!is_executable_file(&dir));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_binary_with_env_finds_binary_only_in_snapshot_path() {
+        let dir =
+            std::env::temp_dir().join(format!("doctor-resolve-env-path-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let bin = dir.join("doctor-env-only-tool");
+        fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let env = crate::DoctorEnv::new(vec![
+            ("PATH".to_string(), dir.to_string_lossy().to_string()),
+            ("HOME".to_string(), dir.to_string_lossy().to_string()),
+        ]);
+        let resolved = resolve_binary_with_env("doctor-env-only-tool", &env);
+
+        assert_eq!(resolved.path.as_deref(), Some(bin.as_path()));
+        assert!(
+            resolved
+                .search_output
+                .contains("strategy 0 — caller environment PATH"),
+            "search trace should mention the snapshot PATH strategy:\n{}",
+            resolved.search_output,
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

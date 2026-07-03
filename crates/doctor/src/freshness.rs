@@ -16,6 +16,7 @@ use serde_json::Value;
 use crate::command::{
     run_command_with_timeout, CommandError, CommandTimeout, FRESHNESS_PROBE_TIMEOUT,
 };
+use crate::environment::{apply_doctor_env, DoctorEnv};
 use crate::package_ids::LatestSource;
 use crate::types::InstallSource;
 
@@ -77,6 +78,13 @@ impl FreshnessCache {
             },
         );
     }
+}
+
+pub(crate) struct FetchVersionInfoOptions<'a> {
+    pub offline: bool,
+    pub npm_registry: Option<&'a str>,
+    pub env: Option<&'a DoctorEnv>,
+    pub cache: Arc<Mutex<FreshnessCache>>,
 }
 
 /// Resolve the on-disk cache file path. Prefers `dirs::cache_dir()`; the
@@ -306,9 +314,14 @@ fn installed_version_from_package_json(
 
 /// Run `<binary> <args>` and parse the first semver-shaped token out of the
 /// combined stdout/stderr. Errors and missing tokens both yield `None`.
-fn installed_version(binary_path: &Path, version_args: &[&str]) -> ProbeResult {
+fn installed_version(
+    binary_path: &Path,
+    version_args: &[&str],
+    env: Option<&DoctorEnv>,
+) -> ProbeResult {
     let mut command = Command::new(binary_path);
     command.args(version_args);
+    apply_doctor_env(&mut command, env);
     let display_command = format!("{} {}", binary_path.display(), version_args.join(" "))
         .trim()
         .to_string();
@@ -348,24 +361,26 @@ fn latest_version(
     source: LatestSource,
     package_id: &str,
     npm_registry: Option<&str>,
+    env: Option<&DoctorEnv>,
 ) -> ProbeResult {
     match source {
-        LatestSource::Brew => latest_brew(package_id),
-        LatestSource::Npm => latest_npm(package_id, npm_registry),
+        LatestSource::Brew => latest_brew(package_id, env),
+        LatestSource::Npm => latest_npm(package_id, npm_registry, env),
         LatestSource::CratesIo => ProbeResult {
             value: latest_crates_io(package_id),
             timeouts: Vec::new(),
         },
         LatestSource::GitHubReleases => ProbeResult {
-            value: latest_github_releases(package_id),
+            value: latest_github_releases(package_id, env),
             timeouts: Vec::new(),
         },
     }
 }
 
-fn latest_brew(package_id: &str) -> ProbeResult {
+fn latest_brew(package_id: &str, env: Option<&DoctorEnv>) -> ProbeResult {
     let mut command = Command::new("brew");
     command.args(["info", "--json=v2", package_id]);
+    apply_doctor_env(&mut command, env);
     let display_command = format!("brew info --json=v2 {package_id}");
     let output = match run_command_with_timeout(command, display_command, FRESHNESS_PROBE_TIMEOUT) {
         Ok(output) => output,
@@ -412,12 +427,17 @@ pub(crate) fn parse_brew_info_v2(bytes: &[u8], _package_id: &str) -> Option<Stri
     None
 }
 
-fn latest_npm(package_id: &str, npm_registry: Option<&str>) -> ProbeResult {
+fn latest_npm(
+    package_id: &str,
+    npm_registry: Option<&str>,
+    env: Option<&DoctorEnv>,
+) -> ProbeResult {
     let mut cmd = Command::new("npm");
     cmd.args(["view", package_id, "version"]);
     if let Some(registry) = npm_registry {
         cmd.args(["--registry", registry]);
     }
+    apply_doctor_env(&mut cmd, env);
     let display_command = if let Some(registry) = npm_registry {
         format!("npm view {package_id} version --registry {registry}")
     } else {
@@ -473,7 +493,7 @@ fn latest_crates_io(package_id: &str) -> Option<String> {
 /// and never returns a hard error. A `GITHUB_TOKEN`/`GH_TOKEN` in the
 /// environment is used as a bearer credential to relax the unauthenticated
 /// rate limit, but is entirely optional.
-fn latest_github_releases(repo: &str) -> Option<String> {
+fn latest_github_releases(repo: &str, env: Option<&DoctorEnv>) -> Option<String> {
     let url = format!("https://api.github.com/repos/{repo}/releases/latest");
     let client = reqwest::blocking::Client::builder()
         // GitHub rejects requests without a User-Agent.
@@ -484,7 +504,7 @@ fn latest_github_releases(repo: &str) -> Option<String> {
     let mut req = client
         .get(&url)
         .header("Accept", "application/vnd.github+json");
-    if let Some(token) = github_token() {
+    if let Some(token) = github_token(env) {
         req = req.bearer_auth(token);
     }
     let resp = req.send().ok()?;
@@ -497,11 +517,17 @@ fn latest_github_releases(repo: &str) -> Option<String> {
 
 /// Read GitHub's optional release-auth token from the environment. Empty values
 /// are treated as absent. Kept separate so the fetcher stays testable.
-fn github_token() -> Option<String> {
-    std::env::var("GITHUB_TOKEN")
-        .ok()
-        .or_else(|| std::env::var("GH_TOKEN").ok())
-        .filter(|s| !s.is_empty())
+fn github_token(env: Option<&DoctorEnv>) -> Option<String> {
+    let token = if let Some(env) = env {
+        env.get("GITHUB_TOKEN")
+            .or_else(|| env.get("GH_TOKEN"))
+            .map(str::to_string)
+    } else {
+        std::env::var("GITHUB_TOKEN")
+            .ok()
+            .or_else(|| std::env::var("GH_TOKEN").ok())
+    };
+    token.filter(|s| !s.is_empty())
 }
 
 /// Pull `tag_name` out of a GitHub `releases/latest` payload, stripping a
@@ -522,14 +548,15 @@ pub(crate) async fn fetch_version_info(
     package_id: Option<&str>,
     binary_path: &Path,
     probe: InstalledProbe<'_>,
-    offline: bool,
-    npm_registry: Option<&str>,
-    cache: Arc<Mutex<FreshnessCache>>,
+    opts: FetchVersionInfoOptions<'_>,
 ) -> VersionInfo {
     let path = binary_path.to_path_buf();
     let probe = probe.to_owned_probe();
     let pkg = package_id.map(|s| s.to_string());
-    let npm_registry = npm_registry.map(|s| s.to_string());
+    let offline = opts.offline;
+    let npm_registry = opts.npm_registry.map(|s| s.to_string());
+    let env = opts.env.cloned();
+    let cache = opts.cache;
 
     let result = tokio::task::spawn_blocking(move || {
         let mut command_timeouts = Vec::new();
@@ -541,6 +568,7 @@ pub(crate) async fn fetch_version_info(
                     let result = installed_version(
                         &path,
                         &args.iter().map(|s| s.as_str()).collect::<Vec<&str>>(),
+                        env.as_ref(),
                     );
                     command_timeouts.extend(result.timeouts);
                     result.value
@@ -563,7 +591,7 @@ pub(crate) async fn fetch_version_info(
             if let Some(v) = cached {
                 Some(v)
             } else {
-                let result = latest_version(source, &pkg, npm_registry.as_deref());
+                let result = latest_version(source, &pkg, npm_registry.as_deref(), env.as_ref());
                 command_timeouts.extend(result.timeouts);
                 if let Some(v) = result.value {
                     if let Ok(mut guard) = cache.lock() {
@@ -749,6 +777,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    fn write_executable(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms).unwrap();
+        }
+    }
+
+    #[test]
+    fn installed_version_uses_env_snapshot() {
+        let root = scratch_dir("installed-env");
+        let tool = root.join("tool");
+        write_executable(
+            &tool,
+            "#!/bin/sh\n\
+             test \"$DOCTOR_FRESHNESS_MARKER\" = yes || exit 42\n\
+             echo 'tool version 1.2.3'\n",
+        );
+        let env = DoctorEnv::new(vec![
+            ("DOCTOR_FRESHNESS_MARKER".to_string(), "yes".to_string()),
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+            ("HOME".to_string(), root.to_string_lossy().to_string()),
+        ]);
+
+        let result = installed_version(&tool, &["--version"], Some(&env));
+
+        assert_eq!(result.value.as_deref(), Some("1.2.3"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn latest_npm_uses_env_snapshot_path_and_vars() {
+        let root = scratch_dir("latest-npm-env");
+        let npm = root.join("npm");
+        write_executable(
+            &npm,
+            "#!/bin/sh\n\
+             test \"$DOCTOR_NPM_MARKER\" = yes || exit 42\n\
+             test \"$1\" = view || exit 43\n\
+             echo '4.5.6'\n",
+        );
+        let env = DoctorEnv::new(vec![
+            ("DOCTOR_NPM_MARKER".to_string(), "yes".to_string()),
+            ("PATH".to_string(), root.to_string_lossy().to_string()),
+            ("HOME".to_string(), root.to_string_lossy().to_string()),
+        ]);
+
+        let result = latest_npm("doctor-package", None, Some(&env));
+
+        assert_eq!(result.value.as_deref(), Some("4.5.6"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

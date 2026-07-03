@@ -11,7 +11,7 @@
 //! Concurrent first-callers for the same working directory are coalesced
 //! through a `watch` channel so only one shell is spawned per (dir, miss).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -26,6 +26,7 @@ use tokio::sync::watch;
 /// cost, short enough that edits to `~/.zshrc` or `bin/activate-hermit` are
 /// picked up within an hour without an explicit invalidation.
 pub const DEFAULT_TTL: Duration = Duration::from_secs(60 * 60);
+const HOME_ENV_CAPTURE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Captured environment from a single interactive login shell invocation.
 #[derive(Clone, Debug)]
@@ -64,6 +65,180 @@ impl ShellEnv {
             cmd.env(k, v);
         }
     }
+}
+
+/// Capture the user's home/global interactive login environment and return a
+/// deterministic snapshot suitable for subprocesses that clear their env.
+///
+/// This sanitizes only the returned clone. The underlying per-directory cache
+/// remains raw so project/git callers keep directory-scoped tool-manager state
+/// for their exact working directory.
+pub async fn home_env_vars_with_extended_path(cache: &ShellEnvCache) -> Vec<(String, String)> {
+    let shell_env = capture_home_interactive_env(cache).await;
+    env_vars_with_extended_path(&shell_env)
+}
+
+pub async fn capture_home_interactive_env(cache: &ShellEnvCache) -> HashMap<String, String> {
+    let Some(home) = home_dir_from_env() else {
+        return HashMap::new();
+    };
+    capture_home_interactive_env_for_dir(cache, &home, HOME_ENV_CAPTURE_TIMEOUT).await
+}
+
+fn home_dir_from_env() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+}
+
+async fn capture_home_interactive_env_for_dir(
+    cache: &ShellEnvCache,
+    home: &Path,
+    timeout_duration: Duration,
+) -> HashMap<String, String> {
+    let mut env = match tokio::time::timeout(timeout_duration, cache.get(home)).await {
+        Ok(Ok(snapshot)) => snapshot.vars().iter().cloned().collect(),
+        Ok(Err(error)) => {
+            log::warn!(
+                "Failed to capture home shell env for {}: {error}",
+                home.display()
+            );
+            HashMap::new()
+        }
+        Err(_) => {
+            log::warn!(
+                "Timed out after {:?} capturing home shell env for {}",
+                timeout_duration,
+                home.display()
+            );
+            HashMap::new()
+        }
+    };
+    sanitize_shell_env(&mut env);
+    env
+}
+
+pub fn sanitize_shell_env(env: &mut HashMap<String, String>) {
+    env.retain(|key, value| !should_remove_shell_env_var(key, value));
+}
+
+fn should_remove_shell_env_var(key: &str, value: &str) -> bool {
+    let upper_key = key.to_ascii_uppercase();
+
+    if upper_key.starts_with("HERMIT_") {
+        return true;
+    }
+
+    if matches!(
+        upper_key.as_str(),
+        "NPM_CONFIG_PREFIX" | "NPM_CONFIG_CACHE" | "COREPACK_HOME"
+    ) {
+        return true;
+    }
+
+    if upper_key == "PATH" {
+        return false;
+    }
+
+    value.contains("/.hermit/") || value.ends_with("/.hermit")
+}
+
+fn push_existing_path(paths: &mut Vec<PathBuf>, path: &str) {
+    paths.extend(std::env::split_paths(path).filter(|p| {
+        !p.to_string_lossy().contains(".hermit") && !p.join("activate-hermit").exists()
+    }));
+}
+
+pub fn build_extended_path_from_path(path: Option<&str>) -> String {
+    let mut paths: Vec<PathBuf> = Vec::new();
+
+    if let Some(path) = path {
+        push_existing_path(&mut paths, path);
+    } else if let Ok(system_path) = std::env::var("PATH") {
+        push_existing_path(&mut paths, &system_path);
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        paths.push(home.join(".amp/bin"));
+        paths.push(home.join(".local/bin"));
+        paths.push(home.join(".npm-global/bin"));
+        paths.push(home.join(".local/share/mise/shims"));
+        paths.push(home.join(".volta/bin"));
+        paths.push(home.join(".asdf/shims"));
+    }
+
+    paths.push(PathBuf::from("/usr/local/bin"));
+
+    #[cfg(target_os = "macos")]
+    {
+        paths.push(PathBuf::from("/opt/homebrew/bin"));
+        paths.push(PathBuf::from("/opt/local/bin"));
+    }
+
+    if cfg!(windows) {
+        if let Some(appdata) = dirs::data_dir() {
+            paths.push(appdata.join("npm"));
+        }
+    }
+
+    if let Some(home) = dirs::home_dir() {
+        let nvm_dir = home.join(".nvm/versions/node");
+        if nvm_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&nvm_dir) {
+                let mut versions: Vec<_> = entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                    .collect();
+                versions.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
+                if let Some(latest) = versions.first() {
+                    paths.push(latest.path().join("bin"));
+                }
+            }
+        }
+
+        let fnm_dir = home.join(".local/share/fnm/node-versions");
+        if fnm_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&fnm_dir) {
+                let mut versions: Vec<_> = entries
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                    .collect();
+                versions.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
+                if let Some(latest) = versions.first() {
+                    paths.push(latest.path().join("installation/bin"));
+                }
+            }
+        }
+    }
+
+    let mut seen = HashSet::new();
+    paths.retain(|p| seen.insert(p.clone()));
+
+    std::env::join_paths(paths)
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string()
+}
+
+/// Build a deterministic environment snapshot with PATH normalized through
+/// [`build_extended_path_from_path`].
+///
+/// If home env capture failed, fall back to the current process environment so
+/// callers that clear child environments still preserve essential variables.
+pub fn env_vars_with_extended_path(shell_env: &HashMap<String, String>) -> Vec<(String, String)> {
+    let mut env = if shell_env.is_empty() {
+        std::env::vars().collect()
+    } else {
+        shell_env.clone()
+    };
+    sanitize_shell_env(&mut env);
+    let extended_path = build_extended_path_from_path(env.get("PATH").map(String::as_str));
+    env.insert("PATH".to_string(), extended_path);
+
+    let mut vars: Vec<_> = env.into_iter().collect();
+    vars.sort_by(|(left, _), (right, _)| left.cmp(right));
+    vars
 }
 
 #[derive(Clone)]
@@ -647,6 +822,129 @@ mod tests {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn sanitize_shell_env_removes_repo_tool_manager_state() {
+        let mut env = HashMap::from([
+            ("HOME".to_string(), "/Users/morganm".to_string()),
+            (
+                "HERMIT_ENV".to_string(),
+                "/Users/morganm/Development/repo".to_string(),
+            ),
+            (
+                "NPM_CONFIG_PREFIX".to_string(),
+                "/Users/morganm/Development/repo/.hermit/node".to_string(),
+            ),
+            (
+                "NPM_CONFIG_CACHE".to_string(),
+                "/Users/morganm/Development/repo/.hermit/cache".to_string(),
+            ),
+            (
+                "COREPACK_HOME".to_string(),
+                "/Users/morganm/Development/repo/.hermit/node".to_string(),
+            ),
+            (
+                "PATH".to_string(),
+                "/Users/morganm/Development/repo/.hermit/bin:/usr/bin".to_string(),
+            ),
+            (
+                "CUSTOM_TOOL_HOME".to_string(),
+                "/Users/morganm/Development/repo/.hermit/custom".to_string(),
+            ),
+        ]);
+
+        sanitize_shell_env(&mut env);
+
+        assert_eq!(env.get("HOME"), Some(&"/Users/morganm".to_string()));
+        assert_eq!(
+            env.get("PATH"),
+            Some(&"/Users/morganm/Development/repo/.hermit/bin:/usr/bin".to_string())
+        );
+        assert!(!env.contains_key("HERMIT_ENV"));
+        assert!(!env.contains_key("NPM_CONFIG_PREFIX"));
+        assert!(!env.contains_key("NPM_CONFIG_CACHE"));
+        assert!(!env.contains_key("COREPACK_HOME"));
+        assert!(!env.contains_key("CUSTOM_TOOL_HOME"));
+    }
+
+    #[test]
+    fn extended_path_starts_with_shell_path_and_filters_hermit_entries() {
+        let path = build_extended_path_from_path(Some(
+            "/shell/bin:/repo/.hermit/bin:/another/bin:/shell/bin",
+        ));
+        let paths: Vec<_> = std::env::split_paths(&path).collect();
+
+        assert_eq!(
+            paths.first().map(|p| p.as_path()),
+            Some(Path::new("/shell/bin"))
+        );
+        assert!(paths.iter().any(|p| p == Path::new("/another/bin")));
+        assert_eq!(
+            paths
+                .iter()
+                .filter(|p| p.as_path() == Path::new("/shell/bin"))
+                .count(),
+            1
+        );
+        assert!(!paths.iter().any(|p| p == Path::new("/repo/.hermit/bin")));
+        assert!(paths.iter().any(|p| p.ends_with(".local/share/mise/shims")));
+        assert!(paths.iter().any(|p| p.ends_with(".amp/bin")));
+        assert!(paths.iter().any(|p| p.ends_with(".volta/bin")));
+        assert!(paths.iter().any(|p| p.ends_with(".asdf/shims")));
+    }
+
+    #[test]
+    fn env_vars_with_extended_path_sanitizes_and_normalizes_path() {
+        let env = HashMap::from([
+            (
+                "PATH".to_string(),
+                "/repo/.hermit/bin:/shell/bin".to_string(),
+            ),
+            ("HERMIT_ENV".to_string(), "/repo".to_string()),
+            ("LANG".to_string(), "en_US.UTF-8".to_string()),
+        ]);
+
+        let vars = env_vars_with_extended_path(&env);
+        let map: HashMap<_, _> = vars.into_iter().collect();
+        let path = map.get("PATH").expect("PATH");
+        let paths: Vec<_> = std::env::split_paths(path).collect();
+
+        assert_eq!(map.get("LANG"), Some(&"en_US.UTF-8".to_string()));
+        assert!(!map.contains_key("HERMIT_ENV"));
+        assert!(paths.iter().any(|p| p == Path::new("/shell/bin")));
+        assert!(!paths.iter().any(|p| p == Path::new("/repo/.hermit/bin")));
+        assert!(paths.iter().any(|p| p.ends_with(".asdf/shims")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn home_interactive_env_sanitizes_clone_but_keeps_raw_cache() {
+        let shell = write_fake_shell(
+            "#!/bin/sh\nPATH='/repo/.hermit/bin:/usr/bin'\nHERMIT_ENV=/repo\nNPM_CONFIG_PREFIX=/repo/.hermit/node\nCUSTOM_VAR=present\nexport PATH HERMIT_ENV NPM_CONFIG_PREFIX CUSTOM_VAR\nexec /bin/sh -s\n",
+        );
+        let cache =
+            ShellEnvCache::with_shell_and_ttl(shell.to_path_buf(), Duration::from_secs(3600));
+        let home = tempfile::tempdir().expect("home");
+
+        let sanitized =
+            capture_home_interactive_env_for_dir(&cache, home.path(), Duration::from_secs(1)).await;
+
+        assert_eq!(sanitized.get("CUSTOM_VAR"), Some(&"present".to_string()));
+        assert!(!sanitized.contains_key("HERMIT_ENV"));
+        assert!(!sanitized.contains_key("NPM_CONFIG_PREFIX"));
+        assert_eq!(
+            sanitized.get("PATH"),
+            Some(&"/repo/.hermit/bin:/usr/bin".to_string())
+        );
+
+        let raw = cache.get(home.path()).await.expect("cached raw env");
+        let raw_map: HashMap<_, _> = raw.vars().iter().cloned().collect();
+        assert_eq!(raw_map.get("HERMIT_ENV"), Some(&"/repo".to_string()));
+        assert_eq!(
+            raw_map.get("PATH"),
+            Some(&"/repo/.hermit/bin:/usr/bin".to_string())
+        );
     }
 
     // ---------------------------------------------------------------------

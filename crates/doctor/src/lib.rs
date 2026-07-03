@@ -7,12 +7,14 @@
 pub mod agents;
 pub mod checks;
 mod command;
+mod environment;
 pub(crate) mod freshness;
 pub(crate) mod package_ids;
 pub mod resolve;
 mod timeout_check;
 pub mod types;
 
+pub use environment::DoctorEnv;
 pub use types::{AgentVersionInfo, CheckStatus, DoctorCheck, DoctorReport, FixType};
 
 use std::collections::{HashMap, HashSet};
@@ -26,6 +28,7 @@ use command::{
 };
 use freshness::{
     fetch_version_info, is_self_updating, load_cache, save_cache, select_installed_probe,
+    FetchVersionInfoOptions,
 };
 use package_ids::{lookup_package_id, LatestSource, Role};
 use resolve::resolve_binary_with_diagnostics;
@@ -72,6 +75,18 @@ pub struct RunChecksOptions {
     /// caller-supplied; the crate bakes in no registry of its own. `None`
     /// (the default) reproduces the original commands exactly.
     pub npm_registry: Option<String>,
+    /// Optional caller-provided environment snapshot. When set, doctor clears
+    /// each child command's environment and applies these variables so binary
+    /// resolution, checks, freshness probes, and fixes all see the same shell
+    /// environment. `None` preserves the previous per-call-site behavior.
+    pub env: Option<DoctorEnv>,
+}
+
+impl RunChecksOptions {
+    pub fn with_env_snapshot(mut self, vars: Vec<(String, String)>) -> Self {
+        self.env = Some(DoctorEnv::new(vars));
+        self
+    }
 }
 
 /// Run all health checks and return the report. Equivalent to
@@ -83,17 +98,27 @@ pub async fn run_checks() -> DoctorReport {
 /// Run all health checks with explicit options. Existing callers that want
 /// the cheap, no-network path should keep using [`run_checks`].
 pub async fn run_checks_with_options(opts: RunChecksOptions) -> DoctorReport {
-    let npm_registry = opts.npm_registry.as_deref();
-    let report = collect_base_report(npm_registry).await;
+    let RunChecksOptions {
+        check_freshness,
+        offline,
+        npm_registry,
+        env,
+    } = opts;
+    let env = env.map(Arc::new);
+    let npm_registry = npm_registry.as_deref();
+    let report = collect_base_report(npm_registry, env.clone()).await;
 
-    if opts.check_freshness {
-        populate_freshness(report, opts.offline, npm_registry).await
+    if check_freshness {
+        populate_freshness(report, offline, npm_registry, env).await
     } else {
         report
     }
 }
 
-async fn collect_base_report(npm_registry: Option<&str>) -> DoctorReport {
+async fn collect_base_report(
+    npm_registry: Option<&str>,
+    env: Option<Arc<DoctorEnv>>,
+) -> DoctorReport {
     let mut binary_names: Vec<&'static str> = vec!["git", "gh", "git-lfs"];
     for info in AI_AGENT_CHECKS {
         for cmd in info.commands {
@@ -111,8 +136,9 @@ async fn collect_base_report(npm_registry: Option<&str>) -> DoctorReport {
     let handles: Vec<_> = binary_names
         .iter()
         .map(|&name| {
+            let env = env.clone();
             tokio::task::spawn_blocking(move || {
-                let (resolved, timeouts) = resolve_binary_with_diagnostics(name);
+                let (resolved, timeouts) = resolve_binary_with_diagnostics(name, env.as_deref());
                 (name, resolved, timeouts)
             })
         })
@@ -158,11 +184,20 @@ async fn collect_base_report(npm_registry: Option<&str>) -> DoctorReport {
     let git_lfs_r = r_git_lfs;
     let git_r3 = r_git;
 
-    let c_git = tokio::task::spawn_blocking(move || check_git(&git_r));
-    let c_gh = tokio::task::spawn_blocking(move || check_gh(&gh_r));
-    let c_gh_auth = tokio::task::spawn_blocking(move || check_gh_auth(&gh_r2));
-    let c_git_lfs = tokio::task::spawn_blocking(move || check_git_lfs(&git_r2, &git_lfs_r));
-    let c_clonefile = tokio::task::spawn_blocking(move || check_clonefile(&git_r3));
+    let c_git_env = env.clone();
+    let c_git = tokio::task::spawn_blocking(move || check_git(&git_r, c_git_env.as_deref()));
+    let c_gh_env = env.clone();
+    let c_gh = tokio::task::spawn_blocking(move || check_gh(&gh_r, c_gh_env.as_deref()));
+    let c_gh_auth_env = env.clone();
+    let c_gh_auth =
+        tokio::task::spawn_blocking(move || check_gh_auth(&gh_r2, c_gh_auth_env.as_deref()));
+    let c_git_lfs_env = env.clone();
+    let c_git_lfs = tokio::task::spawn_blocking(move || {
+        check_git_lfs(&git_r2, &git_lfs_r, c_git_lfs_env.as_deref())
+    });
+    let c_clonefile_env = env.clone();
+    let c_clonefile =
+        tokio::task::spawn_blocking(move || check_clonefile(&git_r3, c_clonefile_env.as_deref()));
 
     let npm_registry_owned = npm_registry.map(|s| s.to_string());
     let agent_handles: Vec<_> = AI_AGENT_CHECKS
@@ -170,6 +205,7 @@ async fn collect_base_report(npm_registry: Option<&str>) -> DoctorReport {
         .map(|info| {
             let found = any_agent_found;
             let registry = npm_registry_owned.clone();
+            let env = env.clone();
             let cmds: Vec<ResolvedBinary> = info
                 .commands
                 .iter()
@@ -182,7 +218,14 @@ async fn collect_base_report(npm_registry: Option<&str>) -> DoctorReport {
                 .collect();
             let main = info.main_command.and_then(|cmd| resolved.get(cmd).cloned());
             tokio::task::spawn_blocking(move || {
-                check_single_ai_agent(info, found, &cmds, main.as_ref(), registry.as_deref())
+                check_single_ai_agent(
+                    info,
+                    found,
+                    &cmds,
+                    main.as_ref(),
+                    registry.as_deref(),
+                    env.as_deref(),
+                )
             })
         })
         .collect();
@@ -436,6 +479,7 @@ async fn populate_freshness(
     mut report: DoctorReport,
     offline: bool,
     npm_registry: Option<&str>,
+    env: Option<Arc<DoctorEnv>>,
 ) -> DoctorReport {
     let cache = Arc::new(Mutex::new(load_cache()));
     let npm_registry = npm_registry.map(|s| s.to_string());
@@ -489,6 +533,7 @@ async fn populate_freshness(
     let futures = targets.into_iter().map(|t| {
         let cache = cache.clone();
         let npm_registry = npm_registry.clone();
+        let env = env.clone();
         async move {
             // npm-distributed bridges don't honor `--version`; read their
             // installed version straight from the owning `package.json`.
@@ -498,9 +543,12 @@ async fn populate_freshness(
                 t.package_id.as_deref(),
                 &t.path,
                 probe,
-                offline,
-                npm_registry.as_deref(),
-                cache,
+                FetchVersionInfoOptions {
+                    offline,
+                    npm_registry: npm_registry.as_deref(),
+                    env: env.as_deref(),
+                    cache,
+                },
             )
             .await;
             ((t.id, t.slot), (info, t.package_id))
@@ -578,6 +626,24 @@ struct FreshnessTarget {
     install_source: Option<InstallSource>,
 }
 
+/// Options for executing a doctor fix command.
+#[derive(Debug, Clone, Default)]
+pub struct ExecuteFixOptions {
+    /// Exact command to run instead of looking up a static check fix.
+    pub command_override: Option<String>,
+    /// Optional npm registry override for npm-backed fix/update commands.
+    pub npm_registry: Option<String>,
+    /// Optional caller-provided environment snapshot for the fix subprocess.
+    pub env: Option<DoctorEnv>,
+}
+
+impl ExecuteFixOptions {
+    pub fn with_env_snapshot(mut self, vars: Vec<(String, String)>) -> Self {
+        self.env = Some(DoctorEnv::new(vars));
+        self
+    }
+}
+
 /// Run a fix command for a doctor check, identified by check ID and fix type.
 ///
 /// The actual shell command is looked up from the static check definitions —
@@ -603,8 +669,26 @@ pub async fn execute_fix_with_options(
     command_override: Option<String>,
     npm_registry: Option<&str>,
 ) -> Result<(), String> {
-    execute_fix_streaming_with_options(check_id, fix_type, command_override, npm_registry, |_| {})
-        .await
+    execute_fix_with_env_options(
+        check_id,
+        fix_type,
+        ExecuteFixOptions {
+            command_override,
+            npm_registry: npm_registry.map(str::to_string),
+            env: None,
+        },
+    )
+    .await
+}
+
+/// Like [`execute_fix_with_options`], but accepts the complete fix execution
+/// options, including a caller-provided environment snapshot.
+pub async fn execute_fix_with_env_options(
+    check_id: String,
+    fix_type: FixType,
+    opts: ExecuteFixOptions,
+) -> Result<(), String> {
+    execute_fix_streaming_with_env_options(check_id, fix_type, opts, |_| {}).await
 }
 
 /// Run a fix command and stream its output line-by-line to `on_line`.
@@ -637,17 +721,41 @@ pub async fn execute_fix_streaming_with_options<F>(
     fix_type: FixType,
     command_override: Option<String>,
     npm_registry: Option<&str>,
+    on_line: F,
+) -> Result<(), String>
+where
+    F: FnMut(&str) + Send + 'static,
+{
+    execute_fix_streaming_with_env_options(
+        check_id,
+        fix_type,
+        ExecuteFixOptions {
+            command_override,
+            npm_registry: npm_registry.map(str::to_string),
+            env: None,
+        },
+        on_line,
+    )
+    .await
+}
+
+/// Like [`execute_fix_streaming_with_options`], but accepts the complete fix
+/// execution options, including a caller-provided environment snapshot.
+pub async fn execute_fix_streaming_with_env_options<F>(
+    check_id: String,
+    fix_type: FixType,
+    opts: ExecuteFixOptions,
     mut on_line: F,
 ) -> Result<(), String>
 where
     F: FnMut(&str) + Send + 'static,
 {
-    let command = match command_override {
+    let command = match opts.command_override {
         Some(cmd) => cmd,
         None => lookup_fix_command(&check_id, &fix_type)
             .ok_or_else(|| format!("Unknown check '{check_id}' or fix type '{fix_type:?}'"))?,
     };
-    let command = agents::apply_npm_registry(&command, npm_registry);
+    let command = agents::apply_npm_registry(&command, opts.npm_registry.as_deref());
 
     // Echo the resolved command as a preamble line so downstream callers (e.g.
     // goose-internal's `run_fix`, which `info!`s every callback line and emits
@@ -659,17 +767,23 @@ where
     // Fixes are intentionally not routed through the bounded probe runner:
     // these are user-triggered install/auth/update actions and can reasonably
     // be interactive or long-running.
-    run_command_streaming(command, on_line).await
+    run_command_streaming(command, opts.env, on_line).await
 }
 
 /// Async wrapper that runs `run_command_streaming_blocking` on the blocking pool.
-pub(crate) async fn run_command_streaming<F>(command: String, on_line: F) -> Result<(), String>
+pub(crate) async fn run_command_streaming<F>(
+    command: String,
+    env: Option<DoctorEnv>,
+    on_line: F,
+) -> Result<(), String>
 where
     F: FnMut(&str) + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || run_command_streaming_blocking(&command, on_line))
-        .await
-        .unwrap_or_else(|e| Err(format!("Task failed: {e}")))
+    tokio::task::spawn_blocking(move || {
+        run_command_streaming_blocking(&command, env.as_ref(), on_line)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {e}")))
 }
 
 enum StreamLine {
@@ -677,35 +791,94 @@ enum StreamLine {
     Stderr(String),
 }
 
-/// Build the login-shell `Command` used by every doctor exec path. Optionally
-/// prepends `path_prefix` directories to the child `PATH` so a binary that's
-/// only findable in the resolved location (e.g. an nvm bin dir) is visible to
-/// the spawned shell even when the parent process was launched with a
-/// restricted `PATH` (the macOS Finder/launchd case). When `path_prefix` is
-/// empty the env layout is byte-identical to the previous implementation, so
-/// existing call sites are unaffected.
-fn build_shell_command(command: &str, path_prefix: &[PathBuf]) -> std::process::Command {
+/// Build the login-shell `Command` used by every doctor exec path. Without a
+/// caller env snapshot, `path_prefix` keeps the legacy behavior of prepending
+/// resolved binary dirs plus conservative fallbacks. With a snapshot, doctor
+/// preserves the snapshot environment and appends missing prefix dirs to its
+/// `PATH` so auth probes can still find resolved binaries without replacing
+/// the caller's environment.
+fn build_shell_command(
+    command: &str,
+    path_prefix: &[PathBuf],
+    env: Option<&DoctorEnv>,
+) -> std::process::Command {
     let (shell, args) = if std::path::Path::new("/bin/zsh").exists() {
         ("/bin/zsh", vec!["-l", "-c", command])
     } else {
         ("/bin/bash", vec!["-l", "-c", command])
     };
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/".to_string());
-    let user = std::env::var("USER").unwrap_or_default();
+    let home = env
+        .and_then(|e| e.get("HOME").map(str::to_string))
+        .or_else(|| std::env::var("HOME").ok())
+        .unwrap_or_else(|| "/".to_string());
+    let user = env
+        .and_then(|e| e.get("USER").map(str::to_string))
+        .or_else(|| std::env::var("USER").ok())
+        .unwrap_or_default();
 
     let mut cmd = std::process::Command::new(shell);
-    cmd.args(&args)
-        .env_clear()
-        .env("HOME", &home)
-        .env("USER", &user)
-        .env("TERM", "xterm-256color")
-        .current_dir(&home);
-    if !path_prefix.is_empty() {
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut path = String::new();
-        for p in path_prefix {
-            let s = p.to_string_lossy().to_string();
-            if !seen.insert(s.clone()) {
+    cmd.args(&args).env_clear();
+
+    if let Some(env) = env {
+        for (key, value) in &env.vars {
+            cmd.env(key, value);
+        }
+        if env.get("HOME").is_none() {
+            cmd.env("HOME", &home);
+        }
+        if env.get("USER").is_none() {
+            cmd.env("USER", &user);
+        }
+        cmd.env("TERM", "xterm-256color").current_dir(&home);
+        if let Some(path) = merged_snapshot_path(env.get("PATH"), path_prefix) {
+            cmd.env("PATH", path);
+        }
+    } else {
+        cmd.env("HOME", &home)
+            .env("USER", &user)
+            .env("TERM", "xterm-256color")
+            .current_dir(&home);
+        if !path_prefix.is_empty() {
+            let path = legacy_prefixed_path(path_prefix);
+            cmd.env("PATH", path);
+        }
+    }
+
+    cmd
+}
+
+fn legacy_prefixed_path(path_prefix: &[PathBuf]) -> String {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut path = String::new();
+    for p in path_prefix {
+        let s = p.to_string_lossy().to_string();
+        if !seen.insert(s.clone()) {
+            continue;
+        }
+        if !path.is_empty() {
+            path.push(':');
+        }
+        path.push_str(&s);
+    }
+    // Conservative fallback ~ what login zsh on macOS sees before
+    // /etc/zprofile augments it. Keeps the rest of the resolved-binary
+    // dir's command graph reachable (e.g. node, npm) without depending on
+    // the parent process's PATH.
+    path.push_str(":/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+    path
+}
+
+fn merged_snapshot_path(snapshot_path: Option<&str>, path_prefix: &[PathBuf]) -> Option<String> {
+    if snapshot_path.is_none() && path_prefix.is_empty() {
+        return None;
+    }
+
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut path = String::new();
+    if let Some(snapshot_path) = snapshot_path {
+        for entry in std::env::split_paths(snapshot_path) {
+            let s = entry.to_string_lossy().to_string();
+            if s.is_empty() || !seen.insert(s.clone()) {
                 continue;
             }
             if !path.is_empty() {
@@ -713,14 +886,18 @@ fn build_shell_command(command: &str, path_prefix: &[PathBuf]) -> std::process::
             }
             path.push_str(&s);
         }
-        // Conservative fallback ~ what login zsh on macOS sees before
-        // /etc/zprofile augments it. Keeps the rest of the resolved-binary
-        // dir's command graph reachable (e.g. node, npm) without depending on
-        // the parent process's PATH.
-        path.push_str(":/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin");
-        cmd.env("PATH", path);
     }
-    cmd
+    for p in path_prefix {
+        let s = p.to_string_lossy().to_string();
+        if s.is_empty() || !seen.insert(s.clone()) {
+            continue;
+        }
+        if !path.is_empty() {
+            path.push(':');
+        }
+        path.push_str(&s);
+    }
+    Some(path)
 }
 
 /// Detailed outcome of running a command. Lets the caller distinguish
@@ -746,14 +923,15 @@ pub(crate) enum ExecOutcome {
     },
 }
 
-/// Run `command` through a login shell, with the caller-supplied `path_prefix`
-/// prepended to the child `PATH`. Returns the detailed exec outcome. No
+/// Run `command` through a login shell, merging the caller-supplied
+/// `path_prefix` into the child `PATH`. Returns the detailed exec outcome. No
 /// streaming — used by the auth probe which wants a single sync result.
-pub(crate) fn execute_command_with_path_prefix(
+pub(crate) fn execute_command_with_path_prefix_with_env(
     command: &str,
     path_prefix: &[PathBuf],
+    env: Option<&DoctorEnv>,
 ) -> ExecOutcome {
-    let cmd = build_shell_command(command, path_prefix);
+    let cmd = build_shell_command(command, path_prefix, env);
     let output = match run_command_with_timeout(cmd, command, DEFAULT_PROBE_TIMEOUT) {
         Ok(output) => output,
         Err(CommandError::Spawn { source, .. } | CommandError::Wait { source, .. }) => {
@@ -779,13 +957,17 @@ pub(crate) fn execute_command_with_path_prefix(
 /// actions and may prompt or run package managers. Stderr lines are also
 /// accumulated so a non-zero exit can surface a useful error message (matching
 /// the non-streaming behavior of the previous `execute_command`).
-fn run_command_streaming_blocking<F>(command: &str, mut on_line: F) -> Result<(), String>
+fn run_command_streaming_blocking<F>(
+    command: &str,
+    env: Option<&DoctorEnv>,
+    mut on_line: F,
+) -> Result<(), String>
 where
     F: FnMut(&str),
 {
     use std::io::{BufRead, BufReader};
 
-    let mut child = build_shell_command(command, &[])
+    let mut child = build_shell_command(command, &[], env)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -853,11 +1035,40 @@ where
 mod tests {
     use super::*;
 
+    use std::path::Path;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     fn timeout(label: &str, command: &str) -> CommandTimeout {
         CommandTimeout::new(label, command, Duration::from_secs(15))
+    }
+
+    fn unique_tmp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "doctor-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_executable(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, contents).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms).unwrap();
+        }
     }
 
     #[test]
@@ -910,6 +1121,7 @@ mod tests {
 
         let result = run_command_streaming(
             "echo doctor-streaming-marker-hello && echo doctor-streaming-marker-world".to_string(),
+            None,
             move |line| {
                 lines_clone.lock().unwrap().push(line.to_string());
             },
@@ -950,7 +1162,7 @@ mod tests {
     #[tokio::test]
     async fn exec_command_not_found_reports_exit_127() {
         let outcome = tokio::task::spawn_blocking(|| {
-            execute_command_with_path_prefix("doctor-nonexistent-xyz-12345", &[])
+            execute_command_with_path_prefix_with_env("doctor-nonexistent-xyz-12345", &[], None)
         })
         .await
         .unwrap();
@@ -991,7 +1203,7 @@ mod tests {
 
         let prefix = vec![tmp.clone()];
         let outcome = tokio::task::spawn_blocking(move || {
-            execute_command_with_path_prefix(script_name, &prefix)
+            execute_command_with_path_prefix_with_env(script_name, &prefix, None)
         })
         .await
         .unwrap();
@@ -1001,6 +1213,37 @@ mod tests {
             other => {
                 panic!("expected Ok with the script reachable via path prefix; got {other:?}",)
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_command_with_path_prefix_merges_env_snapshot() {
+        let tmp = unique_tmp_dir("auth-env-merge");
+        let script_name = "doctor-auth-env-probe";
+        let script = tmp.join(script_name);
+        write_executable(
+            &script,
+            "#!/bin/sh\n\
+             test \"$DOCTOR_AUTH_MARKER\" = yes\n",
+        );
+        let env = DoctorEnv::new(vec![
+            ("DOCTOR_AUTH_MARKER".to_string(), "yes".to_string()),
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+            ("HOME".to_string(), tmp.to_string_lossy().to_string()),
+            ("USER".to_string(), "doctor-test".to_string()),
+        ]);
+        let prefix = vec![tmp.clone()];
+
+        let outcome = tokio::task::spawn_blocking(move || {
+            execute_command_with_path_prefix_with_env(script_name, &prefix, Some(&env))
+        })
+        .await
+        .unwrap();
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        match outcome {
+            ExecOutcome::Ok => {}
+            other => panic!("expected Ok with prefix PATH and env marker merged; got {other:?}"),
         }
     }
 
@@ -1148,6 +1391,55 @@ mod tests {
         assert!(
             captured.iter().any(|l| l == "hello"),
             "subprocess output line should follow the preamble; captured: {captured:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_fix_streaming_with_env_options_uses_snapshot_path() {
+        let tmp = unique_tmp_dir("fix-env-path");
+        let script_name = "doctor-fix-env-probe";
+        let script = tmp.join(script_name);
+        write_executable(
+            &script,
+            "#!/bin/sh\n\
+             test \"$DOCTOR_FIX_MARKER\" = yes || exit 42\n\
+             echo fix-env-ok\n",
+        );
+        let mut path = tmp.to_string_lossy().to_string();
+        if let Ok(existing) = std::env::var("PATH") {
+            path.push(':');
+            path.push_str(&existing);
+        }
+        let env = DoctorEnv::new(vec![
+            ("DOCTOR_FIX_MARKER".to_string(), "yes".to_string()),
+            ("PATH".to_string(), path),
+            ("HOME".to_string(), tmp.to_string_lossy().to_string()),
+            ("USER".to_string(), "doctor-test".to_string()),
+            ("ZDOTDIR".to_string(), tmp.to_string_lossy().to_string()),
+        ]);
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+
+        let result = execute_fix_streaming_with_env_options(
+            "ai-agent-claude".to_string(),
+            FixType::UpdateMain,
+            ExecuteFixOptions {
+                command_override: Some(script_name.to_string()),
+                npm_registry: None,
+                env: Some(env),
+            },
+            move |line| {
+                lines_clone.lock().unwrap().push(line.to_string());
+            },
+        )
+        .await;
+
+        let captured = lines.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(result.is_ok(), "snapshot PATH command failed: {result:?}");
+        assert!(
+            captured.iter().any(|line| line == "fix-env-ok"),
+            "expected command output from snapshot PATH script; captured: {captured:?}",
         );
     }
 

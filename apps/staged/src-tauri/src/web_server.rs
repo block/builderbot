@@ -3579,7 +3579,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         // Doctor
         // =====================================================================
         "run_doctor" => {
-            let report = doctor::run_checks().await;
+            let report = crate::doctor::run_doctor().await;
             Ok(serde_json::to_value(report).unwrap())
         }
         "run_doctor_freshness" => {
@@ -3589,7 +3589,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "run_doctor_fix" => {
             let check_id: String = arg(&args, "checkId")?;
             let fix_type: doctor::FixType = arg(&args, "fixType")?;
-            doctor::execute_fix(check_id, fix_type).await?;
+            crate::doctor::run_doctor_fix(check_id, fix_type).await?;
             Ok(Value::Null)
         }
         "run_doctor_update" => {

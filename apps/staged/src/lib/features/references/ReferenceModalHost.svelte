@@ -157,6 +157,7 @@
     sessionId={entry.sessionId}
     branchId={entry.branchId}
     projectId={entry.projectId}
+    hashtagItems={entry.hashtagItems}
     noteInfo={noteInfoFor(entry)}
     {referenceNav}
     onOpenNote={handleOpenNote}
@@ -171,6 +172,7 @@
     branchId={entry.branchId}
     projectId={entry.projectId}
     repoLabel={entry.repoLabel}
+    hashtagItems={entry.hashtagItems}
     noteInfo={chatNoteInfo(entry)}
     {referenceNav}
     onOpenNote={handleOpenNote}

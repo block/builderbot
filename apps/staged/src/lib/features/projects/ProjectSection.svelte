@@ -587,6 +587,7 @@
     sessionId={openSessionId}
     repoDir={projectDisplayRootCandidates}
     projectId={project.id}
+    {hashtagItems}
     noteInfo={linkedNoteContext(projectNotes.find((n) => n.sessionId === openSessionId))}
     referenceNav={disabledReferenceNav}
     onOpenNote={(note) => {

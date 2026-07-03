@@ -117,6 +117,8 @@
     projectId?: string | null;
     /** Repo label for grouping branch-scoped hashtag suggestions. */
     repoLabel?: Pick<ProjectRepo, 'githubRepo' | 'subpath' | 'headRepo'> | null;
+    /** Precomputed hashtag reference items for the session context. */
+    hashtagItems?: HashtagItem[];
     /** When set, shows a button to open the associated note. */
     noteInfo?: LinkedNoteContext | null;
     onOpenNote?: (note: LinkedNoteContext) => void;
@@ -137,6 +139,7 @@
     branchId,
     projectId,
     repoLabel = null,
+    hashtagItems: providedHashtagItems,
     noteInfo,
     onOpenNote,
     referenceNav,
@@ -216,18 +219,26 @@
   // Hashtag reference items
   let hashtagItems = $state<HashtagItem[]>([]);
   $effect(() => {
-    if (branchId) {
-      let stale = false;
-      buildBranchHashtagItems(branchId, projectId ?? null, {
-        repoSlug: repoLabel?.headRepo ?? repoLabel?.githubRepo,
-        repoSubpath: repoLabel?.subpath,
-      }).then((items) => {
-        if (!stale) hashtagItems = items;
-      });
-      return () => {
-        stale = true;
-      };
+    if (providedHashtagItems) {
+      hashtagItems = providedHashtagItems;
+      return;
     }
+
+    if (!branchId) {
+      hashtagItems = [];
+      return;
+    }
+
+    let stale = false;
+    buildBranchHashtagItems(branchId, projectId ?? null, {
+      repoSlug: repoLabel?.headRepo ?? repoLabel?.githubRepo,
+      repoSubpath: repoLabel?.subpath,
+    }).then((items) => {
+      if (!stale) hashtagItems = items;
+    });
+    return () => {
+      stale = true;
+    };
   });
 
   // Image attachment state (available when project context is provided; branchId is optional)

@@ -34,7 +34,9 @@ describe('renderMarkdown', () => {
       pikchrRenderer: safePikchrRenderer,
     });
 
-    expect(html).toContain('<figure class="markdown-diagram markdown-diagram-pikchr">');
+    expect(html).toContain(
+      '<figure class="markdown-diagram markdown-diagram-pikchr" role="button" tabindex="0" aria-label="Open diagram full screen" title="Open diagram full screen">'
+    );
     expect(html).not.toContain('markdown-diagram-caption');
     expect(html).toContain(
       '<div class="markdown-diagram-preview markdown-diagram-preview-pikchr">'

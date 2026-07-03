@@ -91,6 +91,7 @@ export interface Theme {
   // Diagram previews
   diagram: {
     canvasBg: string; // Canvas behind rendered diagrams
+    stageBg: string; // Base fullscreen viewer background outside the canvas
     pikchrInk: string; // Default Pikchr stroke/text color
     pikchrSurface: string; // Themed replacement for white Pikchr fills
     pikchrMuted: string; // Themed replacement for gray/silver Pikchr colors
@@ -266,7 +267,8 @@ const CONTRAST_OFFSET = 0.0135;
 const LIGHT_CHROME_CONTRAST_SCALE = 0.85;
 
 const DARK_PIKCHR_PALETTE: Theme['diagram'] = {
-  canvasBg: '#f2edf8',
+  canvasBg: '#ffffff',
+  stageBg: '#f2edf8',
   pikchrInk: '#241a2f',
   pikchrSurface: '#fffaff',
   pikchrMuted: '#74677f',
@@ -280,7 +282,8 @@ const DARK_PIKCHR_PALETTE: Theme['diagram'] = {
 };
 
 const LIGHT_PIKCHR_PALETTE: Theme['diagram'] = {
-  canvasBg: '#fbf8ff',
+  canvasBg: '#ffffff',
+  stageBg: '#fbf8ff',
   pikchrInk: '#24292e',
   pikchrSurface: '#ffffff',
   pikchrMuted: '#6e7781',
@@ -607,6 +610,7 @@ export function themeToVarMap(t: Theme): Record<string, string> {
     '--ui-selection': t.ui.selection,
 
     '--diagram-canvas-bg': t.diagram.canvasBg,
+    '--diagram-stage-bg': t.diagram.stageBg,
     '--pikchr-ink': t.diagram.pikchrInk,
     '--pikchr-surface': t.diagram.pikchrSurface,
     '--pikchr-muted': t.diagram.pikchrMuted,

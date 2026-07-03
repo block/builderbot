@@ -45,7 +45,7 @@ function withDiagramSourceClass(renderedSource: string, format: MarkdownDiagramF
 
 function renderPikchrPreview(renderedSvg: string): string {
   return [
-    '<figure class="markdown-diagram markdown-diagram-pikchr">',
+    '<figure class="markdown-diagram markdown-diagram-pikchr" role="button" tabindex="0" aria-label="Open diagram full screen" title="Open diagram full screen">',
     '<div class="markdown-diagram-preview markdown-diagram-preview-pikchr">',
     renderedSvg,
     '</div>',

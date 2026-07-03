@@ -93,6 +93,11 @@
   import { viewport } from '../../shared/viewport.svelte';
   import '../../shared/markdown/diagramStyles.css';
   import { extractMarkdownDiagramFences } from '../../shared/markdown/diagramFormats';
+  import DiagramViewerModal from '../../shared/markdown/DiagramViewerModal.svelte';
+  import {
+    getMarkdownDiagramSvgMarkup,
+    isMarkdownDiagramActivationKey,
+  } from '../../shared/markdown/diagramViewer';
   import { renderMarkdown as renderSharedMarkdown } from '../../shared/markdown/renderMarkdown';
   import { loadPikchrRenderer, type PikchrRenderer } from '../../shared/markdown/pikchrRendering';
   import { getNoteFollowupLabel, type LinkedNoteContext } from './noteFreshness';
@@ -172,6 +177,7 @@
   let pikchrRendererLoadKey = $derived(`${sessionId}\0${assistantMarkdownContent}`);
   let pikchrRendererLoadFailedKey = $state<string | null>(null);
   let pikchrRendererLoadFailed = $derived(pikchrRendererLoadFailedKey === pikchrRendererLoadKey);
+  let diagramViewerSvg = $state<string | null>(null);
 
   const SLIDE_DURATION = 150;
 
@@ -780,6 +786,26 @@
     return renderSharedMarkdown(content, { pikchrRenderer });
   }
 
+  function openDiagramViewerFromEvent(event: MouseEvent | KeyboardEvent): boolean {
+    const svgMarkup = getMarkdownDiagramSvgMarkup(event.target);
+    if (!svgMarkup) return false;
+
+    event.preventDefault();
+    event.stopPropagation();
+    diagramViewerSvg = svgMarkup;
+    return true;
+  }
+
+  function handleMessagesClick(event: MouseEvent) {
+    if (openDiagramViewerFromEvent(event)) return;
+    handleExternalLinkClick(event);
+  }
+
+  function handleMessagesKeydown(event: KeyboardEvent) {
+    if (!isMarkdownDiagramActivationKey(event)) return;
+    openDiagramViewerFromEvent(event);
+  }
+
   /** Memoized wrapper around the shared renderHashtagTokens. */
   const hashtagTokenCache = new Map<string, string>();
   let prevHashtagItems: HashtagItem[] | null = null;
@@ -1155,7 +1181,8 @@
       class="modal-content"
       bind:this={messagesEl}
       onscroll={handleScroll}
-      onclick={handleExternalLinkClick}
+      onclick={handleMessagesClick}
+      onkeydown={handleMessagesKeydown}
     >
       {#if session?.pipeline}
         <PipelineSteps {sessionId} pipeline={session.pipeline} />
@@ -1614,6 +1641,12 @@
     </div>
   </Dialog.Content>
 </Dialog.Root>
+
+<DiagramViewerModal
+  open={diagramViewerSvg !== null}
+  svgMarkup={diagramViewerSvg}
+  onClose={() => (diagramViewerSvg = null)}
+/>
 
 <style>
   /* ======================================================================= */

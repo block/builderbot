@@ -251,7 +251,9 @@ impl AcpDriver {
     /// resolve the same Hermit-activated toolchain as everything else, without
     /// paying the per-session shell-spawn cost. Ignored for remote sessions.
     pub fn with_env_snapshot(mut self, vars: Vec<(String, String)>) -> Self {
-        self.env_snapshot = Some(vars);
+        if !self.is_remote {
+            self.env_snapshot = Some(vars);
+        }
         self
     }
 
@@ -382,9 +384,13 @@ fn shell_path_guard_for_agent_binary(binary_path: &Path) -> Option<String> {
     let quoted_interpreter = shell_quote(&interpreter);
     let quoted_bin_dir = shell_quote(&bin_dir.to_string_lossy());
     let path_assignment = if is_broad_toolchain_dir(bin_dir) {
-        format!("if [ -n \"$PATH\" ]; then PATH=\"$PATH\":{quoted_bin_dir}; else PATH={quoted_bin_dir}; fi")
+        format!(
+            "if [ -n \"$PATH\" ]; then PATH=\"$PATH\":{quoted_bin_dir}; else PATH={quoted_bin_dir}; fi"
+        )
     } else {
-        format!("if [ -n \"$PATH\" ]; then PATH={quoted_bin_dir}:\"$PATH\"; else PATH={quoted_bin_dir}; fi")
+        format!(
+            "if [ -n \"$PATH\" ]; then PATH={quoted_bin_dir}:\"$PATH\"; else PATH={quoted_bin_dir}; fi"
+        )
     };
 
     Some(format!(
@@ -476,30 +482,32 @@ impl AgentDriver for AcpDriver {
         } else {
             let mut c = Command::new(&self.binary_path);
             c.args(&self.acp_args).current_dir(&spawn_working_dir);
-            if let Some(ref snapshot) = self.env_snapshot {
-                // Local session with a captured env: start the agent from the
-                // Hermit-activated snapshot. env_clear first so nothing from
-                // Staged's own (possibly Homebrew-first) environment leaks in,
-                // then apply the captured vars — mirroring `ShellEnv::apply_to`.
-                c.env_clear();
-                let mut snapshot_path: Option<String> = None;
-                for (k, v) in snapshot {
-                    if k == "PATH" {
-                        snapshot_path = Some(v.clone());
+            if !self.is_remote {
+                if let Some(ref snapshot) = self.env_snapshot {
+                    // Local session with a captured env: start the agent from the
+                    // Hermit-activated snapshot. env_clear first so nothing from
+                    // Staged's own (possibly Homebrew-first) environment leaks in,
+                    // then apply the captured vars — mirroring `ShellEnv::apply_to`.
+                    c.env_clear();
+                    let mut snapshot_path: Option<String> = None;
+                    for (k, v) in snapshot {
+                        if k == "PATH" {
+                            snapshot_path = Some(v.clone());
+                        }
+                        c.env(k, v);
                     }
-                    c.env(k, v);
-                }
-                // Preserve the captured PATH unless an env-shebang launcher
-                // (for example `#!/usr/bin/env node`) cannot find its
-                // interpreter from the snapshot. Only then add the agent bin
-                // dir as a targeted fallback; broad toolchain dirs are appended
-                // so they cannot jump ahead of Hermit or other project-managed
-                // paths.
-                let existing_path = snapshot_path.as_deref().unwrap_or_default();
-                if let Some(new_path) =
-                    guarded_path_for_agent_binary(&self.binary_path, existing_path)
-                {
-                    c.env("PATH", new_path);
+                    // Preserve the captured PATH unless an env-shebang launcher
+                    // (for example `#!/usr/bin/env node`) cannot find its
+                    // interpreter from the snapshot. Only then add the agent bin
+                    // dir as a targeted fallback; broad toolchain dirs are appended
+                    // so they cannot jump ahead of Hermit or other project-managed
+                    // paths.
+                    let existing_path = snapshot_path.as_deref().unwrap_or_default();
+                    if let Some(new_path) =
+                        guarded_path_for_agent_binary(&self.binary_path, existing_path)
+                    {
+                        c.env("PATH", new_path);
+                    }
                 }
             }
             c
@@ -1416,10 +1424,7 @@ async fn setup_acp_session(
 
         return Err(format!(
             "Agent does not support required MCP transports (required: http={}, sse={}; agent: http={}, sse={}). Select a provider that supports MCP over HTTP/SSE.",
-            requires_http,
-            requires_sse,
-            mcp_caps.http,
-            mcp_caps.sse
+            requires_http, requires_sse, mcp_caps.http, mcp_caps.sse
         ));
     }
 
@@ -1600,8 +1605,8 @@ mod tests {
         consume_remote_acp_line, decode_remote_acp_line, env_shebang_interpreter,
         guarded_path_for_agent_binary, is_broad_toolchain_dir, mcp_server_transport_supported,
         path_with_inserted_agent_bin_dir, remote_acp_segments, resolve_spawn_working_dir,
-        sanitize_remote_acp_chunk, shell_exec_line, shell_quote, McpCapabilities, McpServer,
-        RemoteLineOutcome,
+        sanitize_remote_acp_chunk, shell_exec_line, shell_quote, AcpDriver, McpCapabilities,
+        McpServer, RemoteLineOutcome,
     };
     use agent_client_protocol::{McpServerHttp, McpServerSse, McpServerStdio};
     use std::path::{Path, PathBuf};
@@ -1744,6 +1749,39 @@ mod tests {
     fn remote_spawn_dir_uses_existing_working_dir() {
         let existing = std::env::temp_dir();
         assert_eq!(resolve_spawn_working_dir(&existing, true), existing);
+    }
+
+    #[test]
+    fn env_snapshot_is_ignored_for_remote_drivers() {
+        let snapshot = vec![(String::from("PATH"), String::from("/snapshot/bin"))];
+        let local = AcpDriver {
+            binary_path: PathBuf::from("/usr/local/bin/codex-acp"),
+            acp_args: vec![],
+            agent_label: String::from("Codex"),
+            is_remote: false,
+            extra_env: vec![],
+            env_snapshot: None,
+            mcp_servers: vec![],
+            remote_working_dir: None,
+        }
+        .with_env_snapshot(snapshot.clone());
+        let remote = AcpDriver {
+            binary_path: PathBuf::from("/usr/local/bin/sq"),
+            acp_args: vec![String::from("blox"), String::from("acp")],
+            agent_label: String::from("Blox"),
+            is_remote: true,
+            extra_env: vec![],
+            env_snapshot: None,
+            mcp_servers: vec![],
+            remote_working_dir: None,
+        }
+        .with_env_snapshot(snapshot);
+
+        assert!(local.env_snapshot.is_some());
+        assert!(
+            remote.env_snapshot.is_none(),
+            "remote sq proxy launches must keep their inherited environment"
+        );
     }
 
     #[test]

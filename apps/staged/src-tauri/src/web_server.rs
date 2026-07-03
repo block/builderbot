@@ -3608,20 +3608,13 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
 mod tests {
     use std::collections::BTreeSet;
 
-    const INTENTIONALLY_UNSUPPORTED_WEB_COMMANDS: &[&str] = &[];
-
     #[test]
     fn web_dispatch_covers_tauri_commands() {
         let tauri_commands = extract_generate_handler_commands(include_str!("lib.rs"));
         let dispatch_commands = extract_dispatch_commands(include_str!("web_server.rs"));
-        let intentionally_unsupported = INTENTIONALLY_UNSUPPORTED_WEB_COMMANDS
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>();
 
         let missing = tauri_commands
             .difference(&dispatch_commands)
-            .filter(|command| !intentionally_unsupported.contains(command.as_str()))
             .cloned()
             .collect::<Vec<_>>();
 

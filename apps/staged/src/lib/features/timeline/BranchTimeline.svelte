@@ -713,7 +713,7 @@
     if (hashtagItems.length > 0) {
       for (const item of all) {
         if (hasHashtagTokens(item.title)) {
-          item.titleHtml = renderHashtagTokens(item.title, hashtagItems);
+          item.titleHtml = renderHashtagTokens(item.title, hashtagItems, { interactive: false });
         }
       }
     }
@@ -966,7 +966,7 @@
             type={item.type}
             title={item.title}
             titleHtml={hashtagItems.length > 0 && hasHashtagTokens(item.title)
-              ? renderHashtagTokens(item.title, hashtagItems)
+              ? renderHashtagTokens(item.title, hashtagItems, { interactive: false })
               : undefined}
             secondaryMeta={item.sessionId
               ? (liveSessionHints[item.sessionId] ??

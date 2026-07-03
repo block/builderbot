@@ -339,12 +339,21 @@ function findHashtagItemInMap(
   }
 }
 
+type RenderHashtagTokenOptions = {
+  interactive?: boolean;
+};
+
 /**
  * Replace `#type:id` tokens in plain text with inline badge HTML.
  * Plain-text segments are HTML-escaped; badge spans use CSS custom-property
  * colours from `hashtagTypeColors`.
  */
-export function renderHashtagTokens(text: string, items: HashtagItem[]): string {
+export function renderHashtagTokens(
+  text: string,
+  items: HashtagItem[],
+  options: RenderHashtagTokenOptions = {}
+): string {
+  const { interactive = true } = options;
   const itemsByKey = new Map<string, HashtagItem>();
   for (const item of items) {
     itemsByKey.set(`${item.type}:${item.id}`, item);
@@ -372,8 +381,11 @@ export function renderHashtagTokens(text: string, items: HashtagItem[]): string 
         ? id.slice(0, 8) + '…'
         : id;
     const ref = `#${type}:${id}`;
+    const interactionAttributes = interactive
+      ? ` role="button" tabindex="0" data-hashtag-ref="${escapeHtml(ref)}"`
+      : '';
     parts.push(
-      `<span class="hashtag-badge stable-raster stable-raster-glyphs" role="button" tabindex="0" data-hashtag-type="${escapeHtml(targetType)}" data-hashtag-id="${escapeHtml(item?.id ?? id)}" data-hashtag-ref="${escapeHtml(ref)}" style="background: var(${colors.bg}); color: var(${colors.color});">${iconSvg} ${escapeHtml(title)}</span>`
+      `<span class="hashtag-badge stable-raster stable-raster-glyphs"${interactionAttributes} data-hashtag-type="${escapeHtml(targetType)}" data-hashtag-id="${escapeHtml(item?.id ?? id)}" style="background: var(${colors.bg}); color: var(${colors.color});">${iconSvg} ${escapeHtml(title)}</span>`
     );
 
     lastIndex = match.index + match[0].length;

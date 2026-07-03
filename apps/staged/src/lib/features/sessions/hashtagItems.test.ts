@@ -302,6 +302,32 @@ describe('renderHashtagTokens', () => {
     expect(projectNoteHtml).toContain('data-hashtag-ref="#project-note:project-note-1"');
     expect(projectNoteHtml).toContain('data-hashtag-type="project-note"');
   });
+
+  it('can render presentational badges without interaction attributes', () => {
+    const html = renderHashtagTokens(
+      'See #note:note-1',
+      [
+        {
+          type: 'note',
+          id: 'note-1',
+          title: 'Note title',
+          color: '--note-color',
+          bgColor: '--note-bg',
+        },
+      ],
+      { interactive: false }
+    );
+
+    expect(html).toContain('class="hashtag-badge stable-raster stable-raster-glyphs"');
+    expect(html).toContain('Note title');
+    expect(html).toContain('viewBox="0 0 24 24"');
+    expect(html).toContain('style="background: var(--note-bg); color: var(--note-color);"');
+    expect(html).toContain('data-hashtag-type="note"');
+    expect(html).toContain('data-hashtag-id="note-1"');
+    expect(html).not.toContain('role="button"');
+    expect(html).not.toContain('tabindex="0"');
+    expect(html).not.toContain('data-hashtag-ref');
+  });
 });
 
 describe('buildProjectHashtagItems', () => {

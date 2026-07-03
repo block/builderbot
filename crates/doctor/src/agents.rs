@@ -6,12 +6,13 @@ use crate::checks::CLONEFILE_FIX_COMMAND;
 use crate::command::{
     run_command_with_timeout, CommandError, CommandTimeout, DEFAULT_PROBE_TIMEOUT,
 };
+use crate::environment::{apply_doctor_env, DoctorEnv};
 use crate::resolve::format_command_output;
 use crate::timeout_check::{command_timeout_check, TimeoutCheck};
 use crate::types::{
     AgentVersionInfo, AuthStatus, CheckStatus, DoctorCheck, FixType, InstallSource, ResolvedBinary,
 };
-use crate::{execute_command_with_path_prefix, ExecOutcome};
+use crate::ExecOutcome;
 
 /// Metadata for an individual AI agent check.
 pub struct AgentCheckInfo {
@@ -280,6 +281,7 @@ pub fn check_single_ai_agent(
     resolved_cmds: &[ResolvedBinary],
     resolved_main: Option<&ResolvedBinary>,
     npm_registry: Option<&str>,
+    env: Option<&DoctorEnv>,
 ) -> DoctorCheck {
     let header = format!(
         "# Check: {} — verify {} agent is installed",
@@ -308,6 +310,7 @@ pub fn check_single_ai_agent(
         if info.id == "ai-agent-goose" {
             let mut command = std::process::Command::new(path_str);
             command.arg("acp").arg("--help");
+            apply_doctor_env(&mut command, env);
             match run_command_with_timeout(command, "goose acp --help", DEFAULT_PROBE_TIMEOUT) {
                 Ok(output) if output.status.success() => {
                     let raw = format!(
@@ -439,7 +442,11 @@ pub fn check_single_ai_agent(
             let auth_path_prefix = collect_resolved_bin_dirs(resolved_main, resolved_cmds);
 
             let (auth_status, auth_output) = match info.auth_status_command {
-                Some(cmd) => match execute_command_with_path_prefix(cmd, &auth_path_prefix) {
+                Some(cmd) => match crate::execute_command_with_path_prefix_with_env(
+                    cmd,
+                    &auth_path_prefix,
+                    env,
+                ) {
                     ExecOutcome::Ok => (
                         Some(AuthStatus::Authenticated),
                         Some(format!("$ {cmd}\n(exit 0)")),
@@ -666,6 +673,7 @@ mod tests {
             std::slice::from_ref(&bridge),
             Some(&main),
             None,
+            None,
         );
 
         let m = check.main.expect("main readout present");
@@ -694,6 +702,7 @@ mod tests {
             std::slice::from_ref(&bridge_missing),
             Some(&main),
             None,
+            None,
         );
 
         let m = check.main.expect("main readout present");
@@ -718,6 +727,7 @@ mod tests {
             std::slice::from_ref(&single),
             None,
             None,
+            None,
         );
 
         let m = check.main.expect("main readout present");
@@ -735,6 +745,7 @@ mod tests {
             false,
             std::slice::from_ref(&missing),
             Some(&missing),
+            None,
             None,
         );
         assert!(check.main.is_none());
@@ -853,6 +864,7 @@ mod tests {
             true,
             std::slice::from_ref(&bridge),
             Some(&main),
+            None,
             None,
         );
         let raw = check.raw_output.expect("raw_output set");

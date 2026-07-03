@@ -3,6 +3,7 @@
 use std::process::Command;
 
 use crate::command::{run_command_with_timeout, CommandError, DEFAULT_PROBE_TIMEOUT};
+use crate::environment::{apply_doctor_env, DoctorEnv};
 use crate::resolve::format_command_output;
 use crate::timeout_check::{command_timeout_check, TimeoutCheck};
 use crate::types::{CheckStatus, DoctorCheck, FixType, ResolvedBinary};
@@ -11,7 +12,7 @@ use crate::types::{CheckStatus, DoctorCheck, FixType, ResolvedBinary};
 pub(crate) const CLONEFILE_FIX_COMMAND: &str = "git config --global core.clonefile true";
 
 /// Check that `git` is installed and reachable.
-pub fn check_git(resolved: &ResolvedBinary) -> DoctorCheck {
+pub fn check_git(resolved: &ResolvedBinary, env: Option<&DoctorEnv>) -> DoctorCheck {
     let label = "Git".to_string();
     let id = "git".to_string();
     let search = &resolved.search_output;
@@ -46,6 +47,7 @@ pub fn check_git(resolved: &ResolvedBinary) -> DoctorCheck {
 
     let mut command = Command::new(git_path);
     command.arg("--version");
+    apply_doctor_env(&mut command, env);
     match run_command_with_timeout(command, "git --version", DEFAULT_PROBE_TIMEOUT) {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -132,7 +134,7 @@ pub fn check_git(resolved: &ResolvedBinary) -> DoctorCheck {
 }
 
 /// Check that the GitHub CLI (`gh`) is installed.
-pub fn check_gh(resolved: &ResolvedBinary) -> DoctorCheck {
+pub fn check_gh(resolved: &ResolvedBinary, env: Option<&DoctorEnv>) -> DoctorCheck {
     let label = "GitHub CLI".to_string();
     let id = "gh".to_string();
     let search = &resolved.search_output;
@@ -167,6 +169,7 @@ pub fn check_gh(resolved: &ResolvedBinary) -> DoctorCheck {
 
     let mut command = Command::new(gh_path);
     command.arg("--version");
+    apply_doctor_env(&mut command, env);
     match run_command_with_timeout(command, "gh --version", DEFAULT_PROBE_TIMEOUT) {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout);
@@ -254,7 +257,7 @@ pub fn check_gh(resolved: &ResolvedBinary) -> DoctorCheck {
 }
 
 /// Check that `gh auth status` succeeds (user is logged in).
-pub fn check_gh_auth(gh: &ResolvedBinary) -> DoctorCheck {
+pub fn check_gh_auth(gh: &ResolvedBinary, env: Option<&DoctorEnv>) -> DoctorCheck {
     let label = "GitHub Auth".to_string();
     let id = "gh-auth".to_string();
     let header = "# Check: GitHub Auth — verify user is logged in to GitHub";
@@ -287,6 +290,7 @@ pub fn check_gh_auth(gh: &ResolvedBinary) -> DoctorCheck {
 
     let mut command = Command::new(gh_path);
     command.args(["auth", "status"]);
+    apply_doctor_env(&mut command, env);
     match run_command_with_timeout(command, "gh auth status", DEFAULT_PROBE_TIMEOUT) {
         Ok(output) => {
             let raw = format!(
@@ -371,7 +375,11 @@ pub fn check_gh_auth(gh: &ResolvedBinary) -> DoctorCheck {
 }
 
 /// Check that Git LFS is installed.
-pub fn check_git_lfs(git: &ResolvedBinary, git_lfs: &ResolvedBinary) -> DoctorCheck {
+pub fn check_git_lfs(
+    git: &ResolvedBinary,
+    git_lfs: &ResolvedBinary,
+    env: Option<&DoctorEnv>,
+) -> DoctorCheck {
     let label = "Git LFS".to_string();
     let id = "git-lfs".to_string();
     let search = &git_lfs.search_output;
@@ -408,6 +416,7 @@ pub fn check_git_lfs(git: &ResolvedBinary, git_lfs: &ResolvedBinary) -> DoctorCh
 
     let mut command = Command::new(git_path);
     command.args(["lfs", "version"]);
+    apply_doctor_env(&mut command, env);
     match run_command_with_timeout(command, "git lfs version", DEFAULT_PROBE_TIMEOUT) {
         Ok(output) if output.status.success() => {
             let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -503,7 +512,7 @@ pub fn check_git_lfs(git: &ResolvedBinary, git_lfs: &ResolvedBinary) -> DoctorCh
 }
 
 /// Check that `core.clonefile` is enabled in the global git config.
-pub fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
+pub fn check_clonefile(git: &ResolvedBinary, env: Option<&DoctorEnv>) -> DoctorCheck {
     let label = "Copy on Write Git Clones".to_string();
     let id = "git-clonefile".to_string();
     let fix_cmd = CLONEFILE_FIX_COMMAND.to_string();
@@ -537,6 +546,7 @@ pub fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
 
     let mut command = Command::new(git_path);
     command.args(["config", "--global", "core.clonefile"]);
+    apply_doctor_env(&mut command, env);
     match run_command_with_timeout(
         command,
         "git config --global core.clonefile",
@@ -648,5 +658,54 @@ pub fn check_clonefile(git: &ResolvedBinary) -> DoctorCheck {
             main: None,
             bridge: None,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn check_git_receives_env_snapshot() {
+        let dir = std::env::temp_dir().join(format!("doctor-check-env-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let git = dir.join("git");
+        std::fs::write(
+            &git,
+            "#!/bin/sh\n\
+             if [ \"$DOCTOR_CHECK_MARKER\" = yes ]; then\n\
+               echo 'git version 9.8.7'\n\
+               exit 0\n\
+             fi\n\
+             echo 'missing marker' >&2\n\
+             exit 42\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let resolved = ResolvedBinary {
+            path: Some(PathBuf::from(&git)),
+            search_output: "fake git resolved from test".to_string(),
+            install_source: None,
+        };
+        let env = DoctorEnv::new(vec![
+            ("DOCTOR_CHECK_MARKER".to_string(), "yes".to_string()),
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+            ("HOME".to_string(), dir.to_string_lossy().to_string()),
+            ("USER".to_string(), "doctor-test".to_string()),
+        ]);
+
+        let check = check_git(&resolved, Some(&env));
+
+        assert_eq!(check.status, CheckStatus::Pass);
+        assert_eq!(check.message, "git version 9.8.7");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

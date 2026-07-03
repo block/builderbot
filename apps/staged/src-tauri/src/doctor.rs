@@ -31,6 +31,7 @@ pub async fn run_doctor_freshness() -> DoctorReport {
         // Use the default public registries — Staged installs these agents
         // from public npm/brew/crates.io, not an internal mirror.
         npm_registry: None,
+        env: None,
     })
     .await
 }
@@ -83,6 +84,7 @@ async fn expected_update_command(check_id: &str, fix_type: &FixType) -> Result<S
         check_freshness: true,
         offline: false,
         npm_registry: None,
+        env: None,
     })
     .await;
 

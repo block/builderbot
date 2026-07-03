@@ -406,6 +406,39 @@ fn fingerprint_curl_pipe(path: &Path, home: &Path) -> bool {
     false
 }
 
+/// Whether the active binary path is owned by a Homebrew cask.
+///
+/// Cask binaries commonly appear as `<brew-prefix>/bin/<tool>` symlinks into
+/// `<brew-prefix>/Caskroom/<token>/<version>/<tool>`. Treat the Caskroom path
+/// (or the bin symlink's immediate target) as the owning install source before
+/// following the full canonical chain for npm detection: cask wrappers may
+/// include node-based internals, but the user updates the active binary through
+/// `brew upgrade`, not an unrelated or inactive global npm package.
+fn looks_like_homebrew_cask(path: &Path) -> bool {
+    if path_has_caskroom_component(path) {
+        return true;
+    }
+
+    let Ok(target) = std::fs::read_link(path) else {
+        return false;
+    };
+    let target = if target.is_absolute() {
+        target
+    } else {
+        path.parent()
+            .map(|parent| parent.join(&target))
+            .unwrap_or(target)
+    };
+
+    path_has_caskroom_component(&target)
+}
+
+fn path_has_caskroom_component(path: &Path) -> bool {
+    path.components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .any(|component| component.eq_ignore_ascii_case("Caskroom"))
+}
+
 /// Whether the canonicalized binary path lives inside a `node_modules/`
 /// directory — a clean positive signal for `npm install -g`, regardless of
 /// which node distribution (brew-shipped, nvm, fnm, asdf, mise) hosts the npm
@@ -426,6 +459,14 @@ fn looks_like_npm_global(path: &Path) -> bool {
 /// Testable inner: same logic as [`detect_install_source`] but takes the home
 /// directory as a parameter so unit tests can inject a fixed value.
 fn detect_install_source_with_home(path: &Path, home: Option<&Path>) -> InstallSource {
+    // Homebrew cask ownership beats npm internals. In a mixed Claude install,
+    // the active `/opt/homebrew/bin/claude` can be a cask symlink while an
+    // unrelated npm global package also exists; update planning must follow
+    // the active Caskroom binary back to Brew.
+    if looks_like_homebrew_cask(path) {
+        return InstallSource::Brew;
+    }
+
     // npm global install (any node distribution). Checked first: the bin entry
     // is a symlink into `node_modules/`, which may live under a brew prefix
     // (`npm config get prefix = /opt/homebrew`), so this must win over the
@@ -810,6 +851,81 @@ mod tests {
             InstallSource::Npm,
         );
         let _ = fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn homebrew_caskroom_symlink_classifies_as_brew_with_inactive_npm_package() {
+        #[cfg(unix)]
+        {
+            let root =
+                std::env::temp_dir().join(format!("doctor-cask-mixed-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+
+            let cask_bin = root.join("Caskroom/claude-code/2.1.152/claude");
+            fs::create_dir_all(cask_bin.parent().unwrap()).unwrap();
+            File::create(&cask_bin).unwrap();
+            fs::create_dir_all(root.join("bin")).unwrap();
+            let active = root.join("bin/claude");
+            std::os::unix::fs::symlink(&cask_bin, &active).unwrap();
+
+            // Unrelated global npm package exists under nvm, but it is not the
+            // active/resolved `claude` binary.
+            let home = root.join("home");
+            let npm_pkg = home
+                .join(".nvm/versions/node/v23.7.0/lib/node_modules/@anthropic-ai/claude-code/cli");
+            fs::create_dir_all(&npm_pkg).unwrap();
+            File::create(npm_pkg.join("claude.js")).unwrap();
+            fs::create_dir_all(home.join(".nvm/versions/node/v23.7.0/bin")).unwrap();
+            std::os::unix::fs::symlink(
+                npm_pkg.join("claude.js"),
+                home.join(".nvm/versions/node/v23.7.0/bin/claude"),
+            )
+            .unwrap();
+
+            assert!(looks_like_homebrew_cask(&active));
+            assert_eq!(
+                detect_install_source_with_home(&active, Some(home.as_path())),
+                InstallSource::Brew,
+            );
+
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn homebrew_caskroom_ownership_wins_over_node_modules_canonical_target() {
+        #[cfg(unix)]
+        {
+            let root = std::env::temp_dir()
+                .join(format!("doctor-cask-node-modules-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+
+            let home = root.join("home");
+            let npm_pkg = home
+                .join(".nvm/versions/node/v23.7.0/lib/node_modules/@anthropic-ai/claude-code/cli");
+            fs::create_dir_all(&npm_pkg).unwrap();
+            let npm_entry = npm_pkg.join("claude.js");
+            File::create(&npm_entry).unwrap();
+
+            let cask_bin = root.join("Caskroom/claude-code/2.1.152/claude");
+            fs::create_dir_all(cask_bin.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&npm_entry, &cask_bin).unwrap();
+            fs::create_dir_all(root.join("bin")).unwrap();
+            let active = root.join("bin/claude");
+            std::os::unix::fs::symlink(&cask_bin, &active).unwrap();
+
+            assert!(looks_like_homebrew_cask(&active));
+            assert!(
+                looks_like_npm_global(&active),
+                "canonical node_modules target should not override Caskroom ownership",
+            );
+            assert_eq!(
+                detect_install_source_with_home(&active, Some(home.as_path())),
+                InstallSource::Brew,
+            );
+
+            let _ = fs::remove_dir_all(&root);
+        }
     }
 
     #[test]

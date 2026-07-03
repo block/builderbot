@@ -7,8 +7,6 @@
  * - Window management (Tauri window vs no-op)
  * - Clipboard (Tauri plugin vs navigator.clipboard)
  *
- * NOTE: Web-mode implementations are intentionally stubbed out in this build.
- * TODO(web): restore web transport paths from the `mobile-web` branch.
  */
 
 // ---------------------------------------------------------------------------
@@ -23,7 +21,7 @@ export const isTauri: boolean = typeof window !== 'undefined' && '__TAURI__' in 
 
 /**
  * Invoke a backend command. In Tauri mode this calls `invoke()` from the
- * Tauri API; in web mode it is stubbed out.
+ * Tauri API; in web mode it POSTs to `/api/invoke/{command}`.
  */
 export async function invokeCommand<T>(
   command: string,
@@ -34,8 +32,27 @@ export async function invokeCommand<T>(
     return invoke<T>(command, args);
   }
 
-  // TODO(web): restore HTTP transport from the `mobile-web` branch
-  throw new Error(`[transport] Web mode is not available in this build (command: ${command})`);
+  const response = await fetch(`/api/invoke/${encodeURIComponent(command)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(args ?? {}),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    let message = text;
+    try {
+      const body = JSON.parse(text) as { error?: unknown };
+      if (typeof body.error === 'string') {
+        message = body.error;
+      }
+    } catch {
+      // Non-JSON error bodies are reported as-is below.
+    }
+    throw new Error(message || `Command failed: ${command}`);
+  }
+
+  return (await response.json()) as T;
 }
 
 // ---------------------------------------------------------------------------
@@ -46,7 +63,7 @@ export type UnlistenFn = () => void;
 
 /**
  * Listen to a backend event. In Tauri mode this delegates to the Tauri event
- * API; in web mode it is stubbed out.
+ * API; in web mode it connects to the shared WebSocket event stream.
  *
  * Returns a synchronous unlisten function. Registration happens asynchronously
  * in the background; if the unlisten is called before registration finishes,
@@ -55,15 +72,14 @@ export type UnlistenFn = () => void;
  * `Promise<UnlistenFn>` reference that could race the unmount.
  */
 export function listenToEvent<T>(event: string, callback: (payload: T) => void): UnlistenFn {
+  if (!isTauri) {
+    return webSocketListen<T>(event, callback);
+  }
+
   let cancelled = false;
   let unlisten: UnlistenFn | undefined;
 
   void (async () => {
-    if (!isTauri) {
-      // TODO(web): restore WebSocket event transport from the `mobile-web` branch
-      console.warn(`[transport] Web mode event listening stubbed out (event: ${event})`);
-      return;
-    }
     const { listen } = await import('@tauri-apps/api/event');
     const u = await listen<T>(event, (e) => callback(e.payload));
     if (cancelled) u();
@@ -75,6 +91,139 @@ export function listenToEvent<T>(event: string, callback: (payload: T) => void):
   return () => {
     cancelled = true;
     unlisten?.();
+  };
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket singleton for web-mode events
+// ---------------------------------------------------------------------------
+
+interface WebSocketListener {
+  event: string;
+  callback: (payload: unknown) => void;
+}
+
+const WEB_SOCKET_HEARTBEAT_MS = 30_000;
+
+let ws: WebSocket | null = null;
+let wsListeners: WebSocketListener[] = [];
+let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let wsHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+let wsConnecting = false;
+
+async function getWsUrl(): Promise<string> {
+  const { getPrPollClientId } = await import('./services/prPollingService');
+  const url = new URL('/api/events', location.href);
+  url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.searchParams.set('clientId', getPrPollClientId());
+  return url.toString();
+}
+
+function sendHeartbeat(): void {
+  if (ws?.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'heartbeat' }));
+  }
+}
+
+function stopHeartbeat(): void {
+  if (wsHeartbeatTimer) {
+    clearInterval(wsHeartbeatTimer);
+    wsHeartbeatTimer = null;
+  }
+}
+
+function startHeartbeat(): void {
+  stopHeartbeat();
+  sendHeartbeat();
+  wsHeartbeatTimer = setInterval(sendHeartbeat, WEB_SOCKET_HEARTBEAT_MS);
+}
+
+async function ensureWebSocket(): Promise<void> {
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+    return;
+  }
+  if (wsConnecting) return;
+
+  wsConnecting = true;
+  const url = await getWsUrl();
+  if (wsListeners.length === 0) {
+    wsConnecting = false;
+    return;
+  }
+
+  const socket = new WebSocket(url);
+  ws = socket;
+
+  socket.onopen = () => {
+    wsConnecting = false;
+    startHeartbeat();
+    if (wsReconnectTimer) {
+      clearTimeout(wsReconnectTimer);
+      wsReconnectTimer = null;
+    }
+  };
+
+  socket.onmessage = (messageEvent) => {
+    try {
+      const data = JSON.parse(messageEvent.data) as { event: string; payload: unknown };
+      for (const listener of wsListeners) {
+        if (listener.event === data.event) {
+          listener.callback(data.payload);
+        }
+      }
+    } catch {
+      console.warn('[transport] Failed to parse WebSocket message:', messageEvent.data);
+    }
+  };
+
+  socket.onclose = () => {
+    wsConnecting = false;
+    stopHeartbeat();
+    if (ws === socket) {
+      ws = null;
+    }
+    if (wsListeners.length > 0 && !wsReconnectTimer) {
+      wsReconnectTimer = setTimeout(() => {
+        wsReconnectTimer = null;
+        if (wsListeners.length > 0) {
+          void ensureWebSocket().catch((e) => {
+            console.error('[transport] Failed to reconnect WebSocket:', e);
+          });
+        }
+      }, 2000);
+    }
+  };
+
+  socket.onerror = () => {
+    wsConnecting = false;
+  };
+}
+
+function webSocketListen<T>(event: string, callback: (payload: T) => void): UnlistenFn {
+  const listener: WebSocketListener = {
+    event,
+    callback: callback as (payload: unknown) => void,
+  };
+
+  wsListeners.push(listener);
+  void ensureWebSocket().catch((e) => {
+    console.error('[transport] Failed to connect WebSocket:', e);
+  });
+
+  return () => {
+    wsListeners = wsListeners.filter((l) => l !== listener);
+    if (wsListeners.length === 0) {
+      if (wsReconnectTimer) {
+        clearTimeout(wsReconnectTimer);
+        wsReconnectTimer = null;
+      }
+      stopHeartbeat();
+      if (ws) {
+        const socket = ws;
+        ws = null;
+        socket.close();
+      }
+    }
   };
 }
 

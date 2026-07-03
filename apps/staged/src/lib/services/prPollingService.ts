@@ -146,10 +146,10 @@ function handleBlur() {
 /**
  * Wire up the interest/hint layer: forward window focus to the backend and
  * subscribe to its refresh/stale lifecycle events. Idempotent; call once at app
- * start. No-op in web mode (the transport is stubbed in this build).
+ * start.
  */
 export function init(): void {
-  if (initialized || !isTauri) return;
+  if (initialized) return;
   initialized = true;
 
   window.addEventListener('focus', handleFocus);
@@ -192,7 +192,6 @@ export function dispose(): void {
 
 /** Set the currently selected project (polls more frequently). */
 export function setSelectedProject(projectId: string | null): void {
-  if (!isTauri) return;
   void setForegroundProject(clientId, projectId).catch((e) =>
     console.error('[PrPollingService] set_foreground_project failed:', e)
   );
@@ -204,7 +203,6 @@ export function updateChecksStatus(
   projectId: string,
   hasPendingChecks: boolean
 ): void {
-  if (!isTauri) return;
   void setBranchPending(clientId, branchId, projectId, hasPendingChecks).catch((e) =>
     console.error('[PrPollingService] set_branch_pending failed:', e)
   );
@@ -212,7 +210,6 @@ export function updateChecksStatus(
 
 /** Trigger an immediate refresh for a specific project (e.g. after PR creation or push). */
 export function refreshNow(projectId: string): void {
-  if (!isTauri) return;
   void refreshPrStatusesNow(clientId, projectId).catch((e) =>
     console.error(`[PrPollingService] refresh_now failed for project=${projectId}:`, e)
   );

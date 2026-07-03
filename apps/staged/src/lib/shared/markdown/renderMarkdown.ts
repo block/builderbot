@@ -6,7 +6,15 @@ import {
   type MarkdownDiagramRenderingOptions,
 } from './diagramRendering';
 
-export type MarkdownRenderingOptions = MarkdownDiagramRenderingOptions;
+export type MarkdownRenderingOptions = MarkdownDiagramRenderingOptions & {
+  /**
+   * Render trusted inline HTML for plain text tokens.
+   *
+   * The returned HTML bypasses the generic Markdown sanitizer, so callbacks
+   * must escape any user-controlled text before returning.
+   */
+  renderInlineText?: (text: string) => string;
+};
 
 interface TrustedHtmlReplacement {
   placeholder: string;
@@ -34,6 +42,7 @@ function createMarkdownRenderer(
 ): Renderer {
   const renderer = new Renderer();
   const renderCode = renderer.code.bind(renderer);
+  const renderText = renderer.text.bind(renderer);
 
   renderer.code = (token: Tokens.Code) => {
     const rendered = renderCode(token);
@@ -44,11 +53,18 @@ function createMarkdownRenderer(
     return stashTrustedHtml(diagram.html, trustedHtml);
   };
 
+  renderer.text = (token: Tokens.Text) => {
+    if (!options.renderInlineText) return renderText(token);
+    if ('tokens' in token && token.tokens) return renderText(token);
+    if ('escaped' in token && token.escaped) return renderText(token);
+    return stashTrustedHtml(options.renderInlineText(token.text), trustedHtml);
+  };
+
   return renderer;
 }
 
 function stashTrustedHtml(html: string, trustedHtml: TrustedHtmlReplacement[]): string {
-  const placeholder = `STAGED_MARKDOWN_TRUSTED_DIAGRAM_${trustedHtml.length}_${createPlaceholderNonce()}`;
+  const placeholder = `STAGED_MARKDOWN_TRUSTED_HTML_${trustedHtml.length}_${createPlaceholderNonce()}`;
   trustedHtml.push({ placeholder, html });
   return placeholder;
 }

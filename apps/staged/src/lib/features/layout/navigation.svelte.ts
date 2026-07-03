@@ -284,6 +284,7 @@ export function openDiffRoute(route: Omit<DiffDetailRoute, 'kind'>): void {
 export function popDetailRoute(): void {
   if (navigation.detailStack.length <= 1) return;
 
+  const poppedRoute = currentRoute();
   const previousProjectId = navigation.selectedProjectId;
   const nextStack = navigation.detailStack.slice(0, -1);
   setDetailStack(nextStack);
@@ -294,6 +295,12 @@ export function popDetailRoute(): void {
     persistLastProject(null);
   } else if (nextRoute.kind === 'project') {
     persistLastProject(nextRoute.projectId);
+  }
+
+  if (poppedRoute.kind === 'diff') {
+    window.dispatchEvent(
+      new CustomEvent('staged:diff-route-popped', { detail: { route: poppedRoute } })
+    );
   }
 }
 

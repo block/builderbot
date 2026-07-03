@@ -15,6 +15,7 @@
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
   import SettingsPage from './lib/features/settings/SettingsPage.svelte';
   import DiffModal from './lib/features/diff/DiffModal.svelte';
+  import ReferenceModalHost from './lib/features/references/ReferenceModalHost.svelte';
   import { Toaster } from '$lib/components/ui/sonner';
   import { Button } from '$lib/components/ui/button';
   import {
@@ -600,6 +601,7 @@
     <SessionLauncher onClose={() => (showSessionLab = false)} />
   {/if}
 
+  <ReferenceModalHost />
   <Toaster position="bottom-right" visibleToasts={4} duration={8000} closeButton expand />
 {/if}
 

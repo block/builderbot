@@ -34,6 +34,15 @@
   import { projectDisplayName } from '../../shared/utils';
   import { Button } from '$lib/components/ui/button';
   import type { LinkedNoteContext } from '../sessions/noteFreshness';
+  import { openDiffRoute } from '../layout/navigation.svelte';
+  import {
+    disabledReferenceNav,
+    pushReferenceEntry,
+    resolveHashtagReference,
+    type HashtagClickInfo,
+    type ReferenceDiffContext,
+    type ReferenceHistoryEntry,
+  } from '../references/referenceHistory.svelte';
 
   interface Props {
     project: Project;
@@ -147,6 +156,10 @@
     );
 
     return [project.id, hashtagVersion, readyBranchParts.join('|'), noteParts.join('|')].join(';');
+  });
+  let referenceDiffContext = $derived<ReferenceDiffContext>({
+    projectId: project.id,
+    projectName: project.name,
   });
 
   async function ensureHashtagItems() {
@@ -266,12 +279,19 @@
   });
 
   let openNote = $state<{
+    noteId: string;
     title: string;
     content: string;
     sessionId?: string;
     noteUpdatedAt?: number;
   } | null>(null);
   let openSessionId = $state<string | null>(null);
+
+  $effect(() => {
+    const _signature = hashtagSignature;
+    if (!openNote && !openSessionId) return;
+    void ensureHashtagItems();
+  });
 
   function isCompletedProjectNote(note: ProjectNote): boolean {
     const isRunning = isSessionActive(note.sessionStatus);
@@ -297,6 +317,78 @@
       updatedAt: note.updatedAt,
       hasParsedNote: !!note.content.trim(),
     };
+  }
+
+  function currentDialogReferenceEntry(): ReferenceHistoryEntry | null {
+    if (openNote) {
+      return {
+        kind: 'note',
+        noteKind: 'project',
+        id: openNote.noteId,
+        ref: `#project-note:${openNote.noteId}`,
+        title: openNote.title,
+        content: openNote.content,
+        view: 'note',
+        sessionId: openNote.sessionId,
+        noteUpdatedAt: openNote.noteUpdatedAt,
+        projectId: project.id,
+        hashtagItems,
+        diffContext: referenceDiffContext,
+      };
+    }
+
+    if (openSessionId) {
+      const note = projectNotes.find((candidate) => candidate.sessionId === openSessionId);
+      if (note) {
+        return {
+          kind: 'note',
+          noteKind: 'project',
+          id: note.id,
+          ref: `#project-note:${note.id}`,
+          title: note.title,
+          content: note.content,
+          view: 'chat',
+          sessionId: openSessionId,
+          noteUpdatedAt: note.updatedAt,
+          projectId: project.id,
+          hashtagItems,
+          diffContext: referenceDiffContext,
+        };
+      }
+
+      return {
+        kind: 'chat',
+        ref: `#chat:${openSessionId}`,
+        sessionId: openSessionId,
+        projectId: project.id,
+        repoDir: projectDisplayRootCandidates,
+        hashtagItems,
+        diffContext: referenceDiffContext,
+      };
+    }
+
+    return null;
+  }
+
+  function closeReferenceDialogs() {
+    openNote = null;
+    openSessionId = null;
+  }
+
+  function handleHashtagClick(click: HashtagClickInfo) {
+    const target = resolveHashtagReference(click, {
+      hashtagItems,
+      diffContext: referenceDiffContext,
+    });
+    if (!target) return;
+
+    const current = currentDialogReferenceEntry();
+    if (current) pushReferenceEntry(current);
+    pushReferenceEntry(target);
+    closeReferenceDialogs();
+    if (target.kind === 'diff') {
+      openDiffRoute(target.route);
+    }
   }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────
@@ -390,6 +482,7 @@
                 ? undefined
                 : () => {
                     openNote = {
+                      noteId: note.id,
                       title: note.title,
                       content: note.content,
                       sessionId: note.sessionId ?? undefined,
@@ -477,11 +570,14 @@
     content={openNote.content}
     sessionId={openNote.sessionId}
     noteUpdatedAt={openNote.noteUpdatedAt}
+    {hashtagItems}
+    referenceNav={disabledReferenceNav}
     onClose={() => (openNote = null)}
     onOpenSession={(sid) => {
       openNote = null;
       openSessionId = sid;
     }}
+    onHashtagClick={handleHashtagClick}
   />
 {/if}
 
@@ -491,11 +587,14 @@
     sessionId={openSessionId}
     repoDir={projectDisplayRootCandidates}
     projectId={project.id}
+    {hashtagItems}
     noteInfo={linkedNoteContext(projectNotes.find((n) => n.sessionId === openSessionId))}
+    referenceNav={disabledReferenceNav}
     onOpenNote={(note) => {
       const sid = openSessionId;
       openSessionId = null;
       openNote = {
+        noteId: note.id,
         title: note.title,
         content: note.content,
         sessionId: sid ?? undefined,
@@ -506,6 +605,7 @@
       openSessionId = null;
       loadProjectNotes();
     }}
+    onHashtagClick={handleHashtagClick}
   />
 {/if}
 

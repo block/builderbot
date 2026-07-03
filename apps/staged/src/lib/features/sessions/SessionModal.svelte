@@ -60,6 +60,7 @@
   import HashtagInput from './HashtagInput.svelte';
   import {
     buildBranchHashtagItems,
+    findHashtagItemForReference,
     renderHashtagTokens as renderHashtagTokensShared,
   } from './hashtagItems';
   import * as Dialog from '$lib/components/ui/dialog';
@@ -101,6 +102,8 @@
   import { renderMarkdown as renderSharedMarkdown } from '../../shared/markdown/renderMarkdown';
   import { loadPikchrRenderer, type PikchrRenderer } from '../../shared/markdown/pikchrRendering';
   import { getNoteFollowupLabel, type LinkedNoteContext } from './noteFreshness';
+  import ReferenceNavControls from '../references/ReferenceNavControls.svelte';
+  import type { HashtagClickInfo, ReferenceNavState } from '../references/referenceHistory.svelte';
 
   interface Props {
     open: boolean;
@@ -114,9 +117,13 @@
     projectId?: string | null;
     /** Repo label for grouping branch-scoped hashtag suggestions. */
     repoLabel?: Pick<ProjectRepo, 'githubRepo' | 'subpath' | 'headRepo'> | null;
+    /** Precomputed hashtag reference items for the session context. */
+    hashtagItems?: HashtagItem[];
     /** When set, shows a button to open the associated note. */
     noteInfo?: LinkedNoteContext | null;
     onOpenNote?: (note: LinkedNoteContext) => void;
+    referenceNav?: ReferenceNavState;
+    onHashtagClick?: (click: HashtagClickInfo) => void;
   }
 
   type SendMessageTarget = {
@@ -132,8 +139,11 @@
     branchId,
     projectId,
     repoLabel = null,
+    hashtagItems: providedHashtagItems,
     noteInfo,
     onOpenNote,
+    referenceNav,
+    onHashtagClick,
   }: Props = $props();
 
   // =========================================================================
@@ -209,18 +219,26 @@
   // Hashtag reference items
   let hashtagItems = $state<HashtagItem[]>([]);
   $effect(() => {
-    if (branchId) {
-      let stale = false;
-      buildBranchHashtagItems(branchId, projectId ?? null, {
-        repoSlug: repoLabel?.headRepo ?? repoLabel?.githubRepo,
-        repoSubpath: repoLabel?.subpath,
-      }).then((items) => {
-        if (!stale) hashtagItems = items;
-      });
-      return () => {
-        stale = true;
-      };
+    if (providedHashtagItems) {
+      hashtagItems = providedHashtagItems;
+      return;
     }
+
+    if (!branchId) {
+      hashtagItems = [];
+      return;
+    }
+
+    let stale = false;
+    buildBranchHashtagItems(branchId, projectId ?? null, {
+      repoSlug: repoLabel?.headRepo ?? repoLabel?.githubRepo,
+      repoSubpath: repoLabel?.subpath,
+    }).then((items) => {
+      if (!stale) hashtagItems = items;
+    });
+    return () => {
+      stale = true;
+    };
   });
 
   // Image attachment state (available when project context is provided; branchId is optional)
@@ -783,7 +801,12 @@
   }
 
   function renderMarkdown(content: string): string {
-    return renderSharedMarkdown(content, { pikchrRenderer });
+    return renderSharedMarkdown(content, {
+      pikchrRenderer,
+      renderInlineText: hashtagItems.length
+        ? (text) => renderHashtagTokens(text, hashtagItems)
+        : undefined,
+    });
   }
 
   function openDiagramViewerFromEvent(event: MouseEvent | KeyboardEvent): boolean {
@@ -794,16 +817,6 @@
     event.stopPropagation();
     diagramViewerSvg = svgMarkup;
     return true;
-  }
-
-  function handleMessagesClick(event: MouseEvent) {
-    if (openDiagramViewerFromEvent(event)) return;
-    handleExternalLinkClick(event);
-  }
-
-  function handleMessagesKeydown(event: KeyboardEvent) {
-    if (!isMarkdownDiagramActivationKey(event)) return;
-    openDiagramViewerFromEvent(event);
   }
 
   /** Memoized wrapper around the shared renderHashtagTokens. */
@@ -820,6 +833,41 @@
     const result = renderHashtagTokensShared(text, items);
     hashtagTokenCache.set(text, result);
     return result;
+  }
+
+  function hashtagClickFromTarget(target: EventTarget | null): HashtagClickInfo | null {
+    if (!(target instanceof HTMLElement)) return null;
+    const badge = target.closest<HTMLElement>('[data-hashtag-ref]');
+    if (!badge) return null;
+    const type = badge.dataset.hashtagType as HashtagItem['type'] | undefined;
+    const id = badge.dataset.hashtagId;
+    const ref = badge.dataset.hashtagRef;
+    if (!type || !id || !ref) return null;
+    const item = findHashtagItemForReference(hashtagItems, type, id);
+    return { type, id, ref, item };
+  }
+
+  function handleContentClick(event: MouseEvent) {
+    if (openDiagramViewerFromEvent(event)) return;
+
+    const click = hashtagClickFromTarget(event.target);
+    if (click && onHashtagClick) {
+      event.preventDefault();
+      event.stopPropagation();
+      onHashtagClick(click);
+      return;
+    }
+    handleExternalLinkClick(event);
+  }
+
+  function handleContentKeydown(event: KeyboardEvent) {
+    if (isMarkdownDiagramActivationKey(event) && openDiagramViewerFromEvent(event)) return;
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    const click = hashtagClickFromTarget(event.target);
+    if (!click || !onHashtagClick) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onHashtagClick(click);
   }
 
   // =========================================================================
@@ -1134,6 +1182,9 @@
   >
     <!-- Header -->
     <header class="modal-header">
+      {#if referenceNav}
+        <ReferenceNavControls nav={referenceNav} />
+      {/if}
       <div class="header-content">
         <Dialog.Title
           class="text-[var(--size-sm)] font-semibold text-foreground overflow-hidden text-ellipsis whitespace-nowrap"
@@ -1181,8 +1232,8 @@
       class="modal-content"
       bind:this={messagesEl}
       onscroll={handleScroll}
-      onclick={handleMessagesClick}
-      onkeydown={handleMessagesKeydown}
+      onclick={handleContentClick}
+      onkeydown={handleContentKeydown}
     >
       {#if session?.pipeline}
         <PipelineSteps {sessionId} pipeline={session.pipeline} />

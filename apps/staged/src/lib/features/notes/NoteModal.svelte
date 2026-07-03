@@ -28,6 +28,10 @@
   } from '../../shared/markdown/diagramViewer';
   import { loadPikchrRenderer, type PikchrRenderer } from '../../shared/markdown/pikchrRendering';
   import { noteMarkdownWithTitle, renderNoteMarkdown } from './noteMarkdown';
+  import type { HashtagItem } from '../../types';
+  import { findHashtagItemForReference, renderHashtagTokens } from '../sessions/hashtagItems';
+  import ReferenceNavControls from '../references/ReferenceNavControls.svelte';
+  import type { HashtagClickInfo, ReferenceNavState } from '../references/referenceHistory.svelte';
 
   interface Props {
     open: boolean;
@@ -42,6 +46,9 @@
     nextSteps?: { commitStep: string | null; noteStep: string | null } | null;
     /** Called when the user clicks a next-step button. */
     onStartSession?: (mode: 'commit' | 'note', prefill: string) => void;
+    hashtagItems?: HashtagItem[];
+    referenceNav?: ReferenceNavState;
+    onHashtagClick?: (click: HashtagClickInfo) => void;
   }
 
   let {
@@ -54,6 +61,9 @@
     onOpenSession,
     nextSteps,
     onStartSession,
+    hashtagItems = [],
+    referenceNav,
+    onHashtagClick,
   }: Props = $props();
 
   let copied = $state(false);
@@ -69,7 +79,14 @@
   let pikchrRendererLoadKey = $derived(noteMarkdown);
   let pikchrRendererLoadFailedKey = $state<string | null>(null);
   let pikchrRendererLoadFailed = $derived(pikchrRendererLoadFailedKey === pikchrRendererLoadKey);
-  let renderedNoteHtml = $derived(renderNoteMarkdown(noteMarkdown, { pikchrRenderer }));
+  let renderedNoteHtml = $derived(
+    renderNoteMarkdown(noteMarkdown, {
+      pikchrRenderer,
+      renderInlineText: hashtagItems.length
+        ? (text) => renderHashtagTokens(text, hashtagItems)
+        : undefined,
+    })
+  );
   let diagramViewerSvg = $state<string | null>(null);
 
   // Search state
@@ -234,14 +251,39 @@
     return true;
   }
 
+  function hashtagClickFromTarget(target: EventTarget | null): HashtagClickInfo | null {
+    if (!(target instanceof HTMLElement)) return null;
+    const badge = target.closest<HTMLElement>('[data-hashtag-ref]');
+    if (!badge) return null;
+    const type = badge.dataset.hashtagType as HashtagItem['type'] | undefined;
+    const id = badge.dataset.hashtagId;
+    const ref = badge.dataset.hashtagRef;
+    if (!type || !id || !ref) return null;
+    const item = findHashtagItemForReference(hashtagItems, type, id);
+    return { type, id, ref, item };
+  }
+
   function handleContentClick(event: MouseEvent) {
     if (openDiagramViewerFromEvent(event)) return;
+
+    const click = hashtagClickFromTarget(event.target);
+    if (click && onHashtagClick) {
+      event.preventDefault();
+      event.stopPropagation();
+      onHashtagClick(click);
+      return;
+    }
     handleExternalLinkClick(event);
   }
 
   function handleContentKeydown(event: KeyboardEvent) {
-    if (!isMarkdownDiagramActivationKey(event)) return;
-    openDiagramViewerFromEvent(event);
+    if (isMarkdownDiagramActivationKey(event) && openDiagramViewerFromEvent(event)) return;
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    const click = hashtagClickFromTarget(event.target);
+    if (!click || !onHashtagClick) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onHashtagClick(click);
   }
 </script>
 
@@ -264,6 +306,9 @@
     <Dialog.Header
       class="flex-row items-center justify-between gap-3 px-4 py-3 border-b border-[var(--border-subtle)] flex-shrink-0"
     >
+      {#if referenceNav}
+        <ReferenceNavControls nav={referenceNav} />
+      {/if}
       <div class="header-content">
         <span class="note-title-icon" aria-hidden="true">
           <FileText size={13} />

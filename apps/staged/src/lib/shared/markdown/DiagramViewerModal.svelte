@@ -19,26 +19,35 @@
   const MIN_SCALE = 0.2;
   const MAX_SCALE = 8;
   const ZOOM_STEP = 1.25;
+  const FIT_PADDING = 48;
 
-  let viewportEl: HTMLDivElement;
+  let viewportEl = $state<HTMLDivElement | null>(null);
+  let surfaceEl = $state<HTMLDivElement | null>(null);
   let zoomController: DiagramZoomController | null = null;
   let scale = $state(1);
   let offsetX = $state(0);
   let offsetY = $state(0);
+  let resetScale = $state(1);
+  let resetOffsetX = $state(0);
+  let resetOffsetY = $state(0);
   let dragging = $state(false);
 
   let transformStyle = $derived(
     `transform: matrix(${scale}, 0, 0, ${scale}, ${offsetX}, ${offsetY});`
   );
-  let resetKey = $derived(`${open}\0${svgMarkup ?? ''}`);
-  let hasCustomTransform = $derived(scale !== 1 || offsetX !== 0 || offsetY !== 0);
+  let hasCustomTransform = $derived(
+    !isClose(scale, resetScale) ||
+      !isClose(offsetX, resetOffsetX) ||
+      !isClose(offsetY, resetOffsetY)
+  );
 
   $effect(() => {
-    if (!viewportEl) return;
+    if (!viewportEl || !surfaceEl || !svgMarkup) return;
 
-    zoomController = createDiagramZoomController(viewportEl, {
+    const controller = createDiagramZoomController(viewportEl, surfaceEl, {
       minScale: MIN_SCALE,
       maxScale: MAX_SCALE,
+      fitPadding: FIT_PADDING,
       isEnabled: () => svgMarkup !== null,
       onTransform: (transform) => {
         scale = transform.scale;
@@ -50,24 +59,31 @@
       },
     });
 
-    return () => {
-      zoomController?.destroy();
-      zoomController = null;
-    };
-  });
-
-  $effect(() => {
-    resetKey;
+    zoomController = controller;
     resetView();
+
+    return () => {
+      controller.destroy();
+      if (zoomController === controller) {
+        zoomController = null;
+      }
+    };
   });
 
   function resetView() {
     if (zoomController) {
+      const resetTransform = zoomController.getResetTransform();
+      resetScale = resetTransform.scale;
+      resetOffsetX = resetTransform.offsetX;
+      resetOffsetY = resetTransform.offsetY;
       zoomController.reset();
     } else {
       scale = 1;
       offsetX = 0;
       offsetY = 0;
+      resetScale = 1;
+      resetOffsetX = 0;
+      resetOffsetY = 0;
       dragging = false;
     }
   }
@@ -80,6 +96,10 @@
     resetView();
     onClose();
   }
+
+  function isClose(a: number, b: number): boolean {
+    return Math.abs(a - b) < 0.001;
+  }
 </script>
 
 <Dialog.Root {open} onOpenChange={(v) => !v && closeViewer()}>
@@ -88,14 +108,8 @@
     showCloseButton={false}
     onOpenAutoFocus={(e) => e.preventDefault()}
   >
-    <Dialog.Header
-      class="flex-row items-center justify-between gap-3 px-4 py-3 border-b border-[var(--border-subtle)] flex-shrink-0"
-    >
-      <Dialog.Title
-        class="flex-1 min-w-0 text-[var(--size-sm)] font-medium text-foreground overflow-hidden text-ellipsis whitespace-nowrap"
-      >
-        Diagram
-      </Dialog.Title>
+    <Dialog.Header class="diagram-viewer-header">
+      <Dialog.Title class="diagram-viewer-title">Diagram</Dialog.Title>
       <div class="header-actions">
         <Button
           variant="ghost"
@@ -145,7 +159,7 @@
 
     <div class="viewer-stage" class:dragging bind:this={viewportEl}>
       {#if svgMarkup}
-        <div class="diagram-surface" style={transformStyle}>
+        <div class="diagram-surface" style={transformStyle} bind:this={surfaceEl}>
           {@html svgMarkup}
         </div>
       {:else}
@@ -156,19 +170,49 @@
 </Dialog.Root>
 
 <style>
+  :global(.diagram-viewer-header) {
+    position: relative;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    min-height: 49px;
+    flex-shrink: 0;
+    padding: 8px 12px 8px 84px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  :global(.diagram-viewer-title) {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: min(44vw, 420px);
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-primary);
+    font-size: var(--size-sm);
+    font-weight: 500;
+    text-align: center;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+  }
+
   .header-actions {
+    position: relative;
+    z-index: 1;
     display: flex;
     align-items: center;
     gap: 4px;
+    margin-left: auto;
     flex-shrink: 0;
   }
 
   .viewer-stage {
     position: relative;
-    display: flex;
+    display: grid;
     flex: 1;
-    align-items: center;
-    justify-content: center;
+    place-items: center;
     min-height: 0;
     overflow: hidden;
     background: var(--diagram-canvas-bg);
@@ -182,15 +226,20 @@
   }
 
   .diagram-surface {
-    transform-origin: center center;
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: max-content;
+    height: max-content;
+    transform-origin: 0 0;
   }
 
   .diagram-surface :global(svg) {
     display: block;
     width: auto;
     height: auto;
-    max-width: calc(100vw - 48px);
-    max-height: calc(100vh - 96px);
+    max-width: none;
+    max-height: none;
     overflow: visible;
   }
 

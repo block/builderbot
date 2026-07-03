@@ -588,6 +588,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         // =====================================================================
         // Store status
         // =====================================================================
+        "get_web_access_token" => Ok(serde_json::to_value(&state.auth_token).unwrap()),
         "get_store_status" => {
             // We don't have DbState in web context — return null (store ready)
             Ok(Value::Null)

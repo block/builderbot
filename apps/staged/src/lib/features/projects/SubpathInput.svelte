@@ -20,6 +20,12 @@
   import FolderOpen from '@lucide/svelte/icons/folder-open';
   import * as commands from '../../api/commands';
   import { Input } from '$lib/components/ui/input';
+  import {
+    getSubpathCurrentSegment,
+    getSubpathParentPath,
+    isSubpathSuggestionVisible,
+    normalizeSubpathInput,
+  } from './subpathSuggestions';
 
   interface Props {
     value: string;
@@ -47,31 +53,10 @@
     };
   });
 
-  function normalize(val: string): string {
-    return val.trim().replace(/^\/+|\/+$/g, '');
-  }
-
   function validationErrorMessage(error: unknown): string {
     const message =
       typeof error === 'string' ? error : error instanceof Error ? error.message : String(error);
     return message.replace(/^git command failed:\s*/i, '') || 'Invalid path in repo';
-  }
-
-  // Split the value into parent path and current segment for suggestions.
-  // For "apps/on" → parent="apps", segment="on"
-  // For "apps"    → parent="",     segment="apps"
-  function getParentPath(val: string): string {
-    const trimmed = val.trim().replace(/^\/+/, '');
-    const lastSlash = trimmed.lastIndexOf('/');
-    if (lastSlash === -1) return '';
-    return trimmed.substring(0, lastSlash);
-  }
-
-  function getCurrentSegment(val: string): string {
-    const trimmed = val.trim().replace(/^\/+/, '');
-    const lastSlash = trimmed.lastIndexOf('/');
-    if (lastSlash === -1) return trimmed;
-    return trimmed.substring(lastSlash + 1);
   }
 
   /**
@@ -93,8 +78,8 @@
       return;
     }
 
-    const parentPath = getParentPath(val);
-    const segment = getCurrentSegment(val).toLowerCase();
+    const parentPath = getSubpathParentPath(val);
+    const segment = getSubpathCurrentSegment(val).toLowerCase();
 
     try {
       // 1. List directories at the parent level
@@ -132,7 +117,7 @@
    * subpath. Called by the parent on submit.
    */
   async function waitForValidation(): Promise<SubpathValidationResult> {
-    const trimmed = normalize(value);
+    const trimmed = normalizeSubpathInput(value);
     if (!trimmed) {
       return { valid: true };
     }
@@ -198,10 +183,10 @@
   }
 
   // Filter suggestions: match full paths that start with the normalized input
+  // and hide dot-prefixed directory segments until the user types "." in
+  // that path segment.
   let filteredSuggestions = $derived.by(() => {
-    const trimmed = normalize(value).toLowerCase();
-    if (!trimmed) return suggestions;
-    return suggestions.filter((s) => s.toLowerCase().startsWith(trimmed));
+    return suggestions.filter((s) => isSubpathSuggestionVisible(s, value));
   });
 
   // Re-fetch suggestions when repo changes

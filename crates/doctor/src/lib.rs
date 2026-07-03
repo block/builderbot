@@ -1285,7 +1285,7 @@ mod tests {
         );
         assert_eq!(
             readout.update_command.as_deref(),
-            Some("npm install -g @anthropic-ai/claude-code@latest"),
+            Some("npm install -g --force @anthropic-ai/claude-code@latest"),
         );
         assert_eq!(readout.update_fix_type, Some(FixType::UpdateMain));
     }

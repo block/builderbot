@@ -7,6 +7,12 @@ import {
 } from './diagramRendering';
 
 export type MarkdownRenderingOptions = MarkdownDiagramRenderingOptions & {
+  /**
+   * Render trusted inline HTML for plain text tokens.
+   *
+   * The returned HTML bypasses the generic Markdown sanitizer, so callbacks
+   * must escape any user-controlled text before returning.
+   */
   renderInlineText?: (text: string) => string;
 };
 
@@ -51,14 +57,14 @@ function createMarkdownRenderer(
     if (!options.renderInlineText) return renderText(token);
     if ('tokens' in token && token.tokens) return renderText(token);
     if ('escaped' in token && token.escaped) return renderText(token);
-    return options.renderInlineText(token.text);
+    return stashTrustedHtml(options.renderInlineText(token.text), trustedHtml);
   };
 
   return renderer;
 }
 
 function stashTrustedHtml(html: string, trustedHtml: TrustedHtmlReplacement[]): string {
-  const placeholder = `STAGED_MARKDOWN_TRUSTED_DIAGRAM_${trustedHtml.length}_${createPlaceholderNonce()}`;
+  const placeholder = `STAGED_MARKDOWN_TRUSTED_HTML_${trustedHtml.length}_${createPlaceholderNonce()}`;
   trustedHtml.push({ placeholder, html });
   return placeholder;
 }

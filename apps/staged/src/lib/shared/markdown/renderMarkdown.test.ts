@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import { renderHashtagTokens } from '../../features/sessions/hashtagItems';
+import type { HashtagItem } from '../../types';
 import { renderMarkdown } from './renderMarkdown';
 import type { PikchrRenderer } from './pikchrRendering';
 
@@ -49,7 +51,26 @@ describe('renderMarkdown', () => {
     expect(html).not.toContain('markdown-diagram-source-pikchr');
     expect(html).not.toContain('box "Start" fit');
     expect(html).not.toContain('box &quot;Start&quot; fit');
-    expect(html).not.toContain('STAGED_MARKDOWN_TRUSTED_DIAGRAM_');
+    expect(html).not.toContain('STAGED_MARKDOWN_TRUSTED_HTML_');
+  });
+
+  it('preserves trusted inline hashtag badge HTML through Markdown sanitization', () => {
+    const html = renderMarkdown('See #note:note-1 for context.', {
+      renderInlineText: (text) => renderHashtagTokens(text, hashtagItems),
+    });
+
+    expect(html).toContain('See ');
+    expect(html).toContain('class="hashtag-badge stable-raster stable-raster-glyphs"');
+    expect(html).toContain('role="button"');
+    expect(html).toContain('tabindex="0"');
+    expect(html).toContain('data-hashtag-ref="#note:note-1"');
+    expect(html).toContain('data-hashtag-type="note"');
+    expect(html).toContain('data-hashtag-id="note-1"');
+    expect(html).toContain('style="background: var(--note-bg); color: var(--note-color);"');
+    expect(html).toContain('<svg xmlns="http://www.w3.org/2000/svg"');
+    expect(html).toContain('<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2');
+    expect(html).toContain('Escaped &lt;title&gt; &amp; &quot;quotes&quot;');
+    expect(html).not.toContain('STAGED_MARKDOWN_TRUSTED_HTML_');
   });
 
   it('preserves numeric Pikchr colors through the Markdown rendering path', () => {
@@ -128,3 +149,13 @@ const unsafePikchrRenderer: PikchrRenderer = () => ({
   kind: 'error',
   message: 'Pikchr rendered unsafe SVG.',
 });
+
+const hashtagItems: HashtagItem[] = [
+  {
+    type: 'note',
+    id: 'note-1',
+    title: 'Escaped <title> & "quotes"',
+    color: '--note-color',
+    bgColor: '--note-bg',
+  },
+];

@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Path, Request, State, WebSocketUpgrade};
+use axum::extract::{Path, Query, Request, State, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
@@ -288,15 +288,36 @@ async fn authenticate(
 // WebSocket endpoint — /api/events
 // =============================================================================
 
-async fn ws_events(ws: WebSocketUpgrade, State(state): State<WebAppState>) -> Response {
-    ws.on_upgrade(move |socket| handle_ws(socket, state))
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EventsQuery {
+    client_id: Option<String>,
+}
+
+async fn ws_events(
+    ws: WebSocketUpgrade,
+    Query(query): Query<EventsQuery>,
+    State(state): State<WebAppState>,
+) -> Response {
+    let client_id = query
+        .client_id
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty());
+    ws.on_upgrade(move |socket| handle_ws(socket, state, client_id))
 }
 
 // clippy's suggested fix (collapsing the inner `if` into a match guard) doesn't
 // compile because `data: Bytes` can't be moved out of the pattern binding into
 // the guard expression.
 #[allow(clippy::collapsible_match)]
-async fn handle_ws(mut socket: WebSocket, state: WebAppState) {
+async fn handle_ws(mut socket: WebSocket, state: WebAppState, client_id: Option<String>) {
+    let pr_scheduler = client_id.as_ref().map(|client_id| {
+        use tauri::Manager;
+        let scheduler = Arc::clone(&state.app_handle.state::<Arc<PrPollScheduler>>());
+        scheduler.touch(client_id.clone());
+        scheduler
+    });
+
     let mut rx = state.event_tx.subscribe();
     loop {
         tokio::select! {
@@ -314,11 +335,30 @@ async fn handle_ws(mut socket: WebSocket, state: WebAppState) {
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
-            // Handle incoming messages (ping/pong, close)
+            // Handle incoming messages (heartbeat, ping/pong, close)
             msg = socket.recv() => {
                 let pong_data = match msg {
                     Some(Ok(Message::Close(_))) | None => break,
-                    Some(Ok(Message::Ping(data))) => data,
+                    Some(Ok(Message::Text(text))) => {
+                        if is_heartbeat_message(text.as_str()) {
+                            if let (Some(scheduler), Some(client_id)) = (&pr_scheduler, &client_id) {
+                                scheduler.touch(client_id.clone());
+                            }
+                        }
+                        continue;
+                    }
+                    Some(Ok(Message::Ping(data))) => {
+                        if let (Some(scheduler), Some(client_id)) = (&pr_scheduler, &client_id) {
+                            scheduler.touch(client_id.clone());
+                        }
+                        data
+                    }
+                    Some(Ok(Message::Pong(_))) => {
+                        if let (Some(scheduler), Some(client_id)) = (&pr_scheduler, &client_id) {
+                            scheduler.touch(client_id.clone());
+                        }
+                        continue;
+                    }
                     _ => continue,
                 };
                 if socket.send(Message::Pong(pong_data)).await.is_err() {
@@ -327,6 +367,26 @@ async fn handle_ws(mut socket: WebSocket, state: WebAppState) {
             }
         }
     }
+
+    if let (Some(scheduler), Some(client_id)) = (pr_scheduler, client_id) {
+        scheduler.disconnect_client(client_id);
+    }
+}
+
+fn is_heartbeat_message(text: &str) -> bool {
+    if text == "heartbeat" {
+        return true;
+    }
+
+    serde_json::from_str::<Value>(text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("type")
+                .and_then(Value::as_str)
+                .map(|message_type| message_type == "heartbeat")
+        })
+        .unwrap_or(false)
 }
 
 // =============================================================================
@@ -3548,20 +3608,13 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
 mod tests {
     use std::collections::BTreeSet;
 
-    const INTENTIONALLY_UNSUPPORTED_WEB_COMMANDS: &[&str] = &[];
-
     #[test]
     fn web_dispatch_covers_tauri_commands() {
         let tauri_commands = extract_generate_handler_commands(include_str!("lib.rs"));
         let dispatch_commands = extract_dispatch_commands(include_str!("web_server.rs"));
-        let intentionally_unsupported = INTENTIONALLY_UNSUPPORTED_WEB_COMMANDS
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>();
 
         let missing = tauri_commands
             .difference(&dispatch_commands)
-            .filter(|command| !intentionally_unsupported.contains(command.as_str()))
             .cloned()
             .collect::<Vec<_>>();
 

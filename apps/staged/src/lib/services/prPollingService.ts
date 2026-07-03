@@ -64,6 +64,11 @@ export function getPrPollClientId(): string {
 type StaleCallback = (projectId: string, isStale: boolean) => void;
 type RefreshingCallback = (projectId: string, isRefreshing: boolean) => void;
 
+interface PendingBranchHint {
+  branchId: string;
+  projectId: string;
+}
+
 interface PrRefreshStateEvent {
   projectId: string;
   refreshing: boolean;
@@ -86,6 +91,9 @@ const refreshingCallbacks = new Set<RefreshingCallback>();
 
 /** Projects the backend currently reports as refreshing. */
 const refreshingProjects = new Set<string>();
+
+let selectedProjectId: string | null = null;
+const pendingBranchHints = new Map<string, PendingBranchHint>();
 
 let initialized = false;
 let unlistenRefreshState: UnlistenFn | null = null;
@@ -146,10 +154,10 @@ function handleBlur() {
 /**
  * Wire up the interest/hint layer: forward window focus to the backend and
  * subscribe to its refresh/stale lifecycle events. Idempotent; call once at app
- * start. No-op in web mode (the transport is stubbed in this build).
+ * start.
  */
 export function init(): void {
-  if (initialized || !isTauri) return;
+  if (initialized) return;
   initialized = true;
 
   window.addEventListener('focus', handleFocus);
@@ -180,6 +188,8 @@ export function dispose(): void {
 
   // Drop this client's interest so the backend recomputes the union without it.
   void disconnectPrPollClient(clientId).catch(() => {});
+  selectedProjectId = null;
+  pendingBranchHints.clear();
 
   for (const projectId of [...refreshingProjects]) {
     setProjectRefreshing(projectId, false);
@@ -192,7 +202,7 @@ export function dispose(): void {
 
 /** Set the currently selected project (polls more frequently). */
 export function setSelectedProject(projectId: string | null): void {
-  if (!isTauri) return;
+  selectedProjectId = projectId;
   void setForegroundProject(clientId, projectId).catch((e) =>
     console.error('[PrPollingService] set_foreground_project failed:', e)
   );
@@ -204,15 +214,35 @@ export function updateChecksStatus(
   projectId: string,
   hasPendingChecks: boolean
 ): void {
-  if (!isTauri) return;
+  if (hasPendingChecks) {
+    pendingBranchHints.set(branchId, { branchId, projectId });
+  } else {
+    pendingBranchHints.delete(branchId);
+  }
   void setBranchPending(clientId, branchId, projectId, hasPendingChecks).catch((e) =>
     console.error('[PrPollingService] set_branch_pending failed:', e)
   );
 }
 
+/**
+ * Re-send this client's current interest after a browser WebSocket reconnect.
+ * The backend drops all interest on clean WS close, then recreates an empty
+ * client when the same id reconnects.
+ */
+export async function replayPrPollInterestHints(): Promise<void> {
+  if (!initialized) return;
+
+  await Promise.all([
+    setPrPollFocus(clientId, document.hasFocus()),
+    setForegroundProject(clientId, selectedProjectId),
+    ...Array.from(pendingBranchHints.values(), ({ branchId, projectId }) =>
+      setBranchPending(clientId, branchId, projectId, true)
+    ),
+  ]);
+}
+
 /** Trigger an immediate refresh for a specific project (e.g. after PR creation or push). */
 export function refreshNow(projectId: string): void {
-  if (!isTauri) return;
   void refreshPrStatusesNow(clientId, projectId).catch((e) =>
     console.error(`[PrPollingService] refresh_now failed for project=${projectId}:`, e)
   );

@@ -138,6 +138,14 @@ function startHeartbeat(): void {
   wsHeartbeatTimer = setInterval(sendHeartbeat, WEB_SOCKET_HEARTBEAT_MS);
 }
 
+function replayCurrentPrPollInterestHints(): void {
+  void import('./services/prPollingService')
+    .then(({ replayPrPollInterestHints }) => replayPrPollInterestHints())
+    .catch((e) => {
+      console.error('[transport] Failed to replay PR polling interest:', e);
+    });
+}
+
 async function ensureWebSocket(): Promise<void> {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
     return;
@@ -157,6 +165,7 @@ async function ensureWebSocket(): Promise<void> {
   socket.onopen = () => {
     wsConnecting = false;
     startHeartbeat();
+    replayCurrentPrPollInterestHints();
     if (wsReconnectTimer) {
       clearTimeout(wsReconnectTimer);
       wsReconnectTimer = null;

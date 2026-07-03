@@ -55,6 +55,7 @@ describe('web transport', () => {
   });
 
   afterEach(() => {
+    vi.doUnmock('./services/prPollingService');
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
@@ -112,5 +113,31 @@ describe('web transport', () => {
 
     unlisten();
     expect(socket.closed).toBe(true);
+  });
+
+  it('replays PR polling interest when the browser event socket opens and reconnects', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    const replayPrPollInterestHints = vi.fn().mockResolvedValue(undefined);
+    vi.doMock('./services/prPollingService', () => ({
+      getPrPollClientId: () => 'web-client-1',
+      replayPrPollInterestHints,
+    }));
+
+    const { listenToEvent } = await import('./transport');
+    const unlisten = listenToEvent('pr-refresh-state', vi.fn());
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+
+    sockets[0].open();
+    await vi.waitFor(() => expect(replayPrPollInterestHints).toHaveBeenCalledTimes(1));
+
+    sockets[0].close();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(() => expect(sockets).toHaveLength(2));
+
+    sockets[1].open();
+    await vi.waitFor(() => expect(replayPrPollInterestHints).toHaveBeenCalledTimes(2));
+
+    unlisten();
   });
 });

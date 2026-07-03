@@ -66,4 +66,29 @@ describe('prPollingService in web mode', () => {
     expect(unlistenRefresh).toHaveBeenCalledTimes(1);
     expect(unlistenStale).toHaveBeenCalledTimes(1);
   });
+
+  it('replays the current interest hints after a web socket reconnect', async () => {
+    const service = await import('./prPollingService');
+    const clientId = service.getPrPollClientId();
+
+    service.init();
+    service.setSelectedProject('project-1');
+    service.updateChecksStatus('branch-1', 'project-1', true);
+    service.updateChecksStatus('branch-2', 'project-1', true);
+    service.updateChecksStatus('branch-2', 'project-1', false);
+
+    invokeCommand.mockClear();
+    await service.replayPrPollInterestHints();
+
+    expect(invokeCommand.mock.calls).toEqual([
+      ['set_focus', { clientId, focused: true }],
+      ['set_foreground_project', { clientId, projectId: 'project-1' }],
+      [
+        'set_branch_pending',
+        { clientId, branchId: 'branch-1', projectId: 'project-1', pending: true },
+      ],
+    ]);
+
+    service.dispose();
+  });
 });

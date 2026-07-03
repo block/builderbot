@@ -277,13 +277,34 @@ fn path_package_id_override(
 }
 
 fn claude_code_cask_token_from_path(path: &Path) -> Option<&'static str> {
+    if let Some(token) = claude_code_cask_token_from_caskroom_path(path) {
+        return Some(token);
+    }
+
+    if let Some(target) = immediate_symlink_target(path) {
+        if let Some(token) = claude_code_cask_token_from_caskroom_path(&target) {
+            return Some(token);
+        }
+    }
+
     if let Ok(canonical) = path.canonicalize() {
         if let Some(token) = claude_code_cask_token_from_caskroom_path(&canonical) {
             return Some(token);
         }
     }
 
-    claude_code_cask_token_from_caskroom_path(path)
+    None
+}
+
+fn immediate_symlink_target(path: &Path) -> Option<std::path::PathBuf> {
+    let target = std::fs::read_link(path).ok()?;
+    Some(if target.is_absolute() {
+        target
+    } else {
+        path.parent()
+            .map(|parent| parent.join(&target))
+            .unwrap_or(target)
+    })
 }
 
 fn claude_code_cask_token_from_caskroom_path(path: &Path) -> Option<&'static str> {
@@ -420,6 +441,37 @@ mod tests {
                 InstallSource::Brew,
                 Role::Main,
                 Some(&link),
+            ),
+            Some(("claude-code@latest".to_string(), LatestSource::Brew)),
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_main_brew_preserves_latest_cask_token_from_immediate_symlink_target() {
+        let root = scratch_dir("claude-cask-immediate-symlink");
+        let npm_entry = root.join(
+            "home/.nvm/versions/node/v23.7.0/lib/node_modules/@anthropic-ai/claude-code/cli/claude.js",
+        );
+        fs::create_dir_all(npm_entry.parent().unwrap()).unwrap();
+        fs::write(&npm_entry, "#!/usr/bin/env node\n").unwrap();
+
+        let cask_bin = root.join("Caskroom/claude-code@latest/2.1.153/claude");
+        fs::create_dir_all(cask_bin.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&npm_entry, &cask_bin).unwrap();
+
+        fs::create_dir_all(root.join("bin")).unwrap();
+        let active = root.join("bin/claude");
+        std::os::unix::fs::symlink(&cask_bin, &active).unwrap();
+
+        assert_eq!(
+            lookup_package_id_for_binary(
+                "ai-agent-claude",
+                InstallSource::Brew,
+                Role::Main,
+                Some(&active),
             ),
             Some(("claude-code@latest".to_string(), LatestSource::Brew)),
         );

@@ -160,7 +160,7 @@ pub fn derive_update_command(
 ) -> Option<String> {
     let pkg = package_id?;
     match install_source? {
-        InstallSource::Npm => Some(derive_npm_update_command(pkg)),
+        InstallSource::Npm => Some(format!("npm install -g {pkg}@latest")),
         InstallSource::Brew => Some(format!("brew upgrade {pkg}")),
         InstallSource::Cargo => Some(format!("cargo install --force {pkg}")),
         InstallSource::CurlPipe
@@ -168,13 +168,6 @@ pub fn derive_update_command(
         | InstallSource::Asdf
         | InstallSource::Unknown
         | InstallSource::System => None,
-    }
-}
-
-fn derive_npm_update_command(package_id: &str) -> String {
-    match package_id {
-        "@anthropic-ai/claude-code" => format!("npm install -g --force {package_id}@latest"),
-        pkg => format!("npm install -g {pkg}@latest"),
     }
 }
 
@@ -922,19 +915,11 @@ mod tests {
     }
 
     #[test]
-    fn derive_update_command_claude_npm_includes_force() {
+    fn derive_update_command_npm_emits_at_latest() {
         assert_eq!(
             derive_update_command(Some(&InstallSource::Npm), Some("@anthropic-ai/claude-code"),)
                 .as_deref(),
-            Some("npm install -g --force @anthropic-ai/claude-code@latest"),
-        );
-    }
-
-    #[test]
-    fn derive_update_command_npm_emits_at_latest() {
-        assert_eq!(
-            derive_update_command(Some(&InstallSource::Npm), Some("amp-acp"),).as_deref(),
-            Some("npm install -g amp-acp@latest"),
+            Some("npm install -g @anthropic-ai/claude-code@latest"),
         );
     }
 

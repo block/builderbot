@@ -88,6 +88,14 @@ pub(crate) const PACKAGE_IDS: &[(&str, &[PackageEntry])] = &[
     (
         "ai-agent-claude",
         &[
+            // Official Homebrew cask (`brew install --cask claude-code`) for
+            // the main Claude Code CLI.
+            (
+                InstallSource::Brew,
+                "claude-code",
+                LatestSource::Brew,
+                Role::Main,
+            ),
             // Main CLI when installed via npm (e.g. under nvm). The native
             // curl-pipe install is fingerprinted as `CurlPipe` (no registry
             // entry here, self-updating) so this only applies when Claude
@@ -285,6 +293,14 @@ mod tests {
         assert_eq!(
             lookup_package_id("ai-agent-claude", InstallSource::Npm, Role::Main),
             Some(("@anthropic-ai/claude-code", LatestSource::Npm)),
+        );
+    }
+
+    #[test]
+    fn claude_main_brew_resolves_to_claude_code_cask() {
+        assert_eq!(
+            lookup_package_id("ai-agent-claude", InstallSource::Brew, Role::Main),
+            Some(("claude-code", LatestSource::Brew)),
         );
     }
 

@@ -34,6 +34,8 @@ use package_ids::{lookup_package_id_for_binary, LatestSource, Role};
 use resolve::resolve_binary_with_diagnostics;
 use types::{InstallSource, ResolvedBinary};
 
+const SNAPSHOT_PATH_ENV: &str = "__BUILDERBOT_DOCTOR_SNAPSHOT_PATH";
+
 /// Fallback check returned when a spawn_blocking task panics.
 fn empty_check(id: &str, label: &str) -> DoctorCheck {
     DoctorCheck {
@@ -811,17 +813,19 @@ enum StreamLine {
 /// caller env snapshot, `path_prefix` keeps the legacy behavior of prepending
 /// resolved binary dirs plus conservative fallbacks. With a snapshot, doctor
 /// preserves the snapshot environment and appends missing prefix dirs to its
-/// `PATH` so auth probes can still find resolved binaries without replacing
-/// the caller's environment.
+/// `PATH` so auth probes can still find resolved binaries. Because login shell
+/// startup can rewrite `PATH` after process spawn, snapshot callers also carry
+/// the merged path in an internal env var and restore it inside the `-c`
+/// payload immediately before running the requested command.
 fn build_shell_command(
     command: &str,
     path_prefix: &[PathBuf],
     env: Option<&DoctorEnv>,
 ) -> std::process::Command {
-    let (shell, args) = if std::path::Path::new("/bin/zsh").exists() {
-        ("/bin/zsh", vec!["-l", "-c", command])
+    let shell = if std::path::Path::new("/bin/zsh").exists() {
+        "/bin/zsh"
     } else {
-        ("/bin/bash", vec!["-l", "-c", command])
+        "/bin/bash"
     };
     let home = env
         .and_then(|e| e.get("HOME").map(str::to_string))
@@ -832,8 +836,9 @@ fn build_shell_command(
         .or_else(|| std::env::var("USER").ok())
         .unwrap_or_default();
 
+    let mut shell_command = command.to_string();
     let mut cmd = std::process::Command::new(shell);
-    cmd.args(&args).env_clear();
+    cmd.env_clear();
 
     if let Some(env) = env {
         for (key, value) in &env.vars {
@@ -847,7 +852,9 @@ fn build_shell_command(
         }
         cmd.env("TERM", "xterm-256color").current_dir(&home);
         if let Some(path) = merged_snapshot_path(env.get("PATH"), path_prefix) {
-            cmd.env("PATH", path);
+            cmd.env("PATH", &path);
+            cmd.env(SNAPSHOT_PATH_ENV, path);
+            shell_command = command_with_snapshot_path_restore(command);
         }
     } else {
         cmd.env("HOME", &home)
@@ -860,7 +867,15 @@ fn build_shell_command(
         }
     }
 
+    cmd.arg("-l").arg("-c").arg(shell_command);
     cmd
+}
+
+fn command_with_snapshot_path_restore(command: &str) -> String {
+    let name = SNAPSHOT_PATH_ENV;
+    format!(
+        "if [ \"${{{name}+x}}\" = x ]; then PATH=\"${{{name}}}\"; export PATH; unset {name}; fi\n{command}",
+    )
 }
 
 fn legacy_prefixed_path(path_prefix: &[PathBuf]) -> String {
@@ -1087,6 +1102,19 @@ mod tests {
         }
     }
 
+    fn shell_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+
+    fn write_login_path_rewrite_profiles(home: &Path, path: &Path) {
+        let profile = format!(
+            "export PATH={}\n",
+            shell_quote(&format!("{}:/usr/bin:/bin", path.to_string_lossy())),
+        );
+        std::fs::write(home.join(".zprofile"), &profile).unwrap();
+        std::fs::write(home.join(".bash_profile"), profile).unwrap();
+    }
+
     #[test]
     fn timeout_diagnostic_ids_are_collision_safe() {
         let checks = timeout_diagnostic_checks(vec![
@@ -1260,6 +1288,41 @@ mod tests {
         match outcome {
             ExecOutcome::Ok => {}
             other => panic!("expected Ok with prefix PATH and env marker merged; got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_command_with_env_snapshot_restores_path_after_login_shell_rewrite() {
+        let tmp = unique_tmp_dir("auth-env-path-login-rewrite");
+        let snapshot_bin = tmp.join("nvm/bin");
+        let login_rewrite_bin = tmp.join("homebrew/bin");
+        let script_name = "doctor-auth-path-probe";
+        write_executable(&snapshot_bin.join(script_name), "#!/bin/sh\nexit 0\n");
+        write_executable(&login_rewrite_bin.join(script_name), "#!/bin/sh\nexit 42\n");
+        write_login_path_rewrite_profiles(&tmp, &login_rewrite_bin);
+
+        let env = DoctorEnv::new(vec![
+            (
+                "PATH".to_string(),
+                format!("{}:/usr/bin:/bin", snapshot_bin.to_string_lossy()),
+            ),
+            ("HOME".to_string(), tmp.to_string_lossy().to_string()),
+            ("USER".to_string(), "doctor-test".to_string()),
+            ("ZDOTDIR".to_string(), tmp.to_string_lossy().to_string()),
+        ]);
+
+        let outcome = tokio::task::spawn_blocking(move || {
+            execute_command_with_path_prefix_with_env(script_name, &[], Some(&env))
+        })
+        .await
+        .unwrap();
+
+        let _ = std::fs::remove_dir_all(&tmp);
+        match outcome {
+            ExecOutcome::Ok => {}
+            other => {
+                panic!("expected snapshot PATH binary to beat login profile rewrite; got {other:?}")
+            }
         }
     }
 
@@ -1505,6 +1568,68 @@ mod tests {
         assert!(
             captured.iter().any(|line| line == "fix-env-ok"),
             "expected command output from snapshot PATH script; captured: {captured:?}",
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_fix_streaming_update_restores_snapshot_path_after_login_shell_rewrite() {
+        let tmp = unique_tmp_dir("fix-update-env-path-login-rewrite");
+        let snapshot_bin = tmp.join("nvm/bin");
+        let login_rewrite_bin = tmp.join("homebrew/bin");
+        write_executable(
+            &snapshot_bin.join("npm"),
+            "#!/bin/sh\n\
+             echo \"snapshot-npm $*\"\n",
+        );
+        write_executable(
+            &login_rewrite_bin.join("npm"),
+            "#!/bin/sh\n\
+             echo \"homebrew-npm $*\"\n\
+             exit 42\n",
+        );
+        write_login_path_rewrite_profiles(&tmp, &login_rewrite_bin);
+
+        let env = DoctorEnv::new(vec![
+            (
+                "PATH".to_string(),
+                format!("{}:/usr/bin:/bin", snapshot_bin.to_string_lossy()),
+            ),
+            ("HOME".to_string(), tmp.to_string_lossy().to_string()),
+            ("USER".to_string(), "doctor-test".to_string()),
+            ("ZDOTDIR".to_string(), tmp.to_string_lossy().to_string()),
+        ]);
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let command = "npm install -g @anthropic-ai/claude-code@latest";
+
+        let result = execute_fix_streaming_with_env_options(
+            "ai-agent-claude".to_string(),
+            FixType::UpdateMain,
+            ExecuteFixOptions {
+                command_override: Some(command.to_string()),
+                npm_registry: None,
+                env: Some(env),
+            },
+            move |line| {
+                lines_clone.lock().unwrap().push(line.to_string());
+            },
+        )
+        .await;
+
+        let captured = lines.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(result.is_ok(), "snapshot npm update failed: {result:?}");
+        assert!(
+            captured
+                .iter()
+                .any(|line| line == "snapshot-npm install -g @anthropic-ai/claude-code@latest"),
+            "expected update to run through snapshot npm; captured: {captured:?}",
+        );
+        assert!(
+            captured
+                .iter()
+                .all(|line| !line.starts_with("homebrew-npm")),
+            "login profile PATH rewrite should not select homebrew npm; captured: {captured:?}",
         );
     }
 

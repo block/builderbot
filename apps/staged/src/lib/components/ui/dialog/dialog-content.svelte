@@ -14,6 +14,7 @@
   let {
     ref = $bindable(null),
     class: className,
+    style: styleProp,
     portalProps,
     children,
     showCloseButton = true,
@@ -48,6 +49,10 @@
   // on-screen keyboard, pinning its footer to the keyboard's top edge.
   const fullScreenStyle =
     'position:fixed;inset:0;top:0;left:0;width:100%;max-width:none;height:calc(100dvh - var(--keyboard-inset, 0px));max-height:none;transform:none;border-radius:0;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);';
+
+  const contentStyle = $derived(
+    fullScreen ? `${styleProp ? `${styleProp};` : ''}${fullScreenStyle}` : styleProp
+  );
 </script>
 
 <DialogPortal {...portalProps}>
@@ -62,7 +67,7 @@
         : 'data-closed:zoom-out-95 data-open:zoom-in-95',
       className
     )}
-    style={fullScreen ? fullScreenStyle : undefined}
+    style={contentStyle}
     onOpenAutoFocus={(e) => e.preventDefault()}
     {...restProps}
   >

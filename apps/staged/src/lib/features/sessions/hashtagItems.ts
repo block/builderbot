@@ -312,6 +312,33 @@ export function hasHashtagTokens(text: string): boolean {
   return re.test(text);
 }
 
+function hashtagReferenceLookupKeys(type: string, id: string): string[] {
+  const exactKey = `${type}:${id}`;
+  return type === 'note' ? [exactKey, `project-note:${id}`] : [exactKey];
+}
+
+export function findHashtagItemForReference(
+  items: readonly HashtagItem[],
+  type: string,
+  id: string
+): HashtagItem | undefined {
+  for (const key of hashtagReferenceLookupKeys(type, id)) {
+    const item = items.find((candidate) => `${candidate.type}:${candidate.id}` === key);
+    if (item) return item;
+  }
+}
+
+function findHashtagItemInMap(
+  itemsByKey: Map<string, HashtagItem>,
+  type: string,
+  id: string
+): HashtagItem | undefined {
+  for (const key of hashtagReferenceLookupKeys(type, id)) {
+    const item = itemsByKey.get(key);
+    if (item) return item;
+  }
+}
+
 /**
  * Replace `#type:id` tokens in plain text with inline badge HTML.
  * Plain-text segments are HTML-escaped; badge spans use CSS custom-property
@@ -335,9 +362,10 @@ export function renderHashtagTokens(text: string, items: HashtagItem[]): string 
 
     const type = match[1];
     const id = match[2];
-    const iconSvg = hashtagTypeIconSvg[type] ?? '';
-    const colors = hashtagTypeColors[type] ?? { color: '--text-muted', bg: '--bg-secondary' };
-    const item = itemsByKey.get(`${type}:${id}`);
+    const item = findHashtagItemInMap(itemsByKey, type, id);
+    const targetType = item?.type ?? type;
+    const iconSvg = hashtagTypeIconSvg[targetType] ?? '';
+    const colors = hashtagTypeColors[targetType] ?? { color: '--text-muted', bg: '--bg-secondary' };
     const title = item
       ? item.title
       : type === 'commit' && id.length > 12
@@ -345,7 +373,7 @@ export function renderHashtagTokens(text: string, items: HashtagItem[]): string 
         : id;
     const ref = `#${type}:${id}`;
     parts.push(
-      `<span class="hashtag-badge stable-raster stable-raster-glyphs" role="button" tabindex="0" data-hashtag-type="${escapeHtml(type)}" data-hashtag-id="${escapeHtml(id)}" data-hashtag-ref="${escapeHtml(ref)}" style="background: var(${colors.bg}); color: var(${colors.color});">${iconSvg} ${escapeHtml(title)}</span>`
+      `<span class="hashtag-badge stable-raster stable-raster-glyphs" role="button" tabindex="0" data-hashtag-type="${escapeHtml(targetType)}" data-hashtag-id="${escapeHtml(item?.id ?? id)}" data-hashtag-ref="${escapeHtml(ref)}" style="background: var(${colors.bg}); color: var(${colors.color});">${iconSvg} ${escapeHtml(title)}</span>`
     );
 
     lastIndex = match.index + match[0].length;

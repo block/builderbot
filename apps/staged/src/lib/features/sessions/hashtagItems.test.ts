@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Branch, BranchTimeline, ProjectNote } from '../../types';
+import type { Branch, BranchTimeline, HashtagItem, ProjectNote } from '../../types';
 import { getBranchTimeline, listProjectNotes } from '../../commands';
 import {
   buildProjectHashtagItems,
+  findHashtagItemForReference,
   projectNotesToHashtagItems,
+  renderHashtagTokens,
   timelineToHashtagItems,
 } from './hashtagItems';
 
@@ -245,6 +247,60 @@ describe('projectNotesToHashtagItems', () => {
 
     expect(items.map((item) => item.id)).toEqual(['new-project-note', 'old-project-note']);
     expect(items[0]).not.toHaveProperty('subtitle');
+  });
+});
+
+describe('findHashtagItemForReference', () => {
+  it('resolves #note project-note aliases after exact note matches', () => {
+    const items: HashtagItem[] = [
+      {
+        type: 'project-note',
+        id: 'shared-id',
+        title: 'Project note',
+        color: '--note-color',
+        bgColor: '--note-bg',
+      },
+      {
+        type: 'note',
+        id: 'shared-id',
+        title: 'Branch note',
+        color: '--note-color',
+        bgColor: '--note-bg',
+      },
+      {
+        type: 'project-note',
+        id: 'project-only',
+        title: 'Project only',
+        color: '--note-color',
+        bgColor: '--note-bg',
+      },
+    ];
+
+    expect(findHashtagItemForReference(items, 'note', 'shared-id')).toEqual(
+      expect.objectContaining({ type: 'note', title: 'Branch note' })
+    );
+    expect(findHashtagItemForReference(items, 'note', 'project-only')).toEqual(
+      expect.objectContaining({ type: 'project-note', title: 'Project only' })
+    );
+  });
+});
+
+describe('renderHashtagTokens', () => {
+  it('renders project notes from #note aliases and keeps #project-note accepted', () => {
+    const items = projectNotesToHashtagItems([
+      projectNote({ id: 'project-note-1', title: 'Project note title' }),
+    ]);
+
+    const noteAliasHtml = renderHashtagTokens('See #note:project-note-1', items);
+    expect(noteAliasHtml).toContain('Project note title');
+    expect(noteAliasHtml).toContain('data-hashtag-ref="#note:project-note-1"');
+    expect(noteAliasHtml).toContain('data-hashtag-type="project-note"');
+    expect(noteAliasHtml).toContain('data-hashtag-id="project-note-1"');
+
+    const projectNoteHtml = renderHashtagTokens('See #project-note:project-note-1', items);
+    expect(projectNoteHtml).toContain('Project note title');
+    expect(projectNoteHtml).toContain('data-hashtag-ref="#project-note:project-note-1"');
+    expect(projectNoteHtml).toContain('data-hashtag-type="project-note"');
   });
 });
 

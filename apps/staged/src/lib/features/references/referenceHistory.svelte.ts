@@ -1,6 +1,7 @@
 import type { DiffDetailRoute } from '../layout/navigation.svelte';
 import type { DisplayRootInput } from '../sessions/pathDisplayRoots';
 import type { HashtagItem, ProjectRepo } from '../../types';
+import { findHashtagItemForReference } from '../sessions/hashtagItems';
 
 export type HashtagClickInfo = {
   type: HashtagItem['type'];
@@ -159,10 +160,7 @@ export function resolveHashtagReference(
   context: ReferenceDialogContext = {}
 ): ReferenceHistoryEntry | null {
   const item =
-    click.item ??
-    context.hashtagItems?.find((candidate) => {
-      return candidate.type === click.type && candidate.id === click.id;
-    });
+    click.item ?? findHashtagItemForReference(context.hashtagItems ?? [], click.type, click.id);
 
   switch (click.type) {
     case 'note':
@@ -170,8 +168,8 @@ export function resolveHashtagReference(
       if (!item?.noteContent && item?.noteContent !== '') return null;
       return {
         kind: 'note',
-        noteKind: click.type === 'project-note' ? 'project' : 'branch',
-        id: click.id,
+        noteKind: item.type === 'project-note' ? 'project' : 'branch',
+        id: item.id,
         ref: click.ref,
         title: item.title,
         content: item.noteContent,

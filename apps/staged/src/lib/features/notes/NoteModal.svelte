@@ -29,7 +29,7 @@
   import { loadPikchrRenderer, type PikchrRenderer } from '../../shared/markdown/pikchrRendering';
   import { noteMarkdownWithTitle, renderNoteMarkdown } from './noteMarkdown';
   import type { HashtagItem } from '../../types';
-  import { renderHashtagTokens } from '../sessions/hashtagItems';
+  import { findHashtagItemForReference, renderHashtagTokens } from '../sessions/hashtagItems';
   import ReferenceNavControls from '../references/ReferenceNavControls.svelte';
   import type { HashtagClickInfo, ReferenceNavState } from '../references/referenceHistory.svelte';
 
@@ -259,7 +259,7 @@
     const id = badge.dataset.hashtagId;
     const ref = badge.dataset.hashtagRef;
     if (!type || !id || !ref) return null;
-    const item = hashtagItems.find((candidate) => candidate.type === type && candidate.id === id);
+    const item = findHashtagItemForReference(hashtagItems, type, id);
     return { type, id, ref, item };
   }
 

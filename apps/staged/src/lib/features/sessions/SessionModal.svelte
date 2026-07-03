@@ -60,6 +60,7 @@
   import HashtagInput from './HashtagInput.svelte';
   import {
     buildBranchHashtagItems,
+    findHashtagItemForReference,
     renderHashtagTokens as renderHashtagTokensShared,
   } from './hashtagItems';
   import * as Dialog from '$lib/components/ui/dialog';
@@ -831,7 +832,7 @@
     const id = badge.dataset.hashtagId;
     const ref = badge.dataset.hashtagRef;
     if (!type || !id || !ref) return null;
-    const item = hashtagItems.find((candidate) => candidate.type === type && candidate.id === id);
+    const item = findHashtagItemForReference(hashtagItems, type, id);
     return { type, id, ref, item };
   }
 

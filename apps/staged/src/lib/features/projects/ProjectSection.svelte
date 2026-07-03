@@ -287,6 +287,12 @@
   } | null>(null);
   let openSessionId = $state<string | null>(null);
 
+  $effect(() => {
+    const _signature = hashtagSignature;
+    if (!openNote && !openSessionId) return;
+    void ensureHashtagItems();
+  });
+
   function isCompletedProjectNote(note: ProjectNote): boolean {
     const isRunning = isSessionActive(note.sessionStatus);
     const isFailed = !isRunning && !!note.sessionId && !note.content.trim();

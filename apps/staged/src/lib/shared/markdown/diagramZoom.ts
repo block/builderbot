@@ -113,7 +113,7 @@ function getFitTransform(
   const availableWidth = Math.max(1, viewportRect.width - options.fitPadding * 2);
   const availableHeight = Math.max(1, viewportRect.height - options.fitPadding * 2);
   const fitScale = Math.min(1, availableWidth / contentWidth, availableHeight / contentHeight);
-  const scale = clamp(fitScale, options.minScale, options.maxScale);
+  const scale = Math.min(fitScale, options.maxScale);
   const offsetX = (viewportRect.width - contentWidth * scale) / 2;
   const offsetY = (viewportRect.height - contentHeight * scale) / 2;
 
@@ -126,10 +126,6 @@ function toDiagramTransform(transform: ZoomTransform): DiagramZoomTransform {
     offsetX: transform.x,
     offsetY: transform.y,
   };
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
 }
 
 function normalizeWheelDelta(event: WheelEvent, viewportEl: HTMLDivElement): [number, number] {

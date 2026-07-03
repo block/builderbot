@@ -16,7 +16,7 @@
 
   let { open, svgMarkup, onClose }: Props = $props();
 
-  const MIN_SCALE = 0.2;
+  const MIN_SCALE = 0.05;
   const MAX_SCALE = 8;
   const ZOOM_STEP = 1.25;
   const FIT_PADDING = 48;
@@ -118,7 +118,7 @@
           aria-label="Zoom out"
           disabled={!svgMarkup || scale <= MIN_SCALE}
           onclick={() => zoomBy(1 / ZOOM_STEP)}
-          class="size-8 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
+          class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
         >
           <ZoomOut size={16} />
         </Button>
@@ -129,7 +129,7 @@
           aria-label="Reset zoom"
           disabled={!svgMarkup || !hasCustomTransform}
           onclick={resetView}
-          class="size-8 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
+          class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
         >
           <RotateCcw size={16} />
         </Button>
@@ -140,7 +140,7 @@
           aria-label="Zoom in"
           disabled={!svgMarkup || scale >= MAX_SCALE}
           onclick={() => zoomBy(ZOOM_STEP)}
-          class="size-8 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
+          class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
         >
           <ZoomIn size={16} />
         </Button>
@@ -150,7 +150,7 @@
           title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
           aria-label="Close"
           onclick={closeViewer}
-          class="size-8 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-[18px]"
+          class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-[18px]"
         >
           <X size={18} />
         </Button>
@@ -175,10 +175,11 @@
     display: flex;
     flex-direction: row;
     align-items: center;
-    min-height: 49px;
+    min-height: 42px;
     flex-shrink: 0;
-    padding: 8px 12px 8px 84px;
-    border-bottom: 1px solid var(--border-subtle);
+    padding: 8px 8px 8px 78px;
+    background: var(--bg-app-bar);
+    border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 70%, transparent);
   }
 
   :global(.diagram-viewer-title) {
@@ -215,7 +216,7 @@
     place-items: center;
     min-height: 0;
     overflow: hidden;
-    background: var(--diagram-canvas-bg);
+    background: color-mix(in srgb, var(--diagram-canvas-bg) 82%, var(--bg-chrome));
     cursor: grab;
     touch-action: none;
     user-select: none;
@@ -231,6 +232,10 @@
     left: 0;
     width: max-content;
     height: max-content;
+    background: var(--diagram-canvas-bg);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--pikchr-ink) 14%, transparent),
+      0 14px 36px color-mix(in srgb, var(--shadow-overlay) 18%, transparent);
     transform-origin: 0 0;
   }
 

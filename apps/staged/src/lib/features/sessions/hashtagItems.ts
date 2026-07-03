@@ -41,6 +41,8 @@ type SortableHashtagItem = HashtagItem & {
 };
 
 type BranchHashtagContext = {
+  branchId?: string;
+  projectId?: string | null;
   branchName?: string;
   repoSlug?: string;
   repoSubpath?: string | null;
@@ -91,6 +93,14 @@ function stripSortMetadata(item: SortableHashtagItem): HashtagItem {
   if (item.branchName !== undefined) stripped.branchName = item.branchName;
   if (item.repoSlug !== undefined) stripped.repoSlug = item.repoSlug;
   if (item.repoSubpath !== undefined) stripped.repoSubpath = item.repoSubpath;
+  if (item.branchId !== undefined) stripped.branchId = item.branchId;
+  if (item.projectId !== undefined) stripped.projectId = item.projectId;
+  if (item.noteContent !== undefined) stripped.noteContent = item.noteContent;
+  if (item.noteSessionId !== undefined) stripped.noteSessionId = item.noteSessionId;
+  if (item.noteUpdatedAt !== undefined) stripped.noteUpdatedAt = item.noteUpdatedAt;
+  if (item.imageFilename !== undefined) stripped.imageFilename = item.imageFilename;
+  if (item.reviewCommitSha !== undefined) stripped.reviewCommitSha = item.reviewCommitSha;
+  if (item.reviewScope !== undefined) stripped.reviewScope = item.reviewScope;
 
   return stripped;
 }
@@ -108,13 +118,9 @@ export async function buildBranchHashtagItems(
     projectId ? listProjectNotes(projectId) : Promise.resolve([]),
   ]);
 
+  const branchContext = { ...context, branchId, projectId };
   return sortAndStripHashtagItems([
-    ...timelineToSortableHashtagItems(
-      timeline,
-      context.branchName,
-      context.repoSlug,
-      context.repoSubpath
-    ),
+    ...timelineToSortableHashtagItems(timeline, branchContext),
     ...projectNotesToSortableHashtagItems(projectNotes),
   ]);
 }
@@ -150,7 +156,13 @@ export async function buildProjectHashtagItems(
     const repoSlug = repo?.githubRepo;
     const repoSubpath = repo?.subpath;
     items.push(
-      ...timelineToSortableHashtagItems(timeline, branch.branchName, repoSlug, repoSubpath)
+      ...timelineToSortableHashtagItems(timeline, {
+        branchId: branch.id,
+        projectId,
+        branchName: branch.branchName,
+        repoSlug,
+        repoSubpath,
+      })
     );
   }
 
@@ -163,20 +175,20 @@ export function timelineToHashtagItems(
   timeline: BranchTimeline,
   branchName?: string,
   repoSlug?: string,
-  repoSubpath?: string | null
+  repoSubpath?: string | null,
+  context: Pick<BranchHashtagContext, 'branchId' | 'projectId'> = {}
 ): HashtagItem[] {
   return sortAndStripHashtagItems(
-    timelineToSortableHashtagItems(timeline, branchName, repoSlug, repoSubpath)
+    timelineToSortableHashtagItems(timeline, { ...context, branchName, repoSlug, repoSubpath })
   );
 }
 
 function timelineToSortableHashtagItems(
   timeline: BranchTimeline,
-  branchName?: string,
-  repoSlug?: string,
-  repoSubpath?: string | null
+  context: BranchHashtagContext = {}
 ): SortableHashtagItem[] {
   const items: SortableHashtagItem[] = [];
+  const { branchId, projectId, branchName, repoSlug, repoSubpath } = context;
 
   for (const note of timeline.notes) {
     if (!note.title.trim()) continue;
@@ -190,6 +202,11 @@ function timelineToSortableHashtagItems(
       branchName,
       repoSlug,
       repoSubpath,
+      branchId,
+      projectId,
+      noteContent: note.content,
+      noteSessionId: note.sessionId,
+      noteUpdatedAt: note.updatedAt,
       sortTimestamp: note.completedAt ?? note.createdAt,
       sortOrder: 0,
     });
@@ -206,6 +223,8 @@ function timelineToSortableHashtagItems(
       branchName,
       repoSlug,
       repoSubpath,
+      branchId,
+      projectId,
       sortTimestamp: commit.timestamp,
       sortOrder: commit.order,
     });
@@ -224,6 +243,10 @@ function timelineToSortableHashtagItems(
       branchName,
       repoSlug,
       repoSubpath,
+      branchId,
+      projectId,
+      reviewCommitSha: review.commitSha,
+      reviewScope: review.scope === 'commit' ? 'commit' : 'branch',
       sortTimestamp: review.completedAt ?? review.createdAt,
       sortOrder: 0,
     });
@@ -240,6 +263,9 @@ function timelineToSortableHashtagItems(
       branchName,
       repoSlug,
       repoSubpath,
+      branchId,
+      projectId,
+      imageFilename: image.filename,
       sortTimestamp: image.createdAt,
       sortOrder: 0,
     });
@@ -261,6 +287,10 @@ function projectNotesToSortableHashtagItems(notes: ProjectNote[]): SortableHasht
       title: n.title,
       color: '--note-color',
       bgColor: '--note-bg',
+      projectId: n.projectId,
+      noteContent: n.content,
+      noteSessionId: n.sessionId,
+      noteUpdatedAt: n.updatedAt,
       sortTimestamp: n.completedAt ?? n.createdAt,
       sortOrder: 0,
     }));
@@ -313,8 +343,9 @@ export function renderHashtagTokens(text: string, items: HashtagItem[]): string 
       : type === 'commit' && id.length > 12
         ? id.slice(0, 8) + '…'
         : id;
+    const ref = `#${type}:${id}`;
     parts.push(
-      `<span class="hashtag-badge stable-raster stable-raster-glyphs" style="background: var(${colors.bg}); color: var(${colors.color});">${iconSvg} ${escapeHtml(title)}</span>`
+      `<span class="hashtag-badge stable-raster stable-raster-glyphs" role="button" tabindex="0" data-hashtag-type="${escapeHtml(type)}" data-hashtag-id="${escapeHtml(id)}" data-hashtag-ref="${escapeHtml(ref)}" style="background: var(${colors.bg}); color: var(${colors.color});">${iconSvg} ${escapeHtml(title)}</span>`
     );
 
     lastIndex = match.index + match[0].length;

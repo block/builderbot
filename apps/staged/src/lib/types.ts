@@ -519,6 +519,15 @@ export interface HashtagItem {
   branchName?: string;
   repoSlug?: string;
   repoSubpath?: string | null;
+  /** Optional context used when resolving a rendered hashtag badge click. */
+  branchId?: string;
+  projectId?: string | null;
+  noteContent?: string;
+  noteSessionId?: string | null;
+  noteUpdatedAt?: number | null;
+  imageFilename?: string;
+  reviewCommitSha?: string;
+  reviewScope?: 'branch' | 'commit';
 }
 
 // =============================================================================

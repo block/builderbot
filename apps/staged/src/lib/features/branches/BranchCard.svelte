@@ -91,6 +91,14 @@
   import { openDiffRoute } from '../layout/navigation.svelte';
   import type { WorktreeChangesPreview } from '../../commands';
   import type { LinkedNoteContext, NoteClickInfo } from '../sessions/noteFreshness';
+  import {
+    disabledReferenceNav,
+    pushReferenceEntry,
+    resolveHashtagReference,
+    type HashtagClickInfo,
+    type ReferenceDiffContext,
+    type ReferenceHistoryEntry,
+  } from '../references/referenceHistory.svelte';
 
   interface Props {
     branch: Branch;
@@ -172,7 +180,17 @@
   // Hashtag items for rendering #type:id badges in timeline titles.
   // Timeline-derived items are computed reactively so badges update when timeline refreshes.
   // Project notes are loaded async separately (they don't change during note generation).
-  let timelineHashtagItems = $derived(timeline ? timelineToHashtagItems(timeline) : []);
+  let timelineHashtagItems = $derived(
+    timeline
+      ? timelineToHashtagItems(
+          timeline,
+          branch.branchName,
+          repoLabel?.headRepo ?? repoLabel?.githubRepo,
+          repoLabel?.subpath,
+          { branchId: branch.id, projectId: branch.projectId }
+        )
+      : []
+  );
   let projectNoteHashtagItems = $state<HashtagItem[]>([]);
   $effect(() => {
     const projectId = branch.projectId;
@@ -190,6 +208,16 @@
     };
   });
   let hashtagItems = $derived([...timelineHashtagItems, ...projectNoteHashtagItems]);
+  let referenceDiffContext = $derived<ReferenceDiffContext>({
+    branchId: branch.id,
+    projectId: branch.projectId,
+    commits: timeline?.commits,
+    baseBranchLabel: formatBaseBranch(branch.baseBranch),
+    branchLabel: branch.branchName,
+    projectName,
+    githubRepo: repoLabel?.headRepo ?? repoLabel?.githubRepo,
+    subpath: repoLabel?.subpath,
+  });
   let reviewDetailsLoadVersion = 0;
 
   /** True when the branch is still provisioning (local worktree or remote workspace). */
@@ -1299,6 +1327,97 @@
     }
   }
 
+  function currentDialogReferenceEntry(): ReferenceHistoryEntry | null {
+    if (openNote) {
+      return {
+        kind: 'note',
+        noteKind: 'branch',
+        id: openNote.noteId,
+        ref: `#note:${openNote.noteId}`,
+        title: openNote.title,
+        content: openNote.content,
+        view: 'note',
+        sessionId: openNote.sessionId,
+        noteUpdatedAt: openNote.noteUpdatedAt,
+        branchId: branch.id,
+        projectId: branch.projectId,
+        hashtagItems,
+        diffContext: referenceDiffContext,
+      };
+    }
+
+    if (sessionMgr.openSessionId) {
+      const noteInfo = findNoteForSession(sessionMgr.openSessionId);
+      if (noteInfo) {
+        return {
+          kind: 'note',
+          noteKind: 'branch',
+          id: noteInfo.id,
+          ref: `#note:${noteInfo.id}`,
+          title: noteInfo.title,
+          content: noteInfo.content,
+          view: 'chat',
+          sessionId: sessionMgr.openSessionId,
+          noteUpdatedAt: noteInfo.updatedAt,
+          branchId: branch.id,
+          projectId: branch.projectId,
+          hashtagItems,
+          diffContext: referenceDiffContext,
+        };
+      }
+
+      return {
+        kind: 'chat',
+        ref: `#chat:${sessionMgr.openSessionId}`,
+        sessionId: sessionMgr.openSessionId,
+        branchId: branch.id,
+        projectId: branch.projectId,
+        repoDir: branch.worktreePath,
+        repoLabel,
+        hashtagItems,
+        diffContext: referenceDiffContext,
+      };
+    }
+
+    if (viewImageId) {
+      return {
+        kind: 'image',
+        ref: `#image:${viewImageId}`,
+        imageId: viewImageId,
+        filename: viewImageFilename,
+        branchId: branch.id,
+        projectId: branch.projectId,
+        hashtagItems,
+        diffContext: referenceDiffContext,
+      };
+    }
+
+    return null;
+  }
+
+  function closeReferenceDialogs() {
+    openNote = null;
+    sessionMgr.openSessionId = null;
+    viewImageId = null;
+  }
+
+  function handleHashtagClick(click: HashtagClickInfo) {
+    const target = resolveHashtagReference(click, {
+      hashtagItems,
+      diffContext: referenceDiffContext,
+    });
+    if (!target) return;
+
+    const current = currentDialogReferenceEntry();
+    if (current) pushReferenceEntry(current);
+    pushReferenceEntry(target);
+    closeReferenceDialogs();
+
+    if (target.kind === 'diff') {
+      openDiffRoute(target.route);
+    }
+  }
+
   function handleDeleteImage(imageId: string, opts?: { altKey: boolean }) {
     const doDelete = async () => {
       confirmDelete = null;
@@ -1730,11 +1849,14 @@
     sessionId={openNote.sessionId}
     noteUpdatedAt={openNote.noteUpdatedAt}
     nextSteps={openNote.nextSteps}
+    {hashtagItems}
+    referenceNav={disabledReferenceNav}
     onClose={() => (openNote = null)}
     onOpenSession={(sid) => {
       openNote = null;
       sessionMgr.openSessionId = sid;
     }}
+    onHashtagClick={handleHashtagClick}
     onStartSession={(mode, prefill) => {
       const noteRef = openNote?.noteId ? `Re: #note:${openNote.noteId}` : '';
       openNote = null;
@@ -1748,6 +1870,7 @@
     open={true}
     imageId={viewImageId}
     filename={viewImageFilename}
+    referenceNav={disabledReferenceNav}
     onClose={() => {
       viewImageId = null;
     }}
@@ -1817,6 +1940,7 @@
     projectId={branch.projectId}
     {repoLabel}
     noteInfo={findNoteForSession(sessionMgr.openSessionId)}
+    referenceNav={disabledReferenceNav}
     onOpenNote={(note) => {
       const sid = sessionMgr.openSessionId;
       sessionMgr.openSessionId = null;
@@ -1830,6 +1954,7 @@
       };
     }}
     onClose={handleSessionModalClose}
+    onHashtagClick={handleHashtagClick}
   />
 {/if}
 

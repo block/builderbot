@@ -6,7 +6,9 @@ import {
   type MarkdownDiagramRenderingOptions,
 } from './diagramRendering';
 
-export type MarkdownRenderingOptions = MarkdownDiagramRenderingOptions;
+export type MarkdownRenderingOptions = MarkdownDiagramRenderingOptions & {
+  renderInlineText?: (text: string) => string;
+};
 
 interface TrustedHtmlReplacement {
   placeholder: string;
@@ -34,6 +36,7 @@ function createMarkdownRenderer(
 ): Renderer {
   const renderer = new Renderer();
   const renderCode = renderer.code.bind(renderer);
+  const renderText = renderer.text.bind(renderer);
 
   renderer.code = (token: Tokens.Code) => {
     const rendered = renderCode(token);
@@ -42,6 +45,13 @@ function createMarkdownRenderer(
     if (!diagram.trustedHtml) return diagram.html;
 
     return stashTrustedHtml(diagram.html, trustedHtml);
+  };
+
+  renderer.text = (token: Tokens.Text) => {
+    if (!options.renderInlineText) return renderText(token);
+    if ('tokens' in token && token.tokens) return renderText(token);
+    if ('escaped' in token && token.escaped) return renderText(token);
+    return options.renderInlineText(token.text);
   };
 
   return renderer;

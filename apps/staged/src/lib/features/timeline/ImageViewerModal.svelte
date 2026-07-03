@@ -11,6 +11,8 @@
   import { Button } from '$lib/components/ui/button';
   import { getImageData } from '../../api/commands';
   import { viewport } from '../../shared/viewport.svelte';
+  import ReferenceNavControls from '../references/ReferenceNavControls.svelte';
+  import type { ReferenceNavState } from '../references/referenceHistory.svelte';
 
   interface Props {
     open: boolean;
@@ -18,9 +20,10 @@
     filename: string;
     onClose: () => void;
     onDelete?: () => void;
+    referenceNav?: ReferenceNavState;
   }
 
-  let { open, imageId, filename, onClose, onDelete }: Props = $props();
+  let { open, imageId, filename, onClose, onDelete, referenceNav }: Props = $props();
   let dataUrl = $state<string | null>(null);
   let loading = $state(true);
 
@@ -47,6 +50,9 @@
     <Dialog.Header
       class="flex-row items-center justify-between gap-3 px-4 py-3 border-b border-[var(--border-subtle)]"
     >
+      {#if referenceNav}
+        <ReferenceNavControls nav={referenceNav} />
+      {/if}
       <Dialog.Title
         class="flex-1 min-w-0 text-[var(--size-sm)] font-medium text-foreground overflow-hidden text-ellipsis whitespace-nowrap"
         >{filename}</Dialog.Title

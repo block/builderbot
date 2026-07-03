@@ -51,6 +51,7 @@
     CommentActionContext,
     CommentSessionState,
     CommitTimelineItem,
+    HashtagItem,
     SessionStatus,
     SmartDiffAnnotation,
     Span,
@@ -59,6 +60,7 @@
   import { findFreshAutoReview, getSession } from '../../commands';
   import * as commands from '../../api/commands';
   import { startOrQueueBranchSessionWithPending } from '../branches/branchSessionLaunch.svelte';
+  import { buildBranchHashtagItems } from '../sessions/hashtagItems';
   import {
     buildFileEntries,
     buildTree,
@@ -71,6 +73,15 @@
     type TreeNode,
   } from './diffModalHelpers';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
+  import { openDiffRoute } from '../layout/navigation.svelte';
+  import {
+    disabledReferenceNav,
+    pushReferenceEntry,
+    resolveHashtagReference,
+    type HashtagClickInfo,
+    type ReferenceDiffContext,
+    type ReferenceHistoryEntry,
+  } from '../references/referenceHistory.svelte';
 
   // ==========================================================================
   // Props
@@ -446,6 +457,7 @@
   // ==========================================================================
 
   let branch = $state<Branch | null>(null);
+  let hashtagItems = $state<HashtagItem[]>([]);
 
   onMount(() => {
     commands
@@ -458,6 +470,34 @@
 
   let isRemote = $derived(branch?.branchType === 'remote');
   let hasPr = $derived(branch?.prNumber != null);
+  let referenceDiffContext = $derived<ReferenceDiffContext>({
+    branchId,
+    projectId,
+    commits,
+    baseBranchLabel,
+    branchLabel,
+    projectName,
+    githubRepo,
+    subpath,
+  });
+
+  $effect(() => {
+    let stale = false;
+    buildBranchHashtagItems(branchId, projectId ?? null, {
+      branchName: branchLabel,
+      repoSlug: githubRepo,
+      repoSubpath: subpath,
+    })
+      .then((items) => {
+        if (!stale) hashtagItems = items;
+      })
+      .catch(() => {
+        if (!stale) hashtagItems = [];
+      });
+    return () => {
+      stale = true;
+    };
+  });
 
   // ==========================================================================
   // New Session Modal state
@@ -476,6 +516,7 @@
   /** Linked session dialogs opened from a comment's Note/Commit button. */
   let openSessionId = $state<string | null>(null);
   let openNote = $state<{
+    noteId?: string;
     title: string;
     content: string;
     sessionId?: string;
@@ -736,6 +777,7 @@
         return;
       }
       openNote = {
+        noteId: note.id,
         title: note.title,
         content: note.content,
         sessionId,
@@ -762,6 +804,64 @@
       toast.error('Unable to show commit', {
         description: e instanceof Error ? e.message : String(e),
       });
+    }
+  }
+
+  function currentDialogReferenceEntry(): ReferenceHistoryEntry | null {
+    if (openNote) {
+      return {
+        kind: 'note',
+        noteKind: 'branch',
+        id: openNote.noteId ?? openNote.sessionId ?? 'note',
+        ref: openNote.noteId ? `#note:${openNote.noteId}` : `#chat:${openNote.sessionId}`,
+        title: openNote.title,
+        content: openNote.content,
+        view: 'note',
+        sessionId: openNote.sessionId,
+        noteUpdatedAt: openNote.noteUpdatedAt,
+        branchId,
+        projectId,
+        hashtagItems,
+        diffContext: referenceDiffContext,
+      };
+    }
+
+    if (openSessionId) {
+      return {
+        kind: 'chat',
+        ref: `#chat:${openSessionId}`,
+        sessionId: openSessionId,
+        branchId,
+        projectId,
+        repoDir: branch?.worktreePath,
+        repoLabel: githubRepo ? { githubRepo, subpath: subpath ?? null, headRepo: null } : null,
+        hashtagItems,
+        diffContext: referenceDiffContext,
+      };
+    }
+
+    return null;
+  }
+
+  function closeReferenceDialogs() {
+    openNote = null;
+    openSessionId = null;
+  }
+
+  function handleHashtagClick(click: HashtagClickInfo) {
+    const target = resolveHashtagReference(click, {
+      hashtagItems,
+      diffContext: referenceDiffContext,
+    });
+    if (!target) return;
+
+    const current = currentDialogReferenceEntry();
+    if (current) pushReferenceEntry(current);
+    pushReferenceEntry(target);
+    closeReferenceDialogs();
+
+    if (target.kind === 'diff') {
+      openDiffRoute(target.route);
     }
   }
 
@@ -1666,9 +1766,11 @@
     {branchId}
     {projectId}
     repoLabel={githubRepo ? { githubRepo, subpath: subpath ?? null, headRepo: null } : null}
+    referenceNav={disabledReferenceNav}
     onClose={() => {
       openSessionId = null;
     }}
+    onHashtagClick={handleHashtagClick}
   />
 
   <NoteModal
@@ -1677,6 +1779,8 @@
     content={openNote?.content ?? ''}
     sessionId={openNote?.sessionId}
     noteUpdatedAt={openNote?.noteUpdatedAt}
+    {hashtagItems}
+    referenceNav={disabledReferenceNav}
     onClose={() => {
       openNote = null;
     }}
@@ -1684,6 +1788,7 @@
       openNote = null;
       openSessionId = sid;
     }}
+    onHashtagClick={handleHashtagClick}
   />
 </div>
 

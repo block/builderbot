@@ -1274,6 +1274,28 @@ mod tests {
         assert_eq!(readout.update_fix_type, Some(FixType::UpdateMain));
     }
 
+    /// Claude Code's Homebrew cask should update as the main CLI via brew, not
+    /// via the npm package used by npm-managed installs.
+    #[tokio::test]
+    async fn apply_freshness_brew_main_emits_claude_code_update_command() {
+        let mut readout = AgentVersionInfo {
+            install_source: Some(InstallSource::Brew),
+            ..AgentVersionInfo::default()
+        };
+        let info = freshness::VersionInfo {
+            installed: Some("2.1.152".into()),
+            latest: Some("2.1.153".into()),
+            update_available: Some(true),
+            command_timeouts: Vec::new(),
+        };
+        apply_freshness(&mut readout, &info, ReadoutSlot::Main, Some("claude-code"));
+        assert_eq!(
+            readout.update_command.as_deref(),
+            Some("brew upgrade claude-code"),
+        );
+        assert_eq!(readout.update_fix_type, Some(FixType::UpdateMain));
+    }
+
     /// Bridge slot with a brew install upgrades via `brew upgrade <pkg>` and
     /// is tagged `UpdateBridge`.
     #[tokio::test]

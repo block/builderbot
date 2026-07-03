@@ -32,8 +32,9 @@
   let resetOffsetY = $state(0);
   let dragging = $state(false);
 
-  let transformStyle = $derived(
-    `transform: matrix(${scale}, 0, 0, ${scale}, ${offsetX}, ${offsetY});`
+  let diagramSize = $derived(readSvgMarkupSize(svgMarkup));
+  let surfaceStyle = $derived(
+    `width: ${diagramSize.width}px; height: ${diagramSize.height}px; transform: matrix(${scale}, 0, 0, ${scale}, ${offsetX}, ${offsetY});`
   );
   let hasCustomTransform = $derived(
     !isClose(scale, resetScale) ||
@@ -48,6 +49,7 @@
       minScale: MIN_SCALE,
       maxScale: MAX_SCALE,
       fitPadding: FIT_PADDING,
+      doubleClickScale: ZOOM_STEP,
       isEnabled: () => svgMarkup !== null,
       onTransform: (transform) => {
         scale = transform.scale;
@@ -99,6 +101,45 @@
 
   function isClose(a: number, b: number): boolean {
     return Math.abs(a - b) < 0.001;
+  }
+
+  function readSvgMarkupSize(markup: string | null): { width: number; height: number } {
+    if (!markup) return { width: 300, height: 150 };
+
+    const svgTag = markup.match(/<svg\b[^>]*>/i)?.[0] ?? markup;
+    const viewBox = svgTag.match(/\bviewBox\s*=\s*["']([^"']+)["']/i)?.[1];
+    const viewBoxParts =
+      viewBox
+        ?.trim()
+        .split(/[\s,]+/)
+        .map(Number) ?? [];
+    if (
+      viewBoxParts.length === 4 &&
+      Number.isFinite(viewBoxParts[2]) &&
+      Number.isFinite(viewBoxParts[3]) &&
+      viewBoxParts[2] > 0 &&
+      viewBoxParts[3] > 0
+    ) {
+      return { width: viewBoxParts[2], height: viewBoxParts[3] };
+    }
+
+    const width = readSvgLength(svgTag, 'width');
+    const height = readSvgLength(svgTag, 'height');
+    if (width > 0 && height > 0) {
+      return { width, height };
+    }
+
+    return { width: 300, height: 150 };
+  }
+
+  function readSvgLength(markup: string, attrName: 'width' | 'height'): number {
+    const value = markup.match(new RegExp(`\\b${attrName}\\s*=\\s*["']([^"']+)["']`, 'i'))?.[1];
+    if (!value) return 0;
+
+    const parsed = Number.parseFloat(value);
+    if (!Number.isFinite(parsed)) return 0;
+
+    return value.trim().endsWith('pt') ? parsed * (4 / 3) : parsed;
   }
 </script>
 
@@ -159,7 +200,7 @@
 
     <div class="viewer-stage" class:dragging bind:this={viewportEl}>
       {#if svgMarkup}
-        <div class="diagram-surface" style={transformStyle} bind:this={surfaceEl}>
+        <div class="diagram-surface" style={surfaceStyle} bind:this={surfaceEl}>
           {@html svgMarkup}
         </div>
       {:else}
@@ -230,8 +271,7 @@
     position: absolute;
     top: 0;
     left: 0;
-    width: max-content;
-    height: max-content;
+    overflow: hidden;
     background: var(--diagram-canvas-bg);
     box-shadow:
       0 0 0 1px color-mix(in srgb, var(--pikchr-ink) 14%, transparent),
@@ -241,11 +281,11 @@
 
   .diagram-surface :global(svg) {
     display: block;
-    width: auto;
-    height: auto;
+    width: 100%;
+    height: 100%;
     max-width: none;
     max-height: none;
-    overflow: visible;
+    overflow: hidden;
   }
 
   .placeholder {

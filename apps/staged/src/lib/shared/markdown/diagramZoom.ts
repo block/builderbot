@@ -1,4 +1,4 @@
-import { select } from 'd3-selection';
+import { pointer, select } from 'd3-selection';
 import { zoom, zoomIdentity, zoomTransform, type D3ZoomEvent, type ZoomTransform } from 'd3-zoom';
 
 export interface DiagramZoomTransform {
@@ -11,6 +11,7 @@ interface DiagramZoomOptions {
   minScale: number;
   maxScale: number;
   fitPadding: number;
+  doubleClickScale: number;
   isEnabled: () => boolean;
   onTransform: (transform: DiagramZoomTransform) => void;
   onDraggingChange: (dragging: boolean) => void;
@@ -62,6 +63,18 @@ export function createDiagramZoomController(
     });
 
   selection.call(behavior);
+  selection.on('dblclick.diagram-zoom', (event: MouseEvent) => {
+    if (!options.isEnabled()) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    behavior.scaleBy(
+      selection,
+      event.altKey ? 1 / options.doubleClickScale : options.doubleClickScale,
+      pointer(event, viewportEl)
+    );
+  });
+
   selection.on('wheel.diagram-pan', (event: WheelEvent) => {
     if (!options.isEnabled() || event.ctrlKey || event.metaKey) return;
 
@@ -86,6 +99,7 @@ export function createDiagramZoomController(
     getResetTransform: () => toDiagramTransform(getFitTransform(viewportEl, contentEl, options)),
     destroy: () => {
       selection.on('.zoom', null);
+      selection.on('.diagram-zoom', null);
       selection.on('.diagram-pan', null);
       options.onDraggingChange(false);
     },

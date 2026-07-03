@@ -13,6 +13,7 @@ describe('createAdaptiveTheme', () => {
     );
 
     expect(vars['--diagram-canvas-bg']).toBe('#ffffff');
+    expect(vars['--diagram-stage-bg']).toBe('#f2edf8');
     expect(vars['--pikchr-ink']).toBe('#241a2f');
     expect(vars['--pikchr-surface']).toBe('#fffaff');
     expect(vars['--pikchr-muted']).toBe('#74677f');
@@ -34,6 +35,7 @@ describe('createAdaptiveTheme', () => {
     );
 
     expect(vars['--diagram-canvas-bg']).toBe('#ffffff');
+    expect(vars['--diagram-stage-bg']).toBe('#fbf8ff');
     expect(vars['--pikchr-surface']).toBe('#ffffff');
     expect(vars['--pikchr-ink']).toBe('#24292e');
     expect(vars['--pikchr-blue']).toBe('#81abdd');

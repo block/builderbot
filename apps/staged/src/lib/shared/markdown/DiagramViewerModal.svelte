@@ -257,7 +257,7 @@
     place-items: center;
     min-height: 0;
     overflow: hidden;
-    background: color-mix(in srgb, var(--diagram-canvas-bg) 82%, var(--bg-chrome));
+    background: color-mix(in srgb, var(--diagram-stage-bg) 82%, var(--bg-chrome));
     cursor: grab;
     touch-action: none;
     user-select: none;
@@ -271,6 +271,8 @@
     position: absolute;
     top: 0;
     left: 0;
+    box-sizing: content-box;
+    padding: 16px;
     overflow: hidden;
     background: var(--diagram-canvas-bg);
     box-shadow:

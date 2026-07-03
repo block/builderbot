@@ -8,6 +8,7 @@
 //! - Cancellation support
 
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -147,6 +148,18 @@ pub struct AcpDriver {
     is_remote: bool,
     /// Extra environment variables to pass to the agent process.
     extra_env: Vec<(String, String)>,
+    /// Captured interactive-login-shell environment for local sessions.
+    ///
+    /// When set, the agent binary is spawned *directly* with this environment
+    /// (env-cleared first, then these vars applied — the same Hermit-activated
+    /// snapshot the caller's `ShellEnvCache` hands pipeline steps and git ops)
+    /// instead of launching an interactive `$SHELL -ils` and piping `exec
+    /// <binary>` to it. This keeps the agent, its per-command shells, pipeline
+    /// steps, and git ops all drawing from one env so their resolved
+    /// toolchains can't diverge, and skips the per-session interactive-shell
+    /// spawn. `None` (remote sessions, or when the caller couldn't capture a
+    /// snapshot) falls back to the `$SHELL -ils` + `exec` spawn.
+    env_snapshot: Option<Vec<(String, String)>>,
     /// MCP servers to inject into the session via NewSessionRequest.
     /// These are *required*: if the agent doesn't support a server's transport,
     /// the session fails.
@@ -175,6 +188,7 @@ impl AcpDriver {
                 agent_label: agent.label,
                 is_remote: false,
                 extra_env: Vec::new(),
+                env_snapshot: None,
                 mcp_servers: Vec::new(),
                 remote_working_dir: None,
             })
@@ -190,6 +204,7 @@ impl AcpDriver {
                 agent_label: agent.label,
                 is_remote: false,
                 extra_env: Vec::new(),
+                env_snapshot: None,
                 mcp_servers: Vec::new(),
                 remote_working_dir: None,
             })
@@ -214,6 +229,7 @@ impl AcpDriver {
             agent_label: "Blox".to_string(),
             is_remote: true,
             extra_env: Vec::new(),
+            env_snapshot: None,
             mcp_servers: Vec::new(),
             remote_working_dir: None,
         })
@@ -222,6 +238,22 @@ impl AcpDriver {
     /// Set extra environment variables to pass to the agent process.
     pub fn with_extra_env(mut self, vars: Vec<(String, String)>) -> Self {
         self.extra_env = vars;
+        self
+    }
+
+    /// Set the captured interactive-login-shell environment for a local session.
+    ///
+    /// `vars` is a fully-captured env snapshot (e.g. from the caller's
+    /// `ShellEnvCache`, the same one pipeline steps and git ops draw from).
+    /// When provided, [`AgentDriver::run`] spawns the agent binary directly
+    /// with this environment instead of launching an interactive `$SHELL -ils`
+    /// and `exec`-ing the binary — so the agent and its per-command shells
+    /// resolve the same Hermit-activated toolchain as everything else, without
+    /// paying the per-session shell-spawn cost. Ignored for remote sessions.
+    pub fn with_env_snapshot(mut self, vars: Vec<(String, String)>) -> Self {
+        if !self.is_remote {
+            self.env_snapshot = Some(vars);
+        }
         self
     }
 
@@ -248,6 +280,134 @@ impl AcpDriver {
 /// escaped via the standard `'\''` trick.
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn env_shebang_interpreter(binary_path: &Path) -> Option<String> {
+    let mut file = std::fs::File::open(binary_path).ok()?;
+    let mut buf = [0_u8; 512];
+    let len = file.read(&mut buf).ok()?;
+    let first_line = std::str::from_utf8(&buf[..len]).ok()?.lines().next()?;
+    let shebang = first_line.strip_prefix("#!")?.trim();
+
+    let mut parts = shebang.split_whitespace();
+    let command = parts.next()?;
+    let command_name = Path::new(command).file_name()?.to_str()?;
+    if command_name != "env" {
+        return None;
+    }
+
+    for part in parts {
+        if part == "-S" || part.starts_with('-') || part.contains('=') {
+            continue;
+        }
+        if part.contains('/') {
+            return None;
+        }
+        return Some(part.to_string());
+    }
+
+    None
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn path_contains_executable(path_value: &str, executable: &str) -> bool {
+    std::env::split_paths(path_value).any(|dir| is_executable_file(&dir.join(executable)))
+}
+
+fn is_broad_toolchain_dir(path: &Path) -> bool {
+    matches!(
+        path.to_str(),
+        Some("/opt/homebrew/bin" | "/usr/local/bin" | "/usr/bin" | "/bin" | "/opt/local/bin")
+    )
+}
+
+fn path_with_inserted_agent_bin_dir(existing_path: &str, bin_dir: &Path) -> Option<String> {
+    let mut entries: Vec<PathBuf> = if existing_path.is_empty() {
+        Vec::new()
+    } else {
+        std::env::split_paths(existing_path).collect()
+    };
+
+    if entries.iter().any(|entry| entry == bin_dir) {
+        return None;
+    }
+
+    if is_broad_toolchain_dir(bin_dir) {
+        entries.push(bin_dir.to_path_buf());
+    } else {
+        entries.insert(0, bin_dir.to_path_buf());
+    }
+
+    std::env::join_paths(entries).ok()?.into_string().ok()
+}
+
+fn guarded_path_for_agent_binary(binary_path: &Path, existing_path: &str) -> Option<String> {
+    let interpreter = env_shebang_interpreter(binary_path)?;
+    if path_contains_executable(existing_path, &interpreter) {
+        return None;
+    }
+
+    let bin_dir = binary_path.parent()?;
+    if !is_executable_file(&bin_dir.join(&interpreter)) {
+        return None;
+    }
+
+    path_with_inserted_agent_bin_dir(existing_path, bin_dir)
+}
+
+fn shell_path_guard_for_agent_binary(binary_path: &Path) -> Option<String> {
+    let interpreter = env_shebang_interpreter(binary_path)?;
+    let bin_dir = binary_path.parent()?;
+    if !is_executable_file(&bin_dir.join(&interpreter)) {
+        return None;
+    }
+
+    let quoted_interpreter = shell_quote(&interpreter);
+    let quoted_bin_dir = shell_quote(&bin_dir.to_string_lossy());
+    let path_assignment = if is_broad_toolchain_dir(bin_dir) {
+        format!(
+            "if [ -n \"$PATH\" ]; then PATH=\"$PATH\":{quoted_bin_dir}; else PATH={quoted_bin_dir}; fi"
+        )
+    } else {
+        format!(
+            "if [ -n \"$PATH\" ]; then PATH={quoted_bin_dir}:\"$PATH\"; else PATH={quoted_bin_dir}; fi"
+        )
+    };
+
+    Some(format!(
+        "command -v {quoted_interpreter} >/dev/null 2>&1 || {{ {path_assignment}; export PATH; }}; "
+    ))
+}
+
+fn shell_exec_line(binary_path: &Path, acp_args: &[String]) -> String {
+    let quoted_binary = shell_quote(&binary_path.to_string_lossy());
+    let quoted_args = acp_args
+        .iter()
+        .map(|a| shell_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let guard = shell_path_guard_for_agent_binary(binary_path).unwrap_or_default();
+
+    format!("{guard}exec {quoted_binary} {quoted_args}\n")
 }
 
 fn resolve_spawn_working_dir(working_dir: &Path, is_remote: bool) -> PathBuf {
@@ -282,18 +442,32 @@ impl AgentDriver for AcpDriver {
             );
         }
 
-        // For local sessions we need Hermit (and similar directory-based shell
-        // hooks) to activate before the agent binary runs. We match the
-        // approach used by the actions executor: spawn an interactive login
+        // Local sessions need Hermit (and similar directory-based shell hooks)
+        // to have activated before the agent binary runs, so the agent — and
+        // every per-command shell it later spawns — resolves the same
+        // toolchain as pipeline steps and git ops.
+        //
+        // The reliable way to get that is to apply a captured
+        // interactive-login-shell env snapshot (`env_snapshot`, produced by the
+        // caller's `ShellEnvCache` — the very snapshot pipeline steps and git
+        // ops use) directly to the agent binary. That starting env is the
+        // single determinant for everything the agent runs, so a Hermit-first
+        // snapshot propagates into its per-command shells too. It also skips
+        // the per-session shell spawn entirely.
+        //
+        // When no snapshot is supplied (remote sessions, or a capture failure
+        // upstream) we fall back to the older dance: spawn an interactive login
         // shell with `-s` (stdin mode) in the working directory with a clean
         // environment. The shell initialises fully (`.zshrc` installs hooks),
         // `precmd` fires in the working directory (activating Hermit), then we
         // write an `exec <binary>` command to stdin. `exec` replaces the shell
         // with the agent binary so all subsequent stdin/stdout traffic is the
-        // JSON-RPC protocol.
-        let is_local_shell = !self.is_remote;
+        // JSON-RPC protocol. This path is fragile (it depends on `precmd`
+        // firing inside an attached interactive shell), which is exactly why
+        // the snapshot path is preferred when available.
+        let use_shell_spawn = !self.is_remote && self.env_snapshot.is_none();
 
-        let mut cmd = if is_local_shell {
+        let mut cmd = if use_shell_spawn {
             let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
             let mut c = Command::new(&shell);
             c.current_dir(&spawn_working_dir) // start in project dir so precmd sees hermit config
@@ -308,6 +482,34 @@ impl AgentDriver for AcpDriver {
         } else {
             let mut c = Command::new(&self.binary_path);
             c.args(&self.acp_args).current_dir(&spawn_working_dir);
+            if !self.is_remote {
+                if let Some(ref snapshot) = self.env_snapshot {
+                    // Local session with a captured env: start the agent from the
+                    // Hermit-activated snapshot. env_clear first so nothing from
+                    // Staged's own (possibly Homebrew-first) environment leaks in,
+                    // then apply the captured vars — mirroring `ShellEnv::apply_to`.
+                    c.env_clear();
+                    let mut snapshot_path: Option<String> = None;
+                    for (k, v) in snapshot {
+                        if k == "PATH" {
+                            snapshot_path = Some(v.clone());
+                        }
+                        c.env(k, v);
+                    }
+                    // Preserve the captured PATH unless an env-shebang launcher
+                    // (for example `#!/usr/bin/env node`) cannot find its
+                    // interpreter from the snapshot. Only then add the agent bin
+                    // dir as a targeted fallback; broad toolchain dirs are appended
+                    // so they cannot jump ahead of Hermit or other project-managed
+                    // paths.
+                    let existing_path = snapshot_path.as_deref().unwrap_or_default();
+                    if let Some(new_path) =
+                        guarded_path_for_agent_binary(&self.binary_path, existing_path)
+                    {
+                        c.env("PATH", new_path);
+                    }
+                }
+            }
             c
         };
 
@@ -331,8 +533,10 @@ impl AgentDriver for AcpDriver {
             #[cfg(unix)]
             cmd.process_group(0);
         }
-        // For local shells extra_env is set on the clean environment; for
-        // remote spawns it augments the inherited environment.
+        // extra_env is applied last so per-session overrides always win: over
+        // the shell's clean environment (shell-spawn path), over the captured
+        // snapshot (local direct-spawn path), and over the inherited
+        // environment (remote spawns).
         for (k, v) in &self.extra_env {
             cmd.env(k, v);
         }
@@ -366,37 +570,19 @@ impl AgentDriver for AcpDriver {
             .take()
             .ok_or_else(|| "Failed to get stdin".to_string())?;
 
-        // For local shells, write the exec command to stdin. By the time the
-        // shell reads from stdin, init is complete and `precmd` has fired in
-        // the working directory (activating Hermit). `exec` replaces the shell
-        // with the agent binary — from this point on, stdin belongs to the
-        // agent's JSON-RPC transport.
-        if is_local_shell {
-            let quoted_binary = shell_quote(&self.binary_path.to_string_lossy());
-            let quoted_args = self
-                .acp_args
-                .iter()
-                .map(|a| shell_quote(a))
-                .collect::<Vec<_>>()
-                .join(" ");
-            // Prepend the agent binary's own directory to PATH for the exec.
-            // Many agents (e.g. `claude-agent-acp`) are `#!/usr/bin/env node`
-            // scripts whose interpreter lives alongside the binary. The session
-            // working directory's shell init may not expose a compatible `node`
-            // (Hermit/direnv can replace PATH, nvm may not activate), in which
-            // case the shebang fails with `env: node: No such file or directory`
-            // and the agent dies before responding — surfacing only as "server
-            // shut down unexpectedly". Pinning the binary's dir on PATH ensures
-            // the interpreter that ships with the agent is always found.
-            let exec_line = match self.binary_path.parent() {
-                Some(bin_dir) => format!(
-                    "exec env PATH={}:\"$PATH\" {} {}\n",
-                    shell_quote(&bin_dir.to_string_lossy()),
-                    quoted_binary,
-                    quoted_args
-                ),
-                None => format!("exec {quoted_binary} {quoted_args}\n"),
-            };
+        // For the shell-spawn fallback, write the exec command to stdin. By the
+        // time the shell reads from stdin, init is complete and `precmd` has
+        // fired in the working directory (activating Hermit). `exec` replaces
+        // the shell with the agent binary — from this point on, stdin belongs
+        // to the agent's JSON-RPC transport. When a snapshot was applied the
+        // agent binary is already the child process, so there is nothing to
+        // exec.
+        if use_shell_spawn {
+            // If the fallback shell's initialized PATH already provides an
+            // env-shebang interpreter, keep it unchanged. Otherwise add the
+            // agent bin dir only as an interpreter fallback, preserving broad
+            // toolchain dirs behind project-managed PATH entries.
+            let exec_line = shell_exec_line(&self.binary_path, &self.acp_args);
             stdin
                 .write_all(exec_line.as_bytes())
                 .await
@@ -423,9 +609,11 @@ impl AgentDriver for AcpDriver {
             });
             Box::new(normalized_stdout_reader)
         } else {
-            // Local shell init (.zshrc, plugin banners, Hermit activation) may
-            // write to stdout before `exec` replaces the shell. Filter out any
-            // non-JSON lines so they don't reach the JSON-RPC parser.
+            // On the shell-spawn fallback, shell init (.zshrc, plugin banners,
+            // Hermit activation) may write to stdout before `exec` replaces the
+            // shell. Filter out any non-JSON lines so they don't reach the
+            // JSON-RPC parser. On the direct-spawn (snapshot) path there is no
+            // shell banner, so this is a harmless passthrough.
             let (normalized_stdout_writer, normalized_stdout_reader) = tokio::io::duplex(64 * 1024);
             tokio::task::spawn_local(async move {
                 if let Err(error) =
@@ -1236,10 +1424,7 @@ async fn setup_acp_session(
 
         return Err(format!(
             "Agent does not support required MCP transports (required: http={}, sse={}; agent: http={}, sse={}). Select a provider that supports MCP over HTTP/SSE.",
-            requires_http,
-            requires_sse,
-            mcp_caps.http,
-            mcp_caps.sse
+            requires_http, requires_sse, mcp_caps.http, mcp_caps.sse
         ));
     }
 
@@ -1417,12 +1602,47 @@ impl MessageWriter for BasicMessageWriter {
 #[cfg(test)]
 mod tests {
     use super::{
-        consume_remote_acp_line, decode_remote_acp_line, mcp_server_transport_supported,
-        remote_acp_segments, resolve_spawn_working_dir, sanitize_remote_acp_chunk, shell_quote,
-        McpCapabilities, McpServer, RemoteLineOutcome,
+        consume_remote_acp_line, decode_remote_acp_line, env_shebang_interpreter,
+        guarded_path_for_agent_binary, is_broad_toolchain_dir, mcp_server_transport_supported,
+        path_with_inserted_agent_bin_dir, remote_acp_segments, resolve_spawn_working_dir,
+        sanitize_remote_acp_chunk, shell_exec_line, shell_quote, AcpDriver, McpCapabilities,
+        McpServer, RemoteLineOutcome,
     };
     use agent_client_protocol::{McpServerHttp, McpServerSse, McpServerStdio};
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock must be after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        dir
+    }
+
+    fn write_executable(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create executable parent");
+        }
+        std::fs::write(path, content).expect("write executable");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms).expect("chmod executable");
+        }
+    }
+
+    fn join_path_entries(entries: &[PathBuf]) -> String {
+        std::env::join_paths(entries)
+            .expect("join path entries")
+            .into_string()
+            .expect("path entries should be utf8")
+    }
 
     #[test]
     fn consumes_wrapped_json_line_across_multiple_chunks() {
@@ -1532,6 +1752,39 @@ mod tests {
     }
 
     #[test]
+    fn env_snapshot_is_ignored_for_remote_drivers() {
+        let snapshot = vec![(String::from("PATH"), String::from("/snapshot/bin"))];
+        let local = AcpDriver {
+            binary_path: PathBuf::from("/usr/local/bin/codex-acp"),
+            acp_args: vec![],
+            agent_label: String::from("Codex"),
+            is_remote: false,
+            extra_env: vec![],
+            env_snapshot: None,
+            mcp_servers: vec![],
+            remote_working_dir: None,
+        }
+        .with_env_snapshot(snapshot.clone());
+        let remote = AcpDriver {
+            binary_path: PathBuf::from("/usr/local/bin/sq"),
+            acp_args: vec![String::from("blox"), String::from("acp")],
+            agent_label: String::from("Blox"),
+            is_remote: true,
+            extra_env: vec![],
+            env_snapshot: None,
+            mcp_servers: vec![],
+            remote_working_dir: None,
+        }
+        .with_env_snapshot(snapshot);
+
+        assert!(local.env_snapshot.is_some());
+        assert!(
+            remote.env_snapshot.is_none(),
+            "remote sq proxy launches must keep their inherited environment"
+        );
+    }
+
+    #[test]
     fn shell_quote_simple_value() {
         assert_eq!(
             shell_quote("/usr/local/bin/goose"),
@@ -1547,6 +1800,106 @@ mod tests {
     #[test]
     fn shell_quote_preserves_spaces() {
         assert_eq!(shell_quote("/path/with space"), "'/path/with space'");
+    }
+
+    #[test]
+    fn env_shebang_interpreter_detects_env_launcher() {
+        let dir = unique_test_dir("acp-env-shebang");
+        let launcher = dir.join("codex-acp");
+        write_executable(&launcher, "#!/usr/bin/env node\n");
+
+        assert_eq!(env_shebang_interpreter(&launcher).as_deref(), Some("node"));
+
+        std::fs::remove_dir_all(dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn guarded_path_keeps_snapshot_when_interpreter_is_already_available() {
+        let dir = unique_test_dir("acp-guarded-path-present");
+        let project_bin = dir.join("project-bin");
+        let agent_bin = dir.join("agent-bin");
+        let launcher = agent_bin.join("codex-acp");
+        write_executable(&project_bin.join("node"), "#!/bin/sh\n");
+        write_executable(&agent_bin.join("node"), "#!/bin/sh\n");
+        write_executable(&launcher, "#!/usr/bin/env node\n");
+
+        let snapshot_path = join_path_entries(&[project_bin.clone(), PathBuf::from("/usr/bin")]);
+
+        assert_eq!(
+            guarded_path_for_agent_binary(&launcher, &snapshot_path),
+            None,
+            "agent bin dir must not be inserted ahead of a snapshot PATH that already provides node"
+        );
+
+        std::fs::remove_dir_all(dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn guarded_path_prepends_private_agent_dir_when_interpreter_is_missing() {
+        let dir = unique_test_dir("acp-guarded-path-missing");
+        let snapshot_bin = dir.join("snapshot-bin");
+        let agent_bin = dir.join("agent-bin");
+        let launcher = agent_bin.join("claude-agent-acp");
+        std::fs::create_dir_all(&snapshot_bin).expect("create snapshot bin");
+        write_executable(&agent_bin.join("node"), "#!/bin/sh\n");
+        write_executable(&launcher, "#!/usr/bin/env node\n");
+
+        let snapshot_path = join_path_entries(std::slice::from_ref(&snapshot_bin));
+        let updated = guarded_path_for_agent_binary(&launcher, &snapshot_path)
+            .expect("missing interpreter should add agent bin dir");
+        let entries: Vec<PathBuf> = std::env::split_paths(&updated).collect();
+
+        assert_eq!(entries, vec![agent_bin, snapshot_bin]);
+
+        std::fs::remove_dir_all(dir).expect("cleanup test dir");
+    }
+
+    #[test]
+    fn broad_toolchain_dirs_are_appended_not_prepended() {
+        let hermit_bin = PathBuf::from("/repo/bin");
+        let existing_path = join_path_entries(std::slice::from_ref(&hermit_bin));
+        let updated =
+            path_with_inserted_agent_bin_dir(&existing_path, Path::new("/opt/homebrew/bin"))
+                .expect("broad dir should still be added as a fallback");
+        let entries: Vec<PathBuf> = std::env::split_paths(&updated).collect();
+
+        assert!(is_broad_toolchain_dir(Path::new("/opt/homebrew/bin")));
+        assert_eq!(
+            entries,
+            vec![hermit_bin, PathBuf::from("/opt/homebrew/bin")]
+        );
+    }
+
+    #[test]
+    fn shell_exec_line_guards_interpreter_before_mutating_path() {
+        let dir = unique_test_dir("acp-shell-guard");
+        let agent_bin = dir.join("agent-bin");
+        let launcher = agent_bin.join("amp-acp");
+        write_executable(&agent_bin.join("node"), "#!/bin/sh\n");
+        write_executable(&launcher, "#!/usr/bin/env node\n");
+
+        let line = shell_exec_line(&launcher, &[String::from("--stdio")]);
+
+        assert!(
+            line.starts_with(
+                "command -v 'node' >/dev/null 2>&1 || { if [ -n \"$PATH\" ]; then PATH='"
+            ),
+            "shell fallback should check the initialized PATH before adding the agent dir: {line}"
+        );
+        assert!(
+            line.contains(":\"$PATH\"; else PATH='"),
+            "private agent dir should be prepended only inside the missing-interpreter guard: {line}"
+        );
+        assert!(
+            line.contains("; fi; export PATH; }; exec '"),
+            "shell fallback should export the guarded PATH before exec: {line}"
+        );
+        assert!(
+            line.ends_with("' '--stdio'\n"),
+            "exec should preserve the binary and args after the guard: {line}"
+        );
+
+        std::fs::remove_dir_all(dir).expect("cleanup test dir");
     }
 
     #[test]

@@ -288,7 +288,7 @@ box "Sink = NO-OP (default / external clone)" "no socket, no Block deps → buil
             writer: &Arc<dyn acp_client::MessageWriter>,
             _cancel_token: &CancellationToken,
             agent_session_id: Option<&str>,
-        ) -> Result<(), String> {
+        ) -> Result<acp_client::AgentRunOutcome, String> {
             let idx = {
                 let mut calls = self.calls.lock().unwrap();
                 let idx = *calls;
@@ -311,7 +311,7 @@ box "Sink = NO-OP (default / external clone)" "no socket, no Block deps → buil
             let reply = self.replies.get(idx).cloned().unwrap_or_default();
             writer.append_text(&reply).await;
             writer.finalize().await;
-            Ok(())
+            Ok(acp_client::AgentRunOutcome::Completed)
         }
     }
 

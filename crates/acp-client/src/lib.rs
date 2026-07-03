@@ -27,9 +27,10 @@ pub use agent_client_protocol::schema::v1::{
     SessionConfigOptionCategory, SessionInfoUpdate, SessionModeState as SessionModelState,
 };
 pub use driver::{
-    strip_code_fences, AcpDriver, AcpEventMetadata, AcpInitializeMetadata, AcpPermissionDecision,
-    AcpPermissionOption, AcpPermissionRequest, AcpToolCallMetadata, AgentDriver, AgentRunOutcome,
-    BasicMessageWriter, MessageWriter, ReplayBoundary, Store,
+    autoapprove_permission_decision, strip_code_fences, AcpDriver, AcpEventMetadata,
+    AcpInitializeMetadata, AcpPermissionDecision, AcpPermissionOption, AcpPermissionOptionKind,
+    AcpPermissionRequest, AcpToolCallMetadata, AgentDriver, AgentRunOutcome, BasicMessageWriter,
+    MessageWriter, ReplayBoundary, Store,
 };
 pub use simple::{run_acp_prompt, run_acp_prompt_with_interpreter_env_snapshot};
 pub use types::{

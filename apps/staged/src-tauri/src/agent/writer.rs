@@ -19,8 +19,8 @@ use tokio_util::sync::CancellationToken;
 use crate::store::{AcpMessageMetadata, MessageRole, Store};
 
 use acp_client::{
-    strip_code_fences, AcpEventMetadata, AcpInitializeMetadata, AcpPermissionDecision,
-    AcpPermissionOption, AcpPermissionRequest, AcpToolCallMetadata,
+    autoapprove_permission_decision, strip_code_fences, AcpEventMetadata, AcpInitializeMetadata,
+    AcpPermissionDecision, AcpPermissionRequest, AcpToolCallMetadata,
 };
 
 /// Minimum interval between DB flushes for streaming text. Chunks accumulate
@@ -98,33 +98,6 @@ fn acp_event_role(metadata: &AcpMessageMetadata) -> MessageRole {
         Some("user_message_chunk") => MessageRole::User,
         _ => MessageRole::Assistant,
     }
-}
-
-fn permission_option_is_approval(option: &AcpPermissionOption) -> bool {
-    let kind = option.kind.to_ascii_lowercase();
-    let option_id = option.option_id.to_ascii_lowercase();
-    let name = option.name.to_ascii_lowercase();
-
-    kind.starts_with("allow")
-        || kind.starts_with("approve")
-        || option_id.starts_with("allow")
-        || option_id.starts_with("approve")
-        || name.contains("allow")
-        || name.contains("approve")
-}
-
-fn autoapprove_permission_decision(request: &AcpPermissionRequest) -> AcpPermissionDecision {
-    request
-        .options
-        .iter()
-        .find(|option| permission_option_is_approval(option))
-        .or_else(|| request.options.first())
-        .map(|option| AcpPermissionDecision::Selected {
-            option_id: option.option_id.clone(),
-        })
-        .unwrap_or(AcpPermissionDecision::Selected {
-            option_id: "approve".to_string(),
-        })
 }
 
 impl MessageWriter {
@@ -443,7 +416,9 @@ mod tests {
 
     use super::MessageWriter;
     use crate::store::{MessageRole, Session, Store};
-    use acp_client::{AcpPermissionDecision, AcpPermissionOption, AcpPermissionRequest};
+    use acp_client::{
+        AcpPermissionDecision, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
+    };
     use tokio_util::sync::CancellationToken;
 
     fn setup_writer() -> (Arc<Store>, String, MessageWriter) {
@@ -470,12 +445,12 @@ mod tests {
                 AcpPermissionOption {
                     option_id: "allow-once".to_string(),
                     name: "Allow once".to_string(),
-                    kind: "allow_once".to_string(),
+                    kind: AcpPermissionOptionKind::AllowOnce,
                 },
                 AcpPermissionOption {
                     option_id: "reject-once".to_string(),
                     name: "Deny".to_string(),
-                    kind: "reject_once".to_string(),
+                    kind: AcpPermissionOptionKind::RejectOnce,
                 },
             ],
             raw_request: None,

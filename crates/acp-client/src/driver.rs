@@ -22,7 +22,8 @@ use agent_client_protocol::{
             AgentCapabilities, AuthMethod, AuthenticateRequest, CancelNotification,
             ContentBlock as AcpContentBlock, ContentChunk, ImageContent, Implementation,
             InitializeRequest, InitializeResponse, LoadSessionRequest, McpCapabilities, McpServer,
-            NewSessionRequest, PermissionOptionId, PromptRequest, PromptResponse,
+            NewSessionRequest, PermissionOption as SchemaPermissionOption, PermissionOptionId,
+            PermissionOptionKind as SchemaPermissionOptionKind, PromptRequest, PromptResponse,
             RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
             SelectedPermissionOutcome, SessionConfigOption, SessionInfoUpdate, SessionModeState,
             SessionNotification, SessionUpdate, StopReason, TextContent, ToolCallContent,
@@ -128,19 +129,23 @@ pub trait MessageWriter: Send + Sync {
 }
 
 fn permission_option_is_approval(option: &AcpPermissionOption) -> bool {
-    let kind = option.kind.to_ascii_lowercase();
+    match option.kind.approval_status() {
+        Some(is_approval) => is_approval,
+        None => legacy_permission_option_is_approval(option),
+    }
+}
+
+fn legacy_permission_option_is_approval(option: &AcpPermissionOption) -> bool {
     let option_id = option.option_id.to_ascii_lowercase();
     let name = option.name.to_ascii_lowercase();
 
-    kind.starts_with("allow")
-        || kind.starts_with("approve")
-        || option_id.starts_with("allow")
+    option_id.starts_with("allow")
         || option_id.starts_with("approve")
         || name.contains("allow")
         || name.contains("approve")
 }
 
-fn autoapprove_permission_decision(request: &AcpPermissionRequest) -> AcpPermissionDecision {
+pub fn autoapprove_permission_decision(request: &AcpPermissionRequest) -> AcpPermissionDecision {
     request
         .options
         .iter()
@@ -214,7 +219,38 @@ pub struct AcpPermissionRequest {
 pub struct AcpPermissionOption {
     pub option_id: String,
     pub name: String,
-    pub kind: String,
+    pub kind: AcpPermissionOptionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcpPermissionOptionKind {
+    AllowOnce,
+    AllowAlways,
+    RejectOnce,
+    RejectAlways,
+    Unknown,
+}
+
+impl AcpPermissionOptionKind {
+    fn approval_status(self) -> Option<bool> {
+        match self {
+            Self::AllowOnce | Self::AllowAlways => Some(true),
+            Self::RejectOnce | Self::RejectAlways => Some(false),
+            Self::Unknown => None,
+        }
+    }
+}
+
+impl From<SchemaPermissionOptionKind> for AcpPermissionOptionKind {
+    fn from(kind: SchemaPermissionOptionKind) -> Self {
+        match kind {
+            SchemaPermissionOptionKind::AllowOnce => Self::AllowOnce,
+            SchemaPermissionOptionKind::AllowAlways => Self::AllowAlways,
+            SchemaPermissionOptionKind::RejectOnce => Self::RejectOnce,
+            SchemaPermissionOptionKind::RejectAlways => Self::RejectAlways,
+            _ => Self::Unknown,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1860,35 +1896,33 @@ impl AcpNotificationHandler {
 }
 
 #[cfg(test)]
-fn schema_permission_option_is_approval(
-    option: &agent_client_protocol::schema::v1::PermissionOption,
-) -> bool {
-    matches!(
-        option.kind,
-        agent_client_protocol::schema::v1::PermissionOptionKind::AllowOnce
-            | agent_client_protocol::schema::v1::PermissionOptionKind::AllowAlways
-    )
-}
-
-#[cfg(test)]
 fn permission_decision_for_options(
-    options: &[agent_client_protocol::schema::v1::PermissionOption],
+    options: &[SchemaPermissionOption],
     cancelled: bool,
 ) -> AcpPermissionDecision {
     if cancelled {
         return AcpPermissionDecision::Cancelled;
     }
 
-    let option_id = options
-        .iter()
-        .find(|option| schema_permission_option_is_approval(option))
-        .or_else(|| options.first())
-        .map(|opt| opt.option_id.clone())
-        .unwrap_or_else(|| PermissionOptionId::new("approve"));
+    let request = AcpPermissionRequest {
+        request_id: "test-request".to_string(),
+        session_id: "test-session".to_string(),
+        tool_call_id: "test-tool-call".to_string(),
+        tool_title: None,
+        tool_kind: None,
+        tool_status: None,
+        raw_input: None,
+        raw_output: None,
+        content: None,
+        locations: None,
+        options: options
+            .iter()
+            .map(acp_permission_option_from_schema)
+            .collect(),
+        raw_request: None,
+    };
 
-    AcpPermissionDecision::Selected {
-        option_id: option_id.0.as_ref().to_string(),
-    }
+    autoapprove_permission_decision(&request)
 }
 
 #[cfg(test)]
@@ -1909,6 +1943,14 @@ fn permission_response_for_decision(decision: AcpPermissionDecision) -> RequestP
                 SelectedPermissionOutcome::new(PermissionOptionId::new(option_id)),
             ))
         }
+    }
+}
+
+fn acp_permission_option_from_schema(option: &SchemaPermissionOption) -> AcpPermissionOption {
+    AcpPermissionOption {
+        option_id: option.option_id.0.as_ref().to_string(),
+        name: option.name.clone(),
+        kind: option.kind.into(),
     }
 }
 
@@ -1941,11 +1983,7 @@ fn acp_permission_request_from_args(args: &RequestPermissionRequest) -> AcpPermi
         options: args
             .options
             .iter()
-            .map(|option| AcpPermissionOption {
-                option_id: option.option_id.0.as_ref().to_string(),
-                name: option.name.clone(),
-                kind: serialize_as_string(&option.kind).unwrap_or_else(|| "unknown".to_string()),
-            })
+            .map(acp_permission_option_from_schema)
             .collect(),
         raw_request: serialize_value(args),
     }
@@ -2480,12 +2518,14 @@ impl MessageWriter for BasicMessageWriter {
 #[cfg(test)]
 mod tests {
     use super::{
-        acp_spawn_command, build_prompt_content_blocks, consume_remote_acp_line,
-        decode_remote_acp_line, env_shebang_interpreter, guarded_path_for_agent_binary,
-        is_broad_toolchain_dir, mcp_server_transport_supported, path_with_inserted_agent_bin_dir,
-        permission_response_for_options, remote_acp_segments, resolve_acp_working_dir,
-        resolve_spawn_working_dir, sanitize_remote_acp_chunk, shell_exec_line, shell_quote,
-        AcpDriver, AgentRunOutcome, RemoteLineOutcome, ReplayBoundary, ReplayBuffer, ReplayEvent,
+        acp_spawn_command, autoapprove_permission_decision, build_prompt_content_blocks,
+        consume_remote_acp_line, decode_remote_acp_line, env_shebang_interpreter,
+        guarded_path_for_agent_binary, is_broad_toolchain_dir, mcp_server_transport_supported,
+        path_with_inserted_agent_bin_dir, permission_response_for_options, remote_acp_segments,
+        resolve_acp_working_dir, resolve_spawn_working_dir, sanitize_remote_acp_chunk,
+        shell_exec_line, shell_quote, AcpDriver, AcpPermissionOption, AcpPermissionOptionKind,
+        AcpPermissionRequest, AgentRunOutcome, RemoteLineOutcome, ReplayBoundary, ReplayBuffer,
+        ReplayEvent,
     };
     use agent_client_protocol::schema::v1::{
         ContentBlock as AcpContentBlock, McpCapabilities, McpServer, McpServerHttp, McpServerSse,
@@ -2526,6 +2566,35 @@ mod tests {
             .expect("join path entries")
             .into_string()
             .expect("path entries should be utf8")
+    }
+
+    fn acp_permission_request(options: Vec<AcpPermissionOption>) -> AcpPermissionRequest {
+        AcpPermissionRequest {
+            request_id: "test-request".to_string(),
+            session_id: "test-session".to_string(),
+            tool_call_id: "test-tool-call".to_string(),
+            tool_title: None,
+            tool_kind: None,
+            tool_status: None,
+            raw_input: None,
+            raw_output: None,
+            content: None,
+            locations: None,
+            options,
+            raw_request: None,
+        }
+    }
+
+    fn acp_permission_option(
+        option_id: &str,
+        name: &str,
+        kind: AcpPermissionOptionKind,
+    ) -> AcpPermissionOption {
+        AcpPermissionOption {
+            option_id: option_id.to_string(),
+            name: name.to_string(),
+            kind,
+        }
     }
 
     #[test]
@@ -3112,6 +3181,61 @@ mod tests {
             RequestPermissionOutcome::Cancelled => panic!("permission should be selected"),
             _ => panic!("unexpected permission outcome"),
         }
+    }
+
+    #[test]
+    fn autoapproval_ignores_reject_kind_named_dont_allow() {
+        let request = acp_permission_request(vec![
+            acp_permission_option("reject", "Don't allow", AcpPermissionOptionKind::RejectOnce),
+            acp_permission_option("approve", "Approve", AcpPermissionOptionKind::AllowOnce),
+        ]);
+
+        let decision = autoapprove_permission_decision(&request);
+
+        assert_eq!(
+            decision,
+            super::AcpPermissionDecision::Selected {
+                option_id: "approve".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn autoapproval_ignores_reject_kind_named_disallow() {
+        let request = acp_permission_request(vec![
+            acp_permission_option("reject", "Disallow", AcpPermissionOptionKind::RejectAlways),
+            acp_permission_option("allow", "Allow", AcpPermissionOptionKind::AllowAlways),
+        ]);
+
+        let decision = autoapprove_permission_decision(&request);
+
+        assert_eq!(
+            decision,
+            super::AcpPermissionDecision::Selected {
+                option_id: "allow".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn autoapproval_falls_back_to_legacy_matching_for_unknown_kind() {
+        let request = acp_permission_request(vec![
+            acp_permission_option("reject", "Reject", AcpPermissionOptionKind::RejectOnce),
+            acp_permission_option(
+                "approve-custom",
+                "Proceed",
+                AcpPermissionOptionKind::Unknown,
+            ),
+        ]);
+
+        let decision = autoapprove_permission_decision(&request);
+
+        assert_eq!(
+            decision,
+            super::AcpPermissionDecision::Selected {
+                option_id: "approve-custom".to_string()
+            }
+        );
     }
 
     #[test]

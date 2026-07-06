@@ -177,14 +177,23 @@ fn find_visible_projection_duplicate_by_content(
 
     for message in candidates {
         if message.id < projection.first_chunk_row_id {
-            if preceding.is_none_or(|current| message.id > current.id) {
+            if match preceding {
+                Some(current) => message.id > current.id,
+                None => true,
+            } {
                 preceding = Some(message);
             }
         } else if message.id <= projection.last_chunk_row_id {
-            if inside_span.is_none_or(|current| message.id < current.id) {
+            if match inside_span {
+                Some(current) => message.id < current.id,
+                None => true,
+            } {
                 inside_span = Some(message);
             }
-        } else if following.is_none_or(|current| message.id < current.id) {
+        } else if match following {
+            Some(current) => message.id < current.id,
+            None => true,
+        } {
             following = Some(message);
         }
     }

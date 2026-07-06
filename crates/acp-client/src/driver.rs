@@ -2026,9 +2026,7 @@ fn usage_update_metadata<T: serde::Serialize>(update: &T) -> AcpEventMetadata {
 
 fn prompt_response_metadata(response: &PromptResponse) -> Option<AcpEventMetadata> {
     let usage = response.usage.as_ref().and_then(serialize_value);
-    if usage.is_none() {
-        return None;
-    }
+    usage.as_ref()?;
 
     Some(AcpEventMetadata {
         event_kind: Some("prompt_response".to_string()),
@@ -2067,16 +2065,16 @@ async fn run_acp_protocol(
 ) -> Result<AgentRunOutcome, String> {
     let setup_task = tokio::time::timeout(
         ACP_SETUP_TIMEOUT,
-        setup_acp_session(
+        setup_acp_session(AcpSessionSetupContext {
             connection,
             working_dir,
             store,
-            &handler.writer,
+            writer: &handler.writer,
             our_session_id,
             acp_session_id,
             mcp_servers,
             agent_label,
-        ),
+        }),
     );
     let setup = tokio::select! {
         _ = cancel_token.cancelled() => {
@@ -2192,16 +2190,29 @@ struct AcpSessionSetup {
     agent_capabilities: AgentCapabilities,
 }
 
-async fn setup_acp_session(
-    connection: &ConnectionTo<Agent>,
-    working_dir: &Path,
-    store: &Arc<dyn Store>,
-    writer: &Arc<dyn MessageWriter>,
-    our_session_id: &str,
-    acp_session_id: Option<&str>,
-    mcp_servers: &[McpServer],
-    agent_label: &str,
-) -> Result<AcpSessionSetup, String> {
+struct AcpSessionSetupContext<'a> {
+    connection: &'a ConnectionTo<Agent>,
+    working_dir: &'a Path,
+    store: &'a Arc<dyn Store>,
+    writer: &'a Arc<dyn MessageWriter>,
+    our_session_id: &'a str,
+    acp_session_id: Option<&'a str>,
+    mcp_servers: &'a [McpServer],
+    agent_label: &'a str,
+}
+
+async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSessionSetup, String> {
+    let AcpSessionSetupContext {
+        connection,
+        working_dir,
+        store,
+        writer,
+        our_session_id,
+        acp_session_id,
+        mcp_servers,
+        agent_label,
+    } = context;
+
     let client_info = Implementation::new("acp-client", env!("CARGO_PKG_VERSION"));
     let init_request = InitializeRequest::new(ProtocolVersion::V1).client_info(client_info);
 

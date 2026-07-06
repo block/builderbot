@@ -22,7 +22,6 @@
     type ReferenceChatEntry,
     type ReferenceHistoryEntry,
     type ReferenceNavState,
-    type ReferenceNoteEntry,
   } from './referenceHistory.svelte';
 
   let entry = $derived(currentReferenceEntry());
@@ -75,13 +74,6 @@
     activateEntry(target);
   }
 
-  function handleOpenSession() {
-    const current = currentReferenceEntry();
-    if (current?.kind === 'note' && current.sessionId) {
-      setCurrentNoteView('chat');
-    }
-  }
-
   function handleOpenNote(note: LinkedNoteContext) {
     const current = currentReferenceEntry();
     if (current?.kind === 'note') {
@@ -107,16 +99,6 @@
     });
   }
 
-  function noteInfoFor(entry: ReferenceNoteEntry): LinkedNoteContext {
-    return {
-      id: entry.id,
-      title: entry.title,
-      content: entry.content,
-      updatedAt: entry.noteUpdatedAt ?? 0,
-      hasParsedNote: !!entry.content.trim(),
-    };
-  }
-
   function chatNoteInfo(entry: ReferenceChatEntry): LinkedNoteContext | null {
     const note = noteItemForSession(entry.sessionId, entry.hashtagItems);
     if (!note?.noteContent && note?.noteContent !== '') return null;
@@ -138,29 +120,21 @@
   }
 </script>
 
-{#if entry?.kind === 'note' && entry.view === 'note'}
+{#if entry?.kind === 'note'}
   <NoteModal
     open={true}
     title={entry.title}
     content={entry.content}
     sessionId={entry.sessionId}
     noteUpdatedAt={entry.noteUpdatedAt}
-    hashtagItems={entry.hashtagItems}
-    {referenceNav}
-    onClose={handleClose}
-    onOpenSession={entry.sessionId ? handleOpenSession : undefined}
-    onHashtagClick={handleHashtagClick}
-  />
-{:else if entry?.kind === 'note' && entry.view === 'chat' && entry.sessionId}
-  <SessionModal
-    open={true}
-    sessionId={entry.sessionId}
+    noteId={entry.id}
+    noteKind={entry.noteKind}
     branchId={entry.branchId}
     projectId={entry.projectId}
+    chatOpen={entry.view === 'chat'}
+    onChatOpenChange={(open) => setCurrentNoteView(open ? 'chat' : 'note')}
     hashtagItems={entry.hashtagItems}
-    noteInfo={noteInfoFor(entry)}
     {referenceNav}
-    onOpenNote={handleOpenNote}
     onClose={handleClose}
     onHashtagClick={handleHashtagClick}
   />

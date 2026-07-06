@@ -6,6 +6,7 @@ import {
   getNoteFollowupLabel,
   hasNoteFollowupBeenSent,
   latestAssistantMessage,
+  noteActivityLabel,
   type LinkedNoteContext,
 } from './noteFreshness';
 
@@ -184,5 +185,25 @@ describe('formatChatButtonLabel', () => {
 
   it('returns generic label for 0 messages', () => {
     expect(formatChatButtonLabel(0)).toBe('View chat');
+  });
+});
+
+describe('noteActivityLabel', () => {
+  it('uses the live writing label for the last group in a running session', () => {
+    expect(noteActivityLabel({ isLive: true, isLastGroup: true, isFirstNoteMessage: true })).toBe(
+      'Writing note'
+    );
+  });
+
+  it('uses note creation for the first completed note-bearing message', () => {
+    expect(noteActivityLabel({ isLive: false, isLastGroup: true, isFirstNoteMessage: true })).toBe(
+      'Note creation'
+    );
+  });
+
+  it('uses note updated for later note-bearing messages', () => {
+    expect(noteActivityLabel({ isLive: false, isLastGroup: true, isFirstNoteMessage: false })).toBe(
+      'Note updated'
+    );
   });
 });

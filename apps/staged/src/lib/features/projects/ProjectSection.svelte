@@ -284,6 +284,7 @@
     content: string;
     sessionId?: string;
     noteUpdatedAt?: number;
+    chatOpen?: boolean;
   } | null>(null);
   let openSessionId = $state<string | null>(null);
 
@@ -570,13 +571,17 @@
     content={openNote.content}
     sessionId={openNote.sessionId}
     noteUpdatedAt={openNote.noteUpdatedAt}
+    noteId={openNote.noteId}
+    noteKind="project"
+    projectId={project.id}
+    repoDir={projectDisplayRootCandidates}
+    chatOpen={openNote.chatOpen ?? false}
+    onChatOpenChange={(chatOpen) => {
+      if (openNote) openNote = { ...openNote, chatOpen };
+    }}
     {hashtagItems}
     referenceNav={disabledReferenceNav}
     onClose={() => (openNote = null)}
-    onOpenSession={(sid) => {
-      openNote = null;
-      openSessionId = sid;
-    }}
     onHashtagClick={handleHashtagClick}
   />
 {/if}
@@ -599,6 +604,7 @@
         content: note.content,
         sessionId: sid ?? undefined,
         noteUpdatedAt: note.updatedAt,
+        chatOpen: true,
       };
     }}
     onClose={() => {

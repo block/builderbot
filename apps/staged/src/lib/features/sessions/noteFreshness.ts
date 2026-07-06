@@ -94,3 +94,16 @@ export function getNoteFollowupLabel(
     ? 'Ask for the note to be updated'
     : 'Ask for a note to be written';
 }
+
+export function noteActivityLabel({
+  isLive,
+  isLastGroup,
+  isFirstNoteMessage,
+}: {
+  isLive: boolean;
+  isLastGroup: boolean;
+  isFirstNoteMessage: boolean;
+}): 'Writing note' | 'Note creation' | 'Note updated' {
+  if (isLive && isLastGroup) return 'Writing note';
+  return isFirstNoteMessage ? 'Note creation' : 'Note updated';
+}

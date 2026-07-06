@@ -11,10 +11,19 @@
   import Check from '@lucide/svelte/icons/check';
   import MessageCircle from '@lucide/svelte/icons/message-circle';
   import FileText from '@lucide/svelte/icons/file-text';
+  import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
+  import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
   import * as Dialog from '$lib/components/ui/dialog';
   import { Button } from '$lib/components/ui/button';
-  import { countAssistantMessagesAfter, handleExternalLinkClick } from '../../api/commands';
-  import { formatChatButtonLabel } from '../sessions/noteFreshness';
+  import {
+    countAssistantMessagesAfter,
+    getBranchNoteBySession,
+    getProjectNoteBySession,
+    handleExternalLinkClick,
+  } from '../../api/commands';
+  import { formatChatButtonLabel, type LinkedNoteContext } from '../sessions/noteFreshness';
+  import SessionChatPane from '../sessions/SessionChatPane.svelte';
+  import type { DisplayRootInput } from '../sessions/pathDisplayRoots';
   import InContentSearch from '../../shared/InContentSearch.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import { registerSearchShortcutTarget } from '../keyboard/searchTargets';
@@ -28,7 +37,7 @@
   } from '../../shared/markdown/diagramViewer';
   import { loadPikchrRenderer, type PikchrRenderer } from '../../shared/markdown/pikchrRendering';
   import { noteMarkdownWithTitle, renderNoteMarkdown } from './noteMarkdown';
-  import type { HashtagItem } from '../../types';
+  import type { HashtagItem, ProjectRepo, Session } from '../../types';
   import { findHashtagItemForReference, renderHashtagTokens } from '../sessions/hashtagItems';
   import ReferenceNavControls from '../references/ReferenceNavControls.svelte';
   import type { HashtagClickInfo, ReferenceNavState } from '../references/referenceHistory.svelte';
@@ -42,6 +51,14 @@
     sessionId?: string | null;
     noteUpdatedAt?: number | null;
     onOpenSession?: (sessionId: string) => void;
+    noteId?: string | null;
+    noteKind?: 'branch' | 'project';
+    branchId?: string | null;
+    projectId?: string | null;
+    repoDir?: DisplayRootInput;
+    repoLabel?: Pick<ProjectRepo, 'githubRepo' | 'subpath' | 'headRepo'> | null;
+    chatOpen?: boolean;
+    onChatOpenChange?: (open: boolean) => void;
     /** Suggested next steps to show as action buttons at the bottom. */
     nextSteps?: { commitStep: string | null; noteStep: string | null } | null;
     /** Called when the user clicks a next-step button. */
@@ -58,7 +75,14 @@
     onClose,
     sessionId,
     noteUpdatedAt,
-    onOpenSession,
+    noteId,
+    noteKind = 'branch',
+    branchId,
+    projectId,
+    repoDir,
+    repoLabel = null,
+    chatOpen = $bindable(false),
+    onChatOpenChange,
     nextSteps,
     onStartSession,
     hashtagItems = [],
@@ -67,11 +91,32 @@
   }: Props = $props();
 
   let copied = $state(false);
+  let liveNote = $state<{ title: string; content: string; updatedAt: number } | null>(null);
   let assistantMessagesAfterNote = $state(0);
   let chatButtonLabel = $derived(formatChatButtonLabel(assistantMessagesAfterNote));
-  let canOpenSession = $derived(Boolean(sessionId && onOpenSession));
-  let showChatInfo = $derived(canOpenSession && assistantMessagesAfterNote > 0);
-  let noteMarkdown = $derived(noteMarkdownWithTitle(title, content));
+  let canOpenSession = $derived(Boolean(sessionId));
+  let showChatInfo = $derived(canOpenSession && assistantMessagesAfterNote > 0 && !chatOpen);
+  let displayTitle = $derived(liveNote?.title ?? title);
+  let displayContent = $derived(liveNote?.content ?? content);
+  let displayUpdatedAt = $derived(liveNote?.updatedAt ?? noteUpdatedAt);
+  let noteMarkdown = $derived(noteMarkdownWithTitle(displayTitle, displayContent));
+  let splitChatOpen = $derived(chatOpen && viewport.canSplit);
+  let narrowChatOpen = $derived(chatOpen && !viewport.canSplit);
+  let contentClass = $derived(
+    `h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col transition-[max-width] duration-150 ${splitChatOpen ? 'sm:max-w-[1080px]' : 'sm:max-w-[700px]'}`
+  );
+  let noteInfo = $derived<LinkedNoteContext | null>(
+    noteId
+      ? {
+          id: noteId,
+          title: displayTitle,
+          content: displayContent,
+          updatedAt: displayUpdatedAt ?? 0,
+          hasParsedNote: !!displayContent.trim(),
+        }
+      : null
+  );
+  let previousSessionStatus = $state<Session['status'] | null>(null);
   let noteHasPikchr = $derived(
     extractMarkdownDiagramFences(noteMarkdown).some((diagram) => diagram.language === 'pikchr')
   );
@@ -139,13 +184,21 @@
     }
   });
 
+  $effect(() => {
+    noteId;
+    title;
+    content;
+    noteUpdatedAt;
+    liveNote = null;
+  });
+
   onDestroy(() => {
     unregisterSearchTarget?.();
   });
 
   $effect(() => {
     const sid = sessionId;
-    const updatedAt = noteUpdatedAt;
+    const updatedAt = displayUpdatedAt;
     if (!sid || typeof updatedAt !== 'number') {
       assistantMessagesAfterNote = 0;
       return;
@@ -166,6 +219,52 @@
       stale = true;
     };
   });
+
+  function setChatOpen(next: boolean) {
+    chatOpen = next;
+    onChatOpenChange?.(next);
+    if (!next) {
+      previousSessionStatus = null;
+    }
+  }
+
+  async function refreshLiveNote() {
+    if (!sessionId) return;
+    try {
+      const refreshed =
+        noteKind === 'project'
+          ? await getProjectNoteBySession(sessionId)
+          : await getBranchNoteBySession(sessionId);
+      if (!refreshed) return;
+      liveNote = {
+        title: refreshed.title,
+        content: refreshed.content,
+        updatedAt: refreshed.updatedAt,
+      };
+    } catch {
+      // The next open or poll-backed refresh will try again.
+    }
+  }
+
+  function handlePaneSessionChange(next: Session | null) {
+    if (previousSessionStatus === 'running' && next && next.status !== 'running') {
+      void refreshLiveNote();
+    }
+    previousSessionStatus = next?.status ?? null;
+  }
+
+  function handleEmbeddedNoteClick() {
+    contentEl?.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function handleChatToggle() {
+    if (!canOpenSession) return;
+    if (chatOpen && !viewport.canSplit) {
+      setChatOpen(false);
+      return;
+    }
+    setChatOpen(!chatOpen);
+  }
 
   async function handleShare() {
     try {
@@ -299,7 +398,7 @@
   }}
 >
   <Dialog.Content
-    class="sm:max-w-[700px] h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col"
+    class={contentClass}
     showCloseButton={false}
     onOpenAutoFocus={(e) => e.preventDefault()}
   >
@@ -351,9 +450,16 @@
             variant="outline"
             size="sm"
             class="h-7 shrink-0 gap-1 border-[var(--border-muted)] bg-transparent px-2.5 text-xs text-muted-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
-            onclick={() => onOpenSession?.(sessionId!)}
+            title={chatOpen ? (viewport.canSplit ? 'Hide chat' : 'View note') : 'View chat'}
+            aria-label={chatOpen ? (viewport.canSplit ? 'Hide chat' : 'View note') : 'View chat'}
+            onclick={handleChatToggle}
           >
-            View chat
+            {#if chatOpen}
+              <PanelRightClose size={15} aria-hidden="true" />
+            {:else}
+              <PanelRightOpen size={15} aria-hidden="true" />
+            {/if}
+            <span>{chatOpen ? (viewport.canSplit ? 'Hide chat' : 'View note') : 'View chat'}</span>
           </Button>
         {/if}
         <Button
@@ -368,66 +474,88 @@
         </Button>
       </div>
     </Dialog.Header>
-    <div class="modal-body">
-      <!-- svelte-ignore a11y_click_events_have_key_events -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
-        class="modal-content"
-        bind:this={contentEl}
-        onclick={handleContentClick}
-        onkeydown={handleContentKeydown}
-      >
-        {#if noteMarkdown.trim()}
-          <div class="markdown-content">
-            {@html renderedNoteHtml}
+    <div class:split-chat-open={splitChatOpen} class:chat-only={narrowChatOpen} class="modal-body">
+      <section class="note-pane" aria-hidden={narrowChatOpen}>
+        <!-- svelte-ignore a11y_click_events_have_key_events -->
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="modal-content"
+          bind:this={contentEl}
+          onclick={handleContentClick}
+          onkeydown={handleContentKeydown}
+        >
+          {#if noteMarkdown.trim()}
+            <div class="markdown-content">
+              {@html renderedNoteHtml}
+            </div>
+          {:else}
+            <p class="empty-note">This note has no content.</p>
+          {/if}
+        </div>
+
+        {#if showChatInfo || (nextSteps && onStartSession && (nextSteps.noteStep || nextSteps.commitStep))}
+          <div class="next-steps">
+            {#if showChatInfo}
+              <div class="chat-info-row">
+                <Button
+                  variant="outline"
+                  class="h-auto min-h-9 max-w-full gap-2 border-[var(--border-muted)] bg-[var(--bg-chrome)] px-3.5 py-2 text-sm font-medium text-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+                  onclick={() => setChatOpen(true)}
+                >
+                  <MessageCircle size={16} aria-hidden="true" />
+                  <span class="min-w-0 truncate" title={chatButtonLabel}>{chatButtonLabel}</span>
+                </Button>
+              </div>
+            {/if}
+            {#if nextSteps && onStartSession && nextSteps.noteStep}
+              <div class="next-step-row">
+                <span class="next-step-prompt">{nextSteps.noteStep}</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="h-auto shrink-0 rounded-md border-transparent bg-[var(--note-bg)] px-3 py-1 text-xs font-medium text-[var(--note-color)] shadow-none hover:border-transparent hover:bg-[var(--note-bg-emphasis)] hover:text-[var(--note-color)]"
+                  onclick={() => onStartSession('note', nextSteps!.noteStep!)}
+                >
+                  Start note
+                </Button>
+              </div>
+            {/if}
+            {#if nextSteps && onStartSession && nextSteps.commitStep}
+              <div class="next-step-row">
+                <span class="next-step-prompt">{nextSteps.commitStep}</span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  class="h-auto shrink-0 rounded-md border-transparent bg-[var(--commit-bg)] px-3 py-1 text-xs font-medium text-[var(--commit-color)] shadow-none hover:border-transparent hover:bg-[var(--commit-bg-emphasis)] hover:text-[var(--commit-color)]"
+                  onclick={() => onStartSession('commit', nextSteps!.commitStep!)}
+                >
+                  Start commit
+                </Button>
+              </div>
+            {/if}
           </div>
-        {:else}
-          <p class="empty-note">This note has no content.</p>
         {/if}
-      </div>
+      </section>
+
+      {#if sessionId && chatOpen}
+        <aside class="chat-pane">
+          <SessionChatPane
+            compact
+            active={chatOpen}
+            {sessionId}
+            {repoDir}
+            {branchId}
+            {projectId}
+            {repoLabel}
+            {hashtagItems}
+            {noteInfo}
+            onOpenNote={() => handleEmbeddedNoteClick()}
+            onSessionChange={handlePaneSessionChange}
+            {onHashtagClick}
+          />
+        </aside>
+      {/if}
     </div>
-    {#if showChatInfo || (nextSteps && onStartSession && (nextSteps.noteStep || nextSteps.commitStep))}
-      <div class="next-steps">
-        {#if showChatInfo}
-          <div class="chat-info-row">
-            <Button
-              variant="outline"
-              class="h-auto min-h-9 max-w-full gap-2 border-[var(--border-muted)] bg-[var(--bg-chrome)] px-3.5 py-2 text-sm font-medium text-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
-              onclick={() => onOpenSession?.(sessionId!)}
-            >
-              <MessageCircle size={16} aria-hidden="true" />
-              <span class="min-w-0 truncate" title={chatButtonLabel}>{chatButtonLabel}</span>
-            </Button>
-          </div>
-        {/if}
-        {#if nextSteps && onStartSession && nextSteps.noteStep}
-          <div class="next-step-row">
-            <span class="next-step-prompt">{nextSteps.noteStep}</span>
-            <Button
-              variant="outline"
-              size="sm"
-              class="h-auto shrink-0 rounded-md border-transparent bg-[var(--note-bg)] px-3 py-1 text-xs font-medium text-[var(--note-color)] shadow-none hover:border-transparent hover:bg-[var(--note-bg-emphasis)] hover:text-[var(--note-color)]"
-              onclick={() => onStartSession('note', nextSteps!.noteStep!)}
-            >
-              Start note
-            </Button>
-          </div>
-        {/if}
-        {#if nextSteps && onStartSession && nextSteps.commitStep}
-          <div class="next-step-row">
-            <span class="next-step-prompt">{nextSteps.commitStep}</span>
-            <Button
-              variant="outline"
-              size="sm"
-              class="h-auto shrink-0 rounded-md border-transparent bg-[var(--commit-bg)] px-3 py-1 text-xs font-medium text-[var(--commit-color)] shadow-none hover:border-transparent hover:bg-[var(--commit-bg-emphasis)] hover:text-[var(--commit-color)]"
-              onclick={() => onStartSession('commit', nextSteps!.commitStep!)}
-            >
-              Start commit
-            </Button>
-          </div>
-        {/if}
-      </div>
-    {/if}
   </Dialog.Content>
 </Dialog.Root>
 
@@ -470,6 +598,42 @@
     flex: 1;
     min-height: 0;
     display: flex;
+    overflow: hidden;
+  }
+
+  .note-pane {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    flex-direction: column;
+  }
+
+  .split-chat-open .note-pane {
+    flex: 2 1 0;
+  }
+
+  .chat-only .note-pane {
+    display: none;
+  }
+
+  .chat-pane {
+    display: flex;
+    flex: 1 1 0;
+    min-width: 0;
+    min-height: 0;
+    border-left: 1px solid var(--border-subtle);
+    background: var(--bg-primary);
+  }
+
+  .split-chat-open .chat-pane {
+    min-width: 340px;
+    max-width: 390px;
+  }
+
+  .chat-only .chat-pane {
+    border-left: none;
+    max-width: none;
   }
 
   .modal-content {

@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use crate::driver::{AgentDriver, BasicMessageWriter, MessageWriter};
+use crate::driver::{acp_spawn_command, AgentDriver, BasicMessageWriter, MessageWriter};
 use crate::types::AcpAgent;
 
 /// Minimal store implementation for simple prompting (no persistence).
@@ -36,6 +36,7 @@ struct SimpleDriverWrapper {
     binary_path: std::path::PathBuf,
     acp_args: Vec<String>,
     agent_label: String,
+    interpreter_env_snapshot: Option<Vec<(String, String)>>,
 }
 
 impl SimpleDriverWrapper {
@@ -44,7 +45,21 @@ impl SimpleDriverWrapper {
             binary_path: agent.binary_path.clone(),
             acp_args: agent.acp_args.clone(),
             agent_label: agent.label.clone(),
+            interpreter_env_snapshot: None,
         }
+    }
+
+    fn with_interpreter_env_snapshot(mut self, vars: Vec<(String, String)>) -> Self {
+        self.interpreter_env_snapshot = Some(vars);
+        self
+    }
+
+    fn spawn_command(&self) -> crate::driver::AcpSpawnCommand {
+        acp_spawn_command(
+            &self.binary_path,
+            &self.acp_args,
+            self.interpreter_env_snapshot.as_deref(),
+        )
     }
 }
 
@@ -81,8 +96,9 @@ impl AgentDriver for SimpleDriverWrapper {
         use tokio::sync::Mutex;
         use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
-        let mut child = Command::new(&self.binary_path)
-            .args(&self.acp_args)
+        let spawn_command = self.spawn_command();
+        let mut child = Command::new(&spawn_command.program)
+            .args(&spawn_command.args)
             .current_dir(working_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -293,9 +309,37 @@ impl AgentDriver for SimpleDriverWrapper {
 ///
 /// The agent's text response
 pub async fn run_acp_prompt(agent: &AcpAgent, working_dir: &Path, prompt: &str) -> Result<String> {
+    run_acp_prompt_with_options(agent, working_dir, prompt, None).await
+}
+
+/// Run a one-shot prompt through ACP using a separate environment snapshot
+/// only for env-shebang interpreter resolution.
+///
+/// The spawned agent process still inherits the caller's environment. The
+/// snapshot is consulted only to turn launchers such as `#!/usr/bin/env node`
+/// into `<resolved-node> <launcher>` so repo-local PATH entries do not choose
+/// the ACP bridge interpreter.
+pub async fn run_acp_prompt_with_interpreter_env_snapshot(
+    agent: &AcpAgent,
+    working_dir: &Path,
+    prompt: &str,
+    interpreter_env_snapshot: Vec<(String, String)>,
+) -> Result<String> {
+    run_acp_prompt_with_options(agent, working_dir, prompt, Some(interpreter_env_snapshot)).await
+}
+
+async fn run_acp_prompt_with_options(
+    agent: &AcpAgent,
+    working_dir: &Path,
+    prompt: &str,
+    interpreter_env_snapshot: Option<Vec<(String, String)>>,
+) -> Result<String> {
     let working_dir = working_dir.to_path_buf();
     let prompt = prompt.to_string();
-    let driver = SimpleDriverWrapper::from_agent(agent);
+    let mut driver = SimpleDriverWrapper::from_agent(agent);
+    if let Some(snapshot) = interpreter_env_snapshot {
+        driver = driver.with_interpreter_env_snapshot(snapshot);
+    }
 
     // Run the ACP session in a blocking task with its own runtime
     // This is needed because ACP uses !Send futures (LocalSet)
@@ -333,4 +377,82 @@ pub async fn run_acp_prompt(agent: &AcpAgent, working_dir: &Path, prompt: &str) 
     })
     .await
     .context("Task join error")?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock must be after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        dir
+    }
+
+    fn write_executable(path: &Path, content: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create executable parent");
+        }
+        std::fs::write(path, content).expect("write executable");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms).expect("chmod executable");
+        }
+    }
+
+    fn join_path_entries(entries: &[PathBuf]) -> String {
+        std::env::join_paths(entries)
+            .expect("join path entries")
+            .into_string()
+            .expect("path entries should be utf8")
+    }
+
+    #[test]
+    fn simple_driver_uses_interpreter_snapshot_for_env_shebang_bridge() {
+        let dir = unique_test_dir("acp-simple-home-interpreter");
+        let home_bin = dir.join("home-bin");
+        let project_bin = dir.join("project-bin");
+        let agent_bin = dir.join("agent-bin");
+        let launcher = agent_bin.join("claude-agent-acp");
+        let home_node = home_bin.join("node");
+        write_executable(&home_node, "#!/bin/sh\n");
+        write_executable(&project_bin.join("node"), "#!/bin/sh\n");
+        write_executable(&launcher, "#!/usr/bin/env node\n");
+
+        let agent = AcpAgent {
+            binary_path: launcher.clone(),
+            acp_args: vec![String::from("--stdio")],
+            label: String::from("Claude Code"),
+        };
+        let home_snapshot = vec![(
+            String::from("PATH"),
+            join_path_entries(std::slice::from_ref(&home_bin)),
+        )];
+
+        let command = SimpleDriverWrapper::from_agent(&agent)
+            .with_interpreter_env_snapshot(home_snapshot)
+            .spawn_command();
+
+        assert_eq!(command.program, home_node);
+        assert_eq!(
+            command.args,
+            vec![
+                launcher.as_os_str().to_os_string(),
+                std::ffi::OsString::from("--stdio"),
+            ]
+        );
+
+        std::fs::remove_dir_all(dir).expect("cleanup test dir");
+    }
 }

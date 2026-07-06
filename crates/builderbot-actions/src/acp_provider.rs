@@ -13,6 +13,7 @@ use crate::detector::AiProvider;
 pub struct AcpAiProvider {
     working_dir: PathBuf,
     provider_id: Option<String>,
+    interpreter_env_snapshot: Option<Vec<(String, String)>>,
 }
 
 impl AcpAiProvider {
@@ -36,6 +37,7 @@ impl AcpAiProvider {
         Ok(Self {
             working_dir,
             provider_id: None,
+            interpreter_env_snapshot: None,
         })
     }
 
@@ -53,7 +55,15 @@ impl AcpAiProvider {
         Ok(Self {
             working_dir,
             provider_id: Some(provider_id.to_string()),
+            interpreter_env_snapshot: None,
         })
+    }
+
+    /// Set a separate environment snapshot used only to resolve env-shebang
+    /// interpreters for ACP bridge startup.
+    pub fn with_interpreter_env_snapshot(mut self, vars: Vec<(String, String)>) -> Self {
+        self.interpreter_env_snapshot = Some(vars);
+        self
     }
 }
 
@@ -66,6 +76,17 @@ impl AiProvider for AcpAiProvider {
         }
         .ok_or_else(|| anyhow::anyhow!("No ACP agent found"))?;
 
-        acp_client::run_acp_prompt(&agent, &self.working_dir, &prompt).await
+        match &self.interpreter_env_snapshot {
+            Some(snapshot) => {
+                acp_client::run_acp_prompt_with_interpreter_env_snapshot(
+                    &agent,
+                    &self.working_dir,
+                    &prompt,
+                    snapshot.clone(),
+                )
+                .await
+            }
+            None => acp_client::run_acp_prompt(&agent, &self.working_dir, &prompt).await,
+        }
     }
 }

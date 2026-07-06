@@ -278,7 +278,8 @@ If still building, set regex and has_endpoint_capture to null/false."#,
                 let provider_result = super::commands::build_action_provider(
                     provider_id.as_deref(),
                     working_dir.clone(),
-                );
+                )
+                .await;
                 let provider = match provider_result {
                     Ok(p) => p,
                     Err(e) => {

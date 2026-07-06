@@ -14,6 +14,7 @@ anyhow = "1"
 async-trait = "0.1"
 log = "0.4"
 blox-cli = { path = "../blox-cli" }
+doctor = { path = "../doctor" }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31", features = ["signal"] }

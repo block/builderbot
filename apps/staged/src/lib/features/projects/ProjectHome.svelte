@@ -9,8 +9,6 @@
   import AlertCircle from '@lucide/svelte/icons/alert-circle';
   import CirclePause from '@lucide/svelte/icons/circle-pause';
   import Cloud from '@lucide/svelte/icons/cloud';
-  import PanelLeftClose from '@lucide/svelte/icons/panel-left-close';
-  import PanelLeftOpen from '@lucide/svelte/icons/panel-left-open';
   import Pause from '@lucide/svelte/icons/pause';
   import Plus from '@lucide/svelte/icons/plus';
   import Trash2 from '@lucide/svelte/icons/trash-2';
@@ -39,12 +37,7 @@
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
   import { toast } from 'svelte-sonner';
-  import {
-    projectsSidebarState,
-    setProjects,
-    setProjectsSidebarCollapsed,
-  } from './projectsSidebarState.svelte';
-  import { viewport } from '../../shared/viewport.svelte';
+  import { setProjects } from './projectsSidebarState.svelte';
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
@@ -724,8 +717,6 @@
         )
       : new Set<string>()
   );
-  let sidebarOpen = $derived(!projectsSidebarState.collapsed);
-
   let reposByProject = $derived(
     new Map(
       projects.map((project) => {
@@ -1075,10 +1066,6 @@
     }
   }
 
-  function toggleProjectsSidebar() {
-    setProjectsSidebarCollapsed(!projectsSidebarState.collapsed);
-  }
-
   async function handleTopBarRepoSelected(selection: RepoPickerSelection) {
     const project = selectedProject;
     if (!project) return;
@@ -1162,37 +1149,10 @@
 
 <TopBarPortal
   title={selectedProject ? '' : 'Project'}
-  leftActions={projectTopBarLeftActions}
   center={projectTopBarCenter}
   badges={projectTopBarBadges}
   rightActions={projectTopBarRightActions}
 />
-
-{#snippet projectTopBarLeftActions()}
-  {#if !viewport.isMobile}
-    <span
-      class="inline-flex"
-      title={sidebarOpen ? 'Hide projects sidebar' : 'Show projects sidebar'}
-    >
-      <Button
-        variant="ghost"
-        size="sm"
-        class="top-bar-action gap-1.5 text-foreground hover:bg-[var(--ui-selection)] hover:text-foreground max-md:size-10 max-md:p-0 [&_svg]:size-3.5"
-        aria-label={sidebarOpen ? 'Hide projects sidebar' : 'Show projects sidebar'}
-        onclick={toggleProjectsSidebar}
-        disabled={!projectsSidebarState.hasProjects}
-      >
-        {#if !sidebarOpen || !projectsSidebarState.hasProjects}
-          <PanelLeftOpen size={14} />
-          <span class="top-bar-action-label">Show Sidebar</span>
-        {:else}
-          <PanelLeftClose size={14} />
-          <span class="top-bar-action-label">Hide Sidebar</span>
-        {/if}
-      </Button>
-    </span>
-  {/if}
-{/snippet}
 
 {#snippet projectTopBarCenter()}
   {#if selectedProject && showTopBarProjectName}

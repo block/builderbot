@@ -300,9 +300,7 @@
   let resizing = $state(false);
   let resizeStartX = 0;
   let resizeStartWidth = SIDEBAR_DEFAULT_WIDTH;
-  let sidebarVisible = $derived(
-    projectsSidebarState.hasProjects && !viewport.isMobile && !projectsSidebarState.collapsed
-  );
+  let sidebarVisible = $derived(projectsSidebarState.hasProjects && !viewport.isMobile);
   let sidebarStyle = $derived(`width: ${projectsSidebarState.width}px;`);
 
   onMount(() => {

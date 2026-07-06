@@ -2,7 +2,6 @@ import type { Project } from '../../types';
 import { getStoreValue, setStoreValue } from '../../shared/persistentStore';
 
 const SIDEBAR_WIDTH_KEY = 'projects-sidebar-width';
-const SIDEBAR_COLLAPSED_KEY = 'projects-sidebar-collapsed';
 
 export const SIDEBAR_DEFAULT_WIDTH = 280;
 export const SIDEBAR_MIN_WIDTH = 220;
@@ -22,7 +21,6 @@ export const projectsList = $state<{ current: Project[] }>({ current: [] });
 
 export const projectsSidebarState = $state({
   width: SIDEBAR_DEFAULT_WIDTH,
-  collapsed: false,
   hydrated: false,
   hasProjects: true,
   scrollTop: 0,
@@ -31,16 +29,10 @@ export const projectsSidebarState = $state({
 export async function hydrateProjectsSidebarState(): Promise<void> {
   if (projectsSidebarState.hydrated) return;
 
-  const [savedWidth, savedCollapsed] = await Promise.all([
-    getStoreValue<number>(SIDEBAR_WIDTH_KEY),
-    getStoreValue<boolean>(SIDEBAR_COLLAPSED_KEY),
-  ]);
+  const savedWidth = await getStoreValue<number>(SIDEBAR_WIDTH_KEY);
 
   if (typeof savedWidth === 'number' && Number.isFinite(savedWidth)) {
     projectsSidebarState.width = clampWidth(savedWidth);
-  }
-  if (typeof savedCollapsed === 'boolean') {
-    projectsSidebarState.collapsed = savedCollapsed;
   }
 
   projectsSidebarState.hydrated = true;
@@ -64,10 +56,4 @@ export function setProjects(projects: Project[]): void {
 export function setProjectsSidebarScrollTop(scrollTop: number): void {
   if (!Number.isFinite(scrollTop)) return;
   projectsSidebarState.scrollTop = Math.max(0, scrollTop);
-}
-
-export function setProjectsSidebarCollapsed(collapsed: boolean): void {
-  if (projectsSidebarState.collapsed === collapsed) return;
-  projectsSidebarState.collapsed = collapsed;
-  void setStoreValue(SIDEBAR_COLLAPSED_KEY, collapsed);
 }

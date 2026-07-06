@@ -1461,7 +1461,6 @@
                         {#if item.detail}
                           <span class="tool-args-preview">{item.detail}</span>
                         {/if}
-                        <span class="tool-status-label">{item.statusLabel}</span>
                       </div>
                       {#if isExpanded && hasDetails}
                         <div
@@ -2151,13 +2150,6 @@
 
   .tool-status-dot.status-cancelled {
     color: var(--text-muted);
-  }
-
-  .tool-status-label {
-    flex-shrink: 0;
-    margin-left: auto;
-    color: var(--text-faint);
-    font-size: calc(var(--size-xs) * 0.88);
   }
 
   .tool-args-preview {

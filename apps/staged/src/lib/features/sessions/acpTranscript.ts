@@ -73,14 +73,8 @@ interface TimelineEntry {
 }
 
 const TOOL_EVENT_KINDS = new Set(['tool_call', 'tool_call_update']);
-const STANDALONE_EVENT_KINDS = new Set<AcpTranscriptEventKind>([
+const VISIBLE_STANDALONE_EVENT_KINDS = new Set<AcpTranscriptEventKind>([
   'plan_update',
-  'usage_update',
-  'prompt_response',
-  'config_options_update',
-  'session_mode_state',
-  'current_mode_update',
-  'available_commands_update',
   'session_info_update',
 ]);
 
@@ -406,7 +400,7 @@ function standaloneEvents(metadataRows: SessionMessage[]): AcpTranscriptEvent[] 
   const events: AcpTranscriptEvent[] = [];
   for (const row of metadataRows) {
     const kind = row.acpEventKind as AcpTranscriptEventKind | undefined;
-    if (!kind || !STANDALONE_EVENT_KINDS.has(kind)) continue;
+    if (!kind || !VISIBLE_STANDALONE_EVENT_KINDS.has(kind)) continue;
     events.push({
       id: row.id,
       kind,

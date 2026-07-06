@@ -102,6 +102,67 @@ describe('buildAcpTranscriptGroups', () => {
     const groups = buildAcpTranscriptGroups([], metadata);
     expect(groups).toEqual([]);
   });
+
+  it('hides operational ACP metadata rows from the transcript', () => {
+    const metadata = [
+      message({
+        id: 1,
+        role: 'assistant',
+        acpEventKind: 'usage_update',
+        acpUsage: { inputTokens: 10, outputTokens: 5 },
+      }),
+      message({
+        id: 2,
+        role: 'assistant',
+        acpEventKind: 'prompt_response',
+        acpUsage: { inputTokens: 20, outputTokens: 8 },
+      }),
+      message({
+        id: 3,
+        role: 'assistant',
+        acpEventKind: 'config_options_update',
+        acpConfigOptions: [{ name: 'Model' }],
+      }),
+      message({
+        id: 4,
+        role: 'assistant',
+        acpEventKind: 'session_mode_state',
+        acpSessionModeState: { currentModeId: 'default' },
+      }),
+      message({
+        id: 5,
+        role: 'assistant',
+        acpEventKind: 'current_mode_update',
+        acpContent: { currentModeId: 'default' },
+      }),
+      message({
+        id: 6,
+        role: 'assistant',
+        acpEventKind: 'available_commands_update',
+        acpContent: { availableCommands: [{ name: 'plan' }] },
+      }),
+    ];
+
+    const groups = buildAcpTranscriptGroups([], metadata);
+    expect(groups).toEqual([]);
+  });
+
+  it('continues surfacing plan metadata rows', () => {
+    const groups = buildAcpTranscriptGroups(
+      [],
+      [
+        message({
+          id: 1,
+          role: 'assistant',
+          acpEventKind: 'plan_update',
+          acpContent: { entries: [{ content: 'Check UI', status: 'pending' }] },
+        }),
+      ]
+    );
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].type).toBe('acp');
+  });
 });
 
 describe('latestAvailableCommands', () => {

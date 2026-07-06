@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { SessionMessage } from '../../types';
-import { buildAcpTranscriptGroups, latestAvailableCommands } from './acpTranscript';
+import {
+  buildAcpTranscriptGroups,
+  groupRichToolsByVerb,
+  latestAvailableCommands,
+  type RichToolItem,
+} from './acpTranscript';
 
 function message(
   overrides: Partial<SessionMessage> & Pick<SessionMessage, 'id' | 'role'>
@@ -165,6 +170,114 @@ describe('buildAcpTranscriptGroups', () => {
   });
 });
 
+describe('groupRichToolsByVerb', () => {
+  it('collapses adjacent tools with the same verb', () => {
+    const groups = groupRichToolsByVerb([
+      richTool({ key: 'tool:1', verb: 'Read', detail: 'src/a.ts' }),
+      richTool({ key: 'tool:2', verb: 'Read', detail: 'src/b.ts' }),
+    ]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].verb).toBe('Read');
+    expect(groups[0].summary).toBe('2 files');
+    expect(groups[0].items.map((item) => item.detail)).toEqual(['src/a.ts', 'src/b.ts']);
+  });
+
+  it('keeps different adjacent verbs separate', () => {
+    const groups = groupRichToolsByVerb([
+      richTool({ key: 'tool:1', verb: 'Read' }),
+      richTool({ key: 'tool:2', verb: 'Searched' }),
+      richTool({ key: 'tool:3', verb: 'Read' }),
+    ]);
+
+    expect(groups.map((group) => group.verb)).toEqual(['Read', 'Searched', 'Read']);
+    expect(groups.map((group) => group.items)).toHaveLength(3);
+  });
+
+  it('does not merge same verbs across transcript group boundaries', () => {
+    const transcript = buildAcpTranscriptGroups(
+      [
+        message({
+          id: 1,
+          role: 'tool_call',
+          content: JSON.stringify({ name: 'Read', input: { file_path: '/repo/a.ts' } }),
+        }),
+        message({ id: 2, role: 'tool_result', content: 'a' }),
+        message({ id: 3, role: 'assistant', content: 'middle' }),
+        message({
+          id: 4,
+          role: 'tool_call',
+          content: JSON.stringify({ name: 'Read', input: { file_path: '/repo/b.ts' } }),
+        }),
+        message({ id: 5, role: 'tool_result', content: 'b' }),
+      ],
+      [],
+      '/repo'
+    );
+    const toolGroups = transcript.filter((group) => group.type === 'tools');
+
+    expect(transcript.map((group) => group.type)).toEqual(['tools', 'assistant', 'tools']);
+    expect(toolGroups).toHaveLength(2);
+    for (const group of toolGroups) {
+      if (group.type === 'tools') {
+        expect(groupRichToolsByVerb(group.items)).toHaveLength(1);
+        expect(group.items).toHaveLength(1);
+      }
+    }
+  });
+
+  it('keeps ACP status and structured metadata on grouped items', () => {
+    const transcript = buildAcpTranscriptGroups(
+      [
+        message({
+          id: 1,
+          role: 'tool_call',
+          content: JSON.stringify({ name: 'Read', input: { file_path: '/repo/a.ts' } }),
+          acpEventKind: 'tool_call',
+          acpToolCallId: 'tc-1',
+          acpToolStatus: 'completed',
+        }),
+        message({
+          id: 2,
+          role: 'tool_call',
+          content: JSON.stringify({ name: 'Read', input: { file_path: '/repo/b.ts' } }),
+          acpEventKind: 'tool_call',
+          acpToolCallId: 'tc-2',
+        }),
+      ],
+      [
+        message({
+          id: 3,
+          role: 'assistant',
+          acpEventKind: 'tool_call_update',
+          acpToolCallId: 'tc-2',
+          acpToolStatus: 'failed',
+          acpRawInput: { file_path: '/repo/b.ts' },
+          acpRawOutput: { error: 'missing' },
+          acpContent: [{ type: 'content', content: { type: 'text', text: 'not found' } }],
+          acpLocations: [{ path: '/repo/b.ts', line: 12 }],
+        }),
+      ],
+      '/repo'
+    );
+    const toolGroup = transcript.find((group) => group.type === 'tools');
+
+    expect(toolGroup?.type).toBe('tools');
+    if (toolGroup?.type === 'tools') {
+      const groups = groupRichToolsByVerb(toolGroup.items);
+      expect(groups).toHaveLength(1);
+      expect(groups[0].statusTone).toBe('danger');
+      expect(groups[0].items[1].status).toBe('failed');
+      expect(groups[0].items[1].rawInput).toEqual({ file_path: '/repo/b.ts' });
+      expect(groups[0].items[1].rawOutput).toEqual({ error: 'missing' });
+      expect(groups[0].items[1].content).toEqual([
+        { type: 'content', content: { type: 'text', text: 'not found' } },
+      ]);
+      expect(groups[0].items[1].locations).toEqual([{ path: '/repo/b.ts', line: 12 }]);
+    }
+  });
+});
+
 describe('latestAvailableCommands', () => {
   it('extracts slash commands from the latest ACP command update', () => {
     const commands = latestAvailableCommands([
@@ -193,3 +306,23 @@ describe('latestAvailableCommands', () => {
     ]);
   });
 });
+
+function richTool(
+  overrides: Partial<RichToolItem> & Pick<RichToolItem, 'key' | 'verb'>
+): RichToolItem {
+  return {
+    call: message({ id: Number(overrides.key.replace(/\D/g, '')) || 1, role: 'tool_call' }),
+    result: null,
+    detail: '',
+    status: 'completed',
+    statusLabel: 'Succeeded',
+    statusTone: 'success',
+    toolCallId: null,
+    toolKind: null,
+    rawInput: undefined,
+    rawOutput: undefined,
+    content: undefined,
+    locations: undefined,
+    ...overrides,
+  };
+}

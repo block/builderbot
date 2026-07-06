@@ -84,6 +84,7 @@
     diffsFromAcpContent,
     displayLocations,
     formatJson,
+    groupRichToolsByVerb,
     latestAvailableCommands,
     simpleUnifiedDiff,
     terminalRefsFromAcpContent,
@@ -91,6 +92,7 @@
     type AcpCommand,
     type AcpTranscriptEvent,
     type AcpTranscriptGroup,
+    type RichToolItem,
   } from './acpTranscript';
   import {
     displayRootKey,
@@ -1212,6 +1214,113 @@
 
 <svelte:window onpaste={handleImagePaste} />
 
+{#snippet toolStatusIcon(statusTone: RichToolItem['statusTone'])}
+  {#if statusTone === 'running'}
+    <Clock size={11} />
+  {:else if statusTone === 'success'}
+    <CircleCheck size={11} />
+  {:else if statusTone === 'danger'}
+    <CircleAlert size={11} />
+  {:else if statusTone === 'cancelled'}
+    <CircleSlash size={11} />
+  {:else}
+    <CircleDot size={11} />
+  {/if}
+{/snippet}
+
+{#snippet richToolCard(item: RichToolItem, nested: boolean)}
+  {@const isExpanded = expandedTools.has(item.key)}
+  {@const resultText = toolResultText(item)}
+  {@const rawInputText = formatJson(item.rawInput)}
+  {@const rawOutputText = formatJson(item.rawOutput)}
+  {@const diffs = diffsFromAcpContent(item.content, displayRoots)}
+  {@const locations = displayLocations(item.locations, displayRoots)}
+  {@const terminalRefs = terminalRefsFromAcpContent(item.content)}
+  {@const hasDetails =
+    !!resultText ||
+    !!rawInputText ||
+    !!rawOutputText ||
+    diffs.length > 0 ||
+    locations.length > 0 ||
+    terminalRefs.length > 0}
+  <div class="tool-card" class:tool-card-nested={nested}>
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="tool-header"
+      class:tool-header-expandable={hasDetails}
+      onclick={() => hasDetails && toggleTool(item.key)}
+    >
+      <span
+        class="tool-caret"
+        class:tool-caret-expanded={isExpanded}
+        class:tool-caret-hidden={!hasDetails}>›</span
+      >
+      <span
+        class="tool-status-dot"
+        class:status-running={item.statusTone === 'running'}
+        class:status-success={item.statusTone === 'success'}
+        class:status-danger={item.statusTone === 'danger'}
+        class:status-cancelled={item.statusTone === 'cancelled'}
+      >
+        {@render toolStatusIcon(item.statusTone)}
+      </span>
+      <span class="tool-name">{item.verb}</span>
+      {#if item.detail}
+        <span class="tool-args-preview">{item.detail}</span>
+      {/if}
+    </div>
+    {#if isExpanded && hasDetails}
+      <div class="tool-code-block" transition:slide={{ duration: SLIDE_DURATION }}>
+        {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
+          <div class="tool-code-command">$ {item.detail}</div>
+        {/if}
+        {#if locations.length > 0}
+          <div class="tool-meta-row">
+            {#each locations as location}
+              <span class="tool-chip">{location}</span>
+            {/each}
+          </div>
+        {/if}
+        {#if rawInputText}
+          <div class="tool-panel-label">Input</div>
+          <pre class="tool-code-output">{rawInputText}</pre>
+        {/if}
+        {#each diffs as diff}
+          <div class="tool-panel-label">{diff.path}</div>
+          <pre class="tool-code-output diff-output">{simpleUnifiedDiff(diff)}</pre>
+        {/each}
+        {#if terminalRefs.length > 0}
+          <div class="tool-panel-label">Terminal</div>
+          <div class="tool-meta-row">
+            {#each terminalRefs as terminalRef}
+              <span class="tool-chip">{terminalRef}</span>
+            {/each}
+          </div>
+        {/if}
+        {#if resultText}
+          <div class="tool-panel-label">Output</div>
+          <pre class="tool-code-output">{resultText}</pre>
+        {/if}
+        {#if rawOutputText && rawOutputText !== resultText}
+          <div class="tool-panel-label">Raw output</div>
+          <pre class="tool-code-output">{rawOutputText}</pre>
+        {/if}
+        <div
+          class="tool-code-status"
+          class:status-danger={item.statusTone === 'danger'}
+          class:status-cancelled={item.statusTone === 'cancelled'}
+        >
+          {#if item.statusTone === 'success'}
+            <Check size={11} />
+          {/if}
+          {item.statusLabel}
+        </div>
+      </div>
+    {/if}
+  </div>
+{/snippet}
+
 <Dialog.Root {open} onOpenChange={(v) => !v && requestClose()}>
   <Dialog.Content
     bind:ref={modalElement}
@@ -1410,112 +1519,42 @@
                 </div>
               {:else if group.type === 'tools'}
                 <div class="message-row tool-group">
-                  {#each group.items as item (item.key)}
-                    {@const isExpanded = expandedTools.has(item.key)}
-                    {@const resultText = toolResultText(item)}
-                    {@const rawInputText = formatJson(item.rawInput)}
-                    {@const rawOutputText = formatJson(item.rawOutput)}
-                    {@const diffs = diffsFromAcpContent(item.content, displayRoots)}
-                    {@const locations = displayLocations(item.locations, displayRoots)}
-                    {@const terminalRefs = terminalRefsFromAcpContent(item.content)}
-                    {@const hasDetails =
-                      !!resultText ||
-                      !!rawInputText ||
-                      !!rawOutputText ||
-                      diffs.length > 0 ||
-                      locations.length > 0 ||
-                      terminalRefs.length > 0}
-                    <div class="tool-card">
-                      <!-- svelte-ignore a11y_click_events_have_key_events -->
-                      <!-- svelte-ignore a11y_no_static_element_interactions -->
-                      <div
-                        class="tool-header"
-                        class:tool-header-expandable={hasDetails}
-                        onclick={() => hasDetails && toggleTool(item.key)}
-                      >
-                        <span
-                          class="tool-caret"
-                          class:tool-caret-expanded={isExpanded}
-                          class:tool-caret-hidden={!hasDetails}>›</span
-                        >
-                        <span
-                          class="tool-status-dot"
-                          class:status-running={item.statusTone === 'running'}
-                          class:status-success={item.statusTone === 'success'}
-                          class:status-danger={item.statusTone === 'danger'}
-                          class:status-cancelled={item.statusTone === 'cancelled'}
-                        >
-                          {#if item.statusTone === 'running'}
-                            <Clock size={11} />
-                          {:else if item.statusTone === 'success'}
-                            <CircleCheck size={11} />
-                          {:else if item.statusTone === 'danger'}
-                            <CircleAlert size={11} />
-                          {:else if item.statusTone === 'cancelled'}
-                            <CircleSlash size={11} />
-                          {:else}
-                            <CircleDot size={11} />
-                          {/if}
-                        </span>
-                        <span class="tool-name">{item.verb}</span>
-                        {#if item.detail}
-                          <span class="tool-args-preview">{item.detail}</span>
-                        {/if}
-                      </div>
-                      {#if isExpanded && hasDetails}
+                  {#each groupRichToolsByVerb(group.items) as verbGroup (verbGroup.key)}
+                    {#if verbGroup.items.length === 1}
+                      {@render richToolCard(verbGroup.items[0], false)}
+                    {:else}
+                      {@const isGroupExpanded = expandedTools.has(verbGroup.key)}
+                      <div class="tool-card">
+                        <!-- svelte-ignore a11y_click_events_have_key_events -->
+                        <!-- svelte-ignore a11y_no_static_element_interactions -->
                         <div
-                          class="tool-code-block"
-                          transition:slide={{ duration: SLIDE_DURATION }}
+                          class="tool-header tool-header-expandable"
+                          onclick={() => toggleTool(verbGroup.key)}
                         >
-                          {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
-                            <div class="tool-code-command">$ {item.detail}</div>
-                          {/if}
-                          {#if locations.length > 0}
-                            <div class="tool-meta-row">
-                              {#each locations as location}
-                                <span class="tool-chip">{location}</span>
-                              {/each}
-                            </div>
-                          {/if}
-                          {#if rawInputText}
-                            <div class="tool-panel-label">Input</div>
-                            <pre class="tool-code-output">{rawInputText}</pre>
-                          {/if}
-                          {#each diffs as diff}
-                            <div class="tool-panel-label">{diff.path}</div>
-                            <pre class="tool-code-output diff-output">{simpleUnifiedDiff(
-                                diff
-                              )}</pre>
-                          {/each}
-                          {#if terminalRefs.length > 0}
-                            <div class="tool-panel-label">Terminal</div>
-                            <div class="tool-meta-row">
-                              {#each terminalRefs as terminalRef}
-                                <span class="tool-chip">{terminalRef}</span>
-                              {/each}
-                            </div>
-                          {/if}
-                          {#if resultText}
-                            <div class="tool-panel-label">Output</div>
-                            <pre class="tool-code-output">{resultText}</pre>
-                          {/if}
-                          {#if rawOutputText && rawOutputText !== resultText}
-                            <div class="tool-panel-label">Raw output</div>
-                            <pre class="tool-code-output">{rawOutputText}</pre>
-                          {/if}
-                          <div
-                            class="tool-code-status"
-                            class:status-danger={item.statusTone === 'danger'}
-                            class:status-cancelled={item.statusTone === 'cancelled'}
+                          <span class="tool-caret" class:tool-caret-expanded={isGroupExpanded}
+                            >›</span
                           >
-                            {#if item.statusTone === 'success'}
-                              <Check size={11} />
-                            {/if}
-                            {item.statusLabel}
-                          </div>
+                          <span
+                            class="tool-status-dot"
+                            class:status-running={verbGroup.statusTone === 'running'}
+                            class:status-success={verbGroup.statusTone === 'success'}
+                            class:status-danger={verbGroup.statusTone === 'danger'}
+                            class:status-cancelled={verbGroup.statusTone === 'cancelled'}
+                          >
+                            {@render toolStatusIcon(verbGroup.statusTone)}
+                          </span>
+                          <span class="tool-name">{verbGroup.verb}</span>
+                          <span class="tool-args-preview">{verbGroup.summary}</span>
+                        </div>
+                      </div>
+                      {#if isGroupExpanded}
+                        <div transition:slide={{ duration: SLIDE_DURATION }}>
+                          {#each verbGroup.items as item (item.key)}
+                            {@render richToolCard(item, true)}
+                          {/each}
                         </div>
                       {/if}
-                    </div>
+                    {/if}
                   {/each}
                 </div>
               {:else}
@@ -2078,6 +2117,10 @@
   .tool-card {
     overflow: hidden;
     min-width: 0;
+  }
+
+  .tool-card-nested {
+    padding-left: 16px;
   }
 
   .tool-header {

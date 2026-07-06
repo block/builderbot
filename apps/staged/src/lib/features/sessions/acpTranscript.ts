@@ -1,6 +1,11 @@
 import type { SessionMessage } from '../../types';
 import type { DisplayRootInput } from './pathDisplayRoots';
-import { formatToolDisplay, makePathsRelative, stripCodeFences } from './sessionModalHelpers';
+import {
+  formatToolDisplay,
+  makePathsRelative,
+  stripCodeFences,
+  verbGroupSummary,
+} from './sessionModalHelpers';
 
 export type ToolStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled';
 
@@ -19,6 +24,14 @@ export interface RichToolItem {
   rawOutput: unknown;
   content: unknown;
   locations: unknown;
+}
+
+export interface RichToolVerbGroup {
+  key: string;
+  verb: string;
+  summary: string;
+  statusTone: RichToolItem['statusTone'];
+  items: RichToolItem[];
 }
 
 export type AcpTranscriptEventKind =
@@ -215,6 +228,28 @@ export function terminalRefsFromAcpContent(content: unknown): string[] {
     .filter((id): id is string => !!id);
 }
 
+export function groupRichToolsByVerb(items: RichToolItem[]): RichToolVerbGroup[] {
+  const groups: Array<Omit<RichToolVerbGroup, 'summary' | 'statusTone'>> = [];
+  for (const item of items) {
+    const last = groups[groups.length - 1];
+    if (last?.verb === item.verb) {
+      last.items.push(item);
+    } else {
+      groups.push({
+        key: `verb:${item.key}:${item.verb}`,
+        verb: item.verb,
+        items: [item],
+      });
+    }
+  }
+
+  return groups.map((group) => ({
+    ...group,
+    summary: verbGroupSummary(group),
+    statusTone: groupStatusTone(group.items),
+  }));
+}
+
 export function simpleUnifiedDiff(diff: AcpDiff): string {
   const oldLines = (diff.oldText ?? '').split('\n');
   const newLines = diff.newText.split('\n');
@@ -236,6 +271,14 @@ export function simpleUnifiedDiff(diff: AcpDiff): string {
     }
   }
   return output.join('\n');
+}
+
+function groupStatusTone(items: RichToolItem[]): RichToolItem['statusTone'] {
+  if (items.some((item) => item.statusTone === 'danger')) return 'danger';
+  if (items.some((item) => item.statusTone === 'running')) return 'running';
+  if (items.some((item) => item.statusTone === 'cancelled')) return 'cancelled';
+  if (items.length > 0 && items.every((item) => item.statusTone === 'success')) return 'success';
+  return 'muted';
 }
 
 function sortedUniqueMessages(messages: SessionMessage[]): SessionMessage[] {

@@ -27,6 +27,7 @@ import type {
   StoreIncompatibility,
   Session,
   SessionMessage,
+  QueuedSessionMessage,
   DiffFilesResponse,
   FileDiff,
   File,
@@ -763,6 +764,32 @@ export function resumeSession(
     imageIds: imageIds ?? null,
     branchId: branchId ?? null,
   });
+}
+
+export function queueSessionMessage(
+  sessionId: string,
+  content: string,
+  imageIds?: string[],
+  branchId?: string | null
+): Promise<QueuedSessionMessage> {
+  return invokeCommand('queue_session_message', {
+    sessionId,
+    content,
+    imageIds: imageIds ?? null,
+    branchId: branchId ?? null,
+  });
+}
+
+export function listQueuedSessionMessages(sessionId: string): Promise<QueuedSessionMessage[]> {
+  return invokeCommand('list_queued_session_messages', { sessionId });
+}
+
+export function deleteQueuedSessionMessage(id: string): Promise<boolean> {
+  return invokeCommand('delete_queued_session_message', { id });
+}
+
+export function sendQueuedSessionMessage(id: string): Promise<void> {
+  return invokeCommand('send_queued_session_message', { id });
 }
 
 export function buildNoteFollowupMessage(

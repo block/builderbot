@@ -9,7 +9,7 @@
   Features:
   - Text input always available at the bottom
   - Send button when idle, Stop button when running
-  - Message queue: hitting Enter while running enqueues for after completion
+  - Message queue: hitting Enter while running persists a follow-up for backend drain
   - Copy button on every message
   - Tool calls show name + args preview; expand to see output
   - Fixed-size modal with proper scrolling
@@ -48,7 +48,14 @@
   import Plus from '@lucide/svelte/icons/plus';
   import Spinner from '../../shared/Spinner.svelte';
   import { isResumableReason } from '../../types';
-  import type { Session, SessionMessage, HashtagItem, ProjectRepo } from '../../types';
+  import type {
+    Session,
+    SessionMessage,
+    QueuedSessionMessage,
+    HashtagItem,
+    ProjectRepo,
+    SessionStatusPayload,
+  } from '../../types';
   import {
     buildNoteFollowupMessage,
     cancelSession,
@@ -61,8 +68,13 @@
     getSessionMessages,
     getSessionMessagesSince,
     handleExternalLinkClick,
+    deleteQueuedSessionMessage,
+    listQueuedSessionMessages,
+    queueSessionMessage,
     resumeSession,
+    sendQueuedSessionMessage,
   } from '../../api/commands';
+  import { listenToEvent, type UnlistenFn } from '../../transport';
   import HashtagInput from './HashtagInput.svelte';
   import {
     buildBranchHashtagItems,
@@ -173,17 +185,19 @@
   let inputEl: HTMLElement | null = $state(null);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let pollInFlight = false;
+  let unlistenStatus: UnlistenFn | null = null;
   let closed = false;
 
   let inputText = $state('');
-  let messageQueue = $state<string[]>([]);
+  let queuedMessages = $state<QueuedSessionMessage[]>([]);
+  let queueActionIds = $state<Set<string>>(new Set());
   let copiedId = $state<number | string | null>(null);
   let expandedTools = $state<Set<string>>(new Set());
   let displayRoots = $state<string[]>([]);
   let currentDisplayRootKey = '';
 
   let isLive = $derived(session?.status === 'running');
-  let hasQueuedMessages = $derived(messageQueue.length > 0);
+  let hasQueuedMessages = $derived(queuedMessages.length > 0);
   let noteFollowupLabel = $derived(getNoteFollowupLabel(session, messages, noteInfo));
   let assistantMarkdownContent = $derived(
     messages
@@ -294,6 +308,11 @@
         for (const id of msg.imageIds) {
           allImageIds.add(id);
         }
+      }
+    }
+    for (const msg of queuedMessages) {
+      for (const id of msg.imageIds) {
+        allImageIds.add(id);
       }
     }
     for (const id of allImageIds) {
@@ -451,6 +470,7 @@
   onDestroy(() => {
     closed = true;
     stopPolling();
+    unlistenStatus?.();
     unregisterSearchTarget?.();
   });
 
@@ -484,6 +504,38 @@
     });
   });
 
+  $effect(() => {
+    const isOpen = open;
+    const id = sessionId;
+    if (!isOpen || !id) return;
+
+    const unlisten = listenToEvent<SessionStatusPayload>('session-status-changed', (payload) => {
+      if (payload.sessionId !== id) return;
+      session =
+        session?.id === id
+          ? {
+              ...session,
+              status: payload.status,
+              errorMessage: payload.errorMessage ?? session.errorMessage,
+              completionReason: payload.completionReason ?? session.completionReason,
+              updatedAt: Date.now(),
+            }
+          : session;
+      refreshQueuedMessages();
+      if (payload.status === 'running') {
+        startPolling();
+      } else {
+        stopPolling();
+      }
+    });
+    unlistenStatus = unlisten;
+
+    return () => {
+      unlistenStatus?.();
+      unlistenStatus = null;
+    };
+  });
+
   function isComposerFocused(): boolean {
     return document.activeElement === inputEl;
   }
@@ -507,14 +559,16 @@
       session = null;
       messages = [];
       acpMetadataMessages = [];
+      queuedMessages = [];
     }
     loading = true;
     error = null;
     try {
-      const [s, msgsResult, acpMsgs] = await Promise.all([
+      const [s, msgsResult, acpMsgs, queued] = await Promise.all([
         getSession(sessionId),
         getSessionMessages(sessionId),
         getSessionAcpMetadataMessages(sessionId),
+        listQueuedSessionMessages(sessionId),
       ]);
       if (closed) return;
       if (!s) {
@@ -523,6 +577,7 @@
       }
       session = s;
       messages = msgsResult.data;
+      queuedMessages = queued;
       if (msgsResult.revalidating) {
         msgsResult.revalidating
           .then((fresh) => {
@@ -555,6 +610,7 @@
       const s = await getSession(sessionId);
       if (closed) return;
       if (s) session = s;
+      await refreshQueuedMessages();
 
       // Incremental message fetch
       if (messages.length === 0) {
@@ -585,15 +641,24 @@
         }
       }
 
-      // Stop polling when session is done; process queued messages
+      // Stop polling when session is done. Backend-owned queue drain may emit
+      // a fresh running event immediately after this terminal state.
       if (s && s.status !== 'running') {
         stopPolling();
-        processQueue();
       }
     } catch {
       // Polling errors are expected during shutdown — silently ignore
     } finally {
       pollInFlight = false;
+    }
+  }
+
+  async function refreshQueuedMessages() {
+    if (!sessionId || closed) return;
+    try {
+      queuedMessages = await listQueuedSessionMessages(sessionId);
+    } catch (e) {
+      console.error('Failed to refresh queued messages:', e);
     }
   }
 
@@ -628,8 +693,14 @@
     tick().then(() => autoResize());
 
     if (isLive) {
-      // Session is running — queue the message for after it finishes
-      messageQueue = [...messageQueue, text];
+      try {
+        await queueSessionMessage(sessionId, text, imageIdsToSend, branchId ?? null);
+        await refreshQueuedMessages();
+      } catch (e) {
+        error = `Failed to queue: ${e instanceof Error ? e.message : String(e)}`;
+        inputText = text;
+        replyImageIds = imageIdsToSend ?? [];
+      }
       return;
     }
 
@@ -659,8 +730,6 @@
       scrollToBottom();
     } catch (e) {
       error = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
-      // Clear the queue — don't keep trying to send if the session is broken
-      messageQueue = [];
     } finally {
       if (!sendingLocked) sending = false;
     }
@@ -683,19 +752,45 @@
       await sendMessage(prompt, undefined, true, target);
     } catch (e) {
       error = `Failed to send: ${e instanceof Error ? e.message : String(e)}`;
-      messageQueue = [];
     } finally {
       noteFollowupSending = false;
       sending = false;
     }
   }
 
-  /** Process the next queued message when the session becomes idle. */
-  async function processQueue() {
-    if (messageQueue.length === 0 || isLive || error) return;
-    const [next, ...rest] = messageQueue;
-    messageQueue = rest;
-    await sendMessage(next);
+  async function handleDeleteQueuedMessage(id: string) {
+    if (queueActionIds.has(id)) return;
+    queueActionIds = new Set(queueActionIds).add(id);
+    try {
+      await deleteQueuedSessionMessage(id);
+      await refreshQueuedMessages();
+    } catch (e) {
+      error = `Failed to remove queued message: ${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      const next = new Set(queueActionIds);
+      next.delete(id);
+      queueActionIds = next;
+    }
+  }
+
+  async function handleSendQueuedMessage(id: string) {
+    if (isLive || sending || queueActionIds.has(id)) return;
+    queueActionIds = new Set(queueActionIds).add(id);
+    error = null;
+    try {
+      await sendQueuedSessionMessage(id);
+      await refreshQueuedMessages();
+      if (session) session = { ...session, status: 'running' };
+      startPolling();
+      scrollToBottom();
+    } catch (e) {
+      error = `Failed to send queued message: ${e instanceof Error ? e.message : String(e)}`;
+      await refreshQueuedMessages();
+    } finally {
+      const next = new Set(queueActionIds);
+      next.delete(id);
+      queueActionIds = next;
+    }
   }
 
   async function handleCancel() {
@@ -1697,19 +1792,53 @@
       {:else}
         {#if hasQueuedMessages}
           <div class="queue-popover">
-            {#each messageQueue as msg, i}
+            {#each queuedMessages as msg (msg.id)}
               <div class="queue-item">
-                <span class="queue-item-label">Queued</span>
-                <span class="queue-item-text">{msg}</span>
+                <span class="queue-item-label"
+                  >{msg.status === 'sending' ? 'Sending' : 'Queued'}</span
+                >
+                <div class="queue-item-body">
+                  <span class="queue-item-text">{msg.content}</span>
+                  {#if msg.imageIds.length > 0}
+                    <div class="queue-item-images">
+                      {#each msg.imageIds as imageId}
+                        {#if messageImageCache.get(imageId)}
+                          <img src={messageImageCache.get(imageId)} alt="queued attachment" />
+                        {:else}
+                          <span class="queue-item-image-placeholder"><ImagePlus size={12} /></span>
+                        {/if}
+                      {/each}
+                    </div>
+                  {/if}
+                  {#if msg.lastError}
+                    <span class="queue-item-error">{msg.lastError}</span>
+                  {/if}
+                </div>
+                {#if !isLive}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    class="size-[22px] shrink-0 rounded text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-40 [&_svg]:!size-3"
+                    title="Send queued message"
+                    aria-label="Send queued message"
+                    disabled={msg.status !== 'queued' || queueActionIds.has(msg.id)}
+                    onclick={() => handleSendQueuedMessage(msg.id)}
+                  >
+                    {#if queueActionIds.has(msg.id)}
+                      <Spinner size={12} />
+                    {:else}
+                      <Send size={12} />
+                    {/if}
+                  </Button>
+                {/if}
                 <Button
                   variant="ghost"
                   size="icon"
                   class="size-[18px] shrink-0 rounded text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-destructive [&_svg]:!size-2.5"
                   title="Remove from queue"
                   aria-label="Remove from queue"
-                  onclick={() => {
-                    messageQueue = messageQueue.filter((_, idx) => idx !== i);
-                  }}
+                  disabled={msg.status !== 'queued' || queueActionIds.has(msg.id)}
+                  onclick={() => handleDeleteQueuedMessage(msg.id)}
                 >
                   <X size={10} />
                 </Button>
@@ -2478,7 +2607,7 @@
 
   .queue-item {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: 8px;
     padding: 6px 10px;
     font-size: calc(var(--size-xs) * 0.95);
@@ -2499,13 +2628,51 @@
     letter-spacing: 0.03em;
   }
 
-  .queue-item-text {
+  .queue-item-body {
     flex: 1;
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .queue-item-text {
     color: var(--text-muted);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .queue-item-images {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+
+  .queue-item-images img,
+  .queue-item-image-placeholder {
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
+    border: 1px solid var(--border-subtle);
+  }
+
+  .queue-item-images img {
+    object-fit: cover;
+  }
+
+  .queue-item-image-placeholder {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-faint);
+    background: var(--bg-hover);
+  }
+
+  .queue-item-error {
+    color: var(--ui-danger);
+    white-space: normal;
+    word-break: break-word;
   }
 
   /* ----- Reply image previews -------------------------------------------- */

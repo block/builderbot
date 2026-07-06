@@ -14,7 +14,7 @@ const VISIBLE_MESSAGE_FILTER: &str = "NOT (content = '' AND acp_event_kind IS NO
 
 /// Parse a JSON array string into a Vec<String>, returning an empty vec on
 /// NULL or invalid JSON.
-fn parse_image_ids(raw: Option<String>) -> Vec<String> {
+pub(super) fn parse_image_ids(raw: Option<String>) -> Vec<String> {
     raw.and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
         .unwrap_or_default()
 }
@@ -25,6 +25,14 @@ fn parse_json_value(raw: Option<String>) -> Option<serde_json::Value> {
 
 fn json_column(value: Option<&serde_json::Value>) -> Option<String> {
     value.and_then(|v| serde_json::to_string(v).ok())
+}
+
+pub(super) fn image_ids_json(image_ids: &[String]) -> Option<String> {
+    if image_ids.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(image_ids).unwrap())
+    }
 }
 
 fn session_message_from_row(row: &Row<'_>) -> rusqlite::Result<SessionMessage> {
@@ -81,11 +89,7 @@ impl Store {
         image_ids: &[String],
     ) -> Result<i64, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let image_ids_json: Option<String> = if image_ids.is_empty() {
-            None
-        } else {
-            Some(serde_json::to_string(image_ids).unwrap())
-        };
+        let image_ids_json = image_ids_json(image_ids);
         conn.execute(
             "INSERT INTO session_messages (session_id, role, content, created_at, image_ids)
              VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -98,6 +102,52 @@ impl Store {
             ],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Insert a user message and atomically mark a claimed queued follow-up as sent.
+    pub fn add_session_message_with_images_from_queue(
+        &self,
+        session_id: &str,
+        role: MessageRole,
+        content: &str,
+        image_ids: &[String],
+        queued_message_id: &str,
+    ) -> Result<i64, StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let image_ids_json = image_ids_json(image_ids);
+        tx.execute(
+            "INSERT INTO session_messages (session_id, role, content, created_at, image_ids)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                session_id,
+                role.as_str(),
+                content,
+                now_timestamp(),
+                image_ids_json
+            ],
+        )?;
+        let message_id = tx.last_insert_rowid();
+        let now = now_timestamp();
+        let rows = tx.execute(
+            "UPDATE queued_session_messages
+             SET status = 'sent',
+                 sent_message_id = ?1,
+                 last_error = NULL,
+                 updated_at = ?2
+             WHERE id = ?3
+               AND session_id = ?4
+               AND status = 'sending'
+               AND sent_message_id IS NULL",
+            params![message_id, now, queued_message_id, session_id],
+        )?;
+        if rows != 1 {
+            return Err(StoreError(format!(
+                "Queued message is no longer claimed: {queued_message_id}"
+            )));
+        }
+        tx.commit()?;
+        Ok(message_id)
     }
 
     pub fn get_session_messages(

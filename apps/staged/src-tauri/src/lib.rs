@@ -2059,6 +2059,7 @@ pub fn run() {
                         Arc::clone(&session_registry),
                         app.handle().clone(),
                     );
+                    session_runner::recover_stale_queued_session_messages(&store_arc);
                     // Clean up images left in "pending" state from compose
                     // dialogs that were abandoned (e.g. user quit mid-dialog).
                     match store_arc.cleanup_pending_images() {
@@ -2318,6 +2319,10 @@ pub fn run() {
             session_commands::count_assistant_messages_after,
             session_commands::start_session,
             session_commands::resume_session,
+            session_commands::queue_session_message,
+            session_commands::list_queued_session_messages,
+            session_commands::delete_queued_session_message,
+            session_commands::send_queued_session_message,
             session_commands::build_note_followup_message,
             session_commands::cancel_session,
             session_commands::delete_session,

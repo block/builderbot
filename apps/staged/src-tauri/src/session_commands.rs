@@ -426,6 +426,7 @@ pub async fn start_session(
             action_registry: None,
             remote_working_dir: None,
             image_ids: vec![],
+            queued_message_id: None,
             branch_id: None,
             project_id: None,
             expose_pikchr_tools: false,
@@ -461,7 +462,34 @@ pub async fn resume_session(
     branch_id: Option<String>,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
+    resume_session_for_store(
+        store,
+        Arc::clone(&registry),
+        Arc::clone(&action_executor),
+        Arc::clone(&action_registry),
+        app_handle,
+        session_id,
+        prompt,
+        image_ids,
+        branch_id,
+        None,
+    )
+    .await
+}
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn resume_session_for_store(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    action_executor: Arc<ActionExecutor>,
+    action_registry: Arc<ActionRegistry>,
+    app_handle: tauri::AppHandle,
+    session_id: String,
+    prompt: String,
+    image_ids: Option<Vec<String>>,
+    branch_id: Option<String>,
+    queued_message_id: Option<String>,
+) -> Result<(), String> {
     let session = store
         .get_session(&session_id)
         .map_err(|e| e.to_string())?
@@ -641,6 +669,7 @@ pub async fn resume_session(
             },
             remote_working_dir,
             image_ids: image_ids.unwrap_or_default(),
+            queued_message_id,
             branch_id: config_branch_id,
             project_id: config_project_id,
             expose_pikchr_tools,
@@ -651,6 +680,146 @@ pub async fn resume_session(
     )?;
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn queue_session_message(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    session_id: String,
+    content: String,
+    image_ids: Option<Vec<String>>,
+    branch_id: Option<String>,
+) -> Result<store::QueuedSessionMessage, String> {
+    let store = get_store(&store)?;
+    let session = store
+        .get_session(&session_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Session not found: {session_id}"))?;
+    if session.status != store::SessionStatus::Running {
+        return Err("Session is not running".to_string());
+    }
+    store
+        .add_queued_session_message(
+            &session_id,
+            &content,
+            &image_ids.unwrap_or_default(),
+            branch_id.as_deref(),
+        )
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_queued_session_messages(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    session_id: String,
+) -> Result<Vec<store::QueuedSessionMessage>, String> {
+    get_store(&store)?
+        .list_queued_session_messages(&session_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_queued_session_message(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    id: String,
+) -> Result<bool, String> {
+    get_store(&store)?
+        .delete_queued_session_message(&id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn send_queued_session_message(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    action_executor: tauri::State<'_, Arc<ActionExecutor>>,
+    action_registry: tauri::State<'_, Arc<ActionRegistry>>,
+    app_handle: tauri::AppHandle,
+    id: String,
+) -> Result<(), String> {
+    let store = get_store(&store)?;
+    send_queued_session_message_for_store(
+        store,
+        Arc::clone(&registry),
+        Arc::clone(&action_executor),
+        Arc::clone(&action_registry),
+        app_handle,
+        id,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn send_queued_session_message_for_store(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    action_executor: Arc<ActionExecutor>,
+    action_registry: Arc<ActionRegistry>,
+    app_handle: tauri::AppHandle,
+    id: String,
+) -> Result<(), String> {
+    let message = store
+        .claim_queued_session_message(&id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Queued message is no longer available or session is running".to_string())?;
+
+    let result = resume_session_for_store(
+        Arc::clone(&store),
+        registry,
+        action_executor,
+        action_registry,
+        app_handle,
+        message.session_id.clone(),
+        message.content.clone(),
+        Some(message.image_ids.clone()),
+        message.branch_id.clone(),
+        Some(message.id.clone()),
+    )
+    .await;
+
+    if let Err(ref e) = result {
+        let _ = store.release_queued_session_message(&message.id, Some(e));
+    }
+
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn drain_queued_message_for_session(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    action_executor: Arc<ActionExecutor>,
+    action_registry: Arc<ActionRegistry>,
+    app_handle: tauri::AppHandle,
+    session_id: String,
+) -> Result<bool, String> {
+    let Some(message) = store
+        .claim_oldest_queued_session_message(&session_id)
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(false);
+    };
+
+    let result = resume_session_for_store(
+        Arc::clone(&store),
+        registry,
+        action_executor,
+        action_registry,
+        app_handle,
+        message.session_id.clone(),
+        message.content.clone(),
+        Some(message.image_ids.clone()),
+        message.branch_id.clone(),
+        Some(message.id.clone()),
+    )
+    .await;
+
+    if let Err(ref e) = result {
+        let _ = store.release_queued_session_message(&message.id, Some(e));
+        return Err(e.clone());
+    }
+
+    Ok(true)
 }
 
 pub(crate) fn infer_branch_resume_session_type(prompt: &str) -> Option<&'static str> {
@@ -1289,6 +1458,7 @@ pub async fn start_project_session(
             action_registry: Some(Arc::clone(&action_registry)),
             remote_working_dir: None,
             image_ids: image_ids.unwrap_or_default(),
+            queued_message_id: None,
             branch_id: None,
             project_id: Some(project_id),
             // Project sessions are always local and write project notes.
@@ -1655,6 +1825,7 @@ fn launch_running_branch_session(
             action_registry: None,
             remote_working_dir: prepared.remote_working_dir,
             image_ids,
+            queued_message_id: None,
             branch_id: Some(branch_id),
             project_id: Some(project_id),
             expose_pikchr_tools,
@@ -2201,6 +2372,7 @@ async fn start_queued_session_for_branch(
             action_registry: None,
             remote_working_dir,
             image_ids,
+            queued_message_id: None,
             branch_id: Some(branch_id),
             project_id: Some(branch.project_id.clone()),
             expose_pikchr_tools: local_note_pikchr_tools_available(
@@ -2552,6 +2724,7 @@ pub async fn trigger_auto_review(
             action_registry: None,
             remote_working_dir,
             image_ids: vec![],
+            queued_message_id: None,
             branch_id: Some(branch_id.clone()),
             project_id: Some(branch.project_id.clone()),
             // Auto-review sessions don't write notes.

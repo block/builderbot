@@ -1408,6 +1408,27 @@ impl ReplayBuffer {
         self.is_complete()
     }
 
+    fn push_text_chunk(&mut self, role: &str, message_id: Option<&str>, text: &str) -> bool {
+        let role_changed = self.current_role.as_deref() != Some(role);
+        let message_id_changed = !role_changed
+            && matches!(
+                (self.current_message_id.as_deref(), message_id),
+                (Some(current), Some(next)) if current != next
+            );
+
+        let mut done = false;
+        if role_changed || message_id_changed {
+            done = self.finalize_current();
+            self.current_role = Some(role.to_string());
+            self.current_message_id = message_id.map(str::to_string);
+        } else if self.current_message_id.is_none() {
+            self.current_message_id = message_id.map(str::to_string);
+        }
+
+        self.current_text.push_str(text);
+        done
+    }
+
     fn find_id_match(&self, event: &ReplayEvent) -> Option<usize> {
         self.db_messages
             .iter()
@@ -1667,37 +1688,22 @@ impl AcpNotificationHandler {
                     let completed = match &notification.update {
                         SessionUpdate::AgentMessageChunk(chunk) => {
                             if let AcpContentBlock::Text(text) = &chunk.content {
-                                // If switching from non-assistant role, finalize previous.
-                                let mut done = false;
-                                if buf.current_role.as_deref() != Some("assistant") {
-                                    done = buf.finalize_current();
-                                    buf.current_role = Some("assistant".to_string());
-                                    buf.current_message_id =
-                                        chunk.message_id.as_ref().map(|id| id.0.to_string());
-                                } else if buf.current_message_id.is_none() {
-                                    buf.current_message_id =
-                                        chunk.message_id.as_ref().map(|id| id.0.to_string());
-                                }
-                                buf.current_text.push_str(&text.text);
-                                done
+                                buf.push_text_chunk(
+                                    "assistant",
+                                    chunk.message_id.as_ref().map(|id| id.0.as_ref()),
+                                    &text.text,
+                                )
                             } else {
                                 false
                             }
                         }
                         SessionUpdate::UserMessageChunk(chunk) => {
                             if let AcpContentBlock::Text(text) = &chunk.content {
-                                let mut done = false;
-                                if buf.current_role.as_deref() != Some("user") {
-                                    done = buf.finalize_current();
-                                    buf.current_role = Some("user".to_string());
-                                    buf.current_message_id =
-                                        chunk.message_id.as_ref().map(|id| id.0.to_string());
-                                } else if buf.current_message_id.is_none() {
-                                    buf.current_message_id =
-                                        chunk.message_id.as_ref().map(|id| id.0.to_string());
-                                }
-                                buf.current_text.push_str(&text.text);
-                                done
+                                buf.push_text_chunk(
+                                    "user",
+                                    chunk.message_id.as_ref().map(|id| id.0.as_ref()),
+                                    &text.text,
+                                )
                             } else {
                                 false
                             }
@@ -3144,6 +3150,41 @@ mod tests {
 
         assert!(completed);
         assert_eq!(buffer.match_cursor, 1);
+    }
+
+    #[test]
+    fn replay_buffer_splits_assistant_chunks_when_message_id_changes() {
+        let mut buffer = ReplayBuffer::new(vec![
+            ReplayBoundary {
+                role: "assistant".to_string(),
+                content: "first".to_string(),
+                acp_message_id: Some("msg-1".to_string()),
+                acp_tool_call_id: None,
+            },
+            ReplayBoundary {
+                role: "assistant".to_string(),
+                content: "second".to_string(),
+                acp_message_id: Some("msg-2".to_string()),
+                acp_tool_call_id: None,
+            },
+        ]);
+
+        let completed = buffer.push_text_chunk("assistant", Some("msg-1"), "first");
+
+        assert!(!completed);
+        assert_eq!(buffer.match_cursor, 0);
+
+        let completed = buffer.push_text_chunk("assistant", Some("msg-2"), "second");
+
+        assert!(!completed);
+        assert_eq!(buffer.match_cursor, 1);
+        assert_eq!(buffer.current_message_id.as_deref(), Some("msg-2"));
+        assert_eq!(buffer.current_text, "second");
+
+        let completed = buffer.finalize_current();
+
+        assert!(completed);
+        assert_eq!(buffer.match_cursor, 2);
     }
 
     #[tokio::test]

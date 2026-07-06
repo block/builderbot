@@ -533,7 +533,7 @@ fn test_queued_session_messages_order_and_image_ids() {
 }
 
 #[test]
-fn test_claim_selected_queued_session_message_and_release() {
+fn test_add_queued_session_message_requires_running_session() {
     let store = Store::in_memory().unwrap();
     let session = Session::new_running("work", Path::new("/tmp"));
     store.create_session(&session).unwrap();
@@ -541,11 +541,36 @@ fn test_claim_selected_queued_session_message_and_release() {
         .update_session_status(&session.id, SessionStatus::Completed, None, None)
         .unwrap();
 
+    let err = store
+        .add_queued_session_message(&session.id, "too late", &[], None)
+        .unwrap_err();
+    assert_eq!(err.to_string(), "Session is not running");
+    assert!(store
+        .list_queued_session_messages(&session.id)
+        .unwrap()
+        .is_empty());
+
+    let err = store
+        .add_queued_session_message("missing-session", "not found", &[], None)
+        .unwrap_err();
+    assert_eq!(err.to_string(), "Session not found: missing-session");
+}
+
+#[test]
+fn test_claim_selected_queued_session_message_and_release() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("work", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
     let oldest = store
         .add_queued_session_message(&session.id, "oldest", &[], None)
         .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
     let selected = store
         .add_queued_session_message(&session.id, "selected", &[], None)
+        .unwrap();
+    store
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
         .unwrap();
 
     let claimed = store
@@ -595,11 +620,11 @@ fn test_queued_session_message_marks_sent_with_transcript_message() {
     let store = Store::in_memory().unwrap();
     let session = Session::new_running("work", Path::new("/tmp"));
     store.create_session(&session).unwrap();
-    store
-        .update_session_status(&session.id, SessionStatus::Completed, None, None)
-        .unwrap();
     let queued = store
         .add_queued_session_message(&session.id, "follow up", &[], None)
+        .unwrap();
+    store
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
         .unwrap();
     store
         .claim_queued_session_message(&queued.id)

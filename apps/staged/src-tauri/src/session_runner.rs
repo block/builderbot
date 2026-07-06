@@ -334,6 +334,8 @@ pub struct SessionConfig {
     pub image_ids: Vec<String>,
     /// Queued follow-up row that produced this run, if any.
     pub queued_message_id: Option<String>,
+    /// Branch with a commit waiting for auto-review once queued follow-ups drain.
+    pub pending_auto_review_branch_id: Option<String>,
     /// Branch that owns this session (branch-level sessions only).
     /// Threaded through so terminal events carry the same context as start events.
     pub branch_id: Option<String>,
@@ -787,7 +789,9 @@ pub fn start_session(
 
         if transitioned {
             let branch_id = config.branch_id.clone();
-            let auto_review_branch_id = committed_branch_id.clone();
+            let auto_review_branch_id = committed_branch_id
+                .clone()
+                .or_else(|| config.pending_auto_review_branch_id.clone());
             let should_drain_queued_message =
                 new_status == "completed" && completion_reason == CompletionReason::TurnComplete;
             let session_id_for_follow_up = session_id_for_status.clone();
@@ -814,6 +818,7 @@ pub fn start_session(
                             Arc::clone(&action_registry_for_follow_up),
                             app_handle_for_follow_up.clone(),
                             session_id_for_follow_up.clone(),
+                            auto_review_branch_id.clone(),
                         )
                         .await
                         {
@@ -1167,6 +1172,7 @@ pub fn start_pipeline_session(
                     remote_working_dir: config.remote_working_dir.clone(),
                     image_ids: vec![],
                     queued_message_id: None,
+                    pending_auto_review_branch_id: None,
                     branch_id: config.branch_id.clone(),
                     project_id: config.project_id.clone(),
                     // Deterministic pipelines hand off to a code-focused AI step,
@@ -1441,6 +1447,7 @@ fn drain_queued_after_pipeline_terminal(
                 Arc::new(ActionRegistry::new()),
                 app_handle.clone(),
                 session_id.clone(),
+                None,
             )
             .await
             {

@@ -3,7 +3,7 @@
 use rusqlite::{params, OptionalExtension};
 
 use super::messages::{image_ids_json, parse_image_ids};
-use super::models::{QueuedSessionMessage, QueuedSessionMessageStatus};
+use super::models::{QueuedSessionMessage, QueuedSessionMessageStatus, SessionStatus};
 use super::{now_timestamp, Store, StoreError};
 
 impl Store {
@@ -16,12 +16,18 @@ impl Store {
     ) -> Result<QueuedSessionMessage, StoreError> {
         let message = QueuedSessionMessage::new(session_id, branch_id, content, image_ids);
         let image_ids_json = image_ids_json(image_ids);
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let rows = tx.execute(
             "INSERT INTO queued_session_messages (
                 id, session_id, branch_id, content, image_ids, status, last_error,
                 created_at, updated_at, claimed_at, owner_pid, sent_message_id
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             )
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
+             WHERE EXISTS (
+                 SELECT 1 FROM sessions
+                 WHERE id = ?2 AND status = ?13
+             )",
             params![
                 message.id,
                 message.session_id,
@@ -35,8 +41,23 @@ impl Store {
                 message.claimed_at,
                 message.owner_pid,
                 message.sent_message_id,
+                SessionStatus::Running.as_str(),
             ],
         )?;
+        if rows == 0 {
+            let status = tx
+                .query_row(
+                    "SELECT status FROM sessions WHERE id = ?1",
+                    params![session_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            return match status {
+                Some(_) => Err(StoreError("Session is not running".to_string())),
+                None => Err(StoreError(format!("Session not found: {session_id}"))),
+            };
+        }
+        tx.commit()?;
         Ok(message)
     }
 

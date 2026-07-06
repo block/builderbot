@@ -2835,6 +2835,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     remote_working_dir: None,
                     image_ids: vec![],
                     queued_message_id: None,
+                    pending_auto_review_branch_id: None,
                     branch_id: None,
                     project_id: None,
                     expose_pikchr_tools: false,
@@ -3015,6 +3016,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     remote_working_dir,
                     image_ids: image_ids.unwrap_or_default(),
                     queued_message_id: None,
+                    pending_auto_review_branch_id: None,
                     branch_id: config_branch_id,
                     project_id: config_project_id,
                     expose_pikchr_tools,
@@ -3032,13 +3034,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let content: String = arg(&args, "content")?;
             let image_ids: Option<Vec<String>> = opt_arg(&args, "imageIds")?;
             let branch_id: Option<String> = opt_arg(&args, "branchId")?;
-            let session = store
-                .get_session(&session_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Session not found: {session_id}"))?;
-            if session.status != store::SessionStatus::Running {
-                return Err("Session is not running".to_string());
-            }
             let message = store
                 .add_queued_session_message(
                     &session_id,
@@ -3182,6 +3177,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     remote_working_dir: None,
                     image_ids: image_ids.unwrap_or_default(),
                     queued_message_id: None,
+                    pending_auto_review_branch_id: None,
                     branch_id: None,
                     project_id: Some(project_id),
                     // Project sessions are always local and write project notes.

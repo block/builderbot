@@ -427,6 +427,7 @@ pub async fn start_session(
             remote_working_dir: None,
             image_ids: vec![],
             queued_message_id: None,
+            pending_auto_review_branch_id: None,
             branch_id: None,
             project_id: None,
             expose_pikchr_tools: false,
@@ -473,6 +474,7 @@ pub async fn resume_session(
         image_ids,
         branch_id,
         None,
+        None,
     )
     .await
 }
@@ -489,6 +491,7 @@ pub(crate) async fn resume_session_for_store(
     image_ids: Option<Vec<String>>,
     branch_id: Option<String>,
     queued_message_id: Option<String>,
+    pending_auto_review_branch_id: Option<String>,
 ) -> Result<(), String> {
     let session = store
         .get_session(&session_id)
@@ -670,6 +673,7 @@ pub(crate) async fn resume_session_for_store(
             remote_working_dir,
             image_ids: image_ids.unwrap_or_default(),
             queued_message_id,
+            pending_auto_review_branch_id,
             branch_id: config_branch_id,
             project_id: config_project_id,
             expose_pikchr_tools,
@@ -691,13 +695,6 @@ pub fn queue_session_message(
     branch_id: Option<String>,
 ) -> Result<store::QueuedSessionMessage, String> {
     let store = get_store(&store)?;
-    let session = store
-        .get_session(&session_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Session not found: {session_id}"))?;
-    if session.status != store::SessionStatus::Running {
-        return Err("Session is not running".to_string());
-    }
     store
         .add_queued_session_message(
             &session_id,
@@ -774,6 +771,7 @@ pub(crate) async fn send_queued_session_message_for_store(
         Some(message.image_ids.clone()),
         message.branch_id.clone(),
         Some(message.id.clone()),
+        None,
     )
     .await;
 
@@ -792,6 +790,7 @@ pub(crate) async fn drain_queued_message_for_session(
     action_registry: Arc<ActionRegistry>,
     app_handle: tauri::AppHandle,
     session_id: String,
+    pending_auto_review_branch_id: Option<String>,
 ) -> Result<bool, String> {
     let Some(message) = store
         .claim_oldest_queued_session_message(&session_id)
@@ -811,6 +810,7 @@ pub(crate) async fn drain_queued_message_for_session(
         Some(message.image_ids.clone()),
         message.branch_id.clone(),
         Some(message.id.clone()),
+        pending_auto_review_branch_id,
     )
     .await;
 
@@ -1459,6 +1459,7 @@ pub async fn start_project_session(
             remote_working_dir: None,
             image_ids: image_ids.unwrap_or_default(),
             queued_message_id: None,
+            pending_auto_review_branch_id: None,
             branch_id: None,
             project_id: Some(project_id),
             // Project sessions are always local and write project notes.
@@ -1826,6 +1827,7 @@ fn launch_running_branch_session(
             remote_working_dir: prepared.remote_working_dir,
             image_ids,
             queued_message_id: None,
+            pending_auto_review_branch_id: None,
             branch_id: Some(branch_id),
             project_id: Some(project_id),
             expose_pikchr_tools,
@@ -2373,6 +2375,7 @@ async fn start_queued_session_for_branch(
             remote_working_dir,
             image_ids,
             queued_message_id: None,
+            pending_auto_review_branch_id: None,
             branch_id: Some(branch_id),
             project_id: Some(branch.project_id.clone()),
             expose_pikchr_tools: local_note_pikchr_tools_available(
@@ -2725,6 +2728,7 @@ pub async fn trigger_auto_review(
             remote_working_dir,
             image_ids: vec![],
             queued_message_id: None,
+            pending_auto_review_branch_id: None,
             branch_id: Some(branch_id.clone()),
             project_id: Some(branch.project_id.clone()),
             // Auto-review sessions don't write notes.

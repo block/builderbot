@@ -1547,6 +1547,14 @@ impl AcpNotificationHandler {
     fn cancel_pending_permissions(&self) {
         self.permission_cancel_token.cancel();
     }
+
+    async fn is_replay_complete(&self) -> bool {
+        let phase = self.phase.lock().await;
+        match &*phase {
+            HandlerPhase::Replaying(buf) => buf.is_complete(),
+            HandlerPhase::WaitingForPrompt { .. } | HandlerPhase::Live { .. } => true,
+        }
+    }
 }
 
 impl AcpNotificationHandler {
@@ -2089,7 +2097,7 @@ async fn run_acp_protocol(
     // If resuming, wait for replay to complete (content match OR idle timeout).
     // An absolute 10s timeout prevents a hang if the server sends zero replay
     // notifications (e.g. the remote session was garbage-collected).
-    if acp_session_id.is_some() {
+    if acp_session_id.is_some() && !handler.is_replay_complete().await {
         let absolute_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             tokio::select! {
@@ -2114,6 +2122,8 @@ async fn run_acp_protocol(
                 }
             }
         }
+    }
+    if acp_session_id.is_some() {
         handler.transition_to_waiting_for_prompt().await;
     }
 
@@ -2523,9 +2533,9 @@ mod tests {
         guarded_path_for_agent_binary, is_broad_toolchain_dir, mcp_server_transport_supported,
         path_with_inserted_agent_bin_dir, permission_response_for_options, remote_acp_segments,
         resolve_acp_working_dir, resolve_spawn_working_dir, sanitize_remote_acp_chunk,
-        shell_exec_line, shell_quote, AcpDriver, AcpPermissionOption, AcpPermissionOptionKind,
-        AcpPermissionRequest, AgentRunOutcome, RemoteLineOutcome, ReplayBoundary, ReplayBuffer,
-        ReplayEvent,
+        shell_exec_line, shell_quote, AcpDriver, AcpNotificationHandler, AcpPermissionOption,
+        AcpPermissionOptionKind, AcpPermissionRequest, AgentRunOutcome, BasicMessageWriter,
+        MessageWriter, RemoteLineOutcome, ReplayBoundary, ReplayBuffer, ReplayEvent,
     };
     use agent_client_protocol::schema::v1::{
         ContentBlock as AcpContentBlock, McpCapabilities, McpServer, McpServerHttp, McpServerSse,
@@ -2534,7 +2544,9 @@ mod tests {
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio_util::sync::CancellationToken;
 
     fn unique_test_dir(prefix: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -3121,6 +3133,22 @@ mod tests {
 
         assert!(completed);
         assert_eq!(buffer.match_cursor, 1);
+    }
+
+    #[tokio::test]
+    async fn replay_handler_treats_user_only_boundaries_as_complete() {
+        let writer: Arc<dyn MessageWriter> = Arc::new(BasicMessageWriter::new());
+        let handler = AcpNotificationHandler::new(
+            writer,
+            true,
+            vec![ReplayBoundary::legacy(
+                "user".to_string(),
+                "previous prompt".to_string(),
+            )],
+            CancellationToken::new(),
+        );
+
+        assert!(handler.is_replay_complete().await);
     }
 
     #[test]

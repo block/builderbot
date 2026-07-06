@@ -6,8 +6,9 @@
 //! `generate_pikchr` turns a natural-language description into validated Pikchr
 //! by running a focused internal agent sub-session that renders and repairs its
 //! own output (via [`crate::pikchr_subsession`]) before returning the final
-//! source plus a preview. Revisions pass the current diagram's source back in
-//! so the sub-agent edits real Pikchr rather than re-describing from scratch.
+//! source plus a path to a saved preview image. Revisions pass the current
+//! diagram's source back in so the sub-agent edits real Pikchr rather than
+//! re-describing from scratch.
 //! The sub-session renders and inspects candidate diagrams through the internal
 //! [`run_preview`] path — the same engine the tool ultimately hands back — so
 //! the agent never has to hand-write Pikchr or drive a separate preview step.
@@ -28,13 +29,14 @@
 //! to spin up its sub-session, so it remains safe to attach to any local
 //! session.
 
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use axum::Router;
-use base64::Engine;
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::transport::streamable_http_server::{
@@ -65,6 +67,8 @@ const MIN_OVERLAP_PX: f64 = 1.0;
 const MIN_TEXT_OVERLAP_PX: f64 = 3.0;
 /// Truncate derived shape labels in the overlap summary.
 const MAX_LABEL_CHARS: usize = 48;
+/// Temp-file prefix for generated Pikchr preview PNGs.
+const TEMP_IMAGE_PREFIX: &str = "staged-pikchr-preview-";
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct GeneratePikchrParams {
@@ -418,9 +422,8 @@ fn describe_element(element: &Element) -> String {
     }
 }
 
-/// Build the text summary returned alongside the image. Text matters because
-/// not every provider forwards image content to the model, and even
-/// vision-less models can act on a textual overlap report.
+/// Build the text summary used by the specialist retry loop. Text matters
+/// because vision-less models can act on a textual overlap report.
 fn build_summary(width: i64, height: i64, elements: &[Element], overlaps: &[Overlap]) -> String {
     let mut out = format!("Rendered Pikchr diagram: {width}×{height} px.");
     if overlaps.is_empty() {
@@ -442,11 +445,9 @@ fn build_summary(width: i64, height: i64, elements: &[Element], overlaps: &[Over
         ));
     }
     out.push_str(
-        "\nIf these overlaps aren't intended, call `generate_pikchr` again passing this source as \
-`previous_pikchr` with a description that separates the shapes/labels — e.g. set an explicit flow \
-direction, use named nodes with explicit anchors (`with .w at …`, `arrow from A.e to B.w`), give \
-long labels room or shorten them, and avoid percentage-length arrows between `fit` boxes. \
-Otherwise the diagram is fine to keep.",
+        "\nAdjust the diagram to separate the overlapping shapes/labels — e.g. set an explicit \
+flow direction, use named nodes with explicit anchors (`with .w at …`, `arrow from A.e to B.w`), \
+give long labels room or shorten them, and avoid percentage-length arrows between `fit` boxes.",
     );
     out
 }
@@ -529,8 +530,8 @@ fn rasterize_tree_to_png(tree: &usvg::Tree, scale: f32) -> Option<Vec<u8>> {
 // =============================================================================
 
 /// Outcome of rendering a candidate diagram: the PNG (if rasterization
-/// succeeded), a text summary of dimensions and overlaps, and whether the
-/// source failed to render at all.
+/// succeeded), a text summary of dimensions and overlaps, whether the source
+/// failed to render at all, and whether renderable geometry still overlaps.
 ///
 /// `pub(crate)` so the `generate_pikchr` sub-session loop can render and
 /// inspect candidate diagrams through this shared render/overlap path.
@@ -538,9 +539,10 @@ pub(crate) struct PreviewOutcome {
     pub(crate) png: Option<Vec<u8>>,
     pub(crate) summary: String,
     pub(crate) is_error: bool,
+    pub(crate) has_overlaps: bool,
 }
 
-/// Render + analyze, producing the content blocks for the tool result.
+/// Render + analyze a candidate Pikchr source.
 /// Synchronous and self-contained so it can run on a blocking thread and be
 /// unit-tested directly. `scale` is taken as-is and clamped internally.
 pub(crate) fn run_preview(source: &str, scale: f32) -> PreviewOutcome {
@@ -549,6 +551,7 @@ pub(crate) fn run_preview(source: &str, scale: f32) -> PreviewOutcome {
             png: None,
             summary: "Pikchr source is empty — nothing to render.".to_string(),
             is_error: true,
+            has_overlaps: false,
         };
     }
     let rendered = match render_pikchr_svg(source) {
@@ -558,6 +561,7 @@ pub(crate) fn run_preview(source: &str, scale: f32) -> PreviewOutcome {
                 png: None,
                 summary: format!("Pikchr could not render this diagram:\n{}", err.trim()),
                 is_error: true,
+                has_overlaps: false,
             };
         }
     };
@@ -575,10 +579,12 @@ the rendered SVG could not be parsed.)",
                 rendered.width, rendered.height
             ),
             is_error: false,
+            has_overlaps: false,
         };
     };
 
     let (elements, overlaps) = analyze_overlaps(&tree);
+    let has_overlaps = !overlaps.is_empty();
     let mut summary = build_summary(rendered.width, rendered.height, &elements, &overlaps);
 
     let png = rasterize_tree_to_png(&tree, scale);
@@ -590,6 +596,29 @@ the rendered SVG could not be parsed.)",
         png,
         summary,
         is_error: false,
+        has_overlaps,
+    }
+}
+
+/// Persist a generated preview image in the OS temp directory and return its
+/// path. Use `create_new` with a UUID-based filename so parallel tool calls
+/// never overwrite each other.
+fn write_png_to_temp_file(png: &[u8]) -> std::io::Result<PathBuf> {
+    let temp_dir = std::env::temp_dir();
+    loop {
+        let path = temp_dir.join(format!("{TEMP_IMAGE_PREFIX}{}.png", uuid::Uuid::new_v4()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(png)?;
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
     }
 }
 
@@ -618,13 +647,11 @@ impl PikchrToolsHandler {
 impl PikchrToolsHandler {
     #[tool(
         description = "Generate a validated Pikchr diagram from a natural-language description. \
-An internal Pikchr specialist writes the diagram, renders it, and repairs syntax errors on its own \
+An internal Pikchr specialist writes the diagram, renders it, and repairs syntax and layout warnings on its own \
 before returning. Prefer this over hand-writing Pikchr. Pass a fine-grained `description` (boxes, \
 arrows, labels, layout, relationships). To revise an existing diagram, also pass its current source \
 as `previous_pikchr` so it is edited rather than redrawn. Returns the validated Pikchr source (drop \
-it into a ```pikchr fenced code block), a rendered PNG preview, and a summary that reports any \
-overlapping shapes or labels. Review the preview and the summary: if the layout needs work, call \
-this again passing the returned source as `previous_pikchr` with a description that adjusts it."
+it into a ```pikchr fenced code block) and a filesystem path to a rendered PNG preview."
     )]
     async fn generate_pikchr(
         &self,
@@ -699,14 +726,18 @@ this again passing the returned source as `previous_pikchr` with a description t
 
         let mut content = Vec::new();
         if let Some(png) = &outcome.png {
-            let b64 = base64::engine::general_purpose::STANDARD.encode(png);
-            content.push(Content::image(b64, "image/png"));
+            let path = write_png_to_temp_file(png).map_err(|e| {
+                ErrorData::internal_error(
+                    format!("Failed to write Pikchr preview image to temp dir: {e}"),
+                    None,
+                )
+            })?;
+            content.push(Content::text(format!(
+                "Rendered preview image path: {}",
+                path.display()
+            )));
         }
         content.push(Content::text(outcome.source));
-        // Always hand back the render summary — "No overlaps detected." or the
-        // ⚠ overlap report — so the calling agent can review the layout and
-        // decide whether to keep the diagram or re-call to adjust it.
-        content.push(Content::text(outcome.summary));
         Ok(CallToolResult::success(content))
     }
 }
@@ -951,15 +982,41 @@ arrow from COLL.e to SNOW.w"#;
     fn valid_source_produces_png_and_dimensions() {
         let outcome = run_preview("box \"hello\"", DEFAULT_SCALE);
         assert!(!outcome.is_error);
+        assert!(!outcome.has_overlaps);
         assert!(outcome.png.is_some(), "expected a PNG for valid source");
         assert!(!outcome.png.unwrap().is_empty());
         assert!(outcome.summary.contains("px"));
     }
 
     #[test]
+    fn overlapping_source_sets_overlap_flag() {
+        let outcome = run_preview(OVERLAPPING_SOURCE, DEFAULT_SCALE);
+        assert!(!outcome.is_error);
+        assert!(outcome.has_overlaps);
+        assert!(outcome.summary.contains("overlapping pair"));
+    }
+
+    #[test]
+    fn writes_png_preview_to_unique_temp_path() {
+        let png = b"fake png bytes";
+        let temp_dir = std::env::temp_dir();
+        let first = write_png_to_temp_file(png).expect("first image should write");
+        let second = write_png_to_temp_file(png).expect("second image should write");
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), Some(temp_dir.as_path()));
+        assert_eq!(std::fs::read(&first).unwrap(), png);
+        assert_eq!(std::fs::read(&second).unwrap(), png);
+
+        let _ = std::fs::remove_file(first);
+        let _ = std::fs::remove_file(second);
+    }
+
+    #[test]
     fn malformed_source_reports_error() {
         let outcome = run_preview("box \"unterminated", DEFAULT_SCALE);
         assert!(outcome.is_error);
+        assert!(!outcome.has_overlaps);
         assert!(outcome.png.is_none());
         assert!(outcome.summary.to_lowercase().contains("pikchr"));
     }
@@ -968,6 +1025,7 @@ arrow from COLL.e to SNOW.w"#;
     fn empty_source_reports_error() {
         let outcome = run_preview("   \n  ", DEFAULT_SCALE);
         assert!(outcome.is_error);
+        assert!(!outcome.has_overlaps);
         assert!(outcome.png.is_none());
     }
 

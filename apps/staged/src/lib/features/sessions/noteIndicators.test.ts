@@ -62,6 +62,27 @@ Strip metadata before scanning for the note separator.`);
     });
   });
 
+  it('skips horizontal rules inside tilde code fences', () => {
+    const split = splitAtNoteIndicator('Example:\n~~~\n---\n# Fake\n~~~\n---\n# Real\nBody.');
+
+    expect(split).toEqual({
+      preamble: 'Example:\n~~~\n---\n# Fake\n~~~\n',
+      hasNote: true,
+    });
+  });
+
+  it('ignores the message when the only horizontal rule is inside a code fence', () => {
+    const text = 'Some reasoning:\n```\n---\n# Title\nBody\n```\nDone.';
+
+    expect(splitAtNoteIndicator(text)).toEqual({ preamble: text, hasNote: false });
+  });
+
+  it('uses the first standalone horizontal rule when multiple are present', () => {
+    const split = splitAtNoteIndicator('Section 1\n---\nSection 2\n---\n# Final Note\nFinal body.');
+
+    expect(split).toEqual({ preamble: 'Section 1\n', hasNote: true });
+  });
+
   it('treats a trailing standalone horizontal rule as a streaming indicator', () => {
     const text = 'Drafting the note now.\n---';
 

@@ -1565,6 +1565,7 @@
                         isLastGroup: groupIdx === grouped.length - 1,
                         isFirstNoteMessage: group.message.id === firstNoteMessageId,
                       })}
+                      actionLabel={compact ? 'Show note' : 'Open linked note'}
                       onclick={noteInfo && onOpenNote ? () => onOpenNote(noteInfo) : undefined}
                     />
                   {/if}

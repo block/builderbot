@@ -5,7 +5,7 @@
   Read-only view.
 -->
 <script lang="ts">
-  import { onDestroy } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
   import X from '@lucide/svelte/icons/x';
   import Copy from '@lucide/svelte/icons/copy';
   import Check from '@lucide/svelte/icons/check';
@@ -102,6 +102,24 @@
   let noteMarkdown = $derived(noteMarkdownWithTitle(displayTitle, displayContent));
   let splitChatOpen = $derived(chatOpen && viewport.canSplit);
   let narrowChatOpen = $derived(chatOpen && !viewport.canSplit);
+  let chatToggleLabel = $derived(
+    chatOpen
+      ? viewport.canSplit
+        ? 'Hide chat'
+        : 'View note'
+      : viewport.canSplit
+        ? 'Show chat'
+        : 'View chat'
+  );
+  let chatToggleAriaLabel = $derived(
+    chatOpen
+      ? viewport.canSplit
+        ? 'Hide chat pane'
+        : 'View note pane'
+      : viewport.canSplit
+        ? 'Show chat pane'
+        : 'View chat pane'
+  );
   let contentClass = $derived(
     `h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col transition-[max-width] duration-150 ${splitChatOpen ? 'sm:max-w-[1080px]' : 'sm:max-w-[700px]'}`
   );
@@ -253,7 +271,11 @@
     previousSessionStatus = next?.status ?? null;
   }
 
-  function handleEmbeddedNoteClick() {
+  async function handleEmbeddedNoteClick() {
+    if (chatOpen && !viewport.canSplit) {
+      setChatOpen(false);
+      await tick();
+    }
     contentEl?.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
@@ -450,8 +472,9 @@
             variant="outline"
             size="sm"
             class="h-7 shrink-0 gap-1 border-[var(--border-muted)] bg-transparent px-2.5 text-xs text-muted-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
-            title={chatOpen ? (viewport.canSplit ? 'Hide chat' : 'View note') : 'View chat'}
-            aria-label={chatOpen ? (viewport.canSplit ? 'Hide chat' : 'View note') : 'View chat'}
+            title={chatToggleAriaLabel}
+            aria-label={chatToggleAriaLabel}
+            aria-pressed={chatOpen}
             onclick={handleChatToggle}
           >
             {#if chatOpen}
@@ -459,7 +482,7 @@
             {:else}
               <PanelRightOpen size={15} aria-hidden="true" />
             {/if}
-            <span>{chatOpen ? (viewport.canSplit ? 'Hide chat' : 'View note') : 'View chat'}</span>
+            <span>{chatToggleLabel}</span>
           </Button>
         {/if}
         <Button
@@ -475,7 +498,12 @@
       </div>
     </Dialog.Header>
     <div class:split-chat-open={splitChatOpen} class:chat-only={narrowChatOpen} class="modal-body">
-      <section class="note-pane" aria-hidden={narrowChatOpen}>
+      <section
+        id="note-modal-note-pane"
+        class="note-pane"
+        aria-hidden={narrowChatOpen}
+        aria-label="Note content"
+      >
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
@@ -538,7 +566,7 @@
       </section>
 
       {#if sessionId && chatOpen}
-        <aside class="chat-pane">
+        <aside id="note-modal-chat-pane" class="chat-pane" aria-label="Chat">
           <SessionChatPane
             compact
             active={chatOpen}

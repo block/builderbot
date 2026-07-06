@@ -4,18 +4,29 @@
   interface Props {
     label: string;
     onclick?: () => void;
+    actionLabel?: string;
   }
 
-  let { label, onclick }: Props = $props();
+  let { label, onclick, actionLabel }: Props = $props();
+  let resolvedActionLabel = $derived(actionLabel ?? label);
+  let accessibleLabel = $derived(actionLabel ? `${actionLabel}: ${label}` : label);
+  let liveMode: 'polite' | undefined = $derived(label === 'Writing note' ? 'polite' : undefined);
 </script>
 
 {#if onclick}
-  <button type="button" class="note-activity-card clickable" {onclick}>
+  <button
+    type="button"
+    class="note-activity-card clickable"
+    aria-label={accessibleLabel}
+    aria-live={liveMode}
+    title={resolvedActionLabel}
+    {onclick}
+  >
     <FileText size={14} aria-hidden="true" />
     <span>{label}</span>
   </button>
 {:else}
-  <div class="note-activity-card">
+  <div class="note-activity-card" aria-live={liveMode}>
     <FileText size={14} aria-hidden="true" />
     <span>{label}</span>
   </div>

@@ -45,11 +45,11 @@ pub struct MessageWriter {
     last_flush_at: Mutex<Instant>,
     /// Maps external tool-call IDs → (DB row ID, last-known title).
     tool_call_rows: Mutex<HashMap<String, (i64, String)>>,
-    /// DB row id of the currently streaming tool result.
+    /// Maps external tool-call IDs -> DB row ID for streaming tool results.
     ///
-    /// ACP can send multiple content updates for one tool call; we update
-    /// the same row instead of inserting duplicates.
-    current_tool_result_msg_id: Mutex<Option<i64>>,
+    /// ACP can send interleaved content updates for multiple tool calls; each
+    /// tool call updates its own row instead of sharing one global result row.
+    tool_result_rows: Mutex<HashMap<String, i64>>,
 }
 
 /// Strip backticks from agent-provided tool-call titles.
@@ -109,7 +109,7 @@ impl MessageWriter {
             current_text: Mutex::new(String::new()),
             last_flush_at: Mutex::new(Instant::now()),
             tool_call_rows: Mutex::new(HashMap::new()),
-            current_tool_result_msg_id: Mutex::new(None),
+            tool_result_rows: Mutex::new(HashMap::new()),
         }
     }
 
@@ -152,7 +152,6 @@ impl MessageWriter {
         raw_input: Option<&serde_json::Value>,
     ) {
         self.finalize().await;
-        *self.current_tool_result_msg_id.lock().await = None;
 
         let title = sanitize_title(title);
         let content = format_tool_call_content(&title, raw_input);
@@ -203,10 +202,10 @@ impl MessageWriter {
     }
 
     /// Record the result/output of a tool call.
-    pub async fn record_tool_result(&self, content: &str) {
+    pub async fn record_tool_result(&self, tool_call_id: &str, content: &str) {
         let content = strip_code_fences(content);
-        let mut current_result_id = self.current_tool_result_msg_id.lock().await;
-        if let Some(id) = *current_result_id {
+        let mut result_rows = self.tool_result_rows.lock().await;
+        if let Some(id) = result_rows.get(tool_call_id).copied() {
             let _ = self.store.update_message_content(id, &content);
             return;
         }
@@ -216,7 +215,14 @@ impl MessageWriter {
             .add_session_message(&self.session_id, MessageRole::ToolResult, &content)
         {
             Ok(id) => {
-                *current_result_id = Some(id);
+                result_rows.insert(tool_call_id.to_string(), id);
+                let metadata = AcpMessageMetadata {
+                    acp_tool_call_id: Some(tool_call_id.to_string()),
+                    ..Default::default()
+                };
+                if let Err(e) = self.store.update_message_acp_metadata(id, &metadata) {
+                    log::error!("Failed to persist ACP tool-result metadata: {e}");
+                }
             }
             Err(e) => log::error!("Failed to insert tool_result message: {e}"),
         }
@@ -295,8 +301,8 @@ impl acp_client::MessageWriter for MessageWriter {
             .await
     }
 
-    async fn record_tool_result(&self, content: &str) {
-        self.record_tool_result(content).await
+    async fn record_tool_result(&self, tool_call_id: &str, content: &str) {
+        self.record_tool_result(tool_call_id, content).await
     }
 
     async fn on_session_info_update(&self, info: &acp_client::SessionInfoUpdate) {
@@ -528,8 +534,8 @@ mod tests {
         writer
             .record_tool_call("tc-1", "Run echo hello", None)
             .await;
-        writer.record_tool_result("first chunk").await;
-        writer.record_tool_result("second chunk").await;
+        writer.record_tool_result("tc-1", "first chunk").await;
+        writer.record_tool_result("tc-1", "second chunk").await;
 
         let messages = store
             .get_session_messages(&session_id)
@@ -538,6 +544,38 @@ mod tests {
         assert_eq!(messages[0].role, MessageRole::ToolCall);
         assert_eq!(messages[1].role, MessageRole::ToolResult);
         assert_eq!(messages[1].content, "second chunk");
+        assert_eq!(messages[1].acp.acp_tool_call_id.as_deref(), Some("tc-1"));
+    }
+
+    #[tokio::test]
+    async fn record_tool_result_keeps_interleaved_tool_updates_separate() {
+        let (store, session_id, writer) = setup_writer();
+
+        writer
+            .record_tool_call("tc-1", "Run first command", None)
+            .await;
+        writer.record_tool_result("tc-1", "first initial").await;
+        writer
+            .record_tool_call("tc-2", "Run second command", None)
+            .await;
+        writer.record_tool_result("tc-2", "second initial").await;
+        writer.record_tool_result("tc-1", "first final").await;
+        writer.record_tool_result("tc-2", "second final").await;
+
+        let messages = store
+            .get_session_messages(&session_id)
+            .expect("query messages");
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].role, MessageRole::ToolCall);
+        assert_eq!(messages[0].content, "Run first command");
+        assert_eq!(messages[1].role, MessageRole::ToolResult);
+        assert_eq!(messages[1].content, "first final");
+        assert_eq!(messages[1].acp.acp_tool_call_id.as_deref(), Some("tc-1"));
+        assert_eq!(messages[2].role, MessageRole::ToolCall);
+        assert_eq!(messages[2].content, "Run second command");
+        assert_eq!(messages[3].role, MessageRole::ToolResult);
+        assert_eq!(messages[3].content, "second final");
+        assert_eq!(messages[3].acp.acp_tool_call_id.as_deref(), Some("tc-2"));
     }
 
     #[tokio::test]

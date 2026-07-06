@@ -84,7 +84,7 @@ pub trait MessageWriter: Send + Sync {
     );
 
     /// Record the result/output of a tool call.
-    async fn record_tool_result(&self, content: &str);
+    async fn record_tool_result(&self, tool_call_id: &str, content: &str);
 
     /// Called when session info is updated (title, timestamps, etc.).
     ///
@@ -1883,7 +1883,7 @@ impl AcpNotificationHandler {
                 }
                 self.writer.record_tool_call_metadata(metadata).await;
                 if let Some(preview) = result {
-                    self.writer.record_tool_result(&preview).await;
+                    self.writer.record_tool_result(&id, &preview).await;
                 }
             }
             LiveAction::Ignore => {
@@ -2509,7 +2509,7 @@ impl MessageWriter for BasicMessageWriter {
         // Nothing to do for basic implementation
     }
 
-    async fn record_tool_result(&self, content: &str) {
+    async fn record_tool_result(&self, _tool_call_id: &str, content: &str) {
         let mut current = self.text.lock().await;
         current.push_str(&format!("\n[Result: {}]\n", content));
     }

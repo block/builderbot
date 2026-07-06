@@ -237,7 +237,7 @@ impl acp_client::MessageWriter for CapturingWriter {
     ) {
     }
 
-    async fn record_tool_result(&self, _content: &str) {}
+    async fn record_tool_result(&self, _tool_call_id: &str, _content: &str) {}
 }
 
 #[cfg(test)]

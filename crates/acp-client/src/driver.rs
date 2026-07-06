@@ -1601,7 +1601,7 @@ impl AcpNotificationHandler {
         &self,
         notification: SessionNotification,
     ) -> agent_client_protocol::Result<()> {
-        // Session metadata events are forwarded regardless of phase.
+        // Session state updates are forwarded regardless of phase.
         match &notification.update {
             SessionUpdate::SessionInfoUpdate(info) => {
                 self.writer.on_session_info_update(info).await;
@@ -1618,16 +1618,6 @@ impl AcpNotificationHandler {
                     .record_acp_event_metadata(AcpEventMetadata {
                         event_kind: Some("current_mode_update".to_string()),
                         content: serialize_value(update),
-                        ..Default::default()
-                    })
-                    .await;
-                return Ok(());
-            }
-            SessionUpdate::Plan(plan) => {
-                self.writer
-                    .record_acp_event_metadata(AcpEventMetadata {
-                        event_kind: Some("plan_update".to_string()),
-                        content: serialize_value(plan),
                         ..Default::default()
                     })
                     .await;
@@ -1856,6 +1846,11 @@ impl AcpNotificationHandler {
                         SessionUpdate::UsageUpdate(update) => {
                             LiveAction::RecordAcpEvent(usage_update_metadata(update))
                         }
+                        SessionUpdate::Plan(plan) => LiveAction::RecordAcpEvent(AcpEventMetadata {
+                            event_kind: Some("plan_update".to_string()),
+                            content: serialize_value(plan),
+                            ..Default::default()
+                        }),
                         _ => LiveAction::Ignore,
                     }
                 }
@@ -2550,18 +2545,19 @@ mod tests {
         guarded_path_for_agent_binary, is_broad_toolchain_dir, mcp_server_transport_supported,
         path_with_inserted_agent_bin_dir, permission_response_for_options, remote_acp_segments,
         resolve_acp_working_dir, resolve_spawn_working_dir, sanitize_remote_acp_chunk,
-        shell_exec_line, shell_quote, AcpDriver, AcpNotificationHandler, AcpPermissionOption,
-        AcpPermissionOptionKind, AcpPermissionRequest, AgentRunOutcome, BasicMessageWriter,
-        MessageWriter, RemoteLineOutcome, ReplayBoundary, ReplayBuffer, ReplayEvent,
+        shell_exec_line, shell_quote, AcpDriver, AcpEventMetadata, AcpNotificationHandler,
+        AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest, AgentRunOutcome,
+        BasicMessageWriter, MessageWriter, RemoteLineOutcome, ReplayBoundary, ReplayBuffer,
+        ReplayEvent,
     };
     use agent_client_protocol::schema::v1::{
         ContentBlock as AcpContentBlock, McpCapabilities, McpServer, McpServerHttp, McpServerSse,
-        McpServerStdio, PermissionOption, PermissionOptionKind, RequestPermissionOutcome,
-        StopReason,
+        McpServerStdio, PermissionOption, PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority,
+        PlanEntryStatus, RequestPermissionOutcome, SessionNotification, SessionUpdate, StopReason,
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio_util::sync::CancellationToken;
 
@@ -2624,6 +2620,48 @@ mod tests {
             name: name.to_string(),
             kind,
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingMessageWriter {
+        events: Mutex<Vec<AcpEventMetadata>>,
+    }
+
+    #[async_trait::async_trait]
+    impl MessageWriter for RecordingMessageWriter {
+        async fn append_text(&self, _text: &str) {}
+
+        async fn finalize(&self) {}
+
+        async fn record_tool_call(
+            &self,
+            _tool_call_id: &str,
+            _title: &str,
+            _raw_input: Option<&serde_json::Value>,
+        ) {
+        }
+
+        async fn update_tool_call_title(
+            &self,
+            _tool_call_id: &str,
+            _title: Option<&str>,
+            _raw_input: Option<&serde_json::Value>,
+        ) {
+        }
+
+        async fn record_tool_result(&self, _tool_call_id: &str, _content: &str) {}
+
+        async fn record_acp_event_metadata(&self, metadata: AcpEventMetadata) {
+            self.events.lock().unwrap().push(metadata);
+        }
+    }
+
+    fn test_plan() -> Plan {
+        Plan::new(vec![PlanEntry::new(
+            "Inspect current state",
+            PlanEntryPriority::Medium,
+            PlanEntryStatus::Pending,
+        )])
     }
 
     #[test]
@@ -3201,6 +3239,46 @@ mod tests {
         );
 
         assert!(handler.is_replay_complete().await);
+    }
+
+    #[tokio::test]
+    async fn replay_handler_drops_replayed_plan_updates() {
+        let writer = Arc::new(RecordingMessageWriter::default());
+        let handler = AcpNotificationHandler::new(
+            writer.clone(),
+            true,
+            vec![ReplayBoundary::legacy(
+                "assistant".to_string(),
+                "previous response".to_string(),
+            )],
+            CancellationToken::new(),
+        );
+
+        handler
+            .session_notification(SessionNotification::new(
+                "session-1",
+                SessionUpdate::Plan(test_plan()),
+            ))
+            .await
+            .expect("replayed plan should be accepted");
+
+        assert!(
+            writer.events.lock().unwrap().is_empty(),
+            "plan updates replayed by session/load must not be persisted again"
+        );
+
+        handler.transition_to_live().await;
+        handler
+            .session_notification(SessionNotification::new(
+                "session-1",
+                SessionUpdate::Plan(test_plan()),
+            ))
+            .await
+            .expect("live plan should be accepted");
+
+        let events = writer.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_kind.as_deref(), Some("plan_update"));
     }
 
     #[test]

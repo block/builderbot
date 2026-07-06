@@ -1460,10 +1460,19 @@ async fn ai_generate_short_names(
     let agent = find_badge_agent(provider)?;
     let prompt = build_badge_prompt(existing_badges, new_repos);
     let working_dir = std::env::temp_dir();
+    let interpreter_env_snapshot = crate::shell_env::home_env_vars_with_extended_path(
+        crate::session_runner::shell_env_cache().as_ref(),
+    )
+    .await;
 
-    let response = acp_client::run_acp_prompt(&agent, &working_dir, &prompt)
-        .await
-        .ok()?;
+    let response = acp_client::run_acp_prompt_with_interpreter_env_snapshot(
+        &agent,
+        &working_dir,
+        &prompt,
+        interpreter_env_snapshot,
+    )
+    .await
+    .ok()?;
 
     // Extract JSON from response (may be wrapped in markdown code fences)
     let json_str = response

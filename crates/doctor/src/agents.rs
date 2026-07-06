@@ -646,7 +646,9 @@ pub fn lookup_fix_command(check_id: &str, fix_type: &FixType) -> Option<String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn resolved(path: Option<&str>, source: Option<InstallSource>) -> ResolvedBinary {
         ResolvedBinary {
@@ -658,6 +660,48 @@ mod tests {
 
     fn agent(id: &str) -> &'static AgentCheckInfo {
         AI_AGENT_CHECKS.iter().find(|i| i.id == id).unwrap()
+    }
+
+    fn unique_tmp_dir(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock must be after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "doctor-agent-{name}-{}-{nonce}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        dir
+    }
+
+    fn write_executable(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create executable parent");
+        }
+        std::fs::write(path, contents).expect("write executable");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms).expect("chmod executable");
+        }
+    }
+
+    fn shell_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+
+    fn write_login_path_rewrite_profiles(home: &Path, path: &Path) {
+        let profile = format!(
+            "export PATH={}\n",
+            shell_quote(&format!("{}:/usr/bin:/bin", path.to_string_lossy())),
+        );
+        std::fs::write(home.join(".zprofile"), &profile).expect("write zprofile");
+        std::fs::write(home.join(".bash_profile"), profile).expect("write bash_profile");
     }
 
     /// An agent with a separate ACP bridge surfaces both binaries as independent
@@ -734,6 +778,75 @@ mod tests {
         assert_eq!(m.install_source, Some(InstallSource::Npm));
         assert!(check.bridge.is_none());
         assert_eq!(check.install_source, Some(InstallSource::Npm));
+    }
+
+    #[test]
+    fn agent_auth_status_uses_doctor_env_over_login_shell_path_rewrite() {
+        let tmp = unique_tmp_dir("auth-env-vs-hermit");
+        let snapshot_bin = tmp.join("snapshot/bin");
+        let hermit_bin = tmp.join("hermit/bin");
+        let claude = snapshot_bin.join("claude");
+        let bridge = snapshot_bin.join("claude-agent-acp");
+        write_executable(
+            &claude,
+            "#!/bin/sh\n\
+             test \"$DOCTOR_AGENT_ENV\" = snapshot || exit 43\n\
+             test \"$1\" = auth || exit 44\n\
+             test \"$2\" = status || exit 45\n\
+             exit 0\n",
+        );
+        write_executable(&bridge, "#!/bin/sh\nexit 0\n");
+        write_executable(&hermit_bin.join("claude"), "#!/bin/sh\nexit 42\n");
+        write_executable(&hermit_bin.join("claude-agent-acp"), "#!/bin/sh\nexit 42\n");
+        write_login_path_rewrite_profiles(&tmp, &hermit_bin);
+
+        let bridge_resolved = ResolvedBinary {
+            path: Some(bridge.clone()),
+            search_output: "BRIDGE-SNAPSHOT-SEARCH".to_string(),
+            install_source: Some(InstallSource::Npm),
+        };
+        let main_resolved = ResolvedBinary {
+            path: Some(claude.clone()),
+            search_output: "MAIN-SNAPSHOT-SEARCH".to_string(),
+            install_source: Some(InstallSource::CurlPipe),
+        };
+        let env = DoctorEnv::new(vec![
+            ("DOCTOR_AGENT_ENV".to_string(), "snapshot".to_string()),
+            (
+                "PATH".to_string(),
+                format!("{}:/usr/bin:/bin", snapshot_bin.to_string_lossy()),
+            ),
+            ("HOME".to_string(), tmp.to_string_lossy().to_string()),
+            ("USER".to_string(), "doctor-test".to_string()),
+            ("ZDOTDIR".to_string(), tmp.to_string_lossy().to_string()),
+        ]);
+
+        let check = check_single_ai_agent(
+            agent("ai-agent-claude"),
+            true,
+            std::slice::from_ref(&bridge_resolved),
+            Some(&main_resolved),
+            None,
+            Some(&env),
+        );
+
+        assert_eq!(check.status, CheckStatus::Pass);
+        assert_eq!(check.auth_status, Some(AuthStatus::Authenticated));
+        assert_eq!(
+            check.path.as_deref(),
+            Some(claude.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            check.bridge_path.as_deref(),
+            Some(bridge.to_string_lossy().as_ref())
+        );
+        let raw = check.raw_output.unwrap_or_default();
+        assert!(
+            !raw.contains(&hermit_bin.to_string_lossy().to_string()),
+            "DoctorEnv-backed auth should not execute through Hermit/login PATH; raw:\n{raw}",
+        );
+
+        let _ = std::fs::remove_dir_all(tmp);
     }
 
     /// A fully unresolved agent carries neither readout.

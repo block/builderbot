@@ -29,7 +29,7 @@ pub use agent_client_protocol::{
 pub use driver::{
     strip_code_fences, AcpDriver, AgentDriver, BasicMessageWriter, MessageWriter, Store,
 };
-pub use simple::run_acp_prompt;
+pub use simple::{run_acp_prompt, run_acp_prompt_with_interpreter_env_snapshot};
 pub use types::{
     discover_providers, find_acp_agent, find_acp_agent_by_id, find_command, known_agent_commands,
     AcpAgent, AcpProviderInfo,

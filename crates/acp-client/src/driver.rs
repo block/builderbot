@@ -474,13 +474,13 @@ fn shell_exec_line(
 }
 
 #[derive(Debug)]
-struct AcpSpawnCommand {
-    program: PathBuf,
-    args: Vec<OsString>,
-    uses_explicit_interpreter: bool,
+pub(crate) struct AcpSpawnCommand {
+    pub(crate) program: PathBuf,
+    pub(crate) args: Vec<OsString>,
+    pub(crate) uses_explicit_interpreter: bool,
 }
 
-fn acp_spawn_command(
+pub(crate) fn acp_spawn_command(
     binary_path: &Path,
     acp_args: &[String],
     interpreter_env_snapshot: Option<&[(String, String)]>,

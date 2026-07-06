@@ -549,6 +549,32 @@ mod tests {
     use super::*;
     use std::fs::{self, File};
 
+    fn write_executable(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, contents).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    fn quoted(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+
+    fn write_login_path_rewrite_profiles(home: &Path, path: &Path) {
+        let profile = format!(
+            "export PATH={}\n",
+            quoted(&format!("{}:/usr/bin:/bin", path.to_string_lossy())),
+        );
+        fs::write(home.join(".zprofile"), &profile).unwrap();
+        fs::write(home.join(".bash_profile"), profile).unwrap();
+    }
+
     #[test]
     fn candidate_accepts_single_absolute_path() {
         assert_eq!(
@@ -671,6 +697,45 @@ mod tests {
                 .search_output
                 .contains("strategy 0 — caller environment PATH"),
             "search trace should mention the snapshot PATH strategy:\n{}",
+            resolved.search_output,
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_binary_with_env_prefers_snapshot_path_over_login_shell_rewrite() {
+        let dir = std::env::temp_dir().join(format!(
+            "doctor-resolve-env-vs-hermit-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let snapshot_bin = dir.join("snapshot/bin");
+        let hermit_bin = dir.join("hermit/bin");
+        let snapshot_tool = snapshot_bin.join("doctor-agent-cli");
+        let hermit_tool = hermit_bin.join("doctor-agent-cli");
+        write_executable(&snapshot_tool, "#!/bin/sh\nexit 0\n");
+        write_executable(&hermit_tool, "#!/bin/sh\nexit 42\n");
+        write_login_path_rewrite_profiles(&dir, &hermit_bin);
+
+        let env = crate::DoctorEnv::new(vec![
+            (
+                "PATH".to_string(),
+                format!("{}:/usr/bin:/bin", snapshot_bin.to_string_lossy()),
+            ),
+            ("HOME".to_string(), dir.to_string_lossy().to_string()),
+            ("USER".to_string(), "doctor-test".to_string()),
+            ("ZDOTDIR".to_string(), dir.to_string_lossy().to_string()),
+        ]);
+        let resolved = resolve_binary_with_env("doctor-agent-cli", &env);
+
+        assert_eq!(resolved.path.as_deref(), Some(snapshot_tool.as_path()));
+        assert!(
+            !resolved
+                .search_output
+                .contains(&hermit_bin.to_string_lossy().to_string()),
+            "DoctorEnv resolution should not fall through to the Hermit/login PATH:\n{}",
             resolved.search_output,
         );
         let _ = fs::remove_dir_all(&dir);

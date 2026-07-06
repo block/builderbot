@@ -442,20 +442,26 @@ pub fn start_session(
         let result = local.block_on(&rt, async {
             let driver = driver.with_extra_env(config.extra_env.clone());
 
-            // For local sessions, hand the agent the captured
-            // interactive-login-shell env snapshot for its working directory
-            // (Hermit-activated, so hermit-first PATH). This is the *same*
-            // cached snapshot pipeline steps and git ops draw from via
-            // `shell_env_cache()`, so the agent — and every per-command shell
-            // it spawns — resolves the same toolchain instead of whatever
-            // (possibly Homebrew-first) environment Staged happened to inherit.
-            // Without it the driver falls back to spawning `$SHELL -ils` and
-            // exec'ing the agent, whose ordering has proven unreliable.
-            // Remote/workspace sessions proxy through `sq blox acp` and don't
-            // execute locally, so they keep the fallback. A capture failure is
-            // non-fatal: log it and let the driver fall back.
+            // For local sessions, hand the driver two env snapshots:
+            // - the home/global snapshot, sanitized and PATH-extended, used
+            //   only to resolve env-shebang interpreters for bridge startup;
+            // - the working-directory snapshot (Hermit-activated), used as the
+            //   actual agent process environment so the agent and every
+            //   per-command shell it spawns see the same toolchain as pipeline
+            //   steps and git ops.
+            //
+            // This lets npm ACP bridges start with the user's global Node even
+            // when a repo-local Hermit Node shadows `node` in the execution
+            // environment. Remote/workspace sessions proxy through `sq blox
+            // acp` and don't execute locally, so they keep the fallback. A
+            // cwd capture failure is non-fatal: log it and let the driver fall
+            // back to spawning `$SHELL -ils` and exec'ing the agent.
             let driver = if config.workspace_name.is_none() {
-                match shell_env_cache().get(&config.working_dir).await {
+                let cache = shell_env_cache();
+                let home_snapshot =
+                    crate::shell_env::home_env_vars_with_extended_path(cache.as_ref()).await;
+                let driver = driver.with_interpreter_env_snapshot(home_snapshot);
+                match cache.get(&config.working_dir).await {
                     Ok(snapshot) => driver.with_env_snapshot(snapshot.vars().to_vec()),
                     Err(e) => {
                         log::warn!(

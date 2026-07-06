@@ -10,6 +10,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "blox-cli",
+ "doctor",
  "log",
  "nix",
  "serde",

@@ -30,7 +30,7 @@ pub(crate) fn resolve_binary_with_diagnostics(
 
     if let Some(path_value) = env.and_then(|env| env.get("PATH")) {
         lines.push("  strategy 0 — caller environment PATH:".to_string());
-        if let Some(path) = resolve_from_path(cmd, path_value) {
+        if let Some(path) = resolve_executable_from_path(cmd, path_value) {
             lines.push(format!("    PATH => {} (resolved)", path.display()));
             return resolved_binary(path, &lines, timeouts, env);
         }
@@ -160,7 +160,11 @@ pub(crate) fn resolve_binary_with_diagnostics(
     )
 }
 
-fn resolve_from_path(cmd: &str, path_value: &str) -> Option<PathBuf> {
+/// Resolve an executable name against a PATH value.
+///
+/// This is intentionally PATH-only: callers that need doctor's full fallback
+/// strategy should use [`resolve_binary`] or [`resolve_binary_with_env`].
+pub fn resolve_executable_from_path(cmd: &str, path_value: &str) -> Option<PathBuf> {
     std::env::split_paths(path_value)
         .map(|dir| dir.join(cmd))
         .find(|path| is_executable_file(path))

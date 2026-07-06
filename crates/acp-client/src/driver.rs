@@ -360,25 +360,14 @@ fn path_contains_executable(path_value: &str, executable: &str) -> bool {
     std::env::split_paths(path_value).any(|dir| is_executable_file(&dir.join(executable)))
 }
 
-fn path_value_from_snapshot(snapshot: &[(String, String)]) -> Option<&str> {
-    snapshot
-        .iter()
-        .find_map(|(key, value)| (key == "PATH").then_some(value.as_str()))
-}
-
-fn resolve_executable_from_path(path_value: &str, executable: &str) -> Option<PathBuf> {
-    std::env::split_paths(path_value)
-        .map(|dir| dir.join(executable))
-        .find(|path| is_executable_file(path))
-}
-
 fn env_shebang_interpreter_from_snapshot(
     binary_path: &Path,
     snapshot: Option<&[(String, String)]>,
 ) -> Option<PathBuf> {
     let interpreter = env_shebang_interpreter(binary_path)?;
-    let path_value = path_value_from_snapshot(snapshot?)?;
-    resolve_executable_from_path(path_value, &interpreter)
+    let env = doctor::DoctorEnv::new(snapshot?.to_vec());
+    let path_value = env.get("PATH")?;
+    doctor::resolve::resolve_executable_from_path(&interpreter, path_value)
 }
 
 fn is_broad_toolchain_dir(path: &Path) -> bool {

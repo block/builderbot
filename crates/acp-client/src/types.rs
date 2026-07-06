@@ -160,93 +160,11 @@ impl AcpAgent {
 // Binary discovery
 // =============================================================================
 
-/// Common paths where CLIs might be installed (GUI apps don't inherit shell PATH).
-const COMMON_PATHS: &[&str] = &[
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    "/usr/bin",
-    "/home/linuxbrew/.linuxbrew/bin",
-];
-
 /// Find a CLI binary by command name.
 ///
-/// Searches in order:
-/// 1. Login shell path lookup (picks up user's PATH from `.zshrc` / `.bashrc`)
-/// 2. Common install locations
+/// Delegates to doctor so ACP and Doctor share one binary resolution policy.
 pub fn find_command(cmd: &str) -> Option<PathBuf> {
-    if let Some(path) = find_via_login_shell(cmd) {
-        return Some(path);
-    }
-
-    for dir in COMMON_PATHS {
-        let path = PathBuf::from(dir).join(cmd);
-        if is_executable_file(&path) {
-            return Some(path);
-        }
-    }
-
-    None
-}
-
-fn find_via_login_shell(cmd: &str) -> Option<PathBuf> {
-    let quoted = shell_quote(cmd);
-    let lookups = [
-        ("/bin/zsh", format!("whence -p -- {quoted}")),
-        ("/bin/bash", format!("type -P -- {quoted}")),
-    ];
-
-    for (shell, lookup_cmd) in lookups {
-        let Ok(output) = std::process::Command::new(shell)
-            .args(["-l", "-c", &lookup_cmd])
-            .output()
-        else {
-            continue;
-        };
-        if !output.status.success() {
-            continue;
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if let Some(path) = candidate_paths_from_shell_output(stdout.as_ref())
-            .filter(|path| is_executable_file(path))
-            .last()
-        {
-            return Some(path);
-        }
-    }
-    None
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn candidate_paths_from_shell_output(output: &str) -> impl Iterator<Item = PathBuf> + '_ {
-    output
-        .lines()
-        .map(str::trim)
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = path.metadata() else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-
-    #[cfg(not(unix))]
-    {
-        true
-    }
+    doctor::resolve::resolve_binary(cmd).path
 }
 
 /// Map an agent ID to the `--command` value for `blox acp`.
@@ -258,58 +176,4 @@ pub(crate) fn blox_acp_command(agent_id: &str) -> Option<String> {
         parts.extend(a.acp_args.iter().copied());
         parts.join(",")
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{candidate_paths_from_shell_output, is_executable_file};
-    use std::path::PathBuf;
-
-    #[test]
-    fn candidate_paths_tolerate_startup_output_before_absolute_path() {
-        let paths: Vec<_> = candidate_paths_from_shell_output(
-            "hello from shell init\n/opt/homebrew/bin/codex-acp\n",
-        )
-        .collect();
-
-        assert_eq!(paths, vec![PathBuf::from("/opt/homebrew/bin/codex-acp")]);
-    }
-
-    #[test]
-    fn candidate_paths_ignore_relative_lines_and_function_bodies() {
-        let paths: Vec<_> =
-            candidate_paths_from_shell_output("codex-acp () {\n\tcommand codex-acp \"$@\"\n}\n")
-                .collect();
-
-        assert!(paths.is_empty());
-    }
-
-    #[test]
-    fn login_shell_picks_last_executable_absolute_path() {
-        // Simulates a rc file printing an absolute path of an unrelated
-        // executable before the shell builtin prints the real lookup answer.
-        let dir = std::env::temp_dir().join(format!("acp-client-last-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let decoy = dir.join("decoy");
-        let real: PathBuf = dir.join("real");
-        std::fs::File::create(&decoy).unwrap();
-        std::fs::File::create(&real).unwrap();
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&decoy, std::fs::Permissions::from_mode(0o755)).unwrap();
-            std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        let stdout = format!("{}\n{}\n", decoy.display(), real.display());
-        let picked = candidate_paths_from_shell_output(&stdout)
-            .filter(|p| is_executable_file(p))
-            .last();
-
-        assert_eq!(picked, Some(real));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }

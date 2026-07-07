@@ -171,7 +171,7 @@
   <Button
     variant="outline"
     type="button"
-    class="gap-1.5 px-4 py-2 text-sm font-medium text-muted-foreground shadow-none hover:text-foreground max-[640px]:h-11 max-[640px]:justify-center"
+    class="gap-1.5 px-4 py-2 text-sm font-medium text-muted-foreground shadow-none hover:text-foreground max-[768px]:h-11 max-[768px]:justify-center"
     onclick={openFilePicker}
   >
     <ImagePlus size={14} />

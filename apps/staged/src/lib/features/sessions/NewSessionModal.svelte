@@ -109,7 +109,7 @@
   );
   let submitLabel = $derived(currentWillQueue ? 'Queue' : isProjectNote ? 'New' : 'Start');
   const footerControlClass =
-    'h-9 gap-1.5 rounded-md border border-[var(--border-muted)] bg-[var(--bg-primary)] px-4 py-2 text-sm font-medium text-muted-foreground shadow-none transition-colors hover:bg-[var(--bg-hover)] hover:text-foreground max-[640px]:h-11 max-[640px]:justify-center';
+    'h-9 gap-1.5 rounded-md border border-[var(--border-muted)] bg-[var(--bg-primary)] px-4 py-2 text-sm font-medium text-muted-foreground shadow-none transition-colors hover:bg-[var(--bg-hover)] hover:text-foreground max-[768px]:h-11 max-[768px]:justify-center';
 
   function selectPromptContent(el: HTMLElement, selection: 'all' | 'last-line') {
     const sel = window.getSelection();
@@ -501,7 +501,7 @@
       <Button
         variant="ghost"
         size="icon"
-        class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[640px]:size-10 [&_svg]:!size-[18px]"
+        class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[768px]:size-10 [&_svg]:!size-[18px]"
         title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
         aria-label="Close"
         onclick={handleClose}
@@ -553,7 +553,7 @@
           <Button
             type="button"
             variant="outline"
-            class="gap-1.5 px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground max-[640px]:h-11 max-[640px]:flex-1 max-[640px]:justify-center"
+            class="gap-1.5 px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground max-[768px]:h-11 max-[768px]:flex-1 max-[768px]:justify-center"
             onclick={handleClose}
             disabled={starting}
           >
@@ -562,7 +562,7 @@
           <Button
             type="submit"
             variant="default"
-            class="gap-1.5 px-4 py-2 text-sm font-semibold shadow-none hover:bg-[var(--ui-accent-hover)] max-[640px]:h-11 max-[640px]:flex-1 max-[640px]:justify-center"
+            class="appearance-none gap-1.5 bg-[var(--ui-accent)] px-4 py-2 text-sm font-semibold shadow-none hover:bg-[var(--ui-accent-hover)] disabled:bg-[var(--ui-accent)] max-[768px]:h-11 max-[768px]:flex-1 max-[768px]:justify-center"
             title={submitDisabledReason ?? undefined}
             disabled={!canSubmit}
           >
@@ -827,7 +827,7 @@
     gap: 8px;
   }
 
-  @media (max-width: 640px) {
+  @media (max-width: 768px) {
     .modal-header {
       padding: 12px 16px;
     }

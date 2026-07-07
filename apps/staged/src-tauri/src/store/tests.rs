@@ -533,6 +533,29 @@ fn test_queued_session_messages_order_and_image_ids() {
 }
 
 #[test]
+fn test_queued_session_message_claims_pending_images() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let session = Session::new_running("work", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    let image = Image::new(None, &project.id, "screenshot.png", "image/png", 42, true);
+    store.create_image(&image).unwrap();
+
+    store
+        .add_queued_session_message(
+            &session.id,
+            "with image",
+            std::slice::from_ref(&image.id),
+            None,
+        )
+        .unwrap();
+
+    let claimed = store.get_image(&image.id).unwrap().unwrap();
+    assert_eq!(claimed.session_id.as_deref(), Some(session.id.as_str()));
+}
+
+#[test]
 fn test_add_queued_session_message_requires_running_session() {
     let store = Store::in_memory().unwrap();
     let session = Session::new_running("work", Path::new("/tmp"));

@@ -186,6 +186,7 @@
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let pollInFlight = false;
   let unlistenStatus: UnlistenFn | null = null;
+  let statusEventVersion = 0;
   let closed = false;
 
   let inputText = $state('');
@@ -511,6 +512,7 @@
 
     const unlisten = listenToEvent<SessionStatusPayload>('session-status-changed', (payload) => {
       if (payload.sessionId !== id) return;
+      statusEventVersion += 1;
       session =
         session?.id === id
           ? {
@@ -607,9 +609,11 @@
     pollInFlight = true;
     try {
       // Fetch session status
+      const statusVersionBeforeFetch = statusEventVersion;
       const s = await getSession(sessionId);
       if (closed) return;
-      if (s) session = s;
+      const statusEventDuringFetch = statusEventVersion !== statusVersionBeforeFetch;
+      if (s && !statusEventDuringFetch) session = s;
       await refreshQueuedMessages();
 
       // Incremental message fetch
@@ -642,8 +646,9 @@
       }
 
       // Stop polling when session is done. Backend-owned queue drain may emit
-      // a fresh running event immediately after this terminal state.
-      if (s && s.status !== 'running') {
+      // a fresh running event while this poll is in flight; that event is
+      // fresher than this status fetch and keeps polling alive.
+      if (s && s.status !== 'running' && !statusEventDuringFetch && session?.status !== 'running') {
         stopPolling();
       }
     } catch {

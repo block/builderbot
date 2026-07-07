@@ -57,6 +57,12 @@ impl Store {
                 None => Err(StoreError(format!("Session not found: {session_id}"))),
             };
         }
+        for image_id in image_ids {
+            tx.execute(
+                "UPDATE images SET session_id = ?1 WHERE id = ?2",
+                params![session_id, image_id],
+            )?;
+        }
         tx.commit()?;
         Ok(message)
     }

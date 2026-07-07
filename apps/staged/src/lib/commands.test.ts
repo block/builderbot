@@ -1,6 +1,13 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 
 describe('browser-native command wrappers', () => {
+  function selectedAcpConfig() {
+    return {
+      model: { configId: 'model', valueId: 'opus', label: 'Opus' },
+      effort: { configId: 'reasoning_effort', valueId: 'high', label: 'High' },
+    };
+  }
+
   beforeEach(() => {
     vi.resetModules();
   });
@@ -121,6 +128,56 @@ describe('browser-native command wrappers', () => {
     ]);
   });
 
+  it('forwards provider and ACP config selection when starting standalone sessions', async () => {
+    const invokeCommand = vi.fn().mockResolvedValue({ id: 'session-1' });
+    vi.doMock('./transport', () => ({
+      invokeCommand,
+      isTauri: true,
+    }));
+
+    const { startSession } = await import('./commands');
+    const acpConfigSelection = selectedAcpConfig();
+
+    await startSession('Investigate', '/repo', 'codex', acpConfigSelection);
+
+    expect(invokeCommand).toHaveBeenCalledWith('start_session', {
+      prompt: 'Investigate',
+      workingDir: '/repo',
+      provider: 'codex',
+      acpConfigSelection,
+    });
+  });
+
+  it('forwards provider and ACP config selection when starting project sessions', async () => {
+    const invokeCommand = vi.fn().mockResolvedValue({
+      sessionId: 'session-1',
+      noteId: 'note-1',
+    });
+    vi.doMock('./transport', () => ({
+      invokeCommand,
+      isTauri: true,
+    }));
+
+    const { startProjectSession } = await import('./commands');
+    const acpConfigSelection = selectedAcpConfig();
+
+    await startProjectSession(
+      'project-1',
+      'Plan the work',
+      'codex',
+      ['image-1'],
+      acpConfigSelection
+    );
+
+    expect(invokeCommand).toHaveBeenCalledWith('start_project_session', {
+      projectId: 'project-1',
+      prompt: 'Plan the work',
+      provider: 'codex',
+      imageIds: ['image-1'],
+      acpConfigSelection,
+    });
+  });
+
   it('forwards provider and ACP config selection when starting or queueing branch sessions', async () => {
     const invokeCommand = vi.fn().mockResolvedValue({
       sessionId: 'session-1',
@@ -139,10 +196,7 @@ describe('browser-native command wrappers', () => {
       commitSha: 'abc123',
       reviewId: 'review-1',
     };
-    const acpConfigSelection = {
-      model: { configId: 'model', valueId: 'opus', label: 'Opus' },
-      effort: { configId: 'reasoning_effort', valueId: 'high', label: 'High' },
-    };
+    const acpConfigSelection = selectedAcpConfig();
 
     await startOrQueueBranchSession(
       'branch-1',
@@ -165,6 +219,46 @@ describe('browser-native command wrappers', () => {
     });
   });
 
+  it('forwards provider and ACP config selection when explicitly queueing branch sessions', async () => {
+    const invokeCommand = vi.fn().mockResolvedValue({
+      sessionId: 'session-1',
+      artifactId: 'note-1',
+      sessionStatus: 'queued',
+    });
+    vi.doMock('./transport', () => ({
+      invokeCommand,
+      isTauri: true,
+    }));
+
+    const { queueBranchSession } = await import('./commands');
+    const launchContext = {
+      source: 'diff_viewer' as const,
+      scope: 'branch' as const,
+      commitSha: 'abc123',
+    };
+    const acpConfigSelection = selectedAcpConfig();
+
+    await queueBranchSession(
+      'branch-1',
+      'Write a note',
+      'note',
+      'codex',
+      ['image-1'],
+      launchContext,
+      acpConfigSelection
+    );
+
+    expect(invokeCommand).toHaveBeenCalledWith('queue_branch_session', {
+      branchId: 'branch-1',
+      prompt: 'Write a note',
+      sessionType: 'note',
+      provider: 'codex',
+      imageIds: ['image-1'],
+      launchContext,
+      acpConfigSelection,
+    });
+  });
+
   it('forwards ACP config selection when resuming a session', async () => {
     const invokeCommand = vi.fn().mockResolvedValue(undefined);
     vi.doMock('./transport', () => ({
@@ -173,10 +267,7 @@ describe('browser-native command wrappers', () => {
     }));
 
     const { resumeSession } = await import('./commands');
-    const acpConfigSelection = {
-      model: { configId: 'model', valueId: 'opus', label: 'Opus' },
-      effort: { configId: 'reasoning_effort', valueId: 'high', label: 'High' },
-    };
+    const acpConfigSelection = selectedAcpConfig();
 
     await resumeSession('session-1', 'Continue', ['image-1'], 'branch-1', acpConfigSelection);
 
@@ -186,6 +277,23 @@ describe('browser-native command wrappers', () => {
       imageIds: ['image-1'],
       branchId: 'branch-1',
       acpConfigSelection,
+    });
+  });
+
+  it('drains queued sessions without overriding the queued session provider or config', async () => {
+    const invokeCommand = vi.fn().mockResolvedValue(true);
+    vi.doMock('./transport', () => ({
+      invokeCommand,
+      isTauri: true,
+    }));
+
+    const { drainQueuedSessions } = await import('./commands');
+
+    await drainQueuedSessions('branch-1');
+
+    expect(invokeCommand).toHaveBeenCalledWith('drain_queued_sessions', {
+      branchId: 'branch-1',
+      provider: null,
     });
   });
 });

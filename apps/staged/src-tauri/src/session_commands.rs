@@ -1940,6 +1940,12 @@ struct CreatedBranchSession {
     artifact_id: String,
 }
 
+fn acp_config_selection_for_session_start(
+    session: &store::Session,
+) -> Option<store::AcpConfigSelection> {
+    session.acp_config_selection.clone()
+}
+
 fn resolve_branch_session_provider(
     store: &Arc<Store>,
     branch_id: &str,
@@ -2284,7 +2290,7 @@ fn launch_running_branch_session(
             image_ids,
             queued_message_id: None,
             pending_auto_review_branch_id: None,
-            acp_config_selection: created.session.acp_config_selection.clone(),
+            acp_config_selection: acp_config_selection_for_session_start(&created.session),
             branch_id: Some(branch_id),
             project_id: Some(project_id),
             expose_pikchr_tools,
@@ -2844,7 +2850,7 @@ async fn start_queued_session_for_branch(
             image_ids,
             queued_message_id: None,
             pending_auto_review_branch_id: None,
-            acp_config_selection: session.acp_config_selection.clone(),
+            acp_config_selection: acp_config_selection_for_session_start(&session),
             branch_id: Some(branch_id),
             project_id: Some(branch.project_id.clone()),
             expose_pikchr_tools: local_note_pikchr_tools_available(
@@ -5113,6 +5119,29 @@ mod tests {
         let session = store.get_session(&response.session_id).unwrap().unwrap();
         assert_eq!(session.status, store::SessionStatus::Queued);
         assert_eq!(session.acp_config_selection, Some(selection));
+    }
+
+    #[test]
+    fn queued_session_start_uses_stored_acp_config_selection() {
+        let selection = store::AcpConfigSelection {
+            model: Some(store::AcpConfigValueSelection {
+                config_id: "model".to_string(),
+                value_id: "gpt-5".to_string(),
+                label: Some("GPT-5".to_string()),
+            }),
+            effort: Some(store::AcpConfigValueSelection {
+                config_id: "reasoning".to_string(),
+                value_id: "high".to_string(),
+                label: Some("High".to_string()),
+            }),
+        };
+        let session =
+            store::Session::new_queued("queued").with_acp_config_selection(selection.clone());
+
+        assert_eq!(
+            acp_config_selection_for_session_start(&session),
+            Some(selection)
+        );
     }
 
     #[test]

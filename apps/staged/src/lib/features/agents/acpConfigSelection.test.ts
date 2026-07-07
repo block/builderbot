@@ -50,6 +50,17 @@ describe('buildAcpConfigSelection', () => {
     });
   });
 
+  it('falls back to the current selector value when a stale selected value is unavailable', () => {
+    expect(
+      buildAcpConfigSelection({
+        model: { selector: selector(), valueId: 'removed-model' },
+      })
+    ).toEqual({
+      model: { configId: 'model', valueId: 'sonnet', label: 'Sonnet' },
+      effort: null,
+    });
+  });
+
   it('omits unavailable selectors and returns null when there is no selectable value', () => {
     expect(
       buildAcpConfigSelection({

@@ -88,37 +88,43 @@
       align="start"
       side={dropUp ? 'top' : 'bottom'}
       sideOffset={4}
-      class="max-h-[min(360px,calc(100vh-48px))] min-w-[220px] max-w-[360px]"
+      class="max-h-[min(360px,calc(100vh-48px))] w-[min(680px,calc(100vw-16px))] max-w-[calc(100vw-16px)]"
     >
-      <DropdownMenu.Label>Provider</DropdownMenu.Label>
-      <DropdownMenu.Item disabled>
-        <span class="inline-flex min-w-0 items-center gap-1.5">
-          <AgentIcon id={providerId ?? ''} size={12} />
-          <span class="truncate">{providerLabel ?? providerId ?? 'Agent'}</span>
-        </span>
-      </DropdownMenu.Item>
+      <div class="picker-column-grid">
+        <div class="picker-column">
+          <DropdownMenu.Label class="picker-section-label">Agent</DropdownMenu.Label>
+          <DropdownMenu.Item disabled>
+            <span class="inline-flex min-w-0 items-center gap-1.5">
+              <AgentIcon id={providerId ?? ''} size={12} />
+              <span class="truncate">{providerLabel ?? providerId ?? 'Agent'}</span>
+            </span>
+          </DropdownMenu.Item>
+        </div>
 
-      {#if modelSelector}
-        <DropdownMenu.Separator />
-        <AcpConfigPickerSection
-          title={modelSelector.label || 'Model'}
-          selector={modelSelector}
-          value={selectedModelValue}
-          {disabled}
-          onValueChange={(value) => onModelChange?.(value)}
-        />
-      {/if}
+        {#if modelSelector}
+          <div class="picker-column">
+            <AcpConfigPickerSection
+              title={modelSelector.label || 'Model'}
+              selector={modelSelector}
+              value={selectedModelValue}
+              {disabled}
+              onValueChange={(value) => onModelChange?.(value)}
+            />
+          </div>
+        {/if}
 
-      {#if effortSelector}
-        <DropdownMenu.Separator />
-        <AcpConfigPickerSection
-          title={effortSelector.label || 'Effort'}
-          selector={effortSelector}
-          value={selectedEffortValue}
-          {disabled}
-          onValueChange={(value) => onEffortChange?.(value)}
-        />
-      {/if}
+        {#if effortSelector}
+          <div class="picker-column">
+            <AcpConfigPickerSection
+              title={effortSelector.label || 'Effort'}
+              selector={effortSelector}
+              value={selectedEffortValue}
+              {disabled}
+              onValueChange={(value) => onEffortChange?.(value)}
+            />
+          </div>
+        {/if}
+      </div>
 
       {#if loading && !modelSelector && !effortSelector}
         <DropdownMenu.Separator />
@@ -139,6 +145,27 @@
 {/if}
 
 <style>
+  .picker-column-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .picker-column {
+    min-width: 0;
+  }
+
+  .picker-column + .picker-column {
+    border-left: 1px solid var(--border-muted);
+    padding-left: 4px;
+  }
+
+  :global(.picker-section-label) {
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+  }
+
   .picker-status-row {
     display: inline-flex;
     min-width: 0;
@@ -146,5 +173,18 @@
     gap: 6px;
     color: var(--text-muted);
     font-size: var(--size-xs);
+  }
+
+  @media (max-width: 560px) {
+    .picker-column-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .picker-column + .picker-column {
+      border-left: 0;
+      border-top: 1px solid var(--border-muted);
+      padding-left: 0;
+      padding-top: 4px;
+    }
   }
 </style>

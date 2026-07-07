@@ -220,53 +220,60 @@
         align="start"
         side={dropUp ? 'top' : 'bottom'}
         sideOffset={4}
-        class="max-h-[min(360px,calc(100vh-48px))] min-w-[220px] max-w-[360px]"
+        class="max-h-[min(360px,calc(100vh-48px))] w-[min(680px,calc(100vw-16px))] max-w-[calc(100vw-16px)]"
       >
-        {#if agents.length > 1}
-          <DropdownMenu.Label>Provider</DropdownMenu.Label>
-          <DropdownMenu.RadioGroup
-            value={selectedProviderId ?? undefined}
-            onValueChange={handleProviderChange}
-          >
-            {#each agents as provider (provider.id)}
-              <DropdownMenu.RadioItem value={provider.id}>
+        <div class="picker-column-grid">
+          <div class="picker-column">
+            <DropdownMenu.Label class="picker-section-label">Agent</DropdownMenu.Label>
+            {#if agents.length > 1}
+              <DropdownMenu.RadioGroup
+                value={selectedProviderId ?? undefined}
+                onValueChange={handleProviderChange}
+              >
+                {#each agents as provider (provider.id)}
+                  <DropdownMenu.RadioItem value={provider.id}>
+                    <span class="inline-flex min-w-0 items-center gap-1.5">
+                      <AgentIcon id={provider.id} size={12} />
+                      <span class="truncate">{provider.label}</span>
+                    </span>
+                  </DropdownMenu.RadioItem>
+                {/each}
+              </DropdownMenu.RadioGroup>
+            {:else}
+              <DropdownMenu.Item disabled>
                 <span class="inline-flex min-w-0 items-center gap-1.5">
-                  <AgentIcon id={provider.id} size={12} />
-                  <span class="truncate">{provider.label}</span>
+                  <AgentIcon id={selectedProviderId ?? ''} size={12} />
+                  <span class="truncate">{selectedProvider?.label ?? 'Agent'}</span>
                 </span>
-              </DropdownMenu.RadioItem>
-            {/each}
-          </DropdownMenu.RadioGroup>
-        {/if}
+              </DropdownMenu.Item>
+            {/if}
+          </div>
 
-        {#if modelSelector}
-          {#if agents.length > 1}
-            <DropdownMenu.Separator />
+          {#if modelSelector}
+            <div class="picker-column">
+              <AcpConfigPickerSection
+                title={modelSelector.label || 'Model'}
+                selector={modelSelector}
+                value={selectedModelValue}
+                onValueChange={handleModelChange}
+              />
+            </div>
           {/if}
-          <AcpConfigPickerSection
-            title={modelSelector.label || 'Model'}
-            selector={modelSelector}
-            value={selectedModelValue}
-            onValueChange={handleModelChange}
-          />
-        {/if}
 
-        {#if effortSelector}
-          {#if agents.length > 1 || modelSelector}
-            <DropdownMenu.Separator />
+          {#if effortSelector}
+            <div class="picker-column">
+              <AcpConfigPickerSection
+                title={effortSelector.label || 'Effort'}
+                selector={effortSelector}
+                value={selectedEffortValue}
+                onValueChange={handleEffortChange}
+              />
+            </div>
           {/if}
-          <AcpConfigPickerSection
-            title={effortSelector.label || 'Effort'}
-            selector={effortSelector}
-            value={selectedEffortValue}
-            onValueChange={handleEffortChange}
-          />
-        {/if}
+        </div>
 
         {#if configLoading && !modelSelector && !effortSelector}
-          {#if agents.length > 1}
-            <DropdownMenu.Separator />
-          {/if}
+          <DropdownMenu.Separator />
           <DropdownMenu.Item disabled>
             <span class="picker-status-row">
               <Spinner size={12} />
@@ -299,6 +306,27 @@
 {/if}
 
 <style>
+  .picker-column-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .picker-column {
+    min-width: 0;
+  }
+
+  .picker-column + .picker-column {
+    border-left: 1px solid var(--border-muted);
+    padding-left: 4px;
+  }
+
+  :global(.picker-section-label) {
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+  }
+
   .picker-status-row {
     display: inline-flex;
     min-width: 0;
@@ -306,5 +334,18 @@
     gap: 6px;
     color: var(--text-muted);
     font-size: var(--size-xs);
+  }
+
+  @media (max-width: 560px) {
+    .picker-column-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .picker-column + .picker-column {
+      border-left: 0;
+      border-top: 1px solid var(--border-muted);
+      padding-left: 0;
+      padding-top: 4px;
+    }
   }
 </style>

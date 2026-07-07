@@ -3,6 +3,7 @@
 //! Tauri commands for the new frontend, built incrementally.
 //! See `src-archive/lib.rs` for the previous implementation.
 
+pub(crate) mod acp_config;
 pub mod actions;
 pub mod agent;
 pub mod background_sync;

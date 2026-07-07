@@ -53,6 +53,7 @@ doctor = { path = "../../../crates/doctor" }
 # Actions framework
 builderbot-actions = { path = "../../../crates/builderbot-actions" }
 acp-client = { path = "../../../crates/acp-client" }
+agent-client-protocol = { version = "0.15.1", features = ["unstable"] }
 blox-cli = { path = "../../../crates/blox-cli" }
 
 regex = "1"

@@ -7,6 +7,7 @@ name = "Staged"
 version = "0.1.8"
 dependencies = [
  "acp-client",
+ "agent-client-protocol",
  "anyhow",
  "async-trait",
  "axum",

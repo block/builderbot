@@ -18,8 +18,8 @@ use tauri::AppHandle;
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::session_runner::SessionRegistry;
 use crate::store::{
-    Branch, CompletionReason, MessageRole, ProjectRepo, Session, SessionMessage, SessionStatus,
-    Store,
+    AcpConfigSelection, Branch, CompletionReason, MessageRole, ProjectRepo, Session,
+    SessionMessage, SessionStatus, Store,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -430,6 +430,10 @@ struct ProjectToolsHandler {
     /// ACP provider ID inherited from the parent project session.
     /// All repo sessions spawned by this handler use this provider.
     provider: Option<String>,
+    /// ACP config selection inherited from the parent project session.
+    /// Repo sessions persist it when queued so queue drain uses the selection
+    /// active when the parent requested the work.
+    acp_config_selection: Option<AcpConfigSelection>,
     /// Cancellation token for the parent project session.
     /// Signalled when the user cancels the project session.
     cancel_token: CancellationToken,
@@ -445,6 +449,7 @@ impl ProjectToolsHandler {
         action_executor: Option<Arc<ActionExecutor>>,
         action_registry: Option<Arc<ActionRegistry>>,
         provider: Option<String>,
+        acp_config_selection: Option<AcpConfigSelection>,
         cancel_token: CancellationToken,
     ) -> Self {
         Self {
@@ -456,6 +461,7 @@ impl ProjectToolsHandler {
             action_executor,
             action_registry,
             provider,
+            acp_config_selection,
             cancel_token,
         }
     }
@@ -486,6 +492,9 @@ impl ProjectToolsHandler {
         let mut session = crate::store::Session::new_queued(&p.instructions);
         if let Some(ref provider) = self.provider {
             session = session.with_provider(provider);
+        }
+        if let Some(selection) = self.acp_config_selection.clone() {
+            session = session.with_acp_config_selection(selection);
         }
         if let Err(e) = self.store.create_session(&session) {
             return format!("Error creating queued session: {e}");
@@ -954,6 +963,7 @@ pub async fn start_project_mcp_server(
     action_executor: Option<Arc<ActionExecutor>>,
     action_registry: Option<Arc<ActionRegistry>>,
     provider: Option<String>,
+    acp_config_selection: Option<AcpConfigSelection>,
     cancel_token: CancellationToken,
 ) -> Result<(u16, JoinHandle<()>), String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -972,6 +982,7 @@ pub async fn start_project_mcp_server(
         action_executor,
         action_registry,
         provider,
+        acp_config_selection,
         cancel_token,
     );
     log::debug!(

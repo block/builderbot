@@ -402,10 +402,14 @@ pub async fn start_session(
     prompt: String,
     working_dir: String,
     provider: Option<String>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<store::Session, String> {
     let store = get_store(&store)?;
     let working_dir = PathBuf::from(working_dir);
-    let mut session = store::Session::new_running(&prompt, &working_dir);
+    let mut session = with_optional_acp_config_selection(
+        store::Session::new_running(&prompt, &working_dir),
+        acp_config_selection.clone(),
+    );
     if let Some(ref p) = provider {
         session = session.with_provider(p);
     }
@@ -428,6 +432,7 @@ pub async fn start_session(
             image_ids: vec![],
             queued_message_id: None,
             pending_auto_review_branch_id: None,
+            acp_config_selection,
             branch_id: None,
             project_id: None,
             expose_pikchr_tools: false,
@@ -461,6 +466,7 @@ pub async fn resume_session(
     prompt: String,
     image_ids: Option<Vec<String>>,
     branch_id: Option<String>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
     resume_session_for_store(
@@ -473,6 +479,7 @@ pub async fn resume_session(
         prompt,
         image_ids,
         branch_id,
+        acp_config_selection,
         None,
         None,
     )
@@ -490,6 +497,7 @@ pub(crate) async fn resume_session_for_store(
     prompt: String,
     image_ids: Option<Vec<String>>,
     branch_id: Option<String>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
     queued_message_id: Option<String>,
     pending_auto_review_branch_id: Option<String>,
 ) -> Result<(), String> {
@@ -503,6 +511,13 @@ pub(crate) async fn resume_session_for_store(
     let provider = session.provider.clone();
     let agent_session_id = session.agent_id.clone();
     let working_dir = PathBuf::from(&session.working_dir);
+    let effective_acp_config_selection =
+        acp_config_selection.or_else(|| session.acp_config_selection.clone());
+    if effective_acp_config_selection != session.acp_config_selection {
+        store
+            .set_session_acp_config_selection(&session_id, effective_acp_config_selection.as_ref())
+            .map_err(|e| e.to_string())?;
+    }
 
     // Check if this session is linked to a project note — if so, we need
     // to start the MCP server so the agent has access to project tools.
@@ -674,6 +689,7 @@ pub(crate) async fn resume_session_for_store(
             image_ids: image_ids.unwrap_or_default(),
             queued_message_id,
             pending_auto_review_branch_id,
+            acp_config_selection: effective_acp_config_selection,
             branch_id: config_branch_id,
             project_id: config_project_id,
             expose_pikchr_tools,
@@ -770,6 +786,7 @@ pub(crate) async fn send_queued_session_message_for_store(
         message.content.clone(),
         Some(message.image_ids.clone()),
         message.branch_id.clone(),
+        None,
         Some(message.id.clone()),
         None,
     )
@@ -809,6 +826,7 @@ pub(crate) async fn drain_queued_message_for_session(
         message.content.clone(),
         Some(message.image_ids.clone()),
         message.branch_id.clone(),
+        None,
         Some(message.id.clone()),
         pending_auto_review_branch_id,
     )
@@ -1006,6 +1024,16 @@ fn extra_env_for_branch_session(session_type: &BranchSessionType) -> Vec<(String
         session_runner::git_identity_env_from_global_config()
     } else {
         vec![]
+    }
+}
+
+fn with_optional_acp_config_selection(
+    session: store::Session,
+    acp_config_selection: Option<store::AcpConfigSelection>,
+) -> store::Session {
+    match acp_config_selection {
+        Some(selection) => session.with_acp_config_selection(selection),
+        None => session,
     }
 }
 
@@ -1398,6 +1426,7 @@ pub async fn start_project_session(
     prompt: String,
     provider: Option<String>,
     image_ids: Option<Vec<String>>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<ProjectSessionResponse, String> {
     let store = get_store(&store)?;
 
@@ -1429,7 +1458,10 @@ pub async fn start_project_session(
         .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
 
     // Create the session
-    let mut session = store::Session::new_running(&full_prompt, &working_dir);
+    let mut session = with_optional_acp_config_selection(
+        store::Session::new_running(&full_prompt, &working_dir),
+        acp_config_selection.clone(),
+    );
     if let Some(ref p) = provider {
         session = session.with_provider(p);
     }
@@ -1460,6 +1492,7 @@ pub async fn start_project_session(
             image_ids: image_ids.unwrap_or_default(),
             queued_message_id: None,
             pending_auto_review_branch_id: None,
+            acp_config_selection,
             branch_id: None,
             project_id: Some(project_id),
             // Project sessions are always local and write project notes.
@@ -1699,8 +1732,12 @@ fn insert_running_branch_session(
     store: &Arc<Store>,
     prepared: &PreparedBranchSessionStart,
     prompt: &str,
+    acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<CreatedBranchSession, String> {
-    let mut session = store::Session::new_running(&prepared.full_prompt, &prepared.working_dir);
+    let mut session = with_optional_acp_config_selection(
+        store::Session::new_running(&prepared.full_prompt, &prepared.working_dir),
+        acp_config_selection,
+    );
     if let Some(ref p) = prepared.provider {
         session = session.with_provider(p);
     }
@@ -1743,9 +1780,13 @@ fn insert_queued_branch_session(
     provider: Option<String>,
     image_ids: &[String],
     launch_context: Option<&BranchSessionLaunchContext>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<BranchSessionResponse, String> {
     let queued_prompt = embed_launch_context(prompt, launch_context)?;
-    let mut session = store::Session::new_queued(&queued_prompt);
+    let mut session = with_optional_acp_config_selection(
+        store::Session::new_queued(&queued_prompt),
+        acp_config_selection,
+    );
     if let Some(ref p) = provider {
         session = session.with_provider(p);
     }
@@ -1828,6 +1869,7 @@ fn launch_running_branch_session(
             image_ids,
             queued_message_id: None,
             pending_auto_review_branch_id: None,
+            acp_config_selection: created.session.acp_config_selection.clone(),
             branch_id: Some(branch_id),
             project_id: Some(project_id),
             expose_pikchr_tools,
@@ -1855,6 +1897,7 @@ pub async fn start_or_queue_branch_session_for_store(
     provider: Option<String>,
     image_ids: Option<Vec<String>>,
     launch_context: Option<BranchSessionLaunchContext>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<BranchSessionResponse, String> {
     let image_ids = image_ids.unwrap_or_default();
 
@@ -1879,6 +1922,7 @@ pub async fn start_or_queue_branch_session_for_store(
                 provider,
                 &image_ids,
                 launch_context.as_ref(),
+                acp_config_selection.clone(),
             );
         }
     }
@@ -1905,9 +1949,10 @@ pub async fn start_or_queue_branch_session_for_store(
                 provider,
                 &image_ids,
                 launch_context.as_ref(),
+                acp_config_selection.clone(),
             );
         }
-        insert_running_branch_session(&store, &prepared, &prompt)?
+        insert_running_branch_session(&store, &prepared, &prompt, acp_config_selection)?
     };
 
     launch_running_branch_session(store, registry, app_handle, prepared, created, image_ids)
@@ -1923,6 +1968,7 @@ pub fn queue_branch_session_for_store(
     provider: Option<String>,
     image_ids: Option<Vec<String>>,
     launch_context: Option<BranchSessionLaunchContext>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<BranchSessionResponse, String> {
     let image_ids = image_ids.unwrap_or_default();
 
@@ -1944,6 +1990,7 @@ pub fn queue_branch_session_for_store(
         provider,
         &image_ids,
         launch_context.as_ref(),
+        acp_config_selection,
     )
 }
 
@@ -1963,6 +2010,7 @@ pub async fn start_branch_session(
     provider: Option<String>,
     image_ids: Option<Vec<String>>,
     launch_context: Option<BranchSessionLaunchContext>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<BranchSessionResponse, String> {
     let store = get_store(&store)?;
     start_or_queue_branch_session_for_store(
@@ -1975,6 +2023,7 @@ pub async fn start_branch_session(
         provider,
         image_ids,
         launch_context,
+        acp_config_selection,
     )
     .await
 }
@@ -1991,6 +2040,7 @@ pub async fn start_or_queue_branch_session(
     provider: Option<String>,
     image_ids: Option<Vec<String>>,
     launch_context: Option<BranchSessionLaunchContext>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<BranchSessionResponse, String> {
     let store = get_store(&store)?;
     start_or_queue_branch_session_for_store(
@@ -2003,6 +2053,7 @@ pub async fn start_or_queue_branch_session(
         provider,
         image_ids,
         launch_context,
+        acp_config_selection,
     )
     .await
 }
@@ -2027,6 +2078,7 @@ pub fn queue_branch_session(
     provider: Option<String>,
     image_ids: Option<Vec<String>>,
     launch_context: Option<BranchSessionLaunchContext>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<BranchSessionResponse, String> {
     let store = get_store(&store)?;
     queue_branch_session_for_store(
@@ -2038,6 +2090,7 @@ pub fn queue_branch_session(
         provider,
         image_ids,
         launch_context,
+        acp_config_selection,
     )
 }
 
@@ -2376,6 +2429,7 @@ async fn start_queued_session_for_branch(
             image_ids,
             queued_message_id: None,
             pending_auto_review_branch_id: None,
+            acp_config_selection: session.acp_config_selection.clone(),
             branch_id: Some(branch_id),
             project_id: Some(branch.project_id.clone()),
             expose_pikchr_tools: local_note_pikchr_tools_available(
@@ -2729,6 +2783,7 @@ pub async fn trigger_auto_review(
             image_ids: vec![],
             queued_message_id: None,
             pending_auto_review_branch_id: None,
+            acp_config_selection: None,
             branch_id: Some(branch_id.clone()),
             project_id: Some(branch.project_id.clone()),
             // Auto-review sessions don't write notes.
@@ -4610,9 +4665,21 @@ mod tests {
     }
 
     #[test]
-    fn explicit_queue_response_reports_queued_status() {
+    fn explicit_queue_response_reports_queued_status_and_stores_acp_config_selection() {
         let (store, branch) = setup_branch_store();
         let registry = Arc::new(session_runner::SessionRegistry::new());
+        let selection = store::AcpConfigSelection {
+            model: Some(store::AcpConfigValueSelection {
+                config_id: "model".to_string(),
+                value_id: "gpt-5".to_string(),
+                label: Some("GPT-5".to_string()),
+            }),
+            effort: Some(store::AcpConfigValueSelection {
+                config_id: "reasoning".to_string(),
+                value_id: "medium".to_string(),
+                label: Some("Medium".to_string()),
+            }),
+        };
 
         let response = queue_branch_session_for_store(
             Arc::clone(&store),
@@ -4623,12 +4690,14 @@ mod tests {
             None,
             None,
             None,
+            Some(selection.clone()),
         )
         .unwrap();
 
         assert_eq!(response.session_status, BranchSessionLaunchStatus::Queued);
         let session = store.get_session(&response.session_id).unwrap().unwrap();
         assert_eq!(session.status, store::SessionStatus::Queued);
+        assert_eq!(session.acp_config_selection, Some(selection));
     }
 
     #[test]

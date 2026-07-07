@@ -52,9 +52,9 @@ use crate::agent::{AcpDriver, AgentDriver, MessageWriter};
 use crate::git::Span;
 use crate::shell_env::ShellEnvCache;
 use crate::store::{
-    Comment, CommentAuthor, CommentType, CompletionReason, FailureStrategy, MessageRole,
-    PipelineExecution, PipelineKind, PipelineStep, SessionMessage, SessionStatus, StepStatus,
-    StepType, Store,
+    AcpConfigSelection, Comment, CommentAuthor, CommentType, CompletionReason, FailureStrategy,
+    MessageRole, PipelineExecution, PipelineKind, PipelineStep, SessionMessage, SessionStatus,
+    StepStatus, StepType, Store,
 };
 
 const PIPELINE_STEP_PROMPT_OUTPUT_MAX_CHARS: usize = 30_000;
@@ -336,6 +336,10 @@ pub struct SessionConfig {
     pub queued_message_id: Option<String>,
     /// Branch with a commit waiting for auto-review once queued follow-ups drain.
     pub pending_auto_review_branch_id: Option<String>,
+    /// Selected ACP config values to apply after session setup and before the
+    /// prompt. This is stored on the session row by command handlers before the
+    /// runner starts so queued and resumed sessions use their own selection.
+    pub acp_config_selection: Option<AcpConfigSelection>,
     /// Branch that owns this session (branch-level sessions only).
     /// Threaded through so terminal events carry the same context as start events.
     pub branch_id: Option<String>,
@@ -403,18 +407,8 @@ pub fn start_session(
         }
     };
 
-    let acp_config_selection = store
-        .get_session(&config.session_id)
-        .map_err(|e| {
-            format!(
-                "Failed to load ACP config selection for session {}: {e}",
-                config.session_id
-            )
-        })?
-        .ok_or_else(|| format!("Session not found: {}", config.session_id))?
-        .acp_config_selection;
     let selected_acp_config_options =
-        crate::acp_config::selected_acp_config_options(acp_config_selection.as_ref());
+        crate::acp_config::selected_acp_config_options(config.acp_config_selection.as_ref());
 
     // Persist the user message right away so it's visible immediately.
     // Include image IDs so the frontend can display them alongside the text.
@@ -527,6 +521,7 @@ pub fn start_session(
                     config.action_executor.clone(),
                     config.action_registry.clone(),
                     config.provider.clone(),
+                    config.acp_config_selection.clone(),
                     cancel_token.clone(),
                 )
                 .await
@@ -1192,6 +1187,7 @@ pub fn start_pipeline_session(
                     image_ids: vec![],
                     queued_message_id: None,
                     pending_auto_review_branch_id: None,
+                    acp_config_selection: None,
                     branch_id: config.branch_id.clone(),
                     project_id: config.project_id.clone(),
                     // Deterministic pipelines hand off to a code-focused AI step,

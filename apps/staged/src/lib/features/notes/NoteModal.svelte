@@ -497,49 +497,49 @@
     showCloseButton={false}
     onOpenAutoFocus={(e) => e.preventDefault()}
   >
-    <Dialog.Header
-      class="flex-row items-stretch justify-between gap-0 border-b border-[var(--border-subtle)] p-0 flex-shrink-0"
-    >
-      <div class="note-header-pane" class:split-pane={splitChatOpen}>
-        {#if referenceNav}
-          <ReferenceNavControls nav={referenceNav} />
-        {/if}
-        <div class="header-content">
-          <span class="note-title-icon" aria-hidden="true">
-            <FileText size={13} />
-          </span>
-          <Dialog.Title
-            class="text-[var(--size-sm)] font-semibold text-foreground overflow-hidden text-ellipsis whitespace-nowrap"
-          >
-            Note
-          </Dialog.Title>
-        </div>
-        <InContentSearch
-          visible={searchVisible}
-          {matchCount}
-          currentIndex={currentMatchIndex}
-          onSearch={performSearch}
-          onNext={nextMatch}
-          onPrevious={previousMatch}
-          onClose={closeSearch}
-        />
-        <div class="note-header-actions">
-          {@render copyButton()}
-          {#if !splitChatOpen}
-            {@render chatToggleButton()}
+    <Dialog.Header class="gap-0 border-b border-[var(--border-subtle)] p-0 flex-shrink-0">
+      <div class:split-chat-open={splitChatOpen} class="note-modal-header-grid">
+        <div class="note-header-pane" class:split-pane={splitChatOpen}>
+          {#if referenceNav}
+            <ReferenceNavControls nav={referenceNav} />
           {/if}
+          <div class="header-content">
+            <span class="note-title-icon" aria-hidden="true">
+              <FileText size={13} />
+            </span>
+            <Dialog.Title
+              class="text-[var(--size-sm)] font-semibold text-foreground overflow-hidden text-ellipsis whitespace-nowrap"
+            >
+              Note
+            </Dialog.Title>
+          </div>
+          <InContentSearch
+            visible={searchVisible}
+            {matchCount}
+            currentIndex={currentMatchIndex}
+            onSearch={performSearch}
+            onNext={nextMatch}
+            onPrevious={previousMatch}
+            onClose={closeSearch}
+          />
+          <div class="note-header-actions">
+            {@render copyButton()}
+            {#if !splitChatOpen}
+              {@render chatToggleButton()}
+            {/if}
+          </div>
         </div>
+        {#if splitChatOpen}
+          <div class="chat-header-pane">
+            {@render chatToggleButton()}
+            {@render closeButton()}
+          </div>
+        {:else}
+          <div class="header-actions">
+            {@render closeButton()}
+          </div>
+        {/if}
       </div>
-      {#if splitChatOpen}
-        <div class="chat-header-pane">
-          {@render chatToggleButton()}
-          {@render closeButton()}
-        </div>
-      {:else}
-        <div class="header-actions">
-          {@render closeButton()}
-        </div>
-      {/if}
     </Dialog.Header>
     <div class:split-chat-open={splitChatOpen} class:chat-only={narrowChatOpen} class="modal-body">
       <section
@@ -637,6 +637,20 @@
 />
 
 <style>
+  .note-modal-header-grid {
+    display: flex;
+    align-items: stretch;
+    justify-content: space-between;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .note-modal-header-grid.split-chat-open,
+  .modal-body.split-chat-open {
+    display: grid;
+    grid-template-columns: minmax(0, 2fr) minmax(340px, 1fr);
+  }
+
   .note-header-pane {
     display: flex;
     align-items: center;

@@ -809,7 +809,7 @@ pub fn start_session(
                 let registry_for_follow_up = Arc::clone(&registry);
                 let app_handle_for_follow_up = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    let mut queued_message_started = false;
+                    let mut queued_message_blocks_auto_review = false;
                     if should_drain_queued_message {
                         match crate::session_commands::drain_queued_message_for_session(
                             Arc::clone(&store_for_follow_up),
@@ -823,13 +823,14 @@ pub fn start_session(
                         .await
                         {
                             Ok(true) => {
-                                queued_message_started = true;
+                                queued_message_blocks_auto_review = true;
                                 log::info!(
                                     "Drained queued follow-up message for session {session_id_for_follow_up}"
                                 );
                             }
                             Ok(false) => {}
                             Err(e) => {
+                                queued_message_blocks_auto_review = true;
                                 log::error!(
                                     "Failed to drain queued follow-up message for session {session_id_for_follow_up}: {e}"
                                 );
@@ -850,7 +851,7 @@ pub fn start_session(
                             Ok(true) => {
                                 log::info!("Drained next queued session for branch {branch_id}");
                             }
-                            Ok(false) if !queued_message_started => {
+                            Ok(false) if !queued_message_blocks_auto_review => {
                                 // Check if auto-review is enabled in user preferences
                                 let auto_review_enabled = crate::preferences_store_path_buf()
                                     .and_then(|path| std::fs::read_to_string(&path).ok())

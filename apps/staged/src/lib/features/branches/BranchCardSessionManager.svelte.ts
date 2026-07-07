@@ -10,7 +10,12 @@
  * launches render through the same timeline rows.
  */
 
-import type { Branch, BranchTimeline as BranchTimelineData, BranchSessionType } from '../../types';
+import type {
+  AcpConfigSelection,
+  Branch,
+  BranchTimeline as BranchTimelineData,
+  BranchSessionType,
+} from '../../types';
 import * as commands from '../../api/commands';
 import { getPreferredAgent } from '../settings/preferences.svelte';
 import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
@@ -24,6 +29,11 @@ import {
   hasPendingSessionStart,
   startOrQueueBranchSessionWithPending,
 } from './branchSessionLaunch.svelte';
+
+interface BranchSessionLaunchOptions {
+  provider?: string | null;
+  acpConfigSelection?: AcpConfigSelection | null;
+}
 
 export default class BranchCardSessionManager {
   // Private callback refs — declared first so $derived fields can reference them
@@ -203,7 +213,12 @@ export default class BranchCardSessionManager {
     }
   }
 
-  async startOrQueueSession(mode: BranchSessionType, prompt: string, imageIds: string[] = []) {
+  async startOrQueueSession(
+    mode: BranchSessionType,
+    prompt: string,
+    imageIds: string[] = [],
+    launchOptions: BranchSessionLaunchOptions = {}
+  ) {
     const branch = this.getBranch();
     const isRemote = this.getIsRemote();
 
@@ -217,6 +232,8 @@ export default class BranchCardSessionManager {
       mode,
       prompt,
       imageIds,
+      provider: launchOptions.provider,
+      acpConfigSelection: launchOptions.acpConfigSelection,
       getTimeline: () => this.getTimeline(),
       onTimelineRefresh: () => this.loadTimeline(),
     });
@@ -264,6 +281,8 @@ export default class BranchCardSessionManager {
     prompt: string;
     mode: BranchSessionType;
     imageIds: string[];
+    provider?: string;
+    acpConfigSelection?: AcpConfigSelection | null;
   }) {
     this.newSessionMode = data.mode;
     this.showNewSession = false;
@@ -276,14 +295,21 @@ export default class BranchCardSessionManager {
       void this.startOrQueueSession(
         data.mode,
         'Review the code changes on this branch.',
-        data.imageIds
+        data.imageIds,
+        {
+          provider: data.provider,
+          acpConfigSelection: data.acpConfigSelection,
+        }
       );
       return;
     }
 
     const prompt =
       data.prompt || (data.mode === 'review' ? 'Review the code changes on this branch.' : '');
-    void this.startOrQueueSession(data.mode, prompt, data.imageIds);
+    void this.startOrQueueSession(data.mode, prompt, data.imageIds, {
+      provider: data.provider,
+      acpConfigSelection: data.acpConfigSelection,
+    });
   }
 
   handleTimelineSessionClick(sessionId: string) {

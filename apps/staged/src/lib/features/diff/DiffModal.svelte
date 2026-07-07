@@ -44,6 +44,7 @@
     createFileSelectionWithSearch,
   } from '@builderbot/diff-viewer/utils';
   import type {
+    AcpConfigSelection,
     Branch,
     BranchSessionType,
     BranchSessionLaunchStatus,
@@ -616,6 +617,8 @@
     prompt: string;
     mode: BranchSessionType;
     imageIds: string[];
+    provider?: string;
+    acpConfigSelection?: AcpConfigSelection | null;
   }) {
     showNewSessionModal = false;
     // Capture (and clear) the origin comment before awaiting so a follow-up
@@ -635,7 +638,9 @@
       mode: data.mode,
       prompt: data.prompt,
       imageIds: data.imageIds,
+      provider: data.provider,
       launchContext,
+      acpConfigSelection: data.acpConfigSelection,
       onTimelineRefresh: () => commands.invalidateBranchTimeline(branchId),
       errorTitle: `Unable to start ${data.mode} session`,
     });

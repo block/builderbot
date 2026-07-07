@@ -120,6 +120,50 @@ describe('browser-native command wrappers', () => {
       ['send_queued_session_message', { id: 'queue-1' }],
     ]);
   });
+
+  it('forwards provider and ACP config selection when starting or queueing branch sessions', async () => {
+    const invokeCommand = vi.fn().mockResolvedValue({
+      sessionId: 'session-1',
+      artifactId: 'commit-1',
+      sessionStatus: 'running',
+    });
+    vi.doMock('./transport', () => ({
+      invokeCommand,
+      isTauri: true,
+    }));
+
+    const { startOrQueueBranchSession } = await import('./commands');
+    const launchContext = {
+      source: 'diff_viewer' as const,
+      scope: 'commit' as const,
+      commitSha: 'abc123',
+      reviewId: 'review-1',
+    };
+    const acpConfigSelection = {
+      model: { configId: 'model', valueId: 'opus', label: 'Opus' },
+      effort: { configId: 'reasoning_effort', valueId: 'high', label: 'High' },
+    };
+
+    await startOrQueueBranchSession(
+      'branch-1',
+      'Fix the bug',
+      'commit',
+      'codex',
+      ['image-1'],
+      launchContext,
+      acpConfigSelection
+    );
+
+    expect(invokeCommand).toHaveBeenCalledWith('start_or_queue_branch_session', {
+      branchId: 'branch-1',
+      prompt: 'Fix the bug',
+      sessionType: 'commit',
+      provider: 'codex',
+      imageIds: ['image-1'],
+      launchContext,
+      acpConfigSelection,
+    });
+  });
 });
 
 describe('cached mutation command wrappers', () => {

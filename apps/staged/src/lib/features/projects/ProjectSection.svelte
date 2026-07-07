@@ -8,7 +8,14 @@
   import { onMount, onDestroy } from 'svelte';
   import { listenToEvent } from '../../transport';
   import FileText from '@lucide/svelte/icons/file-text';
-  import type { Project, ProjectRepo, Branch, ProjectNote, HashtagItem } from '../../types';
+  import type {
+    AcpConfigSelection,
+    Project,
+    ProjectRepo,
+    Branch,
+    ProjectNote,
+    HashtagItem,
+  } from '../../types';
   import * as commands from '../../api/commands';
   import { buildProjectHashtagItems } from '../sessions/hashtagItems';
   import { branchTimelineReadyKey } from '../branches/branchTimelineReady';
@@ -202,17 +209,24 @@
     void ensureHashtagItems();
   }
 
-  async function handleSubmitProjectSession(data: { prompt: string; imageIds: string[] }) {
+  async function handleSubmitProjectSession(data: {
+    prompt: string;
+    imageIds: string[];
+    provider?: string;
+    acpConfigSelection?: AcpConfigSelection | null;
+  }) {
     const text = data.prompt.trim();
-    if (!text || !preferredProvider) return;
+    const provider = data.provider ?? preferredProvider;
+    if (!text || !provider) return;
 
     const imageIdsToSend = data.imageIds.length > 0 ? [...data.imageIds] : undefined;
     try {
       const response = await commands.startProjectSession(
         project.id,
         text,
-        preferredProvider,
-        imageIdsToSend
+        provider,
+        imageIdsToSend,
+        data.acpConfigSelection ?? undefined
       );
       activeSessionIds = new Set([...activeSessionIds, response.sessionId]);
       sessionRegistry.register(response.sessionId, project.id, 'note');
@@ -522,7 +536,12 @@
     onSubmit={(data) => {
       draftProjectPrompt = '';
       draftProjectImageIds = [];
-      void handleSubmitProjectSession({ prompt: data.prompt, imageIds: data.imageIds });
+      void handleSubmitProjectSession({
+        prompt: data.prompt,
+        imageIds: data.imageIds,
+        provider: data.provider,
+        acpConfigSelection: data.acpConfigSelection,
+      });
     }}
   />
 {/if}

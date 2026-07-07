@@ -2,8 +2,8 @@
   AcpConfigPicker.svelte — Compact provider/model/effort picker.
 
   Provider changes are persisted to the existing recent-agent preference so
-  current launch paths keep using the selected provider. Model and effort are
-  rendered here only; launch payload wiring lands separately.
+  other launch paths keep using the selected provider. New-session launch paths
+  can subscribe to the provider plus selected model/effort payload.
 -->
 <script lang="ts">
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
@@ -19,6 +19,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import { cn } from '$lib/components/utils';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+  import { buildAcpConfigSelection, type AcpConfigPickerSelection } from './acpConfigSelection';
 
   interface AgentOption {
     id: string;
@@ -31,6 +32,7 @@
     dropUp?: boolean;
     triggerClass?: string;
     workingDir?: string | null;
+    onSelectionChange?: (selection: AcpConfigPickerSelection) => void;
   }
 
   let {
@@ -39,6 +41,7 @@
     dropUp = false,
     triggerClass,
     workingDir = null,
+    onSelectionChange,
   }: Props = $props();
 
   let config = $state<AcpConfigDiscovery | null>(null);
@@ -66,6 +69,13 @@
     agents.length > 1 || !!modelSelector || !!effortSelector || configLoading || !!configError
   );
   let shouldRender = $derived((remote || agentState.loaded) && agents.length > 0);
+  let pickerSelection = $derived({
+    providerId: selectedProviderId,
+    acpConfigSelection: buildAcpConfigSelection({
+      model: { selector: modelSelector, valueId: selectedModelValue },
+      effort: { selector: effortSelector, valueId: selectedEffortValue },
+    }),
+  } satisfies AcpConfigPickerSelection);
 
   $effect(() => {
     const providerId = selectedProviderId;
@@ -126,6 +136,10 @@
       selectedEffortValue = defaultSelectorValue(effortSelector);
       effortSelectorKey = nextKey;
     }
+  });
+
+  $effect(() => {
+    onSelectionChange?.(pickerSelection);
   });
 
   function handleProviderChange(providerId: string) {

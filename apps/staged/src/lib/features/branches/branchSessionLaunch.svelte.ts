@@ -1,5 +1,6 @@
 import { toast } from 'svelte-sonner';
 import type {
+  AcpConfigSelection,
   BranchSessionLaunchContext,
   BranchSessionLaunchStatus,
   BranchSessionResponse,
@@ -188,8 +189,10 @@ interface StartOrQueueBranchSessionOptions {
   isRemote: boolean;
   mode: BranchSessionType;
   prompt: string;
+  provider?: string | null;
   imageIds?: string[];
   launchContext?: BranchSessionLaunchContext;
+  acpConfigSelection?: AcpConfigSelection | null;
   getTimeline?: () => BranchTimeline | null;
   onTimelineRefresh?: () => void | Promise<void>;
   willQueueHint?: boolean;
@@ -202,8 +205,10 @@ export async function startOrQueueBranchSessionWithPending({
   isRemote,
   mode,
   prompt,
+  provider,
   imageIds = [],
   launchContext,
+  acpConfigSelection = null,
   getTimeline,
   onTimelineRefresh,
   willQueueHint,
@@ -235,9 +240,10 @@ export async function startOrQueueBranchSessionWithPending({
       branchId,
       prompt,
       mode,
-      getPreferredAgent(agents) ?? undefined,
+      provider ?? getPreferredAgent(agents) ?? undefined,
       imageIds.length > 0 ? imageIds : undefined,
-      launchContext
+      launchContext,
+      acpConfigSelection ?? undefined
     );
 
     if (!result || !result.sessionId) {

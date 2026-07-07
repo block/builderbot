@@ -164,6 +164,30 @@ describe('browser-native command wrappers', () => {
       acpConfigSelection,
     });
   });
+
+  it('forwards ACP config selection when resuming a session', async () => {
+    const invokeCommand = vi.fn().mockResolvedValue(undefined);
+    vi.doMock('./transport', () => ({
+      invokeCommand,
+      isTauri: true,
+    }));
+
+    const { resumeSession } = await import('./commands');
+    const acpConfigSelection = {
+      model: { configId: 'model', valueId: 'opus', label: 'Opus' },
+      effort: { configId: 'reasoning_effort', valueId: 'high', label: 'High' },
+    };
+
+    await resumeSession('session-1', 'Continue', ['image-1'], 'branch-1', acpConfigSelection);
+
+    expect(invokeCommand).toHaveBeenCalledWith('resume_session', {
+      sessionId: 'session-1',
+      prompt: 'Continue',
+      imageIds: ['image-1'],
+      branchId: 'branch-1',
+      acpConfigSelection,
+    });
+  });
 });
 
 describe('cached mutation command wrappers', () => {

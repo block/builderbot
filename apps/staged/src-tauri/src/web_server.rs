@@ -2879,14 +2879,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let working_dir = std::path::PathBuf::from(&session.working_dir);
             let effective_acp_config_selection =
                 acp_config_selection.or_else(|| session.acp_config_selection.clone());
-            if effective_acp_config_selection != session.acp_config_selection {
-                store
-                    .set_session_acp_config_selection(
-                        &session_id,
-                        effective_acp_config_selection.as_ref(),
-                    )
-                    .map_err(|e| e.to_string())?;
-            }
+            let acp_config_selection_to_persist = effective_acp_config_selection.clone();
 
             let project_note = store
                 .get_project_note_by_session(&session_id)
@@ -3019,7 +3012,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
 
             session_runner::start_session(
                 SessionConfig {
-                    session_id,
+                    session_id: session_id.clone(),
                     prompt,
                     working_dir,
                     agent_session_id,
@@ -3047,10 +3040,19 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     project_id: config_project_id,
                     expose_pikchr_tools,
                 },
-                store,
+                Arc::clone(&store),
                 app_handle.clone(),
                 Arc::clone(session_registry),
             )?;
+
+            if acp_config_selection_to_persist != session.acp_config_selection {
+                store
+                    .set_session_acp_config_selection(
+                        &session_id,
+                        acp_config_selection_to_persist.as_ref(),
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
 
             Ok(Value::Null)
         }

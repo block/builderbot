@@ -926,11 +926,7 @@ pub(crate) async fn resume_session_for_store(
     let working_dir = PathBuf::from(&session.working_dir);
     let effective_acp_config_selection =
         acp_config_selection.or_else(|| session.acp_config_selection.clone());
-    if effective_acp_config_selection != session.acp_config_selection {
-        store
-            .set_session_acp_config_selection(&session_id, effective_acp_config_selection.as_ref())
-            .map_err(|e| e.to_string())?;
-    }
+    let acp_config_selection_to_persist = effective_acp_config_selection.clone();
 
     // Check if this session is linked to a project note — if so, we need
     // to start the MCP server so the agent has access to project tools.
@@ -1075,7 +1071,7 @@ pub(crate) async fn resume_session_for_store(
 
     session_runner::start_session(
         SessionConfig {
-            session_id,
+            session_id: session_id.clone(),
             prompt,
             working_dir,
             agent_session_id,
@@ -1107,10 +1103,16 @@ pub(crate) async fn resume_session_for_store(
             project_id: config_project_id,
             expose_pikchr_tools,
         },
-        store,
+        Arc::clone(&store),
         app_handle,
         Arc::clone(&registry),
     )?;
+
+    if acp_config_selection_to_persist != session.acp_config_selection {
+        store
+            .set_session_acp_config_selection(&session_id, acp_config_selection_to_persist.as_ref())
+            .map_err(|e| e.to_string())?;
+    }
 
     Ok(())
 }

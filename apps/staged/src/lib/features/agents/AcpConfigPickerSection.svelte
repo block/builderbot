@@ -12,9 +12,10 @@
     selector: AcpConfigSelector;
     value: string | null;
     onValueChange: (value: string) => void;
+    disabled?: boolean;
   }
 
-  let { title, selector, value, onValueChange }: Props = $props();
+  let { title, selector, value, onValueChange, disabled = false }: Props = $props();
 
   let selectedValue = $derived(value ?? selector.currentValueId);
   let groups = $derived(groupOptions(selector.options));
@@ -38,14 +39,16 @@
 {#if selector.options.length > 0}
   <DropdownMenu.RadioGroup
     value={selectedValue ?? undefined}
-    onValueChange={(next) => onValueChange(next)}
+    onValueChange={(next) => {
+      if (!disabled) onValueChange(next);
+    }}
   >
     {#each groups as group, groupIndex (`${group.label ?? 'ungrouped'}-${groupIndex}`)}
       {#if group.label}
         <div class="picker-group-label">{group.label}</div>
       {/if}
       {#each group.options as option (option.valueId)}
-        <DropdownMenu.RadioItem value={option.valueId}>
+        <DropdownMenu.RadioItem value={option.valueId} {disabled}>
           <span class="picker-option-label">{option.label}</span>
         </DropdownMenu.RadioItem>
       {/each}

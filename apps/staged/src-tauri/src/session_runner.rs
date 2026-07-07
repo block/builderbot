@@ -337,8 +337,8 @@ pub struct SessionConfig {
     /// Branch with a commit waiting for auto-review once queued follow-ups drain.
     pub pending_auto_review_branch_id: Option<String>,
     /// Selected ACP config values to apply after session setup and before the
-    /// prompt. This is stored on the session row by command handlers before the
-    /// runner starts so queued and resumed sessions use their own selection.
+    /// prompt. Command handlers also store successful selections on the session
+    /// row so queued and resumed sessions use their own selection.
     pub acp_config_selection: Option<AcpConfigSelection>,
     /// Branch that owns this session (branch-level sessions only).
     /// Threaded through so terminal events carry the same context as start events.

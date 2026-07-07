@@ -49,6 +49,8 @@
   import Spinner from '../../shared/Spinner.svelte';
   import { isResumableReason } from '../../types';
   import type {
+    AcpConfigSelection,
+    AcpConfigValueSelection,
     Session,
     SessionMessage,
     QueuedSessionMessage,
@@ -62,6 +64,7 @@
     createImage,
     createImageFromData,
     deleteImage,
+    discoverAcpConfig,
     getImageData,
     getSession,
     getSessionAcpMetadataMessages,
@@ -73,8 +76,13 @@
     queueSessionMessage,
     resumeSession,
     sendQueuedSessionMessage,
+    type AcpConfigDiscovery,
+    type AcpConfigSelector,
   } from '../../api/commands';
   import { listenToEvent, type UnlistenFn } from '../../transport';
+  import AcpFixedConfigPicker from '../agents/AcpFixedConfigPicker.svelte';
+  import { agentState } from '../agents/agent.svelte';
+  import { buildAcpConfigSelection } from '../agents/acpConfigSelection';
   import HashtagInput from './HashtagInput.svelte';
   import {
     buildBranchHashtagItems,
@@ -126,6 +134,7 @@
   import NoteActivityCard from './NoteActivityCard.svelte';
   import { splitAtNoteIndicator } from './noteIndicators';
   import type { HashtagClickInfo } from '../references/referenceHistory.svelte';
+  import { latestAcpConfigDiscoveryFromMetadata } from './acpConfigMetadata';
 
   interface Props {
     active: boolean;
@@ -193,6 +202,14 @@
   let expandedTools = $state<Set<string>>(new Set());
   let displayRoots = $state<string[]>([]);
   let currentDisplayRootKey = '';
+  let discoveredFollowupConfig = $state<AcpConfigDiscovery | null>(null);
+  let followupConfigLoading = $state(false);
+  let followupConfigError = $state<string | null>(null);
+  let selectedFollowupModelValue = $state<string | null>(null);
+  let selectedFollowupEffortValue = $state<string | null>(null);
+  let followupModelStateKey = $state<string | null>(null);
+  let followupEffortStateKey = $state<string | null>(null);
+  let followupDiscoveryRun = 0;
 
   let isLive = $derived(session?.status === 'running');
   let hasQueuedMessages = $derived(queuedMessages.length > 0);
@@ -213,6 +230,29 @@
   let pikchrRendererLoadFailedKey = $state<string | null>(null);
   let pikchrRendererLoadFailed = $derived(pikchrRendererLoadFailedKey === pikchrRendererLoadKey);
   let diagramViewerSvg = $state<string | null>(null);
+  let metadataFollowupConfig = $derived.by(() =>
+    latestAcpConfigDiscoveryFromMetadata(session?.provider, acpMetadataMessages)
+  );
+  let rediscoveredFollowupConfig = $derived(
+    discoveredFollowupConfig?.providerId === session?.provider ? discoveredFollowupConfig : null
+  );
+  let followupModelSelector = $derived(
+    metadataFollowupConfig?.model ?? rediscoveredFollowupConfig?.model ?? null
+  );
+  let followupEffortSelector = $derived(
+    metadataFollowupConfig?.effort ?? rediscoveredFollowupConfig?.effort ?? null
+  );
+  let followupProviderLabel = $derived(
+    agentState.providers.find((provider) => provider.id === session?.provider)?.label ??
+      session?.provider ??
+      null
+  );
+  let followupAcpConfigSelection = $derived(
+    buildAcpConfigSelection({
+      model: { selector: followupModelSelector, valueId: selectedFollowupModelValue },
+      effort: { selector: followupEffortSelector, valueId: selectedFollowupEffortValue },
+    })
+  );
 
   const SLIDE_DURATION = 150;
 
@@ -704,12 +744,18 @@
     if (!targetSessionId || session?.id !== targetSessionId || (!sendingLocked && sending)) return;
     if (!sendingLocked) sending = true;
     error = null;
+    const acpConfigSelection: AcpConfigSelection | undefined =
+      followupAcpConfigSelection ?? undefined;
     try {
-      await resumeSession(targetSessionId, text, imageIds, targetBranchId);
+      await resumeSession(targetSessionId, text, imageIds, targetBranchId, acpConfigSelection);
       if (session?.id !== targetSessionId) return;
       // Backend sets status to running and emits an event.
       // Force an immediate poll to pick up the new user message + status.
-      session = { ...session, status: 'running' };
+      session = {
+        ...session,
+        status: 'running',
+        acpConfigSelection: acpConfigSelection ?? session.acpConfigSelection ?? null,
+      };
       startPolling();
       scrollToBottom();
     } catch (e) {
@@ -1160,10 +1206,128 @@
     }
   });
 
+  $effect(() => {
+    const providerId = session?.provider ?? null;
+    const workingDir = session?.workingDir ?? null;
+    const hasMetadataConfig = metadataFollowupConfig !== null;
+
+    if (!active || !providerId || hasMetadataConfig) {
+      discoveredFollowupConfig = null;
+      followupConfigLoading = false;
+      followupConfigError = null;
+      return;
+    }
+
+    const run = ++followupDiscoveryRun;
+    let cancelled = false;
+    followupConfigLoading = true;
+    followupConfigError = null;
+
+    discoverAcpConfig(providerId, workingDir, { force: true })
+      .then(({ data, revalidating }) => {
+        if (cancelled || run !== followupDiscoveryRun) return;
+        discoveredFollowupConfig = data;
+        followupConfigLoading = false;
+        revalidating
+          ?.then((fresh) => {
+            if (!cancelled && run === followupDiscoveryRun) {
+              discoveredFollowupConfig = fresh;
+            }
+          })
+          .catch((error) => {
+            if (!cancelled && run === followupDiscoveryRun) {
+              console.error('Failed to revalidate ACP config:', error);
+            }
+          });
+      })
+      .catch((error) => {
+        if (cancelled || run !== followupDiscoveryRun) return;
+        console.error('Failed to discover ACP config:', error);
+        discoveredFollowupConfig = null;
+        followupConfigLoading = false;
+        followupConfigError = error instanceof Error ? error.message : String(error);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  });
+
+  $effect(() => {
+    const key = selectorStateKey(
+      session?.id,
+      followupModelSelector,
+      session?.acpConfigSelection?.model ?? null
+    );
+    if (key !== followupModelStateKey) {
+      selectedFollowupModelValue = initialSelectorValue(
+        followupModelSelector,
+        session?.acpConfigSelection?.model ?? null
+      );
+      followupModelStateKey = key;
+    }
+  });
+
+  $effect(() => {
+    const key = selectorStateKey(
+      session?.id,
+      followupEffortSelector,
+      session?.acpConfigSelection?.effort ?? null
+    );
+    if (key !== followupEffortStateKey) {
+      selectedFollowupEffortValue = initialSelectorValue(
+        followupEffortSelector,
+        session?.acpConfigSelection?.effort ?? null
+      );
+      followupEffortStateKey = key;
+    }
+  });
+
   export function close() {
     if (closed) return;
     closed = true;
     stopPolling();
+  }
+
+  function selectorStateKey(
+    currentSessionId: string | undefined,
+    selector: AcpConfigSelector | null,
+    storedSelection: AcpConfigValueSelection | null
+  ): string {
+    const optionIds = selector?.options.map((option) => option.valueId).join(',') ?? '';
+    return [
+      currentSessionId ?? '',
+      selector?.configId ?? '',
+      selector?.currentValueId ?? '',
+      optionIds,
+      storedSelection?.configId ?? '',
+      storedSelection?.valueId ?? '',
+    ].join('\0');
+  }
+
+  function initialSelectorValue(
+    selector: AcpConfigSelector | null,
+    storedSelection: AcpConfigValueSelection | null
+  ): string | null {
+    if (!selector || selector.options.length === 0) return null;
+    if (
+      storedSelection?.configId === selector.configId &&
+      selector.options.some((option) => option.valueId === storedSelection.valueId)
+    ) {
+      return storedSelection.valueId;
+    }
+    if (selector.options.some((option) => option.valueId === selector.currentValueId)) {
+      return selector.currentValueId;
+    }
+    return selector.options[0]?.valueId ?? null;
+  }
+
+  function handleFollowupModelChange(value: string) {
+    selectedFollowupModelValue = value;
+  }
+
+  function handleFollowupEffortChange(value: string) {
+    selectedFollowupEffortValue = value;
   }
 
   let grouped = $derived.by(() =>
@@ -1897,6 +2061,20 @@
           onkeydown={handleInputKeydown}
           oninput={autoResize}
           items={hashtagItems}
+        />
+        <AcpFixedConfigPicker
+          providerId={session?.provider ?? null}
+          providerLabel={followupProviderLabel}
+          modelSelector={followupModelSelector}
+          effortSelector={followupEffortSelector}
+          selectedModelValue={selectedFollowupModelValue}
+          selectedEffortValue={selectedFollowupEffortValue}
+          loading={followupConfigLoading}
+          error={followupConfigError}
+          disabled={isLive || sending}
+          dropUp
+          onModelChange={handleFollowupModelChange}
+          onEffortChange={handleFollowupEffortChange}
         />
         {#if isLive}
           <span class="inline-flex" title="Stop session">

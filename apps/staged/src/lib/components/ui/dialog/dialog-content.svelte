@@ -10,6 +10,7 @@
   import XIcon from '@lucide/svelte/icons/x';
   import { viewport, watchViewport } from '$lib/shared/viewport.svelte';
   import { watchKeyboardInset } from '$lib/shared/keyboardInset.svelte';
+  import { getWindowSync } from '$lib/transport';
 
   let {
     ref = $bindable(null),
@@ -19,6 +20,7 @@
     children,
     showCloseButton = true,
     fullScreenOnMobile = true,
+    onpointerdown: onPointerDown,
     ...restProps
   }: WithoutChildrenOrChild<DialogPrimitive.ContentProps> & {
     portalProps?: WithoutChildrenOrChild<ComponentProps<typeof DialogPortal>>;
@@ -56,6 +58,35 @@
   const contentStyle = $derived(
     fullScreen ? `${styleProp ? `${styleProp};` : ''}${fullScreenStyle}` : styleProp
   );
+
+  const dragRegionSelector =
+    '[data-dialog-drag-region], [data-slot="dialog-header"], .modal-header, .diagram-viewer-header';
+  const noDragSelector =
+    'button, a, input, select, textarea, summary, [role="button"], [role="link"], [role="textbox"], [contenteditable="true"], [data-dialog-no-drag]';
+
+  type DialogPointerEvent = PointerEvent & { currentTarget: EventTarget & HTMLDivElement };
+
+  function startFullScreenDrag(event: DialogPointerEvent) {
+    if (!fullScreen || event.button !== 0) return;
+
+    const contentElement = event.currentTarget;
+    const target = event.target as HTMLElement | null;
+    if (!target || !contentElement.contains(target)) return;
+    if (target.closest(noDragSelector)) return;
+
+    const dragRegion = target.closest(dragRegionSelector);
+    if (!dragRegion || !contentElement.contains(dragRegion)) return;
+
+    event.preventDefault();
+    void getWindowSync().startDragging();
+  }
+
+  function handlePointerDown(event: DialogPointerEvent) {
+    onPointerDown?.(event);
+    if (!event.defaultPrevented) {
+      startFullScreenDrag(event);
+    }
+  }
 </script>
 
 <DialogPortal {...portalProps}>
@@ -72,6 +103,7 @@
     )}
     style={contentStyle}
     onOpenAutoFocus={(e) => e.preventDefault()}
+    onpointerdown={handlePointerDown}
     {...restProps}
   >
     {@render children?.()}

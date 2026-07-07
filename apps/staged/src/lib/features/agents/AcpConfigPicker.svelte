@@ -60,12 +60,16 @@
   let selectedProvider = $derived(agents.find((provider) => provider.id === selectedProviderId));
   let modelSelector = $derived(config?.model ?? null);
   let effortSelector = $derived(config?.effort ?? null);
+  // The provider is identified by the trigger icon; the label only carries the
+  // model/effort values, falling back to the provider name before discovery.
   let triggerParts = $derived(
     [
-      selectedProvider?.label ?? 'Agent',
       selectorValueLabel(modelSelector, selectedModelValue),
       selectorValueLabel(effortSelector, selectedEffortValue),
     ].filter((part): part is string => !!part)
+  );
+  let triggerLabel = $derived(
+    triggerParts.length > 0 ? triggerParts.join(' · ') : (selectedProvider?.label ?? 'Agent')
   );
   let canOpen = $derived(
     agents.length > 1 || !!modelSelector || !!effortSelector || configLoading || !!configError
@@ -205,12 +209,10 @@
           triggerClass
         )}
         {disabled}
-        title="Select AI configuration"
+        title={`Select AI configuration (${selectedProvider?.label ?? 'Agent'})`}
       >
         <AgentIcon id={selectedProviderId ?? ''} size={12} />
-        <span class="selector-label min-w-0 truncate whitespace-nowrap"
-          >{triggerParts.join(' · ')}</span
-        >
+        <span class="selector-label min-w-0 truncate whitespace-nowrap">{triggerLabel}</span>
         {#if configLoading}
           <Spinner size={12} />
         {:else}

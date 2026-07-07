@@ -40,12 +40,16 @@
     onEffortChange,
   }: Props = $props();
 
+  // The provider is identified by the trigger icon; the label only carries the
+  // model/effort values, falling back to the provider name before discovery.
   let triggerParts = $derived(
     [
-      providerLabel ?? providerId ?? 'Agent',
       selectorValueLabel(modelSelector, selectedModelValue),
       selectorValueLabel(effortSelector, selectedEffortValue),
     ].filter((part): part is string => !!part)
+  );
+  let triggerLabel = $derived(
+    triggerParts.length > 0 ? triggerParts.join(' · ') : (providerLabel ?? providerId ?? 'Agent')
   );
   let shouldRender = $derived(
     !!providerId && (!!modelSelector || !!effortSelector || loading || !!error)
@@ -74,10 +78,10 @@
       {disabled}
       title={disabled
         ? 'Configuration changes are available after this turn'
-        : 'Select model and effort'}
+        : `Select model and effort (${providerLabel ?? providerId ?? 'Agent'})`}
     >
       <AgentIcon id={providerId ?? ''} size={14} />
-      <span class="min-w-0 truncate whitespace-nowrap">{triggerParts.join(' · ')}</span>
+      <span class="min-w-0 truncate whitespace-nowrap">{triggerLabel}</span>
       {#if loading}
         <Spinner size={12} />
       {:else}

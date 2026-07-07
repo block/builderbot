@@ -45,7 +45,7 @@ use tauri::AppHandle;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio_util::sync::CancellationToken;
 
-use acp_client::{McpServer, McpServerHttp};
+use acp_client::{AgentRunOutcome, McpServer, McpServerHttp};
 
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::agent::{AcpDriver, AgentDriver, MessageWriter};
@@ -650,7 +650,9 @@ pub fn start_session(
                 match validate_latest_session_pikchr(&store, &config.session_id)? {
                     LatestAssistantPikchrValidation::SkippedFinalMessage
                     | LatestAssistantPikchrValidation::NoPikchr
-                    | LatestAssistantPikchrValidation::Valid => return Ok(()),
+                    | LatestAssistantPikchrValidation::Valid => {
+                        return Ok(AgentRunOutcome::Completed);
+                    }
                     LatestAssistantPikchrValidation::Invalid(error) => {
                         if repair_attempts >= PIKCHR_VALIDATION_MAX_REPAIR_ATTEMPTS {
                             return Err(format!(
@@ -707,10 +709,14 @@ pub fn start_session(
         // If the session was cancelled and then deleted, these DB writes
         // are harmless no-ops — see module-level docs on the race.
         let (new_status, error_msg, completion_reason) = match result {
-            Ok(()) if cancel_token.is_cancelled() => {
+            Ok(AgentRunOutcome::Cancelled) if cancel_token.is_cancelled() => {
                 ("cancelled", None, cancellation_completion_reason.clone())
             }
-            Ok(()) => ("completed", None, CompletionReason::TurnComplete),
+            Ok(AgentRunOutcome::Cancelled) => ("cancelled", None, CompletionReason::Interrupted),
+            Ok(AgentRunOutcome::Completed) if cancel_token.is_cancelled() => {
+                ("cancelled", None, cancellation_completion_reason.clone())
+            }
+            Ok(AgentRunOutcome::Completed) => ("completed", None, CompletionReason::TurnComplete),
             Err(ref e) if cancel_token.is_cancelled() => {
                 log::info!(
                     "Session {session_id_for_status} cancelled (error during teardown: {e})"
@@ -854,8 +860,11 @@ enum LatestAssistantPikchrValidation {
     Invalid(crate::pikchr_validation::PikchrValidationError),
 }
 
-fn should_validate_pikchr_after_turn(result: &Result<(), String>, is_cancelled: bool) -> bool {
-    result.is_ok() && !is_cancelled
+fn should_validate_pikchr_after_turn(
+    result: &Result<AgentRunOutcome, String>,
+    is_cancelled: bool,
+) -> bool {
+    matches!(result, Ok(AgentRunOutcome::Completed)) && !is_cancelled
 }
 
 fn validate_latest_session_pikchr(
@@ -2842,6 +2851,7 @@ mod tests {
             content: content.to_string(),
             created_at: 0,
             image_ids: vec![],
+            acp: Default::default(),
         }
     }
 
@@ -2911,12 +2921,15 @@ mod tests {
 
     #[test]
     fn pikchr_validation_skips_failed_cancelled_and_interrupted_turns() {
-        let ok = Ok(());
+        let completed = Ok(AgentRunOutcome::Completed);
+        let cancelled = Ok(AgentRunOutcome::Cancelled);
         let failed = Err("agent crashed".to_string());
 
-        assert!(should_validate_pikchr_after_turn(&ok, false));
+        assert!(should_validate_pikchr_after_turn(&completed, false));
+        assert!(!should_validate_pikchr_after_turn(&cancelled, false));
         assert!(!should_validate_pikchr_after_turn(&failed, false));
-        assert!(!should_validate_pikchr_after_turn(&ok, true));
+        assert!(!should_validate_pikchr_after_turn(&completed, true));
+        assert!(!should_validate_pikchr_after_turn(&cancelled, true));
         assert!(!should_validate_pikchr_after_turn(&failed, true));
     }
 

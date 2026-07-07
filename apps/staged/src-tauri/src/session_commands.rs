@@ -355,6 +355,26 @@ pub fn get_session_messages_since(
 }
 
 #[tauri::command]
+pub fn get_session_acp_metadata_messages(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    session_id: String,
+) -> Result<Vec<store::SessionMessage>, String> {
+    get_store(&store)?
+        .get_session_acp_metadata_messages(&session_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_session_acp_initialization(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    session_id: String,
+) -> Result<Option<store::AcpMessageMetadata>, String> {
+    get_store(&store)?
+        .get_session_acp_initialization(&session_id)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub fn count_assistant_messages_after(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     session_id: String,
@@ -535,7 +555,7 @@ pub async fn resume_session(
 
     // For remote branches, resolve the actual workspace path so the remote
     // agent starts in the correct repo directory.
-    let remote_working_dir = if let Some(ref branch) = branch_from_id {
+    let remote_working_dir = if let Some(ref branch) = linked_branch {
         if branch.workspace_name.is_some() {
             let ws_name = branch.workspace_name.as_deref().unwrap().to_string();
             let store_for_resolve = Arc::clone(&store);

@@ -762,6 +762,163 @@ fn test_session_messages() {
 }
 
 #[test]
+fn test_acp_metadata_rows_are_hidden_from_legacy_session_messages() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    let visible_id = store
+        .add_session_message(&session.id, MessageRole::Assistant, "visible")
+        .unwrap();
+    let metadata_id = store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("session_info_update".to_string()),
+                acp_session_info: Some(serde_json::json!({"title": "ACP title"})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let all = store.get_session_messages(&session.id).unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].id, visible_id);
+    assert_eq!(all[0].content, "visible");
+
+    let count = store
+        .count_assistant_messages_after(&session.id, 0)
+        .unwrap();
+    assert_eq!(count, 1);
+
+    let conn = store.conn.lock().unwrap();
+    let raw_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM session_messages WHERE session_id = ?1",
+            [&session.id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored_info: String = conn
+        .query_row(
+            "SELECT acp_session_info FROM session_messages WHERE id = ?1",
+            [metadata_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(raw_count, 2);
+    assert_eq!(stored_info, r#"{"title":"ACP title"}"#);
+}
+
+#[test]
+fn test_acp_metadata_messages_query_includes_hidden_rows() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    store
+        .add_acp_metadata_message_with_role(
+            &session.id,
+            MessageRole::User,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("user_message_chunk".to_string()),
+                acp_message_id: Some("user-msg-1".to_string()),
+                acp_content: Some(serde_json::json!({
+                    "content": {"type": "text", "text": "hello"}
+                })),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("usage_update".to_string()),
+                acp_usage: Some(serde_json::json!({
+                    "used": 42,
+                    "size": 1000
+                })),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    assert!(
+        store.get_session_messages(&session.id).unwrap().is_empty(),
+        "ACP metadata rows must stay hidden from legacy transcript reads"
+    );
+
+    let metadata_rows = store
+        .get_session_acp_metadata_messages(&session.id)
+        .unwrap();
+    assert_eq!(metadata_rows.len(), 2);
+    assert_eq!(metadata_rows[0].role, MessageRole::User);
+    assert_eq!(
+        metadata_rows[0].acp.acp_message_id.as_deref(),
+        Some("user-msg-1")
+    );
+    assert_eq!(metadata_rows[1].acp.acp_usage.as_ref().unwrap()["used"], 42);
+}
+
+#[test]
+fn test_acp_initialization_metadata_is_queryable() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("initialize".to_string()),
+                acp_protocol_version: Some("1".to_string()),
+                acp_agent_capabilities: Some(serde_json::json!({
+                    "loadSession": true,
+                    "promptCapabilities": {"image": true},
+                    "mcpCapabilities": {"http": true, "sse": false}
+                })),
+                acp_auth_methods: Some(serde_json::json!([
+                    {"id": "default", "name": "Default"}
+                ])),
+                acp_agent_info: Some(serde_json::json!({
+                    "name": "goose",
+                    "version": "1.2.3"
+                })),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    assert!(
+        store.get_session_messages(&session.id).unwrap().is_empty(),
+        "initialization metadata must remain hidden from legacy transcript reads"
+    );
+
+    let metadata = store
+        .get_session_acp_initialization(&session.id)
+        .unwrap()
+        .expect("initialization metadata should be returned");
+    assert_eq!(metadata.acp_event_kind.as_deref(), Some("initialize"));
+    assert_eq!(metadata.acp_protocol_version.as_deref(), Some("1"));
+    assert_eq!(
+        metadata.acp_agent_capabilities.as_ref().unwrap()["promptCapabilities"]["image"],
+        true
+    );
+    assert_eq!(
+        metadata.acp_auth_methods.as_ref().unwrap()[0]["id"],
+        "default"
+    );
+    assert_eq!(
+        metadata.acp_agent_info.as_ref().unwrap()["version"],
+        "1.2.3"
+    );
+}
+
+#[test]
 fn test_count_assistant_messages_after() {
     let store = Store::in_memory().unwrap();
 

@@ -12,16 +12,25 @@ use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use agent_client_protocol::{
-    Agent, ClientSideConnection, ContentBlock as AcpContentBlock, ImageContent, Implementation,
-    InitializeRequest, LoadSessionRequest, McpCapabilities, McpServer, NewSessionRequest,
-    PermissionOptionId, PromptRequest, ProtocolVersion, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionConfigOption, SessionInfoUpdate, SessionModelState, SessionNotification, SessionUpdate,
-    TextContent,
+    schema::{
+        v1::{
+            AgentCapabilities, AuthMethod, AuthenticateRequest, CancelNotification,
+            ContentBlock as AcpContentBlock, ContentChunk, ImageContent, Implementation,
+            InitializeRequest, InitializeResponse, LoadSessionRequest, McpCapabilities, McpServer,
+            NewSessionRequest, PermissionOption as SchemaPermissionOption, PermissionOptionId,
+            PermissionOptionKind as SchemaPermissionOptionKind, PromptRequest, PromptResponse,
+            RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+            SelectedPermissionOutcome, SessionConfigOption, SessionInfoUpdate, SessionModeState,
+            SessionNotification, SessionUpdate, StopReason, TextContent, ToolCallContent,
+        },
+        ProtocolVersion,
+    },
+    Agent, ByteStreams, Client, ConnectionTo,
 };
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -36,6 +45,8 @@ use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 
 use crate::types::blox_acp_command;
+
+static PERMISSION_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 // =============================================================================
 // Public traits and types
@@ -73,7 +84,7 @@ pub trait MessageWriter: Send + Sync {
     );
 
     /// Record the result/output of a tool call.
-    async fn record_tool_result(&self, content: &str);
+    async fn record_tool_result(&self, tool_call_id: &str, content: &str);
 
     /// Called when session info is updated (title, timestamps, etc.).
     ///
@@ -81,15 +92,228 @@ pub trait MessageWriter: Send + Sync {
     /// session, or extracted from setup responses.
     async fn on_session_info_update(&self, _info: &SessionInfoUpdate) {}
 
-    /// Called when model state is received from session setup responses.
+    /// Called when mode state is received from session setup responses.
     ///
-    /// `SessionModelState` is only delivered in `NewSessionResponse` and
-    /// `LoadSessionResponse`. Mid-session model changes are surfaced through
+    /// `SessionModeState` is delivered in `NewSessionResponse` and
+    /// `LoadSessionResponse`. Mid-session mode/model changes are surfaced through
     /// `on_config_option_update` via `ConfigOptionUpdate` with category `Model`.
-    async fn on_model_state_update(&self, _state: &SessionModelState) {}
+    async fn on_model_state_update(&self, _state: &SessionModeState) {}
 
     /// Called when session configuration options change.
     async fn on_config_option_update(&self, _options: &[SessionConfigOption]) {}
+
+    /// Called after ACP initialization has negotiated agent capabilities.
+    async fn on_initialize(&self, _metadata: &AcpInitializeMetadata) {}
+
+    /// Attach rich ACP tool-call metadata to an existing tool-call row.
+    async fn record_tool_call_metadata(&self, _metadata: AcpToolCallMetadata) {}
+
+    /// Persist an ACP event that does not map cleanly to a visible transcript row.
+    async fn record_acp_event_metadata(&self, _metadata: AcpEventMetadata) {}
+
+    /// Ask the client UI to resolve an ACP permission request.
+    ///
+    /// Implementations that cannot prompt should automatically approve the
+    /// request unless the prompt turn has been cancelled.
+    async fn request_permission(
+        &self,
+        request: AcpPermissionRequest,
+        cancel_token: CancellationToken,
+    ) -> AcpPermissionDecision {
+        if cancel_token.is_cancelled() {
+            AcpPermissionDecision::Cancelled
+        } else {
+            autoapprove_permission_decision(&request)
+        }
+    }
+}
+
+fn permission_option_is_approval(option: &AcpPermissionOption) -> bool {
+    match option.kind.approval_status() {
+        Some(is_approval) => is_approval,
+        None => legacy_permission_option_is_approval(option),
+    }
+}
+
+fn legacy_permission_option_is_approval(option: &AcpPermissionOption) -> bool {
+    let option_id = option.option_id.to_ascii_lowercase();
+    let name = option.name.to_ascii_lowercase();
+
+    option_id.starts_with("allow")
+        || option_id.starts_with("approve")
+        || name.contains("allow")
+        || name.contains("approve")
+}
+
+pub fn autoapprove_permission_decision(request: &AcpPermissionRequest) -> AcpPermissionDecision {
+    request
+        .options
+        .iter()
+        .find(|option| permission_option_is_approval(option))
+        .or_else(|| request.options.first())
+        .map(|option| AcpPermissionDecision::Selected {
+            option_id: option.option_id.clone(),
+        })
+        .unwrap_or(AcpPermissionDecision::Selected {
+            option_id: "approve".to_string(),
+        })
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AcpInitializeMetadata {
+    pub protocol_version: String,
+    pub agent_capabilities: Option<serde_json::Value>,
+    pub auth_methods: Option<serde_json::Value>,
+    pub agent_info: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AcpToolCallMetadata {
+    pub event_kind: Option<String>,
+    pub message_id: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub tool_kind: Option<String>,
+    pub tool_status: Option<String>,
+    pub raw_input: Option<serde_json::Value>,
+    pub raw_output: Option<serde_json::Value>,
+    pub content: Option<serde_json::Value>,
+    pub locations: Option<serde_json::Value>,
+}
+
+impl AcpToolCallMetadata {
+    fn has_update_fields(&self) -> bool {
+        self.tool_kind.is_some()
+            || self.tool_status.is_some()
+            || self.raw_input.is_some()
+            || self.raw_output.is_some()
+            || self.content.is_some()
+            || self.locations.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AcpEventMetadata {
+    pub event_kind: Option<String>,
+    pub message_id: Option<String>,
+    pub content: Option<serde_json::Value>,
+    pub usage: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AcpPermissionRequest {
+    pub request_id: String,
+    pub session_id: String,
+    pub tool_call_id: String,
+    pub tool_title: Option<String>,
+    pub tool_kind: Option<String>,
+    pub tool_status: Option<String>,
+    pub raw_input: Option<serde_json::Value>,
+    pub raw_output: Option<serde_json::Value>,
+    pub content: Option<serde_json::Value>,
+    pub locations: Option<serde_json::Value>,
+    pub options: Vec<AcpPermissionOption>,
+    pub raw_request: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AcpPermissionOption {
+    pub option_id: String,
+    pub name: String,
+    pub kind: AcpPermissionOptionKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcpPermissionOptionKind {
+    AllowOnce,
+    AllowAlways,
+    RejectOnce,
+    RejectAlways,
+    Unknown,
+}
+
+impl AcpPermissionOptionKind {
+    fn approval_status(self) -> Option<bool> {
+        match self {
+            Self::AllowOnce | Self::AllowAlways => Some(true),
+            Self::RejectOnce | Self::RejectAlways => Some(false),
+            Self::Unknown => None,
+        }
+    }
+}
+
+impl From<SchemaPermissionOptionKind> for AcpPermissionOptionKind {
+    fn from(kind: SchemaPermissionOptionKind) -> Self {
+        match kind {
+            SchemaPermissionOptionKind::AllowOnce => Self::AllowOnce,
+            SchemaPermissionOptionKind::AllowAlways => Self::AllowAlways,
+            SchemaPermissionOptionKind::RejectOnce => Self::RejectOnce,
+            SchemaPermissionOptionKind::RejectAlways => Self::RejectAlways,
+            _ => Self::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AcpPermissionDecision {
+    Selected { option_id: String },
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayBoundary {
+    pub role: String,
+    pub content: String,
+    pub acp_message_id: Option<String>,
+    pub acp_tool_call_id: Option<String>,
+}
+
+impl ReplayBoundary {
+    pub fn legacy(role: String, content: String) -> Self {
+        Self {
+            role,
+            content,
+            acp_message_id: None,
+            acp_tool_call_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentRunOutcome {
+    Completed,
+    Cancelled,
+}
+
+impl AgentRunOutcome {
+    fn from_stop_reason(stop_reason: StopReason) -> Self {
+        match stop_reason {
+            StopReason::Cancelled => Self::Cancelled,
+            StopReason::EndTurn
+            | StopReason::MaxTokens
+            | StopReason::MaxTurnRequests
+            | StopReason::Refusal => Self::Completed,
+            _ => Self::Completed,
+        }
+    }
+}
+
+fn serialize_as_string<T: serde::Serialize>(value: &T) -> Option<String> {
+    match serde_json::to_value(value).ok()? {
+        serde_json::Value::String(s) => Some(s),
+        other => Some(other.to_string()),
+    }
+}
+
+fn serialize_non_empty<T: serde::Serialize>(items: &[T]) -> Option<serde_json::Value> {
+    if items.is_empty() {
+        None
+    } else {
+        serde_json::to_value(items).ok()
+    }
+}
+
+fn serialize_value<T: serde::Serialize>(value: &T) -> Option<serde_json::Value> {
+    serde_json::to_value(value).ok()
 }
 
 /// Storage interface for persisting agent session data.
@@ -101,14 +325,29 @@ pub trait Store: Send + Sync {
     /// Save the agent's session ID for resumption.
     fn set_agent_session_id(&self, session_id: &str, agent_session_id: &str) -> Result<(), String>;
 
-    /// Retrieve existing session messages as `(role, content)` pairs.
+    /// Retrieve existing visible session messages as `(role, content)` pairs.
     ///
-    /// Used during session resumption to match replayed notifications
-    /// against previously persisted messages.  The default implementation
-    /// returns an empty list, which is correct for stores that do not
-    /// support message persistence (e.g. `NoOpStore`).
+    /// This is the legacy replay fallback for stores that do not expose ACP
+    /// message IDs via [`Store::get_session_replay_boundaries`].
     fn get_session_messages(&self, _session_id: &str) -> Result<Vec<(String, String)>, String> {
         Ok(vec![])
+    }
+
+    /// Retrieve replay boundaries for session resumption.
+    ///
+    /// Implementations should prefer ACP message IDs and tool-call IDs from
+    /// persisted metadata when available, while still including visible
+    /// transcript rows as a fallback.
+    fn get_session_replay_boundaries(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<ReplayBoundary>, String> {
+        self.get_session_messages(session_id).map(|messages| {
+            messages
+                .into_iter()
+                .map(|(role, content)| ReplayBoundary::legacy(role, content))
+                .collect()
+        })
     }
 }
 
@@ -134,7 +373,7 @@ pub trait AgentDriver {
         writer: &Arc<dyn MessageWriter>,
         cancel_token: &CancellationToken,
         agent_session_id: Option<&str>,
-    ) -> Result<(), String>;
+    ) -> Result<AgentRunOutcome, String>;
 }
 
 // =============================================================================
@@ -225,6 +464,20 @@ impl AcpDriver {
                 "No ACP agent found. Install Goose, Claude Code, Codex, Pi, or Amp and ensure it's on your PATH."
                     .to_string()
             })
+    }
+
+    pub(crate) fn from_agent(agent: &crate::types::AcpAgent) -> Self {
+        Self {
+            binary_path: agent.binary_path.clone(),
+            acp_args: agent.acp_args.clone(),
+            agent_label: agent.label.clone(),
+            is_remote: false,
+            extra_env: Vec::new(),
+            env_snapshot: None,
+            interpreter_env_snapshot: None,
+            mcp_servers: Vec::new(),
+            remote_working_dir: None,
+        }
     }
 
     /// Create a driver that proxies through `sq blox acp <workspace>`.
@@ -503,6 +756,43 @@ fn resolve_spawn_working_dir(working_dir: &Path, is_remote: bool) -> PathBuf {
     working_dir.to_path_buf()
 }
 
+fn absolute_local_path(path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .map_err(|e| {
+            format!(
+                "Failed to resolve absolute ACP cwd for {}: {e}",
+                path.display()
+            )
+        })
+}
+
+fn resolve_acp_working_dir(
+    working_dir: &Path,
+    is_remote: bool,
+    remote_working_dir: Option<&Path>,
+) -> Result<PathBuf, String> {
+    if is_remote {
+        let remote_dir = remote_working_dir.ok_or_else(|| {
+            "Remote ACP sessions require an absolute remote working directory; could not resolve the workspace repo path"
+                .to_string()
+        })?;
+        if !remote_dir.is_absolute() {
+            return Err(format!(
+                "Remote ACP working directory must be absolute, got {}",
+                remote_dir.display()
+            ));
+        }
+        return Ok(remote_dir.to_path_buf());
+    }
+
+    absolute_local_path(working_dir)
+}
+
 #[async_trait(?Send)]
 impl AgentDriver for AcpDriver {
     async fn run(
@@ -515,8 +805,13 @@ impl AgentDriver for AcpDriver {
         writer: &Arc<dyn MessageWriter>,
         cancel_token: &CancellationToken,
         agent_session_id: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<AgentRunOutcome, String> {
         let spawn_working_dir = resolve_spawn_working_dir(working_dir, self.is_remote);
+        let acp_working_dir = resolve_acp_working_dir(
+            working_dir,
+            self.is_remote,
+            self.remote_working_dir.as_deref(),
+        )?;
         if self.is_remote && spawn_working_dir.as_path() != working_dir {
             log::warn!(
                 "Remote ACP spawn cwd missing ({}); falling back to {}",
@@ -692,7 +987,7 @@ impl AgentDriver for AcpDriver {
             .ok_or_else(|| "Failed to get stdout".to_string())?;
 
         let stdin_compat = stdin.compat_write();
-        let incoming_reader: Box<dyn tokio::io::AsyncRead + Unpin> = if self.is_remote {
+        let incoming_reader: Box<dyn tokio::io::AsyncRead + Send + Unpin> = if self.is_remote {
             let (normalized_stdout_writer, normalized_stdout_reader) = tokio::io::duplex(64 * 1024);
             tokio::task::spawn_local(async move {
                 if let Err(error) =
@@ -721,57 +1016,74 @@ impl AgentDriver for AcpDriver {
         let stdout_compat = incoming_reader.compat();
 
         let is_resuming = agent_session_id.is_some();
-        let db_messages = if is_resuming {
-            store.get_session_messages(session_id).unwrap_or_else(|e| {
-                log::warn!("Failed to load session messages for replay matching: {e}");
-                vec![]
-            })
+        let replay_boundaries = if is_resuming {
+            store
+                .get_session_replay_boundaries(session_id)
+                .unwrap_or_else(|e| {
+                    log::warn!("Failed to load session replay boundaries: {e}");
+                    vec![]
+                })
         } else {
             vec![]
         };
         let handler = Arc::new(AcpNotificationHandler::new(
             Arc::clone(writer),
             is_resuming,
-            db_messages,
+            replay_boundaries,
+            cancel_token.clone(),
         ));
-        let handler_for_conn = Arc::clone(&handler);
-
-        let (connection, io_future) =
-            ClientSideConnection::new(handler_for_conn, stdin_compat, stdout_compat, |fut| {
-                tokio::task::spawn_local(fut);
-            });
-
-        tokio::task::spawn_local(async move {
-            if let Err(e) = io_future.await {
-                log::error!("ACP IO error: {e:?}");
-            }
-        });
-
-        let acp_working_dir = if let Some(ref remote_dir) = self.remote_working_dir {
-            remote_dir.clone()
-        } else if self.is_remote {
-            PathBuf::from(".")
-        } else {
-            working_dir.to_path_buf()
-        };
-
-        let protocol_result = tokio::select! {
-            _ = cancel_token.cancelled() => {
-                log::info!("Session {session_id} cancelled");
-                writer.finalize().await;
-                graceful_stop(&mut child, self.is_remote).await;
-                return Ok(());
-            }
-            result = run_acp_protocol(
-                &connection, &acp_working_dir, prompt, images, store,
-                session_id, agent_session_id, &handler, &self.mcp_servers,
-            ) => result,
-        };
+        let transport = ByteStreams::new(stdin_compat, stdout_compat);
+        let permission_handler = Arc::clone(&handler);
+        let notification_handler = Arc::clone(&handler);
+        let protocol_result = Client
+            .builder()
+            .name("staged-acp-client")
+            .on_receive_request(
+                async move |args: RequestPermissionRequest, responder, _connection| {
+                    let response = permission_handler.request_permission(args).await?;
+                    responder.respond(response)
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_notification(
+                async move |notification: SessionNotification, _connection| {
+                    notification_handler
+                        .session_notification(notification)
+                        .await
+                },
+                agent_client_protocol::on_receive_notification!(),
+            )
+            .connect_with(transport, async |connection| {
+                run_acp_protocol(
+                    &connection,
+                    &acp_working_dir,
+                    prompt,
+                    images,
+                    store,
+                    session_id,
+                    agent_session_id,
+                    &handler,
+                    &self.mcp_servers,
+                    &self.agent_label,
+                    cancel_token,
+                )
+                .await
+                .map_err(agent_client_protocol::util::internal_error)
+            })
+            .await
+            .map_err(|e| format!("ACP protocol failed: {e:?}"));
 
         writer.finalize().await;
         graceful_stop(&mut child, self.is_remote).await;
 
-        protocol_result
+        match protocol_result {
+            Ok(outcome) => Ok(outcome),
+            Err(e) if cancel_token.is_cancelled() => {
+                log::info!("Session {session_id} cancelled during ACP teardown: {e}");
+                Ok(AgentRunOutcome::Cancelled)
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -1012,9 +1324,9 @@ enum HandlerPhase {
 
 /// Accumulates replay notifications and matches them against DB messages.
 struct ReplayBuffer {
-    /// `(role, content)` pairs from the DB, in order.
-    db_messages: Vec<(String, String)>,
-    /// Index into `db_messages` of the next message to match.
+    /// Persisted replay boundaries from the DB, in order.
+    db_messages: Vec<ReplayBoundary>,
+    /// Index into `db_messages` of the next boundary to match.
     match_cursor: usize,
     /// Index of the last non-user message in `db_messages`.
     /// When the cursor passes this, replay is considered complete.
@@ -1023,6 +1335,9 @@ struct ReplayBuffer {
     current_text: String,
     /// Role of the current streaming message (`"user"` or `"assistant"`).
     current_role: Option<String>,
+    /// ACP message ID for the current streaming message, when the provider
+    /// includes one in message chunks.
+    current_message_id: Option<String>,
     /// Tool-call IDs observed during replay (used as a safety-net later).
     replayed_tool_call_ids: HashSet<String>,
     /// Timestamp of the last notification received during replay.
@@ -1032,13 +1347,13 @@ struct ReplayBuffer {
 }
 
 impl ReplayBuffer {
-    fn new(db_messages: Vec<(String, String)>) -> Self {
+    fn new(db_messages: Vec<ReplayBoundary>) -> Self {
         // Find index of last non-user message.
         let target_index = db_messages
             .iter()
             .enumerate()
             .rev()
-            .find(|(_, (role, _))| role != "user")
+            .find(|(_, message)| message.role != "user")
             .map(|(i, _)| i);
 
         Self {
@@ -1047,6 +1362,7 @@ impl ReplayBuffer {
             target_index,
             current_text: String::new(),
             current_role: None,
+            current_message_id: None,
             replayed_tool_call_ids: HashSet::new(),
             last_notification_at: Instant::now(),
             received_any: false,
@@ -1059,28 +1375,67 @@ impl ReplayBuffer {
     fn finalize_current(&mut self) -> bool {
         if let Some(role) = self.current_role.take() {
             if !self.current_text.is_empty() {
-                self.current_text.clear();
-                return self.try_match(&role);
+                let event = ReplayEvent {
+                    role,
+                    content: std::mem::take(&mut self.current_text),
+                    acp_message_id: self.current_message_id.take(),
+                    acp_tool_call_id: None,
+                };
+                return self.try_match(&event);
             }
         }
+        self.current_message_id = None;
         false
     }
 
-    /// Try to match a role against `db_messages[match_cursor]`.
+    /// Try to match a replay event against persisted replay boundaries.
     /// Returns `true` if replay is now considered complete.
-    fn try_match(&mut self, role: &str) -> bool {
+    fn try_match(&mut self, event: &ReplayEvent) -> bool {
         if self.match_cursor >= self.db_messages.len() {
             return self.is_complete();
         }
 
-        let (db_role, _) = &self.db_messages[self.match_cursor];
+        if let Some(idx) = self.find_id_match(event) {
+            self.match_cursor = idx + 1;
+            return self.is_complete();
+        }
 
-        if role == db_role {
+        let boundary = &self.db_messages[self.match_cursor];
+        if boundary.matches_fallback(event) {
             self.match_cursor += 1;
         }
-        // Don't advance cursor on role mismatch.
 
         self.is_complete()
+    }
+
+    fn push_text_chunk(&mut self, role: &str, message_id: Option<&str>, text: &str) -> bool {
+        let role_changed = self.current_role.as_deref() != Some(role);
+        let message_id_changed = !role_changed
+            && matches!(
+                (self.current_message_id.as_deref(), message_id),
+                (Some(current), Some(next)) if current != next
+            );
+
+        let mut done = false;
+        if role_changed || message_id_changed {
+            done = self.finalize_current();
+            self.current_role = Some(role.to_string());
+            self.current_message_id = message_id.map(str::to_string);
+        } else if self.current_message_id.is_none() {
+            self.current_message_id = message_id.map(str::to_string);
+        }
+
+        self.current_text.push_str(text);
+        done
+    }
+
+    fn find_id_match(&self, event: &ReplayEvent) -> Option<usize> {
+        self.db_messages
+            .iter()
+            .enumerate()
+            .skip(self.match_cursor)
+            .find(|(_, boundary)| boundary.matches_id(event))
+            .map(|(idx, _)| idx)
     }
 
     /// Returns `true` if the match cursor has passed the target index.
@@ -1092,18 +1447,59 @@ impl ReplayBuffer {
     }
 }
 
+struct ReplayEvent {
+    role: String,
+    content: String,
+    acp_message_id: Option<String>,
+    acp_tool_call_id: Option<String>,
+}
+
+impl ReplayBoundary {
+    fn matches_id(&self, event: &ReplayEvent) -> bool {
+        match (
+            self.acp_message_id.as_deref(),
+            event.acp_message_id.as_deref(),
+        ) {
+            (Some(boundary_id), Some(event_id)) if boundary_id == event_id => return true,
+            _ => {}
+        }
+
+        matches!(
+            (
+                self.acp_tool_call_id.as_deref(),
+                event.acp_tool_call_id.as_deref()
+            ),
+            (Some(boundary_id), Some(event_id)) if boundary_id == event_id
+        )
+    }
+
+    fn matches_fallback(&self, event: &ReplayEvent) -> bool {
+        if self.role != event.role {
+            return false;
+        }
+
+        if self.content.is_empty() || event.content.is_empty() {
+            return true;
+        }
+
+        self.content == event.content
+    }
+}
+
 struct AcpNotificationHandler {
     writer: Arc<dyn MessageWriter>,
     phase: Mutex<HandlerPhase>,
     /// Signalled when replay matching determines all DB messages have been replayed.
     replay_done: tokio::sync::Notify,
+    permission_cancel_token: CancellationToken,
 }
 
 impl AcpNotificationHandler {
     fn new(
         writer: Arc<dyn MessageWriter>,
         replaying: bool,
-        db_messages: Vec<(String, String)>,
+        db_messages: Vec<ReplayBoundary>,
+        permission_cancel_token: CancellationToken,
     ) -> Self {
         let phase = if replaying {
             HandlerPhase::Replaying(ReplayBuffer::new(db_messages))
@@ -1117,18 +1513,22 @@ impl AcpNotificationHandler {
             writer,
             phase: Mutex::new(phase),
             replay_done: tokio::sync::Notify::new(),
+            permission_cancel_token,
         }
     }
 
-    /// Check whether the replay phase has been idle for at least `timeout`.
-    /// Returns `false` if not in the Replaying phase or no notification received yet.
-    async fn is_replay_idle(&self, timeout: Duration) -> bool {
-        let phase = self.phase.lock().await;
-        if let HandlerPhase::Replaying(buf) = &*phase {
-            buf.received_any && buf.last_notification_at.elapsed() >= timeout
-        } else {
-            false
+    async fn finalize_replay_if_idle(&self, timeout: Duration) -> bool {
+        let mut phase = self.phase.lock().await;
+        if let HandlerPhase::Replaying(buf) = &mut *phase {
+            if buf.received_any && buf.last_notification_at.elapsed() >= timeout {
+                let completed = buf.finalize_current();
+                if completed {
+                    self.replay_done.notify_one();
+                }
+                return true;
+            }
         }
+        false
     }
 
     /// Transition from Replaying to WaitingForPrompt.
@@ -1136,7 +1536,13 @@ impl AcpNotificationHandler {
     async fn transition_to_waiting_for_prompt(&self) {
         let mut phase = self.phase.lock().await;
         let ids = match &mut *phase {
-            HandlerPhase::Replaying(buf) => std::mem::take(&mut buf.replayed_tool_call_ids),
+            HandlerPhase::Replaying(buf) => {
+                let completed = buf.finalize_current();
+                if completed {
+                    self.replay_done.notify_one();
+                }
+                std::mem::take(&mut buf.replayed_tool_call_ids)
+            }
             HandlerPhase::WaitingForPrompt { .. } | HandlerPhase::Live { .. } => return,
         };
         *phase = HandlerPhase::WaitingForPrompt {
@@ -1158,30 +1564,44 @@ impl AcpNotificationHandler {
             replayed_tool_call_ids: ids,
         };
     }
+
+    fn cancel_pending_permissions(&self) {
+        self.permission_cancel_token.cancel();
+    }
+
+    async fn is_replay_complete(&self) -> bool {
+        let phase = self.phase.lock().await;
+        match &*phase {
+            HandlerPhase::Replaying(buf) => buf.is_complete(),
+            HandlerPhase::WaitingForPrompt { .. } | HandlerPhase::Live { .. } => true,
+        }
+    }
 }
 
-#[async_trait(?Send)]
-impl agent_client_protocol::Client for AcpNotificationHandler {
+impl AcpNotificationHandler {
     async fn request_permission(
         &self,
         args: RequestPermissionRequest,
     ) -> agent_client_protocol::Result<RequestPermissionResponse> {
-        let option_id = args
-            .options
-            .first()
-            .map(|opt| opt.option_id.clone())
-            .unwrap_or_else(|| PermissionOptionId::new("approve"));
+        if self.permission_cancel_token.is_cancelled() {
+            return Ok(RequestPermissionResponse::new(
+                RequestPermissionOutcome::Cancelled,
+            ));
+        }
 
-        Ok(RequestPermissionResponse::new(
-            RequestPermissionOutcome::Selected(SelectedPermissionOutcome::new(option_id)),
-        ))
+        let request = acp_permission_request_from_args(&args);
+        let decision = self
+            .writer
+            .request_permission(request, self.permission_cancel_token.clone())
+            .await;
+        Ok(permission_response_for_decision(decision))
     }
 
     async fn session_notification(
         &self,
         notification: SessionNotification,
     ) -> agent_client_protocol::Result<()> {
-        // Session metadata events are forwarded regardless of phase.
+        // Session state updates are forwarded regardless of phase.
         match &notification.update {
             SessionUpdate::SessionInfoUpdate(info) => {
                 self.writer.on_session_info_update(info).await;
@@ -1193,23 +1613,49 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
                     .await;
                 return Ok(());
             }
+            SessionUpdate::CurrentModeUpdate(update) => {
+                self.writer
+                    .record_acp_event_metadata(AcpEventMetadata {
+                        event_kind: Some("current_mode_update".to_string()),
+                        content: serialize_value(update),
+                        ..Default::default()
+                    })
+                    .await;
+                return Ok(());
+            }
+            SessionUpdate::AvailableCommandsUpdate(update) => {
+                self.writer
+                    .record_acp_event_metadata(AcpEventMetadata {
+                        event_kind: Some("available_commands_update".to_string()),
+                        content: serialize_value(update),
+                        ..Default::default()
+                    })
+                    .await;
+                return Ok(());
+            }
             _ => {}
         }
 
         // Determine the action to take under the lock, then drop the lock
         // before calling into the writer to avoid holding it across await points.
         enum LiveAction {
-            AppendText(String),
+            AppendText {
+                text: String,
+                metadata: AcpEventMetadata,
+            },
+            RecordAcpEvent(AcpEventMetadata),
             RecordToolCall {
                 id: String,
                 title: String,
                 raw_input: Option<serde_json::Value>,
+                metadata: AcpToolCallMetadata,
             },
             ToolCallUpdate {
                 id: String,
                 title: Option<String>,
                 raw_input: Option<serde_json::Value>,
                 result: Option<String>,
+                metadata: AcpToolCallMetadata,
             },
             Ignore,
             Drop,
@@ -1232,40 +1678,50 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
                     let completed = match &notification.update {
                         SessionUpdate::AgentMessageChunk(chunk) => {
                             if let AcpContentBlock::Text(text) = &chunk.content {
-                                // If switching from non-assistant role, finalize previous.
-                                let mut done = false;
-                                if buf.current_role.as_deref() != Some("assistant") {
-                                    done = buf.finalize_current();
-                                    buf.current_role = Some("assistant".to_string());
-                                }
-                                buf.current_text.push_str(&text.text);
-                                done
+                                buf.push_text_chunk(
+                                    "assistant",
+                                    chunk.message_id.as_ref().map(|id| id.0.as_ref()),
+                                    &text.text,
+                                )
                             } else {
                                 false
                             }
                         }
                         SessionUpdate::UserMessageChunk(chunk) => {
                             if let AcpContentBlock::Text(text) = &chunk.content {
-                                let mut done = false;
-                                if buf.current_role.as_deref() != Some("user") {
-                                    done = buf.finalize_current();
-                                    buf.current_role = Some("user".to_string());
-                                }
-                                buf.current_text.push_str(&text.text);
-                                done
+                                buf.push_text_chunk(
+                                    "user",
+                                    chunk.message_id.as_ref().map(|id| id.0.as_ref()),
+                                    &text.text,
+                                )
                             } else {
                                 false
                             }
                         }
-                        SessionUpdate::ToolCall(_tc) => {
+                        SessionUpdate::ToolCall(tc) => {
                             buf.finalize_current();
-                            buf.try_match("tool_call")
+                            buf.try_match(&ReplayEvent {
+                                role: "tool_call".to_string(),
+                                content: tc.title.clone(),
+                                acp_message_id: None,
+                                acp_tool_call_id: Some(tc.tool_call_id.0.to_string()),
+                            })
                         }
                         SessionUpdate::ToolCallUpdate(update)
                             if update.fields.content.is_some() =>
                         {
                             buf.finalize_current();
-                            buf.try_match("tool_result")
+                            buf.try_match(&ReplayEvent {
+                                role: "tool_result".to_string(),
+                                content: update
+                                    .fields
+                                    .content
+                                    .as_ref()
+                                    .and_then(|content| extract_content_preview(content))
+                                    .unwrap_or_default(),
+                                acp_message_id: None,
+                                acp_tool_call_id: Some(update.tool_call_id.0.to_string()),
+                            })
                         }
                         SessionUpdate::AgentThoughtChunk(_) => {
                             // Thinking is not persisted — ignore.
@@ -1303,37 +1759,98 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
 
                     match &notification.update {
                         SessionUpdate::AgentMessageChunk(chunk) => {
+                            let metadata = message_chunk_metadata("agent_message_chunk", chunk);
                             if let AcpContentBlock::Text(text) = &chunk.content {
-                                LiveAction::AppendText(text.text.clone())
+                                LiveAction::AppendText {
+                                    text: text.text.clone(),
+                                    metadata,
+                                }
                             } else {
-                                LiveAction::Drop
+                                LiveAction::RecordAcpEvent(metadata)
                             }
                         }
-                        SessionUpdate::ToolCall(tool_call) => LiveAction::RecordToolCall {
-                            id: tool_call.tool_call_id.0.to_string(),
-                            title: tool_call.title.clone(),
-                            raw_input: tool_call.raw_input.clone(),
-                        },
+                        SessionUpdate::UserMessageChunk(chunk) => LiveAction::RecordAcpEvent(
+                            message_chunk_metadata("user_message_chunk", chunk),
+                        ),
+                        SessionUpdate::ToolCall(tool_call) => {
+                            let id = tool_call.tool_call_id.0.to_string();
+                            LiveAction::RecordToolCall {
+                                id: id.clone(),
+                                title: tool_call.title.clone(),
+                                raw_input: tool_call.raw_input.clone(),
+                                metadata: AcpToolCallMetadata {
+                                    event_kind: Some("tool_call".to_string()),
+                                    tool_call_id: Some(id),
+                                    tool_kind: serialize_as_string(&tool_call.kind),
+                                    tool_status: serialize_as_string(&tool_call.status),
+                                    raw_input: tool_call.raw_input.clone(),
+                                    raw_output: tool_call.raw_output.clone(),
+                                    content: serialize_non_empty(&tool_call.content),
+                                    locations: serialize_non_empty(&tool_call.locations),
+                                    ..Default::default()
+                                },
+                            }
+                        }
                         SessionUpdate::ToolCallUpdate(update) => {
                             let tc_id = update.tool_call_id.0.to_string();
                             let title = update.fields.title.clone();
                             let raw_input = update.fields.raw_input.clone();
+                            let metadata = AcpToolCallMetadata {
+                                event_kind: Some("tool_call_update".to_string()),
+                                tool_call_id: Some(tc_id.clone()),
+                                tool_kind: update
+                                    .fields
+                                    .kind
+                                    .as_ref()
+                                    .and_then(serialize_as_string),
+                                tool_status: update
+                                    .fields
+                                    .status
+                                    .as_ref()
+                                    .and_then(serialize_as_string),
+                                raw_input: raw_input.clone(),
+                                raw_output: update.fields.raw_output.clone(),
+                                content: update
+                                    .fields
+                                    .content
+                                    .as_ref()
+                                    .and_then(|content| serialize_non_empty(content)),
+                                locations: update
+                                    .fields
+                                    .locations
+                                    .as_ref()
+                                    .and_then(|locations| serialize_non_empty(locations)),
+                                ..Default::default()
+                            };
                             let result = update
                                 .fields
                                 .content
                                 .as_ref()
                                 .and_then(|c| extract_content_preview(c));
-                            if title.is_some() || raw_input.is_some() || result.is_some() {
+                            if title.is_some()
+                                || raw_input.is_some()
+                                || result.is_some()
+                                || metadata.has_update_fields()
+                            {
                                 LiveAction::ToolCallUpdate {
                                     id: tc_id,
                                     title,
                                     raw_input,
                                     result,
+                                    metadata,
                                 }
                             } else {
                                 LiveAction::Drop
                             }
                         }
+                        SessionUpdate::UsageUpdate(update) => {
+                            LiveAction::RecordAcpEvent(usage_update_metadata(update))
+                        }
+                        SessionUpdate::Plan(plan) => LiveAction::RecordAcpEvent(AcpEventMetadata {
+                            event_kind: Some("plan_update".to_string()),
+                            content: serialize_value(plan),
+                            ..Default::default()
+                        }),
                         _ => LiveAction::Ignore,
                     }
                 }
@@ -1343,31 +1860,39 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
 
         // Execute the live action without holding the phase lock.
         match live_action {
-            LiveAction::AppendText(text) => {
+            LiveAction::AppendText { text, metadata } => {
                 self.writer.append_text(&text).await;
+                self.writer.record_acp_event_metadata(metadata).await;
+            }
+            LiveAction::RecordAcpEvent(metadata) => {
+                self.writer.record_acp_event_metadata(metadata).await;
             }
             LiveAction::RecordToolCall {
                 id,
                 title,
                 raw_input,
+                metadata,
             } => {
                 self.writer
                     .record_tool_call(&id, &title, raw_input.as_ref())
                     .await;
+                self.writer.record_tool_call_metadata(metadata).await;
             }
             LiveAction::ToolCallUpdate {
                 id,
                 title,
                 raw_input,
                 result,
+                metadata,
             } => {
                 if title.is_some() || raw_input.is_some() {
                     self.writer
                         .update_tool_call_title(&id, title.as_deref(), raw_input.as_ref())
                         .await;
                 }
+                self.writer.record_tool_call_metadata(metadata).await;
                 if let Some(preview) = result {
-                    self.writer.record_tool_result(&preview).await;
+                    self.writer.record_tool_result(&id, &preview).await;
                 }
             }
             LiveAction::Ignore => {
@@ -1376,6 +1901,100 @@ impl agent_client_protocol::Client for AcpNotificationHandler {
             LiveAction::Drop => {}
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+fn permission_decision_for_options(
+    options: &[SchemaPermissionOption],
+    cancelled: bool,
+) -> AcpPermissionDecision {
+    if cancelled {
+        return AcpPermissionDecision::Cancelled;
+    }
+
+    let request = AcpPermissionRequest {
+        request_id: "test-request".to_string(),
+        session_id: "test-session".to_string(),
+        tool_call_id: "test-tool-call".to_string(),
+        tool_title: None,
+        tool_kind: None,
+        tool_status: None,
+        raw_input: None,
+        raw_output: None,
+        content: None,
+        locations: None,
+        options: options
+            .iter()
+            .map(acp_permission_option_from_schema)
+            .collect(),
+        raw_request: None,
+    };
+
+    autoapprove_permission_decision(&request)
+}
+
+#[cfg(test)]
+fn permission_response_for_options(
+    options: &[agent_client_protocol::schema::v1::PermissionOption],
+    cancelled: bool,
+) -> RequestPermissionResponse {
+    permission_response_for_decision(permission_decision_for_options(options, cancelled))
+}
+
+fn permission_response_for_decision(decision: AcpPermissionDecision) -> RequestPermissionResponse {
+    match decision {
+        AcpPermissionDecision::Cancelled => {
+            RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
+        }
+        AcpPermissionDecision::Selected { option_id } => {
+            RequestPermissionResponse::new(RequestPermissionOutcome::Selected(
+                SelectedPermissionOutcome::new(PermissionOptionId::new(option_id)),
+            ))
+        }
+    }
+}
+
+fn acp_permission_option_from_schema(option: &SchemaPermissionOption) -> AcpPermissionOption {
+    AcpPermissionOption {
+        option_id: option.option_id.0.as_ref().to_string(),
+        name: option.name.clone(),
+        kind: option.kind.into(),
+    }
+}
+
+fn acp_permission_request_from_args(args: &RequestPermissionRequest) -> AcpPermissionRequest {
+    let tool = &args.tool_call;
+    let tool_call_id = tool.tool_call_id.0.as_ref().to_string();
+    let request_counter = PERMISSION_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    AcpPermissionRequest {
+        request_id: format!(
+            "{}:{tool_call_id}:{request_counter}",
+            args.session_id.0.as_ref()
+        ),
+        session_id: args.session_id.0.as_ref().to_string(),
+        tool_call_id,
+        tool_title: tool.fields.title.clone(),
+        tool_kind: tool.fields.kind.as_ref().and_then(serialize_as_string),
+        tool_status: tool.fields.status.as_ref().and_then(serialize_as_string),
+        raw_input: tool.fields.raw_input.clone(),
+        raw_output: tool.fields.raw_output.clone(),
+        content: tool
+            .fields
+            .content
+            .as_ref()
+            .and_then(|content| serialize_non_empty(content)),
+        locations: tool
+            .fields
+            .locations
+            .as_ref()
+            .and_then(|locations| serialize_non_empty(locations)),
+        options: args
+            .options
+            .iter()
+            .map(acp_permission_option_from_schema)
+            .collect(),
+        raw_request: serialize_value(args),
     }
 }
 
@@ -1388,13 +2007,52 @@ fn notification_tool_call_id(update: &SessionUpdate) -> Option<String> {
     }
 }
 
+fn message_chunk_metadata(event_kind: &str, chunk: &ContentChunk) -> AcpEventMetadata {
+    AcpEventMetadata {
+        event_kind: Some(event_kind.to_string()),
+        message_id: chunk.message_id.as_ref().map(|id| id.0.to_string()),
+        content: serialize_value(chunk),
+        ..Default::default()
+    }
+}
+
+fn usage_update_metadata<T: serde::Serialize>(update: &T) -> AcpEventMetadata {
+    AcpEventMetadata {
+        event_kind: Some("usage_update".to_string()),
+        usage: serialize_value(update),
+        content: serialize_value(update),
+        ..Default::default()
+    }
+}
+
+fn prompt_response_metadata(response: &PromptResponse) -> Option<AcpEventMetadata> {
+    let usage = response.usage.as_ref().and_then(serialize_value);
+    usage.as_ref()?;
+
+    Some(AcpEventMetadata {
+        event_kind: Some("prompt_response".to_string()),
+        message_id: None,
+        usage,
+        content: serialize_value(response),
+    })
+}
+
+fn send_session_cancel(
+    connection: &ConnectionTo<Agent>,
+    acp_session_id: &str,
+) -> Result<(), String> {
+    connection
+        .send_notification(CancelNotification::new(acp_session_id.to_string()))
+        .map_err(|e| format!("Failed to send ACP session/cancel: {e:?}"))
+}
+
 // =============================================================================
 // Protocol helpers
 // =============================================================================
 
 #[allow(clippy::too_many_arguments)]
 async fn run_acp_protocol(
-    connection: &ClientSideConnection,
+    connection: &ConnectionTo<Agent>,
     working_dir: &Path,
     prompt: &str,
     images: &[(String, String)],
@@ -1403,34 +2061,52 @@ async fn run_acp_protocol(
     acp_session_id: Option<&str>,
     handler: &Arc<AcpNotificationHandler>,
     mcp_servers: &[McpServer],
-) -> Result<(), String> {
-    let agent_session_id = tokio::time::timeout(
+    agent_label: &str,
+    cancel_token: &CancellationToken,
+) -> Result<AgentRunOutcome, String> {
+    let setup_task = tokio::time::timeout(
         ACP_SETUP_TIMEOUT,
-        setup_acp_session(
+        setup_acp_session(AcpSessionSetupContext {
             connection,
             working_dir,
             store,
-            &handler.writer,
+            writer: &handler.writer,
             our_session_id,
             acp_session_id,
             mcp_servers,
-        ),
-    )
-    .await
-    .map_err(|_| {
-        format!(
-            "Timed out waiting for ACP protocol startup after {}s",
-            ACP_SETUP_TIMEOUT.as_secs()
-        )
-    })??;
+            agent_label,
+        }),
+    );
+    let setup = tokio::select! {
+        _ = cancel_token.cancelled() => {
+            handler.cancel_pending_permissions();
+            return Ok(AgentRunOutcome::Cancelled);
+        }
+        result = setup_task => {
+            result
+                .map_err(|_| {
+                    format!(
+                        "Timed out waiting for ACP protocol startup after {}s",
+                        ACP_SETUP_TIMEOUT.as_secs()
+                    )
+                })??
+        }
+    };
 
     // If resuming, wait for replay to complete (content match OR idle timeout).
     // An absolute 10s timeout prevents a hang if the server sends zero replay
     // notifications (e.g. the remote session was garbage-collected).
-    if acp_session_id.is_some() {
+    if acp_session_id.is_some() && !handler.is_replay_complete().await {
         let absolute_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         loop {
             tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    handler.cancel_pending_permissions();
+                    if let Err(e) = send_session_cancel(connection, &setup.agent_session_id) {
+                        log::warn!("{e}");
+                    }
+                    return Ok(AgentRunOutcome::Cancelled);
+                }
                 _ = handler.replay_done.notified() => {
                     break;
                 }
@@ -1439,32 +2115,61 @@ async fn run_acp_protocol(
                     break;
                 }
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    if handler.is_replay_idle(Duration::from_secs(1)).await {
+                    if handler.finalize_replay_if_idle(Duration::from_secs(1)).await {
                         break;
                     }
                 }
             }
         }
+    }
+    if acp_session_id.is_some() {
         handler.transition_to_waiting_for_prompt().await;
     }
 
-    let mut content_blocks = vec![AcpContentBlock::Text(TextContent::new(prompt))];
-    for (data, mime_type) in images {
-        content_blocks.push(AcpContentBlock::Image(ImageContent::new(
-            data.as_str(),
-            mime_type.as_str(),
-        )));
+    let supports_images = setup.agent_capabilities.prompt_capabilities.image;
+    if !images.is_empty() && !supports_images {
+        log::warn!(
+            "ACP agent for session {our_session_id} does not advertise promptCapabilities.image; omitting {} image attachment(s)",
+            images.len()
+        );
     }
-    let prompt_request = PromptRequest::new(agent_session_id, content_blocks);
+    let content_blocks = build_prompt_content_blocks(prompt, images, supports_images);
+    let prompt_request = PromptRequest::new(setup.agent_session_id.clone(), content_blocks);
 
     handler.transition_to_live().await;
 
-    connection
-        .prompt(prompt_request)
-        .await
-        .map_err(|e| format!("Prompt failed: {e:?}"))?;
+    let prompt_task = connection.send_request(prompt_request).block_task();
+    tokio::pin!(prompt_task);
 
-    Ok(())
+    let prompt_response = tokio::select! {
+        result = &mut prompt_task => {
+            result.map_err(|e| format!("Prompt failed: {e:?}"))?
+        }
+        _ = cancel_token.cancelled() => {
+            handler.cancel_pending_permissions();
+            if let Err(e) = send_session_cancel(connection, &setup.agent_session_id) {
+                log::warn!("{e}");
+            }
+
+            match tokio::time::timeout(Duration::from_secs(5), &mut prompt_task).await {
+                Ok(result) => result.map_err(|e| format!("Prompt failed after cancellation: {e:?}"))?,
+                Err(_) => {
+                    log::warn!(
+                        "Timed out waiting for ACP prompt response after session/cancel for session {our_session_id}"
+                    );
+                    return Ok(AgentRunOutcome::Cancelled);
+                }
+            }
+        }
+    };
+
+    if let Some(metadata) = prompt_response_metadata(&prompt_response) {
+        handler.writer.record_acp_event_metadata(metadata).await;
+    }
+
+    Ok(AgentRunOutcome::from_stop_reason(
+        prompt_response.stop_reason,
+    ))
 }
 
 /// Whether the agent advertises support for the transport an MCP server needs.
@@ -1481,30 +2186,63 @@ fn mcp_server_transport_supported(server: &McpServer, caps: &McpCapabilities) ->
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn setup_acp_session(
-    connection: &ClientSideConnection,
-    working_dir: &Path,
-    store: &Arc<dyn Store>,
-    writer: &Arc<dyn MessageWriter>,
-    our_session_id: &str,
-    acp_session_id: Option<&str>,
-    mcp_servers: &[McpServer],
-) -> Result<String, String> {
+struct AcpSessionSetup {
+    agent_session_id: String,
+    agent_capabilities: AgentCapabilities,
+}
+
+struct AcpSessionSetupContext<'a> {
+    connection: &'a ConnectionTo<Agent>,
+    working_dir: &'a Path,
+    store: &'a Arc<dyn Store>,
+    writer: &'a Arc<dyn MessageWriter>,
+    our_session_id: &'a str,
+    acp_session_id: Option<&'a str>,
+    mcp_servers: &'a [McpServer],
+    agent_label: &'a str,
+}
+
+async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSessionSetup, String> {
+    let AcpSessionSetupContext {
+        connection,
+        working_dir,
+        store,
+        writer,
+        our_session_id,
+        acp_session_id,
+        mcp_servers,
+        agent_label,
+    } = context;
+
     let client_info = Implementation::new("acp-client", env!("CARGO_PKG_VERSION"));
-    let init_request = InitializeRequest::new(ProtocolVersion::LATEST).client_info(client_info);
+    let init_request = InitializeRequest::new(ProtocolVersion::V1).client_info(client_info);
 
     let init_response = connection
-        .initialize(init_request)
+        .send_request(init_request)
+        .block_task()
         .await
         .map_err(|e| format!("ACP init failed: {e:?}"))?;
 
-    let mcp_caps = &init_response.agent_capabilities.mcp_capabilities;
+    log_initialize_response(agent_label, &init_response);
+    writer
+        .on_initialize(&initialize_metadata(&init_response))
+        .await;
+
+    if init_response.protocol_version != ProtocolVersion::V1 {
+        return Err(format!(
+            "Agent negotiated unsupported ACP protocol version {} (expected {})",
+            init_response.protocol_version,
+            ProtocolVersion::V1
+        ));
+    }
+
+    authenticate_if_advertised(connection, &init_response.auth_methods).await?;
 
     // Required servers must all have a supported transport, or the session
     // fails. Route the decision through mcp_server_transport_supported so the
-    // transport->capability mapping lives in exactly one place — a newly added
+    // transport->capability mapping lives in exactly one place: a newly added
     // transport stays validated here instead of silently slipping through.
+    let mcp_caps = &init_response.agent_capabilities.mcp_capabilities;
     if mcp_servers
         .iter()
         .any(|server| !mcp_server_transport_supported(server, mcp_caps))
@@ -1522,9 +2260,11 @@ async fn setup_acp_session(
         ));
     }
 
+    let agent_capabilities = init_response.agent_capabilities.clone();
+
     match acp_session_id {
         Some(existing_id) => {
-            if !init_response.agent_capabilities.load_session {
+            if !agent_capabilities.load_session {
                 return Err(
                     "Agent does not support load_session — cannot resume conversation".to_string(),
                 );
@@ -1535,27 +2275,32 @@ async fn setup_acp_session(
             );
 
             let load_response = connection
-                .load_session(
+                .send_request(
                     LoadSessionRequest::new(existing_id.to_string(), working_dir.to_path_buf())
                         .mcp_servers(mcp_servers.to_vec()),
                 )
+                .block_task()
                 .await
                 .map_err(|e| format!("Failed to load ACP session: {e:?}"))?;
 
-            if let Some(ref models) = load_response.models {
-                writer.on_model_state_update(models).await;
+            if let Some(ref modes) = load_response.modes {
+                writer.on_model_state_update(modes).await;
             }
             if let Some(ref options) = load_response.config_options {
                 writer.on_config_option_update(options).await;
             }
 
-            Ok(existing_id.to_string())
+            Ok(AcpSessionSetup {
+                agent_session_id: existing_id.to_string(),
+                agent_capabilities,
+            })
         }
         None => {
             let new_session_request =
                 NewSessionRequest::new(working_dir.to_path_buf()).mcp_servers(mcp_servers.to_vec());
             let session_response = connection
-                .new_session(new_session_request)
+                .send_request(new_session_request)
+                .block_task()
                 .await
                 .map_err(|e| format!("Failed to create ACP session: {e:?}"))?;
 
@@ -1564,16 +2309,115 @@ async fn setup_acp_session(
                 .set_agent_session_id(our_session_id, &new_id)
                 .map_err(|e| format!("Failed to save agent session ID: {e}"))?;
 
-            if let Some(ref models) = session_response.models {
-                writer.on_model_state_update(models).await;
+            if let Some(ref modes) = session_response.modes {
+                writer.on_model_state_update(modes).await;
             }
             if let Some(ref options) = session_response.config_options {
                 writer.on_config_option_update(options).await;
             }
 
-            Ok(new_id)
+            Ok(AcpSessionSetup {
+                agent_session_id: new_id,
+                agent_capabilities,
+            })
         }
     }
+}
+
+fn initialize_metadata(init_response: &InitializeResponse) -> AcpInitializeMetadata {
+    AcpInitializeMetadata {
+        protocol_version: init_response.protocol_version.to_string(),
+        agent_capabilities: serde_json::to_value(&init_response.agent_capabilities).ok(),
+        auth_methods: serde_json::to_value(&init_response.auth_methods).ok(),
+        agent_info: init_response
+            .agent_info
+            .as_ref()
+            .and_then(|info| serde_json::to_value(info).ok()),
+    }
+}
+
+fn log_initialize_response(agent_label: &str, init_response: &InitializeResponse) {
+    let agent_name = init_response
+        .agent_info
+        .as_ref()
+        .map(|info| info.name.as_str())
+        .unwrap_or(agent_label);
+    let agent_version = init_response
+        .agent_info
+        .as_ref()
+        .map(|info| info.version.as_str())
+        .unwrap_or("unknown");
+    let capabilities = serde_json::to_string(&init_response.agent_capabilities)
+        .unwrap_or_else(|_| "<unserializable>".to_string());
+    let auth_methods = describe_auth_methods(&init_response.auth_methods);
+
+    log::debug!(
+        "ACP initialized provider={agent_label} agent={agent_name} version={agent_version} protocol={} capabilities={} auth_methods=[{}]",
+        init_response.protocol_version,
+        capabilities,
+        auth_methods
+    );
+}
+
+fn describe_auth_methods(auth_methods: &[AuthMethod]) -> String {
+    auth_methods
+        .iter()
+        .map(|method| format!("{} ({})", method.name(), method.id()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+async fn authenticate_if_advertised(
+    connection: &ConnectionTo<Agent>,
+    auth_methods: &[AuthMethod],
+) -> Result<(), String> {
+    let Some(method) = auth_methods.first() else {
+        return Ok(());
+    };
+
+    log::debug!(
+        "ACP agent advertised authentication methods; selecting {} ({})",
+        method.name(),
+        method.id()
+    );
+
+    connection
+        .send_request(AuthenticateRequest::new(method.id().clone()))
+        .block_task()
+        .await
+        .map_err(|e| {
+            format!(
+                "ACP authentication failed with method {} ({}): {e:?}",
+                method.name(),
+                method.id()
+            )
+        })?;
+
+    Ok(())
+}
+
+fn build_prompt_content_blocks(
+    prompt: &str,
+    images: &[(String, String)],
+    supports_images: bool,
+) -> Vec<AcpContentBlock> {
+    let mut content_blocks = vec![AcpContentBlock::Text(TextContent::new(prompt))];
+
+    if supports_images {
+        for (data, mime_type) in images {
+            content_blocks.push(AcpContentBlock::Image(ImageContent::new(
+                data.as_str(),
+                mime_type.as_str(),
+            )));
+        }
+    } else if !images.is_empty() {
+        content_blocks.push(AcpContentBlock::Text(TextContent::new(format!(
+            "[{} image attachment(s) omitted because this ACP provider does not advertise promptCapabilities.image]",
+            images.len()
+        ))));
+    }
+
+    content_blocks
 }
 
 /// Strip outer markdown code fences from tool-result content.
@@ -1594,10 +2438,10 @@ pub fn strip_code_fences(content: &str) -> String {
     content.to_string()
 }
 
-fn extract_content_preview(content: &[agent_client_protocol::ToolCallContent]) -> Option<String> {
+fn extract_content_preview(content: &[ToolCallContent]) -> Option<String> {
     for item in content {
         match item {
-            agent_client_protocol::ToolCallContent::Content(c) => {
+            ToolCallContent::Content(c) => {
                 if let AcpContentBlock::Text(text) = &c.content {
                     let preview: String = text.text.chars().take(500).collect();
                     return Some(if text.text.len() > 500 {
@@ -1607,7 +2451,7 @@ fn extract_content_preview(content: &[agent_client_protocol::ToolCallContent]) -
                     });
                 }
             }
-            agent_client_protocol::ToolCallContent::Diff(d) => {
+            ToolCallContent::Diff(d) => {
                 return Some(format!(
                     "{}{}",
                     d.path.display(),
@@ -1618,7 +2462,7 @@ fn extract_content_preview(content: &[agent_client_protocol::ToolCallContent]) -
                     }
                 ));
             }
-            agent_client_protocol::ToolCallContent::Terminal(t) => {
+            ToolCallContent::Terminal(t) => {
                 return Some(format!("Terminal: {}", t.terminal_id.0));
             }
             _ => {}
@@ -1687,7 +2531,7 @@ impl MessageWriter for BasicMessageWriter {
         // Nothing to do for basic implementation
     }
 
-    async fn record_tool_result(&self, content: &str) {
+    async fn record_tool_result(&self, _tool_call_id: &str, content: &str) {
         let mut current = self.text.lock().await;
         current.push_str(&format!("\n[Result: {}]\n", content));
     }
@@ -1696,16 +2540,26 @@ impl MessageWriter for BasicMessageWriter {
 #[cfg(test)]
 mod tests {
     use super::{
-        acp_spawn_command, consume_remote_acp_line, decode_remote_acp_line,
-        env_shebang_interpreter, guarded_path_for_agent_binary, is_broad_toolchain_dir,
-        mcp_server_transport_supported, path_with_inserted_agent_bin_dir, remote_acp_segments,
-        resolve_spawn_working_dir, sanitize_remote_acp_chunk, shell_exec_line, shell_quote,
-        AcpDriver, McpCapabilities, McpServer, RemoteLineOutcome,
+        acp_spawn_command, autoapprove_permission_decision, build_prompt_content_blocks,
+        consume_remote_acp_line, decode_remote_acp_line, env_shebang_interpreter,
+        guarded_path_for_agent_binary, is_broad_toolchain_dir, mcp_server_transport_supported,
+        path_with_inserted_agent_bin_dir, permission_response_for_options, remote_acp_segments,
+        resolve_acp_working_dir, resolve_spawn_working_dir, sanitize_remote_acp_chunk,
+        shell_exec_line, shell_quote, AcpDriver, AcpEventMetadata, AcpNotificationHandler,
+        AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest, AgentRunOutcome,
+        BasicMessageWriter, MessageWriter, RemoteLineOutcome, ReplayBoundary, ReplayBuffer,
+        ReplayEvent,
     };
-    use agent_client_protocol::{McpServerHttp, McpServerSse, McpServerStdio};
+    use agent_client_protocol::schema::v1::{
+        ContentBlock as AcpContentBlock, McpCapabilities, McpServer, McpServerHttp, McpServerSse,
+        McpServerStdio, PermissionOption, PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority,
+        PlanEntryStatus, RequestPermissionOutcome, SessionNotification, SessionUpdate, StopReason,
+    };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tokio_util::sync::CancellationToken;
 
     fn unique_test_dir(prefix: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -1737,6 +2591,77 @@ mod tests {
             .expect("join path entries")
             .into_string()
             .expect("path entries should be utf8")
+    }
+
+    fn acp_permission_request(options: Vec<AcpPermissionOption>) -> AcpPermissionRequest {
+        AcpPermissionRequest {
+            request_id: "test-request".to_string(),
+            session_id: "test-session".to_string(),
+            tool_call_id: "test-tool-call".to_string(),
+            tool_title: None,
+            tool_kind: None,
+            tool_status: None,
+            raw_input: None,
+            raw_output: None,
+            content: None,
+            locations: None,
+            options,
+            raw_request: None,
+        }
+    }
+
+    fn acp_permission_option(
+        option_id: &str,
+        name: &str,
+        kind: AcpPermissionOptionKind,
+    ) -> AcpPermissionOption {
+        AcpPermissionOption {
+            option_id: option_id.to_string(),
+            name: name.to_string(),
+            kind,
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingMessageWriter {
+        events: Mutex<Vec<AcpEventMetadata>>,
+    }
+
+    #[async_trait::async_trait]
+    impl MessageWriter for RecordingMessageWriter {
+        async fn append_text(&self, _text: &str) {}
+
+        async fn finalize(&self) {}
+
+        async fn record_tool_call(
+            &self,
+            _tool_call_id: &str,
+            _title: &str,
+            _raw_input: Option<&serde_json::Value>,
+        ) {
+        }
+
+        async fn update_tool_call_title(
+            &self,
+            _tool_call_id: &str,
+            _title: Option<&str>,
+            _raw_input: Option<&serde_json::Value>,
+        ) {
+        }
+
+        async fn record_tool_result(&self, _tool_call_id: &str, _content: &str) {}
+
+        async fn record_acp_event_metadata(&self, metadata: AcpEventMetadata) {
+            self.events.lock().unwrap().push(metadata);
+        }
+    }
+
+    fn test_plan() -> Plan {
+        Plan::new(vec![PlanEntry::new(
+            "Inspect current state",
+            PlanEntryPriority::Medium,
+            PlanEntryStatus::Pending,
+        )])
     }
 
     #[test]
@@ -1914,6 +2839,60 @@ mod tests {
             remote.interpreter_env_snapshot.is_none(),
             "remote sq proxy launches must keep their inherited environment"
         );
+    }
+
+    #[test]
+    fn remote_acp_working_dir_requires_remote_path() {
+        let error = resolve_acp_working_dir(Path::new("/tmp/local"), true, None)
+            .expect_err("remote ACP cwd should be required");
+        assert!(error.contains("absolute remote working directory"));
+    }
+
+    #[test]
+    fn remote_acp_working_dir_rejects_relative_path() {
+        let error = resolve_acp_working_dir(Path::new("/tmp/local"), true, Some(Path::new("repo")))
+            .expect_err("relative remote ACP cwd should be rejected");
+        assert!(error.contains("must be absolute"));
+    }
+
+    #[test]
+    fn remote_acp_working_dir_uses_absolute_remote_path() {
+        let remote = Path::new("/home/bloxer/repo");
+        assert_eq!(
+            resolve_acp_working_dir(Path::new("/tmp/local"), true, Some(remote)).unwrap(),
+            remote
+        );
+    }
+
+    #[test]
+    fn local_acp_working_dir_is_absolute() {
+        let resolved = resolve_acp_working_dir(Path::new("."), false, None).unwrap();
+        assert!(resolved.is_absolute());
+    }
+
+    #[test]
+    fn image_prompt_blocks_are_omitted_when_unsupported() {
+        let images = vec![("abcd".to_string(), "image/png".to_string())];
+        let blocks = build_prompt_content_blocks("inspect this", &images, false);
+
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(blocks[0], AcpContentBlock::Text(_)));
+        match &blocks[1] {
+            AcpContentBlock::Text(text) => {
+                assert!(text.text.contains("image attachment(s) omitted"));
+            }
+            other => panic!("expected omission notice text block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn image_prompt_blocks_are_sent_when_supported() {
+        let images = vec![("abcd".to_string(), "image/png".to_string())];
+        let blocks = build_prompt_content_blocks("inspect this", &images, true);
+
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(blocks[0], AcpContentBlock::Text(_)));
+        assert!(matches!(blocks[1], AcpContentBlock::Image(_)));
     }
 
     #[test]
@@ -2189,5 +3168,243 @@ mod tests {
             .expect("read should succeed");
 
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn replay_boundary_prefers_acp_message_id_over_content() {
+        let mut buffer = ReplayBuffer::new(vec![ReplayBoundary {
+            role: "assistant".to_string(),
+            content: "persisted text".to_string(),
+            acp_message_id: Some("msg-1".to_string()),
+            acp_tool_call_id: None,
+        }]);
+
+        let completed = buffer.try_match(&ReplayEvent {
+            role: "assistant".to_string(),
+            content: "provider replayed different text".to_string(),
+            acp_message_id: Some("msg-1".to_string()),
+            acp_tool_call_id: None,
+        });
+
+        assert!(completed);
+        assert_eq!(buffer.match_cursor, 1);
+    }
+
+    #[test]
+    fn replay_buffer_splits_assistant_chunks_when_message_id_changes() {
+        let mut buffer = ReplayBuffer::new(vec![
+            ReplayBoundary {
+                role: "assistant".to_string(),
+                content: "first".to_string(),
+                acp_message_id: Some("msg-1".to_string()),
+                acp_tool_call_id: None,
+            },
+            ReplayBoundary {
+                role: "assistant".to_string(),
+                content: "second".to_string(),
+                acp_message_id: Some("msg-2".to_string()),
+                acp_tool_call_id: None,
+            },
+        ]);
+
+        let completed = buffer.push_text_chunk("assistant", Some("msg-1"), "first");
+
+        assert!(!completed);
+        assert_eq!(buffer.match_cursor, 0);
+
+        let completed = buffer.push_text_chunk("assistant", Some("msg-2"), "second");
+
+        assert!(!completed);
+        assert_eq!(buffer.match_cursor, 1);
+        assert_eq!(buffer.current_message_id.as_deref(), Some("msg-2"));
+        assert_eq!(buffer.current_text, "second");
+
+        let completed = buffer.finalize_current();
+
+        assert!(completed);
+        assert_eq!(buffer.match_cursor, 2);
+    }
+
+    #[tokio::test]
+    async fn replay_handler_treats_user_only_boundaries_as_complete() {
+        let writer: Arc<dyn MessageWriter> = Arc::new(BasicMessageWriter::new());
+        let handler = AcpNotificationHandler::new(
+            writer,
+            true,
+            vec![ReplayBoundary::legacy(
+                "user".to_string(),
+                "previous prompt".to_string(),
+            )],
+            CancellationToken::new(),
+        );
+
+        assert!(handler.is_replay_complete().await);
+    }
+
+    #[tokio::test]
+    async fn replay_handler_drops_replayed_plan_updates() {
+        let writer = Arc::new(RecordingMessageWriter::default());
+        let handler = AcpNotificationHandler::new(
+            writer.clone(),
+            true,
+            vec![ReplayBoundary::legacy(
+                "assistant".to_string(),
+                "previous response".to_string(),
+            )],
+            CancellationToken::new(),
+        );
+
+        handler
+            .session_notification(SessionNotification::new(
+                "session-1",
+                SessionUpdate::Plan(test_plan()),
+            ))
+            .await
+            .expect("replayed plan should be accepted");
+
+        assert!(
+            writer.events.lock().unwrap().is_empty(),
+            "plan updates replayed by session/load must not be persisted again"
+        );
+
+        handler.transition_to_live().await;
+        handler
+            .session_notification(SessionNotification::new(
+                "session-1",
+                SessionUpdate::Plan(test_plan()),
+            ))
+            .await
+            .expect("live plan should be accepted");
+
+        let events = writer.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_kind.as_deref(), Some("plan_update"));
+    }
+
+    #[test]
+    fn replay_boundary_falls_back_to_role_and_content_without_ids() {
+        let mut buffer = ReplayBuffer::new(vec![ReplayBoundary::legacy(
+            "assistant".to_string(),
+            "persisted text".to_string(),
+        )]);
+
+        let mismatch = buffer.try_match(&ReplayEvent {
+            role: "assistant".to_string(),
+            content: "different text".to_string(),
+            acp_message_id: None,
+            acp_tool_call_id: None,
+        });
+        assert!(!mismatch);
+        assert_eq!(buffer.match_cursor, 0);
+
+        let completed = buffer.try_match(&ReplayEvent {
+            role: "assistant".to_string(),
+            content: "persisted text".to_string(),
+            acp_message_id: None,
+            acp_tool_call_id: None,
+        });
+        assert!(completed);
+        assert_eq!(buffer.match_cursor, 1);
+    }
+
+    #[test]
+    fn cancelled_permission_response_uses_acp_cancelled_outcome() {
+        let options = vec![PermissionOption::new(
+            "approve",
+            "Approve",
+            PermissionOptionKind::AllowOnce,
+        )];
+
+        let response = permission_response_for_options(&options, true);
+
+        assert!(matches!(
+            response.outcome,
+            RequestPermissionOutcome::Cancelled
+        ));
+    }
+
+    #[test]
+    fn permission_response_autoapproves_allow_option_before_cancellation() {
+        let options = vec![
+            PermissionOption::new("reject", "Reject", PermissionOptionKind::RejectOnce),
+            PermissionOption::new("approve", "Approve", PermissionOptionKind::AllowOnce),
+        ];
+
+        let response = permission_response_for_options(&options, false);
+
+        match response.outcome {
+            RequestPermissionOutcome::Selected(outcome) => {
+                assert_eq!(outcome.option_id.0.as_ref(), "approve");
+            }
+            RequestPermissionOutcome::Cancelled => panic!("permission should be selected"),
+            _ => panic!("unexpected permission outcome"),
+        }
+    }
+
+    #[test]
+    fn autoapproval_ignores_reject_kind_named_dont_allow() {
+        let request = acp_permission_request(vec![
+            acp_permission_option("reject", "Don't allow", AcpPermissionOptionKind::RejectOnce),
+            acp_permission_option("approve", "Approve", AcpPermissionOptionKind::AllowOnce),
+        ]);
+
+        let decision = autoapprove_permission_decision(&request);
+
+        assert_eq!(
+            decision,
+            super::AcpPermissionDecision::Selected {
+                option_id: "approve".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn autoapproval_ignores_reject_kind_named_disallow() {
+        let request = acp_permission_request(vec![
+            acp_permission_option("reject", "Disallow", AcpPermissionOptionKind::RejectAlways),
+            acp_permission_option("allow", "Allow", AcpPermissionOptionKind::AllowAlways),
+        ]);
+
+        let decision = autoapprove_permission_decision(&request);
+
+        assert_eq!(
+            decision,
+            super::AcpPermissionDecision::Selected {
+                option_id: "allow".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn autoapproval_falls_back_to_legacy_matching_for_unknown_kind() {
+        let request = acp_permission_request(vec![
+            acp_permission_option("reject", "Reject", AcpPermissionOptionKind::RejectOnce),
+            acp_permission_option(
+                "approve-custom",
+                "Proceed",
+                AcpPermissionOptionKind::Unknown,
+            ),
+        ]);
+
+        let decision = autoapprove_permission_decision(&request);
+
+        assert_eq!(
+            decision,
+            super::AcpPermissionDecision::Selected {
+                option_id: "approve-custom".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn stop_reason_cancelled_maps_to_cancelled_outcome() {
+        assert_eq!(
+            AgentRunOutcome::from_stop_reason(StopReason::Cancelled),
+            AgentRunOutcome::Cancelled
+        );
+        assert_eq!(
+            AgentRunOutcome::from_stop_reason(StopReason::EndTurn),
+            AgentRunOutcome::Completed
+        );
     }
 }

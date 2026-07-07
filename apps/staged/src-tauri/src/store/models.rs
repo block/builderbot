@@ -682,6 +682,51 @@ pub struct SessionMessage {
     /// Stored as a JSON array string in the DB, deserialized to a Vec here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub image_ids: Vec<String>,
+    #[serde(flatten)]
+    pub acp: AcpMessageMetadata,
+}
+
+/// ACP metadata attached to a transcript row.
+///
+/// These fields preserve richer ACP v1 events without changing the legacy
+/// transcript projection consumed by the current UI.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpMessageMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_event_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_protocol_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_agent_capabilities: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_auth_methods: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_agent_info: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_tool_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_tool_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_raw_input: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_raw_output: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_content: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_locations: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_usage: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_session_info: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_config_options: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_session_mode_state: Option<serde_json::Value>,
 }
 
 // =============================================================================

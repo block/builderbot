@@ -145,13 +145,18 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
         )
         .unwrap();
 
-    assert_eq!(version, 16);
+    assert_eq!(version, 18);
     assert_eq!(app_version, super::APP_VERSION);
     assert!(table_exists(&conn, "projects"));
     assert!(table_exists(&conn, "project_notes"));
     assert!(table_exists(&conn, "images"));
     assert!(column_exists(&conn, "comments", "note_session_id"));
     assert!(column_exists(&conn, "comments", "commit_session_id"));
+    assert!(column_exists(
+        &conn,
+        "session_messages",
+        "acp_agent_capabilities"
+    ));
 
     let trigger_count: i64 = conn
         .query_row(
@@ -181,6 +186,14 @@ fn test_store_repairs_github_comment_tracking_user_version() {
         );
         INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
         CREATE TABLE sessions (id TEXT PRIMARY KEY);
+        CREATE TABLE session_messages (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id  TEXT NOT NULL,
+            role        TEXT NOT NULL,
+            content     TEXT NOT NULL,
+            created_at  INTEGER NOT NULL,
+            image_ids   TEXT DEFAULT NULL
+        );
         CREATE TABLE repo_badges (
             github_repo TEXT NOT NULL,
             subpath     TEXT NOT NULL DEFAULT '',
@@ -207,8 +220,13 @@ fn test_store_repairs_github_comment_tracking_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 16);
+    assert_eq!(version, 18);
     assert!(column_exists(&conn, "sessions", "pipeline"));
+    assert!(column_exists(
+        &conn,
+        "session_messages",
+        "acp_agent_capabilities"
+    ));
 
     cleanup_db(&path);
 }
@@ -228,6 +246,14 @@ fn test_store_repairs_pipeline_user_version() {
         CREATE TABLE sessions (
             id       TEXT PRIMARY KEY,
             pipeline TEXT
+        );
+        CREATE TABLE session_messages (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id  TEXT NOT NULL,
+            role        TEXT NOT NULL,
+            content     TEXT NOT NULL,
+            created_at  INTEGER NOT NULL,
+            image_ids   TEXT DEFAULT NULL
         );
         CREATE TABLE repo_badges (
             github_repo TEXT NOT NULL,
@@ -250,10 +276,15 @@ fn test_store_repairs_pipeline_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 16);
+    assert_eq!(version, 18);
     assert!(column_exists(&conn, "comments", "github_comment_id"));
     assert!(column_exists(&conn, "comments", "github_comment_type"));
     assert!(column_exists(&conn, "comments", "github_comment_stale"));
+    assert!(column_exists(
+        &conn,
+        "session_messages",
+        "acp_agent_capabilities"
+    ));
 
     cleanup_db(&path);
 }

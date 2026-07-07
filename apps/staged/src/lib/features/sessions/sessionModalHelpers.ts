@@ -302,7 +302,7 @@ export function groupByVerb(
   return groups;
 }
 
-export function verbGroupSummary(group: VerbGroup): string {
+export function verbGroupSummary(group: { verb: string; items: readonly unknown[] }): string {
   const noun = VERB_NOUNS[group.verb] || 'items';
   return `${group.items.length} ${noun}`;
 }

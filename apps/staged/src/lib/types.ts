@@ -419,6 +419,23 @@ export interface SessionMessage {
   createdAt: number;
   /** Image IDs attached to this message (user messages only). */
   imageIds?: string[];
+  acpEventKind?: string;
+  acpProtocolVersion?: string;
+  acpAgentCapabilities?: unknown;
+  acpAuthMethods?: unknown;
+  acpAgentInfo?: unknown;
+  acpMessageId?: string;
+  acpToolCallId?: string;
+  acpToolKind?: string;
+  acpToolStatus?: string;
+  acpRawInput?: unknown;
+  acpRawOutput?: unknown;
+  acpContent?: unknown;
+  acpLocations?: unknown;
+  acpUsage?: unknown;
+  acpSessionInfo?: unknown;
+  acpConfigOptions?: unknown;
+  acpSessionModeState?: unknown;
 }
 
 // =============================================================================

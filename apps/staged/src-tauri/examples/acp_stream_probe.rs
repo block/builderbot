@@ -107,12 +107,13 @@ impl MessageWriter for ProbeWriter {
         );
     }
 
-    async fn record_tool_result(&self, content: &str) {
+    async fn record_tool_result(&self, tool_call_id: &str, content: &str) {
         let mut state = self.state.lock().expect("probe state lock poisoned");
         state.total_tool_results += 1;
         println!(
-            "[probe] tool_result #{}: {}",
+            "[probe] tool_result #{} id={}: {}",
             state.total_tool_results,
+            tool_call_id,
             Self::truncate(content)
         );
     }

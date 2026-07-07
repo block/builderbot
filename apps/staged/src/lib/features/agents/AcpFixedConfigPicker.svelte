@@ -88,7 +88,7 @@
       align="start"
       side={dropUp ? 'top' : 'bottom'}
       sideOffset={4}
-      class="max-h-[min(360px,calc(100vh-48px))] w-[min(680px,calc(100vw-16px))] max-w-[calc(100vw-16px)]"
+      class="max-h-[min(360px,calc(100vh-48px))] max-w-[calc(100vw-16px)]"
     >
       <div class="picker-column-grid">
         <div class="picker-column">
@@ -146,13 +146,22 @@
 
 <style>
   .picker-column-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    display: inline-grid;
+    grid-auto-columns: max-content;
+    grid-auto-flow: column;
     gap: 4px;
+    max-width: calc(100vw - 16px);
     min-width: 0;
   }
 
   .picker-column {
+    max-width: min(260px, calc(100vw - 24px));
+    min-width: 0;
+  }
+
+  .picker-column :global([data-slot='dropdown-menu-item']),
+  .picker-column :global([data-slot='dropdown-menu-radio-item']) {
+    max-width: 100%;
     min-width: 0;
   }
 

@@ -3,6 +3,7 @@ import type { DisplayRootInput } from './pathDisplayRoots';
 import {
   formatToolDisplay,
   makePathsRelative,
+  parseToolCall,
   stripCodeFences,
   verbGroupSummary,
 } from './sessionModalHelpers';
@@ -24,6 +25,8 @@ export interface RichToolItem {
   rawOutput: unknown;
   content: unknown;
   locations: unknown;
+  isPikchrDiagramTool: boolean;
+  innerSessionId: string | null;
 }
 
 export interface RichToolVerbGroup {
@@ -232,7 +235,11 @@ export function groupRichToolsByVerb(items: RichToolItem[]): RichToolVerbGroup[]
   const groups: Array<Omit<RichToolVerbGroup, 'summary' | 'statusTone'>> = [];
   for (const item of items) {
     const last = groups[groups.length - 1];
-    if (last?.verb === item.verb) {
+    if (
+      !item.isPikchrDiagramTool &&
+      last?.verb === item.verb &&
+      !last.items[0]?.isPikchrDiagramTool
+    ) {
       last.items.push(item);
     } else {
       groups.push({
@@ -494,6 +501,7 @@ function richToolItem(tool: ToolAssembly, displayRoots?: DisplayRootInput): Rich
   const status = tool.metadata.status ?? (tool.result ? 'completed' : 'pending');
   const pending = status === 'pending' || status === 'in_progress';
   const display = formatToolDisplay(tool.call.content, displayRoots, pending);
+  const isPikchrDiagramTool = isPikchrTool(tool);
   return {
     key: tool.key,
     call: tool.call,
@@ -509,7 +517,79 @@ function richToolItem(tool: ToolAssembly, displayRoots?: DisplayRootInput): Rich
     rawOutput: tool.metadata.rawOutput,
     content: tool.metadata.content,
     locations: tool.metadata.locations,
+    isPikchrDiagramTool,
+    innerSessionId: isPikchrDiagramTool ? extractInnerSessionId(tool) : null,
   };
+}
+
+function isPikchrTool(tool: ToolAssembly): boolean {
+  return [tool.call.content, tool.metadata.toolKind]
+    .map(normalizedToolName)
+    .some((name) => name === 'generate_pikchr' || name.endsWith('.generate_pikchr'));
+}
+
+function normalizedToolName(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const parsed = parseToolCall(value);
+  const name = (parsed?.name ?? value).trim().split(/\s+/)[0] ?? '';
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
+}
+
+function extractInnerSessionId(tool: ToolAssembly): string | null {
+  return (
+    innerSessionIdFromValue(tool.metadata.rawOutput) ??
+    innerSessionIdFromValue(tool.metadata.content) ??
+    innerSessionIdFromValue(tool.result?.acpRawOutput) ??
+    innerSessionIdFromValue(tool.result?.acpContent) ??
+    innerSessionIdFromValue(tool.result?.content) ??
+    null
+  );
+}
+
+function innerSessionIdFromValue(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null;
+    try {
+      return innerSessionIdFromValue(JSON.parse(trimmed));
+    } catch {
+      return null;
+    }
+  }
+  if (!value || typeof value !== 'object') return null;
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const sessionId = innerSessionIdFromValue(item);
+      if (sessionId) return sessionId;
+    }
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const direct = stringValue(record.innerSessionId) ?? stringValue(record.inner_session_id);
+  if (direct) return direct;
+
+  for (const key of [
+    'structuredContent',
+    'structured_content',
+    'meta',
+    'metadata',
+    'data',
+    'result',
+  ]) {
+    const sessionId = innerSessionIdFromValue(record[key]);
+    if (sessionId) return sessionId;
+  }
+
+  return null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null;
 }
 
 function normalizeToolStatus(status: string | undefined): ToolStatus | undefined {

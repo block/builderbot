@@ -168,6 +168,81 @@ describe('buildAcpTranscriptGroups', () => {
     expect(groups).toHaveLength(1);
     expect(groups[0].type).toBe('acp');
   });
+
+  it('marks generate_pikchr tools and extracts the inner session id', () => {
+    const groups = buildAcpTranscriptGroups(
+      [
+        message({
+          id: 1,
+          role: 'tool_call',
+          content: JSON.stringify({
+            name: 'generate_pikchr',
+            input: { description: 'Show the signup flow' },
+          }),
+          acpEventKind: 'tool_call',
+          acpToolCallId: 'tc-pikchr',
+        }),
+      ],
+      [
+        message({
+          id: 2,
+          role: 'assistant',
+          acpEventKind: 'tool_call_update',
+          acpToolCallId: 'tc-pikchr',
+          acpToolStatus: 'completed',
+          acpRawOutput: {
+            structuredContent: {
+              innerSessionId: 'child-session-1',
+              previewImagePath: '/tmp/preview.png',
+            },
+          },
+        }),
+      ]
+    );
+
+    expect(groups[0].type).toBe('tools');
+    if (groups[0].type === 'tools') {
+      expect(groups[0].items[0].isPikchrDiagramTool).toBe(true);
+      expect(groups[0].items[0].innerSessionId).toBe('child-session-1');
+    }
+  });
+
+  it('extracts Pikchr inner session ids from nested snake-case structured output', () => {
+    const groups = buildAcpTranscriptGroups(
+      [
+        message({
+          id: 1,
+          role: 'tool_call',
+          content: JSON.stringify({
+            name: 'mcp.generate_pikchr',
+            input: { description: 'Show the signup flow' },
+          }),
+          acpEventKind: 'tool_call',
+          acpToolCallId: 'tc-pikchr',
+        }),
+      ],
+      [
+        message({
+          id: 2,
+          role: 'assistant',
+          acpEventKind: 'tool_call_update',
+          acpToolCallId: 'tc-pikchr',
+          acpRawOutput: {
+            result: {
+              structured_content: {
+                inner_session_id: 'child-session-2',
+              },
+            },
+          },
+        }),
+      ]
+    );
+
+    expect(groups[0].type).toBe('tools');
+    if (groups[0].type === 'tools') {
+      expect(groups[0].items[0].innerSessionId).toBe('child-session-2');
+    }
+  });
 });
 
 describe('groupRichToolsByVerb', () => {
@@ -276,6 +351,27 @@ describe('groupRichToolsByVerb', () => {
       expect(groups[0].items[1].locations).toEqual([{ path: '/repo/b.ts', line: 12 }]);
     }
   });
+
+  it('keeps Pikchr tools out of generic verb groups', () => {
+    const groups = groupRichToolsByVerb([
+      richTool({ key: 'tool:1', verb: 'Ran', detail: 'npm test' }),
+      richTool({
+        key: 'tool:pikchr',
+        verb: 'Ran',
+        detail: 'generate_pikchr',
+        isPikchrDiagramTool: true,
+        innerSessionId: 'child-session-1',
+      }),
+      richTool({ key: 'tool:2', verb: 'Ran', detail: 'npm build' }),
+    ]);
+
+    expect(groups).toHaveLength(3);
+    expect(groups.map((group) => group.items.map((item) => item.key))).toEqual([
+      ['tool:1'],
+      ['tool:pikchr'],
+      ['tool:2'],
+    ]);
+  });
 });
 
 describe('latestAvailableCommands', () => {
@@ -323,6 +419,8 @@ function richTool(
     rawOutput: undefined,
     content: undefined,
     locations: undefined,
+    isPikchrDiagramTool: false,
+    innerSessionId: null,
     ...overrides,
   };
 }

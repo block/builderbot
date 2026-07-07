@@ -81,6 +81,23 @@
     activateEntry(target);
   }
 
+  function handleOpenInnerSession(sessionId: string) {
+    const current = currentReferenceEntry();
+    if (!current || current.kind === 'diff' || current.kind === 'image') return;
+
+    pushReferenceEntry({
+      kind: 'chat',
+      ref: `#chat:${sessionId}`,
+      sessionId,
+      branchId: current.branchId,
+      projectId: current.projectId,
+      repoDir: current.repoDir,
+      repoLabel: current.repoLabel,
+      hashtagItems: current.hashtagItems,
+      diffContext: current.diffContext,
+    });
+  }
+
   function noteEntryForChat(entry: ReferenceChatEntry): ReferenceNoteEntry | null {
     const note = noteItemForSession(entry.sessionId, entry.hashtagItems);
     if (!note?.noteContent && note?.noteContent !== '') return null;
@@ -129,6 +146,7 @@
     onChatOpenChange={(open) => setCurrentNoteView(open ? 'chat' : 'note')}
     hashtagItems={entry.hashtagItems}
     {referenceNav}
+    onOpenSession={handleOpenInnerSession}
     onClose={handleClose}
     onHashtagClick={handleHashtagClick}
   />
@@ -152,6 +170,7 @@
         replaceCurrentReferenceEntry({ ...noteEntry, view: open ? 'chat' : 'note' })}
       hashtagItems={noteEntry.hashtagItems}
       {referenceNav}
+      onOpenSession={handleOpenInnerSession}
       onClose={handleClose}
       onHashtagClick={handleHashtagClick}
     />
@@ -165,6 +184,7 @@
       repoLabel={entry.repoLabel}
       hashtagItems={entry.hashtagItems}
       {referenceNav}
+      onOpenSession={handleOpenInnerSession}
       onClose={handleClose}
       onHashtagClick={handleHashtagClick}
     />

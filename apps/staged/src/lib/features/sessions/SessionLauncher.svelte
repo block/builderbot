@@ -295,6 +295,7 @@
     open={true}
     sessionId={modalSessionId}
     repoDir={null}
+    onOpenSession={openModal}
     onClose={() => closeModal(modalSessionId)}
   />
 {/each}

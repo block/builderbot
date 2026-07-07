@@ -45,6 +45,7 @@
   import Zap from '@lucide/svelte/icons/zap';
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import FileText from '@lucide/svelte/icons/file-text';
+  import ExternalLink from '@lucide/svelte/icons/external-link';
   import ImagePlus from '@lucide/svelte/icons/image-plus';
   import Spinner from '../../shared/Spinner.svelte';
   import { isResumableReason } from '../../types';
@@ -156,6 +157,7 @@
     hashtagItems?: HashtagItem[];
     /** Linked note context for note-related chat actions. */
     noteInfo?: LinkedNoteContext | null;
+    onOpenSession?: (sessionId: string) => void;
     onHashtagClick?: (click: HashtagClickInfo) => void;
     onSessionChange?: (session: Session | null) => void;
     onSearchStateChange?: (state: { matchCount: number; currentIndex: number }) => void;
@@ -176,6 +178,7 @@
     repoLabel = null,
     hashtagItems: providedHashtagItems,
     noteInfo,
+    onOpenSession,
     onHashtagClick,
     onSessionChange,
     onSearchStateChange,
@@ -1647,82 +1650,105 @@
     diffs.length > 0 ||
     locations.length > 0 ||
     terminalRefs.length > 0}
-  <div class="tool-card" class:tool-card-nested={nested}>
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="tool-header"
-      class:tool-header-expandable={hasDetails}
-      onclick={() => hasDetails && toggleTool(item.key)}
-    >
-      <span
-        class="tool-caret"
-        class:tool-caret-expanded={isExpanded}
-        class:tool-caret-hidden={!hasDetails}>›</span
+  {#if item.isPikchrDiagramTool && item.innerSessionId && onOpenSession}
+    <div class="tool-card" class:tool-card-nested={nested}>
+      <Button
+        variant="outline"
+        size="sm"
+        class="tool-session-button"
+        onclick={() => onOpenSession?.(item.innerSessionId!)}
       >
-      <span
-        class="tool-status-dot"
-        class:status-running={item.statusTone === 'running'}
-        class:status-success={item.statusTone === 'success'}
-        class:status-danger={item.statusTone === 'danger'}
-        class:status-cancelled={item.statusTone === 'cancelled'}
-      >
-        {@render toolStatusIcon(item.statusTone)}
-      </span>
-      <span class="tool-name">{item.verb}</span>
-      {#if item.detail}
-        <span class="tool-args-preview">{item.detail}</span>
-      {/if}
-    </div>
-    {#if isExpanded && hasDetails}
-      <div class="tool-code-block" transition:slide={{ duration: SLIDE_DURATION }}>
-        {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
-          <div class="tool-code-command">$ {item.detail}</div>
-        {/if}
-        {#if locations.length > 0}
-          <div class="tool-meta-row">
-            {#each locations as location}
-              <span class="tool-chip">{location}</span>
-            {/each}
-          </div>
-        {/if}
-        {#if rawInputText}
-          <div class="tool-panel-label">Input</div>
-          <pre class="tool-code-output">{rawInputText}</pre>
-        {/if}
-        {#each diffs as diff}
-          <div class="tool-panel-label">{diff.path}</div>
-          <pre class="tool-code-output diff-output">{simpleUnifiedDiff(diff)}</pre>
-        {/each}
-        {#if terminalRefs.length > 0}
-          <div class="tool-panel-label">Terminal</div>
-          <div class="tool-meta-row">
-            {#each terminalRefs as terminalRef}
-              <span class="tool-chip">{terminalRef}</span>
-            {/each}
-          </div>
-        {/if}
-        {#if resultText}
-          <div class="tool-panel-label">Output</div>
-          <pre class="tool-code-output">{resultText}</pre>
-        {/if}
-        {#if rawOutputText && rawOutputText !== resultText}
-          <div class="tool-panel-label">Raw output</div>
-          <pre class="tool-code-output">{rawOutputText}</pre>
-        {/if}
-        <div
-          class="tool-code-status"
+        <span
+          class="tool-status-dot"
+          class:status-running={item.statusTone === 'running'}
+          class:status-success={item.statusTone === 'success'}
           class:status-danger={item.statusTone === 'danger'}
           class:status-cancelled={item.statusTone === 'cancelled'}
         >
-          {#if item.statusTone === 'success'}
-            <Check size={11} />
-          {/if}
-          {item.statusLabel}
-        </div>
+          {@render toolStatusIcon(item.statusTone)}
+        </span>
+        <span>Open diagram session</span>
+        <ExternalLink size={12} />
+      </Button>
+    </div>
+  {:else}
+    <div class="tool-card" class:tool-card-nested={nested}>
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="tool-header"
+        class:tool-header-expandable={hasDetails}
+        onclick={() => hasDetails && toggleTool(item.key)}
+      >
+        <span
+          class="tool-caret"
+          class:tool-caret-expanded={isExpanded}
+          class:tool-caret-hidden={!hasDetails}>›</span
+        >
+        <span
+          class="tool-status-dot"
+          class:status-running={item.statusTone === 'running'}
+          class:status-success={item.statusTone === 'success'}
+          class:status-danger={item.statusTone === 'danger'}
+          class:status-cancelled={item.statusTone === 'cancelled'}
+        >
+          {@render toolStatusIcon(item.statusTone)}
+        </span>
+        <span class="tool-name">{item.verb}</span>
+        {#if item.detail}
+          <span class="tool-args-preview">{item.detail}</span>
+        {/if}
       </div>
-    {/if}
-  </div>
+      {#if isExpanded && hasDetails}
+        <div class="tool-code-block" transition:slide={{ duration: SLIDE_DURATION }}>
+          {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
+            <div class="tool-code-command">$ {item.detail}</div>
+          {/if}
+          {#if locations.length > 0}
+            <div class="tool-meta-row">
+              {#each locations as location}
+                <span class="tool-chip">{location}</span>
+              {/each}
+            </div>
+          {/if}
+          {#if rawInputText}
+            <div class="tool-panel-label">Input</div>
+            <pre class="tool-code-output">{rawInputText}</pre>
+          {/if}
+          {#each diffs as diff}
+            <div class="tool-panel-label">{diff.path}</div>
+            <pre class="tool-code-output diff-output">{simpleUnifiedDiff(diff)}</pre>
+          {/each}
+          {#if terminalRefs.length > 0}
+            <div class="tool-panel-label">Terminal</div>
+            <div class="tool-meta-row">
+              {#each terminalRefs as terminalRef}
+                <span class="tool-chip">{terminalRef}</span>
+              {/each}
+            </div>
+          {/if}
+          {#if resultText}
+            <div class="tool-panel-label">Output</div>
+            <pre class="tool-code-output">{resultText}</pre>
+          {/if}
+          {#if rawOutputText && rawOutputText !== resultText}
+            <div class="tool-panel-label">Raw output</div>
+            <pre class="tool-code-output">{rawOutputText}</pre>
+          {/if}
+          <div
+            class="tool-code-status"
+            class:status-danger={item.statusTone === 'danger'}
+            class:status-cancelled={item.statusTone === 'cancelled'}
+          >
+            {#if item.statusTone === 'success'}
+              <Check size={11} />
+            {/if}
+            {item.statusLabel}
+          </div>
+        </div>
+      {/if}
+    </div>
+  {/if}
 {/snippet}
 
 <div
@@ -2497,6 +2523,23 @@
 
   .tool-header-expandable:hover .tool-name {
     text-decoration: underline;
+  }
+
+  :global(.tool-session-button) {
+    height: 26px;
+    gap: 6px;
+    border-color: var(--border-muted);
+    padding: 0 8px;
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+    font-weight: 500;
+    box-shadow: none;
+  }
+
+  :global(.tool-session-button:hover) {
+    border-color: var(--border-emphasis);
+    background: var(--bg-hover);
+    color: var(--text-primary);
   }
 
   .tool-caret {

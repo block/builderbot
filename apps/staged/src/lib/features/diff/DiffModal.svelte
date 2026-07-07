@@ -882,6 +882,23 @@
     }
   }
 
+  function handleOpenInnerSession(sessionId: string) {
+    const current = currentDialogReferenceEntry();
+    if (current) pushReferenceEntry(current);
+    pushReferenceEntry({
+      kind: 'chat',
+      ref: `#chat:${sessionId}`,
+      sessionId,
+      branchId,
+      projectId,
+      repoDir: branch?.worktreePath,
+      repoLabel: githubRepo ? { githubRepo, subpath: subpath ?? null, headRepo: null } : null,
+      hashtagItems,
+      diffContext: referenceDiffContext,
+    });
+    closeReferenceDialogs();
+  }
+
   // Create tracker for search initialization
   const checkSearchInitialization = createSearchInitializationTracker({
     searchState,
@@ -1787,6 +1804,7 @@
     onClose={() => {
       openSessionId = null;
     }}
+    onOpenSession={handleOpenInnerSession}
     onHashtagClick={handleHashtagClick}
   />
 
@@ -1808,6 +1826,7 @@
     }}
     {hashtagItems}
     referenceNav={disabledReferenceNav}
+    onOpenSession={handleOpenInnerSession}
     onClose={() => {
       openNote = null;
     }}

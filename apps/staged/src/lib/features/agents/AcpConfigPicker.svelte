@@ -273,17 +273,20 @@
               />
             </div>
           {/if}
+
+          {#if configLoading && !modelSelector && !effortSelector}
+            <div class="picker-column">
+              <DropdownMenu.Item disabled>
+                <span class="picker-status-row">
+                  <Spinner size={12} />
+                  Loading options…
+                </span>
+              </DropdownMenu.Item>
+            </div>
+          {/if}
         </div>
 
-        {#if configLoading && !modelSelector && !effortSelector}
-          <DropdownMenu.Separator />
-          <DropdownMenu.Item disabled>
-            <span class="picker-status-row">
-              <Spinner size={12} />
-              Loading options…
-            </span>
-          </DropdownMenu.Item>
-        {:else if configError && !modelSelector && !effortSelector && agents.length <= 1}
+        {#if configError && !modelSelector && !effortSelector && agents.length <= 1}
           <DropdownMenu.Item disabled>
             <span class="picker-status-row">Using provider defaults</span>
           </DropdownMenu.Item>

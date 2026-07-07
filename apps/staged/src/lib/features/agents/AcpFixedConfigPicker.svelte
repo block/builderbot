@@ -128,17 +128,20 @@
             />
           </div>
         {/if}
+
+        {#if loading && !modelSelector && !effortSelector}
+          <div class="picker-column">
+            <DropdownMenu.Item disabled>
+              <span class="picker-status-row">
+                <Spinner size={12} />
+                Loading options…
+              </span>
+            </DropdownMenu.Item>
+          </div>
+        {/if}
       </div>
 
-      {#if loading && !modelSelector && !effortSelector}
-        <DropdownMenu.Separator />
-        <DropdownMenu.Item disabled>
-          <span class="picker-status-row">
-            <Spinner size={12} />
-            Loading options…
-          </span>
-        </DropdownMenu.Item>
-      {:else if error && !modelSelector && !effortSelector}
+      {#if error && !modelSelector && !effortSelector}
         <DropdownMenu.Separator />
         <DropdownMenu.Item disabled>
           <span class="picker-status-row">Using provider defaults</span>

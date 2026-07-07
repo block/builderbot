@@ -93,12 +93,19 @@
   let copied = $state(false);
   let liveNote = $state<{ title: string; content: string; updatedAt: number } | null>(null);
   let assistantMessagesAfterNote = $state(0);
+  let assistantMessagesAfterNoteLoadedKey = $state<string | null>(null);
+  let chatAutoOpenDecisionKey = $state<string | null>(null);
   let chatButtonLabel = $derived(formatChatButtonLabel(assistantMessagesAfterNote));
   let canOpenSession = $derived(Boolean(sessionId));
   let showChatInfo = $derived(canOpenSession && assistantMessagesAfterNote > 0 && !chatOpen);
   let displayTitle = $derived(liveNote?.title ?? title);
   let displayContent = $derived(liveNote?.content ?? content);
   let displayUpdatedAt = $derived(liveNote?.updatedAt ?? noteUpdatedAt);
+  let noteFreshnessKey = $derived(
+    open && sessionId && typeof displayUpdatedAt === 'number'
+      ? `${noteId ?? 'note'}:${sessionId}:${displayUpdatedAt}`
+      : null
+  );
   let noteMarkdown = $derived(noteMarkdownWithTitle(displayTitle, displayContent));
   let splitChatOpen = $derived(chatOpen && viewport.canSplit);
   let narrowChatOpen = $derived(chatOpen && !viewport.canSplit);
@@ -199,6 +206,7 @@
   $effect(() => {
     if (!open) {
       pikchrRendererLoadFailedKey = null;
+      chatAutoOpenDecisionKey = null;
     }
   });
 
@@ -215,27 +223,46 @@
   });
 
   $effect(() => {
+    const key = noteFreshnessKey;
     const sid = sessionId;
     const updatedAt = displayUpdatedAt;
-    if (!sid || typeof updatedAt !== 'number') {
+    if (!open || !key || !sid || typeof updatedAt !== 'number') {
       assistantMessagesAfterNote = 0;
+      assistantMessagesAfterNoteLoadedKey = null;
       return;
     }
 
+    assistantMessagesAfterNoteLoadedKey = null;
     let stale = false;
     countAssistantMessagesAfter(sid, updatedAt)
       .then((count) => {
         if (!stale) {
           assistantMessagesAfterNote = count;
+          assistantMessagesAfterNoteLoadedKey = key;
         }
       })
       .catch(() => {
-        if (!stale) assistantMessagesAfterNote = 0;
+        if (!stale) {
+          assistantMessagesAfterNote = 0;
+          assistantMessagesAfterNoteLoadedKey = key;
+        }
       });
 
     return () => {
       stale = true;
     };
+  });
+
+  $effect(() => {
+    const key = noteFreshnessKey;
+    if (!key || assistantMessagesAfterNoteLoadedKey !== key || chatAutoOpenDecisionKey === key) {
+      return;
+    }
+
+    chatAutoOpenDecisionKey = key;
+    if (assistantMessagesAfterNote > 0 && !chatOpen) {
+      setChatOpen(true);
+    }
   });
 
   function setChatOpen(next: boolean) {

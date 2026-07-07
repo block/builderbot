@@ -440,13 +440,13 @@ describe('cached mutation command wrappers', () => {
     expect(cachedCommand).toHaveBeenCalledWith('discover_acp_providers', undefined, { ttl: 0 });
   });
 
-  it('caches ACP config discovery by provider and working directory', async () => {
+  it('discovers ACP config through the backend without frontend caching', async () => {
     const config = {
       providerId: 'goose',
       model: null,
       effort: null,
     };
-    cachedCommand.mockResolvedValue({ data: config, revalidating: null });
+    invokeCommand.mockResolvedValue(config);
 
     const { discoverAcpConfig } = await import('./commands');
 
@@ -454,40 +454,43 @@ describe('cached mutation command wrappers', () => {
       data: config,
       revalidating: null,
     });
-    expect(cachedCommand).toHaveBeenCalledWith(
+    await discoverAcpConfig('goose', '/other-repo');
+
+    expect(invokeCommand).toHaveBeenNthCalledWith(1, 'discover_acp_config', {
+      providerId: 'goose',
+      workingDir: '/repo',
+      force: false,
+    });
+    expect(invokeCommand).toHaveBeenNthCalledWith(2, 'discover_acp_config', {
+      providerId: 'goose',
+      workingDir: '/other-repo',
+      force: false,
+    });
+    expect(cachedCommand).not.toHaveBeenCalledWith(
       'discover_acp_config',
-      { providerId: 'goose', workingDir: '/repo' },
-      { ttl: 30 * 60_000 }
+      expect.anything(),
+      expect.anything()
     );
   });
 
-  it('forces ACP config discovery revalidation without bypassing the cached value', async () => {
+  it('passes ACP config discovery force to the backend command', async () => {
     const config = {
       providerId: 'goose',
       model: null,
       effort: null,
     };
-    const revalidating = Promise.resolve({
-      providerId: 'goose',
-      model: {
-        configId: 'model',
-        label: 'Model',
-        currentValueId: 'sonnet',
-        options: [{ valueId: 'sonnet', label: 'Sonnet' }],
-      },
-    });
-    cachedCommand.mockResolvedValue({ data: config, revalidating });
+    invokeCommand.mockResolvedValue(config);
 
     const { discoverAcpConfig } = await import('./commands');
 
     await expect(discoverAcpConfig('goose', null, { force: true })).resolves.toEqual({
       data: config,
-      revalidating,
+      revalidating: null,
     });
-    expect(cachedCommand).toHaveBeenCalledWith(
-      'discover_acp_config',
-      { providerId: 'goose', workingDir: null },
-      { ttl: 0 }
-    );
+    expect(invokeCommand).toHaveBeenCalledWith('discover_acp_config', {
+      providerId: 'goose',
+      workingDir: null,
+      force: true,
+    });
   });
 });

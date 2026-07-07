@@ -9,6 +9,7 @@ export interface AcpConfigPickerSelection {
 interface SelectorSelection {
   selector: AcpConfigSelector | null;
   valueId: string | null;
+  explicit?: boolean;
 }
 
 interface AcpSelectorSelections {
@@ -20,15 +21,12 @@ function selectedValueId(selector: AcpConfigSelector, valueId: string | null): s
   if (valueId && selector.options.some((option) => option.valueId === valueId)) {
     return valueId;
   }
-  if (selector.options.some((option) => option.valueId === selector.currentValueId)) {
-    return selector.currentValueId;
-  }
-  return selector.options[0]?.valueId ?? null;
+  return null;
 }
 
 function valueSelection(selection: SelectorSelection | undefined): AcpConfigValueSelection | null {
   const selector = selection?.selector ?? null;
-  if (!selector) return null;
+  if (!selector || !selection?.explicit) return null;
 
   const valueId = selectedValueId(selector, selection?.valueId ?? null);
   if (!valueId) return null;

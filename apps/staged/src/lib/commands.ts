@@ -733,18 +733,17 @@ export function discoverAcpProviders(
 }
 
 /** Discover model/effort selectors exposed by a provider for a working directory. */
-export function discoverAcpConfig(
+export async function discoverAcpConfig(
   providerId: string,
   workingDir?: string | null,
   options: DiscoverAcpConfigOptions = {}
 ): Promise<SwrResult<AcpConfigDiscovery>> {
-  return cachedCommand(
-    'discover_acp_config',
-    { providerId, workingDir: workingDir ?? null },
-    {
-      ttl: options.force ? 0 : ACP_PROVIDER_CACHE_TTL,
-    }
-  );
+  const data = await invokeCommand<AcpConfigDiscovery>('discover_acp_config', {
+    providerId,
+    workingDir: workingDir ?? null,
+    force: options.force ?? false,
+  });
+  return { data, revalidating: null };
 }
 
 // =============================================================================

@@ -49,6 +49,8 @@
   let configError = $state<string | null>(null);
   let selectedModelValue = $state<string | null>(null);
   let selectedEffortValue = $state<string | null>(null);
+  let modelSelectionExplicit = $state(false);
+  let effortSelectionExplicit = $state(false);
   let modelSelectorKey = $state<string | null>(null);
   let effortSelectorKey = $state<string | null>(null);
   let discoveryRun = 0;
@@ -72,8 +74,16 @@
   let pickerSelection = $derived({
     providerId: selectedProviderId,
     acpConfigSelection: buildAcpConfigSelection({
-      model: { selector: modelSelector, valueId: selectedModelValue },
-      effort: { selector: effortSelector, valueId: selectedEffortValue },
+      model: {
+        selector: modelSelector,
+        valueId: selectedModelValue,
+        explicit: modelSelectionExplicit,
+      },
+      effort: {
+        selector: effortSelector,
+        valueId: selectedEffortValue,
+        explicit: effortSelectionExplicit,
+      },
     }),
   } satisfies AcpConfigPickerSelection);
 
@@ -126,6 +136,7 @@
     const nextKey = selectorKey(modelSelector);
     if (nextKey !== modelSelectorKey) {
       selectedModelValue = defaultSelectorValue(modelSelector);
+      modelSelectionExplicit = false;
       modelSelectorKey = nextKey;
     }
   });
@@ -134,6 +145,7 @@
     const nextKey = selectorKey(effortSelector);
     if (nextKey !== effortSelectorKey) {
       selectedEffortValue = defaultSelectorValue(effortSelector);
+      effortSelectionExplicit = false;
       effortSelectorKey = nextKey;
     }
   });
@@ -148,10 +160,12 @@
 
   function handleModelChange(value: string) {
     selectedModelValue = value;
+    modelSelectionExplicit = true;
   }
 
   function handleEffortChange(value: string) {
     selectedEffortValue = value;
+    effortSelectionExplicit = true;
   }
 
   function selectorKey(selector: AcpConfigSelector | null): string | null {

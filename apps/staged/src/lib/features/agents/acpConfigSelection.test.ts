@@ -30,8 +30,8 @@ describe('buildAcpConfigSelection', () => {
 
     expect(
       buildAcpConfigSelection({
-        model: { selector: model, valueId: 'opus' },
-        effort: { selector: effort, valueId: 'high' },
+        model: { selector: model, valueId: 'opus', explicit: true },
+        effort: { selector: effort, valueId: 'high', explicit: true },
       })
     ).toEqual({
       model: { configId: 'model', valueId: 'opus', label: 'Opus' },
@@ -39,10 +39,18 @@ describe('buildAcpConfigSelection', () => {
     });
   });
 
-  it('falls back to the current selector value when no explicit value is selected', () => {
+  it('omits untouched default selector values', () => {
     expect(
       buildAcpConfigSelection({
-        model: { selector: selector(), valueId: null },
+        model: { selector: selector(), valueId: 'sonnet' },
+      })
+    ).toBeNull();
+  });
+
+  it('can explicitly send the current selector value', () => {
+    expect(
+      buildAcpConfigSelection({
+        model: { selector: selector(), valueId: 'sonnet', explicit: true },
       })
     ).toEqual({
       model: { configId: 'model', valueId: 'sonnet', label: 'Sonnet' },
@@ -50,22 +58,19 @@ describe('buildAcpConfigSelection', () => {
     });
   });
 
-  it('falls back to the current selector value when a stale selected value is unavailable', () => {
+  it('does not remap stale selected values to the current selector value', () => {
     expect(
       buildAcpConfigSelection({
-        model: { selector: selector(), valueId: 'removed-model' },
+        model: { selector: selector(), valueId: 'removed-model', explicit: true },
       })
-    ).toEqual({
-      model: { configId: 'model', valueId: 'sonnet', label: 'Sonnet' },
-      effort: null,
-    });
+    ).toBeNull();
   });
 
   it('omits unavailable selectors and returns null when there is no selectable value', () => {
     expect(
       buildAcpConfigSelection({
-        model: { selector: selector({ options: [] }), valueId: null },
-        effort: { selector: null, valueId: null },
+        model: { selector: selector({ options: [] }), valueId: null, explicit: true },
+        effort: { selector: null, valueId: null, explicit: true },
       })
     ).toBeNull();
   });

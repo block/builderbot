@@ -22,7 +22,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use agent_client_protocol::{
     schema::{
@@ -345,6 +345,28 @@ pub struct AcpConfigDiscovery {
 }
 
 const ACP_CONFIG_DISCOVERY_SETUP_TIMEOUT: Duration = Duration::from_secs(90);
+const ACP_CONFIG_DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+
+#[derive(Debug, Clone)]
+struct AcpConfigDiscoveryCacheEntry {
+    discovery: AcpConfigDiscovery,
+    fetched_at: Instant,
+}
+
+static ACP_CONFIG_DISCOVERY_CACHE: OnceLock<Mutex<HashMap<String, AcpConfigDiscoveryCacheEntry>>> =
+    OnceLock::new();
+
+fn acp_config_discovery_cache() -> &'static Mutex<HashMap<String, AcpConfigDiscoveryCacheEntry>> {
+    ACP_CONFIG_DISCOVERY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn normalized_acp_config_provider_id(provider_id: &str) -> Result<String, String> {
+    let provider_id = provider_id.trim().to_string();
+    if provider_id.is_empty() {
+        return Err("ACP provider ID is required for config discovery".to_string());
+    }
+    Ok(provider_id)
+}
 
 #[derive(Debug)]
 struct AcpConfigDiscoverySpawnCommand {
@@ -696,10 +718,7 @@ fn discover_acp_config_for_provider(
     provider_id: String,
     working_dir: PathBuf,
 ) -> Result<AcpConfigDiscovery, String> {
-    let provider_id = provider_id.trim().to_string();
-    if provider_id.is_empty() {
-        return Err("ACP provider ID is required for config discovery".to_string());
-    }
+    let provider_id = normalized_acp_config_provider_id(&provider_id)?;
 
     let handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -719,17 +738,74 @@ fn discover_acp_config_for_provider(
         .map_err(|_| "ACP config discovery thread panicked".to_string())?
 }
 
+fn discover_acp_config_for_provider_with_cache<F>(
+    provider_id: String,
+    working_dir: PathBuf,
+    force: bool,
+    fetch: F,
+) -> Result<AcpConfigDiscovery, String>
+where
+    F: FnOnce(String, PathBuf) -> Result<AcpConfigDiscovery, String>,
+{
+    let provider_id = normalized_acp_config_provider_id(&provider_id)?;
+    let cached_entry = {
+        let cache = acp_config_discovery_cache().lock().unwrap();
+        cache.get(&provider_id).cloned()
+    };
+
+    if !force {
+        if let Some(entry) = &cached_entry {
+            if entry.fetched_at.elapsed() < ACP_CONFIG_DISCOVERY_CACHE_TTL {
+                return Ok(entry.discovery.clone());
+            }
+        }
+    }
+
+    match fetch(provider_id.clone(), working_dir) {
+        Ok(discovery) => {
+            let mut cache = acp_config_discovery_cache().lock().unwrap();
+            cache.insert(
+                provider_id,
+                AcpConfigDiscoveryCacheEntry {
+                    discovery: discovery.clone(),
+                    fetched_at: Instant::now(),
+                },
+            );
+            Ok(discovery)
+        }
+        Err(e) => {
+            if let Some(entry) = cached_entry {
+                log::warn!(
+                    "ACP config discovery refresh failed for {provider_id}; using stale cached options: {e}"
+                );
+                Ok(entry.discovery)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
 /// Discover model/effort selectors for a provider in the given working
 /// directory context.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn discover_acp_config(
     provider_id: String,
     working_dir: Option<String>,
+    force: Option<bool>,
 ) -> Result<AcpConfigDiscovery, String> {
     let working_dir = resolve_acp_config_discovery_working_dir(working_dir);
-    tokio::task::spawn_blocking(move || discover_acp_config_for_provider(provider_id, working_dir))
-        .await
-        .map_err(|e| format!("ACP config discovery task failed: {e}"))?
+    let force = force.unwrap_or(false);
+    tokio::task::spawn_blocking(move || {
+        discover_acp_config_for_provider_with_cache(
+            provider_id,
+            working_dir,
+            force,
+            discover_acp_config_for_provider,
+        )
+    })
+    .await
+    .map_err(|e| format!("ACP config discovery task failed: {e}"))?
 }
 
 // =============================================================================
@@ -4674,8 +4750,8 @@ pub(crate) fn extract_launch_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
-    use std::sync::Arc;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
 
     fn setup_branch_store() -> (Arc<Store>, store::Branch) {
         let store = Arc::new(Store::in_memory().unwrap());
@@ -4709,6 +4785,43 @@ mod tests {
 
     fn ids(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    fn test_acp_config_discovery(provider_id: &str, current_value_id: &str) -> AcpConfigDiscovery {
+        AcpConfigDiscovery {
+            provider_id: provider_id.to_string(),
+            model: Some(crate::acp_config::NormalizedAcpConfigSelector {
+                config_id: "model".to_string(),
+                label: "Model".to_string(),
+                current_value_id: current_value_id.to_string(),
+                options: vec![
+                    crate::acp_config::NormalizedAcpConfigValueOption {
+                        value_id: "sonnet".to_string(),
+                        label: "Sonnet".to_string(),
+                        group_label: None,
+                    },
+                    crate::acp_config::NormalizedAcpConfigValueOption {
+                        value_id: "opus".to_string(),
+                        label: "Opus".to_string(),
+                        group_label: None,
+                    },
+                ],
+            }),
+            effort: None,
+        }
+    }
+
+    fn stale_acp_config_cache_fetch_time() -> Instant {
+        Instant::now()
+            .checked_sub(ACP_CONFIG_DISCOVERY_CACHE_TTL + Duration::from_secs(1))
+            .unwrap_or_else(Instant::now)
+    }
+
+    fn remove_acp_config_cache_entry(provider_id: &str) {
+        acp_config_discovery_cache()
+            .lock()
+            .unwrap()
+            .remove(provider_id);
     }
 
     fn create_auto_review(
@@ -5339,6 +5452,128 @@ mod tests {
         assert_eq!(discovery.provider_id, "claude");
         assert!(discovery.model.is_none());
         assert!(discovery.effort.is_none());
+    }
+
+    #[test]
+    fn acp_config_discovery_cache_is_provider_scoped_across_working_dirs() {
+        let provider_id = "cache-provider-scoped-dirs";
+        remove_acp_config_cache_entry(provider_id);
+        let calls = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+        let calls_for_fetch = Arc::clone(&calls);
+
+        let first = discover_acp_config_for_provider_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo-one"),
+            false,
+            move |provider_id, working_dir| {
+                calls_for_fetch.lock().unwrap().push(working_dir);
+                Ok(test_acp_config_discovery(&provider_id, "sonnet"))
+            },
+        )
+        .unwrap();
+        let second = discover_acp_config_for_provider_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo-two"),
+            false,
+            |_provider_id, _working_dir| panic!("fresh cache hit should not refetch"),
+        )
+        .unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[PathBuf::from("/repo-one")]
+        );
+    }
+
+    #[test]
+    fn acp_config_discovery_force_bypasses_and_replaces_fresh_cache() {
+        let provider_id = "cache-provider-force";
+        remove_acp_config_cache_entry(provider_id);
+
+        let first = discover_acp_config_for_provider_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo"),
+            false,
+            |provider_id, _working_dir| Ok(test_acp_config_discovery(&provider_id, "sonnet")),
+        )
+        .unwrap();
+        let second = discover_acp_config_for_provider_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo"),
+            true,
+            |provider_id, _working_dir| Ok(test_acp_config_discovery(&provider_id, "opus")),
+        )
+        .unwrap();
+        let third = discover_acp_config_for_provider_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo"),
+            false,
+            |_provider_id, _working_dir| panic!("replaced cache hit should not refetch"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            first.model.as_ref().unwrap().current_value_id,
+            "sonnet".to_string()
+        );
+        assert_eq!(
+            second.model.as_ref().unwrap().current_value_id,
+            "opus".to_string()
+        );
+        assert_eq!(third, second);
+    }
+
+    #[test]
+    fn acp_config_discovery_refresh_failure_returns_stale_cache() {
+        let provider_id = "cache-provider-stale";
+        let stale = test_acp_config_discovery(provider_id, "sonnet");
+        acp_config_discovery_cache().lock().unwrap().insert(
+            provider_id.to_string(),
+            AcpConfigDiscoveryCacheEntry {
+                discovery: stale.clone(),
+                fetched_at: stale_acp_config_cache_fetch_time(),
+            },
+        );
+
+        let result = discover_acp_config_for_provider_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo"),
+            false,
+            |_provider_id, _working_dir| Err("provider unavailable".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(result, stale);
+    }
+
+    #[test]
+    fn acp_config_discovery_refresh_failure_without_stale_cache_returns_error() {
+        let provider_id = "cache-provider-miss-failure";
+        remove_acp_config_cache_entry(provider_id);
+
+        let err = discover_acp_config_for_provider_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo"),
+            false,
+            |_provider_id, _working_dir| Err("provider unavailable".to_string()),
+        )
+        .unwrap_err();
+
+        assert_eq!(err, "provider unavailable");
+    }
+
+    #[test]
+    fn acp_config_discovery_cache_rejects_blank_provider_ids() {
+        let err = discover_acp_config_for_provider_with_cache(
+            "   ".to_string(),
+            PathBuf::from("/repo"),
+            false,
+            |_provider_id, _working_dir| panic!("blank provider should not fetch"),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("ACP provider ID is required"));
     }
 
     #[test]

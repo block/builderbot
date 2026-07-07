@@ -207,6 +207,8 @@
   let followupConfigError = $state<string | null>(null);
   let selectedFollowupModelValue = $state<string | null>(null);
   let selectedFollowupEffortValue = $state<string | null>(null);
+  let followupModelTouched = $state(false);
+  let followupEffortTouched = $state(false);
   let followupModelStateKey = $state<string | null>(null);
   let followupEffortStateKey = $state<string | null>(null);
   let followupDiscoveryRun = 0;
@@ -249,8 +251,26 @@
   );
   let followupAcpConfigSelection = $derived(
     buildAcpConfigSelection({
-      model: { selector: followupModelSelector, valueId: selectedFollowupModelValue },
-      effort: { selector: followupEffortSelector, valueId: selectedFollowupEffortValue },
+      model: {
+        selector: followupModelSelector,
+        valueId: selectedFollowupModelValue,
+        explicit: shouldSendFollowupSelectorSelection(
+          followupModelSelector,
+          selectedFollowupModelValue,
+          session?.acpConfigSelection?.model ?? null,
+          followupModelTouched
+        ),
+      },
+      effort: {
+        selector: followupEffortSelector,
+        valueId: selectedFollowupEffortValue,
+        explicit: shouldSendFollowupSelectorSelection(
+          followupEffortSelector,
+          selectedFollowupEffortValue,
+          session?.acpConfigSelection?.effort ?? null,
+          followupEffortTouched
+        ),
+      },
     })
   );
 
@@ -1223,7 +1243,7 @@
     followupConfigLoading = true;
     followupConfigError = null;
 
-    discoverAcpConfig(providerId, workingDir, { force: true })
+    discoverAcpConfig(providerId, workingDir)
       .then(({ data, revalidating }) => {
         if (cancelled || run !== followupDiscoveryRun) return;
         discoveredFollowupConfig = data;
@@ -1264,6 +1284,7 @@
         followupModelSelector,
         session?.acpConfigSelection?.model ?? null
       );
+      followupModelTouched = false;
       followupModelStateKey = key;
     }
   });
@@ -1279,6 +1300,7 @@
         followupEffortSelector,
         session?.acpConfigSelection?.effort ?? null
       );
+      followupEffortTouched = false;
       followupEffortStateKey = key;
     }
   });
@@ -1322,12 +1344,25 @@
     return selector.options[0]?.valueId ?? null;
   }
 
+  function shouldSendFollowupSelectorSelection(
+    selector: AcpConfigSelector | null,
+    valueId: string | null,
+    storedSelection: AcpConfigValueSelection | null,
+    touched: boolean
+  ): boolean {
+    if (!selector || !valueId) return false;
+    if (touched) return true;
+    return storedSelection?.configId === selector.configId && storedSelection.valueId === valueId;
+  }
+
   function handleFollowupModelChange(value: string) {
     selectedFollowupModelValue = value;
+    followupModelTouched = true;
   }
 
   function handleFollowupEffortChange(value: string) {
     selectedFollowupEffortValue = value;
+    followupEffortTouched = true;
   }
 
   let grouped = $derived.by(() =>

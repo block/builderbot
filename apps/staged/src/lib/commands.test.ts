@@ -82,6 +82,44 @@ describe('browser-native command wrappers', () => {
       hasParsedNote: true,
     });
   });
+
+  it('routes queued follow-up message operations through backend commands', async () => {
+    const queued = { id: 'queue-1', sessionId: 'session-1', content: 'next' };
+    const invokeCommand = vi.fn().mockResolvedValue(queued);
+    vi.doMock('./transport', () => ({
+      invokeCommand,
+      isTauri: true,
+    }));
+
+    const {
+      queueSessionMessage,
+      listQueuedSessionMessages,
+      deleteQueuedSessionMessage,
+      sendQueuedSessionMessage,
+    } = await import('./commands');
+
+    await expect(queueSessionMessage('session-1', 'next', ['image-1'], 'branch-1')).resolves.toBe(
+      queued
+    );
+    await listQueuedSessionMessages('session-1');
+    await deleteQueuedSessionMessage('queue-1');
+    await sendQueuedSessionMessage('queue-1');
+
+    expect(invokeCommand.mock.calls).toEqual([
+      [
+        'queue_session_message',
+        {
+          sessionId: 'session-1',
+          content: 'next',
+          imageIds: ['image-1'],
+          branchId: 'branch-1',
+        },
+      ],
+      ['list_queued_session_messages', { sessionId: 'session-1' }],
+      ['delete_queued_session_message', { id: 'queue-1' }],
+      ['send_queued_session_message', { id: 'queue-1' }],
+    ]);
+  });
 });
 
 describe('cached mutation command wrappers', () => {

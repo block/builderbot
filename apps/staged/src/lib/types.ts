@@ -371,6 +371,23 @@ export interface Session {
   pipeline?: PipelineExecution | null;
 }
 
+export type QueuedSessionMessageStatus = 'queued' | 'sending' | 'sent';
+
+export interface QueuedSessionMessage {
+  id: string;
+  sessionId: string;
+  branchId: string | null;
+  content: string;
+  imageIds: string[];
+  status: QueuedSessionMessageStatus;
+  lastError: string | null;
+  createdAt: number;
+  updatedAt: number;
+  claimedAt: number | null;
+  ownerPid: number | null;
+  sentMessageId: number | null;
+}
+
 // =============================================================================
 // Pipelines
 // =============================================================================

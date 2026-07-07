@@ -526,6 +526,76 @@ pub struct Session {
     pub pipeline: Option<PipelineExecution>,
 }
 
+/// Persistent follow-up message waiting to be sent to an existing session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueuedSessionMessage {
+    pub id: String,
+    pub session_id: String,
+    pub branch_id: Option<String>,
+    pub content: String,
+    pub image_ids: Vec<String>,
+    pub status: QueuedSessionMessageStatus,
+    pub last_error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub claimed_at: Option<i64>,
+    pub owner_pid: Option<u32>,
+    pub sent_message_id: Option<i64>,
+}
+
+impl QueuedSessionMessage {
+    pub fn new(
+        session_id: &str,
+        branch_id: Option<&str>,
+        content: &str,
+        image_ids: &[String],
+    ) -> Self {
+        let now = now_timestamp();
+        Self {
+            id: Uuid::new_v4().to_string(),
+            session_id: session_id.to_string(),
+            branch_id: branch_id.map(str::to_string),
+            content: content.to_string(),
+            image_ids: image_ids.to_vec(),
+            status: QueuedSessionMessageStatus::Queued,
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+            claimed_at: None,
+            owner_pid: None,
+            sent_message_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QueuedSessionMessageStatus {
+    Queued,
+    Sending,
+    Sent,
+}
+
+impl QueuedSessionMessageStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Sending => "sending",
+            Self::Sent => "sent",
+        }
+    }
+
+    pub(crate) fn parse(s: &str) -> Option<Self> {
+        match s {
+            "queued" => Some(Self::Queued),
+            "sending" => Some(Self::Sending),
+            "sent" => Some(Self::Sent),
+            _ => None,
+        }
+    }
+}
+
 impl Session {
     pub fn new_running(prompt: &str, working_dir: &Path) -> Self {
         let now = now_timestamp();

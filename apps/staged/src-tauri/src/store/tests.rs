@@ -506,6 +506,232 @@ fn test_transition_queued_to_running_does_not_overwrite_cancelled_session() {
 }
 
 #[test]
+fn test_queued_session_messages_order_and_image_ids() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("work", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    let first_images = vec!["img-1".to_string(), "img-2".to_string()];
+    let first = store
+        .add_queued_session_message(&session.id, "first", &first_images, None)
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let second = store
+        .add_queued_session_message(&session.id, "second", &[], None)
+        .unwrap();
+
+    let queued = store.list_queued_session_messages(&session.id).unwrap();
+    assert_eq!(
+        queued
+            .iter()
+            .map(|message| message.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![first.id.as_str(), second.id.as_str()]
+    );
+    assert_eq!(queued[0].image_ids, first_images);
+    assert!(queued[1].image_ids.is_empty());
+}
+
+#[test]
+fn test_queued_session_message_claims_pending_images() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let session = Session::new_running("work", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    let image = Image::new(None, &project.id, "screenshot.png", "image/png", 42, true);
+    store.create_image(&image).unwrap();
+
+    store
+        .add_queued_session_message(
+            &session.id,
+            "with image",
+            std::slice::from_ref(&image.id),
+            None,
+        )
+        .unwrap();
+
+    let claimed = store.get_image(&image.id).unwrap().unwrap();
+    assert_eq!(claimed.session_id.as_deref(), Some(session.id.as_str()));
+}
+
+#[test]
+fn test_delete_queued_session_message_releases_claimed_images() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    let session = Session::new_running("work", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    let image = Image::new(
+        Some(&branch.id),
+        &project.id,
+        "screenshot.png",
+        "image/png",
+        42,
+        true,
+    );
+    store.create_image(&image).unwrap();
+    let queued = store
+        .add_queued_session_message(
+            &session.id,
+            "with image",
+            std::slice::from_ref(&image.id),
+            Some(&branch.id),
+        )
+        .unwrap();
+
+    assert!(store.delete_queued_session_message(&queued.id).unwrap());
+
+    let released = store.get_image(&image.id).unwrap().unwrap();
+    assert_eq!(released.session_id, None);
+    let branch_images = store.list_images_for_branch(&branch.id).unwrap();
+    assert_eq!(
+        branch_images
+            .iter()
+            .map(|image| image.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![image.id.as_str()]
+    );
+}
+
+#[test]
+fn test_add_queued_session_message_requires_running_session() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("work", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    store
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
+        .unwrap();
+
+    let err = store
+        .add_queued_session_message(&session.id, "too late", &[], None)
+        .unwrap_err();
+    assert_eq!(err.to_string(), "Session is not running");
+    assert!(store
+        .list_queued_session_messages(&session.id)
+        .unwrap()
+        .is_empty());
+
+    let err = store
+        .add_queued_session_message("missing-session", "not found", &[], None)
+        .unwrap_err();
+    assert_eq!(err.to_string(), "Session not found: missing-session");
+}
+
+#[test]
+fn test_claim_selected_queued_session_message_and_release() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("work", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    let oldest = store
+        .add_queued_session_message(&session.id, "oldest", &[], None)
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let selected = store
+        .add_queued_session_message(&session.id, "selected", &[], None)
+        .unwrap();
+    store
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
+        .unwrap();
+
+    let claimed = store
+        .claim_queued_session_message(&selected.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.id, selected.id);
+    assert_eq!(claimed.status, QueuedSessionMessageStatus::Sending);
+    assert_eq!(claimed.owner_pid, Some(std::process::id()));
+
+    store
+        .release_queued_session_message(&selected.id, Some("try again"))
+        .unwrap();
+    let queued = store.list_queued_session_messages(&session.id).unwrap();
+    assert_eq!(queued.len(), 2);
+    assert_eq!(queued[0].id, oldest.id);
+    assert_eq!(queued[1].id, selected.id);
+    assert_eq!(queued[1].last_error.as_deref(), Some("try again"));
+}
+
+#[test]
+fn test_claim_oldest_queued_session_message_skips_running_session() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("work", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    store
+        .add_queued_session_message(&session.id, "queued", &[], None)
+        .unwrap();
+
+    let claimed = store
+        .claim_oldest_queued_session_message(&session.id)
+        .unwrap();
+    assert!(claimed.is_none());
+
+    store
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
+        .unwrap();
+    let claimed = store
+        .claim_oldest_queued_session_message(&session.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(claimed.content, "queued");
+}
+
+#[test]
+fn test_queued_session_message_marks_sent_with_transcript_message() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("work", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    let queued = store
+        .add_queued_session_message(&session.id, "follow up", &[], None)
+        .unwrap();
+    store
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
+        .unwrap();
+    store
+        .claim_queued_session_message(&queued.id)
+        .unwrap()
+        .unwrap();
+
+    let message_id = store
+        .add_session_message_with_images_from_queue(
+            &session.id,
+            MessageRole::User,
+            "follow up",
+            &[],
+            &queued.id,
+        )
+        .unwrap();
+
+    assert!(store
+        .list_queued_session_messages(&session.id)
+        .unwrap()
+        .is_empty());
+    let messages = store.get_session_messages(&session.id).unwrap();
+    assert_eq!(messages[0].id, message_id);
+    assert_eq!(messages[0].content, "follow up");
+}
+
+#[test]
+fn test_queued_session_messages_cascade_when_session_deleted() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("work", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    store
+        .add_queued_session_message(&session.id, "follow up", &[], None)
+        .unwrap();
+
+    store.delete_session(&session.id).unwrap();
+
+    assert!(store
+        .list_queued_session_messages(&session.id)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
 fn test_queued_project_session_cancellation_records_project_session_interrupted() {
     let store = Store::in_memory().unwrap();
 

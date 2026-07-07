@@ -332,6 +332,10 @@ pub struct SessionConfig {
     /// Image IDs to include in the prompt. The runner reads the image files,
     /// base64-encodes them, and passes them as content blocks to the driver.
     pub image_ids: Vec<String>,
+    /// Queued follow-up row that produced this run, if any.
+    pub queued_message_id: Option<String>,
+    /// Branch with a commit waiting for auto-review once queued follow-ups drain.
+    pub pending_auto_review_branch_id: Option<String>,
     /// Branch that owns this session (branch-level sessions only).
     /// Threaded through so terminal events carry the same context as start events.
     pub branch_id: Option<String>,
@@ -405,14 +409,26 @@ pub fn start_session(
     // don't appear in the branch timeline. Both operations are kept together;
     // if set_images_session_id fails we log a warning rather than aborting the
     // session, since the message was already persisted.
-    store
-        .add_session_message_with_images(
-            &config.session_id,
-            MessageRole::User,
-            &config.prompt,
-            &config.image_ids,
-        )
-        .map_err(|e| format!("Failed to persist user message: {e}"))?;
+    if let Some(ref queued_message_id) = config.queued_message_id {
+        store
+            .add_session_message_with_images_from_queue(
+                &config.session_id,
+                MessageRole::User,
+                &config.prompt,
+                &config.image_ids,
+                queued_message_id,
+            )
+            .map_err(|e| format!("Failed to persist queued user message: {e}"))?
+    } else {
+        store
+            .add_session_message_with_images(
+                &config.session_id,
+                MessageRole::User,
+                &config.prompt,
+                &config.image_ids,
+            )
+            .map_err(|e| format!("Failed to persist user message: {e}"))?
+    };
 
     if !config.image_ids.is_empty() {
         if let Err(e) = store.set_images_session_id(&config.image_ids, &config.session_id) {
@@ -733,10 +749,13 @@ pub fn start_session(
         // can keep using the active cancellation token.
         registry.deregister(&session_id_for_status);
 
+        let completed_successfully =
+            terminal_state_completed_successfully(new_status, &completion_reason);
+
         // Run post-completion hooks before transitioning status.
         // These detect artifacts produced by the session (commits, notes).
         // Returns the branch_id when a new commit was detected.
-        let committed_branch_id = if new_status == "completed" {
+        let committed_branch_id = if completed_successfully {
             run_post_completion_hooks(
                 &config.session_id,
                 &config.working_dir,
@@ -773,75 +792,121 @@ pub fn start_session(
 
         if transitioned {
             let branch_id = config.branch_id.clone();
-            let auto_review_branch_id = committed_branch_id.clone();
+            let auto_review_branch_id = auto_review_branch_id_for_terminal_state(
+                committed_branch_id.clone(),
+                config.pending_auto_review_branch_id.clone(),
+                completed_successfully,
+            );
+            let should_drain_queued_message = completed_successfully;
+            let session_id_for_follow_up = session_id_for_status.clone();
+            let action_executor_for_follow_up = config
+                .action_executor
+                .clone()
+                .unwrap_or_else(|| Arc::new(ActionExecutor::new()));
+            let action_registry_for_follow_up = config
+                .action_registry
+                .clone()
+                .unwrap_or_else(|| Arc::new(ActionRegistry::new()));
 
-            if let Some(branch_id) = branch_id {
+            if should_drain_queued_message || branch_id.is_some() {
                 let store_for_follow_up = Arc::clone(&store_for_status);
                 let registry_for_follow_up = Arc::clone(&registry);
                 let app_handle_for_follow_up = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    match crate::session_commands::drain_queued_sessions_for_branch(
-                        Arc::clone(&store_for_follow_up),
-                        Arc::clone(&registry_for_follow_up),
-                        app_handle_for_follow_up.clone(),
-                        branch_id.clone(),
-                        None,
-                    )
-                    .await
-                    {
-                        Ok(true) => {
-                            log::info!("Drained next queued session for branch {branch_id}");
+                    let mut queued_message_blocks_auto_review = false;
+                    if should_drain_queued_message {
+                        match crate::session_commands::drain_queued_message_for_session(
+                            Arc::clone(&store_for_follow_up),
+                            Arc::clone(&registry_for_follow_up),
+                            Arc::clone(&action_executor_for_follow_up),
+                            Arc::clone(&action_registry_for_follow_up),
+                            app_handle_for_follow_up.clone(),
+                            session_id_for_follow_up.clone(),
+                            auto_review_branch_id.clone(),
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                queued_message_blocks_auto_review = true;
+                                log::info!(
+                                    "Drained queued follow-up message for session {session_id_for_follow_up}"
+                                );
+                            }
+                            Ok(false) => {}
+                            Err(e) => {
+                                queued_message_blocks_auto_review = true;
+                                log::error!(
+                                    "Failed to drain queued follow-up message for session {session_id_for_follow_up}: {e}"
+                                );
+                            }
                         }
-                        Ok(false) => {
-                            // Check if auto-review is enabled in user preferences
-                            let auto_review_enabled = crate::preferences_store_path_buf()
-                                .and_then(|path| std::fs::read_to_string(&path).ok())
-                                .and_then(|contents| {
-                                    serde_json::from_str::<serde_json::Value>(&contents).ok()
-                                })
-                                .and_then(|json| {
-                                    json.get("auto-start-code-reviews")?
-                                        .as_str()
-                                        .map(String::from)
-                                })
-                                .map(|mode| mode != "never")
-                                .unwrap_or_else(crate::blox::is_sq_available);
+                    }
 
-                            if let Some(auto_review_branch_id) =
-                                auto_review_branch_id.filter(|_| auto_review_enabled)
-                            {
-                                // Pass None so trigger_auto_review resolves
-                                // the user's current preferred agent at
-                                // trigger time, rather than reusing the
-                                // (possibly stale) commit session provider.
-                                match crate::session_commands::trigger_auto_review(
-                                    store_for_follow_up,
-                                    registry_for_follow_up,
-                                    app_handle_for_follow_up,
-                                    auto_review_branch_id.clone(),
-                                    None,
-                                )
-                                .await
+                    if let Some(branch_id) = branch_id {
+                        match crate::session_commands::drain_queued_sessions_for_branch(
+                            Arc::clone(&store_for_follow_up),
+                            Arc::clone(&registry_for_follow_up),
+                            app_handle_for_follow_up.clone(),
+                            branch_id.clone(),
+                            None,
+                        )
+                        .await
+                        {
+                            Ok(true) => {
+                                log::info!("Drained next queued session for branch {branch_id}");
+                            }
+                            Ok(false) if !queued_message_blocks_auto_review => {
+                                // Check if auto-review is enabled in user preferences
+                                let auto_review_enabled = crate::preferences_store_path_buf()
+                                    .and_then(|path| std::fs::read_to_string(&path).ok())
+                                    .and_then(|contents| {
+                                        serde_json::from_str::<serde_json::Value>(&contents).ok()
+                                    })
+                                    .and_then(|json| {
+                                        json.get("auto-start-code-reviews")?
+                                            .as_str()
+                                            .map(String::from)
+                                    })
+                                    .map(|mode| mode != "never")
+                                    .unwrap_or_else(crate::blox::is_sq_available);
+
+                                if let Some(auto_review_branch_id) =
+                                    auto_review_branch_id.filter(|_| auto_review_enabled)
                                 {
-                                    Ok(resp) => {
-                                        log::info!(
-                                            "Auto review triggered for branch {auto_review_branch_id}: session={}, review={}",
-                                            resp.session_id,
-                                            resp.artifact_id,
-                                        );
-                                    }
-                                    Err(e) => {
-                                        log::error!(
-                                            "Failed to trigger auto review for branch {auto_review_branch_id}: {e}"
-                                        );
+                                    // Pass None so trigger_auto_review resolves
+                                    // the user's current preferred agent at
+                                    // trigger time, rather than reusing the
+                                    // (possibly stale) commit session provider.
+                                    match crate::session_commands::trigger_auto_review(
+                                        store_for_follow_up,
+                                        registry_for_follow_up,
+                                        app_handle_for_follow_up,
+                                        auto_review_branch_id.clone(),
+                                        None,
+                                    )
+                                    .await
+                                    {
+                                        Ok(resp) => {
+                                            log::info!(
+                                                "Auto review triggered for branch {auto_review_branch_id}: session={}, review={}",
+                                                resp.session_id,
+                                                resp.artifact_id,
+                                            );
+                                        }
+                                        Err(e) => {
+                                            log::error!(
+                                                "Failed to trigger auto review for branch {auto_review_branch_id}: {e}"
+                                            );
+                                        }
                                     }
                                 }
                             }
-                        }
-                        Err(e) => {
-                            log::error!(
-                                "Failed to drain queued sessions for branch {branch_id}: {e}"
-                            );
+                            Ok(false) => {}
+                            Err(e) => {
+                                log::error!(
+                                    "Failed to drain queued sessions for branch {branch_id}: {e}"
+                                );
+                            }
                         }
                     }
                 });
@@ -1067,7 +1132,9 @@ pub fn start_pipeline_session(
                         Arc::clone(&store_for_status),
                         Arc::clone(&registry),
                         app_handle.clone(),
+                        session_id.clone(),
                         config.branch_id.clone(),
+                        true,
                     );
                 }
             }
@@ -1109,6 +1176,8 @@ pub fn start_pipeline_session(
                     action_registry: None,
                     remote_working_dir: config.remote_working_dir.clone(),
                     image_ids: vec![],
+                    queued_message_id: None,
+                    pending_auto_review_branch_id: None,
                     branch_id: config.branch_id.clone(),
                     project_id: config.project_id.clone(),
                     // Deterministic pipelines hand off to a code-focused AI step,
@@ -1166,7 +1235,9 @@ pub fn start_pipeline_session(
                             Arc::clone(&store_for_status),
                             Arc::clone(&registry),
                             app_handle.clone(),
+                            session_id.clone(),
                             config.branch_id.clone(),
+                            false,
                         );
                     }
                 }
@@ -1199,7 +1270,9 @@ pub fn start_pipeline_session(
                         Arc::clone(&store_for_status),
                         Arc::clone(&registry),
                         app_handle.clone(),
+                        session_id.clone(),
                         config.branch_id.clone(),
+                        false,
                     );
                 }
             }
@@ -1231,7 +1304,9 @@ pub fn start_pipeline_session(
                         Arc::clone(&store_for_status),
                         Arc::clone(&registry),
                         app_handle.clone(),
+                        session_id.clone(),
                         config.branch_id.clone(),
+                        false,
                     );
                 }
             }
@@ -1360,27 +1435,51 @@ fn drain_queued_after_pipeline_terminal(
     store: Arc<Store>,
     registry: Arc<SessionRegistry>,
     app_handle: AppHandle,
+    session_id: String,
     branch_id: Option<String>,
+    drain_message: bool,
 ) {
-    let Some(branch_id) = branch_id else {
+    if !drain_message && branch_id.is_none() {
         return;
-    };
+    }
 
     tauri::async_runtime::spawn(async move {
-        match crate::session_commands::drain_queued_sessions_for_branch(
-            store,
-            registry,
-            app_handle,
-            branch_id.clone(),
-            None,
-        )
-        .await
-        {
-            Ok(true) => log::info!("Drained next queued session for branch {branch_id}"),
-            Ok(false) => {}
-            Err(e) => log::error!(
-                "Failed to drain queued sessions after pipeline terminal state for branch {branch_id}: {e}"
-            ),
+        if drain_message {
+            match crate::session_commands::drain_queued_message_for_session(
+                Arc::clone(&store),
+                Arc::clone(&registry),
+                Arc::new(ActionExecutor::new()),
+                Arc::new(ActionRegistry::new()),
+                app_handle.clone(),
+                session_id.clone(),
+                None,
+            )
+            .await
+            {
+                Ok(true) => log::info!("Drained queued follow-up message for session {session_id}"),
+                Ok(false) => {}
+                Err(e) => log::error!(
+                    "Failed to drain queued follow-up message after pipeline terminal state for session {session_id}: {e}"
+                ),
+            }
+        }
+
+        if let Some(branch_id) = branch_id {
+            match crate::session_commands::drain_queued_sessions_for_branch(
+                store,
+                registry,
+                app_handle,
+                branch_id.clone(),
+                None,
+            )
+            .await
+            {
+                Ok(true) => log::info!("Drained next queued session for branch {branch_id}"),
+                Ok(false) => {}
+                Err(e) => log::error!(
+                    "Failed to drain queued sessions after pipeline terminal state for branch {branch_id}: {e}"
+                ),
+            }
         }
     });
 }
@@ -2057,6 +2156,42 @@ pub fn recover_dead_sessions(
     }
 }
 
+/// On startup, return unsent queued follow-up messages claimed by dead owners
+/// to the visible queue so they can be retried manually or by a later drain.
+pub fn recover_stale_queued_session_messages(store: &Store) {
+    let messages = match store.list_sending_queued_session_messages() {
+        Ok(messages) => messages,
+        Err(e) => {
+            log::warn!("[session_runner] Failed to query sending queued messages: {e}");
+            return;
+        }
+    };
+
+    for message in messages {
+        let should_release = match message.owner_pid {
+            None => true,
+            Some(pid) if pid == std::process::id() => true,
+            Some(pid) if !is_process_alive(pid) => true,
+            Some(_) => false,
+        };
+
+        if should_release {
+            match store.release_queued_session_message(&message.id, None) {
+                Ok(true) => log::info!(
+                    "Recovered stale queued follow-up message {} for session {}",
+                    message.id,
+                    message.session_id
+                ),
+                Ok(false) => {}
+                Err(e) => log::warn!(
+                    "Failed to recover stale queued follow-up message {}: {e}",
+                    message.id
+                ),
+            }
+        }
+    }
+}
+
 /// Check whether a process is alive by sending signal 0 via the `kill` command.
 ///
 /// `kill -0 pid` succeeds (exit 0) if the process exists and we have permission
@@ -2353,6 +2488,26 @@ fn run_post_completion_hooks(
     }
 
     committed_branch_id
+}
+
+fn terminal_state_completed_successfully(
+    status: &str,
+    completion_reason: &CompletionReason,
+) -> bool {
+    status == SessionStatus::Completed.as_str()
+        && *completion_reason == CompletionReason::TurnComplete
+}
+
+fn auto_review_branch_id_for_terminal_state(
+    committed_branch_id: Option<String>,
+    pending_auto_review_branch_id: Option<String>,
+    completed_successfully: bool,
+) -> Option<String> {
+    committed_branch_id.or_else(|| {
+        completed_successfully
+            .then_some(pending_auto_review_branch_id)
+            .flatten()
+    })
 }
 
 /// Extract note content from a single assistant message.
@@ -2853,6 +3008,34 @@ mod tests {
             image_ids: vec![],
             acp: Default::default(),
         }
+    }
+
+    #[test]
+    fn terminal_auto_review_reuses_pending_branch_only_after_successful_turn() {
+        assert_eq!(
+            auto_review_branch_id_for_terminal_state(
+                None,
+                Some("branch-pending".to_string()),
+                true,
+            ),
+            Some("branch-pending".to_string())
+        );
+        assert_eq!(
+            auto_review_branch_id_for_terminal_state(
+                None,
+                Some("branch-pending".to_string()),
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            auto_review_branch_id_for_terminal_state(
+                Some("branch-commit".to_string()),
+                Some("branch-pending".to_string()),
+                false,
+            ),
+            Some("branch-commit".to_string())
+        );
     }
 
     #[test]

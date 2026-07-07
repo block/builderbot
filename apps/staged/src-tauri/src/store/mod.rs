@@ -9,7 +9,7 @@
 //!
 //! Tables: app_metadata, projects, project_repos, branches, workdirs, commits,
 //! sessions, session_messages, notes, project_notes, reviews, images,
-//! action_contexts, repo_actions, repo_affinities.
+//! action_contexts, repo_actions, repo_affinities, queued_session_messages.
 
 pub mod models;
 
@@ -23,6 +23,7 @@ mod notes;
 mod project_notes;
 mod project_repos;
 mod projects;
+mod queued_messages;
 mod recent_repos;
 pub mod repo_affinities;
 pub mod repo_badges;

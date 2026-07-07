@@ -75,7 +75,7 @@
   <DropdownMenu.Root>
     <DropdownMenu.Trigger
       class={cn(
-        'inline-flex h-9 max-w-[220px] shrink-0 items-center gap-1 rounded-[10px] px-2 text-xs text-muted-foreground transition-colors hover:bg-[var(--bg-hover)] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40',
+        'selector-btn inline-flex min-w-0 items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-[var(--bg-hover)] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40',
         triggerClass
       )}
       {disabled}
@@ -83,8 +83,8 @@
         ? 'Configuration changes are available after this turn'
         : `Select model and effort (${providerLabel ?? providerId ?? 'Agent'})`}
     >
-      <AgentIcon id={providerId ?? ''} size={14} />
-      <span class="min-w-0 truncate whitespace-nowrap">{triggerLabel}</span>
+      <AgentIcon id={providerId ?? ''} size={12} />
+      <span class="selector-label min-w-0 truncate whitespace-nowrap">{triggerLabel}</span>
       {#if loading}
         <Spinner size={12} />
       {:else}

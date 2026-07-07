@@ -212,6 +212,8 @@
   let followupModelStateKey = $state<string | null>(null);
   let followupEffortStateKey = $state<string | null>(null);
   let followupDiscoveryRun = 0;
+  const footerControlClass =
+    'h-9 gap-1.5 rounded-md border border-[var(--border-muted)] bg-[var(--bg-primary)] px-4 py-2 text-sm font-medium text-muted-foreground shadow-none transition-colors hover:bg-[var(--bg-hover)] hover:text-foreground max-[640px]:h-11 max-[640px]:justify-center';
 
   let isLive = $derived(session?.status === 'running');
   let hasQueuedMessages = $derived(queuedMessages.length > 0);
@@ -2063,6 +2065,21 @@
         </div>
       {/if}
       <div class="input-area">
+        <AcpFixedConfigPicker
+          providerId={session?.provider ?? null}
+          providerLabel={followupProviderLabel}
+          modelSelector={followupModelSelector}
+          effortSelector={followupEffortSelector}
+          selectedModelValue={selectedFollowupModelValue}
+          selectedEffortValue={selectedFollowupEffortValue}
+          loading={followupConfigLoading}
+          error={followupConfigError}
+          disabled={isLive || sending}
+          dropUp
+          triggerClass={footerControlClass}
+          onModelChange={handleFollowupModelChange}
+          onEffortChange={handleFollowupEffortChange}
+        />
         {#if canAttachImages}
           <input
             bind:this={imageFileInput}
@@ -2096,20 +2113,6 @@
           onkeydown={handleInputKeydown}
           oninput={autoResize}
           items={hashtagItems}
-        />
-        <AcpFixedConfigPicker
-          providerId={session?.provider ?? null}
-          providerLabel={followupProviderLabel}
-          modelSelector={followupModelSelector}
-          effortSelector={followupEffortSelector}
-          selectedModelValue={selectedFollowupModelValue}
-          selectedEffortValue={selectedFollowupEffortValue}
-          loading={followupConfigLoading}
-          error={followupConfigError}
-          disabled={isLive || sending}
-          dropUp
-          onModelChange={handleFollowupModelChange}
-          onEffortChange={handleFollowupEffortChange}
         />
         {#if isLive}
           <span class="inline-flex" title="Stop session">

@@ -556,6 +556,80 @@ fn test_queued_session_message_claims_pending_images() {
 }
 
 #[test]
+fn test_session_acp_config_selection_round_trips() {
+    let store = Store::in_memory().unwrap();
+    let selection = AcpConfigSelection {
+        model: Some(AcpConfigValueSelection {
+            config_id: "model".to_string(),
+            value_id: "gpt-5".to_string(),
+            label: Some("GPT-5".to_string()),
+        }),
+        effort: Some(AcpConfigValueSelection {
+            config_id: "reasoning_effort".to_string(),
+            value_id: "high".to_string(),
+            label: None,
+        }),
+    };
+
+    let session = Session::new_running("configured", Path::new("/tmp"))
+        .with_acp_config_selection(selection.clone());
+    store.create_session(&session).unwrap();
+
+    let fetched = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(fetched.acp_config_selection, Some(selection.clone()));
+
+    let replacement = AcpConfigSelection {
+        model: Some(AcpConfigValueSelection {
+            config_id: "model".to_string(),
+            value_id: "gpt-5-mini".to_string(),
+            label: Some("GPT-5 mini".to_string()),
+        }),
+        effort: None,
+    };
+    store
+        .set_session_acp_config_selection(&session.id, Some(&replacement))
+        .unwrap();
+    let updated = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(updated.acp_config_selection, Some(replacement));
+
+    store
+        .set_session_acp_config_selection(&session.id, None)
+        .unwrap();
+    let cleared = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(cleared.acp_config_selection, None);
+}
+
+#[test]
+fn test_queued_session_acp_config_selection_round_trips() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let selection = AcpConfigSelection {
+        model: Some(AcpConfigValueSelection {
+            config_id: "model".to_string(),
+            value_id: "gpt-5".to_string(),
+            label: Some("GPT-5".to_string()),
+        }),
+        effort: Some(AcpConfigValueSelection {
+            config_id: "thought_level".to_string(),
+            value_id: "medium".to_string(),
+            label: Some("Medium".to_string()),
+        }),
+    };
+    let session = Session::new_queued("queued").with_acp_config_selection(selection.clone());
+    store.create_session(&session).unwrap();
+    let note = Note::new(&branch.id, "queued", "").with_session(&session.id);
+    store.create_note(&note).unwrap();
+
+    let queued = store.get_queued_sessions_for_branch(&branch.id).unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].acp_config_selection, Some(selection));
+}
+
+#[test]
 fn test_delete_queued_session_message_releases_claimed_images() {
     let store = Store::in_memory().unwrap();
     let project = Project::new("test-owner/test-repo");

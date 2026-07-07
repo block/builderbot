@@ -2,7 +2,9 @@
 
 use rusqlite::{params, OptionalExtension};
 
-use super::models::{CompletionReason, PipelineExecution, Session, SessionStatus};
+use super::models::{
+    AcpConfigSelection, CompletionReason, PipelineExecution, Session, SessionStatus,
+};
 use super::{now_timestamp, Store, StoreError};
 
 impl Store {
@@ -14,9 +16,11 @@ impl Store {
             .map(serde_json::to_string)
             .transpose()
             .map_err(|e| StoreError(format!("Failed to serialize pipeline: {e}")))?;
+        let acp_config_selection_json =
+            serialize_acp_config_selection(session.acp_config_selection.as_ref())?;
         conn.execute(
-            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 session.id,
                 session.prompt,
@@ -30,6 +34,7 @@ impl Store {
                 session.updated_at,
                 session.owner_pid,
                 pipeline_json,
+                acp_config_selection_json,
             ],
         )?;
         Ok(())
@@ -38,7 +43,7 @@ impl Store {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection
              FROM sessions WHERE id = ?1",
             params![id],
             Self::row_to_session,
@@ -212,7 +217,7 @@ impl Store {
     pub fn get_running_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection
              FROM sessions WHERE status = 'running'",
         )?;
         let sessions = stmt
@@ -285,7 +290,7 @@ impl Store {
     ) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT s.id, s.prompt, s.status, s.working_dir, s.provider, s.agent_id, s.error_message, s.completion_reason, s.created_at, s.updated_at, s.owner_pid, s.pipeline
+            "SELECT s.id, s.prompt, s.status, s.working_dir, s.provider, s.agent_id, s.error_message, s.completion_reason, s.created_at, s.updated_at, s.owner_pid, s.pipeline, s.acp_config_selection
              FROM sessions s
              WHERE s.status = 'queued'
                AND (
@@ -391,6 +396,21 @@ impl Store {
         Ok(())
     }
 
+    /// Update the selected ACP config values for a session.
+    pub fn set_session_acp_config_selection(
+        &self,
+        id: &str,
+        selection: Option<&AcpConfigSelection>,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let json = serialize_acp_config_selection(selection)?;
+        conn.execute(
+            "UPDATE sessions SET acp_config_selection = ?1, updated_at = ?2 WHERE id = ?3",
+            params![json, now_timestamp(), id],
+        )?;
+        Ok(())
+    }
+
     /// Update the pipeline execution state for a session.
     pub fn update_session_pipeline(
         &self,
@@ -411,9 +431,15 @@ impl Store {
         let status_str: String = row.get(2)?;
         let reason_str: Option<String> = row.get(7)?;
         let pipeline_json: Option<String> = row.get(11)?;
+        let acp_config_selection_json: Option<String> = row.get(12)?;
         let pipeline = pipeline_json.as_deref().and_then(|s| {
             serde_json::from_str(s)
                 .map_err(|e| log::warn!("Failed to deserialize pipeline JSON: {e}"))
+                .ok()
+        });
+        let acp_config_selection = acp_config_selection_json.as_deref().and_then(|s| {
+            serde_json::from_str(s)
+                .map_err(|e| log::warn!("Failed to deserialize ACP config selection JSON: {e}"))
                 .ok()
         });
         Ok(Session {
@@ -429,6 +455,16 @@ impl Store {
             updated_at: row.get(9)?,
             owner_pid: row.get(10)?,
             pipeline,
+            acp_config_selection,
         })
     }
+}
+
+fn serialize_acp_config_selection(
+    selection: Option<&AcpConfigSelection>,
+) -> Result<Option<String>, StoreError> {
+    selection
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| StoreError(format!("Failed to serialize ACP config selection: {e}")))
 }

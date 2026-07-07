@@ -356,6 +356,17 @@ export function isResumableReason(reason: string | null | undefined): boolean {
   return !!reason && RESUMABLE_REASONS.has(reason as CompletionReason);
 }
 
+export interface AcpConfigValueSelection {
+  configId: string;
+  valueId: string;
+  label?: string | null;
+}
+
+export interface AcpConfigSelection {
+  model?: AcpConfigValueSelection | null;
+  effort?: AcpConfigValueSelection | null;
+}
+
 export interface Session {
   id: string;
   prompt: string;
@@ -369,6 +380,8 @@ export interface Session {
   updatedAt: number;
   /** Pipeline execution state. Present when the session was started via a command pipeline. */
   pipeline?: PipelineExecution | null;
+  /** Selected ACP config values to apply before prompting the agent. */
+  acpConfigSelection?: AcpConfigSelection | null;
 }
 
 export type QueuedSessionMessageStatus = 'queued' | 'sending' | 'sent';

@@ -1549,8 +1549,12 @@
               })}
               {@const firstNoteMessageId = noteBearingMessageIds[0]}
               {@const hasPreamble = split.preamble.trim().length > 0}
+              {@const showAssistantCopy = hasPreamble || !split.hasNote}
               <div class="message-row assistant-message">
-                <div class="group/assistant assistant-content">
+                <div
+                  class="group/assistant assistant-content"
+                  class:assistant-content-has-copy={showAssistantCopy}
+                >
                   {#if hasPreamble}
                     <div class="markdown-content">
                       {@html renderMarkdown(split.preamble)}
@@ -1565,20 +1569,22 @@
                       })}
                     />
                   {/if}
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    class="message-copy-action absolute top-0 right-0 size-auto rounded p-[3px] text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/assistant:opacity-100 [&_svg]:!size-3"
-                    title={copiedId === group.message.id ? 'Copied!' : 'Copy message'}
-                    aria-label={copiedId === group.message.id ? 'Copied!' : 'Copy message'}
-                    onclick={() => copyContent(group.message.content, group.message.id)}
-                  >
-                    {#if copiedId === group.message.id}
-                      <Check size={12} />
-                    {:else}
-                      <Copy size={12} />
-                    {/if}
-                  </Button>
+                  {#if showAssistantCopy}
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      class="message-copy-action absolute top-0 right-0 size-auto rounded p-[3px] text-[var(--text-faint)] opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-hover)] hover:text-foreground group-hover/assistant:opacity-100 [&_svg]:!size-3"
+                      title={copiedId === group.message.id ? 'Copied!' : 'Copy message'}
+                      aria-label={copiedId === group.message.id ? 'Copied!' : 'Copy message'}
+                      onclick={() => copyContent(group.message.content, group.message.id)}
+                    >
+                      {#if copiedId === group.message.id}
+                        <Check size={12} />
+                      {:else}
+                        <Copy size={12} />
+                      {/if}
+                    </Button>
+                  {/if}
                 </div>
               </div>
             {:else if group.type === 'tools'}
@@ -2194,6 +2200,9 @@
     position: relative;
     flex: 1;
     min-width: 0;
+  }
+
+  .assistant-content-has-copy {
     padding-right: 28px;
   }
 

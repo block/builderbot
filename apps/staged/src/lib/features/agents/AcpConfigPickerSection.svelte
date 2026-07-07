@@ -48,7 +48,7 @@
         <div class="picker-group-label">{group.label}</div>
       {/if}
       {#each group.options as option (option.valueId)}
-        <DropdownMenu.RadioItem value={option.valueId} {disabled}>
+        <DropdownMenu.RadioItem value={option.valueId} {disabled} closeOnSelect={false}>
           <span class="picker-option-label">{option.label}</span>
         </DropdownMenu.RadioItem>
       {/each}

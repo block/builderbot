@@ -99,6 +99,7 @@
 
     const run = ++discoveryRun;
     let cancelled = false;
+    config = null;
     configLoading = true;
     configError = null;
 
@@ -231,7 +232,7 @@
                 onValueChange={handleProviderChange}
               >
                 {#each agents as provider (provider.id)}
-                  <DropdownMenu.RadioItem value={provider.id}>
+                  <DropdownMenu.RadioItem value={provider.id} closeOnSelect={false}>
                     <span class="inline-flex min-w-0 items-center gap-1.5">
                       <AgentIcon id={provider.id} size={12} />
                       <span class="truncate">{provider.label}</span>

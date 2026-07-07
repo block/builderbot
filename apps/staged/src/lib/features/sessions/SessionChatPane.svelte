@@ -1765,8 +1765,7 @@
         <div class="queue-popover">
           {#each queuedMessages as msg (msg.id)}
             <div class="queue-item">
-              <span class="queue-item-label"
-                >{msg.status === 'sending' ? 'Sending' : 'Queued'}</span
+              <span class="queue-item-label">{msg.status === 'sending' ? 'Sending' : 'Queued'}</span
               >
               <div class="queue-item-body">
                 <span class="queue-item-text">{msg.content}</span>

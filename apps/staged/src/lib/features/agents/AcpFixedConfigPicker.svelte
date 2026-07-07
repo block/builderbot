@@ -40,6 +40,7 @@
     onModelChange,
     onEffortChange,
   }: Props = $props();
+  let open = $state(false);
   let contentEl = $state<HTMLElement | null>(null);
 
   // The provider is identified by the trigger icon; the label only carries the
@@ -71,10 +72,20 @@
       selector.options.find((candidate) => candidate.valueId === selector.currentValueId);
     return option?.label ?? 'Default';
   }
+
+  function handlePickerKeydown(event: KeyboardEvent) {
+    if (handleAcpPickerGridKeydown(event, contentEl)) return;
+
+    if (event.key === 'Enter') {
+      window.setTimeout(() => {
+        open = false;
+      }, 0);
+    }
+  }
 </script>
 
 {#if shouldRender}
-  <DropdownMenu.Root>
+  <DropdownMenu.Root bind:open>
     <DropdownMenu.Trigger
       class={cn(
         'selector-btn inline-flex min-w-0 items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-[var(--bg-hover)] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40',
@@ -100,7 +111,7 @@
       sideOffset={4}
       class="max-h-[min(360px,calc(100vh-48px))] max-w-[calc(100vw-16px)]"
       onOpenAutoFocus={(event) => handleAcpPickerOpenAutoFocus(event, contentEl)}
-      onkeydowncapture={(event) => handleAcpPickerGridKeydown(event, contentEl)}
+      onkeydowncapture={handlePickerKeydown}
     >
       {#if hasPickerColumns}
         <div class="picker-column-grid">

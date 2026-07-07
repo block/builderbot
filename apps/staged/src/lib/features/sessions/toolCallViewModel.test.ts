@@ -31,6 +31,9 @@ function richTool(overrides: Partial<RichToolItem> = {}): RichToolItem {
     rawOutput: undefined,
     content: undefined,
     locations: undefined,
+    isPikchrDiagramTool: false,
+    innerSessionId: null,
+    pikchrRenderSource: null,
     ...overrides,
   };
 }

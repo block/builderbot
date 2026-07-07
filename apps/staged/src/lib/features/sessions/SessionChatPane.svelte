@@ -35,18 +35,12 @@
   import CircleStop from '@lucide/svelte/icons/circle-stop';
   import Copy from '@lucide/svelte/icons/copy';
   import Check from '@lucide/svelte/icons/check';
-  import Clock from '@lucide/svelte/icons/clock';
-  import CircleAlert from '@lucide/svelte/icons/circle-alert';
-  import CircleCheck from '@lucide/svelte/icons/circle-check';
-  import CircleDot from '@lucide/svelte/icons/circle-dot';
-  import CircleSlash from '@lucide/svelte/icons/circle-slash';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Zap from '@lucide/svelte/icons/zap';
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import BookOpen from '@lucide/svelte/icons/book-open';
   import FileText from '@lucide/svelte/icons/file-text';
-  import ExternalLink from '@lucide/svelte/icons/external-link';
   import ImagePlus from '@lucide/svelte/icons/image-plus';
   import Spinner from '../../shared/Spinner.svelte';
   import { isResumableReason } from '../../types';
@@ -108,22 +102,15 @@
   import { hasXmlBlocks, sessionEndMessage, XML_BLOCK_TAGS } from './sessionModalHelpers';
   import {
     buildAcpTranscriptGroups,
-    diffsFromAcpContent,
-    displayLocations,
     formatJson,
     groupRichToolsByVerb,
     isToolMetadataSettled,
     latestAvailableCommands,
-    simpleUnifiedDiff,
     stabilizeAcpTranscriptGroups,
-    terminalRefsFromAcpContent,
-    toolHasDetails,
-    toolResultText,
     transcriptGroupKey,
     type AcpCommand,
     type AcpTranscriptEvent,
     type AcpTranscriptGroup,
-    type RichToolItem,
   } from './acpTranscript';
   import {
     displayRootKey,
@@ -132,6 +119,8 @@
     type DisplayRootInput,
   } from './pathDisplayRoots';
   import PipelineSteps from './PipelineSteps.svelte';
+  import ToolCallCard from './tool-calls/ToolCallCard.svelte';
+  import ToolCallHeader from './tool-calls/ToolCallHeader.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import '../../shared/markdown/diagramStyles.css';
   import {
@@ -1739,131 +1728,11 @@
 
 <svelte:window onpaste={handleImagePaste} />
 
-{#snippet toolStatusDot(statusTone: RichToolItem['statusTone'])}
-  <span
-    class="tool-status-dot"
-    class:status-running={statusTone === 'running'}
-    class:status-success={statusTone === 'success'}
-    class:status-danger={statusTone === 'danger'}
-    class:status-cancelled={statusTone === 'cancelled'}
-  >
-    {#if statusTone === 'running'}
-      <Clock size={11} />
-    {:else if statusTone === 'success'}
-      <CircleCheck size={11} />
-    {:else if statusTone === 'danger'}
-      <CircleAlert size={11} />
-    {:else if statusTone === 'cancelled'}
-      <CircleSlash size={11} />
-    {:else}
-      <CircleDot size={11} />
-    {/if}
-  </span>
-{/snippet}
-
-{#snippet richToolCard(item: RichToolItem, nested: boolean)}
-  {@const isExpanded = expandedTools.has(item.key)}
-  {@const hasDetails = toolHasDetails(item)}
-  {@const showSessionButton = !!(item.isPikchrDiagramTool && item.innerSessionId && onOpenSession)}
-  {@const showInlineDiagram = item.pikchrRenderSource !== null}
-  <div class="tool-card" class:tool-card-nested={nested}>
-    {#if showInlineDiagram}
-      <div class="tool-diagram markdown-content">
-        {@html renderMarkdown(fencedDiagramMarkdown('pikchr', item.pikchrRenderSource!))}
-      </div>
-    {:else if showSessionButton}
-      <Button
-        variant="outline"
-        size="sm"
-        class="tool-session-button {item.statusTone === 'danger'
-          ? 'tool-session-button-danger'
-          : ''}"
-        onclick={() => onOpenSession?.(item.innerSessionId!)}
-      >
-        {@render toolStatusDot(item.statusTone)}
-        <span
-          >{item.statusTone === 'danger'
-            ? 'Open failed diagram session'
-            : 'Open diagram session'}</span
-        >
-        <ExternalLink size={12} />
-      </Button>
-    {:else}
-      <!-- svelte-ignore a11y_click_events_have_key_events -->
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div
-        class="tool-header"
-        class:tool-header-expandable={hasDetails}
-        onclick={() => hasDetails && toggleTool(item.key)}
-      >
-        <span
-          class="tool-caret"
-          class:tool-caret-expanded={isExpanded}
-          class:tool-caret-hidden={!hasDetails}>›</span
-        >
-        {@render toolStatusDot(item.statusTone)}
-        <span class="tool-name">{item.verb}</span>
-        {#if item.detail}
-          <span class="tool-args-preview">{item.detail}</span>
-        {/if}
-      </div>
-    {/if}
-    {#if isExpanded && hasDetails && !showSessionButton && !showInlineDiagram}
-      <!-- Formatted only once expanded: pretty-printing every collapsed
-           card's raw payloads made live re-renders expensive. -->
-      {@const resultText = toolResultText(item)}
-      {@const rawInputText = formatJson(item.rawInput)}
-      {@const rawOutputText = formatJson(item.rawOutput)}
-      {@const diffs = diffsFromAcpContent(item.content, displayRoots)}
-      {@const locations = displayLocations(item.locations, displayRoots)}
-      {@const terminalRefs = terminalRefsFromAcpContent(item.content)}
-      <div class="tool-code-block" transition:slide={{ duration: SLIDE_DURATION }}>
-        {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
-          <div class="tool-code-command">$ {item.detail}</div>
-        {/if}
-        {#if locations.length > 0}
-          <div class="tool-meta-row">
-            {#each locations as location}
-              <span class="tool-chip">{location}</span>
-            {/each}
-          </div>
-        {/if}
-        {#if rawInputText}
-          <div class="tool-panel-label">Input</div>
-          <pre class="tool-code-output">{rawInputText}</pre>
-        {/if}
-        {#each diffs as diff}
-          <div class="tool-panel-label">{diff.path}</div>
-          <pre class="tool-code-output diff-output">{simpleUnifiedDiff(diff)}</pre>
-        {/each}
-        {#if terminalRefs.length > 0}
-          <div class="tool-panel-label">Terminal</div>
-          <div class="tool-meta-row">
-            {#each terminalRefs as terminalRef}
-              <span class="tool-chip">{terminalRef}</span>
-            {/each}
-          </div>
-        {/if}
-        {#if resultText}
-          <div class="tool-panel-label">Output</div>
-          <pre class="tool-code-output">{resultText}</pre>
-        {/if}
-        {#if rawOutputText && rawOutputText !== resultText}
-          <div class="tool-panel-label">Raw output</div>
-          <pre class="tool-code-output">{rawOutputText}</pre>
-        {/if}
-        <div
-          class="tool-code-status"
-          class:status-danger={item.statusTone === 'danger'}
-          class:status-cancelled={item.statusTone === 'cancelled'}
-        >
-          {#if item.statusTone === 'success'}
-            <Check size={11} />
-          {/if}
-          {item.statusLabel}
-        </div>
-      </div>
-    {/if}
+<!-- Lives here rather than in ToolCallCard because renderMarkdown closes over the
+     pane's pikchr renderer state; passed to ToolCallCard as its diagram snippet. -->
+{#snippet pikchrDiagram(source: string)}
+  <div class="tool-diagram markdown-content">
+    {@html renderMarkdown(fencedDiagramMarkdown('pikchr', source))}
   </div>
 {/snippet}
 
@@ -2041,27 +1910,37 @@
               <div class="message-row tool-group">
                 {#each groupRichToolsByVerb(group.items) as verbGroup (verbGroup.key)}
                   {#if verbGroup.items.length === 1}
-                    {@render richToolCard(verbGroup.items[0], false)}
+                    <ToolCallCard
+                      item={verbGroup.items[0]}
+                      {displayRoots}
+                      expanded={expandedTools.has(verbGroup.items[0].key)}
+                      slideDuration={SLIDE_DURATION}
+                      onToggle={toggleTool}
+                      {onOpenSession}
+                      diagram={pikchrDiagram}
+                    />
                   {:else}
                     {@const isGroupExpanded = expandedTools.has(verbGroup.key)}
-                    <div class="tool-card">
-                      <!-- svelte-ignore a11y_click_events_have_key_events -->
-                      <!-- svelte-ignore a11y_no_static_element_interactions -->
-                      <div
-                        class="tool-header tool-header-expandable"
-                        onclick={() => toggleTool(verbGroup.key)}
-                      >
-                        <span class="tool-caret" class:tool-caret-expanded={isGroupExpanded}>›</span
-                        >
-                        {@render toolStatusDot(verbGroup.statusTone)}
-                        <span class="tool-name">{verbGroup.verb}</span>
-                        <span class="tool-args-preview">{verbGroup.summary}</span>
-                      </div>
-                    </div>
+                    <ToolCallHeader
+                      verb={verbGroup.verb}
+                      detail={verbGroup.summary}
+                      statusTone={verbGroup.statusTone}
+                      expanded={isGroupExpanded}
+                      onToggle={() => toggleTool(verbGroup.key)}
+                    />
                     {#if isGroupExpanded}
                       <div transition:slide={{ duration: SLIDE_DURATION }}>
                         {#each verbGroup.items as item (item.key)}
-                          {@render richToolCard(item, true)}
+                          <ToolCallCard
+                            {item}
+                            {displayRoots}
+                            nested
+                            expanded={expandedTools.has(item.key)}
+                            slideDuration={SLIDE_DURATION}
+                            onToggle={toggleTool}
+                            {onOpenSession}
+                            diagram={pikchrDiagram}
+                          />
                         {/each}
                       </div>
                     {/if}
@@ -2606,61 +2485,6 @@
     min-width: 0;
   }
 
-  .tool-card {
-    overflow: hidden;
-    min-width: 0;
-  }
-
-  .tool-card-nested {
-    padding-left: 16px;
-  }
-
-  .tool-header {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    padding: 2px 0;
-    background: none;
-    color: var(--text-muted);
-    font-size: var(--size-xs);
-    transition: background-color 0.1s;
-    cursor: default;
-    min-width: 0;
-  }
-
-  .tool-header-expandable {
-    cursor: pointer;
-  }
-
-  .tool-header-expandable:hover .tool-name {
-    text-decoration: underline;
-  }
-
-  :global(.tool-session-button) {
-    height: 26px;
-    gap: 6px;
-    border-color: var(--border-muted);
-    padding: 0 8px;
-    color: var(--text-muted);
-    font-size: var(--size-xs);
-    font-weight: 500;
-    box-shadow: none;
-  }
-
-  :global(.tool-session-button:hover) {
-    border-color: var(--border-emphasis);
-    background: var(--bg-hover);
-    color: var(--text-primary);
-  }
-
-  /* A failed generate_pikchr call keeps its session button (the child session
-     records the failure); tint it so the error is visible without expanding. */
-  :global(.tool-session-button-danger),
-  :global(.tool-session-button-danger:hover) {
-    border-color: var(--ui-danger);
-    color: var(--ui-danger);
-  }
-
   /* Inline diagram from a successful render_pikchr call — rendered through the
      markdown pipeline, so it picks up the shared diagram styles (fullscreen
      zoom affordance included); only the message margins are tightened to sit
@@ -2673,157 +2497,24 @@
     display: inline-block;
     flex-shrink: 0;
     width: 8px;
-    font-size: var(--size-xs);
     color: var(--text-faint);
-    transition: transform 0.15s ease;
+    font-size: var(--size-xs);
     line-height: 1;
+    transition: transform 0.15s ease;
   }
 
   .tool-caret-expanded {
     transform: rotate(90deg);
   }
 
-  .tool-caret-hidden {
-    visibility: hidden;
-  }
-
-  .tool-name {
-    flex-shrink: 0;
-    color: var(--text-muted);
-    font-size: var(--size-xs);
-    white-space: nowrap;
-  }
-
-  .tool-status-dot {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 12px;
-    height: 12px;
-    flex-shrink: 0;
-    color: var(--text-faint);
-  }
-
-  .tool-status-dot.status-running {
-    color: var(--ui-warning);
-  }
-
-  .tool-status-dot.status-success {
-    color: var(--ui-success, var(--ui-accent));
-  }
-
-  .tool-status-dot.status-danger {
-    color: var(--ui-danger);
-  }
-
-  .tool-status-dot.status-cancelled {
-    color: var(--text-muted);
-  }
-
   .tool-args-preview {
     flex: 1;
     min-width: 0;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
     color: var(--text-faint);
     font-size: var(--size-xs);
-  }
-
-  .tool-code-block {
-    background: color-mix(in srgb, var(--bg-chrome) 80%, black);
-    border-radius: 8px;
-    padding: 12px 14px;
-    margin-top: 4px;
-    max-height: 240px;
-    overflow-y: auto;
-    font-family: 'SF Mono', 'Menlo', 'Monaco', 'Courier New', monospace;
-    font-size: calc(var(--size-xs) * 0.9);
-    line-height: 1.5;
-  }
-
-  .tool-code-command {
-    color: var(--text-primary);
-    font-weight: 500;
-    margin-bottom: 6px;
-    white-space: pre-wrap;
-    word-break: break-all;
-  }
-
-  .tool-code-output {
-    margin: 0;
-    color: var(--text-muted);
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-
-  .diff-output {
-    color: var(--text-primary);
-  }
-
-  .tool-panel-label {
-    margin: 10px 0 4px;
-    color: var(--text-faint);
-    font-family: inherit;
-    font-size: calc(var(--size-xs) * 0.86);
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-  }
-
-  .tool-panel-label:first-child {
-    margin-top: 0;
-  }
-
-  .tool-meta-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-    margin: 4px 0 8px;
-  }
-
-  .tool-chip {
-    max-width: 100%;
-    overflow: hidden;
     text-overflow: ellipsis;
-    border: 1px solid var(--border-subtle);
-    border-radius: 6px;
-    padding: 2px 6px;
-    color: var(--text-muted);
-    font-family: inherit;
-    font-size: calc(var(--size-xs) * 0.88);
     white-space: nowrap;
-  }
-
-  .tool-code-status {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 3px;
-    margin-top: 8px;
-    font-size: calc(var(--size-xs) * 0.85);
-    color: var(--text-muted);
-  }
-
-  .tool-code-status.status-danger {
-    color: var(--ui-danger);
-  }
-
-  .tool-code-status.status-cancelled {
-    color: var(--text-faint);
-  }
-
-  .tool-code-block::-webkit-scrollbar {
-    width: 4px;
-  }
-
-  .tool-code-block::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .tool-code-block::-webkit-scrollbar-thumb {
-    background: var(--scrollbar-thumb-transparent);
-    border-radius: 2px;
   }
 
   /* ACP metadata cards */

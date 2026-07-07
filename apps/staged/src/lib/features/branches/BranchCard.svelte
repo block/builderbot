@@ -476,6 +476,7 @@
     content: string;
     sessionId?: string;
     noteUpdatedAt?: number;
+    chatOpen?: boolean;
     nextSteps?: { commitStep: string | null; noteStep: string | null } | null;
   } | null>(null);
 
@@ -1848,14 +1849,20 @@
     content={openNote.content}
     sessionId={openNote.sessionId}
     noteUpdatedAt={openNote.noteUpdatedAt}
+    noteId={openNote.noteId}
+    noteKind="branch"
+    branchId={branch.id}
+    projectId={branch.projectId}
+    repoDir={branch.worktreePath}
+    {repoLabel}
+    chatOpen={openNote.chatOpen ?? false}
+    onChatOpenChange={(chatOpen) => {
+      if (openNote) openNote = { ...openNote, chatOpen };
+    }}
     nextSteps={openNote.nextSteps}
     {hashtagItems}
     referenceNav={disabledReferenceNav}
     onClose={() => (openNote = null)}
-    onOpenSession={(sid) => {
-      openNote = null;
-      sessionMgr.openSessionId = sid;
-    }}
     onHashtagClick={handleHashtagClick}
     onStartSession={(mode, prefill) => {
       const noteRef = openNote?.noteId ? `Re: #note:${openNote.noteId}` : '';
@@ -1950,6 +1957,7 @@
         content: note.content,
         sessionId: sid ?? undefined,
         noteUpdatedAt: note.updatedAt,
+        chatOpen: true,
         nextSteps: computeNoteNextSteps(note.id),
       };
     }}

@@ -521,6 +521,7 @@
     content: string;
     sessionId?: string;
     noteUpdatedAt?: number;
+    chatOpen?: boolean;
   } | null>(null);
 
   /** Live status for every comment-linked session id (note + commit). */
@@ -1779,14 +1780,20 @@
     content={openNote?.content ?? ''}
     sessionId={openNote?.sessionId}
     noteUpdatedAt={openNote?.noteUpdatedAt}
+    noteId={openNote?.noteId}
+    noteKind="branch"
+    {branchId}
+    {projectId}
+    repoDir={branch?.worktreePath}
+    repoLabel={githubRepo ? { githubRepo, subpath: subpath ?? null, headRepo: null } : null}
+    chatOpen={openNote?.chatOpen ?? false}
+    onChatOpenChange={(chatOpen) => {
+      if (openNote) openNote = { ...openNote, chatOpen };
+    }}
     {hashtagItems}
     referenceNav={disabledReferenceNav}
     onClose={() => {
       openNote = null;
-    }}
-    onOpenSession={(sid) => {
-      openNote = null;
-      openSessionId = sid;
     }}
     onHashtagClick={handleHashtagClick}
   />

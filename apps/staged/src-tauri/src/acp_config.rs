@@ -1,10 +1,13 @@
 //! Normalization helpers for ACP session configuration options.
 
+use acp_client::AcpSessionConfigOptionSelection;
 use agent_client_protocol::schema::v1::{
     SessionConfigKind, SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
     SessionConfigSelectOptions,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::store::{AcpConfigSelection, AcpConfigValueSelection};
 
 /// Product-facing ACP configuration selectors.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +49,40 @@ pub(crate) fn normalize_acp_config_options(
             config_options,
             &SessionConfigOptionCategory::ThoughtLevel,
         ),
+    }
+}
+
+pub(crate) fn selected_acp_config_options(
+    selection: Option<&AcpConfigSelection>,
+) -> Vec<AcpSessionConfigOptionSelection> {
+    let Some(selection) = selection else {
+        return Vec::new();
+    };
+
+    let mut options = Vec::new();
+    if let Some(model) = &selection.model {
+        options.push(selected_config_option(
+            SessionConfigOptionCategory::Model,
+            model,
+        ));
+    }
+    if let Some(effort) = &selection.effort {
+        options.push(selected_config_option(
+            SessionConfigOptionCategory::ThoughtLevel,
+            effort,
+        ));
+    }
+    options
+}
+
+fn selected_config_option(
+    category: SessionConfigOptionCategory,
+    selection: &AcpConfigValueSelection,
+) -> AcpSessionConfigOptionSelection {
+    AcpSessionConfigOptionSelection {
+        category,
+        config_id: selection.config_id.clone(),
+        value_id: selection.value_id.clone(),
     }
 }
 
@@ -278,5 +315,34 @@ mod tests {
 
         assert!(normalized.model.is_none());
         assert!(normalized.effort.is_none());
+    }
+
+    #[test]
+    fn selected_config_options_preserve_model_then_effort_order() {
+        let selection = AcpConfigSelection {
+            model: Some(AcpConfigValueSelection {
+                config_id: "model".to_string(),
+                value_id: "sonnet".to_string(),
+                label: Some("Sonnet".to_string()),
+            }),
+            effort: Some(AcpConfigValueSelection {
+                config_id: "reasoning".to_string(),
+                value_id: "high".to_string(),
+                label: Some("High".to_string()),
+            }),
+        };
+
+        let selected = selected_acp_config_options(Some(&selection));
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(selected[0].category, SessionConfigOptionCategory::Model);
+        assert_eq!(selected[0].config_id, "model");
+        assert_eq!(selected[0].value_id, "sonnet");
+        assert_eq!(
+            selected[1].category,
+            SessionConfigOptionCategory::ThoughtLevel
+        );
+        assert_eq!(selected[1].config_id, "reasoning");
+        assert_eq!(selected[1].value_id, "high");
     }
 }

@@ -403,6 +403,19 @@ pub fn start_session(
         }
     };
 
+    let acp_config_selection = store
+        .get_session(&config.session_id)
+        .map_err(|e| {
+            format!(
+                "Failed to load ACP config selection for session {}: {e}",
+                config.session_id
+            )
+        })?
+        .ok_or_else(|| format!("Session not found: {}", config.session_id))?
+        .acp_config_selection;
+    let selected_acp_config_options =
+        crate::acp_config::selected_acp_config_options(acp_config_selection.as_ref());
+
     // Persist the user message right away so it's visible immediately.
     // Include image IDs so the frontend can display them alongside the text.
     // We also mark attached images as session-scoped immediately after so they
@@ -656,6 +669,7 @@ pub fn start_session(
                         &writer_trait,
                         &cancel_token,
                         agent_session_id.as_deref(),
+                        &selected_acp_config_options,
                     )
                     .await;
 

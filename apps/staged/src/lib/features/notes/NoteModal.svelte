@@ -5,7 +5,7 @@
   Read-only view.
 -->
 <script lang="ts">
-  import { onDestroy, tick } from 'svelte';
+  import { onDestroy } from 'svelte';
   import X from '@lucide/svelte/icons/x';
   import Copy from '@lucide/svelte/icons/copy';
   import Check from '@lucide/svelte/icons/check';
@@ -271,14 +271,6 @@
     previousSessionStatus = next?.status ?? null;
   }
 
-  async function handleEmbeddedNoteClick() {
-    if (chatOpen && !viewport.canSplit) {
-      setChatOpen(false);
-      await tick();
-    }
-    contentEl?.scrollTo({ top: 0, behavior: 'smooth' });
-  }
-
   function handleChatToggle() {
     if (!canOpenSession) return;
     if (chatOpen && !viewport.canSplit) {
@@ -408,6 +400,60 @@
   }
 </script>
 
+{#snippet copyButton()}
+  <Button
+    variant="outline"
+    size="sm"
+    class={[
+      'h-7 shrink-0 gap-1 border-[var(--border-muted)] bg-transparent px-2.5 text-xs text-muted-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground',
+      copied && 'text-[var(--status-added)] hover:text-[var(--status-added)]',
+    ]}
+    title={copied ? 'Copied!' : 'Copy note to clipboard'}
+    aria-label={copied ? 'Copied!' : 'Copy note to clipboard'}
+    onclick={handleShare}
+  >
+    {#if copied}
+      <Check size={16} />
+    {:else}
+      <Copy size={16} />
+    {/if}
+  </Button>
+{/snippet}
+
+{#snippet chatToggleButton()}
+  {#if canOpenSession}
+    <Button
+      variant="outline"
+      size="sm"
+      class="h-7 shrink-0 gap-1 border-[var(--border-muted)] bg-transparent px-2.5 text-xs text-muted-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
+      title={chatToggleAriaLabel}
+      aria-label={chatToggleAriaLabel}
+      aria-pressed={chatOpen}
+      onclick={handleChatToggle}
+    >
+      {#if chatOpen}
+        <PanelRightClose size={15} aria-hidden="true" />
+      {:else}
+        <PanelRightOpen size={15} aria-hidden="true" />
+      {/if}
+      <span>{chatToggleLabel}</span>
+    </Button>
+  {/if}
+{/snippet}
+
+{#snippet closeButton()}
+  <Button
+    variant="ghost"
+    size="icon-sm"
+    class="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
+    title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
+    aria-label="Close"
+    onclick={onClose}
+  >
+    <X size={16} />
+  </Button>
+{/snippet}
+
 <Dialog.Root
   {open}
   onOpenChange={(v) => {
@@ -425,77 +471,48 @@
     onOpenAutoFocus={(e) => e.preventDefault()}
   >
     <Dialog.Header
-      class="flex-row items-center justify-between gap-3 px-4 py-3 border-b border-[var(--border-subtle)] flex-shrink-0"
+      class="flex-row items-stretch justify-between gap-0 border-b border-[var(--border-subtle)] p-0 flex-shrink-0"
     >
-      {#if referenceNav}
-        <ReferenceNavControls nav={referenceNav} />
-      {/if}
-      <div class="header-content">
-        <span class="note-title-icon" aria-hidden="true">
-          <FileText size={13} />
-        </span>
-        <Dialog.Title
-          class="text-[var(--size-sm)] font-semibold text-foreground overflow-hidden text-ellipsis whitespace-nowrap"
-        >
-          Note
-        </Dialog.Title>
-      </div>
-      <InContentSearch
-        visible={searchVisible}
-        {matchCount}
-        currentIndex={currentMatchIndex}
-        onSearch={performSearch}
-        onNext={nextMatch}
-        onPrevious={previousMatch}
-        onClose={closeSearch}
-      />
-      <div class="header-actions">
-        <Button
-          variant="outline"
-          size="sm"
-          class={[
-            'h-7 shrink-0 gap-1 border-[var(--border-muted)] bg-transparent px-2.5 text-xs text-muted-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground',
-            copied && 'text-[var(--status-added)] hover:text-[var(--status-added)]',
-          ]}
-          title={copied ? 'Copied!' : 'Copy note to clipboard'}
-          aria-label={copied ? 'Copied!' : 'Copy note to clipboard'}
-          onclick={handleShare}
-        >
-          {#if copied}
-            <Check size={16} />
-          {:else}
-            <Copy size={16} />
-          {/if}
-        </Button>
-        {#if canOpenSession}
-          <Button
-            variant="outline"
-            size="sm"
-            class="h-7 shrink-0 gap-1 border-[var(--border-muted)] bg-transparent px-2.5 text-xs text-muted-foreground shadow-none hover:border-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
-            title={chatToggleAriaLabel}
-            aria-label={chatToggleAriaLabel}
-            aria-pressed={chatOpen}
-            onclick={handleChatToggle}
-          >
-            {#if chatOpen}
-              <PanelRightClose size={15} aria-hidden="true" />
-            {:else}
-              <PanelRightOpen size={15} aria-hidden="true" />
-            {/if}
-            <span>{chatToggleLabel}</span>
-          </Button>
+      <div class="note-header-pane" class:split-pane={splitChatOpen}>
+        {#if referenceNav}
+          <ReferenceNavControls nav={referenceNav} />
         {/if}
-        <Button
-          variant="ghost"
-          size="icon-sm"
-          class="size-7 shrink-0 rounded-md text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
-          title={viewport.showShortcutHints ? 'Close (Esc)' : 'Close'}
-          aria-label="Close"
-          onclick={onClose}
-        >
-          <X size={16} />
-        </Button>
+        <div class="header-content">
+          <span class="note-title-icon" aria-hidden="true">
+            <FileText size={13} />
+          </span>
+          <Dialog.Title
+            class="text-[var(--size-sm)] font-semibold text-foreground overflow-hidden text-ellipsis whitespace-nowrap"
+          >
+            Note
+          </Dialog.Title>
+        </div>
+        <InContentSearch
+          visible={searchVisible}
+          {matchCount}
+          currentIndex={currentMatchIndex}
+          onSearch={performSearch}
+          onNext={nextMatch}
+          onPrevious={previousMatch}
+          onClose={closeSearch}
+        />
+        <div class="note-header-actions">
+          {@render copyButton()}
+          {#if !splitChatOpen}
+            {@render chatToggleButton()}
+          {/if}
+        </div>
       </div>
+      {#if splitChatOpen}
+        <div class="chat-header-pane">
+          {@render chatToggleButton()}
+          {@render closeButton()}
+        </div>
+      {:else}
+        <div class="header-actions">
+          {@render closeButton()}
+        </div>
+      {/if}
     </Dialog.Header>
     <div class:split-chat-open={splitChatOpen} class:chat-only={narrowChatOpen} class="modal-body">
       <section
@@ -577,7 +594,6 @@
             {repoLabel}
             {hashtagItems}
             {noteInfo}
-            onOpenNote={() => handleEmbeddedNoteClick()}
             onSessionChange={handlePaneSessionChange}
             {onHashtagClick}
           />
@@ -594,6 +610,31 @@
 />
 
 <style>
+  .note-header-pane {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+    flex: 1;
+    padding: 12px 16px;
+  }
+
+  .note-header-pane.split-pane {
+    flex: 2 1 0;
+  }
+
+  .chat-header-pane {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 4px;
+    min-width: 340px;
+    max-width: 390px;
+    flex: 1 1 0;
+    padding: 12px;
+    border-left: 1px solid var(--border-subtle);
+  }
+
   .header-content {
     display: flex;
     align-items: center;
@@ -614,11 +655,16 @@
     background: var(--note-bg);
   }
 
+  .note-header-actions,
   .header-actions {
     display: flex;
     align-items: center;
     gap: 4px;
     flex-shrink: 0;
+  }
+
+  .header-actions {
+    padding: 12px 16px 12px 0;
   }
 
   .modal-body {

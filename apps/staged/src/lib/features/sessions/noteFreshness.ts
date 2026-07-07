@@ -103,7 +103,7 @@ export function noteActivityLabel({
   isLive: boolean;
   isLastGroup: boolean;
   isFirstNoteMessage: boolean;
-}): 'Writing note' | 'Note creation' | 'Note updated' {
+}): 'Writing note' | 'Note created' | 'Note updated' {
   if (isLive && isLastGroup) return 'Writing note';
-  return isFirstNoteMessage ? 'Note creation' : 'Note updated';
+  return isFirstNoteMessage ? 'Note created' : 'Note updated';
 }

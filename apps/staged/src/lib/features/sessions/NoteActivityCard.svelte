@@ -3,34 +3,16 @@
 
   interface Props {
     label: string;
-    onclick?: () => void;
-    actionLabel?: string;
   }
 
-  let { label, onclick, actionLabel }: Props = $props();
-  let resolvedActionLabel = $derived(actionLabel ?? label);
-  let accessibleLabel = $derived(actionLabel ? `${actionLabel}: ${label}` : label);
+  let { label }: Props = $props();
   let liveMode: 'polite' | undefined = $derived(label === 'Writing note' ? 'polite' : undefined);
 </script>
 
-{#if onclick}
-  <button
-    type="button"
-    class="note-activity-card clickable"
-    aria-label={accessibleLabel}
-    aria-live={liveMode}
-    title={resolvedActionLabel}
-    {onclick}
-  >
-    <FileText size={14} aria-hidden="true" />
-    <span>{label}</span>
-  </button>
-{:else}
-  <div class="note-activity-card" aria-live={liveMode}>
-    <FileText size={14} aria-hidden="true" />
-    <span>{label}</span>
-  </div>
-{/if}
+<div class="note-activity-card" aria-live={liveMode}>
+  <FileText size={14} aria-hidden="true" />
+  <span>{label}</span>
+</div>
 
 <style>
   .note-activity-card {
@@ -39,10 +21,10 @@
     gap: 8px;
     max-width: 100%;
     margin-top: 8px;
-    padding: 8px 10px;
-    border: 1px solid transparent;
+    padding: 7px 10px;
+    border: 1px solid color-mix(in srgb, var(--note-color) 45%, transparent);
     border-radius: 8px;
-    background: var(--note-bg);
+    background: transparent;
     color: var(--note-color);
     font: inherit;
     font-size: var(--size-xs);
@@ -60,18 +42,5 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-
-  button.note-activity-card {
-    cursor: pointer;
-  }
-
-  button.note-activity-card:hover {
-    background: var(--note-bg-emphasis);
-  }
-
-  button.note-activity-card:focus-visible {
-    outline: 2px solid var(--note-color);
-    outline-offset: 2px;
   }
 </style>

@@ -140,9 +140,8 @@
     repoLabel?: Pick<ProjectRepo, 'githubRepo' | 'subpath' | 'headRepo'> | null;
     /** Precomputed hashtag reference items for the session context. */
     hashtagItems?: HashtagItem[];
-    /** When set, shows a button to open the associated note. */
+    /** Linked note context for note-related chat actions. */
     noteInfo?: LinkedNoteContext | null;
-    onOpenNote?: (note: LinkedNoteContext) => void;
     onHashtagClick?: (click: HashtagClickInfo) => void;
     onSessionChange?: (session: Session | null) => void;
     onSearchStateChange?: (state: { matchCount: number; currentIndex: number }) => void;
@@ -163,7 +162,6 @@
     repoLabel = null,
     hashtagItems: providedHashtagItems,
     noteInfo,
-    onOpenNote,
     onHashtagClick,
     onSessionChange,
     onSearchStateChange,
@@ -1565,8 +1563,6 @@
                         isLastGroup: groupIdx === grouped.length - 1,
                         isFirstNoteMessage: group.message.id === firstNoteMessageId,
                       })}
-                      actionLabel={compact ? 'Show note' : 'Open linked note'}
-                      onclick={noteInfo && onOpenNote ? () => onOpenNote(noteInfo) : undefined}
                     />
                   {/if}
                   <Button
@@ -1599,8 +1595,7 @@
                         class="tool-header tool-header-expandable"
                         onclick={() => toggleTool(verbGroup.key)}
                       >
-                        <span class="tool-caret" class:tool-caret-expanded={isGroupExpanded}
-                          >›</span
+                        <span class="tool-caret" class:tool-caret-expanded={isGroupExpanded}>›</span
                         >
                         <span
                           class="tool-status-dot"

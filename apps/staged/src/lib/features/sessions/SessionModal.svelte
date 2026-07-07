@@ -178,7 +178,6 @@
       {repoLabel}
       {hashtagItems}
       {noteInfo}
-      {onOpenNote}
       {onHashtagClick}
       onSessionChange={(next) => (session = next)}
       onSearchStateChange={(state) => {

@@ -195,15 +195,15 @@ describe('noteActivityLabel', () => {
     );
   });
 
-  it('uses note creation for the first completed note-bearing message', () => {
+  it('uses note created for the first completed note-bearing message', () => {
     expect(noteActivityLabel({ isLive: false, isLastGroup: true, isFirstNoteMessage: true })).toBe(
-      'Note creation'
+      'Note created'
     );
   });
 
   it('does not use the live writing label when later transcript groups exist', () => {
     expect(noteActivityLabel({ isLive: true, isLastGroup: false, isFirstNoteMessage: true })).toBe(
-      'Note creation'
+      'Note created'
     );
   });
 

@@ -44,11 +44,14 @@
   // Edge-to-edge geometry applied as inline style so it cleanly overrides any
   // per-modal sizing classes the caller passes (e.g. `sm:max-w-[580px]`,
   // `max-h-[calc(100vh-16vh)]`) without specificity fights. Safe-area padding
-  // keeps the header/footer clear of notches and home indicators. The height
-  // subtracts `--keyboard-inset` so the dialog shrinks to the space above the
-  // on-screen keyboard, pinning its footer to the keyboard's top edge.
+  // keeps the header/footer clear of notches and home indicators. Tailwind v4
+  // translate utilities use the individual `translate` property, so reset that
+  // alongside `transform` to prevent desktop centering from shifting the mobile
+  // panel offscreen. The height subtracts `--keyboard-inset` so the dialog
+  // shrinks to the space above the on-screen keyboard, pinning its footer to
+  // the keyboard's top edge.
   const fullScreenStyle =
-    'position:fixed;inset:0;top:0;left:0;width:100%;max-width:none;height:calc(100dvh - var(--keyboard-inset, 0px));max-height:none;transform:none;border-radius:0;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);';
+    'position:fixed;inset:0;top:0;left:0;width:100%;max-width:none;height:calc(100dvh - var(--keyboard-inset, 0px));max-height:none;transform:none;translate:none;border-radius:0;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);';
 
   const contentStyle = $derived(
     fullScreen ? `${styleProp ? `${styleProp};` : ''}${fullScreenStyle}` : styleProp
@@ -61,10 +64,10 @@
     bind:ref
     data-slot="dialog-content"
     class={cn(
-      'bg-card text-card-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 ring-foreground/10 grid max-w-[calc(100%-2rem)] gap-6 rounded-xl p-6 text-sm ring-1 duration-100 sm:max-w-md fixed top-1/2 left-1/2 z-(--z-index-overlay) w-full -translate-x-1/2 -translate-y-1/2 outline-none',
+      'bg-card text-card-foreground data-open:animate-in data-closed:animate-out data-closed:fade-out-0 data-open:fade-in-0 ring-foreground/10 grid max-w-[calc(100%-2rem)] gap-6 rounded-xl p-6 text-sm ring-1 duration-100 sm:max-w-md fixed z-(--z-index-overlay) w-full outline-none',
       fullScreen
         ? 'data-open:slide-in-from-bottom data-closed:slide-out-to-bottom'
-        : 'data-closed:zoom-out-95 data-open:zoom-in-95',
+        : 'top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 data-closed:zoom-out-95 data-open:zoom-in-95',
       className
     )}
     style={contentStyle}

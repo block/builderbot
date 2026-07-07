@@ -7,6 +7,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import { cn } from '$lib/components/utils';
+  import { handleAcpPickerGridKeydown, handleAcpPickerOpenAutoFocus } from './acpPickerKeyboard';
 
   interface Props {
     providerId: string | null;
@@ -39,6 +40,7 @@
     onModelChange,
     onEffortChange,
   }: Props = $props();
+  let contentEl = $state<HTMLElement | null>(null);
 
   // The provider is identified by the trigger icon; the label only carries the
   // model/effort values, falling back to the provider name before discovery.
@@ -92,15 +94,18 @@
       {/if}
     </DropdownMenu.Trigger>
     <DropdownMenu.Content
+      bind:ref={contentEl}
       align="start"
       side={dropUp ? 'top' : 'bottom'}
       sideOffset={4}
       class="max-h-[min(360px,calc(100vh-48px))] max-w-[calc(100vw-16px)]"
+      onOpenAutoFocus={(event) => handleAcpPickerOpenAutoFocus(event, contentEl)}
+      onkeydowncapture={(event) => handleAcpPickerGridKeydown(event, contentEl)}
     >
       {#if hasPickerColumns}
         <div class="picker-column-grid">
           {#if modelSelector}
-            <div class="picker-column">
+            <div class="picker-column" data-picker-column="model">
               <AcpConfigPickerSection
                 title={modelSelector.label || 'Model'}
                 selector={modelSelector}
@@ -112,7 +117,7 @@
           {/if}
 
           {#if effortSelector}
-            <div class="picker-column">
+            <div class="picker-column" data-picker-column="effort">
               <AcpConfigPickerSection
                 title={effortSelector.label || 'Effort'}
                 selector={effortSelector}
@@ -124,7 +129,7 @@
           {/if}
 
           {#if loading && !modelSelector && !effortSelector}
-            <div class="picker-column">
+            <div class="picker-column" data-picker-column="status">
               <DropdownMenu.Item disabled>
                 <span class="picker-status-row">
                   <Spinner size={12} />

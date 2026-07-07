@@ -20,6 +20,7 @@
   import { cn } from '$lib/components/utils';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import { buildAcpConfigSelection, type AcpConfigPickerSelection } from './acpConfigSelection';
+  import { handleAcpPickerGridKeydown, handleAcpPickerOpenAutoFocus } from './acpPickerKeyboard';
 
   interface AgentOption {
     id: string;
@@ -53,6 +54,7 @@
   let effortSelectionExplicit = $state(false);
   let modelSelectorKey = $state<string | null>(null);
   let effortSelectorKey = $state<string | null>(null);
+  let contentEl = $state<HTMLElement | null>(null);
   let discoveryRun = 0;
 
   let agents = $derived<AgentOption[]>(remote ? REMOTE_AGENTS : agentState.providers);
@@ -220,13 +222,16 @@
         {/if}
       </DropdownMenu.Trigger>
       <DropdownMenu.Content
+        bind:ref={contentEl}
         align="start"
         side={dropUp ? 'top' : 'bottom'}
         sideOffset={4}
         class="max-h-[min(360px,calc(100vh-48px))] max-w-[calc(100vw-16px)]"
+        onOpenAutoFocus={(event) => handleAcpPickerOpenAutoFocus(event, contentEl)}
+        onkeydowncapture={(event) => handleAcpPickerGridKeydown(event, contentEl)}
       >
         <div class="picker-column-grid">
-          <div class="picker-column">
+          <div class="picker-column" data-picker-column="provider">
             <DropdownMenu.Label class="picker-section-label">Agent</DropdownMenu.Label>
             {#if agents.length > 1}
               <DropdownMenu.RadioGroup
@@ -253,7 +258,7 @@
           </div>
 
           {#if modelSelector}
-            <div class="picker-column">
+            <div class="picker-column" data-picker-column="model">
               <AcpConfigPickerSection
                 title={modelSelector.label || 'Model'}
                 selector={modelSelector}
@@ -264,7 +269,7 @@
           {/if}
 
           {#if effortSelector}
-            <div class="picker-column">
+            <div class="picker-column" data-picker-column="effort">
               <AcpConfigPickerSection
                 title={effortSelector.label || 'Effort'}
                 selector={effortSelector}
@@ -275,7 +280,7 @@
           {/if}
 
           {#if configLoading && !modelSelector && !effortSelector}
-            <div class="picker-column">
+            <div class="picker-column" data-picker-column="status">
               <DropdownMenu.Item disabled>
                 <span class="picker-status-row">
                   <Spinner size={12} />

@@ -109,6 +109,7 @@
   let noteMarkdown = $derived(noteMarkdownWithTitle(displayTitle, displayContent));
   let splitChatOpen = $derived(chatOpen && viewport.canSplit);
   let narrowChatOpen = $derived(chatOpen && !viewport.canSplit);
+  let noteSearchAvailable = $derived(!narrowChatOpen);
   let chatToggleLabel = $derived(
     chatOpen
       ? viewport.canSplit
@@ -168,11 +169,11 @@
   let contentEl: HTMLDivElement;
   let unregisterSearchTarget: (() => void) | null = null;
 
-  // Register the global search-shortcut target only while the modal is open.
+  // Register the global search-shortcut target only while the visible note pane can be searched.
   // Branch and project views lazy-mount this component, but this guard keeps
   // persistent callers from letting a closed note modal capture Cmd/Ctrl+F.
   $effect(() => {
-    if (!open) return;
+    if (!open || !noteSearchAvailable) return;
     const unregister = registerSearchShortcutTarget({
       find: openSearch,
       next: nextMatch,
@@ -183,6 +184,11 @@
       unregister();
       unregisterSearchTarget = null;
     };
+  });
+
+  $effect(() => {
+    if (noteSearchAvailable || !searchVisible) return;
+    closeSearch();
   });
 
   $effect(() => {
@@ -318,6 +324,7 @@
   }
 
   function openSearch() {
+    if (!noteSearchAvailable) return;
     searchVisible = true;
   }
 
@@ -513,15 +520,17 @@
               Note
             </Dialog.Title>
           </div>
-          <InContentSearch
-            visible={searchVisible}
-            {matchCount}
-            currentIndex={currentMatchIndex}
-            onSearch={performSearch}
-            onNext={nextMatch}
-            onPrevious={previousMatch}
-            onClose={closeSearch}
-          />
+          {#if noteSearchAvailable}
+            <InContentSearch
+              visible={searchVisible}
+              {matchCount}
+              currentIndex={currentMatchIndex}
+              onSearch={performSearch}
+              onNext={nextMatch}
+              onPrevious={previousMatch}
+              onClose={closeSearch}
+            />
+          {/if}
           <div class="note-header-actions">
             {@render copyButton()}
             {#if !splitChatOpen}

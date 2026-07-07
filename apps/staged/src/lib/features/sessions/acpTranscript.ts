@@ -525,7 +525,7 @@ function richToolItem(tool: ToolAssembly, displayRoots?: DisplayRootInput): Rich
 function isPikchrTool(tool: ToolAssembly): boolean {
   return [tool.call.content, tool.metadata.toolKind]
     .map(normalizedToolName)
-    .some((name) => name === 'generate_pikchr' || name.endsWith('.generate_pikchr'));
+    .some((name) => /(?:^|[._]+)generate_pikchr$/.test(name));
 }
 
 function normalizedToolName(value: unknown): string {

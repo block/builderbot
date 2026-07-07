@@ -243,6 +243,39 @@ describe('buildAcpTranscriptGroups', () => {
       expect(groups[0].items[0].innerSessionId).toBe('child-session-2');
     }
   });
+
+  it('recognizes delimiter-qualified generate_pikchr tool names', () => {
+    const groups = buildAcpTranscriptGroups(
+      [
+        message({
+          id: 1,
+          role: 'tool_call',
+          content: JSON.stringify({
+            name: 'pikchr_generate_pikchr',
+            input: { description: 'Show the signup flow' },
+          }),
+          acpEventKind: 'tool_call',
+          acpToolCallId: 'tc-pikchr-single-underscore',
+        }),
+        message({
+          id: 2,
+          role: 'tool_call',
+          content: JSON.stringify({
+            name: 'mcp__pikchr__generate_pikchr',
+            input: { description: 'Show the signup flow' },
+          }),
+          acpEventKind: 'tool_call',
+          acpToolCallId: 'tc-pikchr-double-underscore',
+        }),
+      ],
+      []
+    );
+
+    expect(groups[0].type).toBe('tools');
+    if (groups[0].type === 'tools') {
+      expect(groups[0].items.map((item) => item.isPikchrDiagramTool)).toEqual([true, true]);
+    }
+  });
 });
 
 describe('groupRichToolsByVerb', () => {

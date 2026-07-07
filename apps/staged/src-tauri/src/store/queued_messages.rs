@@ -99,13 +99,37 @@ impl Store {
     }
 
     pub fn delete_queued_session_message(&self, id: &str) -> Result<bool, StoreError> {
-        let conn = self.conn.lock().unwrap();
-        let rows = conn.execute(
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let Some(message) = select_queued_session_message(&tx, id)? else {
+            tx.commit()?;
+            return Ok(false);
+        };
+        if message.status != QueuedSessionMessageStatus::Queued {
+            tx.commit()?;
+            return Ok(false);
+        }
+
+        let rows = tx.execute(
             "DELETE FROM queued_session_messages
              WHERE id = ?1 AND status = 'queued'",
             params![id],
         )?;
-        Ok(rows > 0)
+        if rows == 0 {
+            tx.commit()?;
+            return Ok(false);
+        }
+
+        for image_id in &message.image_ids {
+            tx.execute(
+                "UPDATE images
+                 SET session_id = NULL
+                 WHERE id = ?1 AND session_id = ?2",
+                params![image_id, message.session_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
     }
 
     pub fn claim_queued_session_message(

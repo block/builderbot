@@ -556,6 +556,47 @@ fn test_queued_session_message_claims_pending_images() {
 }
 
 #[test]
+fn test_delete_queued_session_message_releases_claimed_images() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    let session = Session::new_running("work", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    let image = Image::new(
+        Some(&branch.id),
+        &project.id,
+        "screenshot.png",
+        "image/png",
+        42,
+        true,
+    );
+    store.create_image(&image).unwrap();
+    let queued = store
+        .add_queued_session_message(
+            &session.id,
+            "with image",
+            std::slice::from_ref(&image.id),
+            Some(&branch.id),
+        )
+        .unwrap();
+
+    assert!(store.delete_queued_session_message(&queued.id).unwrap());
+
+    let released = store.get_image(&image.id).unwrap().unwrap();
+    assert_eq!(released.session_id, None);
+    let branch_images = store.list_images_for_branch(&branch.id).unwrap();
+    assert_eq!(
+        branch_images
+            .iter()
+            .map(|image| image.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![image.id.as_str()]
+    );
+}
+
+#[test]
 fn test_add_queued_session_message_requires_running_session() {
     let store = Store::in_memory().unwrap();
     let session = Session::new_running("work", Path::new("/tmp"));

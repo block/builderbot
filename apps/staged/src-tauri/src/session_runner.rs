@@ -749,10 +749,13 @@ pub fn start_session(
         // can keep using the active cancellation token.
         registry.deregister(&session_id_for_status);
 
+        let completed_successfully =
+            terminal_state_completed_successfully(new_status, &completion_reason);
+
         // Run post-completion hooks before transitioning status.
         // These detect artifacts produced by the session (commits, notes).
         // Returns the branch_id when a new commit was detected.
-        let committed_branch_id = if new_status == "completed" {
+        let committed_branch_id = if completed_successfully {
             run_post_completion_hooks(
                 &config.session_id,
                 &config.working_dir,
@@ -789,11 +792,12 @@ pub fn start_session(
 
         if transitioned {
             let branch_id = config.branch_id.clone();
-            let auto_review_branch_id = committed_branch_id
-                .clone()
-                .or_else(|| config.pending_auto_review_branch_id.clone());
-            let should_drain_queued_message =
-                new_status == "completed" && completion_reason == CompletionReason::TurnComplete;
+            let auto_review_branch_id = auto_review_branch_id_for_terminal_state(
+                committed_branch_id.clone(),
+                config.pending_auto_review_branch_id.clone(),
+                completed_successfully,
+            );
+            let should_drain_queued_message = completed_successfully;
             let session_id_for_follow_up = session_id_for_status.clone();
             let action_executor_for_follow_up = config
                 .action_executor
@@ -2486,6 +2490,26 @@ fn run_post_completion_hooks(
     committed_branch_id
 }
 
+fn terminal_state_completed_successfully(
+    status: &str,
+    completion_reason: &CompletionReason,
+) -> bool {
+    status == SessionStatus::Completed.as_str()
+        && *completion_reason == CompletionReason::TurnComplete
+}
+
+fn auto_review_branch_id_for_terminal_state(
+    committed_branch_id: Option<String>,
+    pending_auto_review_branch_id: Option<String>,
+    completed_successfully: bool,
+) -> Option<String> {
+    committed_branch_id.or_else(|| {
+        completed_successfully
+            .then_some(pending_auto_review_branch_id)
+            .flatten()
+    })
+}
+
 /// Extract note content from a single assistant message.
 ///
 /// Callers are responsible for choosing which message to pass — typically the
@@ -2984,6 +3008,34 @@ mod tests {
             image_ids: vec![],
             acp: Default::default(),
         }
+    }
+
+    #[test]
+    fn terminal_auto_review_reuses_pending_branch_only_after_successful_turn() {
+        assert_eq!(
+            auto_review_branch_id_for_terminal_state(
+                None,
+                Some("branch-pending".to_string()),
+                true,
+            ),
+            Some("branch-pending".to_string())
+        );
+        assert_eq!(
+            auto_review_branch_id_for_terminal_state(
+                None,
+                Some("branch-pending".to_string()),
+                false,
+            ),
+            None
+        );
+        assert_eq!(
+            auto_review_branch_id_for_terminal_state(
+                Some("branch-commit".to_string()),
+                Some("branch-pending".to_string()),
+                false,
+            ),
+            Some("branch-commit".to_string())
+        );
     }
 
     #[test]

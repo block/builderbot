@@ -54,6 +54,9 @@
   let shouldRender = $derived(
     !!providerId && (!!modelSelector || !!effortSelector || loading || !!error)
   );
+  let hasPickerColumns = $derived(
+    !!modelSelector || !!effortSelector || (loading && !modelSelector && !effortSelector)
+  );
 
   function selectorValueLabel(
     selector: AcpConfigSelector | null,
@@ -94,55 +97,49 @@
       sideOffset={4}
       class="max-h-[min(360px,calc(100vh-48px))] max-w-[calc(100vw-16px)]"
     >
-      <div class="picker-column-grid">
-        <div class="picker-column">
-          <DropdownMenu.Label class="picker-section-label">Agent</DropdownMenu.Label>
-          <DropdownMenu.Item disabled>
-            <span class="inline-flex min-w-0 items-center gap-1.5">
-              <AgentIcon id={providerId ?? ''} size={12} />
-              <span class="truncate">{providerLabel ?? providerId ?? 'Agent'}</span>
-            </span>
-          </DropdownMenu.Item>
+      {#if hasPickerColumns}
+        <div class="picker-column-grid">
+          {#if modelSelector}
+            <div class="picker-column">
+              <AcpConfigPickerSection
+                title={modelSelector.label || 'Model'}
+                selector={modelSelector}
+                value={selectedModelValue}
+                {disabled}
+                onValueChange={(value) => onModelChange?.(value)}
+              />
+            </div>
+          {/if}
+
+          {#if effortSelector}
+            <div class="picker-column">
+              <AcpConfigPickerSection
+                title={effortSelector.label || 'Effort'}
+                selector={effortSelector}
+                value={selectedEffortValue}
+                {disabled}
+                onValueChange={(value) => onEffortChange?.(value)}
+              />
+            </div>
+          {/if}
+
+          {#if loading && !modelSelector && !effortSelector}
+            <div class="picker-column">
+              <DropdownMenu.Item disabled>
+                <span class="picker-status-row">
+                  <Spinner size={12} />
+                  Loading options…
+                </span>
+              </DropdownMenu.Item>
+            </div>
+          {/if}
         </div>
-
-        {#if modelSelector}
-          <div class="picker-column">
-            <AcpConfigPickerSection
-              title={modelSelector.label || 'Model'}
-              selector={modelSelector}
-              value={selectedModelValue}
-              {disabled}
-              onValueChange={(value) => onModelChange?.(value)}
-            />
-          </div>
-        {/if}
-
-        {#if effortSelector}
-          <div class="picker-column">
-            <AcpConfigPickerSection
-              title={effortSelector.label || 'Effort'}
-              selector={effortSelector}
-              value={selectedEffortValue}
-              {disabled}
-              onValueChange={(value) => onEffortChange?.(value)}
-            />
-          </div>
-        {/if}
-
-        {#if loading && !modelSelector && !effortSelector}
-          <div class="picker-column">
-            <DropdownMenu.Item disabled>
-              <span class="picker-status-row">
-                <Spinner size={12} />
-                Loading options…
-              </span>
-            </DropdownMenu.Item>
-          </div>
-        {/if}
-      </div>
+      {/if}
 
       {#if error && !modelSelector && !effortSelector}
-        <DropdownMenu.Separator />
+        {#if hasPickerColumns}
+          <DropdownMenu.Separator />
+        {/if}
         <DropdownMenu.Item disabled>
           <span class="picker-status-row">Using provider defaults</span>
         </DropdownMenu.Item>

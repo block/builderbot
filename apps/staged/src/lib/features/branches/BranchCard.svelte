@@ -2047,6 +2047,7 @@
   .card-header {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: 12px;
     padding: 12px 16px;
     min-width: 0;
@@ -2056,8 +2057,13 @@
   .header-actions {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
     gap: 4px;
-    flex-shrink: 0;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: 100%;
+    margin-left: auto;
   }
 
   .card-header :global(svg.header-icon) {

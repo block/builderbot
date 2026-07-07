@@ -27,7 +27,7 @@
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import type { Branch, BranchSessionType, HashtagItem, Project, ProjectRepo } from '../../types';
-  import AgentSelector from '../agents/AgentSelector.svelte';
+  import AcpConfigPicker from '../agents/AcpConfigPicker.svelte';
   import ImageAttachment from './ImageAttachment.svelte';
   import HashtagInput from './HashtagInput.svelte';
   import { buildBranchHashtagItems } from './hashtagItems';
@@ -103,6 +103,7 @@
   let isProjectNote = $derived(!branch && !!project);
   let activeProjectId = $derived(branch?.projectId ?? project?.id ?? '');
   let activeBranchId = $derived(branch?.id ?? null);
+  let activeWorkingDir = $derived(branch?.worktreePath ?? null);
   let currentWillQueue = $derived(willQueueForMode?.(currentMode) ?? willQueue);
   let canSubmit = $derived(
     !!activeProjectId && !starting && !submitDisabledReason && (isReview || !!prompt.trim())
@@ -538,7 +539,13 @@
 
       <div class="form-actions">
         <div class="form-actions-left">
-          <AgentSelector disabled={starting} {remote} dropUp triggerClass={footerControlClass} />
+          <AcpConfigPicker
+            disabled={starting}
+            {remote}
+            dropUp
+            triggerClass={footerControlClass}
+            workingDir={activeWorkingDir}
+          />
           {#if imageIds.length === 0}
             <ImageAttachment
               branchId={activeBranchId}

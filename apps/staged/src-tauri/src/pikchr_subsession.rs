@@ -11,19 +11,17 @@
 //! only receives the final source and preview path. The loop is bounded by
 //! [`MAX_ATTEMPTS`].
 //!
-//! The sub-session is deliberately **not** persisted: it uses in-memory `Store`
-//! and `MessageWriter` stubs so its transcript never pollutes the user's
-//! session messages. The store stub captures the agent session id so it can be
-//! threaded into the next turn for resumption; the writer stub just accumulates
-//! assistant text so the loop can read the candidate diagram back.
+//! The sub-session is persisted as a normal `sessions` row. Each attempted
+//! prompt and assistant reply is written into that child session so the parent
+//! tool call can later link to the specialist transcript.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::AgentDriver;
+use crate::agent::{AgentDriver, MessageWriter};
 use crate::pikchr_mcp::run_preview;
+use crate::store::{CompletionReason, MessageRole, SessionStatus, Store};
 
 /// Total sub-agent turns before giving up. Each parse error or empty reply
 /// consumes one, and each renderable candidate flagged with layout warnings
@@ -31,10 +29,6 @@ use crate::pikchr_mcp::run_preview;
 /// couple of repair rounds without letting a hopeless request run the provider
 /// subprocess forever.
 const MAX_ATTEMPTS: usize = 5;
-/// Synthetic session id for the sub-session. The in-memory store keys nothing
-/// meaningful on it; any stable string is fine.
-const SUBSESSION_ID: &str = "pikchr-subsession";
-
 /// Result of a `generate_pikchr` sub-session.
 pub(crate) struct GenOutcome {
     /// The validated Pikchr source (no fences) — drop it into a ```pikchr block.
@@ -49,33 +43,94 @@ pub(crate) struct GenOutcome {
 /// instead of spawning a real provider subprocess.
 pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
     driver: &D,
+    store: Arc<Store>,
+    session_id: &str,
     grammar_reference: &str,
     description: &str,
     previous_pikchr: Option<&str>,
     scale: f32,
     cancel_token: &CancellationToken,
 ) -> Result<GenOutcome, String> {
+    let result = generate_pikchr_source_inner(
+        driver,
+        Arc::clone(&store),
+        session_id,
+        grammar_reference,
+        description,
+        previous_pikchr,
+        scale,
+        cancel_token,
+    )
+    .await;
+
+    let status_result = match &result {
+        Ok(_) => store.update_session_status(
+            session_id,
+            SessionStatus::Completed,
+            None,
+            Some(&CompletionReason::TurnComplete),
+        ),
+        Err(GenerationError::Cancelled) => store.update_session_status(
+            session_id,
+            SessionStatus::Cancelled,
+            None,
+            Some(&CompletionReason::Interrupted),
+        ),
+        Err(GenerationError::Failed(message)) => store.update_session_status(
+            session_id,
+            SessionStatus::Error,
+            Some(message),
+            Some(&CompletionReason::Crashed),
+        ),
+    };
+
+    match (result, status_result) {
+        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Ok(_), Err(e)) => Err(format!("Failed to mark Pikchr session completed: {e}")),
+        (Err(e), Ok(())) => Err(e.to_string()),
+        (Err(e), Err(status_error)) => Err(format!(
+            "{}; additionally failed to update Pikchr session status: {status_error}",
+            e
+        )),
+    }
+}
+
+async fn generate_pikchr_source_inner<D: AgentDriver + ?Sized>(
+    driver: &D,
+    store: Arc<Store>,
+    session_id: &str,
+    grammar_reference: &str,
+    description: &str,
+    previous_pikchr: Option<&str>,
+    scale: f32,
+    cancel_token: &CancellationToken,
+) -> Result<GenOutcome, GenerationError> {
     // The sub-agent needs no repo access; the grammar path is absolute.
     let working_dir = std::env::temp_dir();
-    let store_capture = Arc::new(SessionIdCapture::default());
-    let store_dyn: Arc<dyn acp_client::Store> = store_capture.clone();
+    let store_dyn: Arc<dyn acp_client::Store> = store.clone();
 
     let mut prompt = initial_prompt(grammar_reference, description, previous_pikchr);
     let mut agent_session_id: Option<String> = None;
 
     for _ in 0..MAX_ATTEMPTS {
         if cancel_token.is_cancelled() {
-            break;
+            return Err(GenerationError::Cancelled);
         }
 
-        // Fresh writer per turn: it only accumulates and never clears on
-        // finalize, so we read the whole turn's text back after `run` returns.
-        let writer = Arc::new(CapturingWriter::default());
+        let prompt_message_id = store
+            .add_session_message(session_id, MessageRole::User, &prompt)
+            .map_err(|e| {
+                GenerationError::Failed(format!("Failed to persist Pikchr prompt: {e}"))
+            })?;
+        let writer = Arc::new(MessageWriter::new(
+            session_id.to_string(),
+            Arc::clone(&store),
+        ));
         let writer_dyn: Arc<dyn acp_client::MessageWriter> = writer.clone();
 
-        driver
+        let run_outcome = driver
             .run(
-                SUBSESSION_ID,
+                session_id,
                 &prompt,
                 &[],
                 &working_dir,
@@ -85,21 +140,23 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
                 agent_session_id.as_deref(),
                 &[],
             )
-            .await?;
+            .await;
+        writer_dyn.finalize().await;
+
+        let run_outcome = run_outcome.map_err(GenerationError::Failed)?;
+        if run_outcome == acp_client::AgentRunOutcome::Cancelled || cancel_token.is_cancelled() {
+            return Err(GenerationError::Cancelled);
+        }
 
         // Resume the same sub-session next turn so context is retained. The
-        // driver only sets this on the first (new-session) turn.
-        if let Some(id) = store_capture.agent_session_id() {
+        // real store implementation persists this when the driver creates the
+        // ACP session on the first turn.
+        if let Some(id) = stored_agent_session_id(&store, session_id)? {
             agent_session_id = Some(id);
         }
 
-        // A cancelled run returns Ok with partial text; don't treat that as a
-        // real attempt.
-        if cancel_token.is_cancelled() {
-            break;
-        }
-
-        let source = extract_pikchr_source(&writer.text());
+        let reply = latest_assistant_reply_since(&store, session_id, prompt_message_id)?;
+        let source = extract_pikchr_source(&reply);
         if source.trim().is_empty() {
             prompt = empty_reply_prompt();
             continue;
@@ -124,7 +181,52 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
         });
     }
 
-    Err("The Pikchr specialist could not produce a diagram that renders cleanly.".to_string())
+    Err(GenerationError::Failed(
+        "The Pikchr specialist could not produce a diagram that renders cleanly.".to_string(),
+    ))
+}
+
+#[derive(Debug)]
+enum GenerationError {
+    Failed(String),
+    Cancelled,
+}
+
+impl std::fmt::Display for GenerationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Failed(message) => write!(f, "{message}"),
+            Self::Cancelled => write!(f, "The Pikchr specialist was cancelled."),
+        }
+    }
+}
+
+fn stored_agent_session_id(
+    store: &Store,
+    session_id: &str,
+) -> Result<Option<String>, GenerationError> {
+    store
+        .get_session(session_id)
+        .map(|session| session.and_then(|s| s.agent_id))
+        .map_err(|e| GenerationError::Failed(format!("Failed to load Pikchr child session: {e}")))
+}
+
+fn latest_assistant_reply_since(
+    store: &Store,
+    session_id: &str,
+    since_id: i64,
+) -> Result<String, GenerationError> {
+    store
+        .get_session_messages_since(session_id, since_id)
+        .map_err(|e| GenerationError::Failed(format!("Failed to load Pikchr assistant reply: {e}")))
+        .map(|messages| {
+            messages
+                .into_iter()
+                .rev()
+                .find(|message| message.role == MessageRole::Assistant)
+                .map(|message| message.content)
+                .unwrap_or_default()
+        })
 }
 
 /// Pull the Pikchr source out of a sub-agent reply. Prefers a real
@@ -183,80 +285,15 @@ corrected ```pikchr code block."
     )
 }
 
-// =============================================================================
-// In-memory Store + MessageWriter stubs
-// =============================================================================
-
-/// Captures the ACP agent session id set on the first (new-session) turn so it
-/// can be threaded into later turns for resumption. `get_session_messages`
-/// keeps the trait default (empty), so no user transcript is replayed.
-#[derive(Default)]
-struct SessionIdCapture {
-    agent_session_id: Mutex<Option<String>>,
-}
-
-impl SessionIdCapture {
-    fn agent_session_id(&self) -> Option<String> {
-        self.agent_session_id.lock().unwrap().clone()
-    }
-}
-
-impl acp_client::Store for SessionIdCapture {
-    fn set_agent_session_id(
-        &self,
-        _session_id: &str,
-        agent_session_id: &str,
-    ) -> Result<(), String> {
-        *self.agent_session_id.lock().unwrap() = Some(agent_session_id.to_string());
-        Ok(())
-    }
-}
-
-/// Accumulates the assistant text for one turn. Unlike the DB-backed writer,
-/// `finalize` does **not** clear the buffer — the loop reads the whole turn's
-/// text after `run` returns — and a fresh writer is created for each turn.
-#[derive(Default)]
-struct CapturingWriter {
-    text: Mutex<String>,
-}
-
-impl CapturingWriter {
-    fn text(&self) -> String {
-        self.text.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl acp_client::MessageWriter for CapturingWriter {
-    async fn append_text(&self, text: &str) {
-        self.text.lock().unwrap().push_str(text);
-    }
-
-    async fn finalize(&self) {}
-
-    async fn record_tool_call(
-        &self,
-        _tool_call_id: &str,
-        _title: &str,
-        _raw_input: Option<&serde_json::Value>,
-    ) {
-    }
-
-    async fn update_tool_call_title(
-        &self,
-        _tool_call_id: &str,
-        _title: Option<&str>,
-        _raw_input: Option<&serde_json::Value>,
-    ) {
-    }
-
-    async fn record_tool_result(&self, _tool_call_id: &str, _content: &str) {}
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::Path;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+
+    use crate::store::{Session, Store};
 
     /// A diagram known to render with overlapping boxes (percentage-length
     /// arrows between large `fit` boxes with no explicit flow direction).
@@ -343,12 +380,26 @@ box "Sink = NO-OP (default / external clone)" "no socket, no Block deps → buil
         format!("```pikchr\n{source}\n```")
     }
 
+    fn child_session() -> (Arc<Store>, String) {
+        let store = Arc::new(Store::in_memory().expect("in-memory store"));
+        let session = Session::new_running("Generate Pikchr diagram", &std::env::temp_dir())
+            .with_provider("fake-agent");
+        let session_id = session.id.clone();
+        store
+            .create_session(&session)
+            .expect("create child session");
+        (store, session_id)
+    }
+
     #[tokio::test]
     async fn repairs_overlapping_render_before_returning() {
         let driver = FakeDriver::new(vec![fenced(OVERLAPPING_SOURCE), fenced(CLEAN_SOURCE)]);
+        let (store, session_id) = child_session();
 
         let outcome = generate_pikchr_source(
             &driver,
+            Arc::clone(&store),
+            &session_id,
             "/tmp/grammar.md",
             "a busy diagram",
             None,
@@ -399,9 +450,12 @@ box "Sink = NO-OP (default / external clone)" "no socket, no Block deps → buil
             fenced(OVERLAPPING_SOURCE),   // renders with overlaps, repaired
             fenced(CLEAN_SOURCE),
         ]);
+        let (store, session_id) = child_session();
 
         let outcome = generate_pikchr_source(
             &driver,
+            Arc::clone(&store),
+            &session_id,
             "/tmp/grammar.md",
             "a friendly box",
             None,
@@ -428,11 +482,62 @@ box "Sink = NO-OP (default / external clone)" "no socket, no Block deps → buil
     }
 
     #[tokio::test]
+    async fn persists_prompts_assistant_messages_agent_id_and_terminal_status() {
+        let driver = FakeDriver::new(vec![fenced("box \"unterminated"), fenced(CLEAN_SOURCE)]);
+        let (store, session_id) = child_session();
+
+        let outcome = generate_pikchr_source(
+            &driver,
+            Arc::clone(&store),
+            &session_id,
+            "/tmp/grammar.md",
+            "a friendly box",
+            None,
+            2.0,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("should repair and complete");
+
+        assert_eq!(outcome.source, CLEAN_SOURCE);
+
+        let session = store
+            .get_session(&session_id)
+            .expect("load session")
+            .expect("session exists");
+        assert_eq!(session.status, SessionStatus::Completed);
+        assert_eq!(session.provider.as_deref(), Some("fake-agent"));
+        assert_eq!(session.agent_id.as_deref(), Some("fake-agent-session"));
+        assert_eq!(
+            session.completion_reason.as_ref(),
+            Some(&CompletionReason::TurnComplete)
+        );
+
+        let messages = store
+            .get_session_messages(&session_id)
+            .expect("load messages");
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].role, MessageRole::User);
+        assert!(messages[0]
+            .content
+            .contains("Diagram to produce: a friendly box"));
+        assert_eq!(messages[1].role, MessageRole::Assistant);
+        assert_eq!(messages[1].content, fenced("box \"unterminated"));
+        assert_eq!(messages[2].role, MessageRole::User);
+        assert!(messages[2].content.contains("failed to render"));
+        assert_eq!(messages[3].role, MessageRole::Assistant);
+        assert_eq!(messages[3].content, fenced(CLEAN_SOURCE));
+    }
+
+    #[tokio::test]
     async fn errors_when_nothing_ever_renders() {
         let driver = FakeDriver::new(vec![fenced("box \"unterminated"); MAX_ATTEMPTS + 2]);
+        let (store, session_id) = child_session();
 
         let result = generate_pikchr_source(
             &driver,
+            Arc::clone(&store),
+            &session_id,
             "/tmp/grammar.md",
             "impossible",
             None,
@@ -444,14 +549,27 @@ box "Sink = NO-OP (default / external clone)" "no socket, no Block deps → buil
         assert!(result.is_err());
         // The loop is bounded by MAX_ATTEMPTS even when every reply fails.
         assert_eq!(*driver.calls.lock().unwrap(), MAX_ATTEMPTS);
+
+        let session = store
+            .get_session(&session_id)
+            .expect("load session")
+            .expect("session exists");
+        assert_eq!(session.status, SessionStatus::Error);
+        assert_eq!(
+            session.error_message.as_deref(),
+            Some("The Pikchr specialist could not produce a diagram that renders cleanly.")
+        );
     }
 
     #[tokio::test]
     async fn errors_when_overlaps_never_repair() {
         let driver = FakeDriver::new(vec![fenced(OVERLAPPING_SOURCE); MAX_ATTEMPTS + 2]);
+        let (store, session_id) = child_session();
 
         let result = generate_pikchr_source(
             &driver,
+            Arc::clone(&store),
+            &session_id,
             "/tmp/grammar.md",
             "impossible",
             None,

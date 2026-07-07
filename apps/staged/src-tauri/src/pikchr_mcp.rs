@@ -24,10 +24,10 @@
 //! extents differ by a hair (and font fallback can differ); label thresholds
 //! are kept forgiving to match, and this is acceptable for a preview.
 //!
-//! Unlike `project_mcp`, this handler touches no store, registry, or project.
-//! It carries only the provider id and `AppHandle` that `generate_pikchr` needs
-//! to spin up its sub-session, so it remains safe to attach to any local
-//! session.
+//! Unlike `project_mcp`, this handler touches no registry or project. It
+//! carries only the provider id, app handle, and shared store that
+//! `generate_pikchr` needs to spin up and persist its sub-session, so it remains
+//! safe to attach to any local session.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -45,6 +45,7 @@ use rmcp::transport::streamable_http_server::{
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, ServerHandler};
 
 use crate::agent::AcpDriver;
+use crate::store::{CompletionReason, Session, SessionStatus, Store};
 
 /// Wall-clock cap for one `generate_pikchr` call. Each call spins a provider
 /// subprocess and runs several turns; the cap keeps a stuck sub-agent from
@@ -69,6 +70,7 @@ const MIN_TEXT_OVERLAP_PX: f64 = 3.0;
 const MAX_LABEL_CHARS: usize = 48;
 /// Temp-file prefix for generated Pikchr preview PNGs.
 const TEMP_IMAGE_PREFIX: &str = "staged-pikchr-preview-";
+const PIKCHR_CHILD_SESSION_PROMPT: &str = "Generate Pikchr diagram";
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct GeneratePikchrParams {
@@ -739,14 +741,17 @@ struct PikchrToolsHandler {
     /// Handle used to resolve the bundled Pikchr grammar reference for the
     /// sub-agent's prompt.
     app_handle: tauri::AppHandle,
+    /// Shared app store used to persist the child diagram session.
+    store: Arc<Store>,
     tool_router: ToolRouter<Self>,
 }
 
 impl PikchrToolsHandler {
-    fn new(provider_id: String, app_handle: tauri::AppHandle) -> Self {
+    fn new(provider_id: String, app_handle: tauri::AppHandle, store: Arc<Store>) -> Self {
         Self {
             provider_id,
             app_handle,
+            store,
             tool_router: Self::tool_router(),
         }
     }
@@ -768,6 +773,10 @@ it into a ```pikchr fenced code block) and a filesystem path to a rendered PNG p
     ) -> Result<CallToolResult, ErrorData> {
         let scale = p.scale.unwrap_or(DEFAULT_SCALE);
         let provider_id = self.provider_id.clone();
+        let session = create_pikchr_child_session(&self.store, &provider_id)
+            .map_err(|e| ErrorData::internal_error(e, None))?;
+        let inner_session_id = session.id.clone();
+        let store = Arc::clone(&self.store);
         // The sub-session always runs locally, so resolve a local grammar path
         // (workspace_name = None).
         let grammar_reference =
@@ -788,6 +797,8 @@ it into a ```pikchr fenced code block) and a filesystem path to a rendered PNG p
         // drive the whole generation loop on a dedicated thread with its own
         // current-thread runtime + LocalSet, mirroring `session_runner`.
         let (tx, rx) = tokio::sync::oneshot::channel();
+        let worker_store = Arc::clone(&store);
+        let worker_session_id = inner_session_id.clone();
         std::thread::spawn(move || {
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -795,15 +806,21 @@ it into a ```pikchr fenced code block) and a filesystem path to a rendered PNG p
             {
                 Ok(rt) => rt,
                 Err(e) => {
-                    let _ = tx.send(Err(format!(
-                        "Failed to create runtime for generate_pikchr: {e}"
-                    )));
+                    let message = format!("Failed to create runtime for generate_pikchr: {e}");
+                    mark_pikchr_child_session_error(&worker_store, &worker_session_id, &message);
+                    let _ = tx.send(Err(message));
                     return;
                 }
             };
             let local = tokio::task::LocalSet::new();
             let result = local.block_on(&rt, async move {
-                let driver = AcpDriver::new(&provider_id)?;
+                let driver = match AcpDriver::new(&provider_id) {
+                    Ok(driver) => driver,
+                    Err(e) => {
+                        mark_pikchr_child_session_error(&worker_store, &worker_session_id, &e);
+                        return Err(e);
+                    }
+                };
                 // Enforce the wall-clock cap by cancelling the sub-session's
                 // token; the driver shuts its subprocess down gracefully. The
                 // parent's `DropGuard` cancels this same token if the MCP
@@ -815,6 +832,8 @@ it into a ```pikchr fenced code block) and a filesystem path to a rendered PNG p
                 });
                 crate::pikchr_subsession::generate_pikchr_source(
                     &driver,
+                    worker_store,
+                    &worker_session_id,
                     &grammar_reference,
                     &p.description,
                     p.previous_pikchr.as_deref(),
@@ -829,26 +848,85 @@ it into a ```pikchr fenced code block) and a filesystem path to a rendered PNG p
         let outcome = rx
             .await
             .map_err(|e| {
-                ErrorData::internal_error(format!("generate_pikchr worker dropped: {e}"), None)
+                let message = format!("generate_pikchr worker dropped: {e}");
+                mark_pikchr_child_session_error(&store, &inner_session_id, &message);
+                ErrorData::internal_error(message, None)
             })?
             .map_err(|e| ErrorData::internal_error(e, None))?;
 
-        let mut content = Vec::new();
-        if let Some(png) = &outcome.png {
+        let preview_image_path = if let Some(png) = &outcome.png {
             let path = write_png_to_temp_file(png).map_err(|e| {
-                ErrorData::internal_error(
-                    format!("Failed to write Pikchr preview image to temp dir: {e}"),
-                    None,
-                )
+                let message = format!("Failed to write Pikchr preview image to temp dir: {e}");
+                mark_pikchr_child_session_error(&store, &inner_session_id, &message);
+                ErrorData::internal_error(message, None)
             })?;
-            content.push(Content::text(format!(
-                "Rendered preview image path: {}",
-                path.display()
-            )));
-        }
-        content.push(Content::text(outcome.source));
-        Ok(CallToolResult::success(content))
+            Some(path.display().to_string())
+        } else {
+            None
+        };
+
+        Ok(build_generate_pikchr_result(
+            &inner_session_id,
+            preview_image_path.as_deref(),
+            &outcome.source,
+        ))
     }
+}
+
+fn create_pikchr_child_session(store: &Store, provider_id: &str) -> Result<Session, String> {
+    let mut session = Session::new_running(PIKCHR_CHILD_SESSION_PROMPT, &std::env::temp_dir());
+    if !provider_id.is_empty() {
+        session = session.with_provider(provider_id);
+    }
+    store
+        .create_session(&session)
+        .map_err(|e| format!("Failed to create Pikchr child session: {e}"))?;
+    Ok(session)
+}
+
+fn mark_pikchr_child_session_error(store: &Store, session_id: &str, message: &str) {
+    if let Err(e) = store.update_session_status(
+        session_id,
+        SessionStatus::Error,
+        Some(message),
+        Some(&CompletionReason::Crashed),
+    ) {
+        log::error!("Failed to mark Pikchr child session {session_id} errored: {e}");
+    }
+}
+
+fn build_generate_pikchr_result(
+    inner_session_id: &str,
+    preview_image_path: Option<&str>,
+    source: &str,
+) -> CallToolResult {
+    let mut content = Vec::new();
+    if let Some(path) = preview_image_path {
+        content.push(Content::text(format!(
+            "Rendered preview image path: {path}"
+        )));
+    }
+    content.push(Content::text(source.to_string()));
+
+    let mut structured = serde_json::Map::new();
+    structured.insert(
+        "innerSessionId".to_string(),
+        serde_json::Value::String(inner_session_id.to_string()),
+    );
+    if let Some(path) = preview_image_path {
+        structured.insert(
+            "previewImagePath".to_string(),
+            serde_json::Value::String(path.to_string()),
+        );
+    }
+    structured.insert(
+        "source".to_string(),
+        serde_json::Value::String(source.to_string()),
+    );
+
+    let mut result = CallToolResult::success(content);
+    result.structured_content = Some(serde_json::Value::Object(structured));
+    result
 }
 
 #[tool_handler]
@@ -872,6 +950,7 @@ impl ServerHandler for PikchrToolsHandler {
 pub async fn start_pikchr_mcp_server(
     provider_id: String,
     app_handle: tauri::AppHandle,
+    store: Arc<Store>,
 ) -> Result<(u16, JoinHandle<()>), String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -886,6 +965,7 @@ pub async fn start_pikchr_mcp_server(
             Ok(PikchrToolsHandler::new(
                 provider_id.clone(),
                 app_handle.clone(),
+                Arc::clone(&store),
             ))
         },
         Arc::new(LocalSessionManager::default()),
@@ -940,6 +1020,60 @@ COLL: box "Block OTel Collector" "OTel→UAP mapping (from CDF manifest)" fit fi
 arrow from OTLP.e to COLL.w "OTLP /v1/logs + auth" above
 SNOW: box "unifiedevents/batch" "→ Snowflake (UAP unchanged)" fit fill 0xffd6d6 with .w at 0.6 right of COLL.e
 arrow from COLL.e to SNOW.w"#;
+
+    #[test]
+    fn create_pikchr_child_session_persists_running_provider_session() {
+        let store = Store::in_memory().expect("in-memory store");
+
+        let session =
+            create_pikchr_child_session(&store, "fake-agent").expect("create child session");
+
+        assert_eq!(session.prompt, PIKCHR_CHILD_SESSION_PROMPT);
+        assert_eq!(session.status, SessionStatus::Running);
+        assert_eq!(session.provider.as_deref(), Some("fake-agent"));
+        assert!(!session.working_dir.is_empty());
+
+        let persisted = store
+            .get_session(&session.id)
+            .expect("load session")
+            .expect("session exists");
+        assert_eq!(persisted.prompt, PIKCHR_CHILD_SESSION_PROMPT);
+        assert_eq!(persisted.status, SessionStatus::Running);
+        assert_eq!(persisted.provider.as_deref(), Some("fake-agent"));
+    }
+
+    #[test]
+    fn generate_pikchr_result_preserves_text_and_adds_structured_session_metadata() {
+        let result = build_generate_pikchr_result(
+            "child-session-1",
+            Some("/tmp/staged-pikchr-preview.png"),
+            "box \"Clean\" fit",
+        );
+
+        let texts: Vec<String> = result
+            .content
+            .iter()
+            .filter_map(|content| content.as_text().map(|text| text.text.clone()))
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "Rendered preview image path: /tmp/staged-pikchr-preview.png".to_string(),
+                "box \"Clean\" fit".to_string(),
+            ]
+        );
+
+        let structured = result
+            .structured_content
+            .as_ref()
+            .expect("structured content");
+        assert_eq!(structured["innerSessionId"], "child-session-1");
+        assert_eq!(
+            structured["previewImagePath"],
+            "/tmp/staged-pikchr-preview.png"
+        );
+        assert_eq!(structured["source"], "box \"Clean\" fit");
+    }
 
     /// Render `source` and parse it into a usvg tree the way `run_preview` does,
     /// so geometry tests read the exact same rectangles the tool reports.

@@ -583,6 +583,7 @@ pub fn start_session(
                 match crate::pikchr_mcp::start_pikchr_mcp_server(
                     pikchr_provider,
                     app_handle.clone(),
+                    Arc::clone(&store),
                 )
                 .await
                 {

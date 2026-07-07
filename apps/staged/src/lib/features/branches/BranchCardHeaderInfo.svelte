@@ -128,7 +128,7 @@
     flex-direction: column;
     gap: 2px;
     min-width: 0;
-    flex: 1;
+    flex: 1 1 240px;
   }
 
   .repo-name {

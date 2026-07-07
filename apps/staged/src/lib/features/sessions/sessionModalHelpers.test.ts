@@ -49,6 +49,82 @@ describe('makePathsRelative', () => {
   });
 });
 
+describe('formatToolDisplay', () => {
+  it('uses parsed command query for search tool calls', () => {
+    const call = JSON.stringify({
+      name: 'Search fn running_branch_session_kinds in session_commands.rs',
+      input: {
+        parsed_cmd: [
+          {
+            type: 'search',
+            cmd: "rg -n 'fn running_branch_session_kinds' src-tauri/src/session_commands.rs",
+            query: 'fn running_branch_session_kinds',
+            path: 'session_commands.rs',
+          },
+        ],
+      },
+    });
+
+    expect(formatToolDisplay(call, '/repo')).toEqual({
+      verb: 'Searched',
+      detail: 'fn running_branch_session_kinds',
+    });
+  });
+
+  it('uses parsed command paths for read and write tool calls', () => {
+    const readCall = JSON.stringify({
+      name: 'Read writer.rs',
+      input: {
+        parsed_cmd: [
+          {
+            type: 'read',
+            cmd: 'sed -n "1,80p" /repo/src-tauri/src/agent/writer.rs',
+            name: 'writer.rs',
+            path: '/repo/src-tauri/src/agent/writer.rs',
+          },
+        ],
+      },
+    });
+    const writeCall = JSON.stringify({
+      name: 'Write sessionModalHelpers.ts',
+      input: {
+        parsed_cmd: [
+          {
+            type: 'write',
+            cmd: 'apply_patch src/lib/features/sessions/sessionModalHelpers.ts',
+            name: 'sessionModalHelpers.ts',
+            path: '/repo/src/lib/features/sessions/sessionModalHelpers.ts',
+          },
+        ],
+      },
+    });
+
+    expect(formatToolDisplay(readCall, '/repo')).toEqual({
+      verb: 'Read',
+      detail: 'src-tauri/src/agent/writer.rs',
+    });
+    expect(formatToolDisplay(writeCall, '/repo')).toEqual({
+      verb: 'Wrote',
+      detail: 'src/lib/features/sessions/sessionModalHelpers.ts',
+    });
+  });
+
+  it('keeps top-level search args ahead of parsed command fallbacks', () => {
+    const call = JSON.stringify({
+      name: 'Search',
+      input: {
+        query: 'top level query',
+        parsed_cmd: [{ type: 'search', query: 'parsed query' }],
+      },
+    });
+
+    expect(formatToolDisplay(call)).toEqual({
+      verb: 'Searched',
+      detail: 'top level query',
+    });
+  });
+});
+
 describe('sessionEndMessage', () => {
   it('explains project-session interruptions', () => {
     expect(sessionEndMessage({ completionReason: 'project_session_interrupted' })).toBe(

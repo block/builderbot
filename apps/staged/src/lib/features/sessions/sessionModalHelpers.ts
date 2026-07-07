@@ -150,28 +150,74 @@ function primaryArg(toolName: string, args: Record<string, unknown>): string {
   switch (toolName) {
     case 'Read':
     case 'ReadFile':
+      return (
+        str('file_path') ||
+        str('path') ||
+        parsedCommandString(args, ['read'], ['path', 'name']) ||
+        ''
+      );
     case 'Write':
     case 'WriteFile':
     case 'Edit':
     case 'Delete':
     case 'EditNotebook':
     case 'StrReplace':
-      return str('file_path') || str('path') || '';
+      return (
+        str('file_path') ||
+        str('path') ||
+        parsedCommandString(args, ['write', 'edit', 'delete'], ['path', 'name']) ||
+        ''
+      );
     case 'Run':
     case 'Shell':
     case 'Bash':
-      return str('command') || str('cmd') || '';
+      return str('command') || str('cmd') || parsedCommandString(args, ['unknown'], ['cmd']) || '';
     case 'Grep':
     case 'Search':
     case 'SemanticSearch':
-      return str('pattern') || str('query') || '';
+      return (
+        str('pattern') || str('query') || parsedCommandString(args, ['search'], ['query']) || ''
+      );
     case 'Glob':
-      return str('pattern') || str('glob') || '';
+      return (
+        str('pattern') ||
+        str('glob') ||
+        parsedCommandString(args, ['glob'], ['query', 'path']) ||
+        ''
+      );
     default: {
       const formatted = formatArgs(args);
       return formatted.length > 200 ? formatted.slice(0, 200) + '…' : formatted;
     }
   }
+}
+
+function parsedCommandString(
+  args: Record<string, unknown>,
+  preferredTypes: string[],
+  keys: string[]
+): string | undefined {
+  const commands = parsedCommands(args);
+  const preferred = commands.filter((command) => {
+    const type = command.type;
+    return typeof type === 'string' && preferredTypes.includes(type);
+  });
+  for (const command of [...preferred, ...commands]) {
+    for (const key of keys) {
+      const value = command[key];
+      if (typeof value === 'string' && value.trim()) return value;
+    }
+  }
+}
+
+function parsedCommands(args: Record<string, unknown>): Array<Record<string, unknown>> {
+  const value = args.parsed_cmd ?? args.parsedCmd;
+  if (!Array.isArray(value)) return [];
+  return value.filter(isRecord);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 const TITLE_VERBS = new Set([

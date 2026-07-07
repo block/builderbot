@@ -694,7 +694,30 @@ export interface AcpProviderInfo {
   label: string;
 }
 
+export interface AcpConfigValueOption {
+  valueId: string;
+  label: string;
+  groupLabel?: string | null;
+}
+
+export interface AcpConfigSelector {
+  configId: string;
+  label: string;
+  currentValueId: string;
+  options: AcpConfigValueOption[];
+}
+
+export interface AcpConfigDiscovery {
+  providerId: string;
+  model?: AcpConfigSelector | null;
+  effort?: AcpConfigSelector | null;
+}
+
 export interface DiscoverAcpProvidersOptions {
+  force?: boolean;
+}
+
+export interface DiscoverAcpConfigOptions {
   force?: boolean;
 }
 
@@ -707,6 +730,21 @@ export function discoverAcpProviders(
   return cachedCommand('discover_acp_providers', undefined, {
     ttl: options.force ? 0 : ACP_PROVIDER_CACHE_TTL,
   });
+}
+
+/** Discover model/effort selectors exposed by a provider for a working directory. */
+export function discoverAcpConfig(
+  providerId: string,
+  workingDir?: string | null,
+  options: DiscoverAcpConfigOptions = {}
+): Promise<SwrResult<AcpConfigDiscovery>> {
+  return cachedCommand(
+    'discover_acp_config',
+    { providerId, workingDir: workingDir ?? null },
+    {
+      ttl: options.force ? 0 : ACP_PROVIDER_CACHE_TTL,
+    }
+  );
 }
 
 // =============================================================================

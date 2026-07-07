@@ -17,12 +17,26 @@
 //! `Store` directly.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
+use agent_client_protocol::{
+    schema::{
+        v1::{AuthenticateRequest, Implementation, InitializeRequest, NewSessionRequest},
+        ProtocolVersion,
+    },
+    ByteStreams, Client,
+};
 use serde::{Deserialize, Serialize};
 use tauri::path::BaseDirectory;
 use tauri::Manager;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::agent::{self, AcpProviderInfo};
@@ -317,6 +331,405 @@ pub async fn discover_acp_providers() -> Vec<AcpProviderInfo> {
     tokio::task::spawn_blocking(agent::discover_providers)
         .await
         .unwrap_or_default()
+}
+
+/// Product-facing ACP config discovery for the provider/model/effort picker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpConfigDiscovery {
+    provider_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<crate::acp_config::NormalizedAcpConfigSelector>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effort: Option<crate::acp_config::NormalizedAcpConfigSelector>,
+}
+
+const ACP_CONFIG_DISCOVERY_SETUP_TIMEOUT: Duration = Duration::from_secs(90);
+
+#[derive(Debug)]
+struct AcpConfigDiscoverySpawnCommand {
+    program: PathBuf,
+    args: Vec<OsString>,
+    uses_explicit_interpreter: bool,
+}
+
+fn acp_config_discovery_from_options(
+    provider_id: String,
+    config_options: &[acp_client::SessionConfigOption],
+) -> AcpConfigDiscovery {
+    let normalized = crate::acp_config::normalize_acp_config_options(config_options);
+    AcpConfigDiscovery {
+        provider_id,
+        model: normalized.model,
+        effort: normalized.effort,
+    }
+}
+
+fn resolve_acp_config_discovery_working_dir(working_dir: Option<String>) -> PathBuf {
+    working_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+fn env_shebang_interpreter(binary_path: &Path) -> Option<String> {
+    let mut file = std::fs::File::open(binary_path).ok()?;
+    let mut buf = [0_u8; 512];
+    let len = file.read(&mut buf).ok()?;
+    let first_line = std::str::from_utf8(&buf[..len]).ok()?.lines().next()?;
+    let shebang = first_line.strip_prefix("#!")?.trim();
+
+    let mut parts = shebang.split_whitespace();
+    let command = parts.next()?;
+    let command_name = Path::new(command).file_name()?.to_str()?;
+    if command_name != "env" {
+        return None;
+    }
+
+    for part in parts {
+        if part == "-S" || part.starts_with('-') || part.contains('=') {
+            continue;
+        }
+        if part.contains('/') {
+            return None;
+        }
+        return Some(part.to_string());
+    }
+
+    None
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o111 != 0
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn executable_from_path(executable: &str, path_value: &str) -> Option<PathBuf> {
+    std::env::split_paths(path_value)
+        .map(|dir| dir.join(executable))
+        .find(|path| is_executable_file(path))
+}
+
+fn path_contains_executable(path_value: &str, executable: &str) -> bool {
+    executable_from_path(executable, path_value).is_some()
+}
+
+fn env_shebang_interpreter_from_snapshot(
+    binary_path: &Path,
+    snapshot: &[(String, String)],
+) -> Option<PathBuf> {
+    let interpreter = env_shebang_interpreter(binary_path)?;
+    let path_value = snapshot
+        .iter()
+        .find(|(key, _)| key == "PATH")
+        .map(|(_, value)| value.as_str())?;
+    executable_from_path(&interpreter, path_value)
+}
+
+fn is_broad_toolchain_dir(path: &Path) -> bool {
+    matches!(
+        path.to_str(),
+        Some("/opt/homebrew/bin" | "/usr/local/bin" | "/usr/bin" | "/bin" | "/opt/local/bin")
+    )
+}
+
+fn path_with_inserted_agent_bin_dir(existing_path: &str, bin_dir: &Path) -> Option<String> {
+    let mut entries: Vec<PathBuf> = if existing_path.is_empty() {
+        Vec::new()
+    } else {
+        std::env::split_paths(existing_path).collect()
+    };
+
+    if entries.iter().any(|entry| entry == bin_dir) {
+        return None;
+    }
+
+    if is_broad_toolchain_dir(bin_dir) {
+        entries.push(bin_dir.to_path_buf());
+    } else {
+        entries.insert(0, bin_dir.to_path_buf());
+    }
+
+    std::env::join_paths(entries).ok()?.into_string().ok()
+}
+
+fn guarded_path_for_agent_binary(binary_path: &Path, existing_path: &str) -> Option<String> {
+    let interpreter = env_shebang_interpreter(binary_path)?;
+    if path_contains_executable(existing_path, &interpreter) {
+        return None;
+    }
+
+    let bin_dir = binary_path.parent()?;
+    if !is_executable_file(&bin_dir.join(&interpreter)) {
+        return None;
+    }
+
+    path_with_inserted_agent_bin_dir(existing_path, bin_dir)
+}
+
+fn acp_config_discovery_spawn_command(
+    binary_path: &Path,
+    acp_args: &[String],
+    interpreter_env_snapshot: &[(String, String)],
+) -> AcpConfigDiscoverySpawnCommand {
+    if let Some(interpreter) =
+        env_shebang_interpreter_from_snapshot(binary_path, interpreter_env_snapshot)
+    {
+        let mut args = vec![binary_path.as_os_str().to_os_string()];
+        args.extend(acp_args.iter().map(OsString::from));
+        return AcpConfigDiscoverySpawnCommand {
+            program: interpreter,
+            args,
+            uses_explicit_interpreter: true,
+        };
+    }
+
+    AcpConfigDiscoverySpawnCommand {
+        program: binary_path.to_path_buf(),
+        args: acp_args.iter().map(OsString::from).collect(),
+        uses_explicit_interpreter: false,
+    }
+}
+
+fn apply_acp_config_discovery_env(
+    cmd: &mut Command,
+    env_vars: &[(String, String)],
+    binary_path: &Path,
+    uses_explicit_interpreter: bool,
+) {
+    cmd.env_clear();
+    let mut path_value: Option<&str> = None;
+    for (key, value) in env_vars {
+        if key == "PATH" {
+            path_value = Some(value.as_str());
+        }
+        cmd.env(key, value);
+    }
+
+    if uses_explicit_interpreter {
+        return;
+    }
+
+    if let Some(path) = guarded_path_for_agent_binary(binary_path, path_value.unwrap_or_default()) {
+        cmd.env("PATH", path);
+    }
+}
+
+async fn run_acp_config_discovery_protocol(
+    provider_id: &str,
+    working_dir: &Path,
+    stdin: tokio::process::ChildStdin,
+    stdout: tokio::process::ChildStdout,
+) -> Result<Vec<acp_client::SessionConfigOption>, String> {
+    let stdin_compat = stdin.compat_write();
+    let stdout_compat = stdout.compat();
+    let transport = ByteStreams::new(stdin_compat, stdout_compat);
+    let working_dir = working_dir.to_path_buf();
+    let provider_id = provider_id.to_string();
+    let protocol_provider_id = provider_id.clone();
+
+    Ok(Client
+        .builder()
+        .name("staged-acp-config-discovery")
+        .connect_with(transport, async move |connection| {
+            tokio::time::timeout(ACP_CONFIG_DISCOVERY_SETUP_TIMEOUT, async {
+                let client_info =
+                    Implementation::new("staged-acp-config-discovery", env!("CARGO_PKG_VERSION"));
+                let init_request =
+                    InitializeRequest::new(ProtocolVersion::V1).client_info(client_info);
+                let init_response = connection
+                    .send_request(init_request)
+                    .block_task()
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "ACP config discovery init failed for {protocol_provider_id}: {e:?}"
+                        )
+                    })?;
+
+                if init_response.protocol_version != ProtocolVersion::V1 {
+                    return Err(format!(
+                        "Agent negotiated unsupported ACP protocol version {} (expected {})",
+                        init_response.protocol_version,
+                        ProtocolVersion::V1
+                    ));
+                }
+
+                if let Some(method) = init_response.auth_methods.first() {
+                    connection
+                        .send_request(AuthenticateRequest::new(method.id().clone()))
+                        .block_task()
+                        .await
+                        .map_err(|e| {
+                            format!(
+                                "ACP config discovery authentication failed for {protocol_provider_id} with method {} ({}): {e:?}",
+                                method.name(),
+                                method.id()
+                            )
+                        })?;
+                }
+
+                let session_response = connection
+                    .send_request(NewSessionRequest::new(working_dir))
+                    .block_task()
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "ACP config discovery failed to create session for {protocol_provider_id}: {e:?}"
+                        )
+                    })?;
+
+                Ok(session_response.config_options.unwrap_or_default())
+            })
+            .await
+            .map_err(|_| {
+                agent_client_protocol::util::internal_error(format!(
+                    "Timed out waiting for ACP config discovery startup after {}s",
+                    ACP_CONFIG_DISCOVERY_SETUP_TIMEOUT.as_secs()
+                ))
+            })?
+            .map_err(agent_client_protocol::util::internal_error)
+        })
+        .await
+        .map_err(|e| format!("ACP config discovery protocol failed for {provider_id}: {e:?}"))?)
+}
+
+async fn discover_acp_config_for_provider_async(
+    provider_id: String,
+    working_dir: PathBuf,
+) -> Result<AcpConfigDiscovery, String> {
+    let agent = acp_client::find_acp_agent_by_id(&provider_id)
+        .ok_or_else(|| format!("Unknown or unavailable agent provider: {provider_id}"))?;
+
+    let cache = session_runner::shell_env_cache();
+    let home_snapshot = crate::shell_env::home_env_vars_with_extended_path(cache.as_ref()).await;
+    let spawn_command =
+        acp_config_discovery_spawn_command(agent.path(), &agent.acp_args, &home_snapshot);
+
+    let mut cmd = Command::new(&spawn_command.program);
+    cmd.args(&spawn_command.args)
+        .current_dir(&working_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    match cache.get(&working_dir).await {
+        Ok(snapshot) => apply_acp_config_discovery_env(
+            &mut cmd,
+            snapshot.vars(),
+            agent.path(),
+            spawn_command.uses_explicit_interpreter,
+        ),
+        Err(e) => {
+            log::warn!(
+                "ACP config discovery: failed to capture shell env snapshot for {} \
+                 (falling back to inherited environment): {e}",
+                working_dir.display()
+            );
+        }
+    }
+
+    let mut child = cmd.spawn().map_err(|e| {
+        format!(
+            "Failed to spawn {} for ACP config discovery (binary: {}, cwd: {}): {e}",
+            agent.name(),
+            agent.path().display(),
+            working_dir.display()
+        )
+    })?;
+
+    if let Some(stderr) = child.stderr.take() {
+        let agent_label = agent.name().to_string();
+        tokio::task::spawn_local(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                log::warn!("[{agent_label} stderr][config discovery] {line}");
+            }
+        });
+    }
+
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Failed to get ACP config discovery stdin".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to get ACP config discovery stdout".to_string())?;
+
+    let config_options =
+        run_acp_config_discovery_protocol(&provider_id, &working_dir, stdin, stdout).await;
+
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+
+    let config_options = config_options?;
+    Ok(acp_config_discovery_from_options(
+        provider_id,
+        &config_options,
+    ))
+}
+
+fn discover_acp_config_for_provider(
+    provider_id: String,
+    working_dir: PathBuf,
+) -> Result<AcpConfigDiscovery, String> {
+    let provider_id = provider_id.trim().to_string();
+    if provider_id.is_empty() {
+        return Err("ACP provider ID is required for config discovery".to_string());
+    }
+
+    let handle = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("Failed to create runtime for ACP config discovery: {e}"))?;
+
+        let local = tokio::task::LocalSet::new();
+        local.block_on(
+            &rt,
+            discover_acp_config_for_provider_async(provider_id, working_dir),
+        )
+    });
+
+    handle
+        .join()
+        .map_err(|_| "ACP config discovery thread panicked".to_string())?
+}
+
+/// Discover model/effort selectors for a provider in the given working
+/// directory context.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn discover_acp_config(
+    provider_id: String,
+    working_dir: Option<String>,
+) -> Result<AcpConfigDiscovery, String> {
+    let working_dir = resolve_acp_config_discovery_working_dir(working_dir);
+    tokio::task::spawn_blocking(move || discover_acp_config_for_provider(provider_id, working_dir))
+        .await
+        .map_err(|e| format!("ACP config discovery task failed: {e}"))?
 }
 
 // =============================================================================
@@ -4856,6 +5269,45 @@ mod tests {
     #[test]
     fn resolve_preferred_provider_id_returns_none_when_nothing_available() {
         assert_eq!(resolve_preferred_provider_id(None, &[], &[]), None);
+    }
+
+    #[test]
+    fn acp_config_discovery_returns_provider_when_selectors_are_absent() {
+        let discovery = acp_config_discovery_from_options("goose".to_string(), &[]);
+
+        assert_eq!(discovery.provider_id, "goose");
+        assert!(discovery.model.is_none());
+        assert!(discovery.effort.is_none());
+    }
+
+    #[test]
+    fn acp_config_discovery_ignores_non_picker_config_options() {
+        use agent_client_protocol::schema::v1::{
+            SessionConfigBoolean, SessionConfigKind, SessionConfigOption,
+            SessionConfigOptionCategory, SessionConfigSelectOption,
+        };
+
+        let options = vec![
+            SessionConfigOption::select(
+                "mode",
+                "Mode",
+                "default",
+                vec![SessionConfigSelectOption::new("default", "Default")],
+            )
+            .category(SessionConfigOptionCategory::Mode),
+            SessionConfigOption::new(
+                "model-toggle",
+                "Model toggle",
+                SessionConfigKind::Boolean(SessionConfigBoolean::new(false)),
+            )
+            .category(SessionConfigOptionCategory::Model),
+        ];
+
+        let discovery = acp_config_discovery_from_options("claude".to_string(), &options);
+
+        assert_eq!(discovery.provider_id, "claude");
+        assert!(discovery.model.is_none());
+        assert!(discovery.effort.is_none());
     }
 
     #[test]

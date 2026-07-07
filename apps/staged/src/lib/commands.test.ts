@@ -263,4 +263,55 @@ describe('cached mutation command wrappers', () => {
     });
     expect(cachedCommand).toHaveBeenCalledWith('discover_acp_providers', undefined, { ttl: 0 });
   });
+
+  it('caches ACP config discovery by provider and working directory', async () => {
+    const config = {
+      providerId: 'goose',
+      model: null,
+      effort: null,
+    };
+    cachedCommand.mockResolvedValue({ data: config, revalidating: null });
+
+    const { discoverAcpConfig } = await import('./commands');
+
+    await expect(discoverAcpConfig('goose', '/repo')).resolves.toEqual({
+      data: config,
+      revalidating: null,
+    });
+    expect(cachedCommand).toHaveBeenCalledWith(
+      'discover_acp_config',
+      { providerId: 'goose', workingDir: '/repo' },
+      { ttl: 30 * 60_000 }
+    );
+  });
+
+  it('forces ACP config discovery revalidation without bypassing the cached value', async () => {
+    const config = {
+      providerId: 'goose',
+      model: null,
+      effort: null,
+    };
+    const revalidating = Promise.resolve({
+      providerId: 'goose',
+      model: {
+        configId: 'model',
+        label: 'Model',
+        currentValueId: 'sonnet',
+        options: [{ valueId: 'sonnet', label: 'Sonnet' }],
+      },
+    });
+    cachedCommand.mockResolvedValue({ data: config, revalidating });
+
+    const { discoverAcpConfig } = await import('./commands');
+
+    await expect(discoverAcpConfig('goose', null, { force: true })).resolves.toEqual({
+      data: config,
+      revalidating,
+    });
+    expect(cachedCommand).toHaveBeenCalledWith(
+      'discover_acp_config',
+      { providerId: 'goose', workingDir: null },
+      { ttl: 0 }
+    );
+  });
 });

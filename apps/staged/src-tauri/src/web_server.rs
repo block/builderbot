@@ -2758,6 +2758,13 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .unwrap_or_default();
             Ok(serde_json::to_value(providers).unwrap())
         }
+        "discover_acp_config" => {
+            let provider_id: String = arg(&args, "providerId")?;
+            let working_dir: Option<String> = opt_arg(&args, "workingDir")?;
+            let config =
+                crate::session_commands::discover_acp_config(provider_id, working_dir).await?;
+            Ok(serde_json::to_value(config).unwrap())
+        }
         "get_session" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;

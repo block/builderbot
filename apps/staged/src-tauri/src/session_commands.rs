@@ -293,24 +293,26 @@ Use the existing conversation context. Do not create commits.\n\
 \n\
 {standalone_guidance}\n\
 \n\
-Your final response must include a suggested-next-steps fenced block followed by the note content after a horizontal rule:\n\
-\n\
-```suggested-next-steps\n\
-{{\"suggestedNextCommitStep\": null, \"suggestedNextNoteStep\": null}}\n\
-```\n\
+Your final response must include the note content after a horizontal rule, followed by a final suggested-next-steps fenced block:\n\
 \n\
 ---\n\
 # <Title>\n\
 <Body>\n\
 \n\
+```suggested-next-steps\n\
+{{\"suggestedNextCommitStep\": null, \"suggestedNextNoteStep\": null}}\n\
+```\n\
+\n\
 Formatting requirements:\n\
+- The `---` separator must be on its own line.\n\
+- The note content must start immediately after `---` with a markdown H1.\n\
 - The opening fence line for suggested-next-steps must be exactly: ```suggested-next-steps\n\
 - The closing fence line must be exactly: ```\n\
 - Put only a JSON object inside the suggested-next-steps block.\n\
 - Include both nullable string fields: suggestedNextCommitStep and suggestedNextNoteStep.\n\
 - Keep suggested next steps concise; use null when there is no clear next action.\n\
-- The `---` separator must be on its own line.\n\
-- The note content must start immediately after `---` with a markdown H1.\n\
+- Put the suggested-next-steps block after the note content as the final block.\n\
+- Do not write any prose after the suggested-next-steps block.\n\
 - Do not wrap the note in code fences.\n\
 </action>\n\
 \n\
@@ -4910,13 +4912,9 @@ You may use any tools needed to research and gather information, but do NOT crea
 any commits.",
             NOTE_STANDALONE_OUTPUT_GUIDANCE.trim(),
             "To return the note, your final response must include the structure shown below. \
-Before the `---` separator, emit a `suggested-next-steps` fenced block that suggests \
+After the note content, emit a final `suggested-next-steps` fenced block that suggests \
 what the user might want to do next. The block must contain a single JSON object with \
-two nullable string fields:
-
-```suggested-next-steps
-{\"suggestedNextCommitStep\": \"Fix the null pointer bug in parser.rs\", \"suggestedNextNoteStep\": \"Make a plan to fix the null pointer bug\"}
-```
+two nullable string fields.
 
 Guidelines for suggested next steps:
 - Keep suggestions very concise (a few words). They are shown alongside the note title, \
@@ -4931,19 +4929,25 @@ Do NOT repeat information from the title.
 - If the note is pure research or informational with no clear next action: \
 {\"suggestedNextCommitStep\": null, \"suggestedNextNoteStep\": null}
 
-Then, after the suggested-next-steps block, include the note itself:
+Use this exact response shape:
 
 ---
 # <Title>
 <Body>
 
+```suggested-next-steps
+{\"suggestedNextCommitStep\": \"Fix the null pointer bug in parser.rs\", \"suggestedNextNoteStep\": \"Make a plan to fix the null pointer bug\"}
+```
+
 Formatting requirements:
+- `---` must be on its own line, with a newline immediately before and after it.
+- The note content must start immediately after `---` with a markdown H1 (`# Title`).
 - The opening fence line for suggested-next-steps must be exactly: ```suggested-next-steps
 - The closing fence line must be exactly: ```
 - Put only the JSON object inside the suggested-next-steps block (no prose or markdown).
 - Do not wrap the block in any additional code fences.
-- `---` must be on its own line, with a newline immediately before and after it.
-- The note content must start immediately after `---` with a markdown H1 (`# Title`).
+- Put the suggested-next-steps block after the note content as the final block.
+- Do not write any prose after the suggested-next-steps block.
 - Do not wrap the note in code fences.",
         ]
         .join("\n\n"),
@@ -6886,6 +6890,22 @@ mod tests {
         assert!(prompt.contains(standalone_guidance));
     }
 
+    fn assert_note_prompt_puts_suggested_steps_after_note(prompt: &str) {
+        let note_idx = prompt
+            .find("---\n# <Title>\n<Body>")
+            .expect("prompt should include the note response shape");
+        let steps_idx = prompt[note_idx..]
+            .find("```suggested-next-steps")
+            .map(|offset| note_idx + offset)
+            .expect("prompt should include suggested-next-steps after the note shape");
+
+        assert!(steps_idx > note_idx);
+        assert!(prompt.contains(
+            "Put the suggested-next-steps block after the note content as the final block."
+        ));
+        assert!(!prompt.contains("Before the `---` separator"));
+    }
+
     #[test]
     fn generated_remote_pikchr_grammar_paths_are_unique_temp_markdown_files() {
         let first = generated_pikchr_grammar_remote_path();
@@ -7005,6 +7025,7 @@ mod tests {
             "/Applications/Staged.app/Contents/Resources/resources/pikchr/grammar.md",
         );
         assert_note_standalone_output_guidance(&prompt);
+        assert_note_prompt_puts_suggested_steps_after_note(&prompt);
         assert!(prompt.contains("generate_pikchr"));
     }
 
@@ -7017,6 +7038,7 @@ mod tests {
         assert!(prompt.contains("Please write the note for this session."));
         assert_pikchr_note_guidance(&prompt, &remote_path);
         assert_note_standalone_output_guidance(&prompt);
+        assert_note_prompt_puts_suggested_steps_after_note(&prompt);
         // Remote note sessions can't reach the pikchr server, so it isn't mentioned.
         assert!(!prompt.contains("generate_pikchr"));
     }
@@ -7076,6 +7098,7 @@ mod tests {
 
         assert_note_standalone_output_guidance(&prompt);
         assert!(prompt.contains("The opening fence line for suggested-next-steps must be exactly: ```suggested-next-steps"));
+        assert_note_prompt_puts_suggested_steps_after_note(&prompt);
     }
 
     #[test]

@@ -1084,10 +1084,11 @@ fn build_pikchr_correction_prompt(
 ) -> String {
     let note_format = if note_format_required {
         "\n\nThis session is producing a Staged note. Preserve the required final response format:\n\
-- Start with a fenced block whose opening line is exactly: ```suggested-next-steps\n\
-- Put only a JSON object in that block, with nullable string fields `suggestedNextCommitStep` and `suggestedNextNoteStep`.\n\
-- After that block, include a `---` separator on its own line.\n\
+- Include a `---` separator on its own line.\n\
 - Start the note content immediately after `---` with a markdown H1 (`# <Title>`).\n\
+- After the note content, include a final fenced block whose opening line is exactly: ```suggested-next-steps\n\
+- Put only a JSON object in that block, with nullable string fields `suggestedNextCommitStep` and `suggestedNextNoteStep`.\n\
+- Do not write any prose after the suggested-next-steps block.\n\
 - Do not wrap the note content in code fences."
     } else {
         ""
@@ -2829,6 +2830,22 @@ fn auto_review_branch_id_for_terminal_state(
     })
 }
 
+const SUGGESTED_NEXT_STEPS_MARKER: &str = "```suggested-next-steps";
+
+#[derive(Debug, Clone, Copy)]
+struct NoteSeparator {
+    start: usize,
+    content_start: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SuggestedNextStepsBlock {
+    start: usize,
+    content_start: usize,
+    closing_start: usize,
+    end: usize,
+}
+
 /// Extract note content from a single assistant message.
 ///
 /// Callers are responsible for choosing which message to pass — typically the
@@ -2844,44 +2861,72 @@ fn auto_review_branch_id_for_terminal_state(
 /// to prior text (for example, `Preamble.---\n# Title`) by accepting inline
 /// rules only when the remaining content starts with an H1.
 fn extract_note_content(text: &str) -> Option<String> {
-    let sanitized = strip_suggested_next_steps_blocks(text);
+    let sanitized = strip_suggested_next_steps_metadata(text);
     let text = sanitized.as_deref().unwrap_or(text);
     extract_note_after_standalone_hr(text).or_else(|| extract_note_after_inline_hr(text))
 }
 
 /// Remove assistant response metadata before scanning for the note separator.
-/// The note body remains normal markdown and can still contain fenced code.
-fn strip_suggested_next_steps_blocks(text: &str) -> Option<String> {
-    let marker = "```suggested-next-steps";
+///
+/// Supported metadata positions:
+/// - legacy `suggested-next-steps` blocks before the note separator
+/// - the current terminal `suggested-next-steps` block after the note body
+/// - an interrupted terminal `suggested-next-steps` block after the note body
+///
+/// Other fenced blocks in the note body remain normal markdown.
+fn strip_suggested_next_steps_metadata(text: &str) -> Option<String> {
+    let separator = find_note_separator(text);
+    let blocks = find_suggested_next_steps_blocks(text);
+    let terminal_complete_block_start = blocks
+        .iter()
+        .rev()
+        .find(|block| text[block.end..].trim().is_empty())
+        .map(|block| block.start);
+
+    let mut ranges: Vec<(usize, usize)> = blocks
+        .iter()
+        .filter_map(|block| {
+            let is_legacy_before_separator = separator
+                .map(|separator| block.end <= separator.start)
+                .unwrap_or_else(|| find_note_separator(&text[block.end..]).is_some());
+            let is_terminal_metadata = Some(block.start) == terminal_complete_block_start;
+
+            (is_legacy_before_separator || is_terminal_metadata).then_some((block.start, block.end))
+        })
+        .collect();
+
+    if let Some(separator) = separator {
+        if let Some(start) = find_terminal_unclosed_suggested_next_steps_opening(text) {
+            let already_removed = ranges
+                .iter()
+                .any(|(range_start, range_end)| start >= *range_start && start < *range_end);
+            if start >= separator.content_start && !already_removed {
+                ranges.push((start, text.len()));
+            }
+        }
+    }
+
+    remove_ranges(text, &mut ranges)
+}
+
+fn remove_ranges(text: &str, ranges: &mut Vec<(usize, usize)>) -> Option<String> {
+    ranges.retain(|(start, end)| start < end);
+    if ranges.is_empty() {
+        return None;
+    }
+
+    ranges.sort_by_key(|(start, _)| *start);
+
     let mut output = String::new();
     let mut last_copied = 0;
-    let mut search_from = 0;
     let mut removed_any = false;
 
-    while search_from < text.len() {
-        let Some(rel_pos) = find_suggested_next_steps_opening_fence(&text[search_from..], marker)
-        else {
-            break;
-        };
-        let start_pos = search_from + rel_pos;
-        let block_start = start_pos + marker.len();
-        let Some(newline_pos) = text[block_start..].find('\n') else {
-            break;
-        };
-        let content_start = block_start + newline_pos + 1;
-        let Some(end_pos) = find_closing_fence(&text[content_start..]) else {
-            break;
-        };
-
-        let closing_start = content_start + end_pos;
-        let after_closing = text[closing_start..]
-            .find('\n')
-            .map(|newline| closing_start + newline + 1)
-            .unwrap_or(text.len());
-
-        output.push_str(&text[last_copied..start_pos]);
-        last_copied = after_closing;
-        search_from = after_closing;
+    for (start, end) in ranges.iter().copied() {
+        if start < last_copied {
+            continue;
+        }
+        output.push_str(&text[last_copied..start]);
+        last_copied = end;
         removed_any = true;
     }
 
@@ -2893,7 +2938,106 @@ fn strip_suggested_next_steps_blocks(text: &str) -> Option<String> {
     }
 }
 
+fn find_suggested_next_steps_blocks(text: &str) -> Vec<SuggestedNextStepsBlock> {
+    let mut blocks = Vec::new();
+    let mut search_from = 0;
+
+    while search_from < text.len() {
+        let Some(rel_pos) = find_suggested_next_steps_opening_fence(&text[search_from..]) else {
+            break;
+        };
+        let start = search_from + rel_pos;
+        let block_start = start + SUGGESTED_NEXT_STEPS_MARKER.len();
+        let Some(newline_pos) = text[block_start..].find('\n') else {
+            break;
+        };
+        let content_start = block_start + newline_pos + 1;
+        let Some(end_pos) = find_closing_fence(&text[content_start..]) else {
+            if let Some(next_rel_pos) =
+                find_suggested_next_steps_opening_fence(&text[content_start..])
+            {
+                search_from = content_start + next_rel_pos;
+                continue;
+            }
+            break;
+        };
+
+        let closing_start = content_start + end_pos;
+        if let Some(next_rel_pos) =
+            find_suggested_next_steps_opening_fence(&text[content_start..closing_start])
+        {
+            search_from = content_start + next_rel_pos;
+            continue;
+        }
+
+        let end = text[closing_start..]
+            .find('\n')
+            .map(|newline| closing_start + newline + 1)
+            .unwrap_or(text.len());
+
+        blocks.push(SuggestedNextStepsBlock {
+            start,
+            content_start,
+            closing_start,
+            end,
+        });
+        search_from = end;
+    }
+
+    blocks
+}
+
+fn find_terminal_unclosed_suggested_next_steps_opening(text: &str) -> Option<usize> {
+    let mut search_from = 0;
+
+    while search_from < text.len() {
+        let Some(rel_pos) = find_suggested_next_steps_opening_fence(&text[search_from..]) else {
+            break;
+        };
+        let start = search_from + rel_pos;
+        let block_start = start + SUGGESTED_NEXT_STEPS_MARKER.len();
+        let Some(newline_pos) = text[block_start..].find('\n') else {
+            return text[block_start..].trim().is_empty().then_some(start);
+        };
+        let content_start = block_start + newline_pos + 1;
+
+        let Some(end_pos) = find_closing_fence(&text[content_start..]) else {
+            if let Some(next_rel_pos) =
+                find_suggested_next_steps_opening_fence(&text[content_start..])
+            {
+                search_from = content_start + next_rel_pos;
+                continue;
+            }
+            return Some(start);
+        };
+
+        let closing_start = content_start + end_pos;
+        if let Some(next_rel_pos) =
+            find_suggested_next_steps_opening_fence(&text[content_start..closing_start])
+        {
+            search_from = content_start + next_rel_pos;
+            continue;
+        }
+
+        search_from = text[closing_start..]
+            .find('\n')
+            .map(|newline| closing_start + newline + 1)
+            .unwrap_or(text.len());
+    }
+
+    None
+}
+
 fn extract_note_after_standalone_hr(text: &str) -> Option<String> {
+    let separator = find_standalone_hr_separator(text)?;
+    Some(text[separator.content_start..].trim().to_string())
+}
+
+fn find_note_separator(text: &str) -> Option<NoteSeparator> {
+    find_standalone_hr_separator(text).or_else(|| find_inline_hr_separator(text))
+}
+
+fn find_standalone_hr_separator(text: &str) -> Option<NoteSeparator> {
     // Look for --- on its own line (possibly with surrounding whitespace).
     // We match the same patterns markdown parsers treat as thematic breaks:
     // a line containing only ---, ***, or ___ (with optional spaces).
@@ -2904,12 +3048,12 @@ fn extract_note_after_standalone_hr(text: &str) -> Option<String> {
     //
     // We track whether we are inside a fenced code block (``` or ~~~) and
     // skip any HR that appears inside one.
-    let lines: Vec<&str> = text.lines().collect();
+    let lines: Vec<(usize, &str)> = line_byte_offsets(text).collect();
 
     // Pre-compute which lines are inside a code fence.
     let mut in_fence = vec![false; lines.len()];
     let mut inside = false;
-    for (i, line) in lines.iter().enumerate() {
+    for (i, (_, line)) in lines.iter().enumerate() {
         let trimmed = line.trim();
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             inside = !inside;
@@ -2921,12 +3065,18 @@ fn extract_note_after_standalone_hr(text: &str) -> Option<String> {
         if in_fence[i] {
             continue;
         }
-        let trimmed = lines[i].trim();
+        let (line_start, line) = lines[i];
+        let trimmed = line.trim();
         if trimmed == "---" || trimmed == "***" || trimmed == "___" {
-            let remaining: String = lines[i + 1..].join("\n");
-            let trimmed_remaining = remaining.trim().to_string();
-            if !trimmed_remaining.is_empty() {
-                return Some(trimmed_remaining);
+            let content_start = lines
+                .get(i + 1)
+                .map(|(next_line_start, _)| *next_line_start)
+                .unwrap_or(text.len());
+            if !text[content_start..].trim().is_empty() {
+                return Some(NoteSeparator {
+                    start: line_start,
+                    content_start,
+                });
             }
         }
     }
@@ -2934,11 +3084,16 @@ fn extract_note_after_standalone_hr(text: &str) -> Option<String> {
 }
 
 fn extract_note_after_inline_hr(text: &str) -> Option<String> {
+    let separator = find_inline_hr_separator(text)?;
+    Some(text[separator.content_start..].to_string())
+}
+
+fn find_inline_hr_separator(text: &str) -> Option<NoteSeparator> {
     // Pre-compute a set of byte offsets that fall inside fenced code blocks
     // so we can skip inline HRs that appear in code examples.
     let fence_ranges = compute_fence_ranges(text);
 
-    let mut best: Option<(usize, String)> = None;
+    let mut best: Option<NoteSeparator> = None;
 
     for marker in ["---", "***", "___"] {
         let marker_char = marker.chars().next().unwrap();
@@ -2962,17 +3117,23 @@ fn extract_note_after_inline_hr(text: &str) -> Option<String> {
             if !remaining.starts_with("# ") {
                 continue;
             }
+            let content_start = marker_end + text[marker_end..].len() - remaining.len();
 
             // Keep the *first* (earliest) match — the note starts at the
             // first separator in the message.
             match best {
-                Some((best_idx, _)) if idx >= best_idx => {}
-                _ => best = Some((idx, remaining.to_string())),
+                Some(separator) if idx >= separator.start => {}
+                _ => {
+                    best = Some(NoteSeparator {
+                        start: idx,
+                        content_start,
+                    })
+                }
             }
         }
     }
 
-    best.map(|(_, content)| content)
+    best
 }
 
 /// Return byte-offset ranges `(start, end)` for content inside fenced code
@@ -3185,15 +3346,13 @@ struct SuggestedNextSteps {
 
 /// Extract suggested next steps from assistant output.
 ///
-/// Looks for a ```suggested-next-steps fenced block and parses the JSON object
-/// inside.  Returns `None` if the block is missing or cannot be parsed.
+/// Prefer the terminal ```suggested-next-steps fenced block used by the current
+/// note contract, while still accepting legacy blocks before the note separator.
+/// Returns `None` if the block is missing or cannot be parsed.
 fn extract_suggested_next_steps(text: &str) -> Option<SuggestedNextSteps> {
-    let marker = "```suggested-next-steps";
-    let start_pos = find_suggested_next_steps_opening_fence(text, marker)?;
-    let block_start = start_pos + marker.len();
-    let content_start = block_start + text[block_start..].find('\n')? + 1;
-    let end_pos = find_closing_fence(&text[content_start..])?;
-    let json_str = text[content_start..content_start + end_pos].trim();
+    let blocks = find_suggested_next_steps_blocks(text);
+    let block = preferred_suggested_next_steps_block(text, &blocks)?;
+    let json_str = text[block.content_start..block.closing_start].trim();
     match serde_json::from_str::<SuggestedNextSteps>(json_str) {
         Ok(steps) => Some(steps),
         Err(e) => {
@@ -3203,6 +3362,29 @@ fn extract_suggested_next_steps(text: &str) -> Option<SuggestedNextSteps> {
     }
 }
 
+fn preferred_suggested_next_steps_block(
+    text: &str,
+    blocks: &[SuggestedNextStepsBlock],
+) -> Option<SuggestedNextStepsBlock> {
+    if let Some(block) = blocks
+        .iter()
+        .rev()
+        .find(|block| text[block.end..].trim().is_empty())
+    {
+        return Some(*block);
+    }
+
+    if let Some(separator) = find_note_separator(text) {
+        return blocks
+            .iter()
+            .rev()
+            .find(|block| block.end <= separator.start)
+            .copied();
+    }
+
+    blocks.last().copied()
+}
+
 /// Find a `suggested-next-steps` opening fence.
 ///
 /// The normal fence finder requires markers to appear at the start of a line
@@ -3210,19 +3392,19 @@ fn extract_suggested_next_steps(text: &str) -> Option<SuggestedNextSteps> {
 /// can arrive with this fence attached to the final sentence, so this finder
 /// accepts inline markers while still requiring the rest of the marker line to
 /// contain only optional whitespace before the newline.
-fn find_suggested_next_steps_opening_fence(text: &str, marker: &str) -> Option<usize> {
+fn find_suggested_next_steps_opening_fence(text: &str) -> Option<usize> {
     let mut pos = 0;
     while pos < text.len() {
-        let candidate = text[pos..].find(marker)?;
+        let candidate = text[pos..].find(SUGGESTED_NEXT_STEPS_MARKER)?;
         let abs = pos + candidate;
-        let after_marker = &text[abs + marker.len()..];
+        let after_marker = &text[abs + SUGGESTED_NEXT_STEPS_MARKER.len()..];
         if after_marker
             .find('\n')
             .is_some_and(|newline| after_marker[..newline].trim().is_empty())
         {
             return Some(abs);
         }
-        pos = abs + marker.len();
+        pos = abs + SUGGESTED_NEXT_STEPS_MARKER.len();
     }
     None
 }
@@ -4853,6 +5035,59 @@ Keep normal markdown fences in the note body."#;
     }
 
     #[test]
+    fn note_content_strips_terminal_suggested_steps_after_note() {
+        let text = r#"Done.
+---
+# Harden Note Detection
+Strip metadata after the note body.
+
+```suggested-next-steps
+{"suggestedNextCommitStep":"Fix note parsing","suggestedNextNoteStep":null}
+```"#;
+        let content = extract_note_content(text);
+        assert_eq!(
+            content,
+            Some("# Harden Note Detection\nStrip metadata after the note body.".to_string())
+        );
+    }
+
+    #[test]
+    fn note_content_preserves_nonterminal_suggested_steps_fence_in_note_body() {
+        let text = r#"---
+# Parser Notes
+This note includes an example:
+
+```suggested-next-steps
+{"suggestedNextCommitStep":"Example only","suggestedNextNoteStep":null}
+```
+
+That example is part of the note."#;
+        let content = extract_note_content(text);
+        assert_eq!(
+            content,
+            Some(
+                "# Parser Notes\nThis note includes an example:\n\n```suggested-next-steps\n{\"suggestedNextCommitStep\":\"Example only\",\"suggestedNextNoteStep\":null}\n```\n\nThat example is part of the note."
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn note_content_strips_unterminated_terminal_suggested_steps_after_note() {
+        let text = r#"---
+# Interrupted Note
+The note body finished before metadata started.
+
+```suggested-next-steps
+{"suggestedNextCommitStep":"Fix note parsing""#;
+        let content = extract_note_content(text);
+        assert_eq!(
+            content,
+            Some("# Interrupted Note\nThe note body finished before metadata started.".to_string())
+        );
+    }
+
+    #[test]
     fn note_content_inline_hr_without_h1_is_ignored() {
         let text = "Two reasons:--- this session is read-only.";
         assert_eq!(extract_note_content(text), None);
@@ -4989,6 +5224,68 @@ Body
             steps.suggested_next_note_step.as_deref(),
             Some("Research alternatives")
         );
+    }
+
+    #[test]
+    fn extract_steps_prefers_terminal_block_after_note_body_example() {
+        let text = r#"---
+# Parser Notes
+The note body can include examples.
+
+```suggested-next-steps
+{"suggestedNextCommitStep": "Example only", "suggestedNextNoteStep": null}
+```
+
+Use the real metadata at the end.
+
+```suggested-next-steps
+{"suggestedNextCommitStep": "Fix note parsing", "suggestedNextNoteStep": "Plan parser tests"}
+```"#;
+        let steps = extract_suggested_next_steps(text).unwrap();
+        assert_eq!(
+            steps.suggested_next_commit_step.as_deref(),
+            Some("Fix note parsing")
+        );
+        assert_eq!(
+            steps.suggested_next_note_step.as_deref(),
+            Some("Plan parser tests")
+        );
+    }
+
+    #[test]
+    fn extract_steps_ignores_nonterminal_note_body_block_without_metadata() {
+        let text = r#"---
+# Parser Notes
+This is just an example:
+
+```suggested-next-steps
+{"suggestedNextCommitStep": "Example only", "suggestedNextNoteStep": null}
+```
+
+More note body after the example."#;
+        assert!(extract_suggested_next_steps(text).is_none());
+    }
+
+    #[test]
+    fn extract_steps_uses_terminal_block_after_unclosed_body_example() {
+        let text = r#"---
+# Parser Notes
+This body example is malformed:
+
+```suggested-next-steps
+{"suggestedNextCommitStep": "Example only", "suggestedNextNoteStep": null}
+
+The real metadata still comes last.
+
+```suggested-next-steps
+{"suggestedNextCommitStep": "Fix note parsing", "suggestedNextNoteStep": null}
+```"#;
+        let steps = extract_suggested_next_steps(text).unwrap();
+        assert_eq!(
+            steps.suggested_next_commit_step.as_deref(),
+            Some("Fix note parsing")
+        );
+        assert_eq!(steps.suggested_next_note_step, None);
     }
 
     #[test]

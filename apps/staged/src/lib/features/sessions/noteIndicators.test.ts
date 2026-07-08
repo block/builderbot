@@ -37,6 +37,22 @@ Strip metadata before scanning for the note separator.`);
     });
   });
 
+  it('cuts at the horizontal rule when suggested-next-steps trails note markdown', () => {
+    const split = splitAtNoteIndicator(`I focused the plan on the parser and tests.
+---
+# Harden Note Detection
+Strip metadata after the note body.
+
+\`\`\`suggested-next-steps
+{"suggestedNextCommitStep":"Fix note parsing","suggestedNextNoteStep":null}
+\`\`\``);
+
+    expect(split).toEqual({
+      preamble: 'I focused the plan on the parser and tests.\n',
+      hasNote: true,
+    });
+  });
+
   it('ignores inline horizontal rules that are not immediately followed by an H1', () => {
     const text = 'Two reasons:--- this session is read-only.';
 

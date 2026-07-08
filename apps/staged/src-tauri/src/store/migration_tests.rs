@@ -231,6 +231,8 @@ fn test_store_repairs_github_comment_tracking_user_version() {
             id                 TEXT PRIMARY KEY,
             detecting_actions  INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE notes (id TEXT PRIMARY KEY);
+        CREATE TABLE project_notes (id TEXT PRIMARY KEY);
         ",
     )
     .unwrap();
@@ -306,6 +308,8 @@ fn test_store_repairs_pipeline_user_version() {
             id                 TEXT PRIMARY KEY,
             detecting_actions  INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE notes (id TEXT PRIMARY KEY);
+        CREATE TABLE project_notes (id TEXT PRIMARY KEY);
         ",
     )
     .unwrap();
@@ -370,6 +374,8 @@ fn test_completion_effects_migration_backfills_finished_pipeline_sessions() {
             id                 TEXT PRIMARY KEY,
             detecting_actions  INTEGER NOT NULL DEFAULT 0
         );
+        CREATE TABLE notes (id TEXT PRIMARY KEY);
+        CREATE TABLE project_notes (id TEXT PRIMARY KEY);
         ",
     )
     .unwrap();
@@ -382,7 +388,7 @@ fn test_completion_effects_migration_backfills_finished_pipeline_sessions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 24);
+    assert_eq!(version, 25);
     assert!(column_exists(&conn, "sessions", "completion_effects_at"));
 
     let marker = |id: &str| -> Option<i64> {
@@ -424,6 +430,8 @@ fn test_detecting_pid_migration_clears_orphaned_detection_flags() {
         INSERT INTO action_contexts (id, detecting_actions) VALUES
             ('wedged', 1),
             ('idle',   0);
+        CREATE TABLE notes (id TEXT PRIMARY KEY);
+        CREATE TABLE project_notes (id TEXT PRIMARY KEY);
         ",
     )
     .unwrap();
@@ -436,7 +444,7 @@ fn test_detecting_pid_migration_clears_orphaned_detection_flags() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 24);
+    assert_eq!(version, 25);
     assert!(column_exists(&conn, "action_contexts", "detecting_pid"));
 
     // No shipped build ever cleared the flag from outside the process that set

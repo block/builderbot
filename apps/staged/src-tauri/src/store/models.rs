@@ -887,6 +887,16 @@ impl SuggestedNextStep {
     }
 }
 
+/// Stored note fields read back for change detection:
+/// `(title, content, suggested_next_commit_step, suggested_next_note_step, suggested_next_steps)`.
+pub type StoredNoteFields = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 pub fn suggested_next_steps_from_storage(
     json: Option<String>,
     legacy_commit_step: Option<String>,

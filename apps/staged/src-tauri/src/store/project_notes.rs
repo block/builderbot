@@ -5,7 +5,7 @@ use rusqlite::{params, OptionalExtension};
 use super::models::{
     suggested_next_steps_from_storage, suggested_next_steps_legacy_commit_step,
     suggested_next_steps_legacy_note_step, suggested_next_steps_to_storage, ProjectNote,
-    SuggestedNextStep,
+    StoredNoteFields, SuggestedNextStep,
 };
 use super::{now_timestamp, Store, StoreError};
 
@@ -119,13 +119,7 @@ impl Store {
         // with a linked note, even if the assistant didn't rewrite the note. Without this
         // short-circuit, `updated_at` would advance on every turn, defeating any freshness
         // comparison that relies on it.
-        let existing: Option<(
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        )> = conn
+        let existing: Option<StoredNoteFields> = conn
             .query_row(
                 "SELECT title, content, suggested_next_commit_step, suggested_next_note_step, suggested_next_steps
                  FROM project_notes WHERE id = ?1",

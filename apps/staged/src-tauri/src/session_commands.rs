@@ -1222,6 +1222,15 @@ pub(crate) async fn resume_session_for_store(
         },
     );
 
+    // Persist the effective selection before spawning the run: on an
+    // unavailable-config failure the run clears the stored selection, so
+    // persisting afterwards could resurrect the stale value it just cleared.
+    if acp_config_selection_to_persist != session.acp_config_selection {
+        store
+            .set_session_acp_config_selection(&session_id, acp_config_selection_to_persist.as_ref())
+            .map_err(|e| e.to_string())?;
+    }
+
     session_runner::start_session(
         SessionConfig {
             session_id: session_id.clone(),
@@ -1260,12 +1269,6 @@ pub(crate) async fn resume_session_for_store(
         app_handle,
         Arc::clone(&registry),
     )?;
-
-    if acp_config_selection_to_persist != session.acp_config_selection {
-        store
-            .set_session_acp_config_selection(&session_id, acp_config_selection_to_persist.as_ref())
-            .map_err(|e| e.to_string())?;
-    }
 
     Ok(())
 }

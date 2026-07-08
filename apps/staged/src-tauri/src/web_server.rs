@@ -3021,6 +3021,19 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 },
             );
 
+            // Persist the effective selection before spawning the run: on an
+            // unavailable-config failure the run clears the stored selection,
+            // so persisting afterwards could resurrect the stale value it
+            // just cleared.
+            if acp_config_selection_to_persist != session.acp_config_selection {
+                store
+                    .set_session_acp_config_selection(
+                        &session_id,
+                        acp_config_selection_to_persist.as_ref(),
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+
             session_runner::start_session(
                 SessionConfig {
                     session_id: session_id.clone(),
@@ -3055,15 +3068,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 app_handle.clone(),
                 Arc::clone(session_registry),
             )?;
-
-            if acp_config_selection_to_persist != session.acp_config_selection {
-                store
-                    .set_session_acp_config_selection(
-                        &session_id,
-                        acp_config_selection_to_persist.as_ref(),
-                    )
-                    .map_err(|e| e.to_string())?;
-            }
 
             Ok(Value::Null)
         }

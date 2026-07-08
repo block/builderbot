@@ -239,6 +239,14 @@
         console.error('Failed to discover ACP config for selected model:', error);
         configLoading = false;
         configError = error instanceof Error ? error.message : String(error);
+        // The effort column was cleared for the incoming model-specific
+        // options; restore the previous model's selector so the column stays
+        // usable after a transient failure. If a choice from it turns out to
+        // be stale for the new model, the driver skips it and the launch
+        // falls back to provider-default effort.
+        if (config && !config.effort && retainedEffortSelector) {
+          config = { ...config, effort: retainedEffortSelector };
+        }
       });
   }
 

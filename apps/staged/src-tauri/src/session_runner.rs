@@ -726,7 +726,7 @@ pub fn start_session(
 
         if let Err(ref e) = result {
             if config.acp_config_selection.is_some()
-                && crate::acp_config::is_acp_config_unavailable_error(e)
+                && acp_client::is_config_selection_unavailable_error(e)
             {
                 if let Err(clear_err) =
                     store_for_status.set_session_acp_config_selection(&session_id_for_status, None)

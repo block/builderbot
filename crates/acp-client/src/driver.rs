@@ -2105,12 +2105,34 @@ fn mcp_server_transport_supported(server: &McpServer, caps: &McpCapabilities) ->
     }
 }
 
+// Fragments shared by the config-selection error producers below and
+// [`is_config_selection_unavailable_error`]. Consumers persist selections and
+// clear them when the matcher fires, so producer and matcher must stay on the
+// same strings — reword these constants, never the format! call sites.
+const CONFIG_SELECTION_MISSING_OPTIONS_PREFIX: &str =
+    "Agent did not return ACP config options needed to apply selected";
+const CONFIG_SELECTION_STALE_PREFIX: &str = "Selected ACP ";
+const CONFIG_SELECTION_STALE_UNAVAILABLE: &str = " is no longer available";
+const CONFIG_SELECTION_STALE_NOT_SELECT: &str = " is not a select option";
+
+/// Whether an error from applying stored session config selections means the
+/// selection itself is stale or unavailable, rather than a transport or
+/// protocol failure. Callers that persist selections use this to clear the
+/// stored value so the next run falls back to provider defaults.
+pub fn is_config_selection_unavailable_error(error: &str) -> bool {
+    error.contains(CONFIG_SELECTION_MISSING_OPTIONS_PREFIX)
+        || (error.contains(CONFIG_SELECTION_STALE_PREFIX)
+            && (error.contains(CONFIG_SELECTION_STALE_UNAVAILABLE)
+                || error.contains(CONFIG_SELECTION_STALE_NOT_SELECT)))
+}
+
 async fn apply_or_record_session_config_options(
     connection: &ConnectionTo<Agent>,
     agent_session_id: &str,
     initial_options: Option<&[SessionConfigOption]>,
     selections: &[AcpSessionConfigOptionSelection],
     writer: &Arc<dyn MessageWriter>,
+    resuming: bool,
 ) -> Result<(), String> {
     if selections.is_empty() {
         if let Some(options) = initial_options {
@@ -2119,18 +2141,29 @@ async fn apply_or_record_session_config_options(
         return Ok(());
     }
 
-    let mut latest_options = initial_options
-        .ok_or_else(|| {
-            let labels = selections
-                .iter()
-                .map(|selection| config_selection_label(&selection.category))
-                .collect::<Vec<_>>()
-                .join("/");
-            format!(
-                "Agent did not return ACP config options needed to apply selected {labels} before prompting"
-            )
-        })?
-        .to_vec();
+    let Some(initial_options) = initial_options else {
+        let labels = selections
+            .iter()
+            .map(|selection| config_selection_label(&selection.category))
+            .collect::<Vec<_>>()
+            .join("/");
+        if resuming {
+            // Some agents advertise config options on session/new but omit
+            // them from session/load. The config applied when the session was
+            // created lives in the agent's own session state, so skip the
+            // re-apply rather than failing the first follow-up after an app
+            // restart. A selection changed since creation is skipped too —
+            // the warning is the only trace of that.
+            log::warn!(
+                "Agent returned no ACP config options on session/load; skipping selected {labels}"
+            );
+            return Ok(());
+        }
+        return Err(format!(
+            "{CONFIG_SELECTION_MISSING_OPTIONS_PREFIX} {labels} before prompting"
+        ));
+    };
+    let mut latest_options = initial_options.to_vec();
 
     let mut model_selection_applied = false;
     for selection in selections {
@@ -2187,7 +2220,7 @@ fn resolve_session_config_option_selection(
         option.category.as_ref() == Some(&selection.category) && is_select_option(option)
     }) else {
         return Err(format!(
-            "Selected ACP {label} config option '{}' is no longer available for this provider",
+            "{CONFIG_SELECTION_STALE_PREFIX}{label} config option '{}'{CONFIG_SELECTION_STALE_UNAVAILABLE} for this provider",
             selection.config_id
         ));
     };
@@ -2204,11 +2237,11 @@ fn ensure_config_option_has_value(
     match select_option_has_value(option, value_id) {
         Some(true) => Ok(()),
         Some(false) => Err(format!(
-            "Selected ACP {label} value '{value_id}' is no longer available for config option '{}'",
+            "{CONFIG_SELECTION_STALE_PREFIX}{label} value '{value_id}'{CONFIG_SELECTION_STALE_UNAVAILABLE} for config option '{}'",
             option.id
         )),
         None => Err(format!(
-            "Selected ACP {label} config option '{}' is not a select option",
+            "{CONFIG_SELECTION_STALE_PREFIX}{label} config option '{}'{CONFIG_SELECTION_STALE_NOT_SELECT}",
             option.id
         )),
     }
@@ -2353,6 +2386,7 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
                 load_response.config_options.as_deref(),
                 config_options,
                 writer,
+                true,
             )
             .await?;
 
@@ -2384,6 +2418,7 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
                 session_response.config_options.as_deref(),
                 config_options,
                 writer,
+                false,
             )
             .await?;
 
@@ -2613,13 +2648,13 @@ mod tests {
     use super::{
         acp_spawn_command, apply_or_record_session_config_options, autoapprove_permission_decision,
         build_prompt_content_blocks, consume_remote_acp_line, decode_remote_acp_line,
-        mcp_server_transport_supported, permission_response_for_options, remote_acp_segments,
-        resolve_acp_working_dir, resolve_session_config_option_selection,
-        resolve_spawn_working_dir, sanitize_remote_acp_chunk, shell_exec_line, shell_quote,
-        AcpDriver, AcpEventMetadata, AcpNotificationHandler, AcpPermissionOption,
-        AcpPermissionOptionKind, AcpPermissionRequest, AcpSessionConfigOptionSelection,
-        AgentRunOutcome, BasicMessageWriter, MessageWriter, RemoteLineOutcome, ReplayBoundary,
-        ReplayBuffer, ReplayEvent,
+        is_config_selection_unavailable_error, mcp_server_transport_supported,
+        permission_response_for_options, remote_acp_segments, resolve_acp_working_dir,
+        resolve_session_config_option_selection, resolve_spawn_working_dir,
+        sanitize_remote_acp_chunk, shell_exec_line, shell_quote, AcpDriver, AcpEventMetadata,
+        AcpNotificationHandler, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
+        AcpSessionConfigOptionSelection, AgentRunOutcome, BasicMessageWriter, MessageWriter,
+        RemoteLineOutcome, ReplayBoundary, ReplayBuffer, ReplayEvent,
     };
     use agent_client_protocol::schema::v1::{
         ContentBlock as AcpContentBlock, McpCapabilities, McpServer, McpServerHttp, McpServerSse,
@@ -2775,6 +2810,7 @@ mod tests {
                     Some(&initial_options),
                     &selections,
                     &message_writer,
+                    false,
                 )
                 .await
                 .map_err(agent_client_protocol::util::internal_error)
@@ -2793,6 +2829,79 @@ mod tests {
                 .expect_err("stale effort should remain unavailable"),
             "Selected ACP effort value 'high' is no longer available for config option 'reasoning'"
         );
+    }
+
+    #[test]
+    fn detects_unavailable_config_selection_errors() {
+        assert!(is_config_selection_unavailable_error(
+            "Selected ACP model value 'sonnet' is no longer available for config option 'model'"
+        ));
+        assert!(is_config_selection_unavailable_error(
+            "Agent did not return ACP config options needed to apply selected model before prompting"
+        ));
+        assert!(is_config_selection_unavailable_error(
+            "Selected ACP effort config option 'reasoning' is not a select option"
+        ));
+        assert!(!is_config_selection_unavailable_error(
+            "Failed to create ACP session: transport closed"
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_config_options_skip_apply_on_resume_but_fail_new_sessions() {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let calls_for_handler = Arc::clone(&calls);
+        let agent = agent_client_protocol::Agent.builder().on_receive_request(
+            async move |request: SetSessionConfigOptionRequest, responder, _cx| {
+                calls_for_handler
+                    .lock()
+                    .unwrap()
+                    .push(request.config_id.to_string());
+                responder.respond(SetSessionConfigOptionResponse::new(vec![]))
+            },
+            agent_client_protocol::on_receive_request!(),
+        );
+        let writer = Arc::new(RecordingMessageWriter::default());
+        let message_writer: Arc<dyn MessageWriter> = writer.clone();
+        let selections = vec![AcpSessionConfigOptionSelection {
+            category: SessionConfigOptionCategory::Model,
+            config_id: "model".to_string(),
+            value_id: "opus".to_string(),
+        }];
+
+        agent_client_protocol::Client
+            .builder()
+            .name("acp-config-test")
+            .connect_with(agent, async |connection| {
+                apply_or_record_session_config_options(
+                    &connection,
+                    "session-1",
+                    None,
+                    &selections,
+                    &message_writer,
+                    true,
+                )
+                .await
+                .map_err(agent_client_protocol::util::internal_error)?;
+
+                let error = apply_or_record_session_config_options(
+                    &connection,
+                    "session-1",
+                    None,
+                    &selections,
+                    &message_writer,
+                    false,
+                )
+                .await
+                .expect_err("missing config options must fail new sessions");
+                assert!(is_config_selection_unavailable_error(&error));
+                Ok(())
+            })
+            .await
+            .expect("protocol should succeed");
+
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(writer.config_option_updates.lock().unwrap().is_empty());
     }
 
     fn write_executable(path: &Path, content: &str) {

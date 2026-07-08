@@ -1441,6 +1441,11 @@
         console.error('Failed to discover ACP config for selected model:', error);
         followupConfigLoading = false;
         followupConfigError = error instanceof Error ? error.message : String(error);
+        // Fall back to the non-model-specific effort options so the effort
+        // column survives a transient discovery failure. The model choice is
+        // kept; if the effort sent with it turns out to be stale for the new
+        // model, the driver skips it and uses the provider default.
+        modelSpecificFollowupModelValue = null;
       });
   }
 

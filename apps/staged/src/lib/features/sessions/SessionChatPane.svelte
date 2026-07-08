@@ -2202,7 +2202,7 @@
           items={hashtagItems}
         />
         {#if isLive}
-          <span class="inline-flex" title="Stop session">
+          <span class="inline-flex composer-send" title="Stop session">
             <Button
               variant="destructive"
               size="icon"
@@ -2219,7 +2219,7 @@
             </Button>
           </span>
         {:else}
-          <span class="inline-flex" title="Send message">
+          <span class="inline-flex composer-send" title="Send message">
             <Button
               variant="outline"
               size="icon"
@@ -2282,8 +2282,21 @@
     max-width: 92%;
   }
 
+  /* Compact panes are too narrow to fit the config picker, attach, input, and
+     send controls in one row: give the text input its own full-width row with
+     the controls beneath it. */
   .session-chat-pane.compact .input-area {
     padding: 8px 10px;
+    flex-wrap: wrap;
+  }
+
+  .session-chat-pane.compact .input-area :global(.hashtag-input-wrapper) {
+    order: -1;
+    flex-basis: 100%;
+  }
+
+  .session-chat-pane.compact .input-area .composer-send {
+    margin-left: auto;
   }
 
   .session-chat-pane.compact .queue-popover,

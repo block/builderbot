@@ -162,6 +162,16 @@
 {/if}
 
 <style>
+  /* Keep the trigger on its own compositing layer. The app's 13px rem base
+     gives the trigger fractional-pixel geometry (e.g. gap-1.5 = 4.875px), and
+     partial repaints while typing in a neighboring composer re-rasterize the
+     surrounding layer, flipping the anti-aliasing of edges that sit between
+     device pixels — a subtle shimmer of the icon/border. Isolated, the
+     trigger only re-rasterizes when its own content changes. */
+  :global(.selector-btn) {
+    transform: translateZ(0);
+  }
+
   .selector-label {
     display: inline-flex;
     position: relative;

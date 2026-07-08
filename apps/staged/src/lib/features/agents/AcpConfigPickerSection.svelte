@@ -61,11 +61,6 @@
 {/if}
 
 <style>
-  :global(.picker-section-label) {
-    color: var(--text-muted);
-    font-size: var(--size-xs);
-  }
-
   .picker-group-label {
     padding: 4px 8px 2px;
     color: var(--text-faint);

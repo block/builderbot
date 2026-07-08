@@ -46,9 +46,27 @@
 
   let open = $state(false);
   let contentEl = $state<HTMLElement | null>(null);
+  let labelSizerEl = $state<HTMLElement | null>(null);
+  let labelWidth = $state<number | null>(null);
   let renderedTriggerParts = $derived(
     triggerParts.length > 0 ? triggerParts : [{ id: 'label', label: triggerLabel }]
   );
+
+  // The hidden sizer always lays out at the natural width of the current
+  // parts, so the visible label can transition to it when values change.
+  $effect(() => {
+    const sizer = labelSizerEl;
+    if (!sizer) {
+      labelWidth = null;
+      return;
+    }
+    const observer = new ResizeObserver(() => {
+      // Round up so sub-pixel clipping never triggers part ellipsis.
+      labelWidth = Math.ceil(sizer.getBoundingClientRect().width);
+    });
+    observer.observe(sizer);
+    return () => observer.disconnect();
+  });
 
   function handlePickerKeydown(event: KeyboardEvent) {
     handleAcpPickerGridKeydown(event, contentEl, {
@@ -58,6 +76,39 @@
     });
   }
 </script>
+
+{#snippet labelContent()}
+  <span
+    class="selector-label"
+    aria-label={triggerLabel}
+    style:width={labelWidth === null ? undefined : `${labelWidth}px`}
+  >
+    {#each renderedTriggerParts as part, index (part.id)}
+      {#if index > 0}
+        <span class="trigger-separator" aria-hidden="true">·</span>
+      {/if}
+      <span class="trigger-part">
+        {#key part.label}
+          <span
+            class="trigger-part-value"
+            in:fly={{ x: 4, duration: 120 }}
+            out:fade={{ duration: 80 }}
+          >
+            {part.label}
+          </span>
+        {/key}
+      </span>
+    {/each}
+    <span class="trigger-sizer" aria-hidden="true" bind:this={labelSizerEl}>
+      {#each renderedTriggerParts as part, index (part.id)}
+        {#if index > 0}
+          <span class="trigger-separator">·</span>
+        {/if}
+        <span>{part.label}</span>
+      {/each}
+    </span>
+  </span>
+{/snippet}
 
 {#if canOpen}
   <DropdownMenu.Root bind:open>
@@ -70,24 +121,7 @@
       title={triggerTitle}
     >
       <AgentIcon id={providerId ?? ''} size={12} />
-      <span class="selector-label" aria-label={triggerLabel}>
-        {#each renderedTriggerParts as part, index (part.id)}
-          {#if index > 0}
-            <span class="trigger-separator" aria-hidden="true">·</span>
-          {/if}
-          <span class="trigger-part">
-            {#key part.label}
-              <span
-                class="trigger-part-value"
-                in:fly={{ x: 4, duration: 120 }}
-                out:fade={{ duration: 80 }}
-              >
-                {part.label}
-              </span>
-            {/key}
-          </span>
-        {/each}
-      </span>
+      {@render labelContent()}
       {#if loading}
         <Spinner size={12} />
       {:else}
@@ -123,33 +157,29 @@
     title={triggerTitle}
   >
     <AgentIcon id={providerId ?? ''} size={12} />
-    <span class="selector-label" aria-label={triggerLabel}>
-      {#each renderedTriggerParts as part, index (part.id)}
-        {#if index > 0}
-          <span class="trigger-separator" aria-hidden="true">·</span>
-        {/if}
-        <span class="trigger-part">
-          {#key part.label}
-            <span
-              class="trigger-part-value"
-              in:fly={{ x: 4, duration: 120 }}
-              out:fade={{ duration: 80 }}
-            >
-              {part.label}
-            </span>
-          {/key}
-        </span>
-      {/each}
-    </span>
+    {@render labelContent()}
   </button>
 {/if}
 
 <style>
   .selector-label {
     display: inline-flex;
+    position: relative;
     min-width: 0;
     align-items: center;
     overflow: hidden;
+    white-space: nowrap;
+    transition: width 150ms ease;
+  }
+
+  .trigger-sizer {
+    display: inline-flex;
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: max-content;
+    visibility: hidden;
+    pointer-events: none;
     white-space: nowrap;
   }
 

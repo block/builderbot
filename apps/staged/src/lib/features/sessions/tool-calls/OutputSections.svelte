@@ -50,18 +50,15 @@
     options: Pick<Props, 'includePrimary' | 'includeRaw' | 'includeStreams'>
   ): OutputBlock[] {
     const output = model.output;
-    const emitted = new Set<string>();
     const result: OutputBlock[] = [];
     const defaultTone = model.status === 'cancelled' ? 'cancelled' : 'normal';
 
     if (output.errorText) {
       result.push({ key: 'error', label: 'Error', text: output.errorText, tone: 'danger' });
-      emitted.add(output.errorText);
     }
 
     if (options.includeStreams && output.stdout) {
       result.push({ key: 'stdout', label: 'Stdout', text: output.stdout, tone: defaultTone });
-      emitted.add(output.stdout);
     }
 
     if (options.includeStreams && output.stderr && output.stderr !== output.errorText) {
@@ -71,7 +68,6 @@
         text: output.stderr,
         tone: model.status === 'failed' ? 'danger' : defaultTone,
       });
-      emitted.add(output.stderr);
     }
 
     if (
@@ -82,10 +78,11 @@
       output.primaryText !== output.stderr
     ) {
       result.push({ key: 'output', label: 'Output', text: output.primaryText, tone: defaultTone });
-      emitted.add(output.primaryText);
     }
 
-    if (options.includeRaw && output.rawText && !emitted.has(output.rawText)) {
+    // Raw JSON is a fallback for output we could not render structurally,
+    // never a companion to structured blocks.
+    if (options.includeRaw && output.rawText && result.length === 0) {
       result.push({
         key: 'raw-output',
         label: 'Raw output',

@@ -311,7 +311,7 @@ export function buildToolCallSections(
     sections.push({ kind: 'terminal_refs', label: 'Terminal', refs: metadata.terminalRefs });
   }
 
-  const emittedOutputTexts = new Set<string>();
+  let hasStructuredOutput = false;
   const outputTone = item.status === 'cancelled' ? 'cancelled' : 'normal';
   if (output.errorText) {
     sections.push({
@@ -320,7 +320,7 @@ export function buildToolCallSections(
       text: output.errorText,
       tone: 'danger',
     });
-    emittedOutputTexts.add(output.errorText);
+    hasStructuredOutput = true;
   }
 
   if (output.stdout) {
@@ -330,7 +330,7 @@ export function buildToolCallSections(
       text: output.stdout,
       tone: outputTone,
     });
-    emittedOutputTexts.add(output.stdout);
+    hasStructuredOutput = true;
   }
 
   if (output.stderr && output.stderr !== output.errorText) {
@@ -340,7 +340,7 @@ export function buildToolCallSections(
       text: output.stderr,
       tone: item.status === 'failed' ? 'danger' : outputTone,
     });
-    emittedOutputTexts.add(output.stderr);
+    hasStructuredOutput = true;
   }
 
   if (
@@ -355,10 +355,12 @@ export function buildToolCallSections(
       text: output.primaryText,
       tone: outputTone,
     });
-    emittedOutputTexts.add(output.primaryText);
+    hasStructuredOutput = true;
   }
 
-  if (output.rawText && !emittedOutputTexts.has(output.rawText)) {
+  // Raw JSON is a fallback for output we could not render structurally,
+  // never a companion to structured output sections.
+  if (output.rawText && !hasStructuredOutput) {
     sections.push({ kind: 'raw_output', label: 'Raw output', text: output.rawText });
   }
 

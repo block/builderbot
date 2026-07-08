@@ -202,7 +202,7 @@ describe('buildToolCallViewModel classification', () => {
 });
 
 describe('buildToolCallViewModel output handling', () => {
-  it('promotes failed errors before raw output JSON', () => {
+  it('suppresses raw output JSON when a structured error is shown', () => {
     const model = buildToolCallViewModel(
       richTool({
         status: 'failed',
@@ -217,9 +217,8 @@ describe('buildToolCallViewModel output handling', () => {
     const errorIndex = model.sections.findIndex(
       (section) => section.kind === 'output' && section.label === 'Error'
     );
-    const rawIndex = model.sections.findIndex((section) => section.kind === 'raw_output');
     expect(errorIndex).toBeGreaterThanOrEqual(0);
-    expect(rawIndex).toBeGreaterThan(errorIndex);
+    expect(model.sections.some((section) => section.kind === 'raw_output')).toBe(false);
   });
 
   it('keeps structured stdout and stderr distinct for successful commands', () => {
@@ -236,6 +235,7 @@ describe('buildToolCallViewModel output handling', () => {
       section.kind === 'output' ? [section.label] : []
     );
     expect(outputLabels).toEqual(['Stdout', 'Stderr']);
+    expect(model.sections.some((section) => section.kind === 'raw_output')).toBe(false);
   });
 
   it('falls back to legacy tool_result content when ACP output is absent', () => {

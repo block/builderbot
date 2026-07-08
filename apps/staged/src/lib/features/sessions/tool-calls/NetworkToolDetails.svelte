@@ -25,6 +25,15 @@
 
   let { item, viewModel }: Props = $props();
   let network = $derived(extractNetworkInfo(viewModel, item));
+  let hasStructuredResponse = $derived(
+    !!(
+      network.status ||
+      network.title ||
+      network.screenshot ||
+      network.responseHeaders ||
+      network.responseBody
+    )
+  );
   let hasNetworkPreview = $derived(
     !!(
       network.method ||
@@ -179,5 +188,9 @@
     {/if}
   {/if}
 
-  <OutputSections {viewModel} includePrimary={!network.responseBody} includeRaw />
+  <OutputSections
+    {viewModel}
+    includePrimary={!network.responseBody}
+    includeRaw={!hasStructuredResponse}
+  />
 </div>

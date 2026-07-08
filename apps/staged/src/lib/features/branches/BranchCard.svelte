@@ -47,6 +47,7 @@
     BranchGitState,
     BranchTimeline as BranchTimelineData,
     HashtagItem,
+    NoteTimelineItem,
     ProjectRepo,
     WorkspaceStatus,
   } from '../../types';
@@ -90,7 +91,7 @@
   } from '../../services/branchEventService';
   import { openDiffRoute } from '../layout/navigation.svelte';
   import type { WorktreeChangesPreview } from '../../commands';
-  import type { LinkedNoteContext, NoteClickInfo } from '../sessions/noteFreshness';
+  import type { NoteClickInfo } from '../sessions/noteFreshness';
   import {
     disabledReferenceNav,
     pushReferenceEntry,
@@ -174,6 +175,15 @@
     annotations: number;
     warnings: number;
     userComments: number;
+  };
+  type OpenNoteState = {
+    noteId?: string;
+    title: string;
+    content: string;
+    sessionId?: string;
+    noteUpdatedAt?: number;
+    chatOpen?: boolean;
+    nextSteps?: { commitStep: string | null; noteStep: string | null } | null;
   };
   let timelineReviewDetailsById = $state<Record<string, TimelineReviewDetails>>({});
 
@@ -470,15 +480,7 @@
   // Commit diff modal (opened by clicking a commit in the timeline)
 
   // Note modal (opened by clicking a note in the timeline)
-  let openNote = $state<{
-    noteId: string;
-    title: string;
-    content: string;
-    sessionId?: string;
-    noteUpdatedAt?: number;
-    chatOpen?: boolean;
-    nextSteps?: { commitStep: string | null; noteStep: string | null } | null;
-  } | null>(null);
+  let openNote = $state<OpenNoteState | null>(null);
 
   // Image viewer modal (opened by clicking an image in the timeline)
   let viewImageId = $state<string | null>(null);
@@ -899,17 +901,44 @@
     });
   }
 
-  /** Look up note info from timeline data by session ID (for cross-modal navigation). */
-  function findNoteForSession(sessionId: string): LinkedNoteContext | null {
-    const note = timeline?.notes.find((n) => n.sessionId === sessionId);
-    if (!note) return null;
+  /** Look up a note from timeline data by session ID. */
+  function noteForSession(sessionId: string): NoteTimelineItem | null {
+    return timeline?.notes.find((n) => n.sessionId === sessionId) ?? null;
+  }
+
+  function noteToOpenState(note: NoteTimelineItem, chatOpen = false): OpenNoteState {
     return {
-      id: note.id,
+      noteId: note.id,
       title: note.title,
       content: note.content,
-      updatedAt: note.updatedAt,
-      hasParsedNote: !!note.content.trim(),
+      sessionId: note.sessionId ?? undefined,
+      noteUpdatedAt: note.updatedAt,
+      chatOpen,
+      nextSteps: computeNoteNextSteps(note.id),
     };
+  }
+
+  function openNoteChatForSession(sessionId: string): boolean {
+    const note = noteForSession(sessionId);
+    if (note) {
+      openNote = noteToOpenState(note, true);
+      return true;
+    }
+
+    const pendingNote = getPendingSessionItems(branch.id).find(
+      (item) =>
+        item.sessionId === sessionId &&
+        (item.type === 'generating-note' || item.type === 'queued-note')
+    );
+    if (!pendingNote) return false;
+
+    openNote = {
+      title: pendingNote.title,
+      content: '',
+      sessionId,
+      chatOpen: true,
+    };
+    return true;
   }
 
   function handleCommitClick(sha: string) {
@@ -1333,35 +1362,39 @@
       return {
         kind: 'note',
         noteKind: 'branch',
-        id: openNote.noteId,
-        ref: `#note:${openNote.noteId}`,
+        id: openNote.noteId ?? openNote.sessionId ?? 'note',
+        ref: openNote.noteId ? `#note:${openNote.noteId}` : `#chat:${openNote.sessionId}`,
         title: openNote.title,
         content: openNote.content,
-        view: 'note',
+        view: openNote.chatOpen ? 'chat' : 'note',
         sessionId: openNote.sessionId,
         noteUpdatedAt: openNote.noteUpdatedAt,
         branchId: branch.id,
         projectId: branch.projectId,
+        repoDir: branch.worktreePath,
+        repoLabel,
         hashtagItems,
         diffContext: referenceDiffContext,
       };
     }
 
     if (sessionMgr.openSessionId) {
-      const noteInfo = findNoteForSession(sessionMgr.openSessionId);
-      if (noteInfo) {
+      const note = noteForSession(sessionMgr.openSessionId);
+      if (note) {
         return {
           kind: 'note',
           noteKind: 'branch',
-          id: noteInfo.id,
-          ref: `#note:${noteInfo.id}`,
-          title: noteInfo.title,
-          content: noteInfo.content,
+          id: note.id,
+          ref: `#note:${note.id}`,
+          title: note.title,
+          content: note.content,
           view: 'chat',
           sessionId: sessionMgr.openSessionId,
-          noteUpdatedAt: noteInfo.updatedAt,
+          noteUpdatedAt: note.updatedAt,
           branchId: branch.id,
           projectId: branch.projectId,
+          repoDir: branch.worktreePath,
+          repoLabel,
           hashtagItems,
           diffContext: referenceDiffContext,
         };
@@ -1731,7 +1764,11 @@
               onRetry={() => loadTimeline()}
               deletingItems={timelineDeletingItems}
               reviewCommentBreakdown={timelineReviewDetailsById}
-              onSessionClick={(sid) => sessionMgr.handleTimelineSessionClick(sid)}
+              onSessionClick={(sid) => {
+                if (!openNoteChatForSession(sid)) {
+                  sessionMgr.handleTimelineSessionClick(sid);
+                }
+              }}
               onResumeClick={(sid) => {
                 commands
                   .resumeSession(sid, 'Continue where you left off.', undefined, branch.id)
@@ -1946,21 +1983,7 @@
     branchId={branch.id}
     projectId={branch.projectId}
     {repoLabel}
-    noteInfo={findNoteForSession(sessionMgr.openSessionId)}
     referenceNav={disabledReferenceNav}
-    onOpenNote={(note) => {
-      const sid = sessionMgr.openSessionId;
-      sessionMgr.openSessionId = null;
-      openNote = {
-        noteId: note.id,
-        title: note.title,
-        content: note.content,
-        sessionId: sid ?? undefined,
-        noteUpdatedAt: note.updatedAt,
-        chatOpen: true,
-        nextSteps: computeNoteNextSteps(note.id),
-      };
-    }}
     onClose={handleSessionModalClose}
     onHashtagClick={handleHashtagClick}
   />

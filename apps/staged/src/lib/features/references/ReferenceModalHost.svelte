@@ -4,7 +4,6 @@
   import SessionModal from '../sessions/SessionModal.svelte';
   import ImageViewerModal from '../timeline/ImageViewerModal.svelte';
   import { openDiffRoute } from '../layout/navigation.svelte';
-  import type { LinkedNoteContext } from '../sessions/noteFreshness';
   import type { HashtagItem } from '../../types';
   import {
     clearReferenceHistory,
@@ -21,6 +20,7 @@
     type HashtagClickInfo,
     type ReferenceChatEntry,
     type ReferenceHistoryEntry,
+    type ReferenceNoteEntry,
     type ReferenceNavState,
   } from './referenceHistory.svelte';
 
@@ -40,6 +40,13 @@
     return () => {
       window.removeEventListener('staged:diff-route-popped', handleDiffRoutePopped);
     };
+  });
+
+  $effect(() => {
+    if (entry?.kind !== 'chat') return;
+    const noteEntry = noteEntryForChat(entry);
+    if (!noteEntry) return;
+    replaceCurrentReferenceEntry(noteEntry);
   });
 
   function navigateBack() {
@@ -74,40 +81,25 @@
     activateEntry(target);
   }
 
-  function handleOpenNote(note: LinkedNoteContext) {
-    const current = currentReferenceEntry();
-    if (current?.kind === 'note') {
-      setCurrentNoteView('note');
-      return;
-    }
-    if (current?.kind !== 'chat') return;
-
-    replaceCurrentReferenceEntry({
-      kind: 'note',
-      noteKind: current.branchId ? 'branch' : 'project',
-      id: note.id,
-      ref: `#note:${note.id}`,
-      title: note.title,
-      content: note.content,
-      view: 'note',
-      sessionId: current.sessionId,
-      noteUpdatedAt: note.updatedAt,
-      branchId: current.branchId,
-      projectId: current.projectId,
-      hashtagItems: current.hashtagItems,
-      diffContext: current.diffContext,
-    });
-  }
-
-  function chatNoteInfo(entry: ReferenceChatEntry): LinkedNoteContext | null {
+  function noteEntryForChat(entry: ReferenceChatEntry): ReferenceNoteEntry | null {
     const note = noteItemForSession(entry.sessionId, entry.hashtagItems);
     if (!note?.noteContent && note?.noteContent !== '') return null;
     return {
+      kind: 'note',
+      noteKind: note.type === 'project-note' ? 'project' : 'branch',
       id: note.id,
+      ref: note.type === 'project-note' ? `#project-note:${note.id}` : `#note:${note.id}`,
       title: note.title,
       content: note.noteContent,
-      updatedAt: note.noteUpdatedAt ?? 0,
-      hasParsedNote: !!note.noteContent.trim(),
+      view: 'chat',
+      sessionId: entry.sessionId,
+      noteUpdatedAt: note.noteUpdatedAt,
+      branchId: note.branchId ?? entry.branchId,
+      projectId: note.projectId ?? entry.projectId,
+      repoDir: entry.repoDir,
+      repoLabel: entry.repoLabel,
+      hashtagItems: entry.hashtagItems,
+      diffContext: entry.diffContext,
     };
   }
 
@@ -131,6 +123,8 @@
     noteKind={entry.noteKind}
     branchId={entry.branchId}
     projectId={entry.projectId}
+    repoDir={entry.repoDir}
+    repoLabel={entry.repoLabel}
     chatOpen={entry.view === 'chat'}
     onChatOpenChange={(open) => setCurrentNoteView(open ? 'chat' : 'note')}
     hashtagItems={entry.hashtagItems}
@@ -139,20 +133,42 @@
     onHashtagClick={handleHashtagClick}
   />
 {:else if entry?.kind === 'chat'}
-  <SessionModal
-    open={true}
-    sessionId={entry.sessionId}
-    repoDir={entry.repoDir}
-    branchId={entry.branchId}
-    projectId={entry.projectId}
-    repoLabel={entry.repoLabel}
-    hashtagItems={entry.hashtagItems}
-    noteInfo={chatNoteInfo(entry)}
-    {referenceNav}
-    onOpenNote={handleOpenNote}
-    onClose={handleClose}
-    onHashtagClick={handleHashtagClick}
-  />
+  {@const noteEntry = noteEntryForChat(entry)}
+  {#if noteEntry}
+    <NoteModal
+      open={true}
+      title={noteEntry.title}
+      content={noteEntry.content}
+      sessionId={noteEntry.sessionId}
+      noteUpdatedAt={noteEntry.noteUpdatedAt}
+      noteId={noteEntry.id}
+      noteKind={noteEntry.noteKind}
+      branchId={noteEntry.branchId}
+      projectId={noteEntry.projectId}
+      repoDir={noteEntry.repoDir}
+      repoLabel={noteEntry.repoLabel}
+      chatOpen={true}
+      onChatOpenChange={(open) =>
+        replaceCurrentReferenceEntry({ ...noteEntry, view: open ? 'chat' : 'note' })}
+      hashtagItems={noteEntry.hashtagItems}
+      {referenceNav}
+      onClose={handleClose}
+      onHashtagClick={handleHashtagClick}
+    />
+  {:else}
+    <SessionModal
+      open={true}
+      sessionId={entry.sessionId}
+      repoDir={entry.repoDir}
+      branchId={entry.branchId}
+      projectId={entry.projectId}
+      repoLabel={entry.repoLabel}
+      hashtagItems={entry.hashtagItems}
+      {referenceNav}
+      onClose={handleClose}
+      onHashtagClick={handleHashtagClick}
+    />
+  {/if}
 {:else if entry?.kind === 'image'}
   <ImageViewerModal
     open={true}

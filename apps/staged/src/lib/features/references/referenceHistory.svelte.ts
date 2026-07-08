@@ -42,6 +42,8 @@ export type ReferenceNoteEntry = ReferenceDialogContext & {
   noteUpdatedAt?: number | null;
   branchId?: string | null;
   projectId?: string | null;
+  repoDir?: DisplayRootInput;
+  repoLabel?: Pick<ProjectRepo, 'githubRepo' | 'subpath' | 'headRepo'> | null;
 };
 
 export type ReferenceChatEntry = ReferenceDialogContext & {

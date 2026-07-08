@@ -38,23 +38,68 @@
     onEffortChange,
   }: Props = $props();
 
+  let effortColumnWidth = $state(0);
+  let retainedEffortColumnWidth = $state<number | null>(null);
+  let retainedEffortTriggerLabel = $state<string | null>(null);
+  let retainedProviderId = $state<string | null>(null);
+
+  let loadingEffortOptions = $derived(loading && !!modelSelector && !effortSelector);
+  let modelTriggerLabel = $derived(selectorValueLabel(modelSelector, selectedModelValue));
+  let effortTriggerLabel = $derived(selectorValueLabel(effortSelector, selectedEffortValue));
+  let displayedEffortTriggerLabel = $derived(
+    effortTriggerLabel ?? (loadingEffortOptions ? retainedEffortTriggerLabel : null)
+  );
   // The provider is identified by the trigger icon; the label only carries the
   // model/effort values, falling back to the provider name before discovery.
   let triggerParts = $derived(
     [
-      selectorValueLabel(modelSelector, selectedModelValue),
-      selectorValueLabel(effortSelector, selectedEffortValue),
-    ].filter((part): part is string => !!part)
+      modelTriggerLabel ? { id: 'model', label: modelTriggerLabel } : null,
+      displayedEffortTriggerLabel ? { id: 'effort', label: displayedEffortTriggerLabel } : null,
+    ].filter((part): part is { id: string; label: string } => !!part)
   );
   let triggerLabel = $derived(
-    triggerParts.length > 0 ? triggerParts.join(' · ') : (providerLabel ?? providerId ?? 'Agent')
+    triggerParts.length > 0
+      ? triggerParts.map((part) => part.label).join(' · ')
+      : (providerLabel ?? providerId ?? 'Agent')
+  );
+  let renderedTriggerParts = $derived(
+    triggerParts.length > 0
+      ? triggerParts
+      : [{ id: 'provider', label: providerLabel ?? providerId ?? 'Agent' }]
   );
   let shouldRender = $derived(
     !!providerId && (!!modelSelector || !!effortSelector || loading || !!error)
   );
   let hasPickerColumns = $derived(
-    !!modelSelector || !!effortSelector || (loading && !modelSelector && !effortSelector)
+    !!modelSelector || !!effortSelector || loadingEffortOptions || (loading && !modelSelector)
   );
+  let effortColumnStyle = $derived(
+    loadingEffortOptions && retainedEffortColumnWidth
+      ? `width: ${retainedEffortColumnWidth}px;`
+      : undefined
+  );
+
+  $effect(() => {
+    const nextProviderId = providerId ?? null;
+    if (nextProviderId === retainedProviderId) return;
+
+    retainedProviderId = nextProviderId;
+    retainedEffortTriggerLabel = null;
+    retainedEffortColumnWidth = null;
+    effortColumnWidth = 0;
+  });
+
+  $effect(() => {
+    if (!loading && effortTriggerLabel) {
+      retainedEffortTriggerLabel = effortTriggerLabel;
+    }
+  });
+
+  $effect(() => {
+    if (!loading && effortSelector && effortColumnWidth > 0) {
+      retainedEffortColumnWidth = Math.ceil(effortColumnWidth);
+    }
+  });
 
   function selectorValueLabel(
     selector: AcpConfigSelector | null,
@@ -73,6 +118,7 @@
   <AcpConfigPickerShell
     {providerId}
     {triggerLabel}
+    triggerParts={renderedTriggerParts}
     triggerTitle={disabled
       ? 'Configuration changes are available after this turn'
       : `Select model and effort (${providerLabel ?? providerId ?? 'Agent'})`}
@@ -95,7 +141,7 @@
     {/if}
 
     {#if effortSelector}
-      <div class="picker-column" data-picker-column="effort">
+      <div class="picker-column" data-picker-column="effort" bind:clientWidth={effortColumnWidth}>
         <AcpConfigPickerSection
           title={effortSelector.label || 'Effort'}
           selector={effortSelector}
@@ -104,14 +150,24 @@
           onValueChange={(value) => onEffortChange?.(value)}
         />
       </div>
+    {:else if loadingEffortOptions}
+      <div class="picker-column" data-picker-column="effort" style={effortColumnStyle}>
+        <DropdownMenu.Label class="picker-section-label">Effort</DropdownMenu.Label>
+        <DropdownMenu.Item disabled>
+          <span class="picker-status-row">
+            <Spinner size={12} />
+            <span class="picker-status-text">Loading options…</span>
+          </span>
+        </DropdownMenu.Item>
+      </div>
     {/if}
 
-    {#if loading && (!modelSelector || !effortSelector)}
+    {#if loading && !loadingEffortOptions && (!modelSelector || !effortSelector)}
       <div class="picker-column" data-picker-column="status">
         <DropdownMenu.Item disabled>
           <span class="picker-status-row">
             <Spinner size={12} />
-            Loading options…
+            <span class="picker-status-text">Loading options…</span>
           </span>
         </DropdownMenu.Item>
       </div>

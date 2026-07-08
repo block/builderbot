@@ -2,15 +2,22 @@
 <script lang="ts">
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import type { Snippet } from 'svelte';
+  import { fade, fly } from 'svelte/transition';
   import AgentIcon from './AgentIcon.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import { cn } from '$lib/components/utils';
   import { handleAcpPickerGridKeydown, handleAcpPickerOpenAutoFocus } from './acpPickerKeyboard';
 
+  interface TriggerPart {
+    id: string;
+    label: string;
+  }
+
   interface Props {
     providerId: string | null;
     triggerLabel: string;
+    triggerParts?: TriggerPart[];
     triggerTitle: string;
     disabled?: boolean;
     dropUp?: boolean;
@@ -25,6 +32,7 @@
   let {
     providerId,
     triggerLabel,
+    triggerParts = [],
     triggerTitle,
     disabled = false,
     dropUp = false,
@@ -38,6 +46,9 @@
 
   let open = $state(false);
   let contentEl = $state<HTMLElement | null>(null);
+  let renderedTriggerParts = $derived(
+    triggerParts.length > 0 ? triggerParts : [{ id: 'label', label: triggerLabel }]
+  );
 
   function handlePickerKeydown(event: KeyboardEvent) {
     handleAcpPickerGridKeydown(event, contentEl, {
@@ -59,7 +70,24 @@
       title={triggerTitle}
     >
       <AgentIcon id={providerId ?? ''} size={12} />
-      <span class="selector-label min-w-0 truncate whitespace-nowrap">{triggerLabel}</span>
+      <span class="selector-label" aria-label={triggerLabel}>
+        {#each renderedTriggerParts as part, index (part.id)}
+          {#if index > 0}
+            <span class="trigger-separator" aria-hidden="true">·</span>
+          {/if}
+          <span class="trigger-part">
+            {#key part.label}
+              <span
+                class="trigger-part-value"
+                in:fly={{ x: 4, duration: 120 }}
+                out:fade={{ duration: 80 }}
+              >
+                {part.label}
+              </span>
+            {/key}
+          </span>
+        {/each}
+      </span>
       {#if loading}
         <Spinner size={12} />
       {:else}
@@ -95,11 +123,56 @@
     title={triggerTitle}
   >
     <AgentIcon id={providerId ?? ''} size={12} />
-    <span class="selector-label min-w-0 truncate whitespace-nowrap">{triggerLabel}</span>
+    <span class="selector-label" aria-label={triggerLabel}>
+      {#each renderedTriggerParts as part, index (part.id)}
+        {#if index > 0}
+          <span class="trigger-separator" aria-hidden="true">·</span>
+        {/if}
+        <span class="trigger-part">
+          {#key part.label}
+            <span
+              class="trigger-part-value"
+              in:fly={{ x: 4, duration: 120 }}
+              out:fade={{ duration: 80 }}
+            >
+              {part.label}
+            </span>
+          {/key}
+        </span>
+      {/each}
+    </span>
   </button>
 {/if}
 
 <style>
+  .selector-label {
+    display: inline-flex;
+    min-width: 0;
+    align-items: center;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+
+  .trigger-part {
+    display: inline-grid;
+    min-width: 0;
+    flex: 0 1 auto;
+    overflow: hidden;
+  }
+
+  .trigger-part-value {
+    grid-area: 1 / 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .trigger-separator {
+    flex: 0 0 auto;
+    padding: 0 0.25rem;
+  }
+
   .picker-column-grid {
     display: inline-grid;
     grid-auto-columns: max-content;
@@ -137,6 +210,13 @@
     gap: 6px;
     color: var(--text-muted);
     font-size: var(--size-xs);
+  }
+
+  :global(.picker-status-text) {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   @media (max-width: 560px) {

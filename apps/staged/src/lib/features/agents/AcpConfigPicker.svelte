@@ -52,6 +52,9 @@
   let effortSelectionExplicit = $state(false);
   let modelSelectorKey = $state<string | null>(null);
   let effortSelectorKey = $state<string | null>(null);
+  let effortColumnWidth = $state(0);
+  let retainedEffortColumnWidth = $state<number | null>(null);
+  let retainedEffortTriggerLabel = $state<string | null>(null);
   let discoveryRun = 0;
 
   let agents = $derived<AgentOption[]>(remote ? REMOTE_AGENTS : agentState.providers);
@@ -59,16 +62,34 @@
   let selectedProvider = $derived(agents.find((provider) => provider.id === selectedProviderId));
   let modelSelector = $derived(config?.model ?? null);
   let effortSelector = $derived(config?.effort ?? null);
+  let loadingEffortOptions = $derived(configLoading && !!modelSelector && !effortSelector);
+  let modelTriggerLabel = $derived(selectorValueLabel(modelSelector, selectedModelValue));
+  let effortTriggerLabel = $derived(selectorValueLabel(effortSelector, selectedEffortValue));
+  let displayedEffortTriggerLabel = $derived(
+    effortTriggerLabel ?? (loadingEffortOptions ? retainedEffortTriggerLabel : null)
+  );
   // The provider is identified by the trigger icon; the label only carries the
   // model/effort values, falling back to the provider name before discovery.
   let triggerParts = $derived(
     [
-      selectorValueLabel(modelSelector, selectedModelValue),
-      selectorValueLabel(effortSelector, selectedEffortValue),
-    ].filter((part): part is string => !!part)
+      modelTriggerLabel ? { id: 'model', label: modelTriggerLabel } : null,
+      displayedEffortTriggerLabel ? { id: 'effort', label: displayedEffortTriggerLabel } : null,
+    ].filter((part): part is { id: string; label: string } => !!part)
   );
   let triggerLabel = $derived(
-    triggerParts.length > 0 ? triggerParts.join(' · ') : (selectedProvider?.label ?? 'Agent')
+    triggerParts.length > 0
+      ? triggerParts.map((part) => part.label).join(' · ')
+      : (selectedProvider?.label ?? 'Agent')
+  );
+  let renderedTriggerParts = $derived(
+    triggerParts.length > 0
+      ? triggerParts
+      : [{ id: 'provider', label: selectedProvider?.label ?? 'Agent' }]
+  );
+  let effortColumnStyle = $derived(
+    loadingEffortOptions && retainedEffortColumnWidth
+      ? `width: ${retainedEffortColumnWidth}px;`
+      : undefined
   );
   let canOpen = $derived(
     agents.length > 1 || !!modelSelector || !!effortSelector || configLoading || !!configError
@@ -108,6 +129,9 @@
     effortSelectionExplicit = false;
     modelSelectorKey = null;
     effortSelectorKey = null;
+    retainedEffortTriggerLabel = null;
+    retainedEffortColumnWidth = null;
+    effortColumnWidth = 0;
     config = null;
     configLoading = true;
     configError = null;
@@ -159,6 +183,18 @@
       selectedEffortValue = defaultSelectorValue(effortSelector);
       effortSelectionExplicit = false;
       effortSelectorKey = nextKey;
+    }
+  });
+
+  $effect(() => {
+    if (!configLoading && effortTriggerLabel) {
+      retainedEffortTriggerLabel = effortTriggerLabel;
+    }
+  });
+
+  $effect(() => {
+    if (!configLoading && effortSelector && effortColumnWidth > 0) {
+      retainedEffortColumnWidth = Math.ceil(effortColumnWidth);
     }
   });
 
@@ -250,6 +286,7 @@
   <AcpConfigPickerShell
     providerId={selectedProviderId}
     {triggerLabel}
+    triggerParts={renderedTriggerParts}
     triggerTitle={canOpen
       ? `Select AI configuration (${selectedProvider?.label ?? 'Agent'})`
       : (selectedProvider?.label ?? 'Agent')}
@@ -297,7 +334,7 @@
     {/if}
 
     {#if effortSelector}
-      <div class="picker-column" data-picker-column="effort">
+      <div class="picker-column" data-picker-column="effort" bind:clientWidth={effortColumnWidth}>
         <AcpConfigPickerSection
           title={effortSelector.label || 'Effort'}
           selector={effortSelector}
@@ -305,14 +342,24 @@
           onValueChange={handleEffortChange}
         />
       </div>
+    {:else if loadingEffortOptions}
+      <div class="picker-column" data-picker-column="effort" style={effortColumnStyle}>
+        <DropdownMenu.Label class="picker-section-label">Effort</DropdownMenu.Label>
+        <DropdownMenu.Item disabled>
+          <span class="picker-status-row">
+            <Spinner size={12} />
+            <span class="picker-status-text">Loading options…</span>
+          </span>
+        </DropdownMenu.Item>
+      </div>
     {/if}
 
-    {#if configLoading && (!modelSelector || !effortSelector)}
+    {#if configLoading && !loadingEffortOptions && (!modelSelector || !effortSelector)}
       <div class="picker-column" data-picker-column="status">
         <DropdownMenu.Item disabled>
           <span class="picker-status-row">
             <Spinner size={12} />
-            Loading options…
+            <span class="picker-status-text">Loading options…</span>
           </span>
         </DropdownMenu.Item>
       </div>

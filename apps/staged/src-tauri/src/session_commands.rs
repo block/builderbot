@@ -358,9 +358,17 @@ struct AcpConfigDiscoveryCacheEntry {
 
 static ACP_CONFIG_DISCOVERY_CACHE: OnceLock<Mutex<HashMap<String, AcpConfigDiscoveryCacheEntry>>> =
     OnceLock::new();
+static ACP_CONFIG_DISCOVERY_MODEL_CACHE: OnceLock<
+    Mutex<HashMap<String, AcpConfigDiscoveryCacheEntry>>,
+> = OnceLock::new();
 
 fn acp_config_discovery_cache() -> &'static Mutex<HashMap<String, AcpConfigDiscoveryCacheEntry>> {
     ACP_CONFIG_DISCOVERY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn acp_config_discovery_model_cache(
+) -> &'static Mutex<HashMap<String, AcpConfigDiscoveryCacheEntry>> {
+    ACP_CONFIG_DISCOVERY_MODEL_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn normalized_acp_config_provider_id(provider_id: &str) -> Result<String, String> {
@@ -369,6 +377,10 @@ fn normalized_acp_config_provider_id(provider_id: &str) -> Result<String, String
         return Err("ACP provider ID is required for config discovery".to_string());
     }
     Ok(provider_id)
+}
+
+fn acp_config_discovery_model_cache_key(provider_id: &str, selected_model_value: &str) -> String {
+    format!("{provider_id}\0{selected_model_value}")
 }
 
 #[derive(Debug)]
@@ -781,6 +793,64 @@ where
     }
 }
 
+fn discover_acp_config_for_model_with_cache<F>(
+    provider_id: String,
+    working_dir: PathBuf,
+    selected_model_value: String,
+    force: bool,
+    fetch: F,
+) -> Result<AcpConfigDiscovery, String>
+where
+    F: FnOnce(String, PathBuf, Option<String>) -> Result<AcpConfigDiscovery, String>,
+{
+    let provider_id = normalized_acp_config_provider_id(&provider_id)?;
+    let selected_model_value = normalize_selected_model_value(Some(selected_model_value))
+        .ok_or_else(|| {
+            "ACP model value is required for model-specific config discovery".to_string()
+        })?;
+    let cache_key = acp_config_discovery_model_cache_key(&provider_id, &selected_model_value);
+    let cached_entry = {
+        let cache = acp_config_discovery_model_cache().lock().unwrap();
+        cache.get(&cache_key).cloned()
+    };
+
+    if !force {
+        if let Some(entry) = &cached_entry {
+            if entry.fetched_at.elapsed() < ACP_CONFIG_DISCOVERY_CACHE_TTL {
+                return Ok(entry.discovery.clone());
+            }
+        }
+    }
+
+    match fetch(
+        provider_id.clone(),
+        working_dir,
+        Some(selected_model_value.clone()),
+    ) {
+        Ok(discovery) => {
+            let mut cache = acp_config_discovery_model_cache().lock().unwrap();
+            cache.insert(
+                cache_key,
+                AcpConfigDiscoveryCacheEntry {
+                    discovery: discovery.clone(),
+                    fetched_at: Instant::now(),
+                },
+            );
+            Ok(discovery)
+        }
+        Err(e) => {
+            if let Some(entry) = cached_entry {
+                log::warn!(
+                    "ACP config discovery refresh failed for {provider_id}/{selected_model_value}; using stale cached options: {e}"
+                );
+                Ok(entry.discovery)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
 /// Discover model/effort selectors for a provider in the given working
 /// directory context.
 #[tauri::command(rename_all = "camelCase")]
@@ -794,8 +864,14 @@ pub async fn discover_acp_config(
     let force = force.unwrap_or(false);
     let selected_model_value = normalize_selected_model_value(selected_model_value);
     tokio::task::spawn_blocking(move || {
-        if selected_model_value.is_some() {
-            discover_acp_config_for_provider(provider_id, working_dir, selected_model_value)
+        if let Some(selected_model_value) = selected_model_value {
+            discover_acp_config_for_model_with_cache(
+                provider_id,
+                working_dir,
+                selected_model_value,
+                force,
+                discover_acp_config_for_provider,
+            )
         } else {
             discover_acp_config_for_provider_with_cache(
                 provider_id,
@@ -4932,6 +5008,29 @@ mod tests {
         }
     }
 
+    fn test_acp_config_discovery_with_effort(
+        provider_id: &str,
+        current_model_value_id: &str,
+        current_effort_value_id: &str,
+        effort_values: &[&str],
+    ) -> AcpConfigDiscovery {
+        let mut discovery = test_acp_config_discovery(provider_id, current_model_value_id);
+        discovery.effort = Some(crate::acp_config::NormalizedAcpConfigSelector {
+            config_id: "reasoning".to_string(),
+            label: "Reasoning".to_string(),
+            current_value_id: current_effort_value_id.to_string(),
+            options: effort_values
+                .iter()
+                .map(|value| crate::acp_config::NormalizedAcpConfigValueOption {
+                    value_id: (*value).to_string(),
+                    label: value.to_ascii_uppercase(),
+                    group_label: None,
+                })
+                .collect(),
+        });
+        discovery
+    }
+
     fn test_acp_config_value_selection(
         config_id: &str,
         value_id: &str,
@@ -4955,6 +5054,12 @@ mod tests {
             .lock()
             .unwrap()
             .remove(provider_id);
+    }
+
+    fn remove_acp_config_model_cache_entry(provider_id: &str, selected_model_value: &str) {
+        acp_config_discovery_model_cache().lock().unwrap().remove(
+            &acp_config_discovery_model_cache_key(provider_id, selected_model_value),
+        );
     }
 
     fn create_auto_review(
@@ -5943,6 +6048,152 @@ mod tests {
             "opus".to_string()
         );
         assert_eq!(third, second);
+    }
+
+    #[test]
+    fn acp_config_discovery_model_cache_is_provider_and_model_scoped() {
+        let provider_id = "cache-provider-model-scoped";
+        remove_acp_config_model_cache_entry(provider_id, "sonnet");
+        remove_acp_config_model_cache_entry(provider_id, "opus");
+        let calls = Arc::new(Mutex::new(Vec::<(PathBuf, Option<String>)>::new()));
+
+        let calls_for_sonnet = Arc::clone(&calls);
+        let sonnet = discover_acp_config_for_model_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo-one"),
+            "sonnet".to_string(),
+            false,
+            move |provider_id, working_dir, selected_model_value| {
+                calls_for_sonnet
+                    .lock()
+                    .unwrap()
+                    .push((working_dir, selected_model_value));
+                Ok(test_acp_config_discovery_with_effort(
+                    &provider_id,
+                    "sonnet",
+                    "medium",
+                    &["low", "medium"],
+                ))
+            },
+        )
+        .unwrap();
+        let sonnet_cached = discover_acp_config_for_model_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo-two"),
+            "sonnet".to_string(),
+            false,
+            |_provider_id, _working_dir, _selected_model_value| {
+                panic!("fresh model cache hit should not refetch")
+            },
+        )
+        .unwrap();
+        let calls_for_opus = Arc::clone(&calls);
+        let opus = discover_acp_config_for_model_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo-three"),
+            "opus".to_string(),
+            false,
+            move |provider_id, working_dir, selected_model_value| {
+                calls_for_opus
+                    .lock()
+                    .unwrap()
+                    .push((working_dir, selected_model_value));
+                Ok(test_acp_config_discovery_with_effort(
+                    &provider_id,
+                    "opus",
+                    "low",
+                    &["low"],
+                ))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(sonnet_cached, sonnet);
+        assert_eq!(
+            sonnet
+                .effort
+                .as_ref()
+                .unwrap()
+                .options
+                .iter()
+                .map(|option| option.value_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["low", "medium"]
+        );
+        assert_eq!(
+            opus.effort
+                .as_ref()
+                .unwrap()
+                .options
+                .iter()
+                .map(|option| option.value_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["low"]
+        );
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[
+                (PathBuf::from("/repo-one"), Some("sonnet".to_string())),
+                (PathBuf::from("/repo-three"), Some("opus".to_string())),
+            ]
+        );
+
+        remove_acp_config_model_cache_entry(provider_id, "sonnet");
+        remove_acp_config_model_cache_entry(provider_id, "opus");
+    }
+
+    #[test]
+    fn acp_config_discovery_model_cache_does_not_replace_provider_cache() {
+        let provider_id = "cache-provider-model-does-not-poison-default";
+        remove_acp_config_cache_entry(provider_id);
+        remove_acp_config_model_cache_entry(provider_id, "opus");
+
+        let default = discover_acp_config_for_provider_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo"),
+            false,
+            |provider_id, _working_dir| Ok(test_acp_config_discovery(&provider_id, "sonnet")),
+        )
+        .unwrap();
+        let model_specific = discover_acp_config_for_model_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo"),
+            "opus".to_string(),
+            false,
+            |provider_id, _working_dir, _selected_model_value| {
+                Ok(test_acp_config_discovery_with_effort(
+                    &provider_id,
+                    "opus",
+                    "low",
+                    &["low"],
+                ))
+            },
+        )
+        .unwrap();
+        let default_again = discover_acp_config_for_provider_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo"),
+            false,
+            |_provider_id, _working_dir| panic!("provider cache should remain fresh"),
+        )
+        .unwrap();
+
+        assert_eq!(default_again, default);
+        assert!(default_again.effort.is_none());
+        assert_eq!(
+            model_specific
+                .effort
+                .as_ref()
+                .unwrap()
+                .options
+                .iter()
+                .map(|option| option.value_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["low"]
+        );
+
+        remove_acp_config_cache_entry(provider_id);
+        remove_acp_config_model_cache_entry(provider_id, "opus");
     }
 
     #[test]

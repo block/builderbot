@@ -5,6 +5,10 @@ const CHECKED_ITEM_SELECTOR = "[aria-checked='true']";
 
 type PickerDirection = 'previous' | 'next';
 
+interface PickerKeydownOptions {
+  onDismiss?: () => void;
+}
+
 export function handleAcpPickerOpenAutoFocus(event: Event, root: HTMLElement | null): void {
   event.preventDefault();
   window.setTimeout(() => focusInitialAcpPickerColumn(root), 0);
@@ -12,9 +16,17 @@ export function handleAcpPickerOpenAutoFocus(event: Event, root: HTMLElement | n
 
 export function handleAcpPickerGridKeydown(
   event: KeyboardEvent,
-  root: HTMLElement | null
+  root: HTMLElement | null,
+  options: PickerKeydownOptions = {}
 ): boolean {
   if (event.defaultPrevented || !root) return false;
+
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    event.stopPropagation();
+    options.onDismiss?.();
+    return true;
+  }
 
   if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
     return focusVertical(event, root, event.key === 'ArrowUp' ? 'previous' : 'next');
@@ -54,7 +66,7 @@ function focusVertical(
 
   event.preventDefault();
   event.stopPropagation();
-  focusItem(current.items[nextIndex]);
+  focusAndActivateItem(current.items[nextIndex]);
   return true;
 }
 
@@ -150,4 +162,10 @@ function preferredItemIndex(items: HTMLElement[]): number {
 
 function focusItem(item: HTMLElement | undefined): void {
   item?.focus({ preventScroll: true });
+}
+
+function focusAndActivateItem(item: HTMLElement | undefined): void {
+  if (!item) return;
+  focusItem(item);
+  item.click();
 }

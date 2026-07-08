@@ -74,13 +74,11 @@
   }
 
   function handlePickerKeydown(event: KeyboardEvent) {
-    if (handleAcpPickerGridKeydown(event, contentEl)) return;
-
-    if (event.key === 'Enter') {
-      window.setTimeout(() => {
+    handleAcpPickerGridKeydown(event, contentEl, {
+      onDismiss: () => {
         open = false;
-      }, 0);
-    }
+      },
+    });
   }
 </script>
 

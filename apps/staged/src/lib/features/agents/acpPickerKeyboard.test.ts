@@ -40,6 +40,22 @@ describe('acp picker keyboard navigation', () => {
     expect(document.activeElement?.textContent).toBe('Model B');
   });
 
+  it('activates values as up and down move through a column', () => {
+    const root = buildPicker();
+    const clicked: string[] = [];
+    trackClicks(root, clicked);
+    listenForPickerKeys(root);
+    getItem(root, 'Model B').focus();
+
+    expect(pressKey('ArrowUp')).toBe(true);
+    expect(document.activeElement?.textContent).toBe('Model A');
+    expect(clicked).toEqual(['Model A']);
+
+    expect(pressKey('ArrowDown')).toBe(true);
+    expect(document.activeElement?.textContent).toBe('Model B');
+    expect(clicked).toEqual(['Model A', 'Model B']);
+  });
+
   it('moves left and right between columns', () => {
     const root = buildPicker();
     listenForPickerKeys(root);
@@ -50,6 +66,21 @@ describe('acp picker keyboard navigation', () => {
 
     expect(pressKey('ArrowLeft')).toBe(true);
     expect(document.activeElement?.textContent).toBe('Model B');
+  });
+
+  it('dismisses on return without activating the focused item', () => {
+    const root = buildPicker();
+    const clicked: string[] = [];
+    let dismissed = false;
+    trackClicks(root, clicked);
+    listenForPickerKeys(root, () => {
+      dismissed = true;
+    });
+    getItem(root, 'Model B').focus();
+
+    expect(pressKey('Enter')).toBe(true);
+    expect(dismissed).toBe(true);
+    expect(clicked).toEqual([]);
   });
 });
 
@@ -88,11 +119,11 @@ function item(label: string, options: { checked?: boolean } = {}): HTMLElement {
   return element;
 }
 
-function listenForPickerKeys(root: HTMLElement): void {
+function listenForPickerKeys(root: HTMLElement, onDismiss?: () => void): void {
   root.addEventListener(
     'keydown',
     (event) => {
-      handleAcpPickerGridKeydown(event, root);
+      handleAcpPickerGridKeydown(event, root, { onDismiss });
     },
     { capture: true }
   );
@@ -119,4 +150,12 @@ function getItem(root: HTMLElement, label: string): HTMLElement {
   }
 
   return item;
+}
+
+function trackClicks(root: HTMLElement, clicked: string[]): void {
+  root.querySelectorAll<HTMLElement>("[data-slot='dropdown-menu-radio-item']").forEach((item) => {
+    item.addEventListener('click', () => {
+      clicked.push(item.textContent ?? '');
+    });
+  });
 }

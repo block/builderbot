@@ -54,6 +54,7 @@
   let effortSelectionExplicit = $state(false);
   let modelSelectorKey = $state<string | null>(null);
   let effortSelectorKey = $state<string | null>(null);
+  let open = $state(false);
   let contentEl = $state<HTMLElement | null>(null);
   let discoveryRun = 0;
 
@@ -175,6 +176,14 @@
     effortSelectionExplicit = true;
   }
 
+  function handlePickerKeydown(event: KeyboardEvent) {
+    handleAcpPickerGridKeydown(event, contentEl, {
+      onDismiss: () => {
+        open = false;
+      },
+    });
+  }
+
   function selectorKey(selector: AcpConfigSelector | null): string | null {
     if (!selector) return null;
     const optionIds = selector.options.map((option) => option.valueId).join(',');
@@ -204,7 +213,7 @@
 
 {#if shouldRender}
   {#if canOpen}
-    <DropdownMenu.Root>
+    <DropdownMenu.Root bind:open>
       <DropdownMenu.Trigger
         class={cn(
           'selector-btn inline-flex min-w-0 items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-[var(--bg-hover)] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40',
@@ -228,7 +237,7 @@
         sideOffset={4}
         class="max-h-[min(360px,calc(100vh-48px))] max-w-[calc(100vw-16px)]"
         onOpenAutoFocus={(event) => handleAcpPickerOpenAutoFocus(event, contentEl)}
-        onkeydowncapture={(event) => handleAcpPickerGridKeydown(event, contentEl)}
+        onkeydowncapture={handlePickerKeydown}
       >
         <div class="picker-column-grid">
           <div class="picker-column" data-picker-column="provider">

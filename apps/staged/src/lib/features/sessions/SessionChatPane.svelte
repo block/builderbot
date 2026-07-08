@@ -203,6 +203,9 @@
   let displayRoots = $state<string[]>([]);
   let currentDisplayRootKey = '';
   let discoveredFollowupConfig = $state<AcpConfigDiscovery | null>(null);
+  let modelSpecificFollowupConfig = $state<AcpConfigDiscovery | null>(null);
+  let modelSpecificFollowupModelValue = $state<string | null>(null);
+  let modelSpecificFollowupSessionId = $state<string | null>(null);
   let followupConfigLoading = $state(false);
   let followupConfigError = $state<string | null>(null);
   let selectedFollowupModelValue = $state<string | null>(null);
@@ -240,12 +243,29 @@
   let rediscoveredFollowupConfig = $derived(
     discoveredFollowupConfig?.providerId === session?.provider ? discoveredFollowupConfig : null
   );
+  let usesModelSpecificFollowupConfig = $derived(
+    !!modelSpecificFollowupModelValue &&
+      modelSpecificFollowupModelValue === selectedFollowupModelValue &&
+      modelSpecificFollowupSessionId === session?.id &&
+      followupModelTouched
+  );
+  let activeModelSpecificFollowupConfig = $derived(
+    usesModelSpecificFollowupConfig && modelSpecificFollowupConfig?.providerId === session?.provider
+      ? modelSpecificFollowupConfig
+      : null
+  );
   let followupModelSelector = $derived(
-    metadataFollowupConfig?.model ?? rediscoveredFollowupConfig?.model ?? null
+    activeModelSpecificFollowupConfig?.model ??
+      metadataFollowupConfig?.model ??
+      rediscoveredFollowupConfig?.model ??
+      null
   );
-  let followupEffortSelector = $derived(
-    metadataFollowupConfig?.effort ?? rediscoveredFollowupConfig?.effort ?? null
-  );
+  let followupEffortSelector = $derived.by(() => {
+    if (usesModelSpecificFollowupConfig) {
+      return activeModelSpecificFollowupConfig?.effort ?? null;
+    }
+    return metadataFollowupConfig?.effort ?? rediscoveredFollowupConfig?.effort ?? null;
+  });
   let followupProviderLabel = $derived(
     agentState.providers.find((provider) => provider.id === session?.provider)?.label ??
       session?.provider ??
@@ -269,7 +289,9 @@
         explicit: shouldSendFollowupSelectorSelection(
           followupEffortSelector,
           selectedFollowupEffortValue,
-          session?.acpConfigSelection?.effort ?? null,
+          usesModelSpecificFollowupConfig && !followupEffortTouched
+            ? null
+            : (session?.acpConfigSelection?.effort ?? null),
           followupEffortTouched
         ),
       },
@@ -778,6 +800,9 @@
         status: 'running',
         acpConfigSelection: acpConfigSelection ?? session.acpConfigSelection ?? null,
       };
+      modelSpecificFollowupConfig = null;
+      modelSpecificFollowupModelValue = null;
+      modelSpecificFollowupSessionId = null;
       startPolling();
       scrollToBottom();
     } catch (e) {
@@ -1237,6 +1262,11 @@
       discoveredFollowupConfig = null;
       followupConfigLoading = false;
       followupConfigError = null;
+      if (!active || !providerId) {
+        modelSpecificFollowupConfig = null;
+        modelSpecificFollowupModelValue = null;
+        modelSpecificFollowupSessionId = null;
+      }
       return;
     }
 
@@ -1282,11 +1312,15 @@
       session?.acpConfigSelection?.model ?? null
     );
     if (key !== followupModelStateKey) {
-      selectedFollowupModelValue = initialSelectorValue(
-        followupModelSelector,
-        session?.acpConfigSelection?.model ?? null
-      );
-      followupModelTouched = false;
+      if (!(
+        followupModelTouched && selectorHasValue(followupModelSelector, selectedFollowupModelValue)
+      )) {
+        selectedFollowupModelValue = initialSelectorValue(
+          followupModelSelector,
+          session?.acpConfigSelection?.model ?? null
+        );
+        followupModelTouched = false;
+      }
       followupModelStateKey = key;
     }
   });
@@ -1346,6 +1380,10 @@
     return selector.options[0]?.valueId ?? null;
   }
 
+  function selectorHasValue(selector: AcpConfigSelector | null, valueId: string | null): boolean {
+    return !!selector && !!valueId && selector.options.some((option) => option.valueId === valueId);
+  }
+
   function shouldSendFollowupSelectorSelection(
     selector: AcpConfigSelector | null,
     valueId: string | null,
@@ -1367,6 +1405,43 @@
   function handleFollowupModelChange(value: string) {
     selectedFollowupModelValue = value;
     followupModelTouched = true;
+    selectedFollowupEffortValue = null;
+    followupEffortTouched = false;
+    modelSpecificFollowupConfig = null;
+    modelSpecificFollowupModelValue = value;
+    modelSpecificFollowupSessionId = session?.id ?? null;
+
+    const providerId = session?.provider ?? null;
+    const workingDir = session?.workingDir ?? null;
+    if (!active || !providerId) return;
+
+    const run = ++followupDiscoveryRun;
+    followupConfigLoading = true;
+    followupConfigError = null;
+
+    discoverAcpConfig(providerId, workingDir, { selectedModelValue: value })
+      .then(({ data, revalidating }) => {
+        if (run !== followupDiscoveryRun) return;
+        modelSpecificFollowupConfig = data;
+        followupConfigLoading = false;
+        revalidating
+          ?.then((fresh) => {
+            if (run === followupDiscoveryRun) {
+              modelSpecificFollowupConfig = fresh;
+            }
+          })
+          .catch((error) => {
+            if (run === followupDiscoveryRun) {
+              console.error('Failed to revalidate ACP config for selected model:', error);
+            }
+          });
+      })
+      .catch((error) => {
+        if (run !== followupDiscoveryRun) return;
+        console.error('Failed to discover ACP config for selected model:', error);
+        followupConfigLoading = false;
+        followupConfigError = error instanceof Error ? error.message : String(error);
+      });
   }
 
   function handleFollowupEffortChange(value: string) {

@@ -2762,9 +2762,14 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let provider_id: String = arg(&args, "providerId")?;
             let working_dir: Option<String> = opt_arg(&args, "workingDir")?;
             let force: Option<bool> = opt_arg(&args, "force")?;
-            let config =
-                crate::session_commands::discover_acp_config(provider_id, working_dir, force)
-                    .await?;
+            let selected_model_value: Option<String> = opt_arg(&args, "selectedModelValue")?;
+            let config = crate::session_commands::discover_acp_config(
+                provider_id,
+                working_dir,
+                force,
+                selected_model_value,
+            )
+            .await?;
             Ok(serde_json::to_value(config).unwrap())
         }
         "get_session" => {

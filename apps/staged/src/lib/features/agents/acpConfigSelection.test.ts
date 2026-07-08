@@ -58,6 +58,28 @@ describe('buildAcpConfigSelection', () => {
     });
   });
 
+  it('omits effort after a model change until effort is explicitly reselected', () => {
+    const effort = selector({
+      configId: 'reasoning_effort',
+      label: 'Effort',
+      currentValueId: 'medium',
+      options: [
+        { valueId: 'medium', label: 'Medium' },
+        { valueId: 'high', label: 'High' },
+      ],
+    });
+
+    expect(
+      buildAcpConfigSelection({
+        model: { selector: selector(), valueId: 'opus', explicit: true },
+        effort: { selector: effort, valueId: 'medium', explicit: false },
+      })
+    ).toEqual({
+      model: { configId: 'model', valueId: 'opus', label: 'Opus' },
+      effort: null,
+    });
+  });
+
   it('does not remap stale selected values to the current selector value', () => {
     expect(
       buildAcpConfigSelection({

@@ -106,7 +106,7 @@
       </div>
     {/if}
 
-    {#if loading && !modelSelector && !effortSelector}
+    {#if loading && (!modelSelector || !effortSelector)}
       <div class="picker-column" data-picker-column="status">
         <DropdownMenu.Item disabled>
           <span class="picker-status-row">

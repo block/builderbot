@@ -102,6 +102,12 @@
 
     const run = ++discoveryRun;
     let cancelled = false;
+    selectedModelValue = null;
+    selectedEffortValue = null;
+    modelSelectionExplicit = false;
+    effortSelectionExplicit = false;
+    modelSelectorKey = null;
+    effortSelectorKey = null;
     config = null;
     configLoading = true;
     configError = null;
@@ -139,8 +145,10 @@
   $effect(() => {
     const nextKey = selectorKey(modelSelector);
     if (nextKey !== modelSelectorKey) {
-      selectedModelValue = defaultSelectorValue(modelSelector);
-      modelSelectionExplicit = false;
+      if (!(modelSelectionExplicit && selectorHasValue(modelSelector, selectedModelValue))) {
+        selectedModelValue = defaultSelectorValue(modelSelector);
+        modelSelectionExplicit = false;
+      }
       modelSelectorKey = nextKey;
     }
   });
@@ -165,6 +173,41 @@
   function handleModelChange(value: string) {
     selectedModelValue = value;
     modelSelectionExplicit = true;
+    selectedEffortValue = null;
+    effortSelectionExplicit = false;
+    config = config ? { ...config, effort: null } : config;
+
+    const providerId = selectedProviderId;
+    const discoveryWorkingDir = workingDir ?? null;
+    if (remote || !providerId) return;
+
+    const run = ++discoveryRun;
+    configLoading = true;
+    configError = null;
+
+    discoverAcpConfig(providerId, discoveryWorkingDir, { selectedModelValue: value })
+      .then(({ data, revalidating }) => {
+        if (run !== discoveryRun) return;
+        config = data;
+        configLoading = false;
+        revalidating
+          ?.then((fresh) => {
+            if (run === discoveryRun) {
+              config = fresh;
+            }
+          })
+          .catch((error) => {
+            if (run === discoveryRun) {
+              console.error('Failed to revalidate ACP config for selected model:', error);
+            }
+          });
+      })
+      .catch((error) => {
+        if (run !== discoveryRun) return;
+        console.error('Failed to discover ACP config for selected model:', error);
+        configLoading = false;
+        configError = error instanceof Error ? error.message : String(error);
+      });
   }
 
   function handleEffortChange(value: string) {
@@ -184,6 +227,10 @@
       return selector.currentValueId;
     }
     return selector.options[0]?.valueId ?? null;
+  }
+
+  function selectorHasValue(selector: AcpConfigSelector | null, valueId: string | null): boolean {
+    return !!selector && !!valueId && selector.options.some((option) => option.valueId === valueId);
   }
 
   function selectorValueLabel(
@@ -260,7 +307,7 @@
       </div>
     {/if}
 
-    {#if configLoading && !modelSelector && !effortSelector}
+    {#if configLoading && (!modelSelector || !effortSelector)}
       <div class="picker-column" data-picker-column="status">
         <DropdownMenu.Item disabled>
           <span class="picker-status-row">

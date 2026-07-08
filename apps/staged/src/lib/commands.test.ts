@@ -460,11 +460,13 @@ describe('cached mutation command wrappers', () => {
       providerId: 'goose',
       workingDir: '/repo',
       force: false,
+      selectedModelValue: null,
     });
     expect(invokeCommand).toHaveBeenNthCalledWith(2, 'discover_acp_config', {
       providerId: 'goose',
       workingDir: '/other-repo',
       force: false,
+      selectedModelValue: null,
     });
     expect(cachedCommand).not.toHaveBeenCalledWith(
       'discover_acp_config',
@@ -491,6 +493,31 @@ describe('cached mutation command wrappers', () => {
       providerId: 'goose',
       workingDir: null,
       force: true,
+      selectedModelValue: null,
+    });
+  });
+
+  it('passes selected ACP model discovery through to the backend command', async () => {
+    const config = {
+      providerId: 'goose',
+      model: null,
+      effort: null,
+    };
+    invokeCommand.mockResolvedValue(config);
+
+    const { discoverAcpConfig } = await import('./commands');
+
+    await expect(
+      discoverAcpConfig('goose', '/repo', { selectedModelValue: 'opus' })
+    ).resolves.toEqual({
+      data: config,
+      revalidating: null,
+    });
+    expect(invokeCommand).toHaveBeenCalledWith('discover_acp_config', {
+      providerId: 'goose',
+      workingDir: '/repo',
+      force: false,
+      selectedModelValue: 'opus',
     });
   });
 });

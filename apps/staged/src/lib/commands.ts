@@ -719,6 +719,7 @@ export interface DiscoverAcpProvidersOptions {
 
 export interface DiscoverAcpConfigOptions {
   force?: boolean;
+  selectedModelValue?: string | null;
 }
 
 const ACP_PROVIDER_CACHE_TTL = 30 * 60_000;
@@ -742,6 +743,7 @@ export async function discoverAcpConfig(
     providerId,
     workingDir: workingDir ?? null,
     force: options.force ?? false,
+    selectedModelValue: options.selectedModelValue ?? null,
   });
   return { data, revalidating: null };
 }

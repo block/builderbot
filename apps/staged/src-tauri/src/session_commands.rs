@@ -25,7 +25,11 @@ use std::time::{Duration, Instant};
 
 use agent_client_protocol::{
     schema::{
-        v1::{Implementation, InitializeRequest, NewSessionRequest},
+        v1::{
+            Implementation, InitializeRequest, NewSessionRequest, SessionConfigKind,
+            SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOptions,
+            SetSessionConfigOptionRequest,
+        },
         ProtocolVersion,
     },
     ByteStreams, Client, ConnectTo, ErrorCode,
@@ -396,6 +400,54 @@ fn resolve_acp_config_discovery_working_dir(working_dir: Option<String>) -> Path
         .unwrap_or_else(std::env::temp_dir)
 }
 
+fn normalize_selected_model_value(selected_model_value: Option<String>) -> Option<String> {
+    selected_model_value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn resolve_model_config_id_for_discovery(
+    config_options: &[SessionConfigOption],
+    selected_model_value: &str,
+) -> Result<String, String> {
+    let Some(option) = config_options.iter().find(|option| {
+        option.category.as_ref() == Some(&SessionConfigOptionCategory::Model)
+            && matches!(&option.kind, SessionConfigKind::Select(_))
+    }) else {
+        return Err("ACP config discovery did not return a model selector".to_string());
+    };
+
+    if !select_config_option_has_value(option, selected_model_value) {
+        return Err(format!(
+            "ACP config discovery model value '{selected_model_value}' is no longer available for config option '{}'",
+            option.id
+        ));
+    }
+
+    Ok(option.id.to_string())
+}
+
+fn select_config_option_has_value(option: &SessionConfigOption, value_id: &str) -> bool {
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return false;
+    };
+
+    match &select.options {
+        SessionConfigSelectOptions::Ungrouped(options) => options
+            .iter()
+            .any(|option| option.value.to_string() == value_id),
+        SessionConfigSelectOptions::Grouped(groups) => groups.iter().any(|group| {
+            group
+                .options
+                .iter()
+                .any(|option| option.value.to_string() == value_id)
+        }),
+        _ => false,
+    }
+}
+
 fn acp_config_discovery_spawn_command(
     binary_path: &Path,
     acp_args: &[String],
@@ -456,17 +508,20 @@ async fn run_acp_config_discovery_protocol(
     working_dir: &Path,
     stdin: tokio::process::ChildStdin,
     stdout: tokio::process::ChildStdout,
+    selected_model_value: Option<&str>,
 ) -> Result<Vec<acp_client::SessionConfigOption>, String> {
     let stdin_compat = stdin.compat_write();
     let stdout_compat = stdout.compat();
     let transport = ByteStreams::new(stdin_compat, stdout_compat);
-    run_acp_config_discovery_transport(provider_id, working_dir, transport).await
+    run_acp_config_discovery_transport(provider_id, working_dir, transport, selected_model_value)
+        .await
 }
 
 async fn run_acp_config_discovery_transport<T>(
     provider_id: &str,
     working_dir: &Path,
     transport: T,
+    selected_model_value: Option<&str>,
 ) -> Result<Vec<acp_client::SessionConfigOption>, String>
 where
     T: ConnectTo<Client> + 'static,
@@ -474,6 +529,7 @@ where
     let working_dir = working_dir.to_path_buf();
     let provider_id = provider_id.to_string();
     let protocol_provider_id = provider_id.clone();
+    let selected_model_value = selected_model_value.map(str::to_string);
 
     Ok(Client
         .builder()
@@ -521,7 +577,28 @@ where
                     }
                 };
 
-                Ok(session_response.config_options.unwrap_or_default())
+                let config_options = session_response.config_options.unwrap_or_default();
+                let Some(selected_model_value) = selected_model_value.as_deref() else {
+                    return Ok(config_options);
+                };
+
+                let model_config_id =
+                    resolve_model_config_id_for_discovery(&config_options, selected_model_value)?;
+                let response = connection
+                    .send_request(SetSessionConfigOptionRequest::new(
+                        session_response.session_id.to_string(),
+                        model_config_id,
+                        selected_model_value,
+                    ))
+                    .block_task()
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "ACP config discovery failed to set selected model for {protocol_provider_id}: {e:?}"
+                        )
+                    })?;
+
+                Ok(response.config_options)
             })
             .await
             .map_err(|_| {
@@ -539,6 +616,7 @@ where
 async fn discover_acp_config_for_provider_async(
     provider_id: String,
     working_dir: PathBuf,
+    selected_model_value: Option<String>,
 ) -> Result<AcpConfigDiscovery, String> {
     let agent = acp_client::find_acp_agent_by_id(&provider_id)
         .ok_or_else(|| format!("Unknown or unavailable agent provider: {provider_id}"))?;
@@ -603,8 +681,14 @@ async fn discover_acp_config_for_provider_async(
         .take()
         .ok_or_else(|| "Failed to get ACP config discovery stdout".to_string())?;
 
-    let config_options =
-        run_acp_config_discovery_protocol(&provider_id, &working_dir, stdin, stdout).await;
+    let config_options = run_acp_config_discovery_protocol(
+        &provider_id,
+        &working_dir,
+        stdin,
+        stdout,
+        selected_model_value.as_deref(),
+    )
+    .await;
 
     let _ = child.kill().await;
     let _ = child.wait().await;
@@ -619,8 +703,10 @@ async fn discover_acp_config_for_provider_async(
 fn discover_acp_config_for_provider(
     provider_id: String,
     working_dir: PathBuf,
+    selected_model_value: Option<String>,
 ) -> Result<AcpConfigDiscovery, String> {
     let provider_id = normalized_acp_config_provider_id(&provider_id)?;
+    let selected_model_value = normalize_selected_model_value(selected_model_value);
 
     let handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -631,13 +717,20 @@ fn discover_acp_config_for_provider(
         let local = tokio::task::LocalSet::new();
         local.block_on(
             &rt,
-            discover_acp_config_for_provider_async(provider_id, working_dir),
+            discover_acp_config_for_provider_async(provider_id, working_dir, selected_model_value),
         )
     });
 
     handle
         .join()
         .map_err(|_| "ACP config discovery thread panicked".to_string())?
+}
+
+fn discover_acp_config_for_provider_default(
+    provider_id: String,
+    working_dir: PathBuf,
+) -> Result<AcpConfigDiscovery, String> {
+    discover_acp_config_for_provider(provider_id, working_dir, None)
 }
 
 fn discover_acp_config_for_provider_with_cache<F>(
@@ -695,16 +788,22 @@ pub async fn discover_acp_config(
     provider_id: String,
     working_dir: Option<String>,
     force: Option<bool>,
+    selected_model_value: Option<String>,
 ) -> Result<AcpConfigDiscovery, String> {
     let working_dir = resolve_acp_config_discovery_working_dir(working_dir);
     let force = force.unwrap_or(false);
+    let selected_model_value = normalize_selected_model_value(selected_model_value);
     tokio::task::spawn_blocking(move || {
-        discover_acp_config_for_provider_with_cache(
-            provider_id,
-            working_dir,
-            force,
-            discover_acp_config_for_provider,
-        )
+        if selected_model_value.is_some() {
+            discover_acp_config_for_provider(provider_id, working_dir, selected_model_value)
+        } else {
+            discover_acp_config_for_provider_with_cache(
+                provider_id,
+                working_dir,
+                force,
+                discover_acp_config_for_provider_default,
+            )
+        }
     })
     .await
     .map_err(|e| format!("ACP config discovery task failed: {e}"))?
@@ -5622,9 +5721,10 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             );
 
-        let options = run_acp_config_discovery_transport("test-provider", Path::new("/tmp"), agent)
-            .await
-            .unwrap();
+        let options =
+            run_acp_config_discovery_transport("test-provider", Path::new("/tmp"), agent, None)
+                .await
+                .unwrap();
 
         assert_eq!(options.len(), 1);
         assert!(!auth_called.load(Ordering::SeqCst));
@@ -5665,12 +5765,114 @@ mod tests {
                 agent_client_protocol::on_receive_request!(),
             );
 
-        let options = run_acp_config_discovery_transport("test-provider", Path::new("/tmp"), agent)
-            .await
-            .unwrap();
+        let options =
+            run_acp_config_discovery_transport("test-provider", Path::new("/tmp"), agent, None)
+                .await
+                .unwrap();
 
         assert!(options.is_empty());
         assert!(!auth_called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn acp_config_discovery_with_selected_model_returns_post_set_config_options() {
+        use agent_client_protocol::schema::v1::{
+            InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse,
+            SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+            SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+        };
+
+        let calls = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let calls_for_handler = Arc::clone(&calls);
+        let agent = agent_client_protocol::Agent
+            .builder()
+            .on_receive_request(
+                async |initialize: InitializeRequest, responder, _cx| {
+                    responder.respond(InitializeResponse::new(initialize.protocol_version))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: NewSessionRequest, responder, _cx| {
+                    responder.respond(NewSessionResponse::new("discovery-session").config_options(
+                        vec![
+                            SessionConfigOption::select(
+                                "model",
+                                "Model",
+                                "sonnet",
+                                vec![
+                                    SessionConfigSelectOption::new("sonnet", "Sonnet"),
+                                    SessionConfigSelectOption::new("opus", "Opus"),
+                                ],
+                            )
+                            .category(SessionConfigOptionCategory::Model),
+                            SessionConfigOption::select(
+                                "reasoning",
+                                "Reasoning",
+                                "high",
+                                vec![
+                                    SessionConfigSelectOption::new("low", "Low"),
+                                    SessionConfigSelectOption::new("high", "High"),
+                                ],
+                            )
+                            .category(SessionConfigOptionCategory::ThoughtLevel),
+                        ],
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: SetSessionConfigOptionRequest, responder, _cx| {
+                    calls_for_handler.lock().unwrap().push((
+                        request.config_id.to_string(),
+                        request
+                            .value
+                            .as_value_id()
+                            .expect("selected config value should be a value ID")
+                            .to_string(),
+                    ));
+                    responder.respond(SetSessionConfigOptionResponse::new(vec![
+                        SessionConfigOption::select(
+                            "model",
+                            "Model",
+                            "opus",
+                            vec![
+                                SessionConfigSelectOption::new("sonnet", "Sonnet"),
+                                SessionConfigSelectOption::new("opus", "Opus"),
+                            ],
+                        )
+                        .category(SessionConfigOptionCategory::Model),
+                        SessionConfigOption::select(
+                            "reasoning",
+                            "Reasoning",
+                            "low",
+                            vec![SessionConfigSelectOption::new("low", "Low")],
+                        )
+                        .category(SessionConfigOptionCategory::ThoughtLevel),
+                    ]))
+                },
+                agent_client_protocol::on_receive_request!(),
+            );
+
+        let options = run_acp_config_discovery_transport(
+            "test-provider",
+            Path::new("/tmp"),
+            agent,
+            Some("opus"),
+        )
+        .await
+        .unwrap();
+        let discovery = acp_config_discovery_from_options("test-provider".to_string(), &options);
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(String::from("model"), String::from("opus"))]
+        );
+        assert_eq!(discovery.model.as_ref().unwrap().current_value_id, "opus");
+        let effort = discovery.effort.as_ref().unwrap();
+        assert_eq!(effort.current_value_id, "low");
+        assert_eq!(effort.options.len(), 1);
+        assert_eq!(effort.options[0].value_id, "low");
     }
 
     #[test]

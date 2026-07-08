@@ -2132,8 +2132,19 @@ async fn apply_or_record_session_config_options(
         })?
         .to_vec();
 
+    let mut model_selection_applied = false;
     for selection in selections {
-        let config_id = resolve_session_config_option_selection(&latest_options, selection)?;
+        let config_id = match resolve_session_config_option_selection(&latest_options, selection) {
+            Ok(config_id) => config_id,
+            Err(e)
+                if model_selection_applied
+                    && selection.category == SessionConfigOptionCategory::ThoughtLevel =>
+            {
+                log::warn!("Skipping stale ACP effort selection after model change: {e}");
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
         let response = connection
             .send_request(SetSessionConfigOptionRequest::new(
                 agent_session_id.to_string(),
@@ -2149,6 +2160,9 @@ async fn apply_or_record_session_config_options(
                 )
             })?;
         latest_options = response.config_options;
+        if selection.category == SessionConfigOptionCategory::Model {
+            model_selection_applied = true;
+        }
     }
 
     writer.on_config_option_update(&latest_options).await;
@@ -2597,21 +2611,22 @@ impl MessageWriter for BasicMessageWriter {
 #[cfg(test)]
 mod tests {
     use super::{
-        acp_spawn_command, autoapprove_permission_decision, build_prompt_content_blocks,
-        consume_remote_acp_line, decode_remote_acp_line, mcp_server_transport_supported,
-        permission_response_for_options, remote_acp_segments, resolve_acp_working_dir,
-        resolve_session_config_option_selection, resolve_spawn_working_dir,
-        sanitize_remote_acp_chunk, shell_exec_line, shell_quote, AcpDriver, AcpEventMetadata,
-        AcpNotificationHandler, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
-        AcpSessionConfigOptionSelection, AgentRunOutcome, BasicMessageWriter, MessageWriter,
-        RemoteLineOutcome, ReplayBoundary, ReplayBuffer, ReplayEvent,
+        acp_spawn_command, apply_or_record_session_config_options, autoapprove_permission_decision,
+        build_prompt_content_blocks, consume_remote_acp_line, decode_remote_acp_line,
+        mcp_server_transport_supported, permission_response_for_options, remote_acp_segments,
+        resolve_acp_working_dir, resolve_session_config_option_selection,
+        resolve_spawn_working_dir, sanitize_remote_acp_chunk, shell_exec_line, shell_quote,
+        AcpDriver, AcpEventMetadata, AcpNotificationHandler, AcpPermissionOption,
+        AcpPermissionOptionKind, AcpPermissionRequest, AcpSessionConfigOptionSelection,
+        AgentRunOutcome, BasicMessageWriter, MessageWriter, RemoteLineOutcome, ReplayBoundary,
+        ReplayBuffer, ReplayEvent,
     };
     use agent_client_protocol::schema::v1::{
         ContentBlock as AcpContentBlock, McpCapabilities, McpServer, McpServerHttp, McpServerSse,
         McpServerStdio, PermissionOption, PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority,
         PlanEntryStatus, RequestPermissionOutcome, SessionConfigOption,
         SessionConfigOptionCategory, SessionConfigSelectOption, SessionNotification, SessionUpdate,
-        StopReason,
+        SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -2677,6 +2692,109 @@ mod tests {
         assert!(error.contains("Selected ACP effort value 'high' is no longer available"));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn skips_stale_effort_after_applying_selected_model() {
+        let calls = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let calls_for_handler = Arc::clone(&calls);
+        let agent = agent_client_protocol::Agent.builder().on_receive_request(
+            async move |request: SetSessionConfigOptionRequest, responder, _cx| {
+                calls_for_handler.lock().unwrap().push((
+                    request.config_id.to_string(),
+                    request
+                        .value
+                        .as_value_id()
+                        .expect("selected config value should be a value ID")
+                        .to_string(),
+                ));
+                responder.respond(SetSessionConfigOptionResponse::new(vec![
+                    SessionConfigOption::select(
+                        "model",
+                        "Model",
+                        "opus",
+                        vec![
+                            SessionConfigSelectOption::new("sonnet", "Sonnet"),
+                            SessionConfigSelectOption::new("opus", "Opus"),
+                        ],
+                    )
+                    .category(SessionConfigOptionCategory::Model),
+                    SessionConfigOption::select(
+                        "reasoning",
+                        "Reasoning",
+                        "low",
+                        vec![SessionConfigSelectOption::new("low", "Low")],
+                    )
+                    .category(SessionConfigOptionCategory::ThoughtLevel),
+                ]))
+            },
+            agent_client_protocol::on_receive_request!(),
+        );
+        let writer = Arc::new(RecordingMessageWriter::default());
+        let message_writer: Arc<dyn MessageWriter> = writer.clone();
+        let initial_options = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "sonnet",
+                vec![
+                    SessionConfigSelectOption::new("sonnet", "Sonnet"),
+                    SessionConfigSelectOption::new("opus", "Opus"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::Model),
+            SessionConfigOption::select(
+                "reasoning",
+                "Reasoning",
+                "high",
+                vec![
+                    SessionConfigSelectOption::new("low", "Low"),
+                    SessionConfigSelectOption::new("high", "High"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::ThoughtLevel),
+        ];
+        let selections = vec![
+            AcpSessionConfigOptionSelection {
+                category: SessionConfigOptionCategory::Model,
+                config_id: "model".to_string(),
+                value_id: "opus".to_string(),
+            },
+            AcpSessionConfigOptionSelection {
+                category: SessionConfigOptionCategory::ThoughtLevel,
+                config_id: "reasoning".to_string(),
+                value_id: "high".to_string(),
+            },
+        ];
+
+        agent_client_protocol::Client
+            .builder()
+            .name("acp-config-test")
+            .connect_with(agent, async |connection| {
+                apply_or_record_session_config_options(
+                    &connection,
+                    "session-1",
+                    Some(&initial_options),
+                    &selections,
+                    &message_writer,
+                )
+                .await
+                .map_err(agent_client_protocol::util::internal_error)
+            })
+            .await
+            .expect("protocol should succeed");
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(String::from("model"), String::from("opus"))]
+        );
+        let updates = writer.config_option_updates.lock().unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(
+            resolve_session_config_option_selection(&updates[0], &selections[1])
+                .expect_err("stale effort should remain unavailable"),
+            "Selected ACP effort value 'high' is no longer available for config option 'reasoning'"
+        );
+    }
+
     fn write_executable(path: &Path, content: &str) {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("create executable parent");
@@ -2731,6 +2849,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingMessageWriter {
         events: Mutex<Vec<AcpEventMetadata>>,
+        config_option_updates: Mutex<Vec<Vec<SessionConfigOption>>>,
     }
 
     #[async_trait::async_trait]
@@ -2759,6 +2878,13 @@ mod tests {
 
         async fn record_acp_event_metadata(&self, metadata: AcpEventMetadata) {
             self.events.lock().unwrap().push(metadata);
+        }
+
+        async fn on_config_option_update(&self, options: &[SessionConfigOption]) {
+            self.config_option_updates
+                .lock()
+                .unwrap()
+                .push(options.to_vec());
         }
     }
 

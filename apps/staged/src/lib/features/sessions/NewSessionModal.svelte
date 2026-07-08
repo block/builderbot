@@ -14,7 +14,7 @@
     repoLabel     — optional repo label for display (githubRepo + subpath)
     initialPrompt — pre-fill the textarea (e.g. from a previous close)
     onClose       — called with { prompt, mode, imageIds } when dismissed
-    onSubmit      — called with { prompt, mode, imageIds } when submit is pressed
+    onSubmit      — called with { prompt, mode, imageIds, provider, acpConfigSelection } when submit is pressed
 -->
 <script lang="ts">
   import X from '@lucide/svelte/icons/x';
@@ -26,8 +26,16 @@
   import { tick, untrack } from 'svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
-  import type { Branch, BranchSessionType, HashtagItem, Project, ProjectRepo } from '../../types';
-  import AgentSelector from '../agents/AgentSelector.svelte';
+  import type {
+    AcpConfigSelection,
+    Branch,
+    BranchSessionType,
+    HashtagItem,
+    Project,
+    ProjectRepo,
+  } from '../../types';
+  import AcpConfigPicker from '../agents/AcpConfigPicker.svelte';
+  import type { AcpConfigPickerSelection } from '../agents/acpConfigSelection';
   import ImageAttachment from './ImageAttachment.svelte';
   import HashtagInput from './HashtagInput.svelte';
   import { buildBranchHashtagItems } from './hashtagItems';
@@ -67,7 +75,13 @@
     /** Mode-aware queue state for callers that allow switching session types. */
     willQueueForMode?: (mode: BranchSessionType) => boolean;
     onClose: (draft: { prompt: string; mode: BranchSessionType; imageIds: string[] }) => void;
-    onSubmit: (data: { prompt: string; mode: BranchSessionType; imageIds: string[] }) => void;
+    onSubmit: (data: {
+      prompt: string;
+      mode: BranchSessionType;
+      imageIds: string[];
+      provider?: string;
+      acpConfigSelection?: AcpConfigSelection | null;
+    }) => void;
   }
 
   let {
@@ -96,6 +110,10 @@
   let starting = $state(false);
   let initialized = false;
   let textareaEl: HTMLElement | null = $state(null);
+  let acpPickerSelection = $state<AcpConfigPickerSelection>({
+    providerId: null,
+    acpConfigSelection: null,
+  });
 
   let isCommit = $derived(currentMode === 'commit');
   let isReview = $derived(currentMode === 'review');
@@ -103,6 +121,7 @@
   let isProjectNote = $derived(!branch && !!project);
   let activeProjectId = $derived(branch?.projectId ?? project?.id ?? '');
   let activeBranchId = $derived(branch?.id ?? null);
+  let activeWorkingDir = $derived(branch?.worktreePath ?? null);
   let currentWillQueue = $derived(willQueueForMode?.(currentMode) ?? willQueue);
   let canSubmit = $derived(
     !!activeProjectId && !starting && !submitDisabledReason && (isReview || !!prompt.trim())
@@ -346,13 +365,23 @@
     if (!canSubmit) return;
 
     starting = true;
-    onSubmit({ prompt: prompt.trim(), mode: currentMode, imageIds });
+    onSubmit({
+      prompt: prompt.trim(),
+      mode: currentMode,
+      imageIds,
+      provider: acpPickerSelection.providerId ?? undefined,
+      acpConfigSelection: acpPickerSelection.acpConfigSelection,
+    });
     // Close immediately; parent handles async start + optimistic timeline row.
     onClose({ prompt: '', mode: currentMode, imageIds: [] });
   }
 
   function handleClose() {
     onClose({ prompt, mode: currentMode, imageIds });
+  }
+
+  function handleAcpSelectionChange(selection: AcpConfigPickerSelection) {
+    acpPickerSelection = selection;
   }
 
   function handleKeydown(e: KeyboardEvent) {
@@ -538,7 +567,14 @@
 
       <div class="form-actions">
         <div class="form-actions-left">
-          <AgentSelector disabled={starting} {remote} dropUp triggerClass={footerControlClass} />
+          <AcpConfigPicker
+            disabled={starting}
+            {remote}
+            dropUp
+            triggerClass={footerControlClass}
+            workingDir={activeWorkingDir}
+            onSelectionChange={handleAcpSelectionChange}
+          />
           {#if imageIds.length === 0}
             <ImageAttachment
               branchId={activeBranchId}

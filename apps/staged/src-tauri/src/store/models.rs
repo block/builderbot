@@ -524,6 +524,9 @@ pub struct Session {
     /// command pipeline (deterministic steps before/instead of AI).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pipeline: Option<PipelineExecution>,
+    /// Selected ACP config values to apply before prompting the agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_config_selection: Option<AcpConfigSelection>,
 }
 
 /// Persistent follow-up message waiting to be sent to an existing session.
@@ -612,6 +615,7 @@ impl Session {
             updated_at: now,
             owner_pid: Some(std::process::id()),
             pipeline: None,
+            acp_config_selection: None,
         }
     }
 
@@ -633,6 +637,7 @@ impl Session {
             updated_at: now,
             owner_pid: None,
             pipeline: None,
+            acp_config_selection: None,
         }
     }
 
@@ -645,6 +650,31 @@ impl Session {
         self.agent_id = Some(agent_id.to_string());
         self
     }
+
+    pub fn with_acp_config_selection(mut self, selection: AcpConfigSelection) -> Self {
+        self.acp_config_selection = Some(selection);
+        self
+    }
+}
+
+/// Session-level ACP config selections keyed by product-facing category.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpConfigSelection {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<AcpConfigValueSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<AcpConfigValueSelection>,
+}
+
+/// Selected value for one ACP `session/set_config_option` config ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpConfigValueSelection {
+    pub config_id: String,
+    pub value_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 // =============================================================================

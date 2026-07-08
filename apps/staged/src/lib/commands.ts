@@ -41,6 +41,7 @@ import type {
   PollWorkspaceResult,
   Image,
   SuggestedRepo,
+  AcpConfigSelection,
 } from './types';
 
 export type DiffScope = 'branch' | 'commit' | 'worktree';
@@ -236,13 +237,15 @@ export function startProjectSession(
   projectId: string,
   prompt: string,
   provider?: string,
-  imageIds?: string[]
+  imageIds?: string[],
+  acpConfigSelection?: AcpConfigSelection
 ): Promise<import('./types').ProjectSessionResponse> {
   return invokeCommand('start_project_session', {
     projectId,
     prompt,
     provider: provider ?? null,
     imageIds: imageIds?.length ? imageIds : null,
+    acpConfigSelection: acpConfigSelection ?? null,
   });
 }
 
@@ -691,8 +694,32 @@ export interface AcpProviderInfo {
   label: string;
 }
 
+export interface AcpConfigValueOption {
+  valueId: string;
+  label: string;
+  groupLabel?: string | null;
+}
+
+export interface AcpConfigSelector {
+  configId: string;
+  label: string;
+  currentValueId: string;
+  options: AcpConfigValueOption[];
+}
+
+export interface AcpConfigDiscovery {
+  providerId: string;
+  model?: AcpConfigSelector | null;
+  effort?: AcpConfigSelector | null;
+}
+
 export interface DiscoverAcpProvidersOptions {
   force?: boolean;
+}
+
+export interface DiscoverAcpConfigOptions {
+  force?: boolean;
+  selectedModelValue?: string | null;
 }
 
 const ACP_PROVIDER_CACHE_TTL = 30 * 60_000;
@@ -704,6 +731,21 @@ export function discoverAcpProviders(
   return cachedCommand('discover_acp_providers', undefined, {
     ttl: options.force ? 0 : ACP_PROVIDER_CACHE_TTL,
   });
+}
+
+/** Discover model/effort selectors exposed by a provider for a working directory. */
+export async function discoverAcpConfig(
+  providerId: string,
+  workingDir?: string | null,
+  options: DiscoverAcpConfigOptions = {}
+): Promise<SwrResult<AcpConfigDiscovery>> {
+  const data = await invokeCommand<AcpConfigDiscovery>('discover_acp_config', {
+    providerId,
+    workingDir: workingDir ?? null,
+    force: options.force ?? false,
+    selectedModelValue: options.selectedModelValue ?? null,
+  });
+  return { data, revalidating: null };
 }
 
 // =============================================================================
@@ -745,9 +787,15 @@ export function countAssistantMessagesAfter(
 export function startSession(
   prompt: string,
   workingDir: string,
-  provider?: string
+  provider?: string,
+  acpConfigSelection?: AcpConfigSelection
 ): Promise<Session> {
-  return invokeCommand('start_session', { prompt, workingDir, provider: provider ?? null });
+  return invokeCommand('start_session', {
+    prompt,
+    workingDir,
+    provider: provider ?? null,
+    acpConfigSelection: acpConfigSelection ?? null,
+  });
 }
 
 /** Send a follow-up message to an existing session.
@@ -756,13 +804,15 @@ export function resumeSession(
   sessionId: string,
   prompt: string,
   imageIds?: string[],
-  branchId?: string | null
+  branchId?: string | null,
+  acpConfigSelection?: AcpConfigSelection
 ): Promise<void> {
   return invokeCommand('resume_session', {
     sessionId,
     prompt,
     imageIds: imageIds ?? null,
     branchId: branchId ?? null,
+    acpConfigSelection: acpConfigSelection ?? null,
   });
 }
 
@@ -819,7 +869,8 @@ export function startBranchSession(
   sessionType: BranchSessionType,
   provider?: string,
   imageIds?: string[],
-  launchContext?: BranchSessionLaunchContext
+  launchContext?: BranchSessionLaunchContext,
+  acpConfigSelection?: AcpConfigSelection
 ): Promise<BranchSessionResponse> {
   return invokeCommand('start_branch_session', {
     branchId,
@@ -828,6 +879,7 @@ export function startBranchSession(
     provider: provider ?? null,
     imageIds: imageIds ?? null,
     launchContext: launchContext ?? null,
+    acpConfigSelection: acpConfigSelection ?? null,
   });
 }
 
@@ -838,7 +890,8 @@ export function startOrQueueBranchSession(
   sessionType: BranchSessionType,
   provider?: string,
   imageIds?: string[],
-  launchContext?: BranchSessionLaunchContext
+  launchContext?: BranchSessionLaunchContext,
+  acpConfigSelection?: AcpConfigSelection
 ): Promise<BranchSessionResponse> {
   return invokeCommand('start_or_queue_branch_session', {
     branchId,
@@ -847,6 +900,7 @@ export function startOrQueueBranchSession(
     provider: provider ?? null,
     imageIds: imageIds ?? null,
     launchContext: launchContext ?? null,
+    acpConfigSelection: acpConfigSelection ?? null,
   });
 }
 
@@ -857,7 +911,8 @@ export function queueBranchSession(
   sessionType: BranchSessionType,
   provider?: string,
   imageIds?: string[],
-  launchContext?: BranchSessionLaunchContext
+  launchContext?: BranchSessionLaunchContext,
+  acpConfigSelection?: AcpConfigSelection
 ): Promise<BranchSessionResponse> {
   return invokeCommand('queue_branch_session', {
     branchId,
@@ -866,6 +921,7 @@ export function queueBranchSession(
     provider: provider ?? null,
     imageIds: imageIds ?? null,
     launchContext: launchContext ?? null,
+    acpConfigSelection: acpConfigSelection ?? null,
   });
 }
 

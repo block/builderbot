@@ -57,6 +57,7 @@ impl AgentDriver for SimpleDriverWrapper {
         writer: &Arc<dyn MessageWriter>,
         cancel_token: &CancellationToken,
         agent_session_id: Option<&str>,
+        config_options: &[crate::driver::AcpSessionConfigOptionSelection],
     ) -> Result<AgentRunOutcome, String> {
         if !images.is_empty() {
             log::debug!(
@@ -75,6 +76,7 @@ impl AgentDriver for SimpleDriverWrapper {
                 writer,
                 cancel_token,
                 agent_session_id,
+                config_options,
             )
             .await
     }
@@ -155,6 +157,7 @@ async fn run_acp_prompt_with_options(
                     &writer,
                     &cancel_token,
                     None,
+                    &[],
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("ACP driver error: {e}"))?;

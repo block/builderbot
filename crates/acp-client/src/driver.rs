@@ -9,7 +9,6 @@
 
 use std::collections::HashSet;
 use std::ffi::OsString;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -25,8 +24,10 @@ use agent_client_protocol::{
             NewSessionRequest, PermissionOption as SchemaPermissionOption, PermissionOptionId,
             PermissionOptionKind as SchemaPermissionOptionKind, PromptRequest, PromptResponse,
             RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-            SelectedPermissionOutcome, SessionConfigOption, SessionInfoUpdate, SessionModeState,
-            SessionNotification, SessionUpdate, StopReason, TextContent, ToolCallContent,
+            SelectedPermissionOutcome, SessionConfigKind, SessionConfigOption,
+            SessionConfigOptionCategory, SessionConfigSelectOptions, SessionInfoUpdate,
+            SessionModeState, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+            StopReason, TextContent, ToolCallContent,
         },
         ProtocolVersion,
     },
@@ -260,6 +261,13 @@ pub enum AcpPermissionDecision {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcpSessionConfigOptionSelection {
+    pub category: SessionConfigOptionCategory,
+    pub config_id: String,
+    pub value_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayBoundary {
     pub role: String,
     pub content: String,
@@ -373,6 +381,7 @@ pub trait AgentDriver {
         writer: &Arc<dyn MessageWriter>,
         cancel_token: &CancellationToken,
         agent_session_id: Option<&str>,
+        config_options: &[AcpSessionConfigOptionSelection],
     ) -> Result<AgentRunOutcome, String>;
 }
 
@@ -562,118 +571,21 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-fn env_shebang_interpreter(binary_path: &Path) -> Option<String> {
-    let mut file = std::fs::File::open(binary_path).ok()?;
-    let mut buf = [0_u8; 512];
-    let len = file.read(&mut buf).ok()?;
-    let first_line = std::str::from_utf8(&buf[..len]).ok()?.lines().next()?;
-    let shebang = first_line.strip_prefix("#!")?.trim();
-
-    let mut parts = shebang.split_whitespace();
-    let command = parts.next()?;
-    let command_name = Path::new(command).file_name()?.to_str()?;
-    if command_name != "env" {
-        return None;
-    }
-
-    for part in parts {
-        if part == "-S" || part.starts_with('-') || part.contains('=') {
-            continue;
-        }
-        if part.contains('/') {
-            return None;
-        }
-        return Some(part.to_string());
-    }
-
-    None
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
-fn path_contains_executable(path_value: &str, executable: &str) -> bool {
-    std::env::split_paths(path_value).any(|dir| is_executable_file(&dir.join(executable)))
-}
-
 fn env_shebang_interpreter_from_snapshot(
     binary_path: &Path,
     snapshot: Option<&[(String, String)]>,
 ) -> Option<PathBuf> {
-    let interpreter = env_shebang_interpreter(binary_path)?;
     let env = doctor::DoctorEnv::new(snapshot?.to_vec());
     let path_value = env.get("PATH")?;
-    doctor::resolve::resolve_executable_from_path(&interpreter, path_value)
-}
-
-fn is_broad_toolchain_dir(path: &Path) -> bool {
-    matches!(
-        path.to_str(),
-        Some("/opt/homebrew/bin" | "/usr/local/bin" | "/usr/bin" | "/bin" | "/opt/local/bin")
-    )
-}
-
-fn path_with_inserted_agent_bin_dir(existing_path: &str, bin_dir: &Path) -> Option<String> {
-    let mut entries: Vec<PathBuf> = if existing_path.is_empty() {
-        Vec::new()
-    } else {
-        std::env::split_paths(existing_path).collect()
-    };
-
-    if entries.iter().any(|entry| entry == bin_dir) {
-        return None;
-    }
-
-    if is_broad_toolchain_dir(bin_dir) {
-        entries.push(bin_dir.to_path_buf());
-    } else {
-        entries.insert(0, bin_dir.to_path_buf());
-    }
-
-    std::env::join_paths(entries).ok()?.into_string().ok()
-}
-
-fn guarded_path_for_agent_binary(binary_path: &Path, existing_path: &str) -> Option<String> {
-    let interpreter = env_shebang_interpreter(binary_path)?;
-    if path_contains_executable(existing_path, &interpreter) {
-        return None;
-    }
-
-    let bin_dir = binary_path.parent()?;
-    if !is_executable_file(&bin_dir.join(&interpreter)) {
-        return None;
-    }
-
-    path_with_inserted_agent_bin_dir(existing_path, bin_dir)
+    doctor::resolve::resolve_env_shebang_interpreter_from_path(binary_path, path_value)
 }
 
 fn shell_path_guard_for_agent_binary(binary_path: &Path) -> Option<String> {
-    let interpreter = env_shebang_interpreter(binary_path)?;
-    let bin_dir = binary_path.parent()?;
-    if !is_executable_file(&bin_dir.join(&interpreter)) {
-        return None;
-    }
+    let launcher = doctor::resolve::env_shebang_launcher(binary_path)?;
 
-    let quoted_interpreter = shell_quote(&interpreter);
-    let quoted_bin_dir = shell_quote(&bin_dir.to_string_lossy());
-    let path_assignment = if is_broad_toolchain_dir(bin_dir) {
+    let quoted_interpreter = shell_quote(&launcher.interpreter);
+    let quoted_bin_dir = shell_quote(&launcher.bin_dir.to_string_lossy());
+    let path_assignment = if doctor::resolve::is_broad_toolchain_dir(&launcher.bin_dir) {
         format!(
             "if [ -n \"$PATH\" ]; then PATH=\"$PATH\":{quoted_bin_dir}; else PATH={quoted_bin_dir}; fi"
         )
@@ -805,6 +717,7 @@ impl AgentDriver for AcpDriver {
         writer: &Arc<dyn MessageWriter>,
         cancel_token: &CancellationToken,
         agent_session_id: Option<&str>,
+        config_options: &[AcpSessionConfigOptionSelection],
     ) -> Result<AgentRunOutcome, String> {
         let spawn_working_dir = resolve_spawn_working_dir(working_dir, self.is_remote);
         let acp_working_dir = resolve_acp_working_dir(
@@ -888,7 +801,10 @@ impl AgentDriver for AcpDriver {
                     if !spawn_command.uses_explicit_interpreter {
                         let existing_path = snapshot_path.as_deref().unwrap_or_default();
                         if let Some(new_path) =
-                            guarded_path_for_agent_binary(&self.binary_path, existing_path)
+                            doctor::resolve::guarded_path_for_env_shebang_launcher(
+                                &self.binary_path,
+                                existing_path,
+                            )
                         {
                             c.env("PATH", new_path);
                         }
@@ -1062,6 +978,7 @@ impl AgentDriver for AcpDriver {
                     store,
                     session_id,
                     agent_session_id,
+                    config_options,
                     &handler,
                     &self.mcp_servers,
                     &self.agent_label,
@@ -2059,6 +1976,7 @@ async fn run_acp_protocol(
     store: &Arc<dyn Store>,
     our_session_id: &str,
     acp_session_id: Option<&str>,
+    config_options: &[AcpSessionConfigOptionSelection],
     handler: &Arc<AcpNotificationHandler>,
     mcp_servers: &[McpServer],
     agent_label: &str,
@@ -2073,6 +1991,7 @@ async fn run_acp_protocol(
             writer: &handler.writer,
             our_session_id,
             acp_session_id,
+            config_options,
             mcp_servers,
             agent_label,
         }),
@@ -2186,6 +2105,179 @@ fn mcp_server_transport_supported(server: &McpServer, caps: &McpCapabilities) ->
     }
 }
 
+// Fragments shared by the config-selection error producers below and
+// [`is_config_selection_unavailable_error`]. Consumers persist selections and
+// clear them when the matcher fires, so producer and matcher must stay on the
+// same strings — reword these constants, never the format! call sites.
+const CONFIG_SELECTION_MISSING_OPTIONS_PREFIX: &str =
+    "Agent did not return ACP config options needed to apply selected";
+const CONFIG_SELECTION_STALE_PREFIX: &str = "Selected ACP ";
+const CONFIG_SELECTION_STALE_UNAVAILABLE: &str = " is no longer available";
+const CONFIG_SELECTION_STALE_NOT_SELECT: &str = " is not a select option";
+
+/// Whether an error from applying stored session config selections means the
+/// selection itself is stale or unavailable, rather than a transport or
+/// protocol failure. Callers that persist selections use this to clear the
+/// stored value so the next run falls back to provider defaults.
+pub fn is_config_selection_unavailable_error(error: &str) -> bool {
+    error.contains(CONFIG_SELECTION_MISSING_OPTIONS_PREFIX)
+        || (error.contains(CONFIG_SELECTION_STALE_PREFIX)
+            && (error.contains(CONFIG_SELECTION_STALE_UNAVAILABLE)
+                || error.contains(CONFIG_SELECTION_STALE_NOT_SELECT)))
+}
+
+async fn apply_or_record_session_config_options(
+    connection: &ConnectionTo<Agent>,
+    agent_session_id: &str,
+    initial_options: Option<&[SessionConfigOption]>,
+    selections: &[AcpSessionConfigOptionSelection],
+    writer: &Arc<dyn MessageWriter>,
+    resuming: bool,
+) -> Result<(), String> {
+    if selections.is_empty() {
+        if let Some(options) = initial_options {
+            writer.on_config_option_update(options).await;
+        }
+        return Ok(());
+    }
+
+    let Some(initial_options) = initial_options else {
+        let labels = selections
+            .iter()
+            .map(|selection| config_selection_label(&selection.category))
+            .collect::<Vec<_>>()
+            .join("/");
+        if resuming {
+            // Some agents advertise config options on session/new but omit
+            // them from session/load. The config applied when the session was
+            // created lives in the agent's own session state, so skip the
+            // re-apply rather than failing the first follow-up after an app
+            // restart. A selection changed since creation is skipped too —
+            // the warning is the only trace of that.
+            log::warn!(
+                "Agent returned no ACP config options on session/load; skipping selected {labels}"
+            );
+            return Ok(());
+        }
+        return Err(format!(
+            "{CONFIG_SELECTION_MISSING_OPTIONS_PREFIX} {labels} before prompting"
+        ));
+    };
+    let mut latest_options = initial_options.to_vec();
+
+    let mut model_selection_applied = false;
+    for selection in selections {
+        let config_id = match resolve_session_config_option_selection(&latest_options, selection) {
+            Ok(config_id) => config_id,
+            Err(e)
+                if model_selection_applied
+                    && selection.category == SessionConfigOptionCategory::ThoughtLevel =>
+            {
+                log::warn!("Skipping stale ACP effort selection after model change: {e}");
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+        let response = connection
+            .send_request(SetSessionConfigOptionRequest::new(
+                agent_session_id.to_string(),
+                config_id,
+                selection.value_id.as_str(),
+            ))
+            .block_task()
+            .await
+            .map_err(|e| {
+                format!(
+                    "Failed to set selected ACP {} config option: {e:?}",
+                    config_selection_label(&selection.category)
+                )
+            })?;
+        latest_options = response.config_options;
+        if selection.category == SessionConfigOptionCategory::Model {
+            model_selection_applied = true;
+        }
+    }
+
+    writer.on_config_option_update(&latest_options).await;
+    Ok(())
+}
+
+fn resolve_session_config_option_selection(
+    options: &[SessionConfigOption],
+    selection: &AcpSessionConfigOptionSelection,
+) -> Result<String, String> {
+    let label = config_selection_label(&selection.category);
+
+    if let Some(option) = options
+        .iter()
+        .find(|option| option.id.to_string() == selection.config_id)
+    {
+        ensure_config_option_has_value(option, &selection.value_id, label)?;
+        return Ok(option.id.to_string());
+    }
+
+    let Some(option) = options.iter().find(|option| {
+        option.category.as_ref() == Some(&selection.category) && is_select_option(option)
+    }) else {
+        return Err(format!(
+            "{CONFIG_SELECTION_STALE_PREFIX}{label} config option '{}'{CONFIG_SELECTION_STALE_UNAVAILABLE} for this provider",
+            selection.config_id
+        ));
+    };
+
+    ensure_config_option_has_value(option, &selection.value_id, label)?;
+    Ok(option.id.to_string())
+}
+
+fn ensure_config_option_has_value(
+    option: &SessionConfigOption,
+    value_id: &str,
+    label: &str,
+) -> Result<(), String> {
+    match select_option_has_value(option, value_id) {
+        Some(true) => Ok(()),
+        Some(false) => Err(format!(
+            "{CONFIG_SELECTION_STALE_PREFIX}{label} value '{value_id}'{CONFIG_SELECTION_STALE_UNAVAILABLE} for config option '{}'",
+            option.id
+        )),
+        None => Err(format!(
+            "{CONFIG_SELECTION_STALE_PREFIX}{label} config option '{}'{CONFIG_SELECTION_STALE_NOT_SELECT}",
+            option.id
+        )),
+    }
+}
+
+fn is_select_option(option: &SessionConfigOption) -> bool {
+    matches!(&option.kind, SessionConfigKind::Select(_))
+}
+
+fn select_option_has_value(option: &SessionConfigOption, value_id: &str) -> Option<bool> {
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return None;
+    };
+
+    Some(match &select.options {
+        SessionConfigSelectOptions::Ungrouped(options) => options
+            .iter()
+            .any(|option| option.value.to_string() == value_id),
+        SessionConfigSelectOptions::Grouped(groups) => groups.iter().any(|group| {
+            group
+                .options
+                .iter()
+                .any(|option| option.value.to_string() == value_id)
+        }),
+        _ => false,
+    })
+}
+
+fn config_selection_label(category: &SessionConfigOptionCategory) -> &'static str {
+    match category {
+        SessionConfigOptionCategory::Model => "model",
+        SessionConfigOptionCategory::ThoughtLevel => "effort",
+        _ => "configuration",
+    }
+}
+
 struct AcpSessionSetup {
     agent_session_id: String,
     agent_capabilities: AgentCapabilities,
@@ -2198,6 +2290,7 @@ struct AcpSessionSetupContext<'a> {
     writer: &'a Arc<dyn MessageWriter>,
     our_session_id: &'a str,
     acp_session_id: Option<&'a str>,
+    config_options: &'a [AcpSessionConfigOptionSelection],
     mcp_servers: &'a [McpServer],
     agent_label: &'a str,
 }
@@ -2210,6 +2303,7 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
         writer,
         our_session_id,
         acp_session_id,
+        config_options,
         mcp_servers,
         agent_label,
     } = context;
@@ -2286,9 +2380,15 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
             if let Some(ref modes) = load_response.modes {
                 writer.on_model_state_update(modes).await;
             }
-            if let Some(ref options) = load_response.config_options {
-                writer.on_config_option_update(options).await;
-            }
+            apply_or_record_session_config_options(
+                connection,
+                existing_id,
+                load_response.config_options.as_deref(),
+                config_options,
+                writer,
+                true,
+            )
+            .await?;
 
             Ok(AcpSessionSetup {
                 agent_session_id: existing_id.to_string(),
@@ -2312,9 +2412,15 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
             if let Some(ref modes) = session_response.modes {
                 writer.on_model_state_update(modes).await;
             }
-            if let Some(ref options) = session_response.config_options {
-                writer.on_config_option_update(options).await;
-            }
+            apply_or_record_session_config_options(
+                connection,
+                &new_id,
+                session_response.config_options.as_deref(),
+                config_options,
+                writer,
+                false,
+            )
+            .await?;
 
             Ok(AcpSessionSetup {
                 agent_session_id: new_id,
@@ -2540,20 +2646,22 @@ impl MessageWriter for BasicMessageWriter {
 #[cfg(test)]
 mod tests {
     use super::{
-        acp_spawn_command, autoapprove_permission_decision, build_prompt_content_blocks,
-        consume_remote_acp_line, decode_remote_acp_line, env_shebang_interpreter,
-        guarded_path_for_agent_binary, is_broad_toolchain_dir, mcp_server_transport_supported,
-        path_with_inserted_agent_bin_dir, permission_response_for_options, remote_acp_segments,
-        resolve_acp_working_dir, resolve_spawn_working_dir, sanitize_remote_acp_chunk,
-        shell_exec_line, shell_quote, AcpDriver, AcpEventMetadata, AcpNotificationHandler,
-        AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest, AgentRunOutcome,
-        BasicMessageWriter, MessageWriter, RemoteLineOutcome, ReplayBoundary, ReplayBuffer,
-        ReplayEvent,
+        acp_spawn_command, apply_or_record_session_config_options, autoapprove_permission_decision,
+        build_prompt_content_blocks, consume_remote_acp_line, decode_remote_acp_line,
+        is_config_selection_unavailable_error, mcp_server_transport_supported,
+        permission_response_for_options, remote_acp_segments, resolve_acp_working_dir,
+        resolve_session_config_option_selection, resolve_spawn_working_dir,
+        sanitize_remote_acp_chunk, shell_exec_line, shell_quote, AcpDriver, AcpEventMetadata,
+        AcpNotificationHandler, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
+        AcpSessionConfigOptionSelection, AgentRunOutcome, BasicMessageWriter, MessageWriter,
+        RemoteLineOutcome, ReplayBoundary, ReplayBuffer, ReplayEvent,
     };
     use agent_client_protocol::schema::v1::{
         ContentBlock as AcpContentBlock, McpCapabilities, McpServer, McpServerHttp, McpServerSse,
         McpServerStdio, PermissionOption, PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority,
-        PlanEntryStatus, RequestPermissionOutcome, SessionNotification, SessionUpdate, StopReason,
+        PlanEntryStatus, RequestPermissionOutcome, SessionConfigOption,
+        SessionConfigOptionCategory, SessionConfigSelectOption, SessionNotification, SessionUpdate,
+        SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
     };
     use std::ffi::OsString;
     use std::path::{Path, PathBuf};
@@ -2569,6 +2677,231 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("{prefix}-{}-{nonce}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create test dir");
         dir
+    }
+
+    #[test]
+    fn resolves_stale_config_id_by_category() {
+        let options = vec![SessionConfigOption::select(
+            "model-v2",
+            "Model",
+            "sonnet",
+            vec![
+                SessionConfigSelectOption::new("sonnet", "Sonnet"),
+                SessionConfigSelectOption::new("opus", "Opus"),
+            ],
+        )
+        .category(SessionConfigOptionCategory::Model)];
+        let selection = AcpSessionConfigOptionSelection {
+            category: SessionConfigOptionCategory::Model,
+            config_id: "model-v1".to_string(),
+            value_id: "opus".to_string(),
+        };
+
+        let resolved =
+            resolve_session_config_option_selection(&options, &selection).expect("resolved config");
+
+        assert_eq!(resolved, "model-v2");
+    }
+
+    #[test]
+    fn errors_when_selected_config_value_is_missing() {
+        let options = vec![SessionConfigOption::select(
+            "reasoning",
+            "Reasoning",
+            "medium",
+            vec![
+                SessionConfigSelectOption::new("low", "Low"),
+                SessionConfigSelectOption::new("medium", "Medium"),
+            ],
+        )
+        .category(SessionConfigOptionCategory::ThoughtLevel)];
+        let selection = AcpSessionConfigOptionSelection {
+            category: SessionConfigOptionCategory::ThoughtLevel,
+            config_id: "reasoning".to_string(),
+            value_id: "high".to_string(),
+        };
+
+        let error = resolve_session_config_option_selection(&options, &selection)
+            .expect_err("missing value should fail");
+
+        assert!(error.contains("Selected ACP effort value 'high' is no longer available"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn skips_stale_effort_after_applying_selected_model() {
+        let calls = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let calls_for_handler = Arc::clone(&calls);
+        let agent = agent_client_protocol::Agent.builder().on_receive_request(
+            async move |request: SetSessionConfigOptionRequest, responder, _cx| {
+                calls_for_handler.lock().unwrap().push((
+                    request.config_id.to_string(),
+                    request
+                        .value
+                        .as_value_id()
+                        .expect("selected config value should be a value ID")
+                        .to_string(),
+                ));
+                responder.respond(SetSessionConfigOptionResponse::new(vec![
+                    SessionConfigOption::select(
+                        "model",
+                        "Model",
+                        "opus",
+                        vec![
+                            SessionConfigSelectOption::new("sonnet", "Sonnet"),
+                            SessionConfigSelectOption::new("opus", "Opus"),
+                        ],
+                    )
+                    .category(SessionConfigOptionCategory::Model),
+                    SessionConfigOption::select(
+                        "reasoning",
+                        "Reasoning",
+                        "low",
+                        vec![SessionConfigSelectOption::new("low", "Low")],
+                    )
+                    .category(SessionConfigOptionCategory::ThoughtLevel),
+                ]))
+            },
+            agent_client_protocol::on_receive_request!(),
+        );
+        let writer = Arc::new(RecordingMessageWriter::default());
+        let message_writer: Arc<dyn MessageWriter> = writer.clone();
+        let initial_options = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "sonnet",
+                vec![
+                    SessionConfigSelectOption::new("sonnet", "Sonnet"),
+                    SessionConfigSelectOption::new("opus", "Opus"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::Model),
+            SessionConfigOption::select(
+                "reasoning",
+                "Reasoning",
+                "high",
+                vec![
+                    SessionConfigSelectOption::new("low", "Low"),
+                    SessionConfigSelectOption::new("high", "High"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::ThoughtLevel),
+        ];
+        let selections = vec![
+            AcpSessionConfigOptionSelection {
+                category: SessionConfigOptionCategory::Model,
+                config_id: "model".to_string(),
+                value_id: "opus".to_string(),
+            },
+            AcpSessionConfigOptionSelection {
+                category: SessionConfigOptionCategory::ThoughtLevel,
+                config_id: "reasoning".to_string(),
+                value_id: "high".to_string(),
+            },
+        ];
+
+        agent_client_protocol::Client
+            .builder()
+            .name("acp-config-test")
+            .connect_with(agent, async |connection| {
+                apply_or_record_session_config_options(
+                    &connection,
+                    "session-1",
+                    Some(&initial_options),
+                    &selections,
+                    &message_writer,
+                    false,
+                )
+                .await
+                .map_err(agent_client_protocol::util::internal_error)
+            })
+            .await
+            .expect("protocol should succeed");
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(String::from("model"), String::from("opus"))]
+        );
+        let updates = writer.config_option_updates.lock().unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(
+            resolve_session_config_option_selection(&updates[0], &selections[1])
+                .expect_err("stale effort should remain unavailable"),
+            "Selected ACP effort value 'high' is no longer available for config option 'reasoning'"
+        );
+    }
+
+    #[test]
+    fn detects_unavailable_config_selection_errors() {
+        assert!(is_config_selection_unavailable_error(
+            "Selected ACP model value 'sonnet' is no longer available for config option 'model'"
+        ));
+        assert!(is_config_selection_unavailable_error(
+            "Agent did not return ACP config options needed to apply selected model before prompting"
+        ));
+        assert!(is_config_selection_unavailable_error(
+            "Selected ACP effort config option 'reasoning' is not a select option"
+        ));
+        assert!(!is_config_selection_unavailable_error(
+            "Failed to create ACP session: transport closed"
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_config_options_skip_apply_on_resume_but_fail_new_sessions() {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let calls_for_handler = Arc::clone(&calls);
+        let agent = agent_client_protocol::Agent.builder().on_receive_request(
+            async move |request: SetSessionConfigOptionRequest, responder, _cx| {
+                calls_for_handler
+                    .lock()
+                    .unwrap()
+                    .push(request.config_id.to_string());
+                responder.respond(SetSessionConfigOptionResponse::new(vec![]))
+            },
+            agent_client_protocol::on_receive_request!(),
+        );
+        let writer = Arc::new(RecordingMessageWriter::default());
+        let message_writer: Arc<dyn MessageWriter> = writer.clone();
+        let selections = vec![AcpSessionConfigOptionSelection {
+            category: SessionConfigOptionCategory::Model,
+            config_id: "model".to_string(),
+            value_id: "opus".to_string(),
+        }];
+
+        agent_client_protocol::Client
+            .builder()
+            .name("acp-config-test")
+            .connect_with(agent, async |connection| {
+                apply_or_record_session_config_options(
+                    &connection,
+                    "session-1",
+                    None,
+                    &selections,
+                    &message_writer,
+                    true,
+                )
+                .await
+                .map_err(agent_client_protocol::util::internal_error)?;
+
+                let error = apply_or_record_session_config_options(
+                    &connection,
+                    "session-1",
+                    None,
+                    &selections,
+                    &message_writer,
+                    false,
+                )
+                .await
+                .expect_err("missing config options must fail new sessions");
+                assert!(is_config_selection_unavailable_error(&error));
+                Ok(())
+            })
+            .await
+            .expect("protocol should succeed");
+
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(writer.config_option_updates.lock().unwrap().is_empty());
     }
 
     fn write_executable(path: &Path, content: &str) {
@@ -2625,6 +2958,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingMessageWriter {
         events: Mutex<Vec<AcpEventMetadata>>,
+        config_option_updates: Mutex<Vec<Vec<SessionConfigOption>>>,
     }
 
     #[async_trait::async_trait]
@@ -2653,6 +2987,13 @@ mod tests {
 
         async fn record_acp_event_metadata(&self, metadata: AcpEventMetadata) {
             self.events.lock().unwrap().push(metadata);
+        }
+
+        async fn on_config_option_update(&self, options: &[SessionConfigOption]) {
+            self.config_option_updates
+                .lock()
+                .unwrap()
+                .push(options.to_vec());
         }
     }
 
@@ -2914,58 +3255,6 @@ mod tests {
     }
 
     #[test]
-    fn env_shebang_interpreter_detects_env_launcher() {
-        let dir = unique_test_dir("acp-env-shebang");
-        let launcher = dir.join("codex-acp");
-        write_executable(&launcher, "#!/usr/bin/env node\n");
-
-        assert_eq!(env_shebang_interpreter(&launcher).as_deref(), Some("node"));
-
-        std::fs::remove_dir_all(dir).expect("cleanup test dir");
-    }
-
-    #[test]
-    fn guarded_path_keeps_snapshot_when_interpreter_is_already_available() {
-        let dir = unique_test_dir("acp-guarded-path-present");
-        let project_bin = dir.join("project-bin");
-        let agent_bin = dir.join("agent-bin");
-        let launcher = agent_bin.join("codex-acp");
-        write_executable(&project_bin.join("node"), "#!/bin/sh\n");
-        write_executable(&agent_bin.join("node"), "#!/bin/sh\n");
-        write_executable(&launcher, "#!/usr/bin/env node\n");
-
-        let snapshot_path = join_path_entries(&[project_bin.clone(), PathBuf::from("/usr/bin")]);
-
-        assert_eq!(
-            guarded_path_for_agent_binary(&launcher, &snapshot_path),
-            None,
-            "agent bin dir must not be inserted ahead of a snapshot PATH that already provides node"
-        );
-
-        std::fs::remove_dir_all(dir).expect("cleanup test dir");
-    }
-
-    #[test]
-    fn guarded_path_prepends_private_agent_dir_when_interpreter_is_missing() {
-        let dir = unique_test_dir("acp-guarded-path-missing");
-        let snapshot_bin = dir.join("snapshot-bin");
-        let agent_bin = dir.join("agent-bin");
-        let launcher = agent_bin.join("claude-agent-acp");
-        std::fs::create_dir_all(&snapshot_bin).expect("create snapshot bin");
-        write_executable(&agent_bin.join("node"), "#!/bin/sh\n");
-        write_executable(&launcher, "#!/usr/bin/env node\n");
-
-        let snapshot_path = join_path_entries(std::slice::from_ref(&snapshot_bin));
-        let updated = guarded_path_for_agent_binary(&launcher, &snapshot_path)
-            .expect("missing interpreter should add agent bin dir");
-        let entries: Vec<PathBuf> = std::env::split_paths(&updated).collect();
-
-        assert_eq!(entries, vec![agent_bin, snapshot_bin]);
-
-        std::fs::remove_dir_all(dir).expect("cleanup test dir");
-    }
-
-    #[test]
     fn spawn_command_uses_home_interpreter_for_env_shebang_bridge() {
         let dir = unique_test_dir("acp-home-interpreter");
         let home_bin = dir.join("home-bin");
@@ -3014,22 +3303,6 @@ mod tests {
         assert!(!command.uses_explicit_interpreter);
 
         std::fs::remove_dir_all(dir).expect("cleanup test dir");
-    }
-
-    #[test]
-    fn broad_toolchain_dirs_are_appended_not_prepended() {
-        let hermit_bin = PathBuf::from("/repo/bin");
-        let existing_path = join_path_entries(std::slice::from_ref(&hermit_bin));
-        let updated =
-            path_with_inserted_agent_bin_dir(&existing_path, Path::new("/opt/homebrew/bin"))
-                .expect("broad dir should still be added as a fallback");
-        let entries: Vec<PathBuf> = std::env::split_paths(&updated).collect();
-
-        assert!(is_broad_toolchain_dir(Path::new("/opt/homebrew/bin")));
-        assert_eq!(
-            entries,
-            vec![hermit_bin, PathBuf::from("/opt/homebrew/bin")]
-        );
     }
 
     #[test]

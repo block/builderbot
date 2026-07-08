@@ -145,7 +145,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
         )
         .unwrap();
 
-    assert_eq!(version, 19);
+    assert_eq!(version, 20);
     assert_eq!(app_version, super::APP_VERSION);
     assert!(table_exists(&conn, "projects"));
     assert!(table_exists(&conn, "project_notes"));
@@ -158,6 +158,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
         "session_messages",
         "acp_agent_capabilities"
     ));
+    assert!(column_exists(&conn, "sessions", "acp_config_selection"));
 
     let trigger_count: i64 = conn
         .query_row(
@@ -221,8 +222,9 @@ fn test_store_repairs_github_comment_tracking_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 19);
+    assert_eq!(version, 20);
     assert!(column_exists(&conn, "sessions", "pipeline"));
+    assert!(column_exists(&conn, "sessions", "acp_config_selection"));
     assert!(column_exists(
         &conn,
         "session_messages",
@@ -278,7 +280,7 @@ fn test_store_repairs_pipeline_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 19);
+    assert_eq!(version, 20);
     assert!(column_exists(&conn, "comments", "github_comment_id"));
     assert!(column_exists(&conn, "comments", "github_comment_type"));
     assert!(column_exists(&conn, "comments", "github_comment_stale"));
@@ -288,6 +290,7 @@ fn test_store_repairs_pipeline_user_version() {
         "acp_agent_capabilities"
     ));
     assert!(table_exists(&conn, "queued_session_messages"));
+    assert!(column_exists(&conn, "sessions", "acp_config_selection"));
 
     cleanup_db(&path);
 }

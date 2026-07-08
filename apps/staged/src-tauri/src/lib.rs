@@ -3,6 +3,7 @@
 //! Tauri commands for the new frontend, built incrementally.
 //! See `src-archive/lib.rs` for the previous implementation.
 
+pub(crate) mod acp_config;
 pub mod actions;
 pub mod agent;
 pub mod background_sync;
@@ -2311,6 +2312,7 @@ pub fn run() {
             util_commands::open_in_app,
             // Sessions
             session_commands::discover_acp_providers,
+            session_commands::discover_acp_config,
             session_commands::get_session,
             session_commands::get_session_messages,
             session_commands::get_session_messages_since,

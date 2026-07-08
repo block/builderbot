@@ -170,6 +170,99 @@ pub fn resolve_executable_from_path(cmd: &str, path_value: &str) -> Option<PathB
         .find(|path| is_executable_file(path))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnvShebangLauncher {
+    pub interpreter: String,
+    pub bin_dir: PathBuf,
+}
+
+pub fn env_shebang_interpreter(binary_path: &Path) -> Option<String> {
+    let mut file = std::fs::File::open(binary_path).ok()?;
+    let mut buf = [0_u8; 512];
+    let len = std::io::Read::read(&mut file, &mut buf).ok()?;
+    let first_line = std::str::from_utf8(&buf[..len]).ok()?.lines().next()?;
+    let shebang = first_line.strip_prefix("#!")?.trim();
+
+    let mut parts = shebang.split_whitespace();
+    let command = parts.next()?;
+    let command_name = Path::new(command).file_name()?.to_str()?;
+    if command_name != "env" {
+        return None;
+    }
+
+    for part in parts {
+        if part == "-S" || part.starts_with('-') || part.contains('=') {
+            continue;
+        }
+        if part.contains('/') {
+            return None;
+        }
+        return Some(part.to_string());
+    }
+
+    None
+}
+
+pub fn resolve_env_shebang_interpreter_from_path(
+    binary_path: &Path,
+    path_value: &str,
+) -> Option<PathBuf> {
+    let interpreter = env_shebang_interpreter(binary_path)?;
+    resolve_executable_from_path(&interpreter, path_value)
+}
+
+pub fn env_shebang_launcher(binary_path: &Path) -> Option<EnvShebangLauncher> {
+    let interpreter = env_shebang_interpreter(binary_path)?;
+    let bin_dir = binary_path.parent()?.to_path_buf();
+    if !is_executable_file(&bin_dir.join(&interpreter)) {
+        return None;
+    }
+
+    Some(EnvShebangLauncher {
+        interpreter,
+        bin_dir,
+    })
+}
+
+pub fn is_broad_toolchain_dir(path: &Path) -> bool {
+    matches!(
+        path.to_str(),
+        Some("/opt/homebrew/bin" | "/usr/local/bin" | "/usr/bin" | "/bin" | "/opt/local/bin")
+    )
+}
+
+pub fn path_with_inserted_launcher_bin_dir(existing_path: &str, bin_dir: &Path) -> Option<String> {
+    let mut entries: Vec<PathBuf> = if existing_path.is_empty() {
+        Vec::new()
+    } else {
+        std::env::split_paths(existing_path).collect()
+    };
+
+    if entries.iter().any(|entry| entry == bin_dir) {
+        return None;
+    }
+
+    if is_broad_toolchain_dir(bin_dir) {
+        entries.push(bin_dir.to_path_buf());
+    } else {
+        entries.insert(0, bin_dir.to_path_buf());
+    }
+
+    std::env::join_paths(entries).ok()?.into_string().ok()
+}
+
+pub fn guarded_path_for_env_shebang_launcher(
+    binary_path: &Path,
+    existing_path: &str,
+) -> Option<String> {
+    let launcher = env_shebang_launcher(binary_path)?;
+    if resolve_executable_from_path(&launcher.interpreter, existing_path).is_some() {
+        return None;
+    }
+
+    path_with_inserted_launcher_bin_dir(existing_path, &launcher.bin_dir)
+}
+
 fn resolved_binary(
     path: PathBuf,
     lines: &[String],
@@ -579,6 +672,13 @@ mod tests {
         fs::write(home.join(".bash_profile"), profile).unwrap();
     }
 
+    fn join_path_entries(entries: &[PathBuf]) -> String {
+        std::env::join_paths(entries)
+            .expect("join path entries")
+            .into_string()
+            .expect("path entries should be utf8")
+    }
+
     #[test]
     fn candidate_accepts_single_absolute_path() {
         assert_eq!(
@@ -672,6 +772,83 @@ mod tests {
 
         assert!(!is_executable_file(&dir));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn env_shebang_interpreter_detects_env_launcher() {
+        let dir = std::env::temp_dir().join(format!("doctor-env-shebang-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let launcher = dir.join("codex-acp");
+        write_executable(&launcher, "#!/usr/bin/env node\n");
+
+        assert_eq!(env_shebang_interpreter(&launcher).as_deref(), Some("node"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn guarded_path_keeps_snapshot_when_interpreter_is_already_available() {
+        let dir = std::env::temp_dir().join(format!(
+            "doctor-guarded-path-present-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let project_bin = dir.join("project-bin");
+        let agent_bin = dir.join("agent-bin");
+        let launcher = agent_bin.join("codex-acp");
+        write_executable(&project_bin.join("node"), "#!/bin/sh\n");
+        write_executable(&agent_bin.join("node"), "#!/bin/sh\n");
+        write_executable(&launcher, "#!/usr/bin/env node\n");
+
+        let snapshot_path = join_path_entries(&[project_bin.clone(), PathBuf::from("/usr/bin")]);
+
+        assert_eq!(
+            guarded_path_for_env_shebang_launcher(&launcher, &snapshot_path),
+            None,
+            "launcher bin dir must not be inserted ahead of a snapshot PATH that already provides node"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn guarded_path_prepends_private_launcher_dir_when_interpreter_is_missing() {
+        let dir = std::env::temp_dir().join(format!(
+            "doctor-guarded-path-missing-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        let snapshot_bin = dir.join("snapshot-bin");
+        let agent_bin = dir.join("agent-bin");
+        let launcher = agent_bin.join("claude-agent-acp");
+        fs::create_dir_all(&snapshot_bin).expect("create snapshot bin");
+        write_executable(&agent_bin.join("node"), "#!/bin/sh\n");
+        write_executable(&launcher, "#!/usr/bin/env node\n");
+
+        let snapshot_path = join_path_entries(std::slice::from_ref(&snapshot_bin));
+        let updated = guarded_path_for_env_shebang_launcher(&launcher, &snapshot_path)
+            .expect("missing interpreter should add launcher bin dir");
+        let entries: Vec<PathBuf> = std::env::split_paths(&updated).collect();
+
+        assert_eq!(entries, vec![agent_bin, snapshot_bin]);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn broad_toolchain_dirs_are_appended_not_prepended() {
+        let hermit_bin = PathBuf::from("/repo/bin");
+        let existing_path = join_path_entries(std::slice::from_ref(&hermit_bin));
+        let updated =
+            path_with_inserted_launcher_bin_dir(&existing_path, Path::new("/opt/homebrew/bin"))
+                .expect("broad dir should still be added as a fallback");
+        let entries: Vec<PathBuf> = std::env::split_paths(&updated).collect();
+
+        assert!(is_broad_toolchain_dir(Path::new("/opt/homebrew/bin")));
+        assert_eq!(
+            entries,
+            vec![hermit_bin, PathBuf::from("/opt/homebrew/bin")]
+        );
     }
 
     #[test]

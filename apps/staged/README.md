@@ -162,7 +162,7 @@ src/
     ├── ProjectHome.svelte  # Project dashboard
     ├── BranchTimeline.svelte   # Branch history and commit timeline
     ├── SessionLauncher.svelte  # AI session creation and management
-    ├── AgentSelector.svelte    # Agent provider picker
+    ├── AcpConfigPicker.svelte  # Agent provider/model/effort picker
     ├── TopBar.svelte       # Navigation and project controls
     ├── commands.ts         # Tauri command bindings
     ├── types.ts            # Shared TypeScript types

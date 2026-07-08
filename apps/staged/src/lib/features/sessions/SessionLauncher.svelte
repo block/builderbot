@@ -24,6 +24,8 @@
   import Spinner from '../../shared/Spinner.svelte';
   import { agentState } from '../agents/agent.svelte';
   import { getPreferredAgent } from '../settings/preferences.svelte';
+  import AcpConfigPicker from '../agents/AcpConfigPicker.svelte';
+  import type { AcpConfigPickerSelection } from '../agents/acpConfigSelection';
   import { toast } from 'svelte-sonner';
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
   import { Input } from '$lib/components/ui/input';
@@ -47,8 +49,13 @@
 
   let prompt = $state('');
   let creating = $state(false);
+  let acpPickerSelection = $state<AcpConfigPickerSelection>({
+    providerId: null,
+    acpConfigSelection: null,
+  });
 
   let unlistenStatus: UnlistenFn | null = null;
+  const workingDir = '/tmp';
 
   // =========================================================================
   // Lifecycle — listen for status events
@@ -86,13 +93,12 @@
     creating = true;
     try {
       // startSession creates the session + kicks off goose in the background.
-      // We need a working directory — use the user's home dir as a default
-      // for these standalone debug sessions.
-      const workingDir = '/tmp';
+      // We need a working directory for these standalone debug sessions.
       const s = await startSession(
         text,
         workingDir,
-        getPreferredAgent(agentState.providers) ?? undefined
+        acpPickerSelection.providerId ?? getPreferredAgent(agentState.providers) ?? undefined,
+        acpPickerSelection.acpConfigSelection ?? undefined
       );
       // Register the session in the unified registry
       // Note: SessionLauncher creates standalone sessions not tied to any project/branch
@@ -160,6 +166,10 @@
       handleCreate();
     }
   }
+
+  function handleAcpSelectionChange(selection: AcpConfigPickerSelection) {
+    acpPickerSelection = selection;
+  }
 </script>
 
 <!-- Floating panel — not a modal, doesn't block interaction -->
@@ -187,6 +197,12 @@
       onkeydown={handleKeydown}
       disabled={creating}
       class="flex-1"
+    />
+    <AcpConfigPicker
+      disabled={creating}
+      triggerClass="h-7 max-w-[120px] border border-[var(--border-muted)] bg-[var(--bg-primary)]"
+      {workingDir}
+      onSelectionChange={handleAcpSelectionChange}
     />
     <span class="inline-flex" title="Create session">
       <Button

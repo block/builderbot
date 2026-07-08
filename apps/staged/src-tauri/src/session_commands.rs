@@ -17,12 +17,29 @@
 //! `Store` directly.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
+use agent_client_protocol::{
+    schema::{
+        v1::{
+            Implementation, InitializeRequest, NewSessionRequest, SessionConfigKind,
+            SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOptions,
+            SetSessionConfigOptionRequest,
+        },
+        ProtocolVersion,
+    },
+    ByteStreams, Client, ConnectTo, ErrorCode,
+};
 use serde::{Deserialize, Serialize};
 use tauri::path::BaseDirectory;
 use tauri::Manager;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
+use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::agent::{self, AcpProviderInfo};
@@ -319,6 +336,555 @@ pub async fn discover_acp_providers() -> Vec<AcpProviderInfo> {
         .unwrap_or_default()
 }
 
+/// Product-facing ACP config discovery for the provider/model/effort picker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpConfigDiscovery {
+    provider_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<crate::acp_config::NormalizedAcpConfigSelector>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effort: Option<crate::acp_config::NormalizedAcpConfigSelector>,
+}
+
+const ACP_CONFIG_DISCOVERY_SETUP_TIMEOUT: Duration = Duration::from_secs(90);
+const ACP_CONFIG_DISCOVERY_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+
+#[derive(Debug, Clone)]
+struct AcpConfigDiscoveryCacheEntry {
+    discovery: AcpConfigDiscovery,
+    fetched_at: Instant,
+}
+
+static ACP_CONFIG_DISCOVERY_CACHE: OnceLock<Mutex<HashMap<String, AcpConfigDiscoveryCacheEntry>>> =
+    OnceLock::new();
+static ACP_CONFIG_DISCOVERY_MODEL_CACHE: OnceLock<
+    Mutex<HashMap<String, AcpConfigDiscoveryCacheEntry>>,
+> = OnceLock::new();
+
+fn acp_config_discovery_cache() -> &'static Mutex<HashMap<String, AcpConfigDiscoveryCacheEntry>> {
+    ACP_CONFIG_DISCOVERY_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn acp_config_discovery_model_cache(
+) -> &'static Mutex<HashMap<String, AcpConfigDiscoveryCacheEntry>> {
+    ACP_CONFIG_DISCOVERY_MODEL_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn normalized_acp_config_provider_id(provider_id: &str) -> Result<String, String> {
+    let provider_id = provider_id.trim().to_string();
+    if provider_id.is_empty() {
+        return Err("ACP provider ID is required for config discovery".to_string());
+    }
+    Ok(provider_id)
+}
+
+fn acp_config_discovery_model_cache_key(provider_id: &str, selected_model_value: &str) -> String {
+    format!("{provider_id}\0{selected_model_value}")
+}
+
+#[derive(Debug)]
+struct AcpConfigDiscoverySpawnCommand {
+    program: PathBuf,
+    args: Vec<OsString>,
+    uses_explicit_interpreter: bool,
+}
+
+fn acp_config_discovery_from_options(
+    provider_id: String,
+    config_options: &[acp_client::SessionConfigOption],
+) -> AcpConfigDiscovery {
+    let normalized = crate::acp_config::normalize_acp_config_options(config_options);
+    AcpConfigDiscovery {
+        provider_id,
+        model: normalized.model,
+        effort: normalized.effort,
+    }
+}
+
+fn resolve_acp_config_discovery_working_dir(working_dir: Option<String>) -> PathBuf {
+    working_dir
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+fn normalize_selected_model_value(selected_model_value: Option<String>) -> Option<String> {
+    selected_model_value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn resolve_model_config_id_for_discovery(
+    config_options: &[SessionConfigOption],
+    selected_model_value: &str,
+) -> Result<String, String> {
+    let Some(option) = config_options.iter().find(|option| {
+        option.category.as_ref() == Some(&SessionConfigOptionCategory::Model)
+            && matches!(&option.kind, SessionConfigKind::Select(_))
+    }) else {
+        return Err("ACP config discovery did not return a model selector".to_string());
+    };
+
+    if !select_config_option_has_value(option, selected_model_value) {
+        return Err(format!(
+            "ACP config discovery model value '{selected_model_value}' is no longer available for config option '{}'",
+            option.id
+        ));
+    }
+
+    Ok(option.id.to_string())
+}
+
+fn select_config_option_has_value(option: &SessionConfigOption, value_id: &str) -> bool {
+    let SessionConfigKind::Select(select) = &option.kind else {
+        return false;
+    };
+
+    match &select.options {
+        SessionConfigSelectOptions::Ungrouped(options) => options
+            .iter()
+            .any(|option| option.value.to_string() == value_id),
+        SessionConfigSelectOptions::Grouped(groups) => groups.iter().any(|group| {
+            group
+                .options
+                .iter()
+                .any(|option| option.value.to_string() == value_id)
+        }),
+        _ => false,
+    }
+}
+
+fn acp_config_discovery_spawn_command(
+    binary_path: &Path,
+    acp_args: &[String],
+    interpreter_env_snapshot: &[(String, String)],
+) -> AcpConfigDiscoverySpawnCommand {
+    let interpreter_path = interpreter_env_snapshot
+        .iter()
+        .find(|(key, _)| key == "PATH")
+        .and_then(|(_, value)| {
+            doctor::resolve::resolve_env_shebang_interpreter_from_path(binary_path, value)
+        });
+    if let Some(interpreter) = interpreter_path {
+        let mut args = vec![binary_path.as_os_str().to_os_string()];
+        args.extend(acp_args.iter().map(OsString::from));
+        return AcpConfigDiscoverySpawnCommand {
+            program: interpreter,
+            args,
+            uses_explicit_interpreter: true,
+        };
+    }
+
+    AcpConfigDiscoverySpawnCommand {
+        program: binary_path.to_path_buf(),
+        args: acp_args.iter().map(OsString::from).collect(),
+        uses_explicit_interpreter: false,
+    }
+}
+
+fn apply_acp_config_discovery_env(
+    cmd: &mut Command,
+    env_vars: &[(String, String)],
+    binary_path: &Path,
+    uses_explicit_interpreter: bool,
+) {
+    cmd.env_clear();
+    let mut path_value: Option<&str> = None;
+    for (key, value) in env_vars {
+        if key == "PATH" {
+            path_value = Some(value.as_str());
+        }
+        cmd.env(key, value);
+    }
+
+    if uses_explicit_interpreter {
+        return;
+    }
+
+    if let Some(path) = doctor::resolve::guarded_path_for_env_shebang_launcher(
+        binary_path,
+        path_value.unwrap_or_default(),
+    ) {
+        cmd.env("PATH", path);
+    }
+}
+
+async fn run_acp_config_discovery_protocol(
+    provider_id: &str,
+    working_dir: &Path,
+    stdin: tokio::process::ChildStdin,
+    stdout: tokio::process::ChildStdout,
+    selected_model_value: Option<&str>,
+) -> Result<Vec<acp_client::SessionConfigOption>, String> {
+    let stdin_compat = stdin.compat_write();
+    let stdout_compat = stdout.compat();
+    let transport = ByteStreams::new(stdin_compat, stdout_compat);
+    run_acp_config_discovery_transport(provider_id, working_dir, transport, selected_model_value)
+        .await
+}
+
+async fn run_acp_config_discovery_transport<T>(
+    provider_id: &str,
+    working_dir: &Path,
+    transport: T,
+    selected_model_value: Option<&str>,
+) -> Result<Vec<acp_client::SessionConfigOption>, String>
+where
+    T: ConnectTo<Client> + 'static,
+{
+    let working_dir = working_dir.to_path_buf();
+    let provider_id = provider_id.to_string();
+    let protocol_provider_id = provider_id.clone();
+    let selected_model_value = selected_model_value.map(str::to_string);
+
+    Client
+        .builder()
+        .name("staged-acp-config-discovery")
+        .connect_with(transport, async move |connection| {
+            tokio::time::timeout(ACP_CONFIG_DISCOVERY_SETUP_TIMEOUT, async {
+                let client_info =
+                    Implementation::new("staged-acp-config-discovery", env!("CARGO_PKG_VERSION"));
+                let init_request =
+                    InitializeRequest::new(ProtocolVersion::V1).client_info(client_info);
+                let init_response = connection
+                    .send_request(init_request)
+                    .block_task()
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "ACP config discovery init failed for {protocol_provider_id}: {e:?}"
+                        )
+                    })?;
+
+                if init_response.protocol_version != ProtocolVersion::V1 {
+                    return Err(format!(
+                        "Agent negotiated unsupported ACP protocol version {} (expected {})",
+                        init_response.protocol_version,
+                        ProtocolVersion::V1
+                    ));
+                }
+
+                let session_response = match connection
+                    .send_request(NewSessionRequest::new(working_dir))
+                    .block_task()
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(e) if e.code == ErrorCode::AuthRequired => {
+                        log::debug!(
+                            "ACP config discovery skipped authentication-required provider {protocol_provider_id}"
+                        );
+                        return Ok(Vec::new());
+                    }
+                    Err(e) => {
+                        return Err(format!(
+                            "ACP config discovery failed to create session for {protocol_provider_id}: {e:?}"
+                        ));
+                    }
+                };
+
+                let config_options = session_response.config_options.unwrap_or_default();
+                let Some(selected_model_value) = selected_model_value.as_deref() else {
+                    return Ok(config_options);
+                };
+
+                let model_config_id =
+                    resolve_model_config_id_for_discovery(&config_options, selected_model_value)?;
+                let response = connection
+                    .send_request(SetSessionConfigOptionRequest::new(
+                        session_response.session_id.to_string(),
+                        model_config_id,
+                        selected_model_value,
+                    ))
+                    .block_task()
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "ACP config discovery failed to set selected model for {protocol_provider_id}: {e:?}"
+                        )
+                    })?;
+
+                Ok(response.config_options)
+            })
+            .await
+            .map_err(|_| {
+                agent_client_protocol::util::internal_error(format!(
+                    "Timed out waiting for ACP config discovery startup after {}s",
+                    ACP_CONFIG_DISCOVERY_SETUP_TIMEOUT.as_secs()
+                ))
+            })?
+            .map_err(agent_client_protocol::util::internal_error)
+        })
+        .await
+        .map_err(|e| format!("ACP config discovery protocol failed for {provider_id}: {e:?}"))
+}
+
+async fn discover_acp_config_for_provider_async(
+    provider_id: String,
+    working_dir: PathBuf,
+    selected_model_value: Option<String>,
+) -> Result<AcpConfigDiscovery, String> {
+    let agent = acp_client::find_acp_agent_by_id(&provider_id)
+        .ok_or_else(|| format!("Unknown or unavailable agent provider: {provider_id}"))?;
+
+    let cache = session_runner::shell_env_cache();
+    let home_snapshot = crate::shell_env::home_env_vars_with_extended_path(cache.as_ref()).await;
+    let spawn_command =
+        acp_config_discovery_spawn_command(agent.path(), &agent.acp_args, &home_snapshot);
+
+    let mut cmd = Command::new(&spawn_command.program);
+    cmd.args(&spawn_command.args)
+        .current_dir(&working_dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    match cache.get(&working_dir).await {
+        Ok(snapshot) => apply_acp_config_discovery_env(
+            &mut cmd,
+            snapshot.vars(),
+            agent.path(),
+            spawn_command.uses_explicit_interpreter,
+        ),
+        Err(e) => {
+            log::warn!(
+                "ACP config discovery: failed to capture shell env snapshot for {} \
+                 (falling back to inherited environment): {e}",
+                working_dir.display()
+            );
+        }
+    }
+
+    let mut child = cmd.spawn().map_err(|e| {
+        format!(
+            "Failed to spawn {} for ACP config discovery (binary: {}, cwd: {}): {e}",
+            agent.name(),
+            agent.path().display(),
+            working_dir.display()
+        )
+    })?;
+
+    if let Some(stderr) = child.stderr.take() {
+        let agent_label = agent.name().to_string();
+        tokio::task::spawn_local(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                log::warn!("[{agent_label} stderr][config discovery] {line}");
+            }
+        });
+    }
+
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "Failed to get ACP config discovery stdin".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to get ACP config discovery stdout".to_string())?;
+
+    let config_options = run_acp_config_discovery_protocol(
+        &provider_id,
+        &working_dir,
+        stdin,
+        stdout,
+        selected_model_value.as_deref(),
+    )
+    .await;
+
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+
+    let config_options = config_options?;
+    Ok(acp_config_discovery_from_options(
+        provider_id,
+        &config_options,
+    ))
+}
+
+fn discover_acp_config_for_provider(
+    provider_id: String,
+    working_dir: PathBuf,
+    selected_model_value: Option<String>,
+) -> Result<AcpConfigDiscovery, String> {
+    let provider_id = normalized_acp_config_provider_id(&provider_id)?;
+    let selected_model_value = normalize_selected_model_value(selected_model_value);
+
+    let handle = std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("Failed to create runtime for ACP config discovery: {e}"))?;
+
+        let local = tokio::task::LocalSet::new();
+        local.block_on(
+            &rt,
+            discover_acp_config_for_provider_async(provider_id, working_dir, selected_model_value),
+        )
+    });
+
+    handle
+        .join()
+        .map_err(|_| "ACP config discovery thread panicked".to_string())?
+}
+
+fn discover_acp_config_for_provider_default(
+    provider_id: String,
+    working_dir: PathBuf,
+) -> Result<AcpConfigDiscovery, String> {
+    discover_acp_config_for_provider(provider_id, working_dir, None)
+}
+
+fn discover_acp_config_for_provider_with_cache<F>(
+    provider_id: String,
+    working_dir: PathBuf,
+    force: bool,
+    fetch: F,
+) -> Result<AcpConfigDiscovery, String>
+where
+    F: FnOnce(String, PathBuf) -> Result<AcpConfigDiscovery, String>,
+{
+    let provider_id = normalized_acp_config_provider_id(&provider_id)?;
+    let cached_entry = {
+        let cache = acp_config_discovery_cache().lock().unwrap();
+        cache.get(&provider_id).cloned()
+    };
+
+    if !force {
+        if let Some(entry) = &cached_entry {
+            if entry.fetched_at.elapsed() < ACP_CONFIG_DISCOVERY_CACHE_TTL {
+                return Ok(entry.discovery.clone());
+            }
+        }
+    }
+
+    match fetch(provider_id.clone(), working_dir) {
+        Ok(discovery) => {
+            let mut cache = acp_config_discovery_cache().lock().unwrap();
+            cache.insert(
+                provider_id,
+                AcpConfigDiscoveryCacheEntry {
+                    discovery: discovery.clone(),
+                    fetched_at: Instant::now(),
+                },
+            );
+            Ok(discovery)
+        }
+        Err(e) => {
+            if let Some(entry) = cached_entry {
+                log::warn!(
+                    "ACP config discovery refresh failed for {provider_id}; using stale cached options: {e}"
+                );
+                Ok(entry.discovery)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+fn discover_acp_config_for_model_with_cache<F>(
+    provider_id: String,
+    working_dir: PathBuf,
+    selected_model_value: String,
+    force: bool,
+    fetch: F,
+) -> Result<AcpConfigDiscovery, String>
+where
+    F: FnOnce(String, PathBuf, Option<String>) -> Result<AcpConfigDiscovery, String>,
+{
+    let provider_id = normalized_acp_config_provider_id(&provider_id)?;
+    let selected_model_value = normalize_selected_model_value(Some(selected_model_value))
+        .ok_or_else(|| {
+            "ACP model value is required for model-specific config discovery".to_string()
+        })?;
+    let cache_key = acp_config_discovery_model_cache_key(&provider_id, &selected_model_value);
+    let cached_entry = {
+        let cache = acp_config_discovery_model_cache().lock().unwrap();
+        cache.get(&cache_key).cloned()
+    };
+
+    if !force {
+        if let Some(entry) = &cached_entry {
+            if entry.fetched_at.elapsed() < ACP_CONFIG_DISCOVERY_CACHE_TTL {
+                return Ok(entry.discovery.clone());
+            }
+        }
+    }
+
+    match fetch(
+        provider_id.clone(),
+        working_dir,
+        Some(selected_model_value.clone()),
+    ) {
+        Ok(discovery) => {
+            let mut cache = acp_config_discovery_model_cache().lock().unwrap();
+            cache.insert(
+                cache_key,
+                AcpConfigDiscoveryCacheEntry {
+                    discovery: discovery.clone(),
+                    fetched_at: Instant::now(),
+                },
+            );
+            Ok(discovery)
+        }
+        Err(e) => {
+            if let Some(entry) = cached_entry {
+                log::warn!(
+                    "ACP config discovery refresh failed for {provider_id}/{selected_model_value}; using stale cached options: {e}"
+                );
+                Ok(entry.discovery)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Discover model/effort selectors for a provider in the given working
+/// directory context.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn discover_acp_config(
+    provider_id: String,
+    working_dir: Option<String>,
+    force: Option<bool>,
+    selected_model_value: Option<String>,
+) -> Result<AcpConfigDiscovery, String> {
+    let working_dir = resolve_acp_config_discovery_working_dir(working_dir);
+    let force = force.unwrap_or(false);
+    let selected_model_value = normalize_selected_model_value(selected_model_value);
+    tokio::task::spawn_blocking(move || {
+        if let Some(selected_model_value) = selected_model_value {
+            discover_acp_config_for_model_with_cache(
+                provider_id,
+                working_dir,
+                selected_model_value,
+                force,
+                discover_acp_config_for_provider,
+            )
+        } else {
+            discover_acp_config_for_provider_with_cache(
+                provider_id,
+                working_dir,
+                force,
+                discover_acp_config_for_provider_default,
+            )
+        }
+    })
+    .await
+    .map_err(|e| format!("ACP config discovery task failed: {e}"))?
+}
+
 // =============================================================================
 // Read-only queries (used by frontend polling)
 // =============================================================================
@@ -402,10 +968,14 @@ pub async fn start_session(
     prompt: String,
     working_dir: String,
     provider: Option<String>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<store::Session, String> {
     let store = get_store(&store)?;
     let working_dir = PathBuf::from(working_dir);
-    let mut session = store::Session::new_running(&prompt, &working_dir);
+    let mut session = with_optional_acp_config_selection(
+        store::Session::new_running(&prompt, &working_dir),
+        acp_config_selection.clone(),
+    );
     if let Some(ref p) = provider {
         session = session.with_provider(p);
     }
@@ -428,6 +998,7 @@ pub async fn start_session(
             image_ids: vec![],
             queued_message_id: None,
             pending_auto_review_branch_id: None,
+            acp_config_selection,
             branch_id: None,
             project_id: None,
             expose_pikchr_tools: false,
@@ -461,6 +1032,7 @@ pub async fn resume_session(
     prompt: String,
     image_ids: Option<Vec<String>>,
     branch_id: Option<String>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
     resume_session_for_store(
@@ -473,6 +1045,7 @@ pub async fn resume_session(
         prompt,
         image_ids,
         branch_id,
+        acp_config_selection,
         None,
         None,
     )
@@ -490,6 +1063,7 @@ pub(crate) async fn resume_session_for_store(
     prompt: String,
     image_ids: Option<Vec<String>>,
     branch_id: Option<String>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
     queued_message_id: Option<String>,
     pending_auto_review_branch_id: Option<String>,
 ) -> Result<(), String> {
@@ -503,6 +1077,9 @@ pub(crate) async fn resume_session_for_store(
     let provider = session.provider.clone();
     let agent_session_id = session.agent_id.clone();
     let working_dir = PathBuf::from(&session.working_dir);
+    let effective_acp_config_selection =
+        resolve_resume_acp_config_selection(&store, &session, acp_config_selection);
+    let acp_config_selection_to_persist = effective_acp_config_selection.clone();
 
     // Check if this session is linked to a project note — if so, we need
     // to start the MCP server so the agent has access to project tools.
@@ -645,9 +1222,18 @@ pub(crate) async fn resume_session_for_store(
         },
     );
 
+    // Persist the effective selection before spawning the run: on an
+    // unavailable-config failure the run clears the stored selection, so
+    // persisting afterwards could resurrect the stale value it just cleared.
+    if acp_config_selection_to_persist != session.acp_config_selection {
+        store
+            .set_session_acp_config_selection(&session_id, acp_config_selection_to_persist.as_ref())
+            .map_err(|e| e.to_string())?;
+    }
+
     session_runner::start_session(
         SessionConfig {
-            session_id,
+            session_id: session_id.clone(),
             prompt,
             working_dir,
             agent_session_id,
@@ -674,11 +1260,12 @@ pub(crate) async fn resume_session_for_store(
             image_ids: image_ids.unwrap_or_default(),
             queued_message_id,
             pending_auto_review_branch_id,
+            acp_config_selection: effective_acp_config_selection,
             branch_id: config_branch_id,
             project_id: config_project_id,
             expose_pikchr_tools,
         },
-        store,
+        Arc::clone(&store),
         app_handle,
         Arc::clone(&registry),
     )?;
@@ -770,6 +1357,7 @@ pub(crate) async fn send_queued_session_message_for_store(
         message.content.clone(),
         Some(message.image_ids.clone()),
         message.branch_id.clone(),
+        None,
         Some(message.id.clone()),
         None,
     )
@@ -809,6 +1397,7 @@ pub(crate) async fn drain_queued_message_for_session(
         message.content.clone(),
         Some(message.image_ids.clone()),
         message.branch_id.clone(),
+        None,
         Some(message.id.clone()),
         pending_auto_review_branch_id,
     )
@@ -1006,6 +1595,135 @@ fn extra_env_for_branch_session(session_type: &BranchSessionType) -> Vec<(String
         session_runner::git_identity_env_from_global_config()
     } else {
         vec![]
+    }
+}
+
+fn with_optional_acp_config_selection(
+    session: store::Session,
+    acp_config_selection: Option<store::AcpConfigSelection>,
+) -> store::Session {
+    match acp_config_selection {
+        Some(selection) => session.with_acp_config_selection(selection),
+        None => session,
+    }
+}
+
+pub(crate) fn resolve_resume_acp_config_selection(
+    store: &Store,
+    session: &store::Session,
+    requested_selection: Option<store::AcpConfigSelection>,
+) -> Option<store::AcpConfigSelection> {
+    if requested_selection.is_some() {
+        return normalize_empty_acp_config_selection(requested_selection);
+    }
+
+    let stored_selection =
+        normalize_empty_acp_config_selection(session.acp_config_selection.clone())?;
+    let discovery = fresh_cached_acp_config_discovery(session.provider.as_deref()).or_else(|| {
+        latest_acp_config_discovery_from_session_metadata(
+            store,
+            &session.id,
+            session.provider.as_deref(),
+        )
+    });
+
+    match discovery.as_ref() {
+        Some(discovery) => {
+            sanitize_acp_config_selection_against_discovery(stored_selection, discovery)
+        }
+        None => Some(stored_selection),
+    }
+}
+
+fn normalize_empty_acp_config_selection(
+    selection: Option<store::AcpConfigSelection>,
+) -> Option<store::AcpConfigSelection> {
+    let selection = selection?;
+    if selection.model.is_none() && selection.effort.is_none() {
+        None
+    } else {
+        Some(selection)
+    }
+}
+
+fn sanitize_acp_config_selection_against_discovery(
+    selection: store::AcpConfigSelection,
+    discovery: &AcpConfigDiscovery,
+) -> Option<store::AcpConfigSelection> {
+    normalize_empty_acp_config_selection(Some(store::AcpConfigSelection {
+        model: sanitize_acp_config_value_selection(selection.model, discovery.model.as_ref()),
+        effort: sanitize_acp_config_value_selection(selection.effort, discovery.effort.as_ref()),
+    }))
+}
+
+fn sanitize_acp_config_value_selection(
+    selection: Option<store::AcpConfigValueSelection>,
+    selector: Option<&crate::acp_config::NormalizedAcpConfigSelector>,
+) -> Option<store::AcpConfigValueSelection> {
+    let selection = selection?;
+    let selector = selector?;
+    let option = selector
+        .options
+        .iter()
+        .find(|option| option.value_id == selection.value_id)?;
+
+    Some(store::AcpConfigValueSelection {
+        config_id: selector.config_id.clone(),
+        value_id: selection.value_id,
+        label: Some(option.label.clone()),
+    })
+}
+
+fn latest_acp_config_discovery_from_session_metadata(
+    store: &Store,
+    session_id: &str,
+    provider_id: Option<&str>,
+) -> Option<AcpConfigDiscovery> {
+    let provider_id = provider_id?;
+    let messages = match store.get_session_acp_metadata_messages(session_id) {
+        Ok(messages) => messages,
+        Err(e) => {
+            log::warn!(
+                "Failed to read ACP config metadata for session {session_id}; using stored selection as-is: {e}"
+            );
+            return None;
+        }
+    };
+
+    let options_value = messages.iter().rev().find_map(|message| {
+        if message.acp.acp_event_kind.as_deref() == Some("config_options_update") {
+            message
+                .acp
+                .acp_config_options
+                .as_ref()
+                .or(message.acp.acp_content.as_ref())
+        } else {
+            None
+        }
+    })?;
+
+    match serde_json::from_value::<Vec<acp_client::SessionConfigOption>>(options_value.clone()) {
+        Ok(options) => Some(acp_config_discovery_from_options(
+            provider_id.to_string(),
+            &options,
+        )),
+        Err(e) => {
+            log::warn!(
+                "Failed to parse ACP config metadata for session {session_id}; using stored selection as-is: {e}"
+            );
+            None
+        }
+    }
+}
+
+fn fresh_cached_acp_config_discovery(provider_id: Option<&str>) -> Option<AcpConfigDiscovery> {
+    let provider_id = provider_id?;
+    let cache = acp_config_discovery_cache().lock().unwrap();
+    let entry = cache.get(provider_id)?;
+    if entry.fetched_at.elapsed() < ACP_CONFIG_DISCOVERY_CACHE_TTL {
+        Some(entry.discovery.clone())
+    } else {
+        None
     }
 }
 
@@ -1398,6 +2116,7 @@ pub async fn start_project_session(
     prompt: String,
     provider: Option<String>,
     image_ids: Option<Vec<String>>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<ProjectSessionResponse, String> {
     let store = get_store(&store)?;
 
@@ -1429,7 +2148,10 @@ pub async fn start_project_session(
         .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
 
     // Create the session
-    let mut session = store::Session::new_running(&full_prompt, &working_dir);
+    let mut session = with_optional_acp_config_selection(
+        store::Session::new_running(&full_prompt, &working_dir),
+        acp_config_selection.clone(),
+    );
     if let Some(ref p) = provider {
         session = session.with_provider(p);
     }
@@ -1460,6 +2182,7 @@ pub async fn start_project_session(
             image_ids: image_ids.unwrap_or_default(),
             queued_message_id: None,
             pending_auto_review_branch_id: None,
+            acp_config_selection,
             branch_id: None,
             project_id: Some(project_id),
             // Project sessions are always local and write project notes.
@@ -1490,6 +2213,12 @@ struct PreparedBranchSessionStart {
 struct CreatedBranchSession {
     session: store::Session,
     artifact_id: String,
+}
+
+fn acp_config_selection_for_session_start(
+    session: &store::Session,
+) -> Option<store::AcpConfigSelection> {
+    session.acp_config_selection.clone()
 }
 
 fn resolve_branch_session_provider(
@@ -1699,8 +2428,12 @@ fn insert_running_branch_session(
     store: &Arc<Store>,
     prepared: &PreparedBranchSessionStart,
     prompt: &str,
+    acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<CreatedBranchSession, String> {
-    let mut session = store::Session::new_running(&prepared.full_prompt, &prepared.working_dir);
+    let mut session = with_optional_acp_config_selection(
+        store::Session::new_running(&prepared.full_prompt, &prepared.working_dir),
+        acp_config_selection,
+    );
     if let Some(ref p) = prepared.provider {
         session = session.with_provider(p);
     }
@@ -1735,6 +2468,7 @@ fn insert_running_branch_session(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn insert_queued_branch_session(
     store: &Arc<Store>,
     branch_id: &str,
@@ -1743,9 +2477,13 @@ fn insert_queued_branch_session(
     provider: Option<String>,
     image_ids: &[String],
     launch_context: Option<&BranchSessionLaunchContext>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<BranchSessionResponse, String> {
     let queued_prompt = embed_launch_context(prompt, launch_context)?;
-    let mut session = store::Session::new_queued(&queued_prompt);
+    let mut session = with_optional_acp_config_selection(
+        store::Session::new_queued(&queued_prompt),
+        acp_config_selection,
+    );
     if let Some(ref p) = provider {
         session = session.with_provider(p);
     }
@@ -1828,6 +2566,7 @@ fn launch_running_branch_session(
             image_ids,
             queued_message_id: None,
             pending_auto_review_branch_id: None,
+            acp_config_selection: acp_config_selection_for_session_start(&created.session),
             branch_id: Some(branch_id),
             project_id: Some(project_id),
             expose_pikchr_tools,
@@ -1855,6 +2594,7 @@ pub async fn start_or_queue_branch_session_for_store(
     provider: Option<String>,
     image_ids: Option<Vec<String>>,
     launch_context: Option<BranchSessionLaunchContext>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<BranchSessionResponse, String> {
     let image_ids = image_ids.unwrap_or_default();
 
@@ -1879,6 +2619,7 @@ pub async fn start_or_queue_branch_session_for_store(
                 provider,
                 &image_ids,
                 launch_context.as_ref(),
+                acp_config_selection.clone(),
             );
         }
     }
@@ -1905,9 +2646,10 @@ pub async fn start_or_queue_branch_session_for_store(
                 provider,
                 &image_ids,
                 launch_context.as_ref(),
+                acp_config_selection.clone(),
             );
         }
-        insert_running_branch_session(&store, &prepared, &prompt)?
+        insert_running_branch_session(&store, &prepared, &prompt, acp_config_selection)?
     };
 
     launch_running_branch_session(store, registry, app_handle, prepared, created, image_ids)
@@ -1923,6 +2665,7 @@ pub fn queue_branch_session_for_store(
     provider: Option<String>,
     image_ids: Option<Vec<String>>,
     launch_context: Option<BranchSessionLaunchContext>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<BranchSessionResponse, String> {
     let image_ids = image_ids.unwrap_or_default();
 
@@ -1944,6 +2687,7 @@ pub fn queue_branch_session_for_store(
         provider,
         &image_ids,
         launch_context.as_ref(),
+        acp_config_selection,
     )
 }
 
@@ -1963,6 +2707,7 @@ pub async fn start_branch_session(
     provider: Option<String>,
     image_ids: Option<Vec<String>>,
     launch_context: Option<BranchSessionLaunchContext>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<BranchSessionResponse, String> {
     let store = get_store(&store)?;
     start_or_queue_branch_session_for_store(
@@ -1975,6 +2720,7 @@ pub async fn start_branch_session(
         provider,
         image_ids,
         launch_context,
+        acp_config_selection,
     )
     .await
 }
@@ -1991,6 +2737,7 @@ pub async fn start_or_queue_branch_session(
     provider: Option<String>,
     image_ids: Option<Vec<String>>,
     launch_context: Option<BranchSessionLaunchContext>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<BranchSessionResponse, String> {
     let store = get_store(&store)?;
     start_or_queue_branch_session_for_store(
@@ -2003,6 +2750,7 @@ pub async fn start_or_queue_branch_session(
         provider,
         image_ids,
         launch_context,
+        acp_config_selection,
     )
     .await
 }
@@ -2027,6 +2775,7 @@ pub fn queue_branch_session(
     provider: Option<String>,
     image_ids: Option<Vec<String>>,
     launch_context: Option<BranchSessionLaunchContext>,
+    acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<BranchSessionResponse, String> {
     let store = get_store(&store)?;
     queue_branch_session_for_store(
@@ -2038,6 +2787,7 @@ pub fn queue_branch_session(
         provider,
         image_ids,
         launch_context,
+        acp_config_selection,
     )
 }
 
@@ -2376,6 +3126,7 @@ async fn start_queued_session_for_branch(
             image_ids,
             queued_message_id: None,
             pending_auto_review_branch_id: None,
+            acp_config_selection: acp_config_selection_for_session_start(&session),
             branch_id: Some(branch_id),
             project_id: Some(branch.project_id.clone()),
             expose_pikchr_tools: local_note_pikchr_tools_available(
@@ -2729,6 +3480,7 @@ pub async fn trigger_auto_review(
             image_ids: vec![],
             queued_message_id: None,
             pending_auto_review_branch_id: None,
+            acp_config_selection: None,
             branch_id: Some(branch_id.clone()),
             project_id: Some(branch.project_id.clone()),
             // Auto-review sessions don't write notes.
@@ -4198,8 +4950,9 @@ pub(crate) fn extract_launch_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
-    use std::sync::Arc;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
 
     fn setup_branch_store() -> (Arc<Store>, store::Branch) {
         let store = Arc::new(Store::in_memory().unwrap());
@@ -4233,6 +4986,84 @@ mod tests {
 
     fn ids(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    fn test_acp_config_discovery(provider_id: &str, current_value_id: &str) -> AcpConfigDiscovery {
+        AcpConfigDiscovery {
+            provider_id: provider_id.to_string(),
+            model: Some(crate::acp_config::NormalizedAcpConfigSelector {
+                config_id: "model".to_string(),
+                label: "Model".to_string(),
+                current_value_id: current_value_id.to_string(),
+                options: vec![
+                    crate::acp_config::NormalizedAcpConfigValueOption {
+                        value_id: "sonnet".to_string(),
+                        label: "Sonnet".to_string(),
+                        group_label: None,
+                    },
+                    crate::acp_config::NormalizedAcpConfigValueOption {
+                        value_id: "opus".to_string(),
+                        label: "Opus".to_string(),
+                        group_label: None,
+                    },
+                ],
+            }),
+            effort: None,
+        }
+    }
+
+    fn test_acp_config_discovery_with_effort(
+        provider_id: &str,
+        current_model_value_id: &str,
+        current_effort_value_id: &str,
+        effort_values: &[&str],
+    ) -> AcpConfigDiscovery {
+        let mut discovery = test_acp_config_discovery(provider_id, current_model_value_id);
+        discovery.effort = Some(crate::acp_config::NormalizedAcpConfigSelector {
+            config_id: "reasoning".to_string(),
+            label: "Reasoning".to_string(),
+            current_value_id: current_effort_value_id.to_string(),
+            options: effort_values
+                .iter()
+                .map(|value| crate::acp_config::NormalizedAcpConfigValueOption {
+                    value_id: (*value).to_string(),
+                    label: value.to_ascii_uppercase(),
+                    group_label: None,
+                })
+                .collect(),
+        });
+        discovery
+    }
+
+    fn test_acp_config_value_selection(
+        config_id: &str,
+        value_id: &str,
+        label: &str,
+    ) -> store::AcpConfigValueSelection {
+        store::AcpConfigValueSelection {
+            config_id: config_id.to_string(),
+            value_id: value_id.to_string(),
+            label: Some(label.to_string()),
+        }
+    }
+
+    fn stale_acp_config_cache_fetch_time() -> Instant {
+        Instant::now()
+            .checked_sub(ACP_CONFIG_DISCOVERY_CACHE_TTL + Duration::from_secs(1))
+            .unwrap_or_else(Instant::now)
+    }
+
+    fn remove_acp_config_cache_entry(provider_id: &str) {
+        acp_config_discovery_cache()
+            .lock()
+            .unwrap()
+            .remove(provider_id);
+    }
+
+    fn remove_acp_config_model_cache_entry(provider_id: &str, selected_model_value: &str) {
+        acp_config_discovery_model_cache().lock().unwrap().remove(
+            &acp_config_discovery_model_cache_key(provider_id, selected_model_value),
+        );
     }
 
     fn create_auto_review(
@@ -4610,9 +5441,21 @@ mod tests {
     }
 
     #[test]
-    fn explicit_queue_response_reports_queued_status() {
+    fn explicit_queue_response_reports_queued_status_and_stores_acp_config_selection() {
         let (store, branch) = setup_branch_store();
         let registry = Arc::new(session_runner::SessionRegistry::new());
+        let selection = store::AcpConfigSelection {
+            model: Some(store::AcpConfigValueSelection {
+                config_id: "model".to_string(),
+                value_id: "gpt-5".to_string(),
+                label: Some("GPT-5".to_string()),
+            }),
+            effort: Some(store::AcpConfigValueSelection {
+                config_id: "reasoning".to_string(),
+                value_id: "medium".to_string(),
+                label: Some("Medium".to_string()),
+            }),
+        };
 
         let response = queue_branch_session_for_store(
             Arc::clone(&store),
@@ -4623,12 +5466,125 @@ mod tests {
             None,
             None,
             None,
+            Some(selection.clone()),
         )
         .unwrap();
 
         assert_eq!(response.session_status, BranchSessionLaunchStatus::Queued);
         let session = store.get_session(&response.session_id).unwrap().unwrap();
         assert_eq!(session.status, store::SessionStatus::Queued);
+        assert_eq!(session.acp_config_selection, Some(selection));
+    }
+
+    #[test]
+    fn queued_session_start_uses_stored_acp_config_selection() {
+        let selection = store::AcpConfigSelection {
+            model: Some(store::AcpConfigValueSelection {
+                config_id: "model".to_string(),
+                value_id: "gpt-5".to_string(),
+                label: Some("GPT-5".to_string()),
+            }),
+            effort: Some(store::AcpConfigValueSelection {
+                config_id: "reasoning".to_string(),
+                value_id: "high".to_string(),
+                label: Some("High".to_string()),
+            }),
+        };
+        let session =
+            store::Session::new_queued("queued").with_acp_config_selection(selection.clone());
+
+        assert_eq!(
+            acp_config_selection_for_session_start(&session),
+            Some(selection)
+        );
+    }
+
+    #[test]
+    fn resume_selection_drops_stale_stored_values_from_metadata() {
+        use agent_client_protocol::schema::v1::{
+            SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+        };
+
+        let store = Store::in_memory().unwrap();
+        let stored = store::AcpConfigSelection {
+            model: Some(test_acp_config_value_selection("model", "sonnet", "Sonnet")),
+            effort: Some(test_acp_config_value_selection("reasoning", "high", "High")),
+        };
+        let session = store::Session::new_running("resume", Path::new("/tmp"))
+            .with_provider("claude")
+            .with_acp_config_selection(stored);
+        store.create_session(&session).unwrap();
+
+        let config_options = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "opus",
+                vec![SessionConfigSelectOption::new("opus", "Opus")],
+            )
+            .category(SessionConfigOptionCategory::Model),
+            SessionConfigOption::select(
+                "reasoning",
+                "Effort",
+                "high",
+                vec![
+                    SessionConfigSelectOption::new("low", "Low"),
+                    SessionConfigSelectOption::new("high", "High"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::ThoughtLevel),
+        ];
+        store
+            .add_acp_metadata_message(
+                &session.id,
+                &store::AcpMessageMetadata {
+                    acp_event_kind: Some("config_options_update".to_string()),
+                    acp_config_options: serde_json::to_value(config_options).ok(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let resolved = resolve_resume_acp_config_selection(&store, &session, None);
+
+        assert_eq!(
+            resolved,
+            Some(store::AcpConfigSelection {
+                model: None,
+                effort: Some(test_acp_config_value_selection("reasoning", "high", "High")),
+            })
+        );
+    }
+
+    #[test]
+    fn resume_selection_clears_when_fresh_discovery_has_no_selectors() {
+        let provider_id = "cache-provider-no-selectors";
+        remove_acp_config_cache_entry(provider_id);
+        acp_config_discovery_cache().lock().unwrap().insert(
+            provider_id.to_string(),
+            AcpConfigDiscoveryCacheEntry {
+                discovery: AcpConfigDiscovery {
+                    provider_id: provider_id.to_string(),
+                    model: None,
+                    effort: None,
+                },
+                fetched_at: Instant::now(),
+            },
+        );
+
+        let store = Store::in_memory().unwrap();
+        let stored = store::AcpConfigSelection {
+            model: Some(test_acp_config_value_selection("model", "sonnet", "Sonnet")),
+            effort: Some(test_acp_config_value_selection("reasoning", "high", "High")),
+        };
+        let session = store::Session::new_running("resume", Path::new("/tmp"))
+            .with_provider(provider_id)
+            .with_acp_config_selection(stored);
+
+        let resolved = resolve_resume_acp_config_selection(&store, &session, None);
+
+        assert_eq!(resolved, None);
+        remove_acp_config_cache_entry(provider_id);
     }
 
     #[test]
@@ -4787,6 +5743,513 @@ mod tests {
     #[test]
     fn resolve_preferred_provider_id_returns_none_when_nothing_available() {
         assert_eq!(resolve_preferred_provider_id(None, &[], &[]), None);
+    }
+
+    #[test]
+    fn acp_config_discovery_returns_provider_when_selectors_are_absent() {
+        let discovery = acp_config_discovery_from_options("goose".to_string(), &[]);
+
+        assert_eq!(discovery.provider_id, "goose");
+        assert!(discovery.model.is_none());
+        assert!(discovery.effort.is_none());
+    }
+
+    #[test]
+    fn acp_config_discovery_ignores_non_picker_config_options() {
+        use agent_client_protocol::schema::v1::{
+            SessionConfigBoolean, SessionConfigKind, SessionConfigOption,
+            SessionConfigOptionCategory, SessionConfigSelectOption,
+        };
+
+        let options = vec![
+            SessionConfigOption::select(
+                "mode",
+                "Mode",
+                "default",
+                vec![SessionConfigSelectOption::new("default", "Default")],
+            )
+            .category(SessionConfigOptionCategory::Mode),
+            SessionConfigOption::new(
+                "model-toggle",
+                "Model toggle",
+                SessionConfigKind::Boolean(SessionConfigBoolean::new(false)),
+            )
+            .category(SessionConfigOptionCategory::Model),
+        ];
+
+        let discovery = acp_config_discovery_from_options("claude".to_string(), &options);
+
+        assert_eq!(discovery.provider_id, "claude");
+        assert!(discovery.model.is_none());
+        assert!(discovery.effort.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn acp_config_discovery_does_not_authenticate_advertised_methods() {
+        use agent_client_protocol::schema::v1::{
+            AuthMethod, AuthMethodAgent, AuthenticateRequest, AuthenticateResponse,
+            InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse,
+            SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+        };
+
+        let auth_called = Arc::new(AtomicBool::new(false));
+        let auth_called_for_handler = Arc::clone(&auth_called);
+        let agent = agent_client_protocol::Agent
+            .builder()
+            .on_receive_request(
+                async |initialize: InitializeRequest, responder, _cx| {
+                    responder.respond(
+                        InitializeResponse::new(initialize.protocol_version).auth_methods(vec![
+                            AuthMethod::Agent(AuthMethodAgent::new("browser", "Browser Login")),
+                        ]),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: AuthenticateRequest, responder, _cx| {
+                    auth_called_for_handler.store(true, Ordering::SeqCst);
+                    responder.respond(AuthenticateResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: NewSessionRequest, responder, _cx| {
+                    responder.respond(NewSessionResponse::new("discovery-session").config_options(
+                        vec![
+                            SessionConfigOption::select(
+                                "model",
+                                "Model",
+                                "sonnet",
+                                vec![SessionConfigSelectOption::new("sonnet", "Sonnet")],
+                            )
+                            .category(SessionConfigOptionCategory::Model),
+                        ],
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            );
+
+        let options =
+            run_acp_config_discovery_transport("test-provider", Path::new("/tmp"), agent, None)
+                .await
+                .unwrap();
+
+        assert_eq!(options.len(), 1);
+        assert!(!auth_called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn acp_config_discovery_auth_required_returns_no_options_without_authenticating() {
+        use agent_client_protocol::schema::v1::{
+            AuthMethod, AuthMethodAgent, AuthenticateRequest, AuthenticateResponse,
+            InitializeRequest, InitializeResponse, NewSessionRequest,
+        };
+
+        let auth_called = Arc::new(AtomicBool::new(false));
+        let auth_called_for_handler = Arc::clone(&auth_called);
+        let agent = agent_client_protocol::Agent
+            .builder()
+            .on_receive_request(
+                async |initialize: InitializeRequest, responder, _cx| {
+                    responder.respond(
+                        InitializeResponse::new(initialize.protocol_version).auth_methods(vec![
+                            AuthMethod::Agent(AuthMethodAgent::new("browser", "Browser Login")),
+                        ]),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: AuthenticateRequest, responder, _cx| {
+                    auth_called_for_handler.store(true, Ordering::SeqCst);
+                    responder.respond(AuthenticateResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: NewSessionRequest, responder, _cx| {
+                    responder.respond_with_error(agent_client_protocol::Error::auth_required())
+                },
+                agent_client_protocol::on_receive_request!(),
+            );
+
+        let options =
+            run_acp_config_discovery_transport("test-provider", Path::new("/tmp"), agent, None)
+                .await
+                .unwrap();
+
+        assert!(options.is_empty());
+        assert!(!auth_called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn acp_config_discovery_with_selected_model_returns_post_set_config_options() {
+        use agent_client_protocol::schema::v1::{
+            InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse,
+            SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+            SetSessionConfigOptionRequest, SetSessionConfigOptionResponse,
+        };
+
+        let calls = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+        let calls_for_handler = Arc::clone(&calls);
+        let agent = agent_client_protocol::Agent
+            .builder()
+            .on_receive_request(
+                async |initialize: InitializeRequest, responder, _cx| {
+                    responder.respond(InitializeResponse::new(initialize.protocol_version))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: NewSessionRequest, responder, _cx| {
+                    responder.respond(NewSessionResponse::new("discovery-session").config_options(
+                        vec![
+                            SessionConfigOption::select(
+                                "model",
+                                "Model",
+                                "sonnet",
+                                vec![
+                                    SessionConfigSelectOption::new("sonnet", "Sonnet"),
+                                    SessionConfigSelectOption::new("opus", "Opus"),
+                                ],
+                            )
+                            .category(SessionConfigOptionCategory::Model),
+                            SessionConfigOption::select(
+                                "reasoning",
+                                "Reasoning",
+                                "high",
+                                vec![
+                                    SessionConfigSelectOption::new("low", "Low"),
+                                    SessionConfigSelectOption::new("high", "High"),
+                                ],
+                            )
+                            .category(SessionConfigOptionCategory::ThoughtLevel),
+                        ],
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: SetSessionConfigOptionRequest, responder, _cx| {
+                    calls_for_handler.lock().unwrap().push((
+                        request.config_id.to_string(),
+                        request
+                            .value
+                            .as_value_id()
+                            .expect("selected config value should be a value ID")
+                            .to_string(),
+                    ));
+                    responder.respond(SetSessionConfigOptionResponse::new(vec![
+                        SessionConfigOption::select(
+                            "model",
+                            "Model",
+                            "opus",
+                            vec![
+                                SessionConfigSelectOption::new("sonnet", "Sonnet"),
+                                SessionConfigSelectOption::new("opus", "Opus"),
+                            ],
+                        )
+                        .category(SessionConfigOptionCategory::Model),
+                        SessionConfigOption::select(
+                            "reasoning",
+                            "Reasoning",
+                            "low",
+                            vec![SessionConfigSelectOption::new("low", "Low")],
+                        )
+                        .category(SessionConfigOptionCategory::ThoughtLevel),
+                    ]))
+                },
+                agent_client_protocol::on_receive_request!(),
+            );
+
+        let options = run_acp_config_discovery_transport(
+            "test-provider",
+            Path::new("/tmp"),
+            agent,
+            Some("opus"),
+        )
+        .await
+        .unwrap();
+        let discovery = acp_config_discovery_from_options("test-provider".to_string(), &options);
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[(String::from("model"), String::from("opus"))]
+        );
+        assert_eq!(discovery.model.as_ref().unwrap().current_value_id, "opus");
+        let effort = discovery.effort.as_ref().unwrap();
+        assert_eq!(effort.current_value_id, "low");
+        assert_eq!(effort.options.len(), 1);
+        assert_eq!(effort.options[0].value_id, "low");
+    }
+
+    #[test]
+    fn acp_config_discovery_cache_is_provider_scoped_across_working_dirs() {
+        let provider_id = "cache-provider-scoped-dirs";
+        remove_acp_config_cache_entry(provider_id);
+        let calls = Arc::new(Mutex::new(Vec::<PathBuf>::new()));
+        let calls_for_fetch = Arc::clone(&calls);
+
+        let first = discover_acp_config_for_provider_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo-one"),
+            false,
+            move |provider_id, working_dir| {
+                calls_for_fetch.lock().unwrap().push(working_dir);
+                Ok(test_acp_config_discovery(&provider_id, "sonnet"))
+            },
+        )
+        .unwrap();
+        let second = discover_acp_config_for_provider_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo-two"),
+            false,
+            |_provider_id, _working_dir| panic!("fresh cache hit should not refetch"),
+        )
+        .unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[PathBuf::from("/repo-one")]
+        );
+    }
+
+    #[test]
+    fn acp_config_discovery_force_bypasses_and_replaces_fresh_cache() {
+        let provider_id = "cache-provider-force";
+        remove_acp_config_cache_entry(provider_id);
+
+        let first = discover_acp_config_for_provider_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo"),
+            false,
+            |provider_id, _working_dir| Ok(test_acp_config_discovery(&provider_id, "sonnet")),
+        )
+        .unwrap();
+        let second = discover_acp_config_for_provider_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo"),
+            true,
+            |provider_id, _working_dir| Ok(test_acp_config_discovery(&provider_id, "opus")),
+        )
+        .unwrap();
+        let third = discover_acp_config_for_provider_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo"),
+            false,
+            |_provider_id, _working_dir| panic!("replaced cache hit should not refetch"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            first.model.as_ref().unwrap().current_value_id,
+            "sonnet".to_string()
+        );
+        assert_eq!(
+            second.model.as_ref().unwrap().current_value_id,
+            "opus".to_string()
+        );
+        assert_eq!(third, second);
+    }
+
+    #[test]
+    fn acp_config_discovery_model_cache_is_provider_and_model_scoped() {
+        let provider_id = "cache-provider-model-scoped";
+        remove_acp_config_model_cache_entry(provider_id, "sonnet");
+        remove_acp_config_model_cache_entry(provider_id, "opus");
+        let calls = Arc::new(Mutex::new(Vec::<(PathBuf, Option<String>)>::new()));
+
+        let calls_for_sonnet = Arc::clone(&calls);
+        let sonnet = discover_acp_config_for_model_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo-one"),
+            "sonnet".to_string(),
+            false,
+            move |provider_id, working_dir, selected_model_value| {
+                calls_for_sonnet
+                    .lock()
+                    .unwrap()
+                    .push((working_dir, selected_model_value));
+                Ok(test_acp_config_discovery_with_effort(
+                    &provider_id,
+                    "sonnet",
+                    "medium",
+                    &["low", "medium"],
+                ))
+            },
+        )
+        .unwrap();
+        let sonnet_cached = discover_acp_config_for_model_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo-two"),
+            "sonnet".to_string(),
+            false,
+            |_provider_id, _working_dir, _selected_model_value| {
+                panic!("fresh model cache hit should not refetch")
+            },
+        )
+        .unwrap();
+        let calls_for_opus = Arc::clone(&calls);
+        let opus = discover_acp_config_for_model_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo-three"),
+            "opus".to_string(),
+            false,
+            move |provider_id, working_dir, selected_model_value| {
+                calls_for_opus
+                    .lock()
+                    .unwrap()
+                    .push((working_dir, selected_model_value));
+                Ok(test_acp_config_discovery_with_effort(
+                    &provider_id,
+                    "opus",
+                    "low",
+                    &["low"],
+                ))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(sonnet_cached, sonnet);
+        assert_eq!(
+            sonnet
+                .effort
+                .as_ref()
+                .unwrap()
+                .options
+                .iter()
+                .map(|option| option.value_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["low", "medium"]
+        );
+        assert_eq!(
+            opus.effort
+                .as_ref()
+                .unwrap()
+                .options
+                .iter()
+                .map(|option| option.value_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["low"]
+        );
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &[
+                (PathBuf::from("/repo-one"), Some("sonnet".to_string())),
+                (PathBuf::from("/repo-three"), Some("opus".to_string())),
+            ]
+        );
+
+        remove_acp_config_model_cache_entry(provider_id, "sonnet");
+        remove_acp_config_model_cache_entry(provider_id, "opus");
+    }
+
+    #[test]
+    fn acp_config_discovery_model_cache_does_not_replace_provider_cache() {
+        let provider_id = "cache-provider-model-does-not-poison-default";
+        remove_acp_config_cache_entry(provider_id);
+        remove_acp_config_model_cache_entry(provider_id, "opus");
+
+        let default = discover_acp_config_for_provider_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo"),
+            false,
+            |provider_id, _working_dir| Ok(test_acp_config_discovery(&provider_id, "sonnet")),
+        )
+        .unwrap();
+        let model_specific = discover_acp_config_for_model_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo"),
+            "opus".to_string(),
+            false,
+            |provider_id, _working_dir, _selected_model_value| {
+                Ok(test_acp_config_discovery_with_effort(
+                    &provider_id,
+                    "opus",
+                    "low",
+                    &["low"],
+                ))
+            },
+        )
+        .unwrap();
+        let default_again = discover_acp_config_for_provider_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo"),
+            false,
+            |_provider_id, _working_dir| panic!("provider cache should remain fresh"),
+        )
+        .unwrap();
+
+        assert_eq!(default_again, default);
+        assert!(default_again.effort.is_none());
+        assert_eq!(
+            model_specific
+                .effort
+                .as_ref()
+                .unwrap()
+                .options
+                .iter()
+                .map(|option| option.value_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["low"]
+        );
+
+        remove_acp_config_cache_entry(provider_id);
+        remove_acp_config_model_cache_entry(provider_id, "opus");
+    }
+
+    #[test]
+    fn acp_config_discovery_refresh_failure_returns_stale_cache() {
+        let provider_id = "cache-provider-stale";
+        let stale = test_acp_config_discovery(provider_id, "sonnet");
+        acp_config_discovery_cache().lock().unwrap().insert(
+            provider_id.to_string(),
+            AcpConfigDiscoveryCacheEntry {
+                discovery: stale.clone(),
+                fetched_at: stale_acp_config_cache_fetch_time(),
+            },
+        );
+
+        let result = discover_acp_config_for_provider_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo"),
+            false,
+            |_provider_id, _working_dir| Err("provider unavailable".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(result, stale);
+    }
+
+    #[test]
+    fn acp_config_discovery_refresh_failure_without_stale_cache_returns_error() {
+        let provider_id = "cache-provider-miss-failure";
+        remove_acp_config_cache_entry(provider_id);
+
+        let err = discover_acp_config_for_provider_with_cache(
+            provider_id.to_string(),
+            PathBuf::from("/repo"),
+            false,
+            |_provider_id, _working_dir| Err("provider unavailable".to_string()),
+        )
+        .unwrap_err();
+
+        assert_eq!(err, "provider unavailable");
+    }
+
+    #[test]
+    fn acp_config_discovery_cache_rejects_blank_provider_ids() {
+        let err = discover_acp_config_for_provider_with_cache(
+            "   ".to_string(),
+            PathBuf::from("/repo"),
+            false,
+            |_provider_id, _working_dir| panic!("blank provider should not fetch"),
+        )
+        .unwrap_err();
+
+        assert!(err.contains("ACP provider ID is required"));
     }
 
     #[test]

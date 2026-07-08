@@ -2758,6 +2758,20 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .unwrap_or_default();
             Ok(serde_json::to_value(providers).unwrap())
         }
+        "discover_acp_config" => {
+            let provider_id: String = arg(&args, "providerId")?;
+            let working_dir: Option<String> = opt_arg(&args, "workingDir")?;
+            let force: Option<bool> = opt_arg(&args, "force")?;
+            let selected_model_value: Option<String> = opt_arg(&args, "selectedModelValue")?;
+            let config = crate::session_commands::discover_acp_config(
+                provider_id,
+                working_dir,
+                force,
+                selected_model_value,
+            )
+            .await?;
+            Ok(serde_json::to_value(config).unwrap())
+        }
         "get_session" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;
@@ -2811,9 +2825,14 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let prompt: String = arg(&args, "prompt")?;
             let working_dir: String = arg(&args, "workingDir")?;
             let provider: Option<String> = opt_arg(&args, "provider")?;
+            let acp_config_selection: Option<store::AcpConfigSelection> =
+                opt_arg(&args, "acpConfigSelection")?;
 
             let working_dir = std::path::PathBuf::from(working_dir);
             let mut session = store::Session::new_running(&prompt, &working_dir);
+            if let Some(selection) = acp_config_selection.clone() {
+                session = session.with_acp_config_selection(selection);
+            }
             if let Some(ref p) = provider {
                 session = session.with_provider(p);
             }
@@ -2836,6 +2855,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     image_ids: vec![],
                     queued_message_id: None,
                     pending_auto_review_branch_id: None,
+                    acp_config_selection,
                     branch_id: None,
                     project_id: None,
                     expose_pikchr_tools: false,
@@ -2853,6 +2873,8 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let prompt: String = arg(&args, "prompt")?;
             let image_ids: Option<Vec<String>> = opt_arg(&args, "imageIds")?;
             let branch_id: Option<String> = opt_arg(&args, "branchId")?;
+            let acp_config_selection: Option<store::AcpConfigSelection> =
+                opt_arg(&args, "acpConfigSelection")?;
 
             let session = store
                 .get_session(&session_id)
@@ -2862,6 +2884,13 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let provider = session.provider.clone();
             let agent_session_id = session.agent_id.clone();
             let working_dir = std::path::PathBuf::from(&session.working_dir);
+            let effective_acp_config_selection =
+                session_commands::resolve_resume_acp_config_selection(
+                    &store,
+                    &session,
+                    acp_config_selection,
+                );
+            let acp_config_selection_to_persist = effective_acp_config_selection.clone();
 
             let project_note = store
                 .get_project_note_by_session(&session_id)
@@ -2992,9 +3021,22 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 },
             );
 
+            // Persist the effective selection before spawning the run: on an
+            // unavailable-config failure the run clears the stored selection,
+            // so persisting afterwards could resurrect the stale value it
+            // just cleared.
+            if acp_config_selection_to_persist != session.acp_config_selection {
+                store
+                    .set_session_acp_config_selection(
+                        &session_id,
+                        acp_config_selection_to_persist.as_ref(),
+                    )
+                    .map_err(|e| e.to_string())?;
+            }
+
             session_runner::start_session(
                 SessionConfig {
-                    session_id,
+                    session_id: session_id.clone(),
                     prompt,
                     working_dir,
                     agent_session_id,
@@ -3017,11 +3059,12 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     image_ids: image_ids.unwrap_or_default(),
                     queued_message_id: None,
                     pending_auto_review_branch_id: None,
+                    acp_config_selection: effective_acp_config_selection,
                     branch_id: config_branch_id,
                     project_id: config_project_id,
                     expose_pikchr_tools,
                 },
-                store,
+                Arc::clone(&store),
                 app_handle.clone(),
                 Arc::clone(session_registry),
             )?;
@@ -3102,6 +3145,8 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let image_ids: Option<Vec<String>> = opt_arg(&args, "imageIds")?;
             let launch_context: Option<session_commands::BranchSessionLaunchContext> =
                 opt_arg(&args, "launchContext")?;
+            let acp_config_selection: Option<store::AcpConfigSelection> =
+                opt_arg(&args, "acpConfigSelection")?;
 
             let result = session_commands::start_or_queue_branch_session_for_store(
                 store,
@@ -3113,6 +3158,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 provider,
                 image_ids,
                 launch_context,
+                acp_config_selection,
             )
             .await?;
 
@@ -3124,6 +3170,8 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let prompt: String = arg(&args, "prompt")?;
             let provider: Option<String> = opt_arg(&args, "provider")?;
             let image_ids: Option<Vec<String>> = opt_arg(&args, "imageIds")?;
+            let acp_config_selection: Option<store::AcpConfigSelection> =
+                opt_arg(&args, "acpConfigSelection")?;
 
             let project = store
                 .get_project(&project_id)
@@ -3150,6 +3198,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
 
             let mut session = store::Session::new_running(&full_prompt, &working_dir);
+            if let Some(selection) = acp_config_selection.clone() {
+                session = session.with_acp_config_selection(selection);
+            }
             if let Some(ref p) = provider {
                 session = session.with_provider(p);
             }
@@ -3178,6 +3229,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     image_ids: image_ids.unwrap_or_default(),
                     queued_message_id: None,
                     pending_auto_review_branch_id: None,
+                    acp_config_selection,
                     branch_id: None,
                     project_id: Some(project_id),
                     // Project sessions are always local and write project notes.
@@ -3205,6 +3257,8 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let image_ids: Option<Vec<String>> = opt_arg(&args, "imageIds")?;
             let launch_context: Option<session_commands::BranchSessionLaunchContext> =
                 opt_arg(&args, "launchContext")?;
+            let acp_config_selection: Option<store::AcpConfigSelection> =
+                opt_arg(&args, "acpConfigSelection")?;
 
             let result = session_commands::queue_branch_session_for_store(
                 store,
@@ -3215,6 +3269,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 provider,
                 image_ids,
                 launch_context,
+                acp_config_selection,
             )?;
 
             Ok(serde_json::to_value(result).unwrap())

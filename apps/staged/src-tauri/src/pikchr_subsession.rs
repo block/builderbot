@@ -81,6 +81,7 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
                 &writer_dyn,
                 cancel_token,
                 agent_session_id.as_deref(),
+                &[],
             )
             .await?;
 
@@ -302,6 +303,7 @@ box "Sink = NO-OP (default / external clone)" "no socket, no Block deps → buil
             writer: &Arc<dyn acp_client::MessageWriter>,
             _cancel_token: &CancellationToken,
             agent_session_id: Option<&str>,
+            _config_options: &[acp_client::AcpSessionConfigOptionSelection],
         ) -> Result<acp_client::AgentRunOutcome, String> {
             let idx = {
                 let mut calls = self.calls.lock().unwrap();

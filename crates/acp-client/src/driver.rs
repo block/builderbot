@@ -9,7 +9,6 @@
 
 use std::collections::HashSet;
 use std::ffi::OsString;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -572,118 +571,21 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-fn env_shebang_interpreter(binary_path: &Path) -> Option<String> {
-    let mut file = std::fs::File::open(binary_path).ok()?;
-    let mut buf = [0_u8; 512];
-    let len = file.read(&mut buf).ok()?;
-    let first_line = std::str::from_utf8(&buf[..len]).ok()?.lines().next()?;
-    let shebang = first_line.strip_prefix("#!")?.trim();
-
-    let mut parts = shebang.split_whitespace();
-    let command = parts.next()?;
-    let command_name = Path::new(command).file_name()?.to_str()?;
-    if command_name != "env" {
-        return None;
-    }
-
-    for part in parts {
-        if part == "-S" || part.starts_with('-') || part.contains('=') {
-            continue;
-        }
-        if part.contains('/') {
-            return None;
-        }
-        return Some(part.to_string());
-    }
-
-    None
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
-fn path_contains_executable(path_value: &str, executable: &str) -> bool {
-    std::env::split_paths(path_value).any(|dir| is_executable_file(&dir.join(executable)))
-}
-
 fn env_shebang_interpreter_from_snapshot(
     binary_path: &Path,
     snapshot: Option<&[(String, String)]>,
 ) -> Option<PathBuf> {
-    let interpreter = env_shebang_interpreter(binary_path)?;
     let env = doctor::DoctorEnv::new(snapshot?.to_vec());
     let path_value = env.get("PATH")?;
-    doctor::resolve::resolve_executable_from_path(&interpreter, path_value)
-}
-
-fn is_broad_toolchain_dir(path: &Path) -> bool {
-    matches!(
-        path.to_str(),
-        Some("/opt/homebrew/bin" | "/usr/local/bin" | "/usr/bin" | "/bin" | "/opt/local/bin")
-    )
-}
-
-fn path_with_inserted_agent_bin_dir(existing_path: &str, bin_dir: &Path) -> Option<String> {
-    let mut entries: Vec<PathBuf> = if existing_path.is_empty() {
-        Vec::new()
-    } else {
-        std::env::split_paths(existing_path).collect()
-    };
-
-    if entries.iter().any(|entry| entry == bin_dir) {
-        return None;
-    }
-
-    if is_broad_toolchain_dir(bin_dir) {
-        entries.push(bin_dir.to_path_buf());
-    } else {
-        entries.insert(0, bin_dir.to_path_buf());
-    }
-
-    std::env::join_paths(entries).ok()?.into_string().ok()
-}
-
-fn guarded_path_for_agent_binary(binary_path: &Path, existing_path: &str) -> Option<String> {
-    let interpreter = env_shebang_interpreter(binary_path)?;
-    if path_contains_executable(existing_path, &interpreter) {
-        return None;
-    }
-
-    let bin_dir = binary_path.parent()?;
-    if !is_executable_file(&bin_dir.join(&interpreter)) {
-        return None;
-    }
-
-    path_with_inserted_agent_bin_dir(existing_path, bin_dir)
+    doctor::resolve::resolve_env_shebang_interpreter_from_path(binary_path, path_value)
 }
 
 fn shell_path_guard_for_agent_binary(binary_path: &Path) -> Option<String> {
-    let interpreter = env_shebang_interpreter(binary_path)?;
-    let bin_dir = binary_path.parent()?;
-    if !is_executable_file(&bin_dir.join(&interpreter)) {
-        return None;
-    }
+    let launcher = doctor::resolve::env_shebang_launcher(binary_path)?;
 
-    let quoted_interpreter = shell_quote(&interpreter);
-    let quoted_bin_dir = shell_quote(&bin_dir.to_string_lossy());
-    let path_assignment = if is_broad_toolchain_dir(bin_dir) {
+    let quoted_interpreter = shell_quote(&launcher.interpreter);
+    let quoted_bin_dir = shell_quote(&launcher.bin_dir.to_string_lossy());
+    let path_assignment = if doctor::resolve::is_broad_toolchain_dir(&launcher.bin_dir) {
         format!(
             "if [ -n \"$PATH\" ]; then PATH=\"$PATH\":{quoted_bin_dir}; else PATH={quoted_bin_dir}; fi"
         )
@@ -899,7 +801,10 @@ impl AgentDriver for AcpDriver {
                     if !spawn_command.uses_explicit_interpreter {
                         let existing_path = snapshot_path.as_deref().unwrap_or_default();
                         if let Some(new_path) =
-                            guarded_path_for_agent_binary(&self.binary_path, existing_path)
+                            doctor::resolve::guarded_path_for_env_shebang_launcher(
+                                &self.binary_path,
+                                existing_path,
+                            )
                         {
                             c.env("PATH", new_path);
                         }
@@ -2693,15 +2598,13 @@ impl MessageWriter for BasicMessageWriter {
 mod tests {
     use super::{
         acp_spawn_command, autoapprove_permission_decision, build_prompt_content_blocks,
-        consume_remote_acp_line, decode_remote_acp_line, env_shebang_interpreter,
-        guarded_path_for_agent_binary, is_broad_toolchain_dir, mcp_server_transport_supported,
-        path_with_inserted_agent_bin_dir, permission_response_for_options, remote_acp_segments,
-        resolve_acp_working_dir, resolve_session_config_option_selection,
-        resolve_spawn_working_dir, sanitize_remote_acp_chunk, shell_exec_line, shell_quote,
-        AcpDriver, AcpEventMetadata, AcpNotificationHandler, AcpPermissionOption,
-        AcpPermissionOptionKind, AcpPermissionRequest, AcpSessionConfigOptionSelection,
-        AgentRunOutcome, BasicMessageWriter, MessageWriter, RemoteLineOutcome, ReplayBoundary,
-        ReplayBuffer, ReplayEvent,
+        consume_remote_acp_line, decode_remote_acp_line, mcp_server_transport_supported,
+        permission_response_for_options, remote_acp_segments, resolve_acp_working_dir,
+        resolve_session_config_option_selection, resolve_spawn_working_dir,
+        sanitize_remote_acp_chunk, shell_exec_line, shell_quote, AcpDriver, AcpEventMetadata,
+        AcpNotificationHandler, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
+        AcpSessionConfigOptionSelection, AgentRunOutcome, BasicMessageWriter, MessageWriter,
+        RemoteLineOutcome, ReplayBoundary, ReplayBuffer, ReplayEvent,
     };
     use agent_client_protocol::schema::v1::{
         ContentBlock as AcpContentBlock, McpCapabilities, McpServer, McpServerHttp, McpServerSse,
@@ -3117,58 +3020,6 @@ mod tests {
     }
 
     #[test]
-    fn env_shebang_interpreter_detects_env_launcher() {
-        let dir = unique_test_dir("acp-env-shebang");
-        let launcher = dir.join("codex-acp");
-        write_executable(&launcher, "#!/usr/bin/env node\n");
-
-        assert_eq!(env_shebang_interpreter(&launcher).as_deref(), Some("node"));
-
-        std::fs::remove_dir_all(dir).expect("cleanup test dir");
-    }
-
-    #[test]
-    fn guarded_path_keeps_snapshot_when_interpreter_is_already_available() {
-        let dir = unique_test_dir("acp-guarded-path-present");
-        let project_bin = dir.join("project-bin");
-        let agent_bin = dir.join("agent-bin");
-        let launcher = agent_bin.join("codex-acp");
-        write_executable(&project_bin.join("node"), "#!/bin/sh\n");
-        write_executable(&agent_bin.join("node"), "#!/bin/sh\n");
-        write_executable(&launcher, "#!/usr/bin/env node\n");
-
-        let snapshot_path = join_path_entries(&[project_bin.clone(), PathBuf::from("/usr/bin")]);
-
-        assert_eq!(
-            guarded_path_for_agent_binary(&launcher, &snapshot_path),
-            None,
-            "agent bin dir must not be inserted ahead of a snapshot PATH that already provides node"
-        );
-
-        std::fs::remove_dir_all(dir).expect("cleanup test dir");
-    }
-
-    #[test]
-    fn guarded_path_prepends_private_agent_dir_when_interpreter_is_missing() {
-        let dir = unique_test_dir("acp-guarded-path-missing");
-        let snapshot_bin = dir.join("snapshot-bin");
-        let agent_bin = dir.join("agent-bin");
-        let launcher = agent_bin.join("claude-agent-acp");
-        std::fs::create_dir_all(&snapshot_bin).expect("create snapshot bin");
-        write_executable(&agent_bin.join("node"), "#!/bin/sh\n");
-        write_executable(&launcher, "#!/usr/bin/env node\n");
-
-        let snapshot_path = join_path_entries(std::slice::from_ref(&snapshot_bin));
-        let updated = guarded_path_for_agent_binary(&launcher, &snapshot_path)
-            .expect("missing interpreter should add agent bin dir");
-        let entries: Vec<PathBuf> = std::env::split_paths(&updated).collect();
-
-        assert_eq!(entries, vec![agent_bin, snapshot_bin]);
-
-        std::fs::remove_dir_all(dir).expect("cleanup test dir");
-    }
-
-    #[test]
     fn spawn_command_uses_home_interpreter_for_env_shebang_bridge() {
         let dir = unique_test_dir("acp-home-interpreter");
         let home_bin = dir.join("home-bin");
@@ -3217,22 +3068,6 @@ mod tests {
         assert!(!command.uses_explicit_interpreter);
 
         std::fs::remove_dir_all(dir).expect("cleanup test dir");
-    }
-
-    #[test]
-    fn broad_toolchain_dirs_are_appended_not_prepended() {
-        let hermit_bin = PathBuf::from("/repo/bin");
-        let existing_path = join_path_entries(std::slice::from_ref(&hermit_bin));
-        let updated =
-            path_with_inserted_agent_bin_dir(&existing_path, Path::new("/opt/homebrew/bin"))
-                .expect("broad dir should still be added as a fallback");
-        let entries: Vec<PathBuf> = std::env::split_paths(&updated).collect();
-
-        assert!(is_broad_toolchain_dir(Path::new("/opt/homebrew/bin")));
-        assert_eq!(
-            entries,
-            vec![hermit_bin, PathBuf::from("/opt/homebrew/bin")]
-        );
     }
 
     #[test]

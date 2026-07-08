@@ -196,6 +196,7 @@ fn main() -> Result<()> {
                 &writer,
                 &cancel_token,
                 None,
+                &[],
             )
             .await;
 

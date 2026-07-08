@@ -18,7 +18,6 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -397,124 +396,18 @@ fn resolve_acp_config_discovery_working_dir(working_dir: Option<String>) -> Path
         .unwrap_or_else(std::env::temp_dir)
 }
 
-fn env_shebang_interpreter(binary_path: &Path) -> Option<String> {
-    let mut file = std::fs::File::open(binary_path).ok()?;
-    let mut buf = [0_u8; 512];
-    let len = file.read(&mut buf).ok()?;
-    let first_line = std::str::from_utf8(&buf[..len]).ok()?.lines().next()?;
-    let shebang = first_line.strip_prefix("#!")?.trim();
-
-    let mut parts = shebang.split_whitespace();
-    let command = parts.next()?;
-    let command_name = Path::new(command).file_name()?.to_str()?;
-    if command_name != "env" {
-        return None;
-    }
-
-    for part in parts {
-        if part == "-S" || part.starts_with('-') || part.contains('=') {
-            continue;
-        }
-        if part.contains('/') {
-            return None;
-        }
-        return Some(part.to_string());
-    }
-
-    None
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.permissions().mode() & 0o111 != 0
-    }
-
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
-fn executable_from_path(executable: &str, path_value: &str) -> Option<PathBuf> {
-    std::env::split_paths(path_value)
-        .map(|dir| dir.join(executable))
-        .find(|path| is_executable_file(path))
-}
-
-fn path_contains_executable(path_value: &str, executable: &str) -> bool {
-    executable_from_path(executable, path_value).is_some()
-}
-
-fn env_shebang_interpreter_from_snapshot(
-    binary_path: &Path,
-    snapshot: &[(String, String)],
-) -> Option<PathBuf> {
-    let interpreter = env_shebang_interpreter(binary_path)?;
-    let path_value = snapshot
-        .iter()
-        .find(|(key, _)| key == "PATH")
-        .map(|(_, value)| value.as_str())?;
-    executable_from_path(&interpreter, path_value)
-}
-
-fn is_broad_toolchain_dir(path: &Path) -> bool {
-    matches!(
-        path.to_str(),
-        Some("/opt/homebrew/bin" | "/usr/local/bin" | "/usr/bin" | "/bin" | "/opt/local/bin")
-    )
-}
-
-fn path_with_inserted_agent_bin_dir(existing_path: &str, bin_dir: &Path) -> Option<String> {
-    let mut entries: Vec<PathBuf> = if existing_path.is_empty() {
-        Vec::new()
-    } else {
-        std::env::split_paths(existing_path).collect()
-    };
-
-    if entries.iter().any(|entry| entry == bin_dir) {
-        return None;
-    }
-
-    if is_broad_toolchain_dir(bin_dir) {
-        entries.push(bin_dir.to_path_buf());
-    } else {
-        entries.insert(0, bin_dir.to_path_buf());
-    }
-
-    std::env::join_paths(entries).ok()?.into_string().ok()
-}
-
-fn guarded_path_for_agent_binary(binary_path: &Path, existing_path: &str) -> Option<String> {
-    let interpreter = env_shebang_interpreter(binary_path)?;
-    if path_contains_executable(existing_path, &interpreter) {
-        return None;
-    }
-
-    let bin_dir = binary_path.parent()?;
-    if !is_executable_file(&bin_dir.join(&interpreter)) {
-        return None;
-    }
-
-    path_with_inserted_agent_bin_dir(existing_path, bin_dir)
-}
-
 fn acp_config_discovery_spawn_command(
     binary_path: &Path,
     acp_args: &[String],
     interpreter_env_snapshot: &[(String, String)],
 ) -> AcpConfigDiscoverySpawnCommand {
-    if let Some(interpreter) =
-        env_shebang_interpreter_from_snapshot(binary_path, interpreter_env_snapshot)
-    {
+    let interpreter_path = interpreter_env_snapshot
+        .iter()
+        .find(|(key, _)| key == "PATH")
+        .and_then(|(_, value)| {
+            doctor::resolve::resolve_env_shebang_interpreter_from_path(binary_path, value)
+        });
+    if let Some(interpreter) = interpreter_path {
         let mut args = vec![binary_path.as_os_str().to_os_string()];
         args.extend(acp_args.iter().map(OsString::from));
         return AcpConfigDiscoverySpawnCommand {
@@ -550,7 +443,10 @@ fn apply_acp_config_discovery_env(
         return;
     }
 
-    if let Some(path) = guarded_path_for_agent_binary(binary_path, path_value.unwrap_or_default()) {
+    if let Some(path) = doctor::resolve::guarded_path_for_env_shebang_launcher(
+        binary_path,
+        path_value.unwrap_or_default(),
+    ) {
         cmd.env("PATH", path);
     }
 }

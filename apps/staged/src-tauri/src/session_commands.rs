@@ -25,10 +25,10 @@ use std::time::{Duration, Instant};
 
 use agent_client_protocol::{
     schema::{
-        v1::{AuthenticateRequest, Implementation, InitializeRequest, NewSessionRequest},
+        v1::{Implementation, InitializeRequest, NewSessionRequest},
         ProtocolVersion,
     },
-    ByteStreams, Client,
+    ByteStreams, Client, ConnectTo, ErrorCode,
 };
 use serde::{Deserialize, Serialize};
 use tauri::path::BaseDirectory;
@@ -460,6 +460,17 @@ async fn run_acp_config_discovery_protocol(
     let stdin_compat = stdin.compat_write();
     let stdout_compat = stdout.compat();
     let transport = ByteStreams::new(stdin_compat, stdout_compat);
+    run_acp_config_discovery_transport(provider_id, working_dir, transport).await
+}
+
+async fn run_acp_config_discovery_transport<T>(
+    provider_id: &str,
+    working_dir: &Path,
+    transport: T,
+) -> Result<Vec<acp_client::SessionConfigOption>, String>
+where
+    T: ConnectTo<Client> + 'static,
+{
     let working_dir = working_dir.to_path_buf();
     let provider_id = provider_id.to_string();
     let protocol_provider_id = provider_id.clone();
@@ -491,29 +502,24 @@ async fn run_acp_config_discovery_protocol(
                     ));
                 }
 
-                if let Some(method) = init_response.auth_methods.first() {
-                    connection
-                        .send_request(AuthenticateRequest::new(method.id().clone()))
-                        .block_task()
-                        .await
-                        .map_err(|e| {
-                            format!(
-                                "ACP config discovery authentication failed for {protocol_provider_id} with method {} ({}): {e:?}",
-                                method.name(),
-                                method.id()
-                            )
-                        })?;
-                }
-
-                let session_response = connection
+                let session_response = match connection
                     .send_request(NewSessionRequest::new(working_dir))
                     .block_task()
                     .await
-                    .map_err(|e| {
-                        format!(
+                {
+                    Ok(response) => response,
+                    Err(e) if e.code == ErrorCode::AuthRequired => {
+                        log::debug!(
+                            "ACP config discovery skipped authentication-required provider {protocol_provider_id}"
+                        );
+                        return Ok(Vec::new());
+                    }
+                    Err(e) => {
+                        return Err(format!(
                             "ACP config discovery failed to create session for {protocol_provider_id}: {e:?}"
-                        )
-                    })?;
+                        ));
+                    }
+                };
 
                 Ok(session_response.config_options.unwrap_or_default())
             })
@@ -4647,6 +4653,7 @@ pub(crate) fn extract_launch_context(
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
     fn setup_branch_store() -> (Arc<Store>, store::Branch) {
@@ -5348,6 +5355,103 @@ mod tests {
         assert_eq!(discovery.provider_id, "claude");
         assert!(discovery.model.is_none());
         assert!(discovery.effort.is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn acp_config_discovery_does_not_authenticate_advertised_methods() {
+        use agent_client_protocol::schema::v1::{
+            AuthMethod, AuthMethodAgent, AuthenticateRequest, AuthenticateResponse,
+            InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse,
+            SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+        };
+
+        let auth_called = Arc::new(AtomicBool::new(false));
+        let auth_called_for_handler = Arc::clone(&auth_called);
+        let agent = agent_client_protocol::Agent
+            .builder()
+            .on_receive_request(
+                async |initialize: InitializeRequest, responder, _cx| {
+                    responder.respond(
+                        InitializeResponse::new(initialize.protocol_version).auth_methods(vec![
+                            AuthMethod::Agent(AuthMethodAgent::new("browser", "Browser Login")),
+                        ]),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: AuthenticateRequest, responder, _cx| {
+                    auth_called_for_handler.store(true, Ordering::SeqCst);
+                    responder.respond(AuthenticateResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: NewSessionRequest, responder, _cx| {
+                    responder.respond(NewSessionResponse::new("discovery-session").config_options(
+                        vec![
+                            SessionConfigOption::select(
+                                "model",
+                                "Model",
+                                "sonnet",
+                                vec![SessionConfigSelectOption::new("sonnet", "Sonnet")],
+                            )
+                            .category(SessionConfigOptionCategory::Model),
+                        ],
+                    ))
+                },
+                agent_client_protocol::on_receive_request!(),
+            );
+
+        let options = run_acp_config_discovery_transport("test-provider", Path::new("/tmp"), agent)
+            .await
+            .unwrap();
+
+        assert_eq!(options.len(), 1);
+        assert!(!auth_called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn acp_config_discovery_auth_required_returns_no_options_without_authenticating() {
+        use agent_client_protocol::schema::v1::{
+            AuthMethod, AuthMethodAgent, AuthenticateRequest, AuthenticateResponse,
+            InitializeRequest, InitializeResponse, NewSessionRequest,
+        };
+
+        let auth_called = Arc::new(AtomicBool::new(false));
+        let auth_called_for_handler = Arc::clone(&auth_called);
+        let agent = agent_client_protocol::Agent
+            .builder()
+            .on_receive_request(
+                async |initialize: InitializeRequest, responder, _cx| {
+                    responder.respond(
+                        InitializeResponse::new(initialize.protocol_version).auth_methods(vec![
+                            AuthMethod::Agent(AuthMethodAgent::new("browser", "Browser Login")),
+                        ]),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: AuthenticateRequest, responder, _cx| {
+                    auth_called_for_handler.store(true, Ordering::SeqCst);
+                    responder.respond(AuthenticateResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async |_request: NewSessionRequest, responder, _cx| {
+                    responder.respond_with_error(agent_client_protocol::Error::auth_required())
+                },
+                agent_client_protocol::on_receive_request!(),
+            );
+
+        let options = run_acp_config_discovery_transport("test-provider", Path::new("/tmp"), agent)
+            .await
+            .unwrap();
+
+        assert!(options.is_empty());
+        assert!(!auth_called.load(Ordering::SeqCst));
     }
 
     #[test]

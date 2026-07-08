@@ -438,9 +438,11 @@ export function renderHashtagTokens(
 
     const type = match[1];
     const id = match[2];
-    parts.push(renderHashtagBadge(type, id, findHashtagItemInMap(itemsByKey, type, id), {
-      interactive,
-    }));
+    parts.push(
+      renderHashtagBadge(type, id, findHashtagItemInMap(itemsByKey, type, id), {
+        interactive,
+      })
+    );
 
     lastIndex = match.index + match[0].length;
   }

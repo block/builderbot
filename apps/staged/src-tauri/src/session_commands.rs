@@ -543,7 +543,7 @@ where
     let protocol_provider_id = provider_id.clone();
     let selected_model_value = selected_model_value.map(str::to_string);
 
-    Ok(Client
+    Client
         .builder()
         .name("staged-acp-config-discovery")
         .connect_with(transport, async move |connection| {
@@ -622,7 +622,7 @@ where
             .map_err(agent_client_protocol::util::internal_error)
         })
         .await
-        .map_err(|e| format!("ACP config discovery protocol failed for {provider_id}: {e:?}"))?)
+        .map_err(|e| format!("ACP config discovery protocol failed for {provider_id}: {e:?}"))
 }
 
 async fn discover_acp_config_for_provider_async(
@@ -2465,6 +2465,7 @@ fn insert_running_branch_session(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn insert_queued_branch_session(
     store: &Arc<Store>,
     branch_id: &str,

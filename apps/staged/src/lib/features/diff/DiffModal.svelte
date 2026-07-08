@@ -561,10 +561,10 @@
 
   function handleNewNote(comment: Comment, event: MouseEvent) {
     // Route by the linked note session's state (idle → start, queued/running →
-    // open session, completed → open note).
+    // open note chat, completed → open note).
     const state = getCommentNoteState(comment);
     if ((state === 'queued' || state === 'running') && comment.noteSessionId) {
-      openSessionId = comment.noteSessionId;
+      openNoteChat(comment.noteSessionId);
       return;
     }
     if (state === 'completed' && comment.noteSessionId) {
@@ -579,6 +579,15 @@
     newSessionMode = 'note';
     newSessionPrefill = buildCommentPrompt(comment, 'note');
     showNewSessionModal = true;
+  }
+
+  function openNoteChat(sessionId: string) {
+    openNote = {
+      title: '',
+      content: '',
+      sessionId,
+      chatOpen: true,
+    };
   }
 
   function handleNewCommit(comment: Comment, event: MouseEvent) {
@@ -773,8 +782,8 @@
     try {
       const note = await commands.getBranchNoteBySession(sessionId);
       if (!note) {
-        // Link points at a session with no note — fall back to the session view.
-        openSessionId = sessionId;
+        // Link points at a note session whose note row is not available yet.
+        openNoteChat(sessionId);
         return;
       }
       openNote = {
@@ -817,11 +826,13 @@
         ref: openNote.noteId ? `#note:${openNote.noteId}` : `#chat:${openNote.sessionId}`,
         title: openNote.title,
         content: openNote.content,
-        view: 'note',
+        view: openNote.chatOpen ? 'chat' : 'note',
         sessionId: openNote.sessionId,
         noteUpdatedAt: openNote.noteUpdatedAt,
         branchId,
         projectId,
+        repoDir: branch?.worktreePath,
+        repoLabel: githubRepo ? { githubRepo, subpath: subpath ?? null, headRepo: null } : null,
         hashtagItems,
         diffContext: referenceDiffContext,
       };

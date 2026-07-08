@@ -91,7 +91,9 @@
   }: Props = $props();
 
   let copied = $state(false);
-  let liveNote = $state<{ title: string; content: string; updatedAt: number } | null>(null);
+  let liveNote = $state<{ id: string; title: string; content: string; updatedAt: number } | null>(
+    null
+  );
   let assistantMessagesAfterNote = $state(0);
   let assistantMessagesAfterNoteLoadedKey = $state<string | null>(null);
   let chatAutoOpenDecisionKey = $state<string | null>(null);
@@ -101,15 +103,17 @@
   let displayTitle = $derived(liveNote?.title ?? title);
   let displayContent = $derived(liveNote?.content ?? content);
   let displayUpdatedAt = $derived(liveNote?.updatedAt ?? noteUpdatedAt);
+  let displayNoteId = $derived(liveNote?.id ?? noteId);
+  let hasNoteContent = $derived(!!displayContent.trim());
   let noteFreshnessKey = $derived(
     open && sessionId && typeof displayUpdatedAt === 'number'
-      ? `${noteId ?? 'note'}:${sessionId}:${displayUpdatedAt}`
+      ? `${displayNoteId ?? 'note'}:${sessionId}:${displayUpdatedAt}`
       : null
   );
   let noteMarkdown = $derived(noteMarkdownWithTitle(displayTitle, displayContent));
-  let splitChatOpen = $derived(chatOpen && viewport.canSplit);
-  let narrowChatOpen = $derived(chatOpen && !viewport.canSplit);
-  let noteSearchAvailable = $derived(!narrowChatOpen);
+  let splitChatOpen = $derived(chatOpen && viewport.canSplit && hasNoteContent);
+  let chatOnly = $derived(chatOpen && (!viewport.canSplit || !hasNoteContent));
+  let noteSearchAvailable = $derived(hasNoteContent && !chatOnly);
   let chatToggleLabel = $derived(
     chatOpen
       ? viewport.canSplit
@@ -132,13 +136,13 @@
     `h-[80vh] max-h-[900px] p-0 gap-0 overflow-hidden flex flex-col transition-[max-width] duration-150 ${splitChatOpen ? 'sm:max-w-[1080px]' : 'sm:max-w-[700px]'}`
   );
   let noteInfo = $derived<LinkedNoteContext | null>(
-    noteId
+    displayNoteId
       ? {
-          id: noteId,
+          id: displayNoteId,
           title: displayTitle,
           content: displayContent,
           updatedAt: displayUpdatedAt ?? 0,
-          hasParsedNote: !!displayContent.trim(),
+          hasParsedNote: hasNoteContent,
         }
       : null
   );
@@ -166,7 +170,7 @@
   let matchCount = $state(0);
   let currentMatchIndex = $state(0);
   let matchElements: HTMLElement[] = [];
-  let contentEl: HTMLDivElement;
+  let contentEl: HTMLDivElement | undefined;
   let unregisterSearchTarget: (() => void) | null = null;
 
   // Register the global search-shortcut target only while the visible note pane can be searched.
@@ -213,6 +217,7 @@
     if (!open) {
       pikchrRendererLoadFailedKey = null;
       chatAutoOpenDecisionKey = null;
+      previousSessionStatus = null;
     }
   });
 
@@ -288,6 +293,7 @@
           : await getBranchNoteBySession(sessionId);
       if (!refreshed) return;
       liveNote = {
+        id: refreshed.id,
         title: refreshed.title,
         content: refreshed.content,
         updatedAt: refreshed.updatedAt,
@@ -298,7 +304,9 @@
   }
 
   function handlePaneSessionChange(next: Session | null) {
-    if (previousSessionStatus === 'running' && next && next.status !== 'running') {
+    const wasActive = previousSessionStatus === 'running' || previousSessionStatus === 'queued';
+    const isInactive = next && next.status !== 'running' && next.status !== 'queued';
+    if ((wasActive && isInactive) || (!previousSessionStatus && isInactive && !hasNoteContent)) {
       void refreshLiveNote();
     }
     previousSessionStatus = next?.status ?? null;
@@ -532,8 +540,10 @@
             />
           {/if}
           <div class="note-header-actions">
-            {@render copyButton()}
-            {#if !splitChatOpen}
+            {#if hasNoteContent}
+              {@render copyButton()}
+            {/if}
+            {#if !splitChatOpen && (hasNoteContent || !chatOpen)}
               {@render chatToggleButton()}
             {/if}
           </div>
@@ -550,11 +560,11 @@
         {/if}
       </div>
     </Dialog.Header>
-    <div class:split-chat-open={splitChatOpen} class:chat-only={narrowChatOpen} class="modal-body">
+    <div class:split-chat-open={splitChatOpen} class:chat-only={chatOnly} class="modal-body">
       <section
         id="note-modal-note-pane"
         class="note-pane"
-        aria-hidden={narrowChatOpen}
+        aria-hidden={chatOnly}
         aria-label="Note content"
       >
         <!-- svelte-ignore a11y_click_events_have_key_events -->
@@ -565,7 +575,7 @@
           onclick={handleContentClick}
           onkeydown={handleContentKeydown}
         >
-          {#if noteMarkdown.trim()}
+          {#if hasNoteContent}
             <div class="markdown-content">
               {@html renderedNoteHtml}
             </div>

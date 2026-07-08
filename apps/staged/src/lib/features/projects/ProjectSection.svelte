@@ -24,7 +24,6 @@
     type TimelineContextMenuAction,
   } from '../timeline/TimelineContextMenu.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
-  import SessionModal from '../sessions/SessionModal.svelte';
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
   import { agentState } from '../agents/agent.svelte';
   import { getPreferredAgent } from '../settings/preferences.svelte';
@@ -33,7 +32,6 @@
   import { createLiveSessionHints } from '../timeline/liveSessionHints';
   import { projectDisplayName } from '../../shared/utils';
   import { Button } from '$lib/components/ui/button';
-  import type { LinkedNoteContext } from '../sessions/noteFreshness';
   import { openDiffRoute } from '../layout/navigation.svelte';
   import {
     disabledReferenceNav,
@@ -278,19 +276,20 @@
     return actions;
   });
 
-  let openNote = $state<{
+  type OpenProjectNoteState = {
     noteId: string;
     title: string;
     content: string;
     sessionId?: string;
     noteUpdatedAt?: number;
     chatOpen?: boolean;
-  } | null>(null);
-  let openSessionId = $state<string | null>(null);
+  };
+
+  let openNote = $state<OpenProjectNoteState | null>(null);
 
   $effect(() => {
     const _signature = hashtagSignature;
-    if (!openNote && !openSessionId) return;
+    if (!openNote) return;
     void ensureHashtagItems();
   });
 
@@ -309,15 +308,19 @@
     openProjectSessionModal();
   }
 
-  function linkedNoteContext(note: ProjectNote | undefined): LinkedNoteContext | null {
-    if (!note) return null;
+  function projectNoteToOpenState(note: ProjectNote, chatOpen = false): OpenProjectNoteState {
     return {
-      id: note.id,
+      noteId: note.id,
       title: note.title,
       content: note.content,
-      updatedAt: note.updatedAt,
-      hasParsedNote: !!note.content.trim(),
+      sessionId: note.sessionId ?? undefined,
+      noteUpdatedAt: note.updatedAt,
+      chatOpen,
     };
+  }
+
+  function openProjectNote(note: ProjectNote, chatOpen = false) {
+    openNote = projectNoteToOpenState(note, chatOpen);
   }
 
   function currentDialogReferenceEntry(): ReferenceHistoryEntry | null {
@@ -329,38 +332,9 @@
         ref: `#project-note:${openNote.noteId}`,
         title: openNote.title,
         content: openNote.content,
-        view: 'note',
+        view: openNote.chatOpen ? 'chat' : 'note',
         sessionId: openNote.sessionId,
         noteUpdatedAt: openNote.noteUpdatedAt,
-        projectId: project.id,
-        hashtagItems,
-        diffContext: referenceDiffContext,
-      };
-    }
-
-    if (openSessionId) {
-      const note = projectNotes.find((candidate) => candidate.sessionId === openSessionId);
-      if (note) {
-        return {
-          kind: 'note',
-          noteKind: 'project',
-          id: note.id,
-          ref: `#project-note:${note.id}`,
-          title: note.title,
-          content: note.content,
-          view: 'chat',
-          sessionId: openSessionId,
-          noteUpdatedAt: note.updatedAt,
-          projectId: project.id,
-          hashtagItems,
-          diffContext: referenceDiffContext,
-        };
-      }
-
-      return {
-        kind: 'chat',
-        ref: `#chat:${openSessionId}`,
-        sessionId: openSessionId,
         projectId: project.id,
         repoDir: projectDisplayRootCandidates,
         hashtagItems,
@@ -373,7 +347,6 @@
 
   function closeReferenceDialogs() {
     openNote = null;
-    openSessionId = null;
   }
 
   function handleHashtagClick(click: HashtagClickInfo) {
@@ -479,19 +452,9 @@
               deleting={deletingNoteIds.has(note.id)}
               isLast={false}
               sessionId={note.sessionId ?? undefined}
-              onItemClick={isRunning || isFailed
-                ? undefined
-                : () => {
-                    openNote = {
-                      noteId: note.id,
-                      title: note.title,
-                      content: note.content,
-                      sessionId: note.sessionId ?? undefined,
-                      noteUpdatedAt: note.updatedAt,
-                    };
-                  }}
+              onItemClick={isRunning || isFailed ? undefined : () => openProjectNote(note)}
               onSessionClick={(sid) => {
-                openSessionId = sid;
+                openProjectNote({ ...note, sessionId: sid }, true);
               }}
               deleteDisabledReason={deletingNoteIds.has(note.id) ? 'Deleting...' : undefined}
               onDeleteClick={() => handleDeleteNote(note.id)}
@@ -581,35 +544,9 @@
     }}
     {hashtagItems}
     referenceNav={disabledReferenceNav}
-    onClose={() => (openNote = null)}
-    onHashtagClick={handleHashtagClick}
-  />
-{/if}
-
-{#if openSessionId}
-  <SessionModal
-    open={true}
-    sessionId={openSessionId}
-    repoDir={projectDisplayRootCandidates}
-    projectId={project.id}
-    {hashtagItems}
-    noteInfo={linkedNoteContext(projectNotes.find((n) => n.sessionId === openSessionId))}
-    referenceNav={disabledReferenceNav}
-    onOpenNote={(note) => {
-      const sid = openSessionId;
-      openSessionId = null;
-      openNote = {
-        noteId: note.id,
-        title: note.title,
-        content: note.content,
-        sessionId: sid ?? undefined,
-        noteUpdatedAt: note.updatedAt,
-        chatOpen: true,
-      };
-    }}
     onClose={() => {
-      openSessionId = null;
-      loadProjectNotes();
+      openNote = null;
+      void loadProjectNotes();
     }}
     onHashtagClick={handleHashtagClick}
   />

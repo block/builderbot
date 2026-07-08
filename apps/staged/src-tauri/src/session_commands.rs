@@ -903,7 +903,7 @@ pub(crate) async fn resume_session_for_store(
     let agent_session_id = session.agent_id.clone();
     let working_dir = PathBuf::from(&session.working_dir);
     let effective_acp_config_selection =
-        acp_config_selection.or_else(|| session.acp_config_selection.clone());
+        resolve_resume_acp_config_selection(&store, &session, acp_config_selection);
     let acp_config_selection_to_persist = effective_acp_config_selection.clone();
 
     // Check if this session is linked to a project note — if so, we need
@@ -1427,6 +1427,125 @@ fn with_optional_acp_config_selection(
     match acp_config_selection {
         Some(selection) => session.with_acp_config_selection(selection),
         None => session,
+    }
+}
+
+pub(crate) fn resolve_resume_acp_config_selection(
+    store: &Store,
+    session: &store::Session,
+    requested_selection: Option<store::AcpConfigSelection>,
+) -> Option<store::AcpConfigSelection> {
+    if requested_selection.is_some() {
+        return normalize_empty_acp_config_selection(requested_selection);
+    }
+
+    let stored_selection =
+        normalize_empty_acp_config_selection(session.acp_config_selection.clone())?;
+    let discovery = fresh_cached_acp_config_discovery(session.provider.as_deref()).or_else(|| {
+        latest_acp_config_discovery_from_session_metadata(
+            store,
+            &session.id,
+            session.provider.as_deref(),
+        )
+    });
+
+    match discovery.as_ref() {
+        Some(discovery) => {
+            sanitize_acp_config_selection_against_discovery(stored_selection, discovery)
+        }
+        None => Some(stored_selection),
+    }
+}
+
+fn normalize_empty_acp_config_selection(
+    selection: Option<store::AcpConfigSelection>,
+) -> Option<store::AcpConfigSelection> {
+    let selection = selection?;
+    if selection.model.is_none() && selection.effort.is_none() {
+        None
+    } else {
+        Some(selection)
+    }
+}
+
+fn sanitize_acp_config_selection_against_discovery(
+    selection: store::AcpConfigSelection,
+    discovery: &AcpConfigDiscovery,
+) -> Option<store::AcpConfigSelection> {
+    normalize_empty_acp_config_selection(Some(store::AcpConfigSelection {
+        model: sanitize_acp_config_value_selection(selection.model, discovery.model.as_ref()),
+        effort: sanitize_acp_config_value_selection(selection.effort, discovery.effort.as_ref()),
+    }))
+}
+
+fn sanitize_acp_config_value_selection(
+    selection: Option<store::AcpConfigValueSelection>,
+    selector: Option<&crate::acp_config::NormalizedAcpConfigSelector>,
+) -> Option<store::AcpConfigValueSelection> {
+    let selection = selection?;
+    let selector = selector?;
+    let option = selector
+        .options
+        .iter()
+        .find(|option| option.value_id == selection.value_id)?;
+
+    Some(store::AcpConfigValueSelection {
+        config_id: selector.config_id.clone(),
+        value_id: selection.value_id,
+        label: Some(option.label.clone()),
+    })
+}
+
+fn latest_acp_config_discovery_from_session_metadata(
+    store: &Store,
+    session_id: &str,
+    provider_id: Option<&str>,
+) -> Option<AcpConfigDiscovery> {
+    let provider_id = provider_id?;
+    let messages = match store.get_session_acp_metadata_messages(session_id) {
+        Ok(messages) => messages,
+        Err(e) => {
+            log::warn!(
+                "Failed to read ACP config metadata for session {session_id}; using stored selection as-is: {e}"
+            );
+            return None;
+        }
+    };
+
+    let options_value = messages.iter().rev().find_map(|message| {
+        if message.acp.acp_event_kind.as_deref() == Some("config_options_update") {
+            message
+                .acp
+                .acp_config_options
+                .as_ref()
+                .or(message.acp.acp_content.as_ref())
+        } else {
+            None
+        }
+    })?;
+
+    match serde_json::from_value::<Vec<acp_client::SessionConfigOption>>(options_value.clone()) {
+        Ok(options) => Some(acp_config_discovery_from_options(
+            provider_id.to_string(),
+            &options,
+        )),
+        Err(e) => {
+            log::warn!(
+                "Failed to parse ACP config metadata for session {session_id}; using stored selection as-is: {e}"
+            );
+            None
+        }
+    }
+}
+
+fn fresh_cached_acp_config_discovery(provider_id: Option<&str>) -> Option<AcpConfigDiscovery> {
+    let provider_id = provider_id?;
+    let cache = acp_config_discovery_cache().lock().unwrap();
+    let entry = cache.get(provider_id)?;
+    if entry.fetched_at.elapsed() < ACP_CONFIG_DISCOVERY_CACHE_TTL {
+        Some(entry.discovery.clone())
+    } else {
+        None
     }
 }
 
@@ -4714,6 +4833,18 @@ mod tests {
         }
     }
 
+    fn test_acp_config_value_selection(
+        config_id: &str,
+        value_id: &str,
+        label: &str,
+    ) -> store::AcpConfigValueSelection {
+        store::AcpConfigValueSelection {
+            config_id: config_id.to_string(),
+            value_id: value_id.to_string(),
+            label: Some(label.to_string()),
+        }
+    }
+
     fn stale_acp_config_cache_fetch_time() -> Instant {
         Instant::now()
             .checked_sub(ACP_CONFIG_DISCOVERY_CACHE_TTL + Duration::from_secs(1))
@@ -5158,6 +5289,94 @@ mod tests {
             acp_config_selection_for_session_start(&session),
             Some(selection)
         );
+    }
+
+    #[test]
+    fn resume_selection_drops_stale_stored_values_from_metadata() {
+        use agent_client_protocol::schema::v1::{
+            SessionConfigOption, SessionConfigOptionCategory, SessionConfigSelectOption,
+        };
+
+        let store = Store::in_memory().unwrap();
+        let stored = store::AcpConfigSelection {
+            model: Some(test_acp_config_value_selection("model", "sonnet", "Sonnet")),
+            effort: Some(test_acp_config_value_selection("reasoning", "high", "High")),
+        };
+        let session = store::Session::new_running("resume", Path::new("/tmp"))
+            .with_provider("claude")
+            .with_acp_config_selection(stored);
+        store.create_session(&session).unwrap();
+
+        let config_options = vec![
+            SessionConfigOption::select(
+                "model",
+                "Model",
+                "opus",
+                vec![SessionConfigSelectOption::new("opus", "Opus")],
+            )
+            .category(SessionConfigOptionCategory::Model),
+            SessionConfigOption::select(
+                "reasoning",
+                "Effort",
+                "high",
+                vec![
+                    SessionConfigSelectOption::new("low", "Low"),
+                    SessionConfigSelectOption::new("high", "High"),
+                ],
+            )
+            .category(SessionConfigOptionCategory::ThoughtLevel),
+        ];
+        store
+            .add_acp_metadata_message(
+                &session.id,
+                &store::AcpMessageMetadata {
+                    acp_event_kind: Some("config_options_update".to_string()),
+                    acp_config_options: serde_json::to_value(config_options).ok(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let resolved = resolve_resume_acp_config_selection(&store, &session, None);
+
+        assert_eq!(
+            resolved,
+            Some(store::AcpConfigSelection {
+                model: None,
+                effort: Some(test_acp_config_value_selection("reasoning", "high", "High")),
+            })
+        );
+    }
+
+    #[test]
+    fn resume_selection_clears_when_fresh_discovery_has_no_selectors() {
+        let provider_id = "cache-provider-no-selectors";
+        remove_acp_config_cache_entry(provider_id);
+        acp_config_discovery_cache().lock().unwrap().insert(
+            provider_id.to_string(),
+            AcpConfigDiscoveryCacheEntry {
+                discovery: AcpConfigDiscovery {
+                    provider_id: provider_id.to_string(),
+                    model: None,
+                    effort: None,
+                },
+                fetched_at: Instant::now(),
+            },
+        );
+
+        let store = Store::in_memory().unwrap();
+        let stored = store::AcpConfigSelection {
+            model: Some(test_acp_config_value_selection("model", "sonnet", "Sonnet")),
+            effort: Some(test_acp_config_value_selection("reasoning", "high", "High")),
+        };
+        let session = store::Session::new_running("resume", Path::new("/tmp"))
+            .with_provider(provider_id)
+            .with_acp_config_selection(stored);
+
+        let resolved = resolve_resume_acp_config_selection(&store, &session, None);
+
+        assert_eq!(resolved, None);
+        remove_acp_config_cache_entry(provider_id);
     }
 
     #[test]

@@ -1354,7 +1354,14 @@
   ): boolean {
     if (!selector || !valueId) return false;
     if (touched) return true;
-    return storedSelection?.configId === selector.configId && storedSelection.valueId === valueId;
+    if (!storedSelection) return false;
+
+    const storedValueIsAvailable =
+      storedSelection.configId === selector.configId &&
+      selector.options.some((option) => option.valueId === storedSelection.valueId);
+    if (!storedValueIsAvailable) return true;
+
+    return storedSelection.valueId === valueId;
   }
 
   function handleFollowupModelChange(value: string) {

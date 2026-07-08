@@ -2880,7 +2880,11 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let agent_session_id = session.agent_id.clone();
             let working_dir = std::path::PathBuf::from(&session.working_dir);
             let effective_acp_config_selection =
-                acp_config_selection.or_else(|| session.acp_config_selection.clone());
+                session_commands::resolve_resume_acp_config_selection(
+                    &store,
+                    &session,
+                    acp_config_selection,
+                );
             let acp_config_selection_to_persist = effective_acp_config_selection.clone();
 
             let project_note = store

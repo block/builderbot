@@ -724,6 +724,20 @@ pub fn start_session(
             .cancellation_completion_reason(&session_id_for_status)
             .unwrap_or(CompletionReason::Interrupted);
 
+        if let Err(ref e) = result {
+            if config.acp_config_selection.is_some()
+                && crate::acp_config::is_acp_config_unavailable_error(e)
+            {
+                if let Err(clear_err) =
+                    store_for_status.set_session_acp_config_selection(&session_id_for_status, None)
+                {
+                    log::warn!(
+                        "Failed to clear stale ACP config selection for session {session_id_for_status}: {clear_err}"
+                    );
+                }
+            }
+        }
+
         // Transition the session to its terminal state, but only if it is
         // still "running". This prevents a late-arriving "completed" from
         // overwriting a "cancelled" that was set by a concurrent cancel

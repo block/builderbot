@@ -75,6 +75,13 @@ pub(crate) fn selected_acp_config_options(
     options
 }
 
+pub(crate) fn is_acp_config_unavailable_error(error: &str) -> bool {
+    error.contains("Agent did not return ACP config options needed to apply selected")
+        || (error.contains("Selected ACP ")
+            && (error.contains(" is no longer available")
+                || error.contains(" is not a select option")))
+}
+
 fn selected_config_option(
     category: SessionConfigOptionCategory,
     selection: &AcpConfigValueSelection,
@@ -344,5 +351,18 @@ mod tests {
         );
         assert_eq!(selected[1].config_id, "reasoning");
         assert_eq!(selected[1].value_id, "high");
+    }
+
+    #[test]
+    fn detects_unavailable_config_selection_errors() {
+        assert!(is_acp_config_unavailable_error(
+            "Selected ACP model value 'sonnet' is no longer available for config option 'model'"
+        ));
+        assert!(is_acp_config_unavailable_error(
+            "Agent did not return ACP config options needed to apply selected model before prompting"
+        ));
+        assert!(!is_acp_config_unavailable_error(
+            "Failed to create ACP session: transport closed"
+        ));
     }
 }

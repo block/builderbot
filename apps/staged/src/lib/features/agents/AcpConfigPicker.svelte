@@ -52,8 +52,8 @@
   let effortSelectionExplicit = $state(false);
   let modelSelectorKey = $state<string | null>(null);
   let effortSelectorKey = $state<string | null>(null);
-  let effortColumnWidth = $state(0);
-  let retainedEffortColumnWidth = $state<number | null>(null);
+  let retainedEffortSelector = $state<AcpConfigSelector | null>(null);
+  let retainedEffortValue = $state<string | null>(null);
   let retainedEffortTriggerLabel = $state<string | null>(null);
   let discoveryRun = 0;
 
@@ -86,11 +86,9 @@
       ? triggerParts
       : [{ id: 'provider', label: selectedProvider?.label ?? 'Agent' }]
   );
-  let effortColumnStyle = $derived(
-    loadingEffortOptions && retainedEffortColumnWidth
-      ? `width: ${retainedEffortColumnWidth}px;`
-      : undefined
-  );
+  // Only spin the trigger before any model/effort content is available; once
+  // values are showing, reloads keep the chevron instead of flickering.
+  let triggerLoading = $derived(configLoading && triggerParts.length === 0);
   let canOpen = $derived(
     agents.length > 1 || !!modelSelector || !!effortSelector || configLoading || !!configError
   );
@@ -129,9 +127,9 @@
     effortSelectionExplicit = false;
     modelSelectorKey = null;
     effortSelectorKey = null;
+    retainedEffortSelector = null;
+    retainedEffortValue = null;
     retainedEffortTriggerLabel = null;
-    retainedEffortColumnWidth = null;
-    effortColumnWidth = 0;
     config = null;
     configLoading = true;
     configError = null;
@@ -186,15 +184,13 @@
     }
   });
 
+  // Snapshot the effort options so a model change can keep showing the old
+  // column as muted text while the model-specific options load.
   $effect(() => {
-    if (!configLoading && effortTriggerLabel) {
+    if (!configLoading && effortSelector) {
+      retainedEffortSelector = effortSelector;
+      retainedEffortValue = selectedEffortValue;
       retainedEffortTriggerLabel = effortTriggerLabel;
-    }
-  });
-
-  $effect(() => {
-    if (!configLoading && effortSelector && effortColumnWidth > 0) {
-      retainedEffortColumnWidth = Math.ceil(effortColumnWidth);
     }
   });
 
@@ -290,7 +286,7 @@
     triggerTitle={canOpen
       ? `Select AI configuration (${selectedProvider?.label ?? 'Agent'})`
       : (selectedProvider?.label ?? 'Agent')}
-    loading={configLoading}
+    loading={triggerLoading}
     {disabled}
     {dropUp}
     {triggerClass}
@@ -334,7 +330,7 @@
     {/if}
 
     {#if effortSelector}
-      <div class="picker-column" data-picker-column="effort" bind:clientWidth={effortColumnWidth}>
+      <div class="picker-column" data-picker-column="effort">
         <AcpConfigPickerSection
           title={effortSelector.label || 'Effort'}
           selector={effortSelector}
@@ -343,14 +339,24 @@
         />
       </div>
     {:else if loadingEffortOptions}
-      <div class="picker-column" data-picker-column="effort" style={effortColumnStyle}>
-        <DropdownMenu.Label class="picker-section-label">Effort</DropdownMenu.Label>
-        <DropdownMenu.Item disabled>
-          <span class="picker-status-row">
-            <Spinner size={12} />
-            <span class="picker-status-text">Loading options…</span>
-          </span>
-        </DropdownMenu.Item>
+      <div class="picker-column" data-picker-column="effort">
+        {#if retainedEffortSelector}
+          <AcpConfigPickerSection
+            title={retainedEffortSelector.label || 'Effort'}
+            selector={retainedEffortSelector}
+            value={retainedEffortValue}
+            disabled
+            onValueChange={() => {}}
+          />
+        {:else}
+          <DropdownMenu.Label class="picker-section-label">Effort</DropdownMenu.Label>
+          <DropdownMenu.Item disabled>
+            <span class="picker-status-row">
+              <Spinner size={12} />
+              <span class="picker-status-text">Loading options…</span>
+            </span>
+          </DropdownMenu.Item>
+        {/if}
       </div>
     {/if}
 

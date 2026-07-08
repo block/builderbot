@@ -145,7 +145,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
         )
         .unwrap();
 
-    assert_eq!(version, 24);
+    assert_eq!(version, 25);
     assert_eq!(app_version, super::APP_VERSION);
     assert!(table_exists(&conn, "projects"));
     assert!(table_exists(&conn, "project_notes"));
@@ -162,6 +162,12 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
     assert!(column_exists(&conn, "sessions", "acp_title"));
     assert!(column_exists(&conn, "sessions", "branch_id"));
     assert!(column_exists(&conn, "sessions", "completion_effects_at"));
+    assert!(column_exists(&conn, "notes", "suggested_next_steps"));
+    assert!(column_exists(
+        &conn,
+        "project_notes",
+        "suggested_next_steps"
+    ));
 
     let trigger_count: i64 = conn
         .query_row(
@@ -237,7 +243,7 @@ fn test_store_repairs_github_comment_tracking_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 24);
+    assert_eq!(version, 25);
     assert!(column_exists(&conn, "sessions", "pipeline"));
     assert!(column_exists(&conn, "sessions", "acp_config_selection"));
     assert!(column_exists(&conn, "sessions", "acp_title"));
@@ -247,6 +253,12 @@ fn test_store_repairs_github_comment_tracking_user_version() {
         &conn,
         "session_messages",
         "acp_agent_capabilities"
+    ));
+    assert!(column_exists(&conn, "notes", "suggested_next_steps"));
+    assert!(column_exists(
+        &conn,
+        "project_notes",
+        "suggested_next_steps"
     ));
     assert!(table_exists(&conn, "queued_session_messages"));
 
@@ -306,7 +318,7 @@ fn test_store_repairs_pipeline_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 24);
+    assert_eq!(version, 25);
     assert!(column_exists(&conn, "comments", "github_comment_id"));
     assert!(column_exists(&conn, "comments", "github_comment_type"));
     assert!(column_exists(&conn, "comments", "github_comment_stale"));
@@ -314,6 +326,12 @@ fn test_store_repairs_pipeline_user_version() {
         &conn,
         "session_messages",
         "acp_agent_capabilities"
+    ));
+    assert!(column_exists(&conn, "notes", "suggested_next_steps"));
+    assert!(column_exists(
+        &conn,
+        "project_notes",
+        "suggested_next_steps"
     ));
     assert!(table_exists(&conn, "queued_session_messages"));
     assert!(column_exists(&conn, "sessions", "acp_config_selection"));

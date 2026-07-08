@@ -2,7 +2,11 @@
 
 use rusqlite::{params, OptionalExtension};
 
-use super::models::Note;
+use super::models::{
+    suggested_next_steps_from_storage, suggested_next_steps_legacy_commit_step,
+    suggested_next_steps_legacy_note_step, suggested_next_steps_to_storage, Note,
+    SuggestedNextStep,
+};
 use super::{now_timestamp, Store, StoreError};
 
 impl Store {
@@ -28,9 +32,19 @@ impl Store {
     }
 
     fn insert_note(conn: &rusqlite::Connection, note: &Note) -> Result<(), StoreError> {
+        let suggested_next_steps = suggested_next_steps_to_storage(&note.suggested_next_steps)
+            .map_err(|e| StoreError(format!("Failed to serialize suggested next steps: {e}")))?;
+        let suggested_next_commit_step = note
+            .suggested_next_commit_step
+            .as_deref()
+            .or_else(|| suggested_next_steps_legacy_commit_step(&note.suggested_next_steps));
+        let suggested_next_note_step = note
+            .suggested_next_note_step
+            .as_deref()
+            .or_else(|| suggested_next_steps_legacy_note_step(&note.suggested_next_steps));
         conn.execute(
-            "INSERT INTO notes (id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO notes (id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, suggested_next_steps)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 note.id,
                 note.branch_id,
@@ -40,8 +54,9 @@ impl Store {
                 note.created_at,
                 note.updated_at,
                 note.completed_at,
-                note.suggested_next_commit_step,
-                note.suggested_next_note_step,
+                suggested_next_commit_step,
+                suggested_next_note_step,
+                suggested_next_steps,
             ],
         )?;
         Ok(())
@@ -79,7 +94,7 @@ impl Store {
     pub fn get_note(&self, id: &str) -> Result<Option<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, suggested_next_steps
              FROM notes WHERE id = ?1",
             params![id],
             Self::row_to_note,
@@ -91,7 +106,7 @@ impl Store {
     pub fn list_notes_for_branch(&self, branch_id: &str) -> Result<Vec<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, suggested_next_steps
              FROM notes WHERE branch_id = ?1
              ORDER BY COALESCE(completed_at, created_at) DESC, created_at DESC",
         )?;
@@ -103,7 +118,7 @@ impl Store {
     pub fn get_note_by_session(&self, session_id: &str) -> Result<Option<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, suggested_next_steps
              FROM notes WHERE session_id = ?1",
             params![session_id],
             Self::row_to_note,
@@ -116,7 +131,7 @@ impl Store {
     pub fn get_empty_note_by_session(&self, session_id: &str) -> Result<Option<Note>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step
+            "SELECT id, branch_id, session_id, title, content, created_at, updated_at, completed_at, suggested_next_commit_step, suggested_next_note_step, suggested_next_steps
              FROM notes WHERE session_id = ?1 AND content = ''",
             params![session_id],
             Self::row_to_note,
@@ -131,35 +146,63 @@ impl Store {
         id: &str,
         title: &str,
         content: &str,
-        suggested_next_commit_step: Option<&str>,
-        suggested_next_note_step: Option<&str>,
+        suggested_next_steps: &[SuggestedNextStep],
     ) -> Result<(), StoreError> {
+        let suggested_next_steps_json = suggested_next_steps_to_storage(suggested_next_steps)
+            .map_err(|e| StoreError(format!("Failed to serialize suggested next steps: {e}")))?;
+        let comparable_next_steps =
+            suggested_next_steps_from_storage(suggested_next_steps_json.clone(), None, None);
+        let suggested_next_commit_step =
+            suggested_next_steps_legacy_commit_step(&comparable_next_steps);
+        let suggested_next_note_step =
+            suggested_next_steps_legacy_note_step(&comparable_next_steps);
+
         let conn = self.conn.lock().unwrap();
         // The session runner re-runs note extraction at the end of every turn for sessions
         // with a linked note, even if the assistant didn't rewrite the note. Without this
         // short-circuit, `updated_at` would advance on every turn, defeating any freshness
         // comparison that relies on it.
-        let existing: Option<(String, String, Option<String>, Option<String>)> = conn
+        let existing: Option<(
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        )> = conn
             .query_row(
-                "SELECT title, content, suggested_next_commit_step, suggested_next_note_step
+                "SELECT title, content, suggested_next_commit_step, suggested_next_note_step, suggested_next_steps
                  FROM notes WHERE id = ?1",
                 params![id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .optional()?;
-        if let Some((cur_title, cur_content, cur_sncs, cur_snns)) = existing {
-            if cur_title == title
-                && cur_content == content
-                && cur_sncs.as_deref() == suggested_next_commit_step
-                && cur_snns.as_deref() == suggested_next_note_step
-            {
+        if let Some((cur_title, cur_content, cur_sncs, cur_snns, cur_steps_json)) = existing {
+            let cur_steps = suggested_next_steps_from_storage(cur_steps_json, cur_sncs, cur_snns);
+            if cur_title == title && cur_content == content && cur_steps == comparable_next_steps {
                 return Ok(());
             }
         }
         let now = now_timestamp();
         conn.execute(
-            "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3, completed_at = COALESCE(completed_at, ?4), suggested_next_commit_step = ?5, suggested_next_note_step = ?6 WHERE id = ?7",
-            params![title, content, now, now, suggested_next_commit_step, suggested_next_note_step, id],
+            "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3, completed_at = COALESCE(completed_at, ?4), suggested_next_commit_step = ?5, suggested_next_note_step = ?6, suggested_next_steps = ?7 WHERE id = ?8",
+            params![
+                title,
+                content,
+                now,
+                now,
+                suggested_next_commit_step,
+                suggested_next_note_step,
+                suggested_next_steps_json,
+                id
+            ],
         )?;
         Ok(())
     }
@@ -191,6 +234,14 @@ impl Store {
     }
 
     fn row_to_note(row: &rusqlite::Row) -> rusqlite::Result<Note> {
+        let suggested_next_commit_step: Option<String> = row.get(8)?;
+        let suggested_next_note_step: Option<String> = row.get(9)?;
+        let suggested_next_steps_json: Option<String> = row.get(10)?;
+        let suggested_next_steps = suggested_next_steps_from_storage(
+            suggested_next_steps_json,
+            suggested_next_commit_step.clone(),
+            suggested_next_note_step.clone(),
+        );
         Ok(Note {
             id: row.get(0)?,
             branch_id: row.get(1)?,
@@ -200,8 +251,9 @@ impl Store {
             created_at: row.get(5)?,
             updated_at: row.get(6)?,
             completed_at: row.get(7)?,
-            suggested_next_commit_step: row.get(8)?,
-            suggested_next_note_step: row.get(9)?,
+            suggested_next_commit_step,
+            suggested_next_note_step,
+            suggested_next_steps,
         })
     }
 }

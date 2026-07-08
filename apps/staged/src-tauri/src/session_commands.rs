@@ -300,7 +300,7 @@ Your final response must include the note content after a horizontal rule, follo
 <Body>\n\
 \n\
 ```suggested-next-steps\n\
-{{\"suggestedNextCommitStep\": null, \"suggestedNextNoteStep\": null}}\n\
+{{\"suggestedNextSteps\": []}}\n\
 ```\n\
 \n\
 Formatting requirements:\n\
@@ -309,8 +309,10 @@ Formatting requirements:\n\
 - The opening fence line for suggested-next-steps must be exactly: ```suggested-next-steps\n\
 - The closing fence line must be exactly: ```\n\
 - Put only a JSON object inside the suggested-next-steps block.\n\
-- Include both nullable string fields: suggestedNextCommitStep and suggestedNextNoteStep.\n\
-- Keep suggested next steps concise; use null when there is no clear next action.\n\
+- Include one suggestedNextSteps array with up to 4 ordered items.\n\
+- Implementation items must be {{\"type\":\"implementation\",\"prompt\":\"...\",\"expectedMultipleCommits\":false}}.\n\
+- Note items must be {{\"type\":\"note\",\"prompt\":\"...\"}}.\n\
+- Keep suggested next steps concise; use an empty array when there is no clear next action.\n\
 - Put the suggested-next-steps block after the note content as the final block.\n\
 - Do not write any prose after the suggested-next-steps block.\n\
 - Do not wrap the note in code fences.\n\
@@ -4911,23 +4913,18 @@ pub(crate) fn build_full_prompt_with_pikchr_reference(
 You may use any tools needed to research and gather information, but do NOT create \
 any commits.",
             NOTE_STANDALONE_OUTPUT_GUIDANCE.trim(),
-            "To return the note, your final response must include the structure shown below. \
-After the note content, emit a final `suggested-next-steps` fenced block that suggests \
-what the user might want to do next. The block must contain a single JSON object with \
-two nullable string fields.
+            r#"To return the note, your final response must include the structure shown below. After the note content, emit a final `suggested-next-steps` fenced block that suggests what the user might want to do next. The block must contain a single JSON object with one ordered suggestedNextSteps array.
 
 Guidelines for suggested next steps:
-- Keep suggestions very concise (a few words). They are shown alongside the note title, \
-so you can assume the user has already read the title for context. \
-Do NOT repeat information from the title.
-- If the note is a plan, suggest a commit to implement it: \
-{\"suggestedNextCommitStep\": \"Implement this plan\", \"suggestedNextNoteStep\": null}
-- If the note is a plan with multiple options, pick the best option: \
-{\"suggestedNextCommitStep\": \"Implement option 2: use Redis cache\", \"suggestedNextNoteStep\": null}
-- If the note is bug research, suggest both a fix and a deeper plan: \
-{\"suggestedNextCommitStep\": \"Fix this bug\", \"suggestedNextNoteStep\": \"Plan a fix for this bug\"}
-- If the note is pure research or informational with no clear next action: \
-{\"suggestedNextCommitStep\": null, \"suggestedNextNoteStep\": null}
+- Return up to 4 suggested next steps in recommendation order.
+- Keep suggestions very concise (a few words). They are shown alongside the note title, so you can assume the user has already read the title for context. Do NOT repeat information from the title.
+- Implementation items must include `type`, `prompt`, and `expectedMultipleCommits`.
+- Note items must include only `type` and `prompt`.
+- If the note is a plan, suggest an implementation step to implement it: {"suggestedNextSteps":[{"type":"implementation","prompt":"Implement this plan","expectedMultipleCommits":false}]}
+- If the note is a plan with multiple options, pick the best option: {"suggestedNextSteps":[{"type":"implementation","prompt":"Implement option 2: use Redis cache","expectedMultipleCommits":false}]}
+- If the note is bug research, suggest both a fix and a deeper plan in recommendation order: {"suggestedNextSteps":[{"type":"implementation","prompt":"Fix this bug","expectedMultipleCommits":false},{"type":"note","prompt":"Plan a fix for this bug"}]}
+- If implementation is likely to require multiple focused commits, set expectedMultipleCommits to true.
+- If the note is pure research or informational with no clear next action: {"suggestedNextSteps":[]}
 
 Use this exact response shape:
 
@@ -4936,7 +4933,7 @@ Use this exact response shape:
 <Body>
 
 ```suggested-next-steps
-{\"suggestedNextCommitStep\": \"Fix the null pointer bug in parser.rs\", \"suggestedNextNoteStep\": \"Make a plan to fix the null pointer bug\"}
+{"suggestedNextSteps":[{"type":"implementation","prompt":"Fix the null pointer bug in parser.rs","expectedMultipleCommits":false},{"type":"note","prompt":"Make a plan to fix the null pointer bug"}]}
 ```
 
 Formatting requirements:
@@ -4948,7 +4945,7 @@ Formatting requirements:
 - Do not wrap the block in any additional code fences.
 - Put the suggested-next-steps block after the note content as the final block.
 - Do not write any prose after the suggested-next-steps block.
-- Do not wrap the note in code fences.",
+- Do not wrap the note in code fences."#,
         ]
         .join("\n\n"),
         BranchSessionType::Commit => {

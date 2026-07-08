@@ -15,6 +15,7 @@
     Branch,
     ProjectNote,
     HashtagItem,
+    SuggestedNextStep,
   } from '../../types';
   import * as commands from '../../api/commands';
   import { buildProjectHashtagItems } from '../sessions/hashtagItems';
@@ -31,6 +32,7 @@
     type TimelineContextMenuAction,
   } from '../timeline/TimelineContextMenu.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
+  import { suggestedNextStepsForNote } from '../notes/suggestedNextSteps';
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
   import { agentState } from '../agents/agent.svelte';
   import { getPreferredAgent } from '../settings/preferences.svelte';
@@ -303,6 +305,7 @@
     sessionId?: string;
     noteUpdatedAt?: number;
     chatOpen?: boolean;
+    nextSteps?: SuggestedNextStep[] | null;
   };
 
   let openNote = $state<OpenProjectNoteState | null>(null);
@@ -328,6 +331,22 @@
     openProjectSessionModal();
   }
 
+  function computeProjectNoteNextSteps(note: {
+    suggestedNextSteps?: SuggestedNextStep[] | null;
+    suggestedNextCommitStep?: string | null;
+    suggestedNextNoteStep?: string | null;
+  }): SuggestedNextStep[] | null {
+    const steps = suggestedNextStepsForNote(note);
+    return steps.length > 0 ? steps : null;
+  }
+
+  function handleProjectNoteNextStep(step: SuggestedNextStep) {
+    const noteRef = openNote?.noteId ? `Re: #project-note:${openNote.noteId}` : '';
+    const prompt = noteRef ? `${noteRef}\n${step.prompt}` : step.prompt;
+    openNote = null;
+    void handleSubmitProjectSession({ prompt, imageIds: [] });
+  }
+
   function projectNoteToOpenState(note: ProjectNote, chatOpen = false): OpenProjectNoteState {
     return {
       noteId: note.id,
@@ -336,6 +355,7 @@
       sessionId: note.sessionId ?? undefined,
       noteUpdatedAt: note.updatedAt,
       chatOpen,
+      nextSteps: computeProjectNoteNextSteps(note),
     };
   }
 
@@ -409,7 +429,12 @@
     const onTimelineInvalidated = () => {
       hashtagVersion++;
     };
+    const onProjectNotesInvalidated = () => {
+      hashtagVersion++;
+      void loadProjectNotes();
+    };
     window.addEventListener('timeline-invalidated', onTimelineInvalidated);
+    window.addEventListener('project-notes-invalidated', onProjectNotesInvalidated);
 
     const unlistenSession = listenToEvent<{
       sessionId: string;
@@ -451,6 +476,7 @@
     return () => {
       unlistenSession();
       window.removeEventListener('timeline-invalidated', onTimelineInvalidated);
+      window.removeEventListener('project-notes-invalidated', onProjectNotesInvalidated);
     };
   });
 </script>
@@ -585,6 +611,7 @@
     onChatOpenChange={(chatOpen) => {
       if (openNote) openNote = { ...openNote, chatOpen };
     }}
+    nextSteps={openNote.nextSteps}
     {hashtagItems}
     referenceNav={disabledReferenceNav}
     onClose={() => {
@@ -593,6 +620,7 @@
     }}
     onOpenSession={handleOpenInnerSession}
     onHashtagClick={handleHashtagClick}
+    onStartSession={handleProjectNoteNextStep}
   />
 {/if}
 

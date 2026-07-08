@@ -179,6 +179,7 @@ pub struct NoteTimelineItem {
     pub completed_at: Option<i64>,
     pub suggested_next_commit_step: Option<String>,
     pub suggested_next_note_step: Option<String>,
+    pub suggested_next_steps: Vec<crate::store::SuggestedNextStep>,
 }
 
 /// Review with session status resolved.

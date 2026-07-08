@@ -58,7 +58,7 @@ use crate::shell_env::ShellEnvCache;
 use crate::store::{
     AcpConfigSelection, Comment, CommentAuthor, CommentType, CompletionReason, FailureStrategy,
     MessageRole, PipelineExecution, PipelineKind, PipelineStep, SessionMessage, SessionStatus,
-    StepStatus, StepType, Store,
+    StepStatus, StepType, Store, SuggestedNextStep,
 };
 
 const PIPELINE_STEP_PROMPT_OUTPUT_MAX_CHARS: usize = 30_000;
@@ -1087,7 +1087,7 @@ fn build_pikchr_correction_prompt(
 - Include a `---` separator on its own line.\n\
 - Start the note content immediately after `---` with a markdown H1 (`# <Title>`).\n\
 - After the note content, include a final fenced block whose opening line is exactly: ```suggested-next-steps\n\
-- Put only a JSON object in that block, with nullable string fields `suggestedNextCommitStep` and `suggestedNextNoteStep`.\n\
+- Put only a JSON object in that block, with an ordered `suggestedNextSteps` array.\n\
 - Do not write any prose after the suggested-next-steps block.\n\
 - Do not wrap the note content in code fences."
     } else {
@@ -2680,9 +2680,8 @@ fn run_post_completion_hooks(
                 .find_map(|m| extract_suggested_next_steps(&m.content));
             if let Some(ref steps) = suggested_next_steps {
                 log::info!(
-                    "Session {session_id}: extracted suggested next steps — commit: {:?}, note: {:?}",
-                    steps.suggested_next_commit_step,
-                    steps.suggested_next_note_step,
+                    "Session {session_id}: extracted {} suggested next step(s)",
+                    steps.suggested_next_steps.len(),
                 );
             }
 
@@ -2702,26 +2701,22 @@ fn run_post_completion_hooks(
                             "extracted"
                         }
                     );
-                    let sncs = suggested_next_steps
+                    let suggested_steps = suggested_next_steps
                         .as_ref()
-                        .and_then(|s| s.suggested_next_commit_step.as_deref());
-                    let snns = suggested_next_steps
-                        .as_ref()
-                        .and_then(|s| s.suggested_next_note_step.as_deref());
+                        .map(|s| s.suggested_next_steps.as_slice())
+                        .unwrap_or(&[]);
                     let result = match target.kind {
                         NoteKind::Repo => store.update_note_title_and_content(
                             &target.id,
                             &final_title,
                             &body,
-                            sncs,
-                            snns,
+                            suggested_steps,
                         ),
                         NoteKind::Project => store.update_project_note_title_and_content(
                             &target.id,
                             &final_title,
                             &body,
-                            sncs,
-                            snns,
+                            suggested_steps,
                         ),
                     };
                     if let Err(e) = result {
@@ -3337,11 +3332,82 @@ fn extract_review_title(text: &str) -> Option<String> {
 
 /// Structured representation of the suggested next steps extracted from a
 /// `suggested-next-steps` fenced block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SuggestedNextSteps {
+    suggested_next_steps: Vec<SuggestedNextStep>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SuggestedNextSteps {
+struct SuggestedNextStepsPayload {
+    #[serde(default)]
+    suggested_next_steps: Vec<SuggestedNextStep>,
     suggested_next_commit_step: Option<String>,
     suggested_next_note_step: Option<String>,
+}
+
+impl SuggestedNextStepsPayload {
+    fn into_steps(self) -> SuggestedNextSteps {
+        let suggested_next_steps = if self.suggested_next_steps.is_empty() {
+            legacy_suggested_next_steps(
+                self.suggested_next_commit_step,
+                self.suggested_next_note_step,
+            )
+        } else {
+            self.suggested_next_steps
+        };
+
+        SuggestedNextSteps {
+            suggested_next_steps: sanitize_suggested_next_steps(suggested_next_steps),
+        }
+    }
+}
+
+fn legacy_suggested_next_steps(
+    suggested_next_commit_step: Option<String>,
+    suggested_next_note_step: Option<String>,
+) -> Vec<SuggestedNextStep> {
+    let mut steps = Vec::new();
+    if let Some(prompt) = non_empty_suggested_step_prompt(suggested_next_commit_step) {
+        steps.push(SuggestedNextStep::Implementation {
+            prompt,
+            expected_multiple_commits: false,
+        });
+    }
+    if let Some(prompt) = non_empty_suggested_step_prompt(suggested_next_note_step) {
+        steps.push(SuggestedNextStep::Note { prompt });
+    }
+    steps
+}
+
+fn sanitize_suggested_next_steps(steps: Vec<SuggestedNextStep>) -> Vec<SuggestedNextStep> {
+    steps
+        .into_iter()
+        .filter_map(|step| match step {
+            SuggestedNextStep::Implementation {
+                prompt,
+                expected_multiple_commits,
+            } => non_empty_suggested_step_prompt(Some(prompt)).map(|prompt| {
+                SuggestedNextStep::Implementation {
+                    prompt,
+                    expected_multiple_commits,
+                }
+            }),
+            SuggestedNextStep::Note { prompt } => non_empty_suggested_step_prompt(Some(prompt))
+                .map(|prompt| SuggestedNextStep::Note { prompt }),
+        })
+        .take(4)
+        .collect()
+}
+
+fn non_empty_suggested_step_prompt(prompt: Option<String>) -> Option<String> {
+    let prompt = prompt?;
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// Extract suggested next steps from assistant output.
@@ -3353,8 +3419,8 @@ fn extract_suggested_next_steps(text: &str) -> Option<SuggestedNextSteps> {
     let blocks = find_suggested_next_steps_blocks(text);
     let block = preferred_suggested_next_steps_block(text, &blocks)?;
     let json_str = text[block.content_start..block.closing_start].trim();
-    match serde_json::from_str::<SuggestedNextSteps>(json_str) {
-        Ok(steps) => Some(steps),
+    match serde_json::from_str::<SuggestedNextStepsPayload>(json_str) {
+        Ok(payload) => Some(payload.into_steps()),
         Err(e) => {
             log::warn!("Failed to parse suggested-next-steps JSON: {e}");
             None
@@ -3523,6 +3589,19 @@ mod tests {
             created_at: 0,
             image_ids: vec![],
             acp: Default::default(),
+        }
+    }
+
+    fn implementation_step(prompt: &str, expected_multiple_commits: bool) -> SuggestedNextStep {
+        SuggestedNextStep::Implementation {
+            prompt: prompt.to_string(),
+            expected_multiple_commits,
+        }
+    }
+
+    fn note_step(prompt: &str) -> SuggestedNextStep {
+        SuggestedNextStep::Note {
+            prompt: prompt.to_string(),
         }
     }
 
@@ -5217,12 +5296,27 @@ Body
 "#;
         let steps = extract_suggested_next_steps(text).unwrap();
         assert_eq!(
-            steps.suggested_next_commit_step.as_deref(),
-            Some("Implement the plan")
+            steps.suggested_next_steps,
+            vec![
+                implementation_step("Implement the plan", false),
+                note_step("Research alternatives")
+            ]
         );
+    }
+
+    #[test]
+    fn extract_steps_accepts_ordered_typed_steps() {
+        let text = r#"```suggested-next-steps
+{"suggestedNextSteps":[{"type":"implementation","prompt":"Fix parser crash","expectedMultipleCommits":false},{"type":"implementation","prompt":"Split parser cleanup","expectedMultipleCommits":true},{"type":"note","prompt":"Research parser coverage"}]}
+```"#;
+        let steps = extract_suggested_next_steps(text).unwrap();
         assert_eq!(
-            steps.suggested_next_note_step.as_deref(),
-            Some("Research alternatives")
+            steps.suggested_next_steps,
+            vec![
+                implementation_step("Fix parser crash", false),
+                implementation_step("Split parser cleanup", true),
+                note_step("Research parser coverage")
+            ]
         );
     }
 
@@ -5243,12 +5337,11 @@ Use the real metadata at the end.
 ```"#;
         let steps = extract_suggested_next_steps(text).unwrap();
         assert_eq!(
-            steps.suggested_next_commit_step.as_deref(),
-            Some("Fix note parsing")
-        );
-        assert_eq!(
-            steps.suggested_next_note_step.as_deref(),
-            Some("Plan parser tests")
+            steps.suggested_next_steps,
+            vec![
+                implementation_step("Fix note parsing", false),
+                note_step("Plan parser tests")
+            ]
         );
     }
 
@@ -5282,10 +5375,9 @@ The real metadata still comes last.
 ```"#;
         let steps = extract_suggested_next_steps(text).unwrap();
         assert_eq!(
-            steps.suggested_next_commit_step.as_deref(),
-            Some("Fix note parsing")
+            steps.suggested_next_steps,
+            vec![implementation_step("Fix note parsing", false)]
         );
-        assert_eq!(steps.suggested_next_note_step, None);
     }
 
     #[test]
@@ -5293,12 +5385,11 @@ The real metadata still comes last.
         let text = "Ready to return the note.```suggested-next-steps\n{\"suggestedNextCommitStep\": \"Reduce churn\", \"suggestedNextNoteStep\": \"Plan IPC fix\"}\n```\n";
         let steps = extract_suggested_next_steps(text).unwrap();
         assert_eq!(
-            steps.suggested_next_commit_step.as_deref(),
-            Some("Reduce churn")
-        );
-        assert_eq!(
-            steps.suggested_next_note_step.as_deref(),
-            Some("Plan IPC fix")
+            steps.suggested_next_steps,
+            vec![
+                implementation_step("Reduce churn", false),
+                note_step("Plan IPC fix")
+            ]
         );
     }
 
@@ -5306,8 +5397,7 @@ The real metadata still comes last.
     fn extract_steps_null_fields() {
         let text = "```suggested-next-steps\n{\"suggestedNextCommitStep\": null, \"suggestedNextNoteStep\": null}\n```\n";
         let steps = extract_suggested_next_steps(text).unwrap();
-        assert_eq!(steps.suggested_next_commit_step, None);
-        assert_eq!(steps.suggested_next_note_step, None);
+        assert!(steps.suggested_next_steps.is_empty());
     }
 
     #[test]
@@ -5315,10 +5405,9 @@ The real metadata still comes last.
         let text = "```suggested-next-steps\n{\"suggestedNextCommitStep\": \"Fix the bug\", \"suggestedNextNoteStep\": null}\n```\n";
         let steps = extract_suggested_next_steps(text).unwrap();
         assert_eq!(
-            steps.suggested_next_commit_step.as_deref(),
-            Some("Fix the bug")
+            steps.suggested_next_steps,
+            vec![implementation_step("Fix the bug", false)]
         );
-        assert_eq!(steps.suggested_next_note_step, None);
     }
 
     #[test]

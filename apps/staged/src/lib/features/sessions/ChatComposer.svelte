@@ -15,8 +15,10 @@
   /** Styling for the agent config picker trigger rendered in the control row. */
   export const composerControlClass = `${controlBaseClass} px-4 py-1`;
 
-  /** Attach button — same chrome as the config picker trigger, icon-sized. */
-  const attachButtonClass = `${controlBaseClass} w-9 justify-center [&_svg]:!size-4`;
+  /** Attach button — same chrome as the config picker trigger, icon-sized.
+      h-auto (not the icon size variant) so the control row can stretch it to
+      match the tallest control. */
+  const attachButtonClass = `${controlBaseClass} h-auto w-9 px-0 justify-center [&_svg]:!size-4`;
 </script>
 
 <script lang="ts">
@@ -141,7 +143,6 @@
       <span class="inline-flex" title="Attach image">
         <Button
           variant="outline"
-          size="icon"
           class={attachButtonClass}
           aria-label="Attach image"
           onclick={openImagePicker}
@@ -155,8 +156,7 @@
       <span class="inline-flex composer-send" title="Stop session">
         <Button
           variant="destructive"
-          size="icon"
-          class="size-9 shrink-0 rounded-[10px] [&_svg]:!size-4"
+          class="h-auto min-h-9 w-9 shrink-0 rounded-[10px] px-0 [&_svg]:!size-4"
           aria-label="Stop session"
           onclick={onStop}
           disabled={cancelling}
@@ -172,7 +172,7 @@
       <span class="inline-flex composer-send" title="Send message">
         <Button
           variant="accent"
-          class="gap-1.5 px-4 py-2 text-sm max-[640px]:min-h-11"
+          class="h-auto min-h-9 gap-1.5 px-4 py-1 text-sm max-[640px]:min-h-11"
           onclick={onSend}
           disabled={sending || !value.trim()}
         >
@@ -273,9 +273,11 @@
 
   /* ----- Control row -------------------------------------------------------- */
 
+  /* Stretch so every control matches the tallest one (the config picker can
+     grow to two lines for its vertical model/effort label). */
   .composer-controls {
     display: flex;
-    align-items: flex-end;
+    align-items: stretch;
     gap: 8px;
   }
 

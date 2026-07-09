@@ -28,3 +28,17 @@ export function badgeBorderHover(hue: number, dark: boolean): string {
 export function badgeShortcutBg(hue: number, dark: boolean): string {
   return dark ? `oklch(0.40 0.06 ${hue})` : `oklch(0.86 0.06 ${hue})`;
 }
+
+/**
+ * Track gradient for the badge hue slider, sampled from the badge
+ * foreground color every 15° so the color under the thumb is the one
+ * the chosen OKLCH hue actually produces (HSL hue angles don't line up
+ * with OKLCH hue angles).
+ */
+export function hueSliderGradient(dark: boolean): string {
+  const stops: string[] = [];
+  for (let hue = 0; hue <= 360; hue += 15) {
+    stops.push(badgeFg(hue, dark));
+  }
+  return `linear-gradient(to right, ${stops.join(', ')})`;
+}

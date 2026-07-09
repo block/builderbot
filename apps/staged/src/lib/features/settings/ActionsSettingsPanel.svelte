@@ -30,6 +30,8 @@
     type ActionType,
   } from '../actions/actions';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
+  import { darkMode } from '../../stores/isDark.svelte';
+  import { hueSliderGradient } from '../../shared/badgeColors';
   import { matchesRepoSearch } from './repoContextSearch';
   import { toast } from 'svelte-sonner';
   import { getPreferredAgent } from './preferences.svelte';
@@ -635,6 +637,7 @@
                     min="0"
                     max="359"
                     step="1"
+                    style="background: {hueSliderGradient(darkMode.value)}"
                     bind:value={badgeEditHue}
                     onchange={saveBadge}
                   />
@@ -1066,22 +1069,8 @@
     appearance: none;
     height: 16px;
     border-radius: 8px;
-    background: linear-gradient(
-      to right,
-      hsl(0, 80%, 55%),
-      hsl(30, 80%, 55%),
-      hsl(60, 80%, 55%),
-      hsl(90, 80%, 55%),
-      hsl(120, 80%, 55%),
-      hsl(150, 80%, 55%),
-      hsl(180, 80%, 55%),
-      hsl(210, 80%, 55%),
-      hsl(240, 80%, 55%),
-      hsl(270, 80%, 55%),
-      hsl(300, 80%, 55%),
-      hsl(330, 80%, 55%),
-      hsl(359, 80%, 55%)
-    );
+    /* Track gradient comes from hueSliderGradient() as an inline style so it
+       tracks the theme and stays in sync with the badge OKLCH values. */
     outline: none;
   }
 

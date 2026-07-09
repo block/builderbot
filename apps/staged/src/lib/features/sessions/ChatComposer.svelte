@@ -15,10 +15,10 @@
   /** Styling for the agent config picker trigger rendered in the control row. */
   export const composerControlClass = `${controlBaseClass} px-4 py-1`;
 
-  /** Attach button — same chrome as the config picker trigger, icon-sized.
-      h-auto (not the icon size variant) so the control row can stretch it to
-      match the tallest control. */
-  const attachButtonClass = `${controlBaseClass} h-auto w-9 px-0 justify-center [&_svg]:!size-4`;
+  /** Attach button — same chrome as the config picker trigger. h-auto (not a
+      fixed-height size variant) so the control row can stretch it to match
+      the tallest control. */
+  const attachButtonClass = `${composerControlClass} h-auto [&_svg]:!size-4`;
 </script>
 
 <script lang="ts">
@@ -149,6 +149,7 @@
           disabled={isLive}
         >
           <Paperclip size={16} />
+          Attach
         </Button>
       </span>
     {/if}

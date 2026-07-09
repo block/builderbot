@@ -1071,6 +1071,7 @@
     border-radius: 8px;
     /* Track gradient comes from hueSliderGradient() as an inline style so it
        tracks the theme and stays in sync with the badge OKLCH values. */
+    border: 1px solid var(--border-subtle);
     outline: none;
   }
 

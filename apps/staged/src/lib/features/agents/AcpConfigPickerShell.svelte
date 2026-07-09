@@ -67,9 +67,17 @@
       labelWidth = null;
       return;
     }
-    const observer = new ResizeObserver(() => {
+    const observer = new ResizeObserver((entries) => {
+      // Measure from the observer entry, not getBoundingClientRect: the
+      // trigger mounts inside dialogs whose open animation scales the content
+      // (zoom-in-95), and a rect captured mid-animation is ~5% short. The
+      // sizer's local size never changes afterwards, so the observer would
+      // not fire again and the label would stay truncated. Entry sizes are in
+      // local CSS pixels, unaffected by ancestor transforms.
+      const entry = entries[entries.length - 1];
+      const width = entry.borderBoxSize?.[0]?.inlineSize ?? entry.contentRect.width;
       // Round up so sub-pixel clipping never triggers part ellipsis.
-      labelWidth = Math.ceil(sizer.getBoundingClientRect().width);
+      labelWidth = Math.ceil(width);
     });
     observer.observe(sizer);
     return () => observer.disconnect();

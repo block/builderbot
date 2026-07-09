@@ -6,11 +6,20 @@ pub use doctor::{
     RunChecksOptions,
 };
 
-async fn doctor_env_vars() -> Vec<(String, String)> {
-    crate::shell_env::home_env_vars_with_extended_path(
+/// Environment snapshot for doctor checks and fixes. Shaped through
+/// `apply_bundled_tools_env` so checks resolve binaries from the same PATH
+/// the agent spawn path uses — a bridge Staged bundles must never be
+/// reported missing (or prompt an install) just because the user has no
+/// global copy.
+async fn doctor_env_vars(app_handle: &tauri::AppHandle) -> Vec<(String, String)> {
+    let mut env_vars = crate::shell_env::home_env_vars_with_extended_path(
         crate::session_runner::shell_env_cache().as_ref(),
     )
-    .await
+    .await;
+    if let Some(dir) = crate::acp_tools::resolve_bundled_acp_tools_dir(app_handle) {
+        crate::acp_tools::apply_bundled_tools_env(&mut env_vars, &dir);
+    }
+    env_vars
 }
 
 fn run_checks_options(check_freshness: bool, env_vars: Vec<(String, String)>) -> RunChecksOptions {
@@ -44,8 +53,8 @@ fn execute_fix_options(
 /// The frontend calls this first for an instant paint, then follows up with
 /// [`run_doctor_freshness`] to fill in version/update information.
 #[tauri::command]
-pub async fn run_doctor() -> DoctorReport {
-    let env_vars = doctor_env_vars().await;
+pub async fn run_doctor(app_handle: tauri::AppHandle) -> DoctorReport {
+    let env_vars = doctor_env_vars(&app_handle).await;
     doctor::run_checks_with_options(run_checks_options(false, env_vars)).await
 }
 
@@ -57,8 +66,8 @@ pub async fn run_doctor() -> DoctorReport {
 /// `updateAvailable`, and the source-aware `updateCommand`/`updateFixType` on
 /// each readout. Hits the network, so it must never block first paint.
 #[tauri::command]
-pub async fn run_doctor_freshness() -> DoctorReport {
-    let env_vars = doctor_env_vars().await;
+pub async fn run_doctor_freshness(app_handle: tauri::AppHandle) -> DoctorReport {
+    let env_vars = doctor_env_vars(&app_handle).await;
     doctor::run_checks_with_options(run_checks_options(true, env_vars)).await
 }
 
@@ -67,8 +76,12 @@ pub async fn run_doctor_freshness() -> DoctorReport {
 /// The actual shell command is looked up from the static check definitions —
 /// the caller never sends a raw command string.
 #[tauri::command]
-pub async fn run_doctor_fix(check_id: String, fix_type: FixType) -> Result<(), String> {
-    let env_vars = doctor_env_vars().await;
+pub async fn run_doctor_fix(
+    app_handle: tauri::AppHandle,
+    check_id: String,
+    fix_type: FixType,
+) -> Result<(), String> {
+    let env_vars = doctor_env_vars(&app_handle).await;
     doctor::execute_fix_with_env_options(check_id, fix_type, execute_fix_options(None, env_vars))
         .await
 }
@@ -87,11 +100,12 @@ pub async fn run_doctor_fix(check_id: String, fix_type: FixType) -> Result<(), S
 /// validated against the authoritative backend derivation.
 #[tauri::command]
 pub async fn run_doctor_update(
+    app_handle: tauri::AppHandle,
     check_id: String,
     fix_type: FixType,
     command: String,
 ) -> Result<(), String> {
-    let env_vars = doctor_env_vars().await;
+    let env_vars = doctor_env_vars(&app_handle).await;
     let expected = expected_update_command(&check_id, &fix_type, env_vars.clone()).await?;
     if expected != command {
         return Err(format!(

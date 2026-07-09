@@ -2,6 +2,7 @@
 
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 // =============================================================================
 // Known agents — the registry of ACP-compatible providers
@@ -160,11 +161,35 @@ impl AcpAgent {
 // Binary discovery
 // =============================================================================
 
+/// Directory holding app-bundled ACP bridge executables, registered once at
+/// app startup via [`set_bundled_tools_dir`].
+static BUNDLED_TOOLS_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Register the directory holding app-bundled ACP bridge executables.
+///
+/// [`find_command`] consults this directory before any other resolution
+/// strategy, so the pinned bridges an app ships as resources win
+/// deterministically over user-installed copies. Set once at app startup;
+/// later calls are ignored.
+pub fn set_bundled_tools_dir(dir: PathBuf) {
+    let _ = BUNDLED_TOOLS_DIR.set(dir);
+}
+
 /// Find a CLI binary by command name.
 ///
-/// Delegates to doctor so ACP and Doctor share one binary resolution policy.
+/// The app-bundled tools dir (if registered) wins; everything else delegates
+/// to doctor so ACP and Doctor share one binary resolution policy.
 pub fn find_command(cmd: &str) -> Option<PathBuf> {
+    if let Some(path) = command_in_dir(BUNDLED_TOOLS_DIR.get().map(PathBuf::as_path), cmd) {
+        return Some(path);
+    }
     doctor::resolve::resolve_binary(cmd).path
+}
+
+/// Resolve `cmd` to an executable file inside an optional directory.
+fn command_in_dir(dir: Option<&Path>, cmd: &str) -> Option<PathBuf> {
+    let dir = dir?;
+    doctor::resolve::resolve_executable_from_path(cmd, &dir.to_string_lossy())
 }
 
 /// Map an agent ID to the `--command` value for `blox acp`.
@@ -176,4 +201,60 @@ pub(crate) fn blox_acp_command(agent_id: &str) -> Option<String> {
         parts.extend(a.acp_args.iter().copied());
         parts.join(",")
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::command_in_dir;
+    use std::fs;
+    use std::path::Path;
+
+    fn write_executable(path: &Path) {
+        fs::write(path, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[test]
+    fn command_in_dir_resolves_executable() {
+        let dir = std::env::temp_dir().join(format!("acp-bundled-dir-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        write_executable(&dir.join("claude-agent-acp"));
+
+        assert_eq!(
+            command_in_dir(Some(&dir), "claude-agent-acp").as_deref(),
+            Some(dir.join("claude-agent-acp").as_path()),
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn command_in_dir_skips_missing_and_unregistered() {
+        let dir = std::env::temp_dir().join(format!("acp-bundled-missing-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        assert_eq!(command_in_dir(Some(&dir), "claude-agent-acp"), None);
+        assert_eq!(command_in_dir(None, "claude-agent-acp"), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_in_dir_skips_non_executable_files() {
+        let dir = std::env::temp_dir().join(format!("acp-bundled-nonexec-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("claude-agent-acp");
+        fs::write(&file, "not executable").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert_eq!(command_in_dir(Some(&dir), "claude-agent-acp"), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

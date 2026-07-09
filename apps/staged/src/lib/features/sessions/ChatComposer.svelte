@@ -23,7 +23,6 @@
   import type { Snippet } from 'svelte';
   import X from '@lucide/svelte/icons/x';
   import CircleStop from '@lucide/svelte/icons/circle-stop';
-  import Send from '@lucide/svelte/icons/send';
   import Paperclip from '@lucide/svelte/icons/paperclip';
   import ImagePlus from '@lucide/svelte/icons/image-plus';
   import Spinner from '../../shared/Spinner.svelte';
@@ -172,8 +171,8 @@
     {:else}
       <span class="inline-flex composer-send" title="Send message">
         <Button
-          variant="default"
-          class="appearance-none gap-1.5 bg-[var(--ui-accent)] px-4 py-2 text-sm font-semibold shadow-none hover:bg-[var(--ui-accent-hover)] disabled:bg-[var(--ui-accent)] max-[640px]:min-h-11"
+          variant="accent"
+          class="gap-1.5 px-4 py-2 text-sm max-[640px]:min-h-11"
           onclick={onSend}
           disabled={sending || !value.trim()}
         >
@@ -181,7 +180,6 @@
             <Spinner size={14} />
             Sending…
           {:else}
-            <Send size={14} />
             Send
           {/if}
         </Button>

@@ -30,7 +30,6 @@
   import AlertCircle from '@lucide/svelte/icons/alert-circle';
   import Info from '@lucide/svelte/icons/info';
   import CircleStop from '@lucide/svelte/icons/circle-stop';
-  import Send from '@lucide/svelte/icons/send';
   import Copy from '@lucide/svelte/icons/copy';
   import Check from '@lucide/svelte/icons/check';
   import Clock from '@lucide/svelte/icons/clock';
@@ -2062,9 +2061,9 @@
               </div>
               {#if !isLive}
                 <Button
-                  variant="ghost"
-                  size="icon"
-                  class="size-[22px] shrink-0 rounded text-[var(--text-faint)] hover:bg-[var(--bg-hover)] hover:text-foreground disabled:opacity-40 [&_svg]:!size-3"
+                  variant="accent"
+                  size="xs"
+                  class="shrink-0"
                   title="Send queued message"
                   aria-label="Send queued message"
                   disabled={msg.status !== 'queued' || queueActionIds.has(msg.id)}
@@ -2073,7 +2072,7 @@
                   {#if queueActionIds.has(msg.id)}
                     <Spinner size={12} />
                   {:else}
-                    <Send size={12} />
+                    Send
                   {/if}
                 </Button>
               {/if}

@@ -8,6 +8,8 @@
     variants: {
       variant: {
         default: 'bg-primary text-primary-foreground hover:bg-primary/80',
+        accent:
+          'appearance-none bg-[var(--ui-accent)] font-semibold text-primary-foreground shadow-none hover:bg-[var(--ui-accent-hover)] disabled:bg-[var(--ui-accent)]',
         outline:
           'border-border bg-background hover:bg-muted hover:text-foreground dark:bg-input/30 dark:border-input dark:hover:bg-input/50 aria-expanded:bg-muted aria-expanded:text-foreground',
         secondary:

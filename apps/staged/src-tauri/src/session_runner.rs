@@ -348,7 +348,7 @@ pub struct SessionConfig {
     pub project_id: Option<String>,
     /// Expose the `generate_pikchr` MCP tool to this session. Set for local,
     /// note-writing sessions (project notes and local branch notes) so the
-    /// agent can generate validated Pikchr diagrams (rendered and overlap-checked
+    /// agent can generate validated Pikchr diagrams (rendered and layout-checked
     /// for it) before finalizing a note. The server is attached as a *required*
     /// MCP server, so a provider that doesn't support HTTP MCP fails the session
     /// rather than silently dropping the tool. Only honored for local sessions
@@ -548,7 +548,7 @@ pub fn start_session(
 
             // For local note-writing sessions, additionally attach the pikchr
             // MCP server so the agent can generate validated diagrams (rendered
-            // and overlap-checked for it). This is a *required* server too: a
+            // and layout-checked for it). This is a *required* server too: a
             // local note session assumes its provider speaks HTTP MCP, so an
             // unsupported transport fails the session (via the required-transport
             // check) rather than silently dropping the tool. Skipped for remote

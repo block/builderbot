@@ -25,6 +25,12 @@
     loading?: boolean;
     canOpen?: boolean;
     hasColumns?: boolean;
+    /**
+     * horizontal: all parts inline in the same style, separated by "·".
+     * vertical: first part is the title; later parts stack below it in
+     * smaller text.
+     */
+    layout?: 'horizontal' | 'vertical';
     children?: Snippet;
     footer?: Snippet;
   }
@@ -40,6 +46,7 @@
     loading = false,
     canOpen = true,
     hasColumns = true,
+    layout = 'horizontal',
     children,
     footer,
   }: Props = $props();
@@ -80,14 +87,15 @@
 {#snippet labelContent()}
   <span
     class="selector-label"
+    class:selector-label-vertical={layout === 'vertical'}
     aria-label={triggerLabel}
     style:width={labelWidth === null ? undefined : `${labelWidth}px`}
   >
     {#each renderedTriggerParts as part, index (part.id)}
-      {#if index > 0}
+      {#if layout === 'horizontal' && index > 0}
         <span class="trigger-separator" aria-hidden="true">·</span>
       {/if}
-      <span class="trigger-part">
+      <span class="trigger-part" class:trigger-part-subtitle={layout === 'vertical' && index > 0}>
         {#key part.label}
           <span
             class="trigger-part-value"
@@ -101,10 +109,10 @@
     {/each}
     <span class="trigger-sizer" aria-hidden="true" bind:this={labelSizerEl}>
       {#each renderedTriggerParts as part, index (part.id)}
-        {#if index > 0}
+        {#if layout === 'horizontal' && index > 0}
           <span class="trigger-separator">·</span>
         {/if}
-        <span>{part.label}</span>
+        <span class:trigger-part-subtitle={layout === 'vertical' && index > 0}>{part.label}</span>
       {/each}
     </span>
   </span>
@@ -122,11 +130,13 @@
     >
       <AgentIcon id={providerId ?? ''} size={12} />
       {@render labelContent()}
-      {#if loading}
-        <Spinner size={12} />
-      {:else}
-        <ChevronDown size={12} />
-      {/if}
+      <span class="trigger-caret" aria-hidden="true">
+        {#if loading}
+          <span class="trigger-caret-icon"><Spinner size={12} /></span>
+        {:else}
+          <span class="trigger-caret-icon"><ChevronDown size={12} /></span>
+        {/if}
+      </span>
     </DropdownMenu.Trigger>
     <DropdownMenu.Content
       bind:ref={contentEl}
@@ -182,6 +192,20 @@
     transition: width 150ms ease;
   }
 
+  .selector-label-vertical {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .selector-label-vertical .trigger-part {
+    max-width: 100%;
+    line-height: 1.25;
+  }
+
+  .trigger-part-subtitle {
+    font-size: 0.85em;
+  }
+
   .trigger-sizer {
     display: inline-flex;
     position: absolute;
@@ -191,6 +215,29 @@
     visibility: hidden;
     pointer-events: none;
     white-space: nowrap;
+  }
+
+  .selector-label-vertical .trigger-sizer {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  /* Fixed-size slot so swapping the spinner for the chevron never changes
+     how much horizontal space the trailing icon takes (the icons themselves
+     could otherwise shrink unevenly when the trigger is width-constrained). */
+  .trigger-caret {
+    position: relative;
+    flex: none;
+    width: 12px;
+    height: 12px;
+  }
+
+  .trigger-caret-icon {
+    display: inline-flex;
+    position: absolute;
+    align-items: center;
+    justify-content: center;
+    inset: 0;
   }
 
   .trigger-part {

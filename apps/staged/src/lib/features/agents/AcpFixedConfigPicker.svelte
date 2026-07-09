@@ -18,6 +18,7 @@
     disabled?: boolean;
     dropUp?: boolean;
     triggerClass?: string;
+    layout?: 'horizontal' | 'vertical';
     onModelChange?: (value: string) => void;
     onEffortChange?: (value: string) => void;
   }
@@ -34,6 +35,7 @@
     disabled = false,
     dropUp = false,
     triggerClass,
+    layout = 'horizontal',
     onModelChange,
     onEffortChange,
   }: Props = $props();
@@ -122,6 +124,7 @@
     {disabled}
     {dropUp}
     {triggerClass}
+    {layout}
     hasColumns={hasPickerColumns}
   >
     {#if modelSelector}

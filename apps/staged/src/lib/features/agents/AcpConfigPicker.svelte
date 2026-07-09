@@ -30,6 +30,7 @@
     remote?: boolean;
     dropUp?: boolean;
     triggerClass?: string;
+    layout?: 'horizontal' | 'vertical';
     workingDir?: string | null;
     onSelectionChange?: (selection: AcpConfigPickerSelection) => void;
   }
@@ -39,6 +40,7 @@
     remote = false,
     dropUp = false,
     triggerClass,
+    layout = 'horizontal',
     workingDir = null,
     onSelectionChange,
   }: Props = $props();
@@ -298,6 +300,7 @@
     {disabled}
     {dropUp}
     {triggerClass}
+    {layout}
     {canOpen}
   >
     <div class="picker-column" data-picker-column="provider">

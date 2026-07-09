@@ -498,7 +498,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(ToOwned::to_owned)
-                .unwrap_or_else(|| crate::branches::infer_branch_name(trimmed));
+                .unwrap_or_else(|| crate::branches::infer_prefixed_branch_name(trimmed));
 
             let mut project = crate::store::Project::named(trimmed);
             project.location = project_location;

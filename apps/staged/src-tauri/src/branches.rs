@@ -837,6 +837,42 @@ pub(crate) fn infer_branch_name(project_name: &str) -> String {
     }
 }
 
+/// Read the user's configured branch prefix (General settings → Branch
+/// prefix) from the preferences store. Returns `None` when unset, blank, or
+/// consisting only of slashes.
+fn read_branch_prefix() -> Option<String> {
+    let path = crate::preferences_store_path_buf()?;
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let json = serde_json::from_str::<serde_json::Value>(&contents).ok()?;
+    let prefix = json.get("branch-prefix")?.as_str()?.trim();
+    if prefix.trim_matches('/').is_empty() {
+        return None;
+    }
+    Some(prefix.to_string())
+}
+
+/// Join the configured branch prefix onto `branch` with a `/` separator,
+/// unless the prefix already ends in `/`.
+fn apply_branch_prefix(prefix: Option<&str>, branch: &str) -> String {
+    match prefix {
+        Some(p) if p.ends_with('/') => format!("{p}{branch}"),
+        Some(p) => format!("{p}/{branch}"),
+        None => branch.to_string(),
+    }
+}
+
+/// Infer a branch name from the project name, applying the user's configured
+/// branch prefix. Used whenever a repo is added without an explicit branch
+/// name. The [`resolve_project_workspace_name`] fallback stays on the
+/// unprefixed [`infer_branch_name`] so existing workspace identities are
+/// unaffected by the setting.
+pub(crate) fn infer_prefixed_branch_name(project_name: &str) -> String {
+    apply_branch_prefix(
+        read_branch_prefix().as_deref(),
+        &infer_branch_name(project_name),
+    )
+}
+
 pub(crate) fn infer_workspace_name(branch_name: &str) -> String {
     const WORKSPACE_NAME_MAX_LENGTH: usize = 32;
     let safe = branch_name
@@ -2587,6 +2623,27 @@ pub(crate) async fn run_prerun_actions_for_branch(
 mod tests {
     use super::*;
     use crate::test_utils::TempGitRepo;
+
+    #[test]
+    fn apply_branch_prefix_joins_with_slash() {
+        assert_eq!(
+            apply_branch_prefix(Some("mtoohey"), "my-project"),
+            "mtoohey/my-project"
+        );
+    }
+
+    #[test]
+    fn apply_branch_prefix_skips_separator_when_prefix_ends_in_slash() {
+        assert_eq!(
+            apply_branch_prefix(Some("mtoohey/"), "my-project"),
+            "mtoohey/my-project"
+        );
+    }
+
+    #[test]
+    fn apply_branch_prefix_without_prefix_returns_branch_unchanged() {
+        assert_eq!(apply_branch_prefix(None, "my-project"), "my-project");
+    }
 
     #[test]
     fn local_base_ref_for_worktree_accepts_existing_origin_ref() {

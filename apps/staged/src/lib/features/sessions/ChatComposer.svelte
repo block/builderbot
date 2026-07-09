@@ -172,17 +172,17 @@
     {:else}
       <span class="inline-flex composer-send" title="Send message">
         <Button
-          variant="outline"
-          size="icon"
-          class="size-9 shrink-0 rounded-[10px] shadow-none disabled:opacity-30 [&_svg]:!size-4"
-          aria-label="Send message"
+          variant="default"
+          class="appearance-none gap-1.5 bg-[var(--ui-accent)] px-4 py-2 text-sm font-semibold shadow-none hover:bg-[var(--ui-accent-hover)] disabled:bg-[var(--ui-accent)] max-[640px]:min-h-11"
           onclick={onSend}
           disabled={sending || !value.trim()}
         >
           {#if sending}
-            <Spinner size={16} />
+            <Spinner size={14} />
+            Sending…
           {:else}
-            <Send size={16} />
+            <Send size={14} />
+            Send
           {/if}
         </Button>
       </span>

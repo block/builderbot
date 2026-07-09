@@ -21,7 +21,6 @@
   import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
   import FileText from '@lucide/svelte/icons/file-text';
   import FileSearch from '@lucide/svelte/icons/file-search';
-  import Send from '@lucide/svelte/icons/send';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import { tick, untrack } from 'svelte';
   import Spinner from '../../shared/Spinner.svelte';
@@ -597,8 +596,8 @@
           </Button>
           <Button
             type="submit"
-            variant="default"
-            class="appearance-none gap-1.5 bg-[var(--ui-accent)] px-4 py-2 text-sm font-semibold shadow-none hover:bg-[var(--ui-accent-hover)] disabled:bg-[var(--ui-accent)] max-[768px]:h-11 max-[768px]:flex-1 max-[768px]:justify-center"
+            variant="accent"
+            class="gap-1.5 px-4 py-2 text-sm max-[768px]:h-11 max-[768px]:flex-1 max-[768px]:justify-center"
             title={submitDisabledReason ?? undefined}
             disabled={!canSubmit}
           >
@@ -606,7 +605,6 @@
               <Spinner size={14} />
               {currentWillQueue ? 'Queueing…' : 'Starting…'}
             {:else}
-              <Send size={14} />
               {submitLabel}
             {/if}
           </Button>

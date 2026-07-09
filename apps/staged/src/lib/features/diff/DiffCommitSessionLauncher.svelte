@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import Send from '@lucide/svelte/icons/send';
   import Spinner from '../../shared/Spinner.svelte';
   import { Button } from '$lib/components/ui/button';
   import { toast } from 'svelte-sonner';
@@ -215,7 +214,7 @@
   <div class="composer-footer">
     <Button
       type="button"
-      variant="outline"
+      variant="accent"
       class="w-full gap-1.5"
       onclick={handleSubmit}
       disabled={starting || !draftPrompt.trim()}
@@ -224,7 +223,6 @@
         <Spinner size={14} />
         {willQueue ? 'Queueing…' : 'Starting…'}
       {:else}
-        <Send size={14} />
         {willQueue ? 'Queue commit' : 'Start commit'}
         {#if viewport.showShortcutHints}
           <span class="shortcut-badge">⌘↵</span>

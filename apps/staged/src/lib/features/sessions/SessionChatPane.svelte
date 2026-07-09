@@ -43,9 +43,7 @@
   import Zap from '@lucide/svelte/icons/zap';
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import FileText from '@lucide/svelte/icons/file-text';
-  import Paperclip from '@lucide/svelte/icons/paperclip';
   import ImagePlus from '@lucide/svelte/icons/image-plus';
-  import Plus from '@lucide/svelte/icons/plus';
   import Spinner from '../../shared/Spinner.svelte';
   import { isResumableReason } from '../../types';
   import type {
@@ -83,7 +81,7 @@
   import AcpFixedConfigPicker from '../agents/AcpFixedConfigPicker.svelte';
   import { agentState } from '../agents/agent.svelte';
   import { buildAcpConfigSelection } from '../agents/acpConfigSelection';
-  import HashtagInput from './HashtagInput.svelte';
+  import ChatComposer, { composerControlClass } from './ChatComposer.svelte';
   import {
     buildBranchHashtagItems,
     findHashtagItemForReference,
@@ -215,9 +213,6 @@
   let followupModelStateKey = $state<string | null>(null);
   let followupEffortStateKey = $state<string | null>(null);
   let followupDiscoveryRun = 0;
-  // min-h instead of h so the vertical model/effort label can grow the button.
-  const footerControlClass =
-    'min-h-9 gap-1.5 rounded-md border border-[var(--border-muted)] bg-[var(--bg-primary)] px-4 py-1 text-sm font-medium text-muted-foreground shadow-none transition-colors hover:bg-[var(--bg-hover)] hover:text-foreground max-[640px]:min-h-11 max-[640px]:justify-center';
 
   let isLive = $derived(session?.status === 'running');
   let hasQueuedMessages = $derived(queuedMessages.length > 0);
@@ -355,7 +350,6 @@
   let canAttachImages = $derived(!!projectId);
   let replyImageIds = $state<string[]>([]);
   let imagePreviews = $state<Map<string, string>>(new Map());
-  let imageFileInput = $state<HTMLInputElement>();
 
   // Drag-and-drop state
   let dragOver = $state(false);
@@ -413,17 +407,10 @@
     }
   });
 
-  function openImagePicker() {
-    imageFileInput?.click();
-  }
-
-  async function handleImageFileSelect(e: Event) {
-    const input = e.target as HTMLInputElement;
-    if (!input.files) return;
-    for (const file of Array.from(input.files)) {
+  async function handleAttachFiles(files: File[]) {
+    for (const file of files) {
       await addImageFile(file);
     }
-    input.value = '';
   }
 
   async function addImageFile(file: File) {
@@ -2031,7 +2018,7 @@
   <!-- Input area with queued messages and image previews -->
   <div class="input-wrapper">
     {#if isPipelinePrelude}
-      <div class="input-area pipeline-stop-area">
+      <div class="pipeline-stop-area">
         <span class="inline-flex" title="Stop workflow">
           <Button
             variant="destructive"
@@ -2115,130 +2102,43 @@
           {/each}
         </div>
       {/if}
-      {#if canAttachImages && replyImageIds.length > 0}
-        <div class="reply-images">
-          {#each replyImageIds as imageId}
-            <div class="group/thumb reply-image-thumb">
-              {#if imagePreviews.get(imageId)}
-                <img src={imagePreviews.get(imageId)} alt="attached" />
-              {:else}
-                <div class="reply-image-placeholder"><ImagePlus size={16} /></div>
-              {/if}
-              {#if !isLive}
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="reply-image-remove-action absolute top-0.5 right-0.5 size-4 rounded-full bg-[var(--bg-deepest)] text-muted-foreground opacity-0 shadow-none transition-opacity hover:bg-[var(--bg-chrome)] hover:text-foreground group-hover/thumb:opacity-100 [&_svg]:!size-2.5"
-                  title="Remove image"
-                  aria-label="Remove image"
-                  onclick={() => removeReplyImage(imageId)}
-                >
-                  <X size={10} />
-                </Button>
-              {/if}
-            </div>
-          {/each}
-          {#if !isLive}
-            <Button
-              variant="outline"
-              size="icon"
-              class="size-12 shrink-0 rounded-md border border-dashed border-[var(--border-muted)] bg-transparent text-[var(--text-faint)] shadow-none hover:border-[var(--border-emphasis)] hover:bg-transparent hover:text-muted-foreground [&_svg]:!size-4"
-              title="Add image"
-              aria-label="Add image"
-              onclick={openImagePicker}
-            >
-              <Plus size={16} />
-            </Button>
-          {/if}
-        </div>
-      {/if}
-      <div class="input-area">
-        <AcpFixedConfigPicker
-          providerId={session?.provider ?? null}
-          providerLabel={followupProviderLabel}
-          modelSelector={followupModelSelector}
-          effortSelector={followupEffortSelector}
-          selectedModelValue={selectedFollowupModelValue}
-          selectedEffortValue={selectedFollowupEffortValue}
-          loading={followupConfigLoading}
-          error={followupConfigError}
-          disabled={isLive || sending}
-          dropUp
-          triggerClass={footerControlClass}
-          layout="vertical"
-          onModelChange={handleFollowupModelChange}
-          onEffortChange={handleFollowupEffortChange}
-        />
-        {#if canAttachImages}
-          <input
-            bind:this={imageFileInput}
-            type="file"
-            accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
-            multiple
-            class="file-input-hidden"
-            onchange={handleImageFileSelect}
+      <ChatComposer
+        bind:textareaEl={inputEl}
+        bind:value={inputText}
+        placeholder={isLive ? 'Type to queue a follow-up…' : 'Send a message…'}
+        {hashtagItems}
+        onkeydown={handleInputKeydown}
+        oninput={autoResize}
+        {canAttachImages}
+        attachedImageIds={replyImageIds}
+        {imagePreviews}
+        onAttachFiles={handleAttachFiles}
+        onRemoveImage={removeReplyImage}
+        {isLive}
+        {sending}
+        {cancelling}
+        onSend={handleSend}
+        onStop={handleCancel}
+      >
+        {#snippet configPicker()}
+          <AcpFixedConfigPicker
+            providerId={session?.provider ?? null}
+            providerLabel={followupProviderLabel}
+            modelSelector={followupModelSelector}
+            effortSelector={followupEffortSelector}
+            selectedModelValue={selectedFollowupModelValue}
+            selectedEffortValue={selectedFollowupEffortValue}
+            loading={followupConfigLoading}
+            error={followupConfigError}
+            disabled={isLive || sending}
+            dropUp
+            triggerClass={composerControlClass}
+            layout="vertical"
+            onModelChange={handleFollowupModelChange}
+            onEffortChange={handleFollowupEffortChange}
           />
-          {#if replyImageIds.length === 0}
-            <span class="inline-flex" title="Attach image">
-              <Button
-                variant="ghost"
-                size="icon"
-                class="size-9 shrink-0 rounded-[10px] text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground [&_svg]:!size-4"
-                aria-label="Attach image"
-                onclick={openImagePicker}
-                disabled={isLive}
-              >
-                <Paperclip size={16} />
-              </Button>
-            </span>
-          {/if}
-        {/if}
-        <HashtagInput
-          bind:textareaEl={inputEl}
-          bind:value={inputText}
-          class="message-input"
-          placeholder={isLive ? 'Type to queue a follow-up…' : 'Send a message…'}
-          rows={1}
-          onkeydown={handleInputKeydown}
-          oninput={autoResize}
-          items={hashtagItems}
-        />
-        {#if isLive}
-          <span class="inline-flex composer-send" title="Stop session">
-            <Button
-              variant="destructive"
-              size="icon"
-              class="size-9 shrink-0 rounded-[10px] [&_svg]:!size-4"
-              aria-label="Stop session"
-              onclick={handleCancel}
-              disabled={cancelling}
-            >
-              {#if cancelling}
-                <Spinner size={16} />
-              {:else}
-                <CircleStop size={16} />
-              {/if}
-            </Button>
-          </span>
-        {:else}
-          <span class="inline-flex composer-send" title="Send message">
-            <Button
-              variant="outline"
-              size="icon"
-              class="size-9 shrink-0 rounded-[10px] shadow-none disabled:opacity-30 [&_svg]:!size-4"
-              aria-label="Send message"
-              onclick={handleSend}
-              disabled={sending || !inputText.trim()}
-            >
-              {#if sending}
-                <Spinner size={16} />
-              {:else}
-                <Send size={16} />
-              {/if}
-            </Button>
-          </span>
-        {/if}
-      </div>
+        {/snippet}
+      </ChatComposer>
     {/if}
   </div>
 </div>
@@ -2282,28 +2182,6 @@
 
   .session-chat-pane.compact .human-bubble {
     max-width: 92%;
-  }
-
-  /* Compact panes are too narrow to fit the config picker, attach, input, and
-     send controls in one row: give the text input its own full-width row with
-     the controls beneath it. */
-  .session-chat-pane.compact .input-area {
-    padding: 8px 10px;
-    flex-wrap: wrap;
-  }
-
-  .session-chat-pane.compact .input-area :global(.hashtag-input-wrapper) {
-    order: -1;
-    flex-basis: 100%;
-  }
-
-  .session-chat-pane.compact .input-area .composer-send {
-    margin-left: auto;
-  }
-
-  .session-chat-pane.compact .queue-popover,
-  .session-chat-pane.compact .slash-command-popover {
-    margin: 0 10px;
   }
 
   /* ----- Content area (scrollable) --------------------------------------- */
@@ -2525,15 +2403,12 @@
 
   .human-bubble:focus-within :global(.message-copy-action),
   .assistant-content:focus-within :global(.message-copy-action),
-  .reply-image-thumb:focus-within :global(.reply-image-remove-action),
-  :global(.message-copy-action:focus-visible),
-  :global(.reply-image-remove-action:focus-visible) {
+  :global(.message-copy-action:focus-visible) {
     opacity: 1;
   }
 
   @media (hover: none), (pointer: coarse) {
-    :global(.message-copy-action),
-    :global(.reply-image-remove-action) {
+    :global(.message-copy-action) {
       opacity: 1;
     }
   }
@@ -2969,90 +2844,15 @@
     word-break: break-word;
   }
 
-  /* ----- Reply image previews -------------------------------------------- */
+  /* ----- Pipeline stop area ---------------------------------------------- */
 
-  .file-input-hidden {
-    display: none;
-  }
-
-  .reply-images {
+  .pipeline-stop-area {
     display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-    padding: 8px 14px 0;
-    border-top: 1px solid var(--border-subtle);
-  }
-
-  .reply-images + .input-area {
-    border-top: none;
-  }
-
-  .reply-image-thumb {
-    position: relative;
-    width: 48px;
-    height: 48px;
-    border-radius: 6px;
-    overflow: hidden;
-    border: 1px solid var(--border-muted);
-    background: var(--bg-hover);
-    flex-shrink: 0;
-  }
-
-  .reply-image-thumb img {
-    width: 100%;
-    height: 100%;
-    object-fit: cover;
-  }
-
-  .reply-image-placeholder {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 100%;
-    height: 100%;
-    color: var(--text-faint);
-  }
-
-  /* ----- Input area ------------------------------------------------------ */
-
-  .input-area {
-    display: flex;
-    align-items: flex-end;
-    gap: 8px;
+    justify-content: flex-end;
     padding: 10px 14px;
     border-top: 1px solid var(--border-subtle);
     background: var(--bg-chrome);
     flex-shrink: 0;
-  }
-
-  .pipeline-stop-area {
-    justify-content: flex-end;
-  }
-
-  .input-area :global(.message-input) {
-    flex: 1;
-    padding: 7px 12px;
-    background: var(--bg-primary);
-    border: 1px solid var(--border-muted);
-    border-radius: 10px;
-    color: var(--text-primary);
-    font-size: var(--size-md);
-    font-family: inherit;
-    line-height: 1.5;
-    resize: none;
-    overflow-y: hidden;
-    min-height: 36px;
-    max-height: 120px;
-  }
-
-  .input-area :global(.message-input):focus {
-    outline: none;
-    border-color: var(--border-emphasis);
-  }
-
-  .input-area :global(.hashtag-input-wrapper) {
-    flex: 1;
   }
 
   /* ======================================================================= */

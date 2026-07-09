@@ -256,8 +256,9 @@ If you need the Pikchr grammar while writing a diagram, read the reference at: {
             " To create or revise a diagram, call the `generate_pikchr` tool with a `description` \
 of the diagram you want (boxes, arrows, labels, layout, relationships); when revising an existing \
 diagram, or when you want existing source validated or repaired, also pass its current Pikchr \
-source as `previous_pikchr`. It writes the diagram, renders it, and fixes syntax errors and overlap \
-warnings on its own, then returns validated Pikchr source and a filesystem path to a rendered preview \
+source as `previous_pikchr`. It writes the diagram, renders it, and fixes syntax errors and layout \
+warnings (overlapping or out-of-bounds elements) on its own, then returns validated Pikchr source and \
+a filesystem path to a rendered preview \
 image — place the returned source in a fenced `pikchr` code block. Prefer this over hand-writing Pikchr.",
         );
     }

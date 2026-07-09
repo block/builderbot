@@ -6,7 +6,8 @@
 //! path. On a parse error the sub-agent is re-prompted with the specific
 //! failure, resuming the *same* sub-session so the grammar and prior attempts
 //! stay in context — a diagram that doesn't render is useless to hand back. The
-//! same loop now re-prompts on overlap warnings too, so the calling note agent
+//! same loop now re-prompts on layout warnings too — overlapping elements or
+//! elements extending beyond the diagram bounds — so the calling note agent
 //! only receives the final source and preview path. The loop is bounded by
 //! [`MAX_ATTEMPTS`].
 //!
@@ -25,9 +26,10 @@ use crate::agent::AgentDriver;
 use crate::pikchr_mcp::run_preview;
 
 /// Total sub-agent turns before giving up. Each parse error or empty reply
-/// consumes one, and each renderable-but-overlapping candidate also consumes
-/// one. 5 leaves room for a couple of repair rounds without letting a hopeless
-/// request run the provider subprocess forever.
+/// consumes one, and each renderable candidate flagged with layout warnings
+/// (overlaps, out-of-bounds elements) also consumes one. 5 leaves room for a
+/// couple of repair rounds without letting a hopeless request run the provider
+/// subprocess forever.
 const MAX_ATTEMPTS: usize = 5;
 /// Synthetic session id for the sub-session. The in-memory store keys nothing
 /// meaningful on it; any stable string is fine.
@@ -109,12 +111,12 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
             continue;
         }
 
-        if preview.has_overlaps {
-            prompt = overlap_warning_prompt(&source, &preview.summary);
+        if preview.has_overlaps || preview.has_out_of_bounds {
+            prompt = layout_warning_prompt(&source, &preview.summary);
             continue;
         }
 
-        // It renders cleanly, with no overlap warnings for the caller to
+        // It renders cleanly, with no layout warnings for the caller to
         // interpret.
         return Ok(GenOutcome {
             source,
@@ -171,13 +173,13 @@ Fix it and resend ONLY the ```pikchr code block."
     )
 }
 
-fn overlap_warning_prompt(source: &str, summary: &str) -> String {
+fn layout_warning_prompt(source: &str, summary: &str) -> String {
     format!(
-        "That diagram rendered, but the preview analysis found layout overlap warnings:\n{summary}\n\
+        "That diagram rendered, but the preview analysis found layout warnings:\n{summary}\n\
 \n\
 Current source:\n```pikchr\n{source}\n```\n\
-Fix the overlaps while preserving the requested diagram content. Resend ONLY the corrected \
-```pikchr code block."
+Fix the reported layout issues while preserving the requested diagram content. Resend ONLY the \
+corrected ```pikchr code block."
     )
 }
 
@@ -271,6 +273,11 @@ box "Sink = NO-OP (default / external clone)" "no socket, no Block deps → buil
 
     const CLEAN_SOURCE: &str = r#"box "Clean" fit"#;
 
+    /// Renders fine, but a negative margin shrinks Pikchr's computed canvas
+    /// below its content, so the box geometry (font-independent) crosses the
+    /// diagram edges.
+    const OUT_OF_BOUNDS_SOURCE: &str = "margin = -0.2in\nbox \"Out\"";
+
     /// Scripted driver that replays canned replies turn by turn and records the
     /// `agent_session_id` it was handed each turn (to assert resumption).
     struct FakeDriver {
@@ -356,9 +363,33 @@ box "Sink = NO-OP (default / external clone)" "no socket, no Block deps → buil
         assert_eq!(*driver.calls.lock().unwrap(), 2);
 
         let prompts = driver.prompts.lock().unwrap();
-        assert!(prompts[1].contains("overlap warnings"));
+        assert!(prompts[1].contains("layout warnings"));
         assert!(prompts[1].contains("overlapping pair"));
         assert!(prompts[1].contains(OVERLAPPING_SOURCE));
+    }
+
+    #[tokio::test]
+    async fn repairs_out_of_bounds_render_before_returning() {
+        let driver = FakeDriver::new(vec![fenced(OUT_OF_BOUNDS_SOURCE), fenced(CLEAN_SOURCE)]);
+
+        let outcome = generate_pikchr_source(
+            &driver,
+            "/tmp/grammar.md",
+            "a cramped diagram",
+            None,
+            2.0,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("should repair the out-of-bounds render");
+
+        assert_eq!(outcome.source, CLEAN_SOURCE);
+        assert_eq!(*driver.calls.lock().unwrap(), 2);
+
+        let prompts = driver.prompts.lock().unwrap();
+        assert!(prompts[1].contains("layout warnings"));
+        assert!(prompts[1].contains("beyond the diagram bounds"));
+        assert!(prompts[1].contains(OUT_OF_BOUNDS_SOURCE));
     }
 
     #[tokio::test]

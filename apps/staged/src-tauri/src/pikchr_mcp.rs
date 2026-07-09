@@ -15,14 +15,14 @@
 //!
 //! Fidelity: rendering goes through the `pikchr` crate, which bundles the same
 //! official `pikchr.c` that the frontend's `pikchr-js` compiles to WASM. The
-//! shape geometry — the part that matters most for overlap detection — is
-//! therefore identical to what the user eventually sees. Overlap detection then
-//! reads the shape and text rectangles straight off the `usvg` tree that also
-//! rasterizes the preview, so labels are checked with real, shaped extents
-//! rather than bare anchor points. `usvg`/`resvg` lay text out with native
-//! system fonts, not the frontend's browser metrics, so text extents differ by
-//! a hair (and font fallback can differ); label-overlap thresholds are kept
-//! forgiving to match, and this is acceptable for a preview.
+//! shape geometry — the part that matters most for layout analysis — is
+//! therefore identical to what the user eventually sees. Overlap and
+//! out-of-bounds detection then read the shape and text rectangles straight off
+//! the `usvg` tree that also rasterizes the preview, so labels are checked with
+//! real, shaped extents rather than bare anchor points. `usvg`/`resvg` lay text
+//! out with native system fonts, not the frontend's browser metrics, so text
+//! extents differ by a hair (and font fallback can differ); label thresholds
+//! are kept forgiving to match, and this is acceptable for a preview.
 //!
 //! Unlike `project_mcp`, this handler touches no store, registry, or project.
 //! It carries only the provider id and `AppHandle` that `generate_pikchr` needs
@@ -169,6 +169,19 @@ struct Overlap {
     overlap_h: f64,
 }
 
+/// One element extending past the diagram's drawing area, by index into the
+/// element list. Each field is the distance (px in Pikchr's coordinate space)
+/// the element crosses that edge, zeroed for edges it stays within (or crosses
+/// by less than the detection threshold).
+#[derive(Clone, Debug)]
+struct OutOfBounds {
+    element: usize,
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+}
+
 // =============================================================================
 // Pikchr rendering (SVG)
 // =============================================================================
@@ -196,7 +209,7 @@ fn render_pikchr_svg(source: &str) -> Result<RenderedSvg, String> {
 }
 
 // =============================================================================
-// Overlap detection
+// Layout analysis (overlaps + bounds)
 // =============================================================================
 
 /// Extract every box-like shape and text label from the rendered SVG tree.
@@ -398,13 +411,52 @@ fn find_overlaps(elements: &[Element], homes: &[Option<usize>]) -> Vec<Overlap> 
     overlaps
 }
 
-/// Run the full overlap analysis on a parsed Pikchr SVG tree.
-fn analyze_overlaps(tree: &usvg::Tree) -> (Vec<Element>, Vec<Overlap>) {
+/// Find elements that stick out past the diagram's drawing area.
+///
+/// Pikchr sizes the canvas from its own text-width estimates, so a label laid
+/// out with real fonts can spill past the edge and get clipped when the diagram
+/// is displayed — the case this catches. The per-kind thresholds mirror overlap
+/// detection: text uses the forgiving [`MIN_TEXT_OVERLAP_PX`] because usvg's
+/// font metrics differ by a hair from the frontend's.
+fn find_out_of_bounds(elements: &[Element], diagram: &BBox) -> Vec<OutOfBounds> {
+    elements
+        .iter()
+        .enumerate()
+        .filter_map(|(i, element)| {
+            let threshold = match element.kind {
+                ElementKind::Box => MIN_OVERLAP_PX,
+                ElementKind::Text => MIN_TEXT_OVERLAP_PX,
+            };
+            let past = |amount: f64| if amount > threshold { amount } else { 0.0 };
+            let oob = OutOfBounds {
+                element: i,
+                left: past(diagram.min_x - element.bounds.min_x),
+                top: past(diagram.min_y - element.bounds.min_y),
+                right: past(element.bounds.max_x - diagram.max_x),
+                bottom: past(element.bounds.max_y - diagram.max_y),
+            };
+            (oob.left > 0.0 || oob.top > 0.0 || oob.right > 0.0 || oob.bottom > 0.0).then_some(oob)
+        })
+        .collect()
+}
+
+/// Run the full layout analysis — overlap detection plus out-of-bounds
+/// detection against the diagram's drawing area — on a parsed Pikchr SVG tree.
+fn analyze_layout(tree: &usvg::Tree) -> (Vec<Element>, Vec<Overlap>, Vec<OutOfBounds>) {
     let mut elements = extract_elements(tree);
     let homes = home_boxes(&elements);
     assign_box_labels(&mut elements, &homes);
     let overlaps = find_overlaps(&elements, &homes);
-    (elements, overlaps)
+    // Pikchr emits a 0-origin 1:1 viewBox, so the drawing area in usvg canvas
+    // coordinates runs from (0, 0) to the tree's size.
+    let diagram = BBox {
+        min_x: 0.0,
+        min_y: 0.0,
+        max_x: tree.size().width() as f64,
+        max_y: tree.size().height() as f64,
+    };
+    let out_of_bounds = find_out_of_bounds(&elements, &diagram);
+    (elements, overlaps, out_of_bounds)
 }
 
 /// Human-readable description of one element for the overlap summary.
@@ -422,33 +474,77 @@ fn describe_element(element: &Element) -> String {
     }
 }
 
+/// Human-readable description of how far an element crosses each diagram edge,
+/// e.g. "≈ 6 px past the right edge".
+fn describe_overhang(oob: &OutOfBounds) -> String {
+    [
+        (oob.left, "left"),
+        (oob.top, "top"),
+        (oob.right, "right"),
+        (oob.bottom, "bottom"),
+    ]
+    .iter()
+    .filter(|(amount, _)| *amount > 0.0)
+    .map(|(amount, edge)| format!("≈ {amount:.0} px past the {edge} edge"))
+    .collect::<Vec<_>>()
+    .join(", ")
+}
+
 /// Build the text summary used by the specialist retry loop. Text matters
-/// because vision-less models can act on a textual overlap report.
-fn build_summary(width: i64, height: i64, elements: &[Element], overlaps: &[Overlap]) -> String {
+/// because vision-less models can act on a textual layout report.
+fn build_summary(
+    width: i64,
+    height: i64,
+    elements: &[Element],
+    overlaps: &[Overlap],
+    out_of_bounds: &[OutOfBounds],
+) -> String {
     let mut out = format!("Rendered Pikchr diagram: {width}×{height} px.");
-    if overlaps.is_empty() {
-        out.push_str("\nNo overlaps detected.");
+    if overlaps.is_empty() && out_of_bounds.is_empty() {
+        out.push_str("\nNo layout issues detected.");
         return out;
     }
 
-    out.push_str(&format!(
-        "\n⚠ {} overlapping pair(s) detected:",
-        overlaps.len()
-    ));
-    for o in overlaps {
+    if !overlaps.is_empty() {
         out.push_str(&format!(
-            "\n- {} overlaps {} (≈ {:.0}×{:.0} px)",
-            describe_element(&elements[o.a]),
-            describe_element(&elements[o.b]),
-            o.overlap_w,
-            o.overlap_h
+            "\n⚠ {} overlapping pair(s) detected:",
+            overlaps.len()
         ));
-    }
-    out.push_str(
-        "\nAdjust the diagram to separate the overlapping shapes/labels — e.g. set an explicit \
+        for o in overlaps {
+            out.push_str(&format!(
+                "\n- {} overlaps {} (≈ {:.0}×{:.0} px)",
+                describe_element(&elements[o.a]),
+                describe_element(&elements[o.b]),
+                o.overlap_w,
+                o.overlap_h
+            ));
+        }
+        out.push_str(
+            "\nAdjust the diagram to separate the overlapping shapes/labels — e.g. set an explicit \
 flow direction, use named nodes with explicit anchors (`with .w at …`, `arrow from A.e to B.w`), \
 give long labels room or shorten them, and avoid percentage-length arrows between `fit` boxes.",
-    );
+        );
+    }
+
+    if !out_of_bounds.is_empty() {
+        out.push_str(&format!(
+            "\n⚠ {} element(s) extend beyond the diagram bounds:",
+            out_of_bounds.len()
+        ));
+        for oob in out_of_bounds {
+            out.push_str(&format!(
+                "\n- {} sticks out {}",
+                describe_element(&elements[oob.element]),
+                describe_overhang(oob)
+            ));
+        }
+        out.push_str(
+            "\nContent outside the bounds is clipped when the diagram is displayed. Bring every \
+element back inside the drawing area — e.g. shorten the offending labels or widen the boxes \
+holding them, keep free-standing text away from the edges, and add canvas margin \
+(`margin = 0.25in`) if the content needs breathing room.",
+        );
+    }
     out
 }
 
@@ -530,16 +626,18 @@ fn rasterize_tree_to_png(tree: &usvg::Tree, scale: f32) -> Option<Vec<u8>> {
 // =============================================================================
 
 /// Outcome of rendering a candidate diagram: the PNG (if rasterization
-/// succeeded), a text summary of dimensions and overlaps, whether the source
-/// failed to render at all, and whether renderable geometry still overlaps.
+/// succeeded), a text summary of dimensions and layout warnings, whether the
+/// source failed to render at all, and whether renderable geometry still
+/// overlaps or extends beyond the diagram bounds.
 ///
 /// `pub(crate)` so the `generate_pikchr` sub-session loop can render and
-/// inspect candidate diagrams through this shared render/overlap path.
+/// inspect candidate diagrams through this shared render/analysis path.
 pub(crate) struct PreviewOutcome {
     pub(crate) png: Option<Vec<u8>>,
     pub(crate) summary: String,
     pub(crate) is_error: bool,
     pub(crate) has_overlaps: bool,
+    pub(crate) has_out_of_bounds: bool,
 }
 
 /// Render + analyze a candidate Pikchr source.
@@ -552,6 +650,7 @@ pub(crate) fn run_preview(source: &str, scale: f32) -> PreviewOutcome {
             summary: "Pikchr source is empty — nothing to render.".to_string(),
             is_error: true,
             has_overlaps: false,
+            has_out_of_bounds: false,
         };
     }
     let rendered = match render_pikchr_svg(source) {
@@ -562,11 +661,12 @@ pub(crate) fn run_preview(source: &str, scale: f32) -> PreviewOutcome {
                 summary: format!("Pikchr could not render this diagram:\n{}", err.trim()),
                 is_error: true,
                 has_overlaps: false,
+                has_out_of_bounds: false,
             };
         }
     };
 
-    // Parse the rendered SVG once; both overlap analysis and rasterization read
+    // Parse the rendered SVG once; both layout analysis and rasterization read
     // geometry from the same tree, and both need text laid out with the same
     // fonts. If usvg can't parse Pikchr's own output (rare), degrade to
     // dimensions only rather than failing the whole call.
@@ -580,12 +680,20 @@ the rendered SVG could not be parsed.)",
             ),
             is_error: false,
             has_overlaps: false,
+            has_out_of_bounds: false,
         };
     };
 
-    let (elements, overlaps) = analyze_overlaps(&tree);
+    let (elements, overlaps, out_of_bounds) = analyze_layout(&tree);
     let has_overlaps = !overlaps.is_empty();
-    let mut summary = build_summary(rendered.width, rendered.height, &elements, &overlaps);
+    let has_out_of_bounds = !out_of_bounds.is_empty();
+    let mut summary = build_summary(
+        rendered.width,
+        rendered.height,
+        &elements,
+        &overlaps,
+        &out_of_bounds,
+    );
 
     let png = rasterize_tree_to_png(&tree, scale);
     if png.is_none() {
@@ -597,6 +705,7 @@ the rendered SVG could not be parsed.)",
         summary,
         is_error: false,
         has_overlaps,
+        has_out_of_bounds,
     }
 }
 
@@ -883,7 +992,7 @@ arrow from COLL.e to SNOW.w"#;
         // (Pikchr emits a 1:1 viewBox), so a box's bounds equal its `<path>`
         // geometry — the invariant the overlap check relies on.
         let tree = tree_for(r#"box "Start" fit"#);
-        let (elements, _) = analyze_overlaps(&tree);
+        let (elements, _, _) = analyze_layout(&tree);
         let boxes: Vec<_> = elements
             .iter()
             .filter(|e| e.kind == ElementKind::Box)
@@ -902,14 +1011,14 @@ arrow from COLL.e to SNOW.w"#;
         // An arrow renders as an open shaft path plus a filled (stroke-less)
         // arrowhead polygon; neither is a container, so only the two boxes count.
         let tree = tree_for(r#"box "A" fit; arrow right; box "B" fit"#);
-        let (elements, _) = analyze_overlaps(&tree);
+        let (elements, _, _) = analyze_layout(&tree);
         assert_eq!(count_boxes(&elements), 2, "expected exactly two boxes");
     }
 
     #[test]
     fn overlap_detector_flags_known_overlapping_source() {
         let tree = tree_for(OVERLAPPING_SOURCE);
-        let (elements, overlaps) = analyze_overlaps(&tree);
+        let (elements, overlaps, _) = analyze_layout(&tree);
         assert_eq!(count_boxes(&elements), 5, "expected five boxes");
         assert!(
             !overlaps.is_empty(),
@@ -920,7 +1029,7 @@ arrow from COLL.e to SNOW.w"#;
     #[test]
     fn overlap_detector_passes_corrected_source() {
         let tree = tree_for(CORRECTED_SOURCE);
-        let (_elements, overlaps) = analyze_overlaps(&tree);
+        let (_elements, overlaps, _) = analyze_layout(&tree);
         assert!(
             overlaps.is_empty(),
             "corrected diagram should have no overlaps, found {overlaps:?}"
@@ -983,6 +1092,7 @@ arrow from COLL.e to SNOW.w"#;
         let outcome = run_preview("box \"hello\"", DEFAULT_SCALE);
         assert!(!outcome.is_error);
         assert!(!outcome.has_overlaps);
+        assert!(!outcome.has_out_of_bounds);
         assert!(outcome.png.is_some(), "expected a PNG for valid source");
         assert!(!outcome.png.unwrap().is_empty());
         assert!(outcome.summary.contains("px"));
@@ -994,6 +1104,17 @@ arrow from COLL.e to SNOW.w"#;
         assert!(!outcome.is_error);
         assert!(outcome.has_overlaps);
         assert!(outcome.summary.contains("overlapping pair"));
+    }
+
+    #[test]
+    fn out_of_bounds_source_sets_out_of_bounds_flag() {
+        // A negative margin shrinks Pikchr's computed canvas below its content,
+        // so the box geometry (font-independent, unlike spilling text) crosses
+        // the diagram edges on every host.
+        let outcome = run_preview("margin = -0.2in\nbox \"Out\"", DEFAULT_SCALE);
+        assert!(!outcome.is_error);
+        assert!(outcome.has_out_of_bounds);
+        assert!(outcome.summary.contains("beyond the diagram bounds"));
     }
 
     #[test]
@@ -1017,6 +1138,7 @@ arrow from COLL.e to SNOW.w"#;
         let outcome = run_preview("box \"unterminated", DEFAULT_SCALE);
         assert!(outcome.is_error);
         assert!(!outcome.has_overlaps);
+        assert!(!outcome.has_out_of_bounds);
         assert!(outcome.png.is_none());
         assert!(outcome.summary.to_lowercase().contains("pikchr"));
     }
@@ -1026,6 +1148,7 @@ arrow from COLL.e to SNOW.w"#;
         let outcome = run_preview("   \n  ", DEFAULT_SCALE);
         assert!(outcome.is_error);
         assert!(!outcome.has_overlaps);
+        assert!(!outcome.has_out_of_bounds);
         assert!(outcome.png.is_none());
     }
 
@@ -1033,9 +1156,82 @@ arrow from COLL.e to SNOW.w"#;
     fn summary_lists_overlap_count() {
         let rendered = render_pikchr_svg(OVERLAPPING_SOURCE).unwrap();
         let tree = tree_for(OVERLAPPING_SOURCE);
-        let (elements, overlaps) = analyze_overlaps(&tree);
-        let summary = build_summary(rendered.width, rendered.height, &elements, &overlaps);
+        let (elements, overlaps, out_of_bounds) = analyze_layout(&tree);
+        let summary = build_summary(
+            rendered.width,
+            rendered.height,
+            &elements,
+            &overlaps,
+            &out_of_bounds,
+        );
         assert!(summary.contains("overlapping pair"));
         assert!(summary.contains('⚠'));
+    }
+
+    #[test]
+    fn element_past_diagram_edge_is_flagged() {
+        let diagram = BBox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 100.0,
+            max_y: 50.0,
+        };
+        let elements = vec![
+            element(ElementKind::Box, "inside", 5.0, 5.0, 95.0, 45.0),
+            element(ElementKind::Text, "spilling label", 60.0, 10.0, 110.0, 24.0),
+        ];
+        let oob = find_out_of_bounds(&elements, &diagram);
+        assert_eq!(oob.len(), 1, "only the spilling label is out: {oob:?}");
+        assert_eq!(oob[0].element, 1);
+        assert!(
+            (oob[0].right - 10.0).abs() < 1e-6,
+            "right overhang was {}",
+            oob[0].right
+        );
+        assert_eq!(oob[0].left, 0.0);
+        assert_eq!(oob[0].top, 0.0);
+        assert_eq!(oob[0].bottom, 0.0);
+    }
+
+    #[test]
+    fn hairline_overhang_is_not_flagged() {
+        let diagram = BBox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 100.0,
+            max_y: 50.0,
+        };
+        // A label 2 px past the edge is within text-metric noise, and a box
+        // half a pixel past is a rounding artifact — neither is a real spill.
+        let elements = vec![
+            element(ElementKind::Text, "nearly out", 60.0, 10.0, 102.0, 24.0),
+            element(ElementKind::Box, "", -0.5, 5.0, 95.0, 45.0),
+        ];
+        let oob = find_out_of_bounds(&elements, &diagram);
+        assert!(oob.is_empty(), "hairline overhangs are noise: {oob:?}");
+    }
+
+    #[test]
+    fn summary_reports_out_of_bounds_elements() {
+        let diagram = BBox {
+            min_x: 0.0,
+            min_y: 0.0,
+            max_x: 100.0,
+            max_y: 50.0,
+        };
+        let elements = vec![element(
+            ElementKind::Text,
+            "wide label",
+            60.0,
+            10.0,
+            130.0,
+            24.0,
+        )];
+        let oob = find_out_of_bounds(&elements, &diagram);
+        let summary = build_summary(100, 50, &elements, &[], &oob);
+        assert!(summary.contains('⚠'));
+        assert!(summary.contains("beyond the diagram bounds"));
+        assert!(summary.contains("label \"wide label\""));
+        assert!(summary.contains("right edge"));
     }
 }

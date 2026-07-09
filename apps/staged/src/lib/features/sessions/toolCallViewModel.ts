@@ -59,12 +59,20 @@ export interface ToolCallOutput {
   emptyLabel: 'Waiting for output' | 'No output' | null;
 }
 
+export type ToolCallOutputSource = 'error' | 'stdout' | 'stderr' | 'primary';
+
 export type ToolCallSection =
   | { kind: 'locations'; locations: ToolCallLocation[] }
   | { kind: 'input'; label: 'Input'; text: string }
   | { kind: 'diff'; diff: ToolCallDiff }
   | { kind: 'terminal_refs'; label: 'Terminal'; refs: string[] }
-  | { kind: 'output'; label: string; text: string; tone: 'normal' | 'danger' | 'cancelled' }
+  | {
+      kind: 'output';
+      source: ToolCallOutputSource;
+      label: string;
+      text: string;
+      tone: 'normal' | 'danger' | 'cancelled';
+    }
   | { kind: 'raw_output'; label: 'Raw output'; text: string }
   | { kind: 'empty'; label: 'Waiting for output' | 'No output' }
   | {
@@ -178,7 +186,9 @@ export function buildToolCallViewModel(
     metadata,
     output,
     sections,
-    hasDetails: sections.length > 0,
+    // Status and empty-state rows only echo what the collapsed header already
+    // shows, so they alone don't make a card worth expanding.
+    hasDetails: sections.some((section) => section.kind !== 'status' && section.kind !== 'empty'),
   };
 }
 
@@ -316,6 +326,7 @@ export function buildToolCallSections(
   if (output.errorText) {
     sections.push({
       kind: 'output',
+      source: 'error',
       label: 'Error',
       text: output.errorText,
       tone: 'danger',
@@ -326,6 +337,7 @@ export function buildToolCallSections(
   if (output.stdout) {
     sections.push({
       kind: 'output',
+      source: 'stdout',
       label: 'Stdout',
       text: output.stdout,
       tone: outputTone,
@@ -336,6 +348,7 @@ export function buildToolCallSections(
   if (output.stderr && output.stderr !== output.errorText) {
     sections.push({
       kind: 'output',
+      source: 'stderr',
       label: 'Stderr',
       text: output.stderr,
       tone: item.status === 'failed' ? 'danger' : outputTone,
@@ -351,6 +364,7 @@ export function buildToolCallSections(
   ) {
     sections.push({
       kind: 'output',
+      source: 'primary',
       label: 'Output',
       text: output.primaryText,
       tone: outputTone,

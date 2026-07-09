@@ -1,12 +1,6 @@
 import type { SessionMessage } from '../../types';
 import type { DisplayRootInput } from './pathDisplayRoots';
-import {
-  formatToolDisplay,
-  makePathsRelative,
-  parseToolCall,
-  stripCodeFences,
-  verbGroupSummary,
-} from './sessionModalHelpers';
+import { formatToolDisplay, parseToolCall, verbGroupSummary } from './sessionModalHelpers';
 
 export type ToolStatus = 'pending' | 'in_progress' | 'completed' | 'failed' | 'cancelled';
 
@@ -308,29 +302,6 @@ export function textFromAcpContent(content: unknown): string {
   return parts.join('\n').trim();
 }
 
-export interface AcpDiff {
-  path: string;
-  oldText: string | null;
-  newText: string;
-}
-
-export function diffsFromAcpContent(content: unknown, displayRoots?: DisplayRootInput): AcpDiff[] {
-  if (!Array.isArray(content)) return [];
-  const diffs: AcpDiff[] = [];
-  for (const item of content) {
-    if (stringProp(item, 'type') !== 'diff') continue;
-    const path = stringProp(item, 'path');
-    const newText = stringProp(item, 'newText');
-    if (!path || newText === null) continue;
-    diffs.push({
-      path: makePathsRelative(path, displayRoots),
-      oldText: stringProp(item, 'oldText'),
-      newText,
-    });
-  }
-  return diffs;
-}
-
 export function terminalRefsFromAcpContent(content: unknown): string[] {
   if (!Array.isArray(content)) return [];
   return content
@@ -366,29 +337,6 @@ export function groupRichToolsByVerb(items: RichToolItem[]): RichToolVerbGroup[]
     summary: verbGroupSummary(group),
     statusTone: groupStatusTone(group.items),
   }));
-}
-
-export function simpleUnifiedDiff(diff: AcpDiff): string {
-  const oldLines = (diff.oldText ?? '').split('\n');
-  const newLines = diff.newText.split('\n');
-  if (diff.oldText === null) {
-    return newLines.map((line) => `+${line}`).join('\n');
-  }
-  if (diff.oldText === diff.newText) return diff.newText;
-
-  const output: string[] = [];
-  const max = Math.max(oldLines.length, newLines.length);
-  for (let i = 0; i < max; i++) {
-    const oldLine = oldLines[i];
-    const newLine = newLines[i];
-    if (oldLine === newLine) {
-      if (oldLine !== undefined) output.push(` ${oldLine}`);
-    } else {
-      if (oldLine !== undefined) output.push(`-${oldLine}`);
-      if (newLine !== undefined) output.push(`+${newLine}`);
-    }
-  }
-  return output.join('\n');
 }
 
 function groupStatusTone(items: RichToolItem[]): RichToolItem['statusTone'] {
@@ -869,78 +817,4 @@ function stringProp(value: unknown, key: string): string | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const prop = (value as Record<string, unknown>)[key];
   return typeof prop === 'string' ? prop : null;
-}
-
-export function displayLocations(locations: unknown, displayRoots?: DisplayRootInput): string[] {
-  if (!Array.isArray(locations)) return [];
-  return locations
-    .map((location) => {
-      const path = stringProp(location, 'path');
-      if (!path) return null;
-      const line =
-        location && typeof location === 'object'
-          ? (location as Record<string, unknown>).line
-          : undefined;
-      const suffix = typeof line === 'number' ? `:${line}` : '';
-      return `${makePathsRelative(path, displayRoots)}${suffix}`;
-    })
-    .filter((location): location is string => !!location);
-}
-
-export function toolResultText(item: RichToolItem): string {
-  const structuredText = textFromAcpContent(item.content);
-  if (structuredText) return structuredText;
-  if (typeof item.rawOutput === 'string') return item.rawOutput;
-  if (item.rawOutput !== undefined && item.rawOutput !== null) return formatJson(item.rawOutput);
-  if (item.result?.content) return stripCodeFences(item.result.content);
-  return '';
-}
-
-/**
- * Whether an expanded tool card would have anything to show. Equivalent to
- * checking the formatted values (`formatJson`, `toolResultText`,
- * `diffsFromAcpContent`, …) for emptiness, but without building them — the
- * formatted strings are only needed once a card is actually expanded, and
- * pretty-printing large raw payloads for every collapsed card is what made
- * live-transcript re-renders expensive.
- */
-export function toolHasDetails(item: RichToolItem): boolean {
-  return (
-    hasJsonValue(item.rawInput) ||
-    hasJsonValue(item.rawOutput) ||
-    acpContentHasDiff(item.content) ||
-    acpContentHasTerminalRef(item.content) ||
-    hasLocation(item.locations) ||
-    !!toolResultText(item)
-  );
-}
-
-/** Mirrors `!!formatJson(value)`: only undefined/null/'' format to ''. */
-function hasJsonValue(value: unknown): boolean {
-  return value !== undefined && value !== null && value !== '';
-}
-
-/** Mirrors `diffsFromAcpContent(content).length > 0`. */
-function acpContentHasDiff(content: unknown): boolean {
-  if (!Array.isArray(content)) return false;
-  return content.some(
-    (item) =>
-      stringProp(item, 'type') === 'diff' &&
-      !!stringProp(item, 'path') &&
-      stringProp(item, 'newText') !== null
-  );
-}
-
-/** Mirrors `terminalRefsFromAcpContent(content).length > 0`. */
-function acpContentHasTerminalRef(content: unknown): boolean {
-  if (!Array.isArray(content)) return false;
-  return content.some(
-    (item) => stringProp(item, 'type') === 'terminal' && !!stringProp(item, 'terminalId')
-  );
-}
-
-/** Mirrors `displayLocations(locations).length > 0`. */
-function hasLocation(locations: unknown): boolean {
-  if (!Array.isArray(locations)) return false;
-  return locations.some((location) => !!stringProp(location, 'path'));
 }

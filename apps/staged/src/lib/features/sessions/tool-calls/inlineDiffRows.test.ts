@@ -42,6 +42,19 @@ describe('buildDiffRows', () => {
     expect(rows).toHaveLength(2);
     expect(rows.every((row) => row.marker === '+' && row.oldLine === null)).toBe(true);
   });
+
+  it('renders both halves of a modified pair that straddles an unchanged line', () => {
+    // 'bar' is the LCS anchor, so the similar foo(1)/foo(2) lines pair up
+    // across it and never align during the row walk.
+    const rows = buildDiffRows(diff('foo(1)\nbar', 'bar\nfoo(2)'));
+
+    expect(rows).toMatchObject([
+      { marker: '-', tone: 'modified-removed', oldLine: 1, newLine: null, text: 'foo(1)' },
+      { marker: ' ', tone: 'context', oldLine: 2, newLine: 1, text: 'bar' },
+      { marker: '+', tone: 'modified-added', oldLine: null, newLine: 2, text: 'foo(2)' },
+    ]);
+    expect(diffRowStats(rows)).toEqual({ added: 1, removed: 1 });
+  });
 });
 
 describe('diffRowStats', () => {

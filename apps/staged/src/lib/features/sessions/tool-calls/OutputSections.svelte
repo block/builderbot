@@ -49,55 +49,35 @@
     }
   }
 
+  // The view model's sections already encode which outputs to show (error /
+  // stdout / stderr precedence, raw JSON only as a fallback); this just
+  // projects them through the renderer's include options.
   function outputBlocks(
     model: ToolCallViewModel,
     options: Pick<Props, 'includePrimary' | 'includeRaw' | 'includeStreams' | 'primaryLabel'>
   ): OutputBlock[] {
-    const output = model.output;
     const result: OutputBlock[] = [];
     const defaultTone = model.status === 'cancelled' ? 'cancelled' : 'normal';
 
-    if (output.errorText) {
-      result.push({ key: 'error', label: 'Error', text: output.errorText, tone: 'danger' });
-    }
-
-    if (options.includeStreams && output.stdout) {
-      result.push({ key: 'stdout', label: 'Stdout', text: output.stdout, tone: defaultTone });
-    }
-
-    if (options.includeStreams && output.stderr && output.stderr !== output.errorText) {
-      result.push({
-        key: 'stderr',
-        label: 'Stderr',
-        text: output.stderr,
-        tone: model.status === 'failed' ? 'danger' : defaultTone,
-      });
-    }
-
-    if (
-      options.includePrimary &&
-      output.primaryText &&
-      output.primaryText !== output.errorText &&
-      output.primaryText !== output.stdout &&
-      output.primaryText !== output.stderr
-    ) {
-      result.push({
-        key: 'output',
-        label: options.primaryLabel ?? 'Output',
-        text: output.primaryText,
-        tone: defaultTone,
-      });
-    }
-
-    // Raw JSON is a fallback for output we could not render structurally,
-    // never a companion to structured blocks.
-    if (options.includeRaw && output.rawText && result.length === 0) {
-      result.push({
-        key: 'raw-output',
-        label: 'Raw output',
-        text: output.rawText,
-        tone: defaultTone,
-      });
+    for (const section of model.sections) {
+      if (section.kind === 'output') {
+        if (!options.includeStreams && (section.source === 'stdout' || section.source === 'stderr'))
+          continue;
+        if (section.source === 'primary' && !options.includePrimary) continue;
+        result.push({
+          key: section.source,
+          label: section.source === 'primary' ? (options.primaryLabel ?? 'Output') : section.label,
+          text: section.text,
+          tone: section.tone,
+        });
+      } else if (section.kind === 'raw_output' && options.includeRaw) {
+        result.push({
+          key: 'raw-output',
+          label: section.label,
+          text: section.text,
+          tone: defaultTone,
+        });
+      }
     }
 
     return result;

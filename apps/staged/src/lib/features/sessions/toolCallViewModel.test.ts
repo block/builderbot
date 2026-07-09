@@ -253,6 +253,7 @@ describe('buildToolCallViewModel output handling', () => {
     expect(model.output.primaryText).toBe('legacy output');
     expect(model.sections).toContainEqual({
       kind: 'output',
+      source: 'primary',
       label: 'Output',
       text: 'legacy output',
       tone: 'normal',
@@ -273,7 +274,7 @@ describe('buildToolCallViewModel output handling', () => {
     expect(model.sections).toContainEqual({ kind: 'empty', label: 'Waiting for output' });
   });
 
-  it('shows a no-output state for completed tools without output', () => {
+  it('is not expandable when only empty and status rows would show', () => {
     const model = buildToolCallViewModel(
       richTool({
         status: 'completed',
@@ -283,7 +284,13 @@ describe('buildToolCallViewModel output handling', () => {
 
     expect(model.output.state).toBe('empty');
     expect(model.output.emptyLabel).toBe('No output');
-    expect(model.hasDetails).toBe(true);
+    expect(model.hasDetails).toBe(false);
     expect(model.sections).toContainEqual({ kind: 'empty', label: 'No output' });
+  });
+
+  it('is expandable once any structured detail exists', () => {
+    const model = buildToolCallViewModel(richTool({ rawInput: { option: 'value' } }));
+
+    expect(model.hasDetails).toBe(true);
   });
 });

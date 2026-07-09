@@ -41,24 +41,6 @@
     }
     return result;
   }
-
-  function highlightedLineHtml(text: string, highlights: CharHighlight[]): string {
-    return segments(text, highlights)
-      .map((segment) => {
-        const escaped = escapeHtml(segment.text);
-        return segment.highlighted ? `<span class="char-highlight">${escaped}</span>` : escaped;
-      })
-      .join('');
-  }
-
-  function escapeHtml(text: string): string {
-    return text
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#39;');
-  }
 </script>
 
 {#snippet diffRow(row: DiffRow)}
@@ -70,7 +52,11 @@
     <span class="line-number old">{row.oldLine ?? ''}</span>
     <span class="line-number new">{row.newLine ?? ''}</span>
     <span class="marker">{row.marker}</span>
-    <code class="line-text">{@html highlightedLineHtml(row.text, row.highlights)}</code>
+    <code class="line-text"
+      >{#each segments(row.text, row.highlights) as segment}{#if segment.highlighted}<span
+            class="char-highlight">{segment.text}</span
+          >{:else}{segment.text}{/if}{/each}</code
+    >
   </div>
 {/snippet}
 
@@ -246,7 +232,7 @@
     white-space: pre-wrap;
   }
 
-  .inline-diff :global(.char-highlight) {
+  .char-highlight {
     border-radius: 3px;
     background: color-mix(in srgb, currentColor 18%, transparent);
   }

@@ -90,35 +90,67 @@ export function buildDiffRows(diff: ToolCallDiff): DiffRow[] {
       continue;
     }
 
-    if (beforeClass === 'removed' || (beforeClass === 'modified' && !modifiedPair)) {
+    if (beforeClass === 'removed') {
       result.push({
         key: `removed:${beforeIndex}`,
         oldLine: beforeIndex + 1,
         newLine: null,
         marker: '-',
         text: beforeLines[beforeIndex],
-        tone: beforeClass === 'modified' ? 'modified-removed' : 'removed',
-        highlights: modifiedByBefore.get(beforeIndex)?.beforeHighlights ?? [],
+        tone: 'removed',
+        highlights: [],
       });
       beforeIndex += 1;
       continue;
     }
 
     const afterPair = modifiedByAfter.get(afterIndex);
-    if (afterClass === 'added' || (afterClass === 'modified' && !afterPair)) {
+    if (afterClass === 'added') {
       result.push({
         key: `added:${afterIndex}`,
         oldLine: null,
         newLine: afterIndex + 1,
         marker: '+',
         text: afterLines[afterIndex],
-        tone: afterClass === 'modified' ? 'modified-added' : 'added',
-        highlights: modifiedByAfter.get(afterIndex)?.afterHighlights ?? [],
+        tone: 'added',
+        highlights: [],
       });
       afterIndex += 1;
       continue;
     }
 
+    // A modified pair can straddle an LCS anchor (e.g. a line edited while
+    // moving across an unchanged line), so it never aligns for the paired
+    // branch above. Render each half as its own row instead of dropping it.
+    if (beforeIndex < beforeLines.length && beforeClass !== 'unchanged') {
+      result.push({
+        key: `removed:${beforeIndex}`,
+        oldLine: beforeIndex + 1,
+        newLine: null,
+        marker: '-',
+        text: beforeLines[beforeIndex],
+        tone: 'modified-removed',
+        highlights: modifiedPair?.beforeHighlights ?? [],
+      });
+      beforeIndex += 1;
+      continue;
+    }
+
+    if (afterIndex < afterLines.length && afterClass !== 'unchanged') {
+      result.push({
+        key: `added:${afterIndex}`,
+        oldLine: null,
+        newLine: afterIndex + 1,
+        marker: '+',
+        text: afterLines[afterIndex],
+        tone: 'modified-added',
+        highlights: afterPair?.afterHighlights ?? [],
+      });
+      afterIndex += 1;
+      continue;
+    }
+
+    // Unreachable for well-formed line diffs; advance to guarantee progress.
     if (beforeIndex < beforeLines.length) {
       beforeIndex += 1;
     }

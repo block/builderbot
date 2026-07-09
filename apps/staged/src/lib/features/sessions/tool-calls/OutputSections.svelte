@@ -19,6 +19,7 @@
     includeRaw?: boolean;
     includeStatus?: boolean;
     includeStreams?: boolean;
+    primaryLabel?: string;
   }
 
   let {
@@ -28,10 +29,13 @@
     includeRaw = true,
     includeStatus = true,
     includeStreams = true,
+    primaryLabel = 'Output',
   }: Props = $props();
 
   let copiedKey = $state<string | null>(null);
-  let blocks = $derived(outputBlocks(viewModel, { includePrimary, includeRaw, includeStreams }));
+  let blocks = $derived(
+    outputBlocks(viewModel, { includePrimary, includeRaw, includeStreams, primaryLabel })
+  );
 
   async function copyOutput(text: string, key: string) {
     try {
@@ -47,7 +51,7 @@
 
   function outputBlocks(
     model: ToolCallViewModel,
-    options: Pick<Props, 'includePrimary' | 'includeRaw' | 'includeStreams'>
+    options: Pick<Props, 'includePrimary' | 'includeRaw' | 'includeStreams' | 'primaryLabel'>
   ): OutputBlock[] {
     const output = model.output;
     const result: OutputBlock[] = [];
@@ -77,7 +81,12 @@
       output.primaryText !== output.stdout &&
       output.primaryText !== output.stderr
     ) {
-      result.push({ key: 'output', label: 'Output', text: output.primaryText, tone: defaultTone });
+      result.push({
+        key: 'output',
+        label: options.primaryLabel ?? 'Output',
+        text: output.primaryText,
+        tone: defaultTone,
+      });
     }
 
     // Raw JSON is a fallback for output we could not render structurally,

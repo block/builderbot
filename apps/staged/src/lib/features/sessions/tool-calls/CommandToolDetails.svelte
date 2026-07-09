@@ -8,6 +8,12 @@
 
   let { viewModel }: Props = $props();
   let commandText = $derived((viewModel.metadata.command ?? viewModel.detail) || 'Command');
+  // Status already shows in the header dot and the footer; only surface failure exits here.
+  let failureExitCode = $derived(
+    viewModel.output.exitCode !== null && viewModel.output.exitCode !== 0
+      ? viewModel.output.exitCode
+      : null
+  );
 </script>
 
 <div class="tool-detail-stack">
@@ -16,18 +22,18 @@
       <span class="tool-command-prefix">$</span>
       <span class="tool-command-text">{commandText}</span>
     </div>
-    <div class="tool-field-list">
-      {#if viewModel.metadata.workingDirectory}
-        <span class="tool-field-label">Directory</span>
-        <span class="tool-field-value">{viewModel.metadata.workingDirectory}</span>
-      {/if}
-      {#if viewModel.output.exitCode !== null}
-        <span class="tool-field-label">Exit</span>
-        <span class="tool-field-value">{viewModel.output.exitCode}</span>
-      {/if}
-      <span class="tool-field-label">Status</span>
-      <span class="tool-field-value">{viewModel.statusLabel}</span>
-    </div>
+    {#if viewModel.metadata.workingDirectory || failureExitCode !== null}
+      <div class="tool-field-list">
+        {#if viewModel.metadata.workingDirectory}
+          <span class="tool-field-label">Directory</span>
+          <span class="tool-field-value">{viewModel.metadata.workingDirectory}</span>
+        {/if}
+        {#if failureExitCode !== null}
+          <span class="tool-field-label">Exit</span>
+          <span class="tool-field-value">{failureExitCode}</span>
+        {/if}
+      </div>
+    {/if}
   </div>
 
   {#if viewModel.metadata.terminalRefs.length > 0}

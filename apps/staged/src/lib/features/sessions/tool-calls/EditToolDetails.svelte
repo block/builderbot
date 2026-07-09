@@ -8,19 +8,31 @@
   }
 
   let { viewModel }: Props = $props();
+  // The diff header already names the file; only surface path metadata it doesn't cover.
+  let showPath = $derived(
+    !!viewModel.metadata.targetPath &&
+      !viewModel.metadata.diffs.some((diff) => diff.path === viewModel.metadata.targetPath)
+  );
+  let locations = $derived(
+    viewModel.metadata.locations.filter(
+      (location) =>
+        location.display !== viewModel.metadata.targetPath &&
+        !viewModel.metadata.diffs.some((diff) => diff.path === location.display)
+    )
+  );
 </script>
 
 <div class="tool-detail-stack">
-  {#if viewModel.metadata.targetPath}
+  {#if showPath}
     <div class="tool-primary-row">
       <span class="tool-field-label">Path</span>
       <span class="tool-field-value">{viewModel.metadata.targetPath}</span>
     </div>
   {/if}
 
-  {#if viewModel.metadata.locations.length > 0}
+  {#if locations.length > 0}
     <div class="tool-meta-row">
-      {#each viewModel.metadata.locations as location}
+      {#each locations as location}
         <span class="tool-chip">{location.display}</span>
       {/each}
     </div>
@@ -28,10 +40,7 @@
 
   {#if viewModel.metadata.diffs.length > 0}
     {#each viewModel.metadata.diffs as diff}
-      <section>
-        <div class="tool-panel-label">{diff.path}</div>
-        <InlineToolDiff {diff} />
-      </section>
+      <InlineToolDiff {diff} />
     {/each}
   {:else if viewModel.metadata.inputText}
     <section>

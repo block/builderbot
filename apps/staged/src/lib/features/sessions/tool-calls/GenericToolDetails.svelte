@@ -27,10 +27,7 @@
   {/if}
 
   {#each viewModel.metadata.diffs as diff}
-    <section>
-      <div class="tool-panel-label">{diff.path}</div>
-      <InlineToolDiff {diff} />
-    </section>
+    <InlineToolDiff {diff} />
   {/each}
 
   {#if viewModel.metadata.terminalRefs.length > 0}

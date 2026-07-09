@@ -1,18 +1,8 @@
 <script lang="ts">
-  import { computeLineDiff, type CharHighlight } from '@builderbot/diff-viewer/utils';
+  import UnfoldVertical from '@lucide/svelte/icons/unfold-vertical';
+  import type { CharHighlight } from '@builderbot/diff-viewer/utils';
   import type { ToolCallDiff } from '../toolCallViewModel';
-
-  type DiffTone = 'context' | 'removed' | 'added' | 'modified-removed' | 'modified-added';
-
-  interface DiffRow {
-    key: string;
-    oldLine: number | null;
-    newLine: number | null;
-    marker: ' ' | '-' | '+';
-    text: string;
-    tone: DiffTone;
-    highlights: CharHighlight[];
-  }
+  import { buildDiffRows, diffRowStats, groupDiffRows, type DiffRow } from './inlineDiffRows';
 
   interface Segment {
     text: string;
@@ -24,118 +14,13 @@
   }
 
   let { diff }: Props = $props();
-  let rows = $derived.by(() => buildRows(diff));
+  let rows = $derived.by(() => buildDiffRows(diff));
+  let stats = $derived(diffRowStats(rows));
+  let blocks = $derived.by(() => groupDiffRows(rows));
+  let expandedKeys = $state<string[]>([]);
 
-  function splitLines(text: string | null): string[] {
-    if (text === null || text === '') return [];
-    return text.split('\n');
-  }
-
-  function buildRows(toolDiff: ToolCallDiff): DiffRow[] {
-    const beforeLines = splitLines(toolDiff.oldText);
-    const afterLines = splitLines(toolDiff.newText);
-    const lineDiff = computeLineDiff(beforeLines, afterLines);
-    const modifiedByBefore = new Map(
-      lineDiff.modifiedPairs.map((pair) => [pair.beforeLineIndex, pair])
-    );
-    const modifiedByAfter = new Map(
-      lineDiff.modifiedPairs.map((pair) => [pair.afterLineIndex, pair])
-    );
-    const result: DiffRow[] = [];
-    let beforeIndex = 0;
-    let afterIndex = 0;
-
-    while (beforeIndex < beforeLines.length || afterIndex < afterLines.length) {
-      const beforeClass = lineDiff.beforeLines[beforeIndex];
-      const afterClass = lineDiff.afterLines[afterIndex];
-
-      if (
-        beforeIndex < beforeLines.length &&
-        afterIndex < afterLines.length &&
-        beforeClass === 'unchanged' &&
-        afterClass === 'unchanged'
-      ) {
-        result.push({
-          key: `context:${beforeIndex}:${afterIndex}`,
-          oldLine: beforeIndex + 1,
-          newLine: afterIndex + 1,
-          marker: ' ',
-          text: beforeLines[beforeIndex],
-          tone: 'context',
-          highlights: [],
-        });
-        beforeIndex += 1;
-        afterIndex += 1;
-        continue;
-      }
-
-      const modifiedPair = modifiedByBefore.get(beforeIndex);
-      if (modifiedPair && modifiedPair.afterLineIndex === afterIndex) {
-        result.push({
-          key: `mod-before:${beforeIndex}`,
-          oldLine: beforeIndex + 1,
-          newLine: null,
-          marker: '-',
-          text: beforeLines[beforeIndex],
-          tone: 'modified-removed',
-          highlights: modifiedPair.beforeHighlights,
-        });
-        result.push({
-          key: `mod-after:${afterIndex}`,
-          oldLine: null,
-          newLine: afterIndex + 1,
-          marker: '+',
-          text: afterLines[afterIndex],
-          tone: 'modified-added',
-          highlights: modifiedPair.afterHighlights,
-        });
-        beforeIndex += 1;
-        afterIndex += 1;
-        continue;
-      }
-
-      if (beforeClass === 'removed' || (beforeClass === 'modified' && !modifiedPair)) {
-        result.push({
-          key: `removed:${beforeIndex}`,
-          oldLine: beforeIndex + 1,
-          newLine: null,
-          marker: '-',
-          text: beforeLines[beforeIndex],
-          tone: beforeClass === 'modified' ? 'modified-removed' : 'removed',
-          highlights: modifiedByBefore.get(beforeIndex)?.beforeHighlights ?? [],
-        });
-        beforeIndex += 1;
-        continue;
-      }
-
-      const afterPair = modifiedByAfter.get(afterIndex);
-      if (afterClass === 'added' || (afterClass === 'modified' && !afterPair)) {
-        result.push({
-          key: `added:${afterIndex}`,
-          oldLine: null,
-          newLine: afterIndex + 1,
-          marker: '+',
-          text: afterLines[afterIndex],
-          tone: afterClass === 'modified' ? 'modified-added' : 'added',
-          highlights: modifiedByAfter.get(afterIndex)?.afterHighlights ?? [],
-        });
-        afterIndex += 1;
-        continue;
-      }
-
-      if (beforeIndex < beforeLines.length) {
-        beforeIndex += 1;
-      }
-      if (afterIndex < afterLines.length) {
-        afterIndex += 1;
-      }
-    }
-
-    return result;
-  }
-
-  function lineNumber(value: number | null): string {
-    return value === null ? '' : String(value);
+  function expand(key: string) {
+    if (!expandedKeys.includes(key)) expandedKeys = [...expandedKeys, key];
   }
 
   function segments(text: string, highlights: CharHighlight[]): Segment[] {
@@ -176,22 +61,48 @@
   }
 </script>
 
+{#snippet diffRow(row: DiffRow)}
+  <div
+    class="diff-row"
+    class:removed={row.tone === 'removed' || row.tone === 'modified-removed'}
+    class:added={row.tone === 'added' || row.tone === 'modified-added'}
+  >
+    <span class="line-number old">{row.oldLine ?? ''}</span>
+    <span class="line-number new">{row.newLine ?? ''}</span>
+    <span class="marker">{row.marker}</span>
+    <code class="line-text">{@html highlightedLineHtml(row.text, row.highlights)}</code>
+  </div>
+{/snippet}
+
 <div class="inline-diff" aria-label={`${diff.path} diff`}>
+  <div class="inline-diff-header">
+    <span class="diff-path">{diff.path}</span>
+    {#if diff.kind === 'created'}
+      <span class="diff-kind-badge created">Created</span>
+    {:else if diff.kind === 'deleted'}
+      <span class="diff-kind-badge deleted">Deleted</span>
+    {/if}
+    {#if stats.added > 0 || stats.removed > 0}
+      <span class="diff-stats">
+        {#if stats.added > 0}<span class="diff-stat-added">+{stats.added}</span>{/if}
+        {#if stats.removed > 0}<span class="diff-stat-removed">−{stats.removed}</span>{/if}
+      </span>
+    {/if}
+  </div>
   {#if rows.length === 0}
     <div class="inline-diff-empty">No changes</div>
   {:else}
-    {#each rows as row (row.key)}
-      <div
-        class="diff-row"
-        class:removed={row.tone === 'removed' || row.tone === 'modified-removed'}
-        class:added={row.tone === 'added' || row.tone === 'modified-added'}
-        class:modified={row.tone === 'modified-removed' || row.tone === 'modified-added'}
-      >
-        <span class="line-number old">{lineNumber(row.oldLine)}</span>
-        <span class="line-number new">{lineNumber(row.newLine)}</span>
-        <span class="marker">{row.marker}</span>
-        <code class="line-text">{@html highlightedLineHtml(row.text, row.highlights)}</code>
-      </div>
+    {#each blocks as block (block.key)}
+      {#if block.kind === 'visible' || expandedKeys.includes(block.key)}
+        {#each block.rows as row (row.key)}
+          {@render diffRow(row)}
+        {/each}
+      {:else}
+        <button type="button" class="diff-collapse-row" onclick={() => expand(block.key)}>
+          <UnfoldVertical size={11} />
+          {block.rows.length} unchanged {block.rows.length === 1 ? 'line' : 'lines'}
+        </button>
+      {/if}
     {/each}
   {/if}
 </div>
@@ -204,9 +115,86 @@
     background: var(--bg-primary);
   }
 
+  .inline-diff-header {
+    position: sticky;
+    left: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    padding: 6px 10px;
+    border-bottom: 1px solid var(--border-subtle);
+    background: color-mix(in srgb, var(--bg-chrome) 60%, var(--bg-primary));
+  }
+
+  .diff-path {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: var(--text-muted);
+    font-weight: 600;
+  }
+
+  .diff-kind-badge {
+    flex-shrink: 0;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    padding: 1px 6px;
+    font-size: calc(var(--size-xs) * 0.85);
+  }
+
+  .diff-kind-badge.created {
+    border-color: color-mix(in srgb, var(--ui-success, var(--ui-accent)) 35%, var(--border-subtle));
+    color: var(--ui-success, var(--ui-accent));
+  }
+
+  .diff-kind-badge.deleted {
+    border-color: color-mix(in srgb, var(--ui-danger) 35%, var(--border-subtle));
+    color: var(--ui-danger);
+  }
+
+  .diff-stats {
+    display: flex;
+    flex-shrink: 0;
+    gap: 6px;
+  }
+
+  .diff-stat-added {
+    color: var(--ui-success, var(--ui-accent));
+  }
+
+  .diff-stat-removed {
+    color: var(--ui-danger);
+  }
+
   .inline-diff-empty {
     padding: 8px 10px;
     color: var(--text-faint);
+  }
+
+  .diff-collapse-row {
+    position: sticky;
+    left: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: 100%;
+    border: 0;
+    border-top: 1px dashed var(--border-subtle);
+    border-bottom: 1px dashed var(--border-subtle);
+    padding: 3px 8px;
+    background: color-mix(in srgb, var(--bg-chrome) 40%, var(--bg-primary));
+    color: var(--text-faint);
+    font: inherit;
+    font-size: calc(var(--size-xs) * 0.85);
+    cursor: pointer;
+  }
+
+  .diff-collapse-row:hover,
+  .diff-collapse-row:focus-visible {
+    color: var(--text-muted);
+    outline: none;
   }
 
   .diff-row {

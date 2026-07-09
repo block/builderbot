@@ -17,6 +17,12 @@
 
   let { item, viewModel }: Props = $props();
   let matches = $derived(extractMatches(item.rawOutput));
+  // The Path field already names the file; only chip locations that add line info.
+  let locations = $derived(
+    viewModel.metadata.locations.filter(
+      (location) => location.display !== viewModel.metadata.targetPath
+    )
+  );
 
   function extractMatches(rawOutput: unknown): MatchRow[] {
     const candidates = matchCandidates(rawOutput);
@@ -85,9 +91,9 @@
     {/if}
   </div>
 
-  {#if viewModel.metadata.locations.length > 0}
+  {#if locations.length > 0}
     <div class="tool-meta-row">
-      {#each viewModel.metadata.locations as location}
+      {#each locations as location}
         <span class="tool-chip">{location.display}</span>
       {/each}
     </div>
@@ -95,7 +101,10 @@
 
   {#if matches.length > 0}
     <section>
-      <div class="tool-panel-label">Matches</div>
+      <div class="tool-panel-label">
+        {matches.length}
+        {matches.length === 1 ? 'match' : 'matches'}
+      </div>
       <div class="tool-match-list">
         {#each matches as match}
           <div class="tool-match-row">
@@ -111,5 +120,6 @@
     {viewModel}
     includePrimary={matches.length === 0}
     includeRaw={matches.length === 0}
+    primaryLabel={viewModel.category === 'read' ? 'Content' : 'Output'}
   />
 </div>

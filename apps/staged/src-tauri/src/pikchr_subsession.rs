@@ -430,9 +430,12 @@ box "Sink = NO-OP (default / external clone)" "no socket, no Block deps → buil
     #[tokio::test]
     async fn repairs_out_of_bounds_render_before_returning() {
         let driver = FakeDriver::new(vec![fenced(OUT_OF_BOUNDS_SOURCE), fenced(CLEAN_SOURCE)]);
+        let (store, session_id) = child_session();
 
         let outcome = generate_pikchr_source(
             &driver,
+            Arc::clone(&store),
+            &session_id,
             "/tmp/grammar.md",
             "a cramped diagram",
             None,

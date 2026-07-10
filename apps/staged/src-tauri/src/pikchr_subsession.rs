@@ -86,7 +86,15 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
 
     match (result, status_result) {
         (Ok(outcome), Ok(())) => Ok(outcome),
-        (Ok(_), Err(e)) => Err(format!("Failed to mark Pikchr session completed: {e}")),
+        // The diagram was generated successfully; a status-bookkeeping failure
+        // shouldn't discard it. The session stays Running until dead-session
+        // recovery on the next launch.
+        (Ok(outcome), Err(e)) => {
+            log::warn!(
+                "[pikchr_subsession] failed to mark Pikchr session {session_id} completed: {e}"
+            );
+            Ok(outcome)
+        }
         (Err(e), Ok(())) => Err(e.to_string()),
         (Err(e), Err(status_error)) => Err(format!(
             "{}; additionally failed to update Pikchr session status: {status_error}",

@@ -7,9 +7,9 @@
   argument previews.
 
   Features:
-  - Text input always available at the bottom
-  - Send button when idle, Stop button when running
-  - Message queue: hitting Enter while running persists a follow-up for backend drain
+  - Text input always available at the bottom (Cmd/Ctrl+Enter sends, Enter adds a newline)
+  - Send button when idle, Queue button when running; Stop lives on the Thinking row
+  - Message queue: sending while running persists a follow-up for backend drain
   - Copy button on every message
   - Tool calls show name + args preview; expand to see output
   - Fixed-size modal with proper scrolling
@@ -874,7 +874,8 @@
   // =========================================================================
 
   function handleInputKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
+    // Multiline input: plain Enter inserts a newline; Cmd/Ctrl+Enter sends.
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       handleSend();
     }
@@ -1961,6 +1962,22 @@
           <div class="thinking" in:messageSlide>
             <Spinner size={14} />
             <span>Thinking…</span>
+            <Button
+              variant="destructive"
+              size="xs"
+              class="ml-auto"
+              title="Stop session"
+              aria-label="Stop session"
+              onclick={handleCancel}
+              disabled={cancelling}
+            >
+              {#if cancelling}
+                <Spinner size={12} />
+              {:else}
+                <CircleStop size={12} />
+              {/if}
+              Stop
+            </Button>
           </div>
         {/if}
 
@@ -2115,9 +2132,7 @@
         onRemoveImage={removeReplyImage}
         {isLive}
         {sending}
-        {cancelling}
         onSend={handleSend}
-        onStop={handleCancel}
       >
         {#snippet configPicker()}
           <AcpFixedConfigPicker

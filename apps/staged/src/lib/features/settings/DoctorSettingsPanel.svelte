@@ -163,9 +163,9 @@
     display: flex;
     flex-direction: column;
     border: 1px solid var(--border-subtle);
-    border-radius: 12px;
+    border-radius: 8px;
     overflow: hidden;
-    background: var(--bg-chrome);
+    background: var(--bg-primary);
   }
 
   .panel-intro {
@@ -231,6 +231,11 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+  }
+
+  :global(.doctor-settings-panel .check-row) {
+    border: 1px solid var(--border-subtle);
+    background: var(--bg-elevated);
   }
 
   .loading-state,

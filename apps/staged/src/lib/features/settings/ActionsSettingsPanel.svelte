@@ -533,17 +533,15 @@
 </script>
 
 <div class="actions-settings-panel">
-  <div class="panel-intro">
-    <h2>
-      <FolderGit2 size={16} />
-      Repos
-    </h2>
-    <p>Manage per-repo actions and remove repos from Staged when they are no longer needed.</p>
-  </div>
-
   <div class="panel-body">
     <aside class="sidebar">
-      <div class="sidebar-title">Repos</div>
+      <div class="sidebar-header">
+        <h2>
+          <FolderGit2 size={16} />
+          Repos
+        </h2>
+        <p>Manage per-repo actions and remove repos from Staged when they are no longer needed.</p>
+      </div>
       <label class="sidebar-search">
         <Search size={14} />
         <Input
@@ -592,228 +590,230 @@
     </aside>
 
     <section class="main-panel">
-      {#if !selectedEntry}
-        <div class="empty-main">Select a repo to configure actions</div>
-      {:else}
-        <div class="repo-overview">
-          <div class="repo-overview-main">
-            <RepoLabel githubRepo={selectedEntry.githubRepo} subpath={selectedEntry.subpath} />
-            <span class="repo-overview-meta">
-              {#if loadingRepoAttachments}
-                Loading usage...
-              {:else if selectedContext}
-                {formatProjectCount(selectedContextAttachments.length)}
+      <div class="main-panel-scroll">
+        {#if !selectedEntry}
+          <div class="empty-main">Select a repo to configure actions</div>
+        {:else}
+          <div class="repo-overview">
+            <div class="repo-overview-main">
+              <RepoLabel githubRepo={selectedEntry.githubRepo} subpath={selectedEntry.subpath} />
+              <span class="repo-overview-meta">
+                {#if loadingRepoAttachments}
+                  Loading usage...
+                {:else if selectedContext}
+                  {formatProjectCount(selectedContextAttachments.length)}
+                {:else}
+                  Badge only (no action context)
+                {/if}
+              </span>
+            </div>
+
+            {#if selectedBadge}
+              <div class="badge-editor">
+                <div class="badge-editor-row">
+                  <label class="badge-field">
+                    <span class="badge-field-label">Short name</span>
+                    <input
+                      class="badge-input"
+                      class:badge-input-error={badgeError}
+                      type="text"
+                      maxlength="6"
+                      autocapitalize="off"
+                      autocorrect="off"
+                      bind:value={badgeEditName}
+                      oninput={saveBadge}
+                      onblur={saveBadge}
+                      onkeydown={(e) => {
+                        if (e.key === 'Enter') saveBadge();
+                      }}
+                    />
+                  </label>
+                  <label class="badge-field">
+                    <span class="badge-field-label">Hue</span>
+                    <input
+                      class="badge-hue-slider"
+                      type="range"
+                      min="0"
+                      max="359"
+                      step="1"
+                      style="background: {hueSliderGradient(darkMode.value)}"
+                      bind:value={badgeEditHue}
+                      onchange={saveBadge}
+                    />
+                  </label>
+                  <div class="badge-editor-preview">
+                    <RepoBadge
+                      shortName={badgeEditName || selectedBadge.shortName}
+                      hue={badgeEditHue}
+                    />
+                  </div>
+                </div>
+                {#if badgeError}
+                  <span class="badge-error">{badgeError}</span>
+                {/if}
+              </div>
+            {/if}
+
+            {#if selectedContext}
+              {#if selectedContextAttachments.length > 0}
+                <div class="repo-attachments">
+                  {#each selectedContextAttachments as attachment (attachment.projectRepoId)}
+                    <span class="attachment-chip"
+                      >{attachment.projectName} ({attachment.branchName})</span
+                    >
+                  {/each}
+                </div>
               {:else}
-                Badge only (no action context)
+                <div class="repo-empty-attachments">This repo is not attached to any projects.</div>
               {/if}
-            </span>
+            {/if}
           </div>
 
-          {#if selectedBadge}
-            <div class="badge-editor">
-              <div class="badge-editor-row">
-                <label class="badge-field">
-                  <span class="badge-field-label">Short name</span>
-                  <input
-                    class="badge-input"
-                    class:badge-input-error={badgeError}
-                    type="text"
-                    maxlength="6"
-                    autocapitalize="off"
-                    autocorrect="off"
-                    bind:value={badgeEditName}
-                    oninput={saveBadge}
-                    onblur={saveBadge}
-                    onkeydown={(e) => {
-                      if (e.key === 'Enter') saveBadge();
-                    }}
-                  />
-                </label>
-                <label class="badge-field">
-                  <span class="badge-field-label">Hue</span>
-                  <input
-                    class="badge-hue-slider"
-                    type="range"
-                    min="0"
-                    max="359"
-                    step="1"
-                    style="background: {hueSliderGradient(darkMode.value)}"
-                    bind:value={badgeEditHue}
-                    onchange={saveBadge}
-                  />
-                </label>
-                <div class="badge-editor-preview">
-                  <RepoBadge
-                    shortName={badgeEditName || selectedBadge.shortName}
-                    hue={badgeEditHue}
-                  />
-                </div>
-              </div>
-              {#if badgeError}
-                <span class="badge-error">{badgeError}</span>
+          <div class="actions-header">
+            <Button
+              variant="destructive"
+              size="sm"
+              onclick={() => (showDeleteRepoConfirm = true)}
+              disabled={deletingRepo}
+            >
+              {#if deletingRepo}
+                <Spinner size={14} />
+              {:else}
+                <Trash2 size={14} />
               {/if}
-            </div>
-          {/if}
-
-          {#if selectedContext}
-            {#if selectedContextAttachments.length > 0}
-              <div class="repo-attachments">
-                {#each selectedContextAttachments as attachment (attachment.projectRepoId)}
-                  <span class="attachment-chip"
-                    >{attachment.projectName} ({attachment.branchName})</span
-                  >
-                {/each}
-              </div>
-            {:else}
-              <div class="repo-empty-attachments">This repo is not attached to any projects.</div>
-            {/if}
-          {/if}
-        </div>
-
-        <div class="actions-header">
-          <Button
-            variant="destructive"
-            size="sm"
-            onclick={() => (showDeleteRepoConfirm = true)}
-            disabled={deletingRepo}
-          >
-            {#if deletingRepo}
-              <Spinner size={14} />
-            {:else}
-              <Trash2 size={14} />
-            {/if}
-            Delete Repo
-          </Button>
-          {#if selectedContext}
-            {#if actions.length > 0}
+              Delete Repo
+            </Button>
+            {#if selectedContext}
+              {#if actions.length > 0}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onclick={() => (showDeleteAllConfirm = true)}
+                  disabled={deletingRepo}
+                >
+                  <Trash2 size={14} />
+                  Delete All Actions
+                </Button>
+              {/if}
               <Button
                 variant="outline"
                 size="sm"
-                onclick={() => (showDeleteAllConfirm = true)}
-                disabled={deletingRepo}
+                onclick={detectActions}
+                disabled={detecting || deletingRepo}
               >
-                <Trash2 size={14} />
-                Delete All Actions
+                {#if detecting}
+                  <Spinner size={14} />
+                {:else}
+                  <Zap size={14} />
+                {/if}
+                Detect Actions
+              </Button>
+              <Button variant="outline" size="sm" onclick={startAddAction} disabled={deletingRepo}>
+                <Plus size={14} />
+                Add Action
               </Button>
             {/if}
-            <Button
-              variant="outline"
-              size="sm"
-              onclick={detectActions}
-              disabled={detecting || deletingRepo}
-            >
-              {#if detecting}
-                <Spinner size={14} />
-              {:else}
-                <Zap size={14} />
-              {/if}
-              Detect Actions
-            </Button>
-            <Button variant="outline" size="sm" onclick={startAddAction} disabled={deletingRepo}>
-              <Plus size={14} />
-              Add Action
-            </Button>
-          {/if}
-        </div>
+          </div>
 
-        {#if !selectedContext}
-          <!-- Badge-only entry: no actions to show -->
-        {:else if loadingActions}
-          <div class="loading-state">
-            <Spinner size={24} />
-            <span>Loading...</span>
-          </div>
-        {:else if actions.length === 0}
-          <div class="empty-state">
-            <Play size={32} />
-            <p>No actions configured</p>
-            <p class="empty-hint">Click "Detect Actions" or add one manually</p>
-          </div>
-        {:else}
-          <div class="actions-list">
-            {#each Object.entries(groupedActions) as [type, typeActions]}
-              {#if typeActions.length > 0}
-                <div class="action-group">
-                  <div class="group-header">{type}</div>
-                  {#each typeActions as action (action.id)}
-                    {@const Icon = getActionIcon(action.actionType)}
-                    <div class="action-row">
-                      <div class="action-main">
-                        <Icon size={14} />
-                        <div class="action-details">
-                          <div class="action-name">{action.name}</div>
-                          <div class="action-command">
-                            <Code2 size={12} />
-                            {action.command}
+          {#if !selectedContext}
+            <!-- Badge-only entry: no actions to show -->
+          {:else if loadingActions}
+            <div class="loading-state">
+              <Spinner size={24} />
+              <span>Loading...</span>
+            </div>
+          {:else if actions.length === 0}
+            <div class="empty-state">
+              <Play size={32} />
+              <p>No actions configured</p>
+              <p class="empty-hint">Click "Detect Actions" or add one manually</p>
+            </div>
+          {:else}
+            <div class="actions-list">
+              {#each Object.entries(groupedActions) as [type, typeActions]}
+                {#if typeActions.length > 0}
+                  <div class="action-group">
+                    <div class="group-header">{type}</div>
+                    {#each typeActions as action (action.id)}
+                      {@const Icon = getActionIcon(action.actionType)}
+                      <div class="action-row">
+                        <div class="action-main">
+                          <Icon size={14} />
+                          <div class="action-details">
+                            <div class="action-name">{action.name}</div>
+                            <div class="action-command">
+                              <Code2 size={12} />
+                              {action.command}
+                            </div>
                           </div>
                         </div>
+                        <div class="action-buttons">
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            onclick={() => startEditAction(action)}
+                          >
+                            <Pencil size={13} />
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            class="hover:text-destructive"
+                            onclick={() => deleteAction(action.id)}
+                          >
+                            <Trash2 size={13} />
+                          </Button>
+                        </div>
                       </div>
-                      <div class="action-buttons">
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          onclick={() => startEditAction(action)}
-                        >
-                          <Pencil size={13} />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon-sm"
-                          class="hover:text-destructive"
-                          onclick={() => deleteAction(action.id)}
-                        >
-                          <Trash2 size={13} />
-                        </Button>
-                      </div>
-                    </div>
-                  {/each}
-                </div>
-              {/if}
-            {/each}
-          </div>
+                    {/each}
+                  </div>
+                {/if}
+              {/each}
+            </div>
+          {/if}
         {/if}
+      </div>
+
+      {#if editingAction}
+        <div class="editor">
+          <Input bind:value={editForm.name} placeholder="Action name" />
+          <Input
+            bind:value={editForm.command}
+            placeholder="Command"
+            autocomplete="off"
+            autocorrect="off"
+            autocapitalize="off"
+            spellcheck="false"
+          />
+          <Select.Root
+            type="single"
+            value={editForm.actionType}
+            onValueChange={(v) => (editForm.actionType = v as ActionType)}
+          >
+            <Select.Trigger class="w-full">
+              {editForm.actionType}
+            </Select.Trigger>
+            <Select.Content>
+              {#each ['run', 'prerun', 'build', 'test', 'format', 'check', 'cleanUp'] as t (t)}
+                <Select.Item value={t} label={t}>{t}</Select.Item>
+              {/each}
+            </Select.Content>
+          </Select.Root>
+          <div class="flex items-center gap-1.5">
+            <Checkbox id="auto-commit" bind:checked={editForm.autoCommit} />
+            <Label for="auto-commit" class="text-muted-foreground text-sm">Auto-commit</Label>
+          </div>
+          <div class="editor-buttons">
+            <Button variant="ghost" size="sm" onclick={cancelEdit}>Cancel</Button>
+            <Button variant="outline" size="sm" onclick={saveAction}>
+              <Save size={14} />
+              Save
+            </Button>
+          </div>
+        </div>
       {/if}
     </section>
   </div>
-
-  {#if editingAction}
-    <div class="editor">
-      <Input bind:value={editForm.name} placeholder="Action name" />
-      <Input
-        bind:value={editForm.command}
-        placeholder="Command"
-        autocomplete="off"
-        autocorrect="off"
-        autocapitalize="off"
-        spellcheck="false"
-      />
-      <Select.Root
-        type="single"
-        value={editForm.actionType}
-        onValueChange={(v) => (editForm.actionType = v as ActionType)}
-      >
-        <Select.Trigger class="w-full">
-          {editForm.actionType}
-        </Select.Trigger>
-        <Select.Content>
-          {#each ['run', 'prerun', 'build', 'test', 'format', 'check', 'cleanUp'] as t (t)}
-            <Select.Item value={t} label={t}>{t}</Select.Item>
-          {/each}
-        </Select.Content>
-      </Select.Root>
-      <div class="flex items-center gap-1.5">
-        <Checkbox id="auto-commit" bind:checked={editForm.autoCommit} />
-        <Label for="auto-commit" class="text-muted-foreground text-sm">Auto-commit</Label>
-      </div>
-      <div class="editor-buttons">
-        <Button variant="ghost" size="sm" onclick={cancelEdit}>Cancel</Button>
-        <Button variant="outline" size="sm" onclick={saveAction}>
-          <Save size={14} />
-          Save
-        </Button>
-      </div>
-    </div>
-  {/if}
 </div>
 
 <AlertDialog.Root bind:open={showDeleteRepoConfirm}>
@@ -860,33 +860,8 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-    border: 1px solid var(--border-subtle);
-    border-radius: 12px;
     overflow: hidden;
-    background: var(--bg-chrome);
-  }
-
-  .panel-intro {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 12px 14px;
-    border-bottom: 1px solid var(--border-subtle);
-  }
-
-  .panel-intro h2 {
-    margin: 0;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: var(--size-md);
-    font-weight: 600;
-  }
-
-  .panel-intro p {
-    margin: 0;
-    font-size: var(--size-sm);
-    color: var(--text-muted);
+    background: transparent;
   }
 
   .panel-body {
@@ -898,18 +873,38 @@
   }
 
   .sidebar {
-    border-right: 1px solid var(--border-subtle);
-    padding: 10px;
+    --repo-row-bleed: 10px;
+    --repo-sidebar-hover-bg: color-mix(in srgb, var(--text-primary) 4%, transparent);
+
+    border-right: 1px solid color-mix(in srgb, var(--border-subtle) 50%, transparent);
+    background: var(--bg-app-bar);
+    padding: 0 var(--repo-row-bleed) 10px;
     overflow-y: auto;
     min-height: 0;
   }
 
-  .sidebar-title {
+  .sidebar-header {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 14px 2px 12px;
+  }
+
+  .sidebar-header h2 {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: var(--size-md);
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .sidebar-header p {
+    margin: 0;
     font-size: var(--size-xs);
     color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    margin: 4px 6px 10px;
+    line-height: 1.35;
   }
 
   .sidebar-search {
@@ -917,7 +912,7 @@
     grid-template-columns: auto minmax(0, 1fr);
     align-items: center;
     gap: 8px;
-    margin-bottom: 10px;
+    margin-bottom: 12px;
     padding: 0 2px;
     color: var(--text-faint);
   }
@@ -929,23 +924,27 @@
   }
 
   .context-item {
+    width: calc(100% + (2 * var(--repo-row-bleed)));
+    margin: 0 calc(-1 * var(--repo-row-bleed));
     text-align: left;
     padding: 8px 10px;
-    border: 1px solid transparent;
-    border-radius: 8px;
+    border: none;
+    border-radius: 0;
     background: transparent;
     color: var(--text-primary);
     cursor: pointer;
     font-size: var(--size-sm);
+    transition:
+      background-color 0.15s ease,
+      color 0.15s ease;
   }
 
   .context-item:hover {
-    background: var(--bg-hover);
+    background: var(--repo-sidebar-hover-bg);
   }
 
   .context-item.selected {
-    background: var(--bg-primary);
-    border-color: var(--border-muted);
+    background: var(--bg-hover);
   }
 
   .context-item-main {
@@ -968,7 +967,16 @@
   }
 
   .loading-side,
-  .empty-side,
+  .empty-side {
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 18px 10px;
+    font-size: var(--size-sm);
+  }
+
   .empty-main,
   .loading-state,
   .empty-state {
@@ -980,20 +988,46 @@
   }
 
   .main-panel {
+    background: var(--bg-chrome);
     padding: 14px;
-    overflow-y: auto;
+    overflow: hidden;
     min-height: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .main-panel-scroll {
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .empty-main,
+  .loading-state,
+  .empty-state {
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    background: var(--bg-primary);
+  }
+
+  .empty-main,
+  .loading-state {
+    min-height: 180px;
+    padding: 24px;
   }
 
   .repo-overview {
     border: 1px solid var(--border-subtle);
-    border-radius: 10px;
-    background: color-mix(in srgb, var(--bg-primary) 70%, transparent);
+    border-radius: 8px;
+    background: var(--bg-primary);
     padding: 10px;
     display: flex;
     flex-direction: column;
     gap: 8px;
-    margin-bottom: 12px;
   }
 
   .repo-overview-main {
@@ -1016,7 +1050,7 @@
     padding: 8px 10px;
     border: 1px solid var(--border-subtle);
     border-radius: 8px;
-    background: var(--bg-primary);
+    background: var(--bg-chrome);
   }
 
   .badge-editor-row {
@@ -1047,7 +1081,7 @@
     padding: 3px 6px;
     border-radius: 6px;
     border: 1px solid var(--border-muted);
-    background: var(--bg-chrome);
+    background: var(--bg-primary);
     color: var(--text-primary);
     font-family: 'SF Mono', Menlo, Consolas, monospace;
     font-size: var(--size-md);
@@ -1081,9 +1115,9 @@
     width: 16px;
     height: 16px;
     border-radius: 50%;
-    background: white;
-    border: 2px solid rgba(0, 0, 0, 0.3);
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    background: var(--bg-primary);
+    border: 2px solid var(--border-emphasis);
+    box-shadow: 0 1px 3px color-mix(in srgb, var(--text-primary) 20%, transparent);
     cursor: pointer;
   }
 
@@ -1091,9 +1125,9 @@
     width: 16px;
     height: 16px;
     border-radius: 50%;
-    background: white;
-    border: 2px solid rgba(0, 0, 0, 0.3);
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    background: var(--bg-primary);
+    border: 2px solid var(--border-emphasis);
+    box-shadow: 0 1px 3px color-mix(in srgb, var(--text-primary) 20%, transparent);
     cursor: pointer;
   }
 
@@ -1109,7 +1143,7 @@
     padding: 4px 8px;
     font-size: calc(var(--size-xs) - 1px);
     color: var(--text-muted);
-    background: var(--bg-primary);
+    background: var(--bg-chrome);
   }
 
   .repo-empty-attachments {
@@ -1122,7 +1156,6 @@
     justify-content: flex-start;
     flex-wrap: wrap;
     gap: 8px;
-    margin-bottom: 12px;
   }
 
   .actions-list {
@@ -1133,12 +1166,13 @@
 
   .action-group {
     border: 1px solid var(--border-subtle);
-    border-radius: 10px;
+    border-radius: 8px;
     overflow: hidden;
+    background: var(--bg-primary);
   }
 
   .group-header {
-    background: var(--bg-primary);
+    background: var(--bg-chrome);
     color: var(--text-muted);
     font-size: var(--size-xs);
     text-transform: uppercase;
@@ -1182,7 +1216,9 @@
   }
 
   .editor {
-    border-top: 1px solid var(--border-subtle);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    background: var(--bg-primary);
     padding: 12px;
     display: grid;
     grid-template-columns: 1fr 1fr auto auto;

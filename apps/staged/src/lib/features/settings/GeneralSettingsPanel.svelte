@@ -187,8 +187,10 @@
     display: flex;
     flex-direction: column;
     height: 100%;
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
     overflow: hidden;
-    background: var(--bg-chrome);
+    background: var(--bg-primary);
   }
 
   .panel-intro {
@@ -260,7 +262,7 @@
     width: 100%;
     max-width: 320px;
     padding: 0;
-    background: none;
+    background: var(--bg-elevated);
     border: 1px solid var(--border-muted);
     border-radius: 5px;
     color: var(--text-primary);
@@ -316,7 +318,7 @@
   .theme-filter-btn {
     flex: 1;
     padding: 4px 8px;
-    background: none;
+    background: transparent;
     border: none;
     border-radius: 3px;
     color: var(--text-muted);
@@ -334,7 +336,7 @@
   }
 
   .theme-filter-btn.active {
-    background: var(--bg-active);
+    background: var(--bg-hover);
     color: var(--text-primary);
     font-weight: 600;
   }

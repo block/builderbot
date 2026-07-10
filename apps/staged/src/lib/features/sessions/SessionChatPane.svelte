@@ -1964,7 +1964,7 @@
             <span>Thinking…</span>
             <Button
               variant="destructive"
-              size="xs"
+              size="sm"
               class="ml-auto"
               title="Stop session"
               aria-label="Stop session"
@@ -1972,9 +1972,9 @@
               disabled={cancelling}
             >
               {#if cancelling}
-                <Spinner size={12} />
+                <Spinner size={14} />
               {:else}
-                <CircleStop size={12} />
+                <CircleStop size={14} />
               {/if}
               Stop
             </Button>

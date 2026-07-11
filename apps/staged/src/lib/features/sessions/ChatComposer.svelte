@@ -2,7 +2,7 @@
   ChatComposer.svelte — Shared bottom chat input for session chat surfaces.
 
   Houses the attached-image strip, the text input, and the control row below
-  it (agent config picker slot, attach button, send/stop button). Rendered by
+  it (agent config picker slot, attach button, send/queue button). Rendered by
   SessionChatPane, which backs both the session dialog and the note dialog's
   chat pane, so the composer looks and behaves identically everywhere: the
   text input gets its own full-width row with the controls beneath it.
@@ -24,7 +24,6 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import X from '@lucide/svelte/icons/x';
-  import CircleStop from '@lucide/svelte/icons/circle-stop';
   import Paperclip from '@lucide/svelte/icons/paperclip';
   import ImagePlus from '@lucide/svelte/icons/image-plus';
   import Spinner from '../../shared/Spinner.svelte';
@@ -49,12 +48,10 @@
     imagePreviews?: Map<string, string>;
     onAttachFiles?: (files: File[]) => void;
     onRemoveImage?: (imageId: string) => void;
-    /** Session is running — attach/remove disabled, stop replaces send. */
+    /** Session is running — attach/remove disabled, send queues instead. */
     isLive?: boolean;
     sending?: boolean;
-    cancelling?: boolean;
     onSend?: () => void;
-    onStop?: () => void;
     /** Agent config picker rendered at the start of the control row. */
     configPicker?: Snippet;
   }
@@ -73,9 +70,7 @@
     onRemoveImage,
     isLive = false,
     sending = false,
-    cancelling = false,
     onSend,
-    onStop,
     configPicker,
   }: Props = $props();
 
@@ -153,39 +148,23 @@
         </Button>
       </span>
     {/if}
-    {#if isLive}
-      <span class="inline-flex composer-send" title="Stop session">
-        <Button
-          variant="destructive"
-          class="h-auto min-h-9 w-9 shrink-0 rounded-[10px] px-0 [&_svg]:!size-4"
-          aria-label="Stop session"
-          onclick={onStop}
-          disabled={cancelling}
-        >
-          {#if cancelling}
-            <Spinner size={16} />
-          {:else}
-            <CircleStop size={16} />
-          {/if}
-        </Button>
-      </span>
-    {:else}
-      <span class="inline-flex composer-send" title="Send message">
-        <Button
-          variant="accent"
-          class="h-auto min-h-9 gap-1.5 px-4 py-1 text-sm max-[640px]:min-h-11"
-          onclick={onSend}
-          disabled={sending || !value.trim()}
-        >
-          {#if sending}
-            <Spinner size={14} />
-            Sending…
-          {:else}
-            Send
-          {/if}
-        </Button>
-      </span>
-    {/if}
+    <span class="inline-flex composer-send" title={isLive ? 'Queue message' : 'Send message'}>
+      <Button
+        variant="accent"
+        class="h-auto min-h-9 gap-1.5 px-4 py-1 text-sm max-[640px]:min-h-11"
+        onclick={onSend}
+        disabled={sending || !value.trim()}
+      >
+        {#if sending}
+          <Spinner size={14} />
+          Sending…
+        {:else if isLive}
+          Queue
+        {:else}
+          Send
+        {/if}
+      </Button>
+    </span>
   </div>
 </div>
 

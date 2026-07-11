@@ -4,6 +4,23 @@
 # resources cannot drift (a drift would make dev and bundled installs fail
 # differently on the same missing/old Node runtime).
 #
+# acp_required_node_major <node-engine>
+#   Prints the minimum Node.js major version implied by a ">=N..." engine
+#   range, defaulting to 22 when the range is not in that form. Shared by
+#   the wrapper shim below and the node-runtime.json manifest consumed by
+#   the app's Node.js runtime doctor check, so the version the wrapper
+#   enforces at spawn time and the version the doctor reports at setup
+#   time cannot disagree.
+acp_required_node_major() {
+  local node_engine="$1"
+  local major
+  major="$(printf '%s\n' "$node_engine" | sed -n 's/^>=\([0-9][0-9]*\).*$/\1/p')"
+  if [[ -z "$major" ]]; then
+    major=22
+  fi
+  printf '%s\n' "$major"
+}
+
 # write_node_wrapper <wrapper> <entrypoint> [node-engine]
 #   Writes an executable bash shim at <wrapper> that verifies a Node.js
 #   runtime satisfying <node-engine> (default ">=22") is on PATH, then
@@ -16,10 +33,7 @@ write_node_wrapper() {
   local entrypoint="$2"
   local node_engine="${3:->=22}"
   local required_node_major
-  required_node_major="$(printf '%s\n' "$node_engine" | sed -n 's/^>=\([0-9][0-9]*\).*$/\1/p')"
-  if [[ -z "$required_node_major" ]]; then
-    required_node_major=22
-  fi
+  required_node_major="$(acp_required_node_major "$node_engine")"
 
   mkdir -p "$(dirname "$wrapper")"
   {

@@ -51,6 +51,14 @@ find "$resource_bin_dir" -type f ! -name ".gitkeep" -delete
 rm -rf "$resource_node_dir"
 mkdir -p "$resource_node_dir"
 
+# Manifest for the app's Node.js runtime doctor check, staged next to the
+# bin dir so the app can resolve it as the bin dir's parent. Removed up
+# front so locks with no npm-sourced tools ship no manifest and the doctor
+# check stays silent.
+node_runtime_manifest="$resource_root/node-runtime.json"
+rm -f "$node_runtime_manifest"
+node_runtime_entries=()
+
 codesign_if_darwin() {
   local file="$1"
   if [[ "$(uname -s)" == "Darwin" ]] && command -v codesign >/dev/null 2>&1; then
@@ -75,6 +83,7 @@ while IFS=$'\t' read -r id binary package version node_engine; do
     exit 1
   fi
   write_node_wrapper "$resource_bin_dir/$binary" "../node/$id/node_modules/$package/dist/index.js" "$node_engine"
+  node_runtime_entries+=("$id"$'\t'"$binary"$'\t'"$node_engine"$'\t'"$(acp_required_node_major "$node_engine")")
   while IFS= read -r native_binary; do
     [[ -n "$native_binary" ]] || continue
     codesign_if_darwin "$native_binary"
@@ -92,5 +101,21 @@ for (const entry of data.tools ?? []) {
 }
 NODE
 )
+
+# One manifest entry per npm-sourced bridge, each carrying its own required
+# Node major, so bridges with different engine ranges surface distinct
+# requirements in the doctor check.
+if ((${#node_runtime_entries[@]} > 0)); then
+  node -e '
+const fs = require("node:fs");
+const [manifestFile, ...entries] = process.argv.slice(1);
+const tools = entries.map((line) => {
+  const [id, binary, nodeEngine, requiredNodeMajor] = line.split("\t");
+  return { id, binary, nodeEngine, requiredNodeMajor: Number(requiredNodeMajor) };
+});
+fs.writeFileSync(manifestFile, `${JSON.stringify({ tools }, null, 2)}\n`);
+' "$node_runtime_manifest" ${node_runtime_entries[@]+"${node_runtime_entries[@]}"}
+  echo "Wrote ACP Node runtime manifest: $node_runtime_manifest"
+fi
 
 echo "Staged ACP tools resource: $resource_bin_dir"

@@ -5,6 +5,9 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 app_root="$(cd "$script_dir/.." && pwd)"
 lock_file="${ACP_TOOLS_LOCK_FILE:-$app_root/acp-tools.lock.json}"
 
+# shellcheck source=scripts/lib/acp-node-wrapper.sh
+source "$script_dir/lib/acp-node-wrapper.sh"
+
 usage() {
   cat <<'USAGE'
 Usage: scripts/prepare-acp-tools-resource.sh [target-triple]
@@ -47,37 +50,6 @@ mkdir -p "$resource_bin_dir"
 find "$resource_bin_dir" -type f ! -name ".gitkeep" -delete
 rm -rf "$resource_node_dir"
 mkdir -p "$resource_node_dir"
-
-write_node_wrapper() {
-  local wrapper="$1"
-  local entrypoint="$2"
-  local node_engine="${3:->=22}"
-  local required_node_major
-  required_node_major="$(printf '%s\n' "$node_engine" | sed -n 's/^>=\([0-9][0-9]*\).*$/\1/p')"
-  if [[ -z "$required_node_major" ]]; then
-    required_node_major=22
-  fi
-
-  mkdir -p "$(dirname "$wrapper")"
-  {
-    printf '#!/usr/bin/env bash\n'
-    printf 'set -euo pipefail\n'
-    printf 'if ! command -v node >/dev/null 2>&1; then\n'
-    printf '  echo "%s requires Node.js %s on PATH." >&2\n' "$(basename "$wrapper")" "$node_engine"
-    printf '  exit 127\n'
-    printf 'fi\n'
-    printf 'required_node_major=%q\n' "$required_node_major"
-    printf 'node_major="$(node -p '\''process.versions.node.split(".")[0]'\'' 2>/dev/null || true)"\n'
-    printf 'if [[ -z "$node_major" || "$node_major" -lt "$required_node_major" ]]; then\n'
-    printf '  echo "%s requires Node.js %s on PATH." >&2\n' "$(basename "$wrapper")" "$node_engine"
-    printf '  exit 1\n'
-    printf 'fi\n'
-    printf 'wrapper_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n'
-    printf 'entrypoint="$wrapper_dir"/%q\n' "$entrypoint"
-    printf 'exec node "$entrypoint" "$@"\n'
-  } > "$wrapper"
-  chmod +x "$wrapper"
-}
 
 codesign_if_darwin() {
   local file="$1"

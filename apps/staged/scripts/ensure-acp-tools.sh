@@ -317,7 +317,10 @@ for (const entry of entries) {
   entrypoint="$package_dir/dist/index.js"
   native_binary="$install_dir/node_modules/$native_package/$native_executable"
   staged_bin="$bin_dir/$binary"
-  stamp="$tool_dir/stamp.env"
+  # The staged output is shared across lock versions, so its freshness stamp
+  # must live next to it, not in the per-version tool_dir: a per-version stamp
+  # stays self-consistent after a lock revert and would skip re-staging.
+  stamp="$staged_bin.stamp"
   if [[ -x "$staged_bin" && -f "$stamp" && -f "$entrypoint" && -x "$native_binary" ]]; then
     # shellcheck disable=SC1090
     source "$stamp"
@@ -371,6 +374,19 @@ for (const entry of entries) {
     printf 'STAMP_NATIVE_EXECUTABLE=%q\n' "$native_executable"
     printf 'STAMP_BINARY=%q\n' "$binary"
   } > "$stamp"
+done
+
+# bin_dir is on the Goose search path, so binaries (and stamps) for tools no
+# longer in the lock must be pruned, not just left behind.
+locked_binaries="$(node -e '
+const entries = JSON.parse(process.argv[1]);
+for (const entry of entries) console.log(entry.binary);
+' "$lock_entries" | sort -u)"
+find "$bin_dir" -type f -print0 | while IFS= read -r -d '' staged_file; do
+  name="$(basename "$staged_file")"
+  if ! printf '%s\n' "$locked_binaries" | grep -Fxq -- "${name%.stamp}"; then
+    rm -f -- "$staged_file"
+  fi
 done
 
 if [[ "$print_bin_dir" == "1" ]]; then

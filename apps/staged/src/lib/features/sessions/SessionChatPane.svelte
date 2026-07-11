@@ -9,6 +9,7 @@
   Features:
   - Text input always available at the bottom (Cmd/Ctrl+Enter sends, Enter adds a newline)
   - Send button when idle, Queue button when running; Stop lives on the Thinking row
+  - While a pipeline runs, the composer is replaced by a labeled Stop button
   - Message queue: sending while running persists a follow-up for backend drain
   - Copy button on every message
   - Tool calls show name + args preview; expand to see output
@@ -1465,7 +1466,7 @@
       .map((message) => message.id);
   });
 
-  let isPipelinePrelude = $derived(isLive && !!session?.pipeline && grouped.length === 0);
+  let isPipelineRunning = $derived(isLive && !!session?.pipeline);
 
   function insertSlashCommand(command: AcpCommand) {
     inputText = `/${command.name}${command.inputHint ? ' ' : ''}`;
@@ -2033,22 +2034,22 @@
 
   <!-- Input area with queued messages and image previews -->
   <div class="input-wrapper">
-    {#if isPipelinePrelude}
+    {#if isPipelineRunning}
       <div class="pipeline-stop-area">
         <span class="inline-flex" title="Stop workflow">
           <Button
             variant="destructive"
-            size="icon"
-            class="size-9 shrink-0 rounded-[10px] [&_svg]:!size-4"
+            size="sm"
             aria-label="Stop workflow"
             onclick={handleCancel}
             disabled={cancelling}
           >
             {#if cancelling}
-              <Spinner size={16} />
+              <Spinner size={14} />
             {:else}
-              <CircleStop size={16} />
+              <CircleStop size={14} />
             {/if}
+            Stop
           </Button>
         </span>
       </div>

@@ -80,6 +80,7 @@
   import AcpFixedConfigPicker from '../agents/AcpFixedConfigPicker.svelte';
   import { agentState } from '../agents/agent.svelte';
   import { buildAcpConfigSelection } from '../agents/acpConfigSelection';
+  import { setAcpConfigPref } from '../settings/preferences.svelte';
   import ChatComposer, { composerControlClass } from './ChatComposer.svelte';
   import {
     buildBranchHashtagItems,
@@ -1312,6 +1313,10 @@
     }
   });
 
+  // Mirror of the model effect above: a touched selection survives selector
+  // changes while it stays valid. While model-specific options load the
+  // selector is null; the selection is retained as the desired value and
+  // reconciled against the options once they arrive.
   $effect(() => {
     const key = selectorStateKey(
       session?.id,
@@ -1319,11 +1324,19 @@
       session?.acpConfigSelection?.effort ?? null
     );
     if (key !== followupEffortStateKey) {
-      selectedFollowupEffortValue = initialSelectorValue(
-        followupEffortSelector,
-        session?.acpConfigSelection?.effort ?? null
-      );
-      followupEffortTouched = false;
+      if (
+        followupEffortSelector &&
+        !(
+          followupEffortTouched &&
+          selectorHasValue(followupEffortSelector, selectedFollowupEffortValue)
+        )
+      ) {
+        selectedFollowupEffortValue = initialSelectorValue(
+          followupEffortSelector,
+          session?.acpConfigSelection?.effort ?? null
+        );
+        followupEffortTouched = false;
+      }
       followupEffortStateKey = key;
     }
   });
@@ -1392,13 +1405,16 @@
   function handleFollowupModelChange(value: string) {
     selectedFollowupModelValue = value;
     followupModelTouched = true;
-    selectedFollowupEffortValue = null;
-    followupEffortTouched = false;
+    // The effort selection is kept as the desired value; the effort effect
+    // reconciles it once the model-specific options arrive.
     modelSpecificFollowupConfig = null;
     modelSpecificFollowupModelValue = value;
     modelSpecificFollowupSessionId = session?.id ?? null;
 
     const providerId = session?.provider ?? null;
+    if (providerId) {
+      setAcpConfigPref(providerId, { model: value });
+    }
     const workingDir = session?.workingDir ?? null;
     if (!active || !providerId) return;
 
@@ -1439,6 +1455,9 @@
   function handleFollowupEffortChange(value: string) {
     selectedFollowupEffortValue = value;
     followupEffortTouched = true;
+    if (session?.provider) {
+      setAcpConfigPref(session.provider, { effort: value });
+    }
   }
 
   let grouped = $derived.by(() =>

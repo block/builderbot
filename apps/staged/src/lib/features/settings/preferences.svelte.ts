@@ -20,6 +20,10 @@ import {
 } from '../diff/highlighter';
 import { initPersistentStore, getStoreValue, setStoreValue } from '../../shared/persistentStore';
 import { createAdaptiveTheme, themeToVarMap, type ThemeGitColors } from '../../theme';
+import { mergeAcpConfigPref, type AcpConfigPref, type AcpConfigPrefPatch } from './acpConfigPrefs';
+
+// Re-export so picker code can import the type alongside the actions.
+export type { AcpConfigPref, AcpConfigPrefPatch };
 
 // Re-export for convenience
 export { isLightTheme, loadAllThemePreviewColors, type ThemePreviewColors };
@@ -41,6 +45,8 @@ const DIFF_THEME_STORE_KEY = 'diff-theme';
 /** The app chrome appearance: light / dark / system. */
 const APP_MODE_STORE_KEY = 'app-mode';
 const RECENT_AGENTS_STORE_KEY = 'recent-agents';
+/** Per-provider last explicitly chosen model/effort selector values. */
+const ACP_CONFIG_PREFS_STORE_KEY = 'acp-config-prefs';
 const AUTO_REVIEW_STORE_KEY = 'auto-start-code-reviews';
 /** Maximum number of recent agents to remember. */
 const RECENT_AGENTS_MAX = 10;
@@ -125,6 +131,12 @@ export const preferences = $state({
    * Used to pick the best available agent for a given context (local vs remote).
    */
   recentAgents: [] as string[],
+  /**
+   * Per-provider last explicitly chosen model/effort picker values, keyed by
+   * provider id. Values are selector valueIds validated against live
+   * discovery options on restore, so stale ids fall back silently.
+   */
+  acpConfigPrefs: {} as Record<string, AcpConfigPref>,
   /** Whether auto code reviews are triggered after commits */
   autoReviewMode: 'after-changes' as AutoReviewMode,
   /** Whether all preferences have been loaded from storage */
@@ -265,6 +277,18 @@ export async function initPreferences(): Promise<void> {
     }
   }
 
+  // Load per-provider model/effort picker preferences
+  const savedConfigPrefs = await getStoreValue<Record<string, AcpConfigPref>>(
+    ACP_CONFIG_PREFS_STORE_KEY
+  );
+  if (
+    savedConfigPrefs &&
+    typeof savedConfigPrefs === 'object' &&
+    !Array.isArray(savedConfigPrefs)
+  ) {
+    preferences.acpConfigPrefs = savedConfigPrefs;
+  }
+
   // Load auto-review mode
   const savedAutoReview = await getStoreValue<AutoReviewMode>(AUTO_REVIEW_STORE_KEY);
   if (savedAutoReview === 'never' || savedAutoReview === 'after-changes') {
@@ -368,6 +392,26 @@ export function setAiAgent(agentId: string): void {
   const filtered = preferences.recentAgents.filter((id) => id !== agentId);
   preferences.recentAgents = [agentId, ...filtered].slice(0, RECENT_AGENTS_MAX);
   setStoreValue(RECENT_AGENTS_STORE_KEY, preferences.recentAgents);
+}
+
+/**
+ * Persist the last explicitly chosen model/effort for a provider.
+ *
+ * Only fields present in `patch` change; `null` clears a field. Untouched
+ * picker values are never persisted, so pickers keep tracking provider
+ * defaults until the user makes an explicit choice.
+ */
+export function setAcpConfigPref(providerId: string, patch: AcpConfigPrefPatch): void {
+  preferences.acpConfigPrefs = {
+    ...preferences.acpConfigPrefs,
+    [providerId]: mergeAcpConfigPref(preferences.acpConfigPrefs[providerId], patch),
+  };
+  setStoreValue(ACP_CONFIG_PREFS_STORE_KEY, preferences.acpConfigPrefs);
+}
+
+/** The last explicitly chosen model/effort for a provider, if any. */
+export function getAcpConfigPref(providerId: string): AcpConfigPref | null {
+  return preferences.acpConfigPrefs[providerId] ?? null;
 }
 
 /**

@@ -384,8 +384,8 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    // Cmd+Enter to submit
-    if (e.key === 'Enter' && e.metaKey && canSubmit) {
+    // Cmd/Ctrl+Enter to submit
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && canSubmit) {
       e.preventDefault();
       handleSubmit();
     }

@@ -9,7 +9,7 @@
   - Delete sessions from the database
 -->
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, tick } from 'svelte';
   import { listenToEvent, type UnlistenFn } from '../../transport';
   import Plus from '@lucide/svelte/icons/plus';
   import X from '@lucide/svelte/icons/x';
@@ -28,7 +28,6 @@
   import type { AcpConfigPickerSelection } from '../agents/acpConfigSelection';
   import { toast } from 'svelte-sonner';
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
-  import { Input } from '$lib/components/ui/input';
   import { Button } from '$lib/components/ui/button';
 
   interface Props {
@@ -48,6 +47,7 @@
   let openModals = $state<Set<string>>(new Set());
 
   let prompt = $state('');
+  let promptEl: HTMLTextAreaElement | null = $state(null);
   let creating = $state(false);
   let acpPickerSelection = $state<AcpConfigPickerSelection>({
     providerId: null,
@@ -106,6 +106,7 @@
       sessionRegistry.register(s.id, 'standalone', 'other');
       sessions = [...sessions, s];
       prompt = '';
+      tick().then(() => autoResize());
     } catch (e) {
       toast.error('Unable to start session', {
         description: e instanceof Error ? e.message : String(e),
@@ -161,9 +162,23 @@
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
+    // Multiline input: plain Enter inserts a newline; Cmd/Ctrl+Enter sends.
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
       handleCreate();
+    }
+  }
+
+  function autoResize() {
+    if (!promptEl) return;
+    promptEl.style.height = 'auto';
+    promptEl.style.overflow = 'hidden';
+    const borderY = promptEl.offsetHeight - promptEl.clientHeight;
+    const maxHeight = 120;
+    const height = Math.min(promptEl.scrollHeight + borderY, maxHeight);
+    promptEl.style.height = height + 'px';
+    if (height >= maxHeight) {
+      promptEl.style.overflow = 'auto';
     }
   }
 
@@ -190,14 +205,15 @@
 
   <!-- Create form -->
   <div class="create-row">
-    <Input
-      type="text"
+    <textarea
+      bind:this={promptEl}
+      class="prompt-input"
       placeholder="Session prompt…"
+      rows="1"
       bind:value={prompt}
       onkeydown={handleKeydown}
-      disabled={creating}
-      class="flex-1"
-    />
+      oninput={autoResize}
+      disabled={creating}></textarea>
     <AcpConfigPicker
       disabled={creating}
       triggerClass="h-7 max-w-[120px] border border-[var(--border-muted)] bg-[var(--bg-primary)]"
@@ -316,8 +332,38 @@
   /* Create row */
   .create-row {
     display: flex;
+    align-items: flex-start;
     gap: 6px;
     padding: 10px 14px;
+  }
+
+  .prompt-input {
+    flex: 1;
+    min-width: 0;
+    min-height: 36px;
+    max-height: 120px;
+    padding: 8px 10px;
+    border: 1px solid var(--border-muted);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: var(--size-sm);
+    line-height: 18px;
+    resize: none;
+    outline: none;
+  }
+
+  .prompt-input::placeholder {
+    color: var(--text-faint);
+  }
+
+  .prompt-input:focus {
+    border-color: var(--ui-accent);
+  }
+
+  .prompt-input:disabled {
+    opacity: 0.5;
   }
 
   /* Session list */

@@ -16,6 +16,7 @@
     setAcpConfigPref,
     getAcpConfigPref,
   } from '../settings/preferences.svelte';
+  import { preferredAcpEffort } from '../settings/acpConfigPrefs';
   import {
     discoverAcpConfig,
     type AcpConfigDiscovery,
@@ -203,21 +204,14 @@
         !(effortSelectionExplicit && selectorHasValue(effortSelector, selectedEffortValue))
       ) {
         const persisted = selectedProviderId ? getAcpConfigPref(selectedProviderId) : null;
-        const reconciled = reconcileSelectorValue(effortSelector, persisted?.effort ?? null);
+        const reconciled = reconcileSelectorValue(
+          effortSelector,
+          preferredAcpEffort(persisted, selectedModelValue)
+        );
         selectedEffortValue = reconciled.valueId;
         effortSelectionExplicit = reconciled.explicit;
       }
       effortSelectorKey = nextKey;
-    }
-  });
-
-  // Snapshot the effort options so a model change can keep showing the old
-  // column as muted text while the model-specific options load.
-  $effect(() => {
-    if (!configLoading && effortSelector) {
-      retainedEffortSelector = effortSelector;
-      retainedEffortValue = selectedEffortValue;
-      retainedEffortTriggerLabel = effortTriggerLabel;
     }
   });
 
@@ -244,7 +238,10 @@
     selectedEffortValue = value;
     effortSelectionExplicit = true;
     if (!remote && selectedProviderId) {
-      setAcpConfigPref(selectedProviderId, { effort: value });
+      setAcpConfigPref(selectedProviderId, {
+        effort: value,
+        effortModel: selectedModelValue ?? undefined,
+      });
     }
   }
 
@@ -282,6 +279,16 @@
     const discoveryWorkingDir = workingDir ?? null;
     if (remote || !providerId) return;
 
+    // Snapshot the outgoing effort options so the column keeps showing them
+    // as muted text while the model-specific ones load, and so the catch
+    // below can restore them. Captured here rather than in an effect because
+    // on the mount-restore path discovery lands and this fetch starts in the
+    // same tick, before any effect could observe the loaded selector.
+    if (config?.effort) {
+      retainedEffortSelector = config.effort;
+      retainedEffortValue = selectedEffortValue;
+      retainedEffortTriggerLabel = effortTriggerLabel;
+    }
     config = config ? { ...config, effort: null } : config;
 
     const run = ++discoveryRun;

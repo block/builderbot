@@ -79,7 +79,11 @@
   import { listenToEvent, type UnlistenFn } from '../../transport';
   import AcpFixedConfigPicker from '../agents/AcpFixedConfigPicker.svelte';
   import { agentState } from '../agents/agent.svelte';
-  import { buildAcpConfigSelection } from '../agents/acpConfigSelection';
+  import {
+    buildAcpConfigSelection,
+    defaultSelectorValue,
+    selectorHasValue,
+  } from '../agents/acpConfigSelection';
   import { setAcpConfigPref } from '../settings/preferences.svelte';
   import ChatComposer, { composerControlClass } from './ChatComposer.svelte';
   import {
@@ -208,10 +212,20 @@
   let followupConfigError = $state<string | null>(null);
   let selectedFollowupModelValue = $state<string | null>(null);
   let selectedFollowupEffortValue = $state<string | null>(null);
-  let followupModelTouched = $state(false);
-  let followupEffortTouched = $state(false);
+  let followupModelTouchedSessionId = $state<string | null>(null);
+  let followupEffortTouchedSessionId = $state<string | null>(null);
   let followupModelStateKey = $state<string | null>(null);
   let followupEffortStateKey = $state<string | null>(null);
+  // A touched selection belongs to the session it was made in. The pane is
+  // reused across sessions and effort ids are near-universal within a
+  // provider, so a bare boolean would let an explicit choice from one
+  // session survive the state-key reset and carry into the next.
+  let followupModelTouched = $derived(
+    followupModelTouchedSessionId !== null && followupModelTouchedSessionId === session?.id
+  );
+  let followupEffortTouched = $derived(
+    followupEffortTouchedSessionId !== null && followupEffortTouchedSessionId === session?.id
+  );
   let followupDiscoveryRun = 0;
 
   let isLive = $derived(session?.status === 'running');
@@ -1307,7 +1321,7 @@
           followupModelSelector,
           session?.acpConfigSelection?.model ?? null
         );
-        followupModelTouched = false;
+        followupModelTouchedSessionId = null;
       }
       followupModelStateKey = key;
     }
@@ -1335,7 +1349,7 @@
           followupEffortSelector,
           session?.acpConfigSelection?.effort ?? null
         );
-        followupEffortTouched = false;
+        followupEffortTouchedSessionId = null;
       }
       followupEffortStateKey = key;
     }
@@ -1367,21 +1381,14 @@
     selector: AcpConfigSelector | null,
     storedSelection: AcpConfigValueSelection | null
   ): string | null {
-    if (!selector || selector.options.length === 0) return null;
     if (
-      storedSelection?.configId === selector.configId &&
-      selector.options.some((option) => option.valueId === storedSelection.valueId)
+      storedSelection &&
+      storedSelection.configId === selector?.configId &&
+      selectorHasValue(selector, storedSelection.valueId)
     ) {
       return storedSelection.valueId;
     }
-    if (selector.options.some((option) => option.valueId === selector.currentValueId)) {
-      return selector.currentValueId;
-    }
-    return selector.options[0]?.valueId ?? null;
-  }
-
-  function selectorHasValue(selector: AcpConfigSelector | null, valueId: string | null): boolean {
-    return !!selector && !!valueId && selector.options.some((option) => option.valueId === valueId);
+    return defaultSelectorValue(selector);
   }
 
   function shouldSendFollowupSelectorSelection(
@@ -1396,7 +1403,7 @@
 
     const storedValueIsAvailable =
       storedSelection.configId === selector.configId &&
-      selector.options.some((option) => option.valueId === storedSelection.valueId);
+      selectorHasValue(selector, storedSelection.valueId);
     if (!storedValueIsAvailable) return true;
 
     return storedSelection.valueId === valueId;
@@ -1404,7 +1411,7 @@
 
   function handleFollowupModelChange(value: string) {
     selectedFollowupModelValue = value;
-    followupModelTouched = true;
+    followupModelTouchedSessionId = session?.id ?? null;
     // The effort selection is kept as the desired value; the effort effect
     // reconciles it once the model-specific options arrive.
     modelSpecificFollowupConfig = null;
@@ -1454,9 +1461,12 @@
 
   function handleFollowupEffortChange(value: string) {
     selectedFollowupEffortValue = value;
-    followupEffortTouched = true;
+    followupEffortTouchedSessionId = session?.id ?? null;
     if (session?.provider) {
-      setAcpConfigPref(session.provider, { effort: value });
+      setAcpConfigPref(session.provider, {
+        effort: value,
+        effortModel: selectedFollowupModelValue ?? undefined,
+      });
     }
   }
 

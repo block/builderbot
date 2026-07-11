@@ -11,13 +11,21 @@
  */
 export interface AcpConfigPref {
   model?: string;
+  /** Provider-level effort: the fallback for models without their own entry. */
   effort?: string;
+  /** Effort keyed by the model it was chosen alongside. */
+  modelEfforts?: Record<string, string>;
 }
 
-/** Patch for one provider's pref: absent fields are untouched, `null` clears. */
+/**
+ * Patch for one provider's pref: absent fields are untouched, `null` clears.
+ * When `effortModel` names the model the effort was chosen alongside, the
+ * effort is also recorded (or cleared) under that model.
+ */
 export interface AcpConfigPrefPatch {
   model?: string | null;
   effort?: string | null;
+  effortModel?: string;
 }
 
 export function mergeAcpConfigPref(
@@ -32,6 +40,29 @@ export function mergeAcpConfigPref(
   if (patch.effort !== undefined) {
     if (patch.effort === null) delete next.effort;
     else next.effort = patch.effort;
+    if (patch.effortModel) {
+      const modelEfforts = { ...next.modelEfforts };
+      if (patch.effort === null) delete modelEfforts[patch.effortModel];
+      else modelEfforts[patch.effortModel] = patch.effort;
+      if (Object.keys(modelEfforts).length === 0) delete next.modelEfforts;
+      else next.modelEfforts = modelEfforts;
+    }
   }
   return next;
+}
+
+/**
+ * The persisted effort to restore for a model: the effort last chosen
+ * alongside that model when recorded, otherwise the provider-level effort.
+ */
+export function preferredAcpEffort(
+  pref: AcpConfigPref | null | undefined,
+  modelId: string | null
+): string | null {
+  if (!pref) return null;
+  if (modelId) {
+    const modelEffort = pref.modelEfforts?.[modelId];
+    if (modelEffort) return modelEffort;
+  }
+  return pref.effort ?? null;
 }

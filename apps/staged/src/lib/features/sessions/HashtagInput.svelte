@@ -471,7 +471,7 @@
         scrollSelectedIntoView();
         return;
       }
-      if (e.key === 'Enter' && !e.shiftKey && !e.metaKey) {
+      if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey) {
         e.preventDefault();
         e.stopPropagation();
         selectItem(filteredItems[selectedIndex]);

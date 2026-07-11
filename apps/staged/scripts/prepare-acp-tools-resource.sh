@@ -84,10 +84,17 @@ while IFS=$'\t' read -r id binary package version node_engine; do
   fi
   write_node_wrapper "$resource_bin_dir/$binary" "../node/$id/node_modules/$package/dist/index.js" "$node_engine"
   node_runtime_entries+=("$id"$'\t'"$binary"$'\t'"$node_engine"$'\t'"$(acp_required_node_major "$node_engine")")
-  while IFS= read -r native_binary; do
-    [[ -n "$native_binary" ]] || continue
-    codesign_if_darwin "$native_binary"
-  done < <(find "$resource_package_dir" -type f \( -name claude -o -name codex \))
+  # Ad-hoc sign every Mach-O in the staged package, not just the main CLIs:
+  # the codex native package also vendors executables like rg and zsh, and
+  # unsigned nested Mach-Os are killed by Gatekeeper. Darwin only, so Linux
+  # staging skips the file(1) scan.
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    while IFS= read -r -d '' candidate; do
+      if file -b "$candidate" | grep -q "Mach-O"; then
+        codesign_if_darwin "$candidate"
+      fi
+    done < <(find "$resource_package_dir" -type f -print0)
+  fi
 done < <(node - "$lock_file" "$target" <<'NODE'
 const fs = require("node:fs");
 const [lockFile, target] = process.argv.slice(2);

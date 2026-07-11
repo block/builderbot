@@ -68,10 +68,7 @@ fn prepend_dir_to_path(vars: &mut Vec<(String, String)>, dir: &Path) {
         Some((_, value)) => {
             let mut paths = vec![dir.to_path_buf()];
             paths.extend(std::env::split_paths(value).filter(|path| path != dir));
-            *value = std::env::join_paths(paths)
-                .unwrap_or_default()
-                .to_string_lossy()
-                .to_string();
+            *value = crate::shell_env::join_paths_best_effort(paths);
         }
         None => vars.push(("PATH".to_string(), dir.to_string_lossy().to_string())),
     }
@@ -178,6 +175,22 @@ mod tests {
             paths,
             vec![PathBuf::from("/acp/bin"), PathBuf::from("/shell/bin")]
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unjoinable_bundled_dir_keeps_shell_path_instead_of_emptying_it() {
+        // A dir embedding the separator (legal in macOS paths) can't be joined
+        // into PATH; it must be dropped, not erase every shell search path.
+        let mut vars = vec![("PATH".to_string(), "/shell/bin:/user/bin".to_string())];
+
+        apply_bundled_tools_env(&mut vars, Path::new("/weird:dir/bin"));
+
+        let path = var(&vars, "PATH").expect("PATH should be set");
+        let paths: Vec<_> = std::env::split_paths(path).collect();
+        assert!(paths.contains(&PathBuf::from("/shell/bin")));
+        assert!(paths.contains(&PathBuf::from("/user/bin")));
+        assert!(!paths.iter().any(|p| p.to_string_lossy().contains("weird")));
     }
 
     #[test]

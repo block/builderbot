@@ -215,10 +215,31 @@ pub fn build_extended_path_from_path(path: Option<&str>) -> String {
     let mut seen = HashSet::new();
     paths.retain(|p| seen.insert(p.clone()));
 
-    std::env::join_paths(paths)
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string()
+    join_paths_best_effort(paths)
+}
+
+/// Join PATH entries, degrading to a best-effort join when a single entry
+/// embeds the platform separator (legal in macOS paths): `join_paths` rejects
+/// the whole list for one such entry, and `unwrap_or_default` would then hand
+/// subprocesses an empty PATH. Drop the un-joinable entries (logging each)
+/// instead of erasing every search path.
+pub(crate) fn join_paths_best_effort(mut paths: Vec<PathBuf>) -> String {
+    match std::env::join_paths(&paths) {
+        Ok(joined) => joined.to_string_lossy().to_string(),
+        Err(_) => {
+            paths.retain(|path| {
+                let joinable = std::env::join_paths(std::iter::once(path)).is_ok();
+                if !joinable {
+                    log::warn!("Dropping un-joinable PATH entry: {}", path.display());
+                }
+                joinable
+            });
+            std::env::join_paths(paths)
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string()
+        }
+    }
 }
 
 /// Build a deterministic environment snapshot with PATH normalized through
@@ -892,6 +913,22 @@ mod tests {
         assert!(paths.iter().any(|p| p.ends_with(".amp/bin")));
         assert!(paths.iter().any(|p| p.ends_with(".volta/bin")));
         assert!(paths.iter().any(|p| p.ends_with(".asdf/shims")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn join_paths_best_effort_drops_unjoinable_entries_instead_of_emptying_path() {
+        let joined = join_paths_best_effort(vec![
+            PathBuf::from("/weird:dir/bin"),
+            PathBuf::from("/shell/bin"),
+            PathBuf::from("/user/bin"),
+        ]);
+        let paths: Vec<_> = std::env::split_paths(&joined).collect();
+
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("/shell/bin"), PathBuf::from("/user/bin")]
+        );
     }
 
     #[test]

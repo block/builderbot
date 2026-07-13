@@ -10,12 +10,6 @@ on:
 concurrency:
   group: staged-bump-acp-tools
 
-env:
-  # The lockfile records registry-specific tarball URLs. Point npm at Block
-  # Artifactory so CI runs produce the same URLs as dev machines instead of
-  # rewriting them all to registry.npmjs.org.
-  npm_config_registry: https://global.block-artifacts.com/artifactory/api/npm/square-npm/
-
 jobs:
   bump:
     name: Bump ACP tool pins

@@ -56,9 +56,10 @@ use crate::commit_reassociation::Reassociation;
 use crate::git::Span;
 use crate::shell_env::ShellEnvCache;
 use crate::store::{
-    AcpConfigSelection, Comment, CommentAuthor, CommentType, CompletionReason, FailureStrategy,
-    MessageRole, PipelineExecution, PipelineKind, PipelineStep, SessionMessage, SessionStatus,
-    StepStatus, StepType, Store, SuggestedNextStep,
+    legacy_suggested_next_steps, sanitize_suggested_next_steps, AcpConfigSelection, Comment,
+    CommentAuthor, CommentType, CompletionReason, FailureStrategy, MessageRole, PipelineExecution,
+    PipelineKind, PipelineStep, SessionMessage, SessionStatus, StepStatus, StepType, Store,
+    SuggestedNextStep,
 };
 
 const PIPELINE_STEP_PROMPT_OUTPUT_MAX_CHARS: usize = 30_000;
@@ -3360,53 +3361,6 @@ impl SuggestedNextStepsPayload {
         SuggestedNextSteps {
             suggested_next_steps: sanitize_suggested_next_steps(suggested_next_steps),
         }
-    }
-}
-
-fn legacy_suggested_next_steps(
-    suggested_next_commit_step: Option<String>,
-    suggested_next_note_step: Option<String>,
-) -> Vec<SuggestedNextStep> {
-    let mut steps = Vec::new();
-    if let Some(prompt) = non_empty_suggested_step_prompt(suggested_next_commit_step) {
-        steps.push(SuggestedNextStep::Implementation {
-            prompt,
-            expected_multiple_commits: false,
-        });
-    }
-    if let Some(prompt) = non_empty_suggested_step_prompt(suggested_next_note_step) {
-        steps.push(SuggestedNextStep::Note { prompt });
-    }
-    steps
-}
-
-fn sanitize_suggested_next_steps(steps: Vec<SuggestedNextStep>) -> Vec<SuggestedNextStep> {
-    steps
-        .into_iter()
-        .filter_map(|step| match step {
-            SuggestedNextStep::Implementation {
-                prompt,
-                expected_multiple_commits,
-            } => non_empty_suggested_step_prompt(Some(prompt)).map(|prompt| {
-                SuggestedNextStep::Implementation {
-                    prompt,
-                    expected_multiple_commits,
-                }
-            }),
-            SuggestedNextStep::Note { prompt } => non_empty_suggested_step_prompt(Some(prompt))
-                .map(|prompt| SuggestedNextStep::Note { prompt }),
-        })
-        .take(4)
-        .collect()
-}
-
-fn non_empty_suggested_step_prompt(prompt: Option<String>) -> Option<String> {
-    let prompt = prompt?;
-    let trimmed = prompt.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
     }
 }
 

@@ -941,7 +941,7 @@ pub fn suggested_next_steps_legacy_note_step(steps: &[SuggestedNextStep]) -> Opt
     })
 }
 
-fn legacy_suggested_next_steps(
+pub fn legacy_suggested_next_steps(
     legacy_commit_step: Option<String>,
     legacy_note_step: Option<String>,
 ) -> Vec<SuggestedNextStep> {
@@ -958,7 +958,7 @@ fn legacy_suggested_next_steps(
     steps
 }
 
-fn sanitize_suggested_next_steps(steps: Vec<SuggestedNextStep>) -> Vec<SuggestedNextStep> {
+pub fn sanitize_suggested_next_steps(steps: Vec<SuggestedNextStep>) -> Vec<SuggestedNextStep> {
     steps
         .into_iter()
         .filter_map(|step| match step {

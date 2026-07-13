@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AcpConfigSelector } from '../../api/commands';
-import { buildAcpConfigSelection } from './acpConfigSelection';
+import { buildAcpConfigSelection, reconcileSelectorValue } from './acpConfigSelection';
 
 function selector(overrides: Partial<AcpConfigSelector> = {}): AcpConfigSelector {
   return {
@@ -95,5 +95,43 @@ describe('buildAcpConfigSelection', () => {
         effort: { selector: null, valueId: null, explicit: true },
       })
     ).toBeNull();
+  });
+});
+
+describe('reconcileSelectorValue', () => {
+  it('keeps a desired value the selector still offers, marked explicit', () => {
+    expect(reconcileSelectorValue(selector(), 'opus')).toEqual({
+      valueId: 'opus',
+      explicit: true,
+    });
+  });
+
+  it('falls back to the selector default when the desired value is gone', () => {
+    expect(reconcileSelectorValue(selector(), 'removed-model')).toEqual({
+      valueId: 'sonnet',
+      explicit: false,
+    });
+  });
+
+  it('falls back to the selector default when there is no desired value', () => {
+    expect(reconcileSelectorValue(selector(), null)).toEqual({
+      valueId: 'sonnet',
+      explicit: false,
+    });
+  });
+
+  it('falls back to the first option when the selector default is not listed', () => {
+    expect(reconcileSelectorValue(selector({ currentValueId: 'missing' }), null)).toEqual({
+      valueId: 'sonnet',
+      explicit: false,
+    });
+  });
+
+  it('returns no value for a missing or empty selector', () => {
+    expect(reconcileSelectorValue(null, 'opus')).toEqual({ valueId: null, explicit: false });
+    expect(reconcileSelectorValue(selector({ options: [] }), 'opus')).toEqual({
+      valueId: null,
+      explicit: false,
+    });
   });
 });

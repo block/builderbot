@@ -10,7 +10,13 @@
   import AcpConfigPickerSection from './AcpConfigPickerSection.svelte';
   import AcpConfigPickerShell from './AcpConfigPickerShell.svelte';
   import { agentState, REMOTE_AGENTS } from './agent.svelte';
-  import { setAiAgent, getPreferredAgent } from '../settings/preferences.svelte';
+  import {
+    setAiAgent,
+    getPreferredAgent,
+    setAcpConfigPref,
+    getAcpConfigPref,
+  } from '../settings/preferences.svelte';
+  import { preferredAcpEffort } from '../settings/acpConfigPrefs';
   import {
     discoverAcpConfig,
     type AcpConfigDiscovery,
@@ -18,7 +24,13 @@
   } from '../../api/commands';
   import Spinner from '../../shared/Spinner.svelte';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
-  import { buildAcpConfigSelection, type AcpConfigPickerSelection } from './acpConfigSelection';
+  import {
+    buildAcpConfigSelection,
+    defaultSelectorValue,
+    reconcileSelectorValue,
+    selectorHasValue,
+    type AcpConfigPickerSelection,
+  } from './acpConfigSelection';
 
   interface AgentOption {
     id: string;
@@ -141,10 +153,12 @@
         if (cancelled || run !== discoveryRun) return;
         config = data;
         configLoading = false;
+        restorePersistedModel(data);
         revalidating
           ?.then((fresh) => {
             if (!cancelled && run === discoveryRun) {
               config = fresh;
+              restorePersistedModel(fresh);
             }
           })
           .catch((error) => {
@@ -177,22 +191,27 @@
     }
   });
 
+  // Mirror of the model effect above, with two twists: while a model-specific
+  // fetch is in flight the selector is null, and the current selection is
+  // retained as the desired value for the incoming options; and when there is
+  // no valid explicit selection, the persisted preference is tried before the
+  // selector default.
   $effect(() => {
     const nextKey = selectorKey(effortSelector);
     if (nextKey !== effortSelectorKey) {
-      selectedEffortValue = defaultSelectorValue(effortSelector);
-      effortSelectionExplicit = false;
+      if (
+        effortSelector &&
+        !(effortSelectionExplicit && selectorHasValue(effortSelector, selectedEffortValue))
+      ) {
+        const persisted = selectedProviderId ? getAcpConfigPref(selectedProviderId) : null;
+        const reconciled = reconcileSelectorValue(
+          effortSelector,
+          preferredAcpEffort(persisted, selectedModelValue)
+        );
+        selectedEffortValue = reconciled.valueId;
+        effortSelectionExplicit = reconciled.explicit;
+      }
       effortSelectorKey = nextKey;
-    }
-  });
-
-  // Snapshot the effort options so a model change can keep showing the old
-  // column as muted text while the model-specific options load.
-  $effect(() => {
-    if (!configLoading && effortSelector) {
-      retainedEffortSelector = effortSelector;
-      retainedEffortValue = selectedEffortValue;
-      retainedEffortTriggerLabel = effortTriggerLabel;
     }
   });
 
@@ -207,19 +226,76 @@
   function handleModelChange(value: string) {
     selectedModelValue = value;
     modelSelectionExplicit = true;
-    selectedEffortValue = null;
-    effortSelectionExplicit = false;
-    config = config ? { ...config, effort: null } : config;
+    if (!remote && selectedProviderId) {
+      setAcpConfigPref(selectedProviderId, { model: value });
+    }
+    // The current effort selection is kept as the desired value; the effort
+    // effect reconciles it once the model-specific options arrive.
+    discoverEffortOptionsForModel(value);
+  }
 
+  function handleEffortChange(value: string) {
+    selectedEffortValue = value;
+    effortSelectionExplicit = true;
+    if (!remote && selectedProviderId) {
+      setAcpConfigPref(selectedProviderId, {
+        effort: value,
+        effortModel: selectedModelValue ?? undefined,
+      });
+    }
+  }
+
+  /**
+   * Re-apply the last explicitly chosen model for this provider once
+   * discovery lands. Restored values are marked explicit so they are sent at
+   * launch — non-explicit selections are display-only (see
+   * buildAcpConfigSelection) — which is safe because the driver skips config
+   * values the agent no longer offers. Persisted values missing from the
+   * options fall back silently; options can vary by working directory and
+   * agent version, so the pref is not deleted.
+   */
+  function restorePersistedModel(discovered: AcpConfigDiscovery | null) {
+    if (remote || modelSelectionExplicit || !selectedProviderId) return;
+    const persistedModel = getAcpConfigPref(selectedProviderId)?.model ?? null;
+    const selector = discovered?.model ?? null;
+    if (!persistedModel || !selectorHasValue(selector, persistedModel)) return;
+
+    selectedModelValue = persistedModel;
+    modelSelectionExplicit = true;
+    // The effort options in the initial discovery belong to the provider's
+    // default model; fetch the ones for the restored model instead.
+    if (persistedModel !== defaultSelectorValue(selector)) {
+      discoverEffortOptionsForModel(persistedModel);
+    }
+  }
+
+  /**
+   * Fetch the effort options specific to a model. The effort selector is
+   * cleared so the column shows its loading state; the current effort
+   * selection is retained and reconciled when the new options arrive.
+   */
+  function discoverEffortOptionsForModel(modelValue: string) {
     const providerId = selectedProviderId;
     const discoveryWorkingDir = workingDir ?? null;
     if (remote || !providerId) return;
+
+    // Snapshot the outgoing effort options so the column keeps showing them
+    // as muted text while the model-specific ones load, and so the catch
+    // below can restore them. Captured here rather than in an effect because
+    // on the mount-restore path discovery lands and this fetch starts in the
+    // same tick, before any effect could observe the loaded selector.
+    if (config?.effort) {
+      retainedEffortSelector = config.effort;
+      retainedEffortValue = selectedEffortValue;
+      retainedEffortTriggerLabel = effortTriggerLabel;
+    }
+    config = config ? { ...config, effort: null } : config;
 
     const run = ++discoveryRun;
     configLoading = true;
     configError = null;
 
-    discoverAcpConfig(providerId, discoveryWorkingDir, { selectedModelValue: value })
+    discoverAcpConfig(providerId, discoveryWorkingDir, { selectedModelValue: modelValue })
       .then(({ data, revalidating }) => {
         if (run !== discoveryRun) return;
         config = data;
@@ -243,36 +319,19 @@
         configError = error instanceof Error ? error.message : String(error);
         // The effort column was cleared for the incoming model-specific
         // options; restore the previous model's selector so the column stays
-        // usable after a transient failure. If a choice from it turns out to
-        // be stale for the new model, the driver skips it and the launch
-        // falls back to provider-default effort.
+        // usable — with its selection intact — after a transient failure. If
+        // the choice turns out to be stale for the new model, the driver
+        // skips it and the launch falls back to provider-default effort.
         if (config && !config.effort && retainedEffortSelector) {
           config = { ...config, effort: retainedEffortSelector };
         }
       });
   }
 
-  function handleEffortChange(value: string) {
-    selectedEffortValue = value;
-    effortSelectionExplicit = true;
-  }
-
   function selectorKey(selector: AcpConfigSelector | null): string | null {
     if (!selector) return null;
     const optionIds = selector.options.map((option) => option.valueId).join(',');
     return `${selector.configId}:${selector.currentValueId}:${optionIds}`;
-  }
-
-  function defaultSelectorValue(selector: AcpConfigSelector | null): string | null {
-    if (!selector || selector.options.length === 0) return null;
-    if (selector.options.some((option) => option.valueId === selector.currentValueId)) {
-      return selector.currentValueId;
-    }
-    return selector.options[0]?.valueId ?? null;
-  }
-
-  function selectorHasValue(selector: AcpConfigSelector | null, valueId: string | null): boolean {
-    return !!selector && !!valueId && selector.options.some((option) => option.valueId === valueId);
   }
 
   function selectorValueLabel(

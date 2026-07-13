@@ -1621,18 +1621,26 @@
 
 <svelte:window onpaste={handleImagePaste} />
 
-{#snippet toolStatusIcon(statusTone: RichToolItem['statusTone'])}
-  {#if statusTone === 'running'}
-    <Clock size={11} />
-  {:else if statusTone === 'success'}
-    <CircleCheck size={11} />
-  {:else if statusTone === 'danger'}
-    <CircleAlert size={11} />
-  {:else if statusTone === 'cancelled'}
-    <CircleSlash size={11} />
-  {:else}
-    <CircleDot size={11} />
-  {/if}
+{#snippet toolStatusDot(statusTone: RichToolItem['statusTone'])}
+  <span
+    class="tool-status-dot"
+    class:status-running={statusTone === 'running'}
+    class:status-success={statusTone === 'success'}
+    class:status-danger={statusTone === 'danger'}
+    class:status-cancelled={statusTone === 'cancelled'}
+  >
+    {#if statusTone === 'running'}
+      <Clock size={11} />
+    {:else if statusTone === 'success'}
+      <CircleCheck size={11} />
+    {:else if statusTone === 'danger'}
+      <CircleAlert size={11} />
+    {:else if statusTone === 'cancelled'}
+      <CircleSlash size={11} />
+    {:else}
+      <CircleDot size={11} />
+    {/if}
+  </span>
 {/snippet}
 
 {#snippet richToolCard(item: RichToolItem, nested: boolean)}
@@ -1650,29 +1658,20 @@
     diffs.length > 0 ||
     locations.length > 0 ||
     terminalRefs.length > 0}
-  {#if item.isPikchrDiagramTool && item.innerSessionId && onOpenSession}
-    <div class="tool-card" class:tool-card-nested={nested}>
+  {@const showSessionButton = !!(item.isPikchrDiagramTool && item.innerSessionId && onOpenSession)}
+  <div class="tool-card" class:tool-card-nested={nested}>
+    {#if showSessionButton}
       <Button
         variant="outline"
         size="sm"
         class="tool-session-button"
         onclick={() => onOpenSession?.(item.innerSessionId!)}
       >
-        <span
-          class="tool-status-dot"
-          class:status-running={item.statusTone === 'running'}
-          class:status-success={item.statusTone === 'success'}
-          class:status-danger={item.statusTone === 'danger'}
-          class:status-cancelled={item.statusTone === 'cancelled'}
-        >
-          {@render toolStatusIcon(item.statusTone)}
-        </span>
+        {@render toolStatusDot(item.statusTone)}
         <span>Open diagram session</span>
         <ExternalLink size={12} />
       </Button>
-    </div>
-  {:else}
-    <div class="tool-card" class:tool-card-nested={nested}>
+    {:else}
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <!-- svelte-ignore a11y_no_static_element_interactions -->
       <div
@@ -1685,70 +1684,62 @@
           class:tool-caret-expanded={isExpanded}
           class:tool-caret-hidden={!hasDetails}>›</span
         >
-        <span
-          class="tool-status-dot"
-          class:status-running={item.statusTone === 'running'}
-          class:status-success={item.statusTone === 'success'}
-          class:status-danger={item.statusTone === 'danger'}
-          class:status-cancelled={item.statusTone === 'cancelled'}
-        >
-          {@render toolStatusIcon(item.statusTone)}
-        </span>
+        {@render toolStatusDot(item.statusTone)}
         <span class="tool-name">{item.verb}</span>
         {#if item.detail}
           <span class="tool-args-preview">{item.detail}</span>
         {/if}
       </div>
-      {#if isExpanded && hasDetails}
-        <div class="tool-code-block" transition:slide={{ duration: SLIDE_DURATION }}>
-          {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
-            <div class="tool-code-command">$ {item.detail}</div>
-          {/if}
-          {#if locations.length > 0}
-            <div class="tool-meta-row">
-              {#each locations as location}
-                <span class="tool-chip">{location}</span>
-              {/each}
-            </div>
-          {/if}
-          {#if rawInputText}
-            <div class="tool-panel-label">Input</div>
-            <pre class="tool-code-output">{rawInputText}</pre>
-          {/if}
-          {#each diffs as diff}
-            <div class="tool-panel-label">{diff.path}</div>
-            <pre class="tool-code-output diff-output">{simpleUnifiedDiff(diff)}</pre>
-          {/each}
-          {#if terminalRefs.length > 0}
-            <div class="tool-panel-label">Terminal</div>
-            <div class="tool-meta-row">
-              {#each terminalRefs as terminalRef}
-                <span class="tool-chip">{terminalRef}</span>
-              {/each}
-            </div>
-          {/if}
-          {#if resultText}
-            <div class="tool-panel-label">Output</div>
-            <pre class="tool-code-output">{resultText}</pre>
-          {/if}
-          {#if rawOutputText && rawOutputText !== resultText}
-            <div class="tool-panel-label">Raw output</div>
-            <pre class="tool-code-output">{rawOutputText}</pre>
-          {/if}
-          <div
-            class="tool-code-status"
-            class:status-danger={item.statusTone === 'danger'}
-            class:status-cancelled={item.statusTone === 'cancelled'}
-          >
-            {#if item.statusTone === 'success'}
-              <Check size={11} />
-            {/if}
-            {item.statusLabel}
+    {/if}
+    {#if isExpanded && hasDetails && !showSessionButton}
+      <div class="tool-code-block" transition:slide={{ duration: SLIDE_DURATION }}>
+        {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
+          <div class="tool-code-command">$ {item.detail}</div>
+        {/if}
+        {#if locations.length > 0}
+          <div class="tool-meta-row">
+            {#each locations as location}
+              <span class="tool-chip">{location}</span>
+            {/each}
           </div>
+        {/if}
+        {#if rawInputText}
+          <div class="tool-panel-label">Input</div>
+          <pre class="tool-code-output">{rawInputText}</pre>
+        {/if}
+        {#each diffs as diff}
+          <div class="tool-panel-label">{diff.path}</div>
+          <pre class="tool-code-output diff-output">{simpleUnifiedDiff(diff)}</pre>
+        {/each}
+        {#if terminalRefs.length > 0}
+          <div class="tool-panel-label">Terminal</div>
+          <div class="tool-meta-row">
+            {#each terminalRefs as terminalRef}
+              <span class="tool-chip">{terminalRef}</span>
+            {/each}
+          </div>
+        {/if}
+        {#if resultText}
+          <div class="tool-panel-label">Output</div>
+          <pre class="tool-code-output">{resultText}</pre>
+        {/if}
+        {#if rawOutputText && rawOutputText !== resultText}
+          <div class="tool-panel-label">Raw output</div>
+          <pre class="tool-code-output">{rawOutputText}</pre>
+        {/if}
+        <div
+          class="tool-code-status"
+          class:status-danger={item.statusTone === 'danger'}
+          class:status-cancelled={item.statusTone === 'cancelled'}
+        >
+          {#if item.statusTone === 'success'}
+            <Check size={11} />
+          {/if}
+          {item.statusLabel}
         </div>
-      {/if}
-    </div>
-  {/if}
+      </div>
+    {/if}
+  </div>
 {/snippet}
 
 <div
@@ -1937,15 +1928,7 @@
                       >
                         <span class="tool-caret" class:tool-caret-expanded={isGroupExpanded}>›</span
                         >
-                        <span
-                          class="tool-status-dot"
-                          class:status-running={verbGroup.statusTone === 'running'}
-                          class:status-success={verbGroup.statusTone === 'success'}
-                          class:status-danger={verbGroup.statusTone === 'danger'}
-                          class:status-cancelled={verbGroup.statusTone === 'cancelled'}
-                        >
-                          {@render toolStatusIcon(verbGroup.statusTone)}
-                        </span>
+                        {@render toolStatusDot(verbGroup.statusTone)}
                         <span class="tool-name">{verbGroup.verb}</span>
                         <span class="tool-args-preview">{verbGroup.summary}</span>
                       </div>

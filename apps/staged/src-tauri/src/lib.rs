@@ -4,6 +4,7 @@
 //! See `src-archive/lib.rs` for the previous implementation.
 
 pub(crate) mod acp_config;
+pub mod acp_tools;
 pub mod actions;
 pub mod agent;
 pub mod background_sync;
@@ -1870,6 +1871,13 @@ pub fn run() {
         )
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
+            // Register the bundled ACP bridge tools dir before any command
+            // runs so binary resolution (session spawn, provider discovery)
+            // prefers the pinned bridges Staged ships as resources.
+            if let Some(dir) = acp_tools::resolve_bundled_acp_tools_dir(app.handle()) {
+                acp_client::set_bundled_tools_dir(dir);
+            }
+
             let updater_pubkey_present = app
                 .config()
                 .plugins

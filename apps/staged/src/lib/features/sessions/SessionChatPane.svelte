@@ -9,7 +9,9 @@
   Features:
   - Text input always available at the bottom (Cmd/Ctrl+Enter sends, Enter adds a newline)
   - Send button when idle, Queue button when running; Stop lives on the Thinking row
-  - While a pipeline runs, the composer is replaced by a labeled Stop button
+  - While a pipeline runs with an empty transcript, the composer is replaced by
+    a labeled Stop button; once messages exist, Stop lives on the Thinking row
+    and the composer queues follow-ups as usual
   - Message queue: sending while running persists a follow-up for backend drain
   - Copy button on every message
   - Tool calls show name + args preview; expand to see output
@@ -2063,7 +2065,7 @@
 
   <!-- Input area with queued messages and image previews -->
   <div class="input-wrapper">
-    {#if isPipelineRunning}
+    {#if isPipelineRunning && grouped.length === 0}
       <div class="pipeline-stop-area">
         <span class="inline-flex" title="Stop workflow">
           <Button

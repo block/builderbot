@@ -182,6 +182,36 @@ function packageDist(metadata, label) {
   };
 }
 
+function compareSemver(left, right) {
+  const leftCore = left.split("-", 1)[0].split(".").map(Number);
+  const rightCore = right.split("-", 1)[0].split(".").map(Number);
+  for (let i = 0; i < 3; i += 1) {
+    if ((leftCore[i] ?? 0) !== (rightCore[i] ?? 0)) {
+      return (leftCore[i] ?? 0) - (rightCore[i] ?? 0);
+    }
+  }
+  // A release outranks any prerelease of the same core version.
+  return (left.includes("-") ? 0 : 1) - (right.includes("-") ? 0 : 1);
+}
+
+// npm view returns a single object when a spec matches one version, but an
+// array of per-version objects when a range matches several. Pick the highest
+// matching version so a ranged dependency still pins the newest release.
+function pickLatestMatch(metadata, label) {
+  if (!Array.isArray(metadata)) return metadata;
+  if (metadata.length === 0) {
+    throw new Error(`No versions match ${label}`);
+  }
+  return metadata.reduce((best, candidate) =>
+    compareSemver(
+      requireString(candidate?.version, `${label} version`),
+      requireString(best?.version, `${label} version`),
+    ) > 0
+      ? candidate
+      : best,
+  );
+}
+
 function parseNpmAliasSpec(spec, fallbackPackage) {
   if (!spec.startsWith("npm:")) {
     return { packageName: fallbackPackage, version: spec };
@@ -243,9 +273,15 @@ async function lockToolForTarget(tool, target) {
     packageMetadata.dependencies?.[tool.dependencyPackage],
     `${packageName} dependency ${tool.dependencyPackage}`,
   );
-  const dependencyMetadata = await npmView(
+  const dependencyMetadata = pickLatestMatch(
+    await npmView(`${tool.dependencyPackage}@${dependencyRange}`, [
+      "name",
+      "version",
+      "dist",
+      "optionalDependencies",
+      "claudeCodeVersion",
+    ]),
     `${tool.dependencyPackage}@${dependencyRange}`,
-    ["name", "version", "dist", "optionalDependencies", "claudeCodeVersion"],
   );
   const dependencyVersion = requireString(
     dependencyMetadata.version,

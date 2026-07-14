@@ -173,7 +173,14 @@ export default class BranchCardSessionManager {
   }
 
   async loadNewSessionDraftForMode(mode: BranchSessionType): Promise<string | null> {
-    return loadDraft(this.draftKeyForMode(mode));
+    // Never reject: openNewSession callers fire-and-forget, so a failed store
+    // read should degrade to an empty draft instead of blocking the modal.
+    try {
+      return await loadDraft(this.draftKeyForMode(mode));
+    } catch (e) {
+      console.error('[BranchCard] Failed to load session draft:', e);
+      return null;
+    }
   }
 
   handleNewSessionDraftChange(

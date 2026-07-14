@@ -180,7 +180,7 @@
 
   onDestroy(() => {
     liveSessionHintPoller.destroy();
-    projectDraftWriter.cancel();
+    void projectDraftWriter.flush();
   });
 
   // ── In-flight repo sessions spawned by running project sessions ────────

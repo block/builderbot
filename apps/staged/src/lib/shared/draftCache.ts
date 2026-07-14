@@ -50,6 +50,8 @@ export async function clearDraft(key: string): Promise<void> {
 
 export function createDraftWriteScheduler(delayMs = DRAFT_WRITE_DEBOUNCE_MS) {
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let pendingKey: string | null = null;
+  let pendingValue = '';
   let writeQueue: Promise<void> = Promise.resolve();
 
   function enqueue(write: () => Promise<void>): Promise<void> {
@@ -62,24 +64,48 @@ export function createDraftWriteScheduler(delayMs = DRAFT_WRITE_DEBOUNCE_MS) {
       clearTimeout(timer);
       timer = null;
     }
+    pendingKey = null;
+  }
+
+  function flushPending(): Promise<void> {
+    if (pendingKey === null) return writeQueue;
+    const key = pendingKey;
+    const value = pendingValue;
+    cancelPending();
+    return enqueue(() => saveDraft(key, value));
+  }
+
+  // One scheduler instance can be reused across targets (e.g. the session
+  // modal keeps one writer while switching sessions). A pending debounced
+  // write for a *different* key must be flushed rather than cancelled, or
+  // that key's latest keystrokes would be dropped.
+  function settleBeforeWrite(key: string) {
+    if (pendingKey !== null && pendingKey !== key) {
+      void flushPending();
+    } else {
+      cancelPending();
+    }
   }
 
   return {
     scheduleSave(key: string, value: string) {
-      cancelPending();
+      settleBeforeWrite(key);
+      pendingKey = key;
+      pendingValue = value;
       timer = setTimeout(() => {
         timer = null;
+        pendingKey = null;
         void enqueue(() => saveDraft(key, value));
       }, delayMs);
     },
     saveNow(key: string, value: string): Promise<void> {
-      cancelPending();
+      settleBeforeWrite(key);
       return enqueue(() => saveDraft(key, value));
     },
     clearNow(key: string): Promise<void> {
-      cancelPending();
+      settleBeforeWrite(key);
       return enqueue(() => clearDraft(key));
     },
-    cancel: cancelPending,
+    flush: flushPending,
   };
 }

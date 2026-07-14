@@ -21,6 +21,8 @@ versions and integrity hashes.
 Environment variables:
   ACP_TOOLS_LOCK_FILE    lockfile path (default: ./acp-tools.lock.json)
   ACP_TOOLS_CACHE_DIR    cache dir override
+  ACP_TOOLS_NPM_REGISTRY npm registry override (default: normal npm config
+                         resolution, minus project .npmrc files — see below)
 USAGE
 }
 
@@ -300,6 +302,13 @@ for (const entry of entries) {
   echo "Installing ACP tool $id $version from npm for $target..." >&2
   rm -rf "$install_dir"
   mkdir -p "$install_dir" "$bin_dir"
+  # `npm --prefix` reads project config from the (freshly wiped) prefix dir
+  # rather than the repo, so repo .npmrc files can't influence this install;
+  # only user/global config and this optional override apply. There is no
+  # hard-coded registry.npmjs.org default on purpose: Block's Cloudflare
+  # gateway blocks that host outright on managed devices (dependency
+  # confusion policy), so a corporate-mirror ~/.npmrc must keep winning by
+  # default and this override is the escape hatch for other environments.
   npm_args=(
     install
     --prefix "$install_dir"
@@ -311,11 +320,17 @@ for (const entry of entries) {
     --os "$npm_os"
     --cpu "$npm_cpu"
   )
+  if [[ -n "${ACP_TOOLS_NPM_REGISTRY:-}" ]]; then
+    npm_args+=(--registry "$ACP_TOOLS_NPM_REGISTRY")
+  fi
   if [[ -n "$npm_libc" ]]; then
     npm_args+=(--libc "$npm_libc")
   fi
   npm_args+=("$package@$version")
-  npm "${npm_args[@]}" >&2
+  if ! npm "${npm_args[@]}" >&2; then
+    echo "Failed to install $package@$version. If your configured registry is a corporate mirror that has not synced this version yet, retry once it catches up, or set ACP_TOOLS_NPM_REGISTRY to a registry that has it." >&2
+    exit 1
+  fi
 
   validate_npm_install "$install_dir" "$package" "$version" "$integrity" "$dependency_package" "$dependency_version" "$dependency_integrity" "$native_package" "$native_package_name" "$native_version" "$native_integrity" "$native_executable" "$claude_code_version"
   write_node_wrapper "$staged_bin" "$entrypoint" "$node_engine"

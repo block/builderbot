@@ -205,8 +205,7 @@
         {#if preferences.branchPrefix.trim()}
           Branch names generated from project names will look like {branchPrefixExample}.
         {:else}
-          This prefix will be added to branch names along with a slash separator when a repo is
-          added without choosing a branch.
+          This prefix will be added to branch names along with a slash separator.
         {/if}
       </p>
     </div>

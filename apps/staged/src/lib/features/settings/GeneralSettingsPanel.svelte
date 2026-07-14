@@ -195,7 +195,7 @@
       <Input
         id="branch-prefix-input"
         type="text"
-        placeholder="e.g. mtoohey"
+        placeholder="e.g. alice"
         class="max-w-[320px]"
         value={preferences.branchPrefix}
         oninput={(e) => setBranchPrefix(e.currentTarget.value)}

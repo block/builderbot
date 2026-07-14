@@ -845,7 +845,7 @@ pub(crate) fn infer_branch_name(project_name: &str) -> String {
 
 /// Normalize a configured branch prefix with the same rules
 /// [`infer_branch_name`] applies to project names, per `/`-separated segment
-/// so multi-level prefixes like `team/mtoohey` keep their hierarchy. Empty
+/// so multi-level prefixes like `team/alice` keep their hierarchy. Empty
 /// segments are dropped, so leading, trailing, and doubled slashes cannot
 /// produce an invalid ref. Returns `None` when nothing valid remains.
 fn normalize_branch_prefix(prefix: &str) -> Option<String> {
@@ -2647,8 +2647,8 @@ mod tests {
     #[test]
     fn apply_branch_prefix_joins_with_slash() {
         assert_eq!(
-            apply_branch_prefix(Some("mtoohey"), "my-project"),
-            "mtoohey/my-project"
+            apply_branch_prefix(Some("alice"), "my-project"),
+            "alice/my-project"
         );
     }
 
@@ -2660,8 +2660,8 @@ mod tests {
     #[test]
     fn normalize_branch_prefix_sanitizes_like_project_names() {
         assert_eq!(
-            normalize_branch_prefix("Matt Toohey"),
-            Some("matt-toohey".to_string())
+            normalize_branch_prefix("Alice Doe"),
+            Some("alice-doe".to_string())
         );
         assert_eq!(
             normalize_branch_prefix("branch.lock"),
@@ -2676,21 +2676,15 @@ mod tests {
     #[test]
     fn normalize_branch_prefix_preserves_multi_level_prefixes() {
         assert_eq!(
-            normalize_branch_prefix("team/mtoohey"),
-            Some("team/mtoohey".to_string())
+            normalize_branch_prefix("team/alice"),
+            Some("team/alice".to_string())
         );
     }
 
     #[test]
     fn normalize_branch_prefix_drops_empty_segments() {
-        assert_eq!(
-            normalize_branch_prefix("mtoohey/"),
-            Some("mtoohey".to_string())
-        );
-        assert_eq!(
-            normalize_branch_prefix("/mtoohey"),
-            Some("mtoohey".to_string())
-        );
+        assert_eq!(normalize_branch_prefix("alice/"), Some("alice".to_string()));
+        assert_eq!(normalize_branch_prefix("/alice"), Some("alice".to_string()));
         assert_eq!(
             normalize_branch_prefix("foo//bar"),
             Some("foo/bar".to_string())

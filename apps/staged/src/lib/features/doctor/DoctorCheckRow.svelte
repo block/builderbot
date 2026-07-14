@@ -169,7 +169,7 @@
     <span class="check-message">{check.message}</span>
     {#if check.path}
       {#if check.main?.bundled}
-        <span class="check-path">ACP bundled with Staged</span>
+        <span class="check-path">Bundled with Staged</span>
       {:else}
         <span class="check-path">{check.path}</span>
       {/if}
@@ -177,7 +177,7 @@
     {/if}
     {#if check.bridgePath}
       {#if check.bridge?.bundled}
-        <span class="check-path">ACP bundled with Staged</span>
+        <span class="check-path">Bundled with Staged</span>
       {:else}
         <span class="check-path">{check.bridgePath}</span>
       {/if}

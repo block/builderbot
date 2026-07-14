@@ -707,7 +707,9 @@
     stopPolling();
     unlistenStatus?.();
     unlistenBackgroundHold?.();
-    replyDraftWriter.cancel();
+    // Flush (not cancel) so a reply typed within the debounce window of
+    // teardown still gets persisted.
+    void replyDraftWriter.flush();
   });
 
   // This pane is mounted once and reused across opens (`sessionPanePool`

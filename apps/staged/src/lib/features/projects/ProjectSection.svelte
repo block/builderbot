@@ -165,7 +165,7 @@
 
   onDestroy(() => {
     liveSessionHintPoller.destroy();
-    projectDraftWriter.cancel();
+    void projectDraftWriter.flush();
   });
 
   // Hashtag reference items

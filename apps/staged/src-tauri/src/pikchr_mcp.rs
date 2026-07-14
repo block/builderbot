@@ -887,10 +887,15 @@ specialist deliberately accepted."
             .map_err(|e| ErrorData::internal_error(e, None))?;
 
         let preview_image_path = if let Some(png) = &outcome.png {
+            // A temp-file failure here is the parent's bookkeeping problem, not
+            // the specialist's: the sub-session already succeeded and recorded
+            // its own terminal status, so leave that intact and let this tool
+            // result's error explain the failure to the caller.
             let path = write_png_to_temp_file(png).map_err(|e| {
-                let message = format!("Failed to write Pikchr preview image to temp dir: {e}");
-                mark_pikchr_child_session_error(&store, &inner_session_id, &message);
-                ErrorData::internal_error(message, None)
+                ErrorData::internal_error(
+                    format!("Failed to write Pikchr preview image to temp dir: {e}"),
+                    None,
+                )
             })?;
             Some(path.display().to_string())
         } else {

@@ -918,7 +918,10 @@ fn create_pikchr_child_session(store: &Store, provider_id: &str) -> Result<Sessi
 }
 
 fn mark_pikchr_child_session_error(store: &Store, session_id: &str, message: &str) {
-    if let Err(e) = store.update_session_status(
+    // `transition_from_running` so a status the child session already reached
+    // — a concurrent user cancel, or the terminal status recorded by
+    // `generate_pikchr_source` — is not clobbered by this bookkeeping write.
+    if let Err(e) = store.transition_from_running(
         session_id,
         SessionStatus::Error,
         Some(message),

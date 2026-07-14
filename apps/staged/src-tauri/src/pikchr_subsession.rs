@@ -105,20 +105,25 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
     )
     .await;
 
+    // Terminal status goes through `transition_from_running`: this child
+    // session is driven by the pikchr worker thread rather than the
+    // SessionRegistry, so a user cancel takes `cancel_session`'s fallback path
+    // and writes Cancelled straight to the store — an unconditional write here
+    // would silently clobber it.
     let status_result = match &result {
-        Ok(_) => store.update_session_status(
+        Ok(_) => store.transition_from_running(
             session_id,
             SessionStatus::Completed,
             None,
             Some(&CompletionReason::TurnComplete),
         ),
-        Err(GenerationError::Cancelled) => store.update_session_status(
+        Err(GenerationError::Cancelled) => store.transition_from_running(
             session_id,
             SessionStatus::Cancelled,
             None,
             Some(&CompletionReason::Interrupted),
         ),
-        Err(GenerationError::Failed(message)) => store.update_session_status(
+        Err(GenerationError::Failed(message)) => store.transition_from_running(
             session_id,
             SessionStatus::Error,
             Some(message),
@@ -127,7 +132,18 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
     };
 
     match (result, status_result) {
-        (Ok(outcome), Ok(())) => Ok(outcome),
+        (Ok(outcome), Ok(transitioned)) => {
+            if !transitioned {
+                // A concurrent transition (e.g. a user cancel) won the race;
+                // its status stands, but the generated diagram still goes back
+                // to the caller.
+                log::info!(
+                    "[pikchr_subsession] Pikchr session {session_id} already left Running; \
+not marking it completed"
+                );
+            }
+            Ok(outcome)
+        }
         // The diagram was generated successfully; a status-bookkeeping failure
         // shouldn't discard it. The session stays Running until dead-session
         // recovery on the next launch.
@@ -137,7 +153,7 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
             );
             Ok(outcome)
         }
-        (Err(e), Ok(())) => Err(e.to_string()),
+        (Err(e), Ok(_)) => Err(e.to_string()),
         (Err(e), Err(status_error)) => Err(format!(
             "{}; additionally failed to update Pikchr session status: {status_error}",
             e
@@ -435,8 +451,8 @@ mod tests {
         (store, session_id)
     }
 
-    async fn run_generation(
-        driver: &FakeDriver,
+    async fn run_generation<D: AgentDriver>(
+        driver: &D,
         store: &Arc<Store>,
         session_id: &str,
         slot: &LastRenderSlot,
@@ -731,6 +747,86 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(*driver.calls.lock().unwrap(), 0);
+
+        let session = store
+            .get_session(&session_id)
+            .expect("load session")
+            .expect("session exists");
+        assert_eq!(session.status, SessionStatus::Cancelled);
+        assert_eq!(
+            session.completion_reason.as_ref(),
+            Some(&CompletionReason::Interrupted)
+        );
+    }
+
+    /// Simulates `cancel_session`'s fallback path: this child session is never
+    /// in the SessionRegistry, so a user cancel writes Cancelled straight to
+    /// the store while the specialist turn is still running.
+    struct CancelRacingDriver {
+        inner: FakeDriver,
+        store: Arc<Store>,
+    }
+
+    #[async_trait(?Send)]
+    impl AgentDriver for CancelRacingDriver {
+        async fn run(
+            &self,
+            session_id: &str,
+            prompt: &str,
+            images: &[(String, String)],
+            working_dir: &Path,
+            store: &Arc<dyn acp_client::Store>,
+            writer: &Arc<dyn acp_client::MessageWriter>,
+            cancel_token: &CancellationToken,
+            agent_session_id: Option<&str>,
+            config_options: &[acp_client::AcpSessionConfigOptionSelection],
+        ) -> Result<acp_client::AgentRunOutcome, String> {
+            self.store
+                .update_session_status(
+                    session_id,
+                    SessionStatus::Cancelled,
+                    None,
+                    Some(&CompletionReason::Interrupted),
+                )
+                .expect("write concurrent cancel");
+            self.inner
+                .run(
+                    session_id,
+                    prompt,
+                    images,
+                    working_dir,
+                    store,
+                    writer,
+                    cancel_token,
+                    agent_session_id,
+                    config_options,
+                )
+                .await
+        }
+    }
+
+    #[tokio::test]
+    async fn late_completion_does_not_clobber_concurrent_cancel() {
+        let slot = Arc::new(LastRenderSlot::new());
+        let (store, session_id) = child_session();
+        let driver = CancelRacingDriver {
+            inner: FakeDriver::new(
+                Arc::clone(&slot),
+                vec![turn(Some(render(CLEAN_SOURCE)), ACCEPT_SENTINEL)],
+            ),
+            store: Arc::clone(&store),
+        };
+
+        let outcome = run_generation(
+            &driver,
+            &store,
+            &session_id,
+            &slot,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("the generated diagram still goes back to the caller");
+        assert_eq!(outcome.source, CLEAN_SOURCE);
 
         let session = store
             .get_session(&session_id)

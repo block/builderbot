@@ -83,6 +83,7 @@ impl LastRenderSlot {
 ///
 /// Generic over [`AgentDriver`] so it can be unit-tested with a fake driver
 /// instead of spawning a real provider subprocess.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
     driver: &D,
     store: Arc<Store>,
@@ -161,6 +162,7 @@ not marking it completed"
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn generate_pikchr_source_inner<D: AgentDriver + ?Sized>(
     driver: &D,
     store: Arc<Store>,

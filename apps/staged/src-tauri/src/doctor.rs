@@ -26,7 +26,11 @@ async fn doctor_env_vars(bundled_dir: Option<&Path>) -> Vec<(String, String)> {
     env_vars
 }
 
-fn run_checks_options(check_freshness: bool, env_vars: Vec<(String, String)>) -> RunChecksOptions {
+fn run_checks_options(
+    check_freshness: bool,
+    env_vars: Vec<(String, String)>,
+    bundled_dir: Option<PathBuf>,
+) -> RunChecksOptions {
     RunChecksOptions {
         check_freshness,
         offline: false,
@@ -34,6 +38,11 @@ fn run_checks_options(check_freshness: bool, env_vars: Vec<(String, String)>) ->
         // from public npm/brew/crates.io, not an internal mirror.
         npm_registry: None,
         env: None,
+        // Doctor labels binaries resolved from this dir as bundled (install
+        // source + readout flag) and suppresses registry update fixes for
+        // them — versions are pinned by acp-tools.lock.json and ship with
+        // Staged updates.
+        bundled_tools_dir: bundled_dir,
     }
     .with_env_snapshot(env_vars)
 }
@@ -74,39 +83,24 @@ pub async fn run_doctor_freshness(app_handle: tauri::AppHandle) -> DoctorReport 
 }
 
 /// Run the doctor crate's checks plus Staged-local ones (currently the
-/// bundled ACP Node.js runtime check) over one shared env snapshot.
+/// bundled ACP Node.js runtime check) over one shared env snapshot. Bundled
+/// readouts are labeled by the doctor crate itself via
+/// `RunChecksOptions::bundled_tools_dir`.
 async fn run_doctor_report(app_handle: &tauri::AppHandle, check_freshness: bool) -> DoctorReport {
     let bundled_dir = crate::acp_tools::resolve_bundled_acp_tools_dir(app_handle);
     let env_vars = doctor_env_vars(bundled_dir.as_deref()).await;
     let (mut report, node_runtime) = tokio::join!(
-        doctor::run_checks_with_options(run_checks_options(check_freshness, env_vars.clone())),
+        doctor::run_checks_with_options(run_checks_options(
+            check_freshness,
+            env_vars.clone(),
+            bundled_dir.clone(),
+        )),
         run_node_runtime_check(&env_vars, bundled_dir.as_deref()),
     );
     if let Some(check) = node_runtime {
         report.checks.push(check);
     }
-    mark_bundled_bridges(&mut report, bundled_dir.as_deref());
     report
-}
-
-/// Stamp `bundled` on bridge readouts whose resolved path lives inside the
-/// app's bundled ACP tools dir. The doctor crate resolves those bridges via
-/// the PATH prefix `apply_bundled_tools_env` injects, so a prefix match
-/// against the same dir identifies them; the UI then presents them as
-/// bundled instead of showing an app-internal resource path.
-fn mark_bundled_bridges(report: &mut DoctorReport, bundled_dir: Option<&Path>) {
-    let Some(dir) = bundled_dir else { return };
-    for check in &mut report.checks {
-        let in_bundled_dir = check
-            .bridge_path
-            .as_deref()
-            .is_some_and(|p| Path::new(p).starts_with(dir));
-        if in_bundled_dir {
-            if let Some(bridge) = check.bridge.as_mut() {
-                bridge.bundled = Some(true);
-            }
-        }
-    }
 }
 
 /// Run a fix for a doctor check, identified by check ID and fix type.
@@ -146,7 +140,8 @@ pub async fn run_doctor_update(
 ) -> Result<(), String> {
     let bundled_dir = crate::acp_tools::resolve_bundled_acp_tools_dir(&app_handle);
     let env_vars = doctor_env_vars(bundled_dir.as_deref()).await;
-    let expected = expected_update_command(&check_id, &fix_type, env_vars.clone()).await?;
+    let expected =
+        expected_update_command(&check_id, &fix_type, env_vars.clone(), bundled_dir).await?;
     if expected != command {
         return Err(format!(
             "Update command mismatch for {check_id}: refusing to run a command \
@@ -166,13 +161,17 @@ pub async fn run_doctor_update(
 }
 
 /// Re-run freshness and return the authoritative update command for the given
-/// check + slot, or an error if no actionable update is derivable.
+/// check + slot, or an error if no actionable update is derivable. Passes the
+/// bundled dir through so bundled readouts derive no update command here,
+/// exactly as in the report the UI rendered.
 async fn expected_update_command(
     check_id: &str,
     fix_type: &FixType,
     env_vars: Vec<(String, String)>,
+    bundled_dir: Option<PathBuf>,
 ) -> Result<String, String> {
-    let report = doctor::run_checks_with_options(run_checks_options(true, env_vars)).await;
+    let report =
+        doctor::run_checks_with_options(run_checks_options(true, env_vars, bundled_dir)).await;
 
     let check = report
         .checks
@@ -654,51 +653,15 @@ mod tests {
         assert_eq!(parse_node_major(""), None);
     }
 
-    fn agent_check_with_bridge(id: &str, bridge_path: &str) -> DoctorCheck {
-        let mut check =
-            node_runtime_doctor_check(CheckStatus::Pass, "Installed".to_string(), None, None);
-        check.id = id.to_string();
-        check.bridge_path = Some(bridge_path.to_string());
-        check.bridge = Some(AgentVersionInfo::default());
-        check
-    }
-
+    /// Bundled-readout labeling lives in the doctor crate now; Staged's job is
+    /// only to hand the resolved bundled dir into the run options.
     #[test]
-    fn mark_bundled_bridges_stamps_only_bridges_inside_bundled_dir() {
-        let mut report = DoctorReport {
-            checks: vec![
-                agent_check_with_bridge(
-                    "ai-agent-claude",
-                    "/bundle/resources/acp/bin/claude-agent-acp",
-                ),
-                agent_check_with_bridge("ai-agent-pi", "/Users/me/.npm-global/bin/pi-acp"),
-            ],
-        };
+    fn run_checks_options_carries_bundled_tools_dir() {
+        let dir = PathBuf::from("/bundle/resources/acp/bin");
+        let opts = run_checks_options(false, Vec::new(), Some(dir.clone()));
+        assert_eq!(opts.bundled_tools_dir, Some(dir));
 
-        mark_bundled_bridges(&mut report, Some(Path::new("/bundle/resources/acp/bin")));
-
-        assert_eq!(
-            report.checks[0].bridge.as_ref().unwrap().bundled,
-            Some(true),
-        );
-        assert_eq!(
-            report.checks[1].bridge.as_ref().unwrap().bundled,
-            None,
-            "a user-installed bridge outside the bundled dir must not be stamped",
-        );
-    }
-
-    #[test]
-    fn mark_bundled_bridges_without_bundled_dir_is_a_no_op() {
-        let mut report = DoctorReport {
-            checks: vec![agent_check_with_bridge(
-                "ai-agent-claude",
-                "/bundle/resources/acp/bin/claude-agent-acp",
-            )],
-        };
-
-        mark_bundled_bridges(&mut report, None);
-
-        assert_eq!(report.checks[0].bridge.as_ref().unwrap().bundled, None);
+        let opts = run_checks_options(false, Vec::new(), None);
+        assert!(opts.bundled_tools_dir.is_none());
     }
 }

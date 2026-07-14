@@ -346,14 +346,19 @@ fn installed_version(
     }
 }
 
-/// Whether a tool keeps itself up to date and therefore should never raise an
-/// "update available" nag. Curl/native installers (Claude native, Cursor,
-/// Amp-curl) self-update; those installs are fingerprinted as
-/// [`InstallSource::CurlPipe`] (directly or via a per-agent override). Registry
-/// installs (brew/npm/cargo) are user-managed and remain actionable, which is
-/// why a brew/npm install of the same agent is *not* treated as self-updating.
+/// Whether a tool's freshness is managed outside the user's hands and
+/// therefore should never raise an "update available" nag. Curl/native
+/// installers (Cursor, Amp-curl) self-update; those installs are
+/// fingerprinted as [`InstallSource::CurlPipe`] (directly or via a per-agent
+/// override). [`InstallSource::Bundled`] binaries are pinned by the embedding
+/// app's lock and updated with the app. Registry installs (brew/npm/cargo)
+/// are user-managed and remain actionable, which is why a brew/npm install of
+/// the same agent is *not* treated as self-updating.
 pub(crate) fn is_self_updating(source: Option<&InstallSource>) -> bool {
-    matches!(source, Some(InstallSource::CurlPipe))
+    matches!(
+        source,
+        Some(InstallSource::CurlPipe | InstallSource::Bundled)
+    )
 }
 
 /// Dispatch a latest-version probe per source.
@@ -761,8 +766,9 @@ mod tests {
     }
 
     #[test]
-    fn self_updating_only_for_curl_pipe() {
+    fn self_updating_only_for_curl_pipe_and_bundled() {
         assert!(is_self_updating(Some(&InstallSource::CurlPipe)));
+        assert!(is_self_updating(Some(&InstallSource::Bundled)));
         assert!(!is_self_updating(Some(&InstallSource::Npm)));
         assert!(!is_self_updating(Some(&InstallSource::Brew)));
         assert!(!is_self_updating(None));
@@ -899,48 +905,20 @@ mod tests {
     #[test]
     fn package_json_resolves_scoped_package() {
         let root = scratch_dir("pj-scoped");
-        let pkg = root.join("node_modules/@zed-industries/codex-acp");
+        let pkg = root.join("node_modules/@agentclientprotocol/codex-acp");
         std::fs::create_dir_all(pkg.join("dist")).unwrap();
         let index = pkg.join("dist/index.js");
         std::fs::write(&index, "// node script\n").unwrap();
         std::fs::write(
             pkg.join("package.json"),
-            br#"{"name": "@zed-industries/codex-acp", "version": "0.7.1"}"#,
+            br#"{"name": "@agentclientprotocol/codex-acp", "version": "1.1.2"}"#,
         )
         .unwrap();
 
         assert_eq!(
-            installed_version_from_package_json(&index, Some("@zed-industries/codex-acp"))
+            installed_version_from_package_json(&index, Some("@agentclientprotocol/codex-acp"))
                 .as_deref(),
-            Some("0.7.1"),
-        );
-    }
-
-    /// Exercises the Claude main CLI's new npm package id end-to-end at the
-    /// freshness layer: when claude is npm-installed under nvm, its main
-    /// readout walks up to `@anthropic-ai/claude-code`'s `package.json`.
-    #[test]
-    fn package_json_resolves_claude_main_npm_layout() {
-        let root = scratch_dir("pj-claude-main");
-        let pkg = root.join("node_modules/@anthropic-ai/claude-code");
-        std::fs::create_dir_all(pkg.join("cli")).unwrap();
-        let entry = pkg.join("cli/cli.js");
-        std::fs::write(&entry, "// node script\n").unwrap();
-        std::fs::write(
-            pkg.join("package.json"),
-            br#"{"name": "@anthropic-ai/claude-code", "version": "2.1.0"}"#,
-        )
-        .unwrap();
-
-        // npm leaves a `claude` symlink in `bin/`.
-        std::fs::create_dir_all(root.join("bin")).unwrap();
-        let bin = root.join("bin/claude");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&entry, &bin).unwrap();
-
-        assert_eq!(
-            installed_version_from_package_json(&bin, Some("@anthropic-ai/claude-code")).as_deref(),
-            Some("2.1.0"),
+            Some("1.1.2"),
         );
     }
 

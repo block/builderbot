@@ -38,11 +38,18 @@ pub struct AgentCheckInfo {
     pub auth_status_command: Option<&'static str>,
     /// Per-tool override declaring this agent's install source when generic path
     /// and filesystem-fingerprint heuristics fall through to
-    /// [`InstallSource::Unknown`]. Lets a curl/native-only agent (Claude native,
-    /// Cursor, Amp) report its true source instead of `Unknown`. Applied only on
+    /// [`InstallSource::Unknown`]. Lets a curl/native-only agent (Cursor, Amp)
+    /// report its true source instead of `Unknown`. Applied only on
     /// `Unknown`; a positively-detected source (Brew/Npm/…) and a missing binary
     /// (`None`) are left untouched.
     pub install_source_override: Option<InstallSource>,
+    /// CLI args that print the vendored agent CLI's version through the ACP
+    /// bridge's passthrough subcommand (e.g. `--cli --version` for
+    /// `claude-agent-acp`). Used by the freshness pass for
+    /// [`InstallSource::Bundled`] readouts, where the bridge version is pinned
+    /// by the embedding app's lock and the version worth surfacing is the
+    /// vendored harness CLI's (e.g. Claude Code 2.1.x).
+    pub bundled_version_args: Option<&'static [&'static str]>,
 }
 
 /// All AI agents we check for individually.
@@ -59,34 +66,42 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         auth_command: None,
         auth_status_command: None,
         install_source_override: None,
+        bundled_version_args: None,
     },
+    // The claude-agent-acp bridge vendors the complete Claude Code CLI and
+    // forwards `--cli <args>` to it, sharing the user's credential store
+    // (macOS Keychain / ~/.claude). The bridge is therefore the only binary
+    // this check needs — no separate `claude` main CLI is probed.
     AgentCheckInfo {
         id: "ai-agent-claude",
         label: "Claude Code",
         commands: &["claude-agent-acp"],
-        main_command: Some("claude"),
-        install_url: Some("https://code.claude.com/docs/en/overview"),
-        install_command: Some("curl -fsSL https://claude.ai/install.sh | bash"),
-        bridge_install_url: Some("https://github.com/zed-industries/claude-agent-acp#installation"),
-        bridge_install_command: Some("npm install -g @agentclientprotocol/claude-agent-acp"),
-        auth_command: Some("claude auth login"),
-        auth_status_command: Some("claude auth status"),
-        // Main `claude` is a curl/native install; the bridge is npm and is
-        // detected positively, so this only takes effect on the main-only path.
-        install_source_override: Some(InstallSource::CurlPipe),
+        main_command: None,
+        install_url: Some("https://www.npmjs.com/package/@agentclientprotocol/claude-agent-acp"),
+        install_command: Some("npm install -g @agentclientprotocol/claude-agent-acp"),
+        bridge_install_url: None,
+        bridge_install_command: None,
+        auth_command: Some("claude-agent-acp --cli auth login"),
+        auth_status_command: Some("claude-agent-acp --cli auth status"),
+        install_source_override: None,
+        bundled_version_args: Some(&["--cli", "--version"]),
     },
+    // The codex-acp bridge vendors the full `codex` binary and forwards
+    // `cli <args>` to it, sharing the user's ~/.codex/auth.json — same
+    // single-binary shape as Claude above.
     AgentCheckInfo {
         id: "ai-agent-codex",
         label: "Codex",
         commands: &["codex-acp"],
-        main_command: Some("codex"),
-        install_url: Some("https://github.com/openai/codex#quickstart"),
-        install_command: Some("brew install --cask codex"),
-        bridge_install_url: Some("https://github.com/zed-industries/codex-acp#installation"),
-        bridge_install_command: Some("npm install -g @zed-industries/codex-acp"),
-        auth_command: Some("codex login"),
-        auth_status_command: Some("codex login status"),
+        main_command: None,
+        install_url: Some("https://www.npmjs.com/package/@agentclientprotocol/codex-acp"),
+        install_command: Some("npm install -g @agentclientprotocol/codex-acp"),
+        bridge_install_url: None,
+        bridge_install_command: None,
+        auth_command: Some("codex-acp cli login"),
+        auth_status_command: Some("codex-acp cli login status"),
         install_source_override: None,
+        bundled_version_args: Some(&["cli", "--version"]),
     },
     AgentCheckInfo {
         id: "ai-agent-pi",
@@ -100,6 +115,7 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         auth_command: None,
         auth_status_command: None,
         install_source_override: None,
+        bundled_version_args: None,
     },
     AgentCheckInfo {
         id: "ai-agent-amp",
@@ -114,6 +130,7 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         auth_status_command: Some("amp usage"),
         // Main `amp` curl installer; bridge `amp-acp` is npm (detected positively).
         install_source_override: Some(InstallSource::CurlPipe),
+        bundled_version_args: None,
     },
     AgentCheckInfo {
         id: "ai-agent-copilot",
@@ -127,6 +144,7 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         auth_command: Some("copilot login"),
         auth_status_command: None,
         install_source_override: None,
+        bundled_version_args: None,
     },
     AgentCheckInfo {
         id: "ai-agent-cursor",
@@ -142,13 +160,34 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         // Cursor has only a curl/native installer and no ACP bridge, so the
         // resolved binary is the curl install — the override's primary use case.
         install_source_override: Some(InstallSource::CurlPipe),
+        bundled_version_args: None,
     },
 ];
 
+/// Version-probe args for a bundled agent readout: the bridge-passthrough
+/// invocation that prints the vendored harness CLI's version (e.g. Claude
+/// Code 2.1.x instead of the bridge package's own version). `None` for
+/// non-bundled sources — registry installs keep their registry-consistent
+/// probes so `update_available` compares like with like — and for agents
+/// without a passthrough.
+pub(crate) fn bundled_version_probe_args(
+    check_id: &str,
+    install_source: Option<&InstallSource>,
+) -> Option<&'static [&'static str]> {
+    if !matches!(install_source, Some(InstallSource::Bundled)) {
+        return None;
+    }
+    AI_AGENT_CHECKS
+        .iter()
+        .find(|info| info.id == check_id)
+        .and_then(|info| info.bundled_version_args)
+}
+
 /// Derive a source-aware update command from a readout's install source and
-/// package id. Returns `None` for self-updating sources (`CurlPipe`), sources
-/// with no canonical update recipe (`Mise`/`Asdf`/`Unknown`/`System`), or when
-/// the package id is unknown.
+/// package id. Returns `None` for self-updating sources (`CurlPipe`),
+/// app-managed installs (`Bundled` — updates ship with the embedding app),
+/// sources with no canonical update recipe (`Mise`/`Asdf`/`Unknown`/`System`),
+/// or when the package id is unknown.
 ///
 /// The caller is responsible for gating on `update_available == Some(true)` —
 /// this function only knows how to update, not whether to. `apply_npm_registry`
@@ -164,6 +203,7 @@ pub fn derive_update_command(
         InstallSource::Brew => Some(format!("brew upgrade {pkg}")),
         InstallSource::Cargo => Some(format!("cargo install --force {pkg}")),
         InstallSource::CurlPipe
+        | InstallSource::Bundled
         | InstallSource::Mise
         | InstallSource::Asdf
         | InstallSource::Unknown
@@ -264,8 +304,11 @@ fn apply_install_source_override(
 /// `Some` only when the binary was resolved (i.e. a source was detected); the
 /// version fields stay `None` until the freshness pass fills them in. A binary
 /// that wasn't found (`None`) yields `None` — no empty readout is fabricated.
+/// A `Bundled` source also stamps the readout's `bundled` flag so the UI can
+/// label the binary without re-deriving the app-bundle prefix match.
 fn version_readout(source: Option<InstallSource>) -> Option<AgentVersionInfo> {
     source.map(|src| AgentVersionInfo {
+        bundled: (src == InstallSource::Bundled).then_some(true),
         install_source: Some(src),
         ..AgentVersionInfo::default()
     })
@@ -734,14 +777,14 @@ mod tests {
 
     /// When only the agent CLI resolves (no bridge), the main readout carries
     /// the CLI's source — upgraded from `Unknown` via the per-agent override —
-    /// and the bridge readout is `None`. Claude's main-only path returns before
+    /// and the bridge readout is `None`. Amp's main-only path returns before
     /// any auth probe, so this runs without shelling out.
     #[test]
     fn agent_check_main_only_applies_override_and_omits_bridge() {
         let bridge_missing = resolved(None, None);
-        let main = resolved(Some("/h/.local/bin/claude"), Some(InstallSource::Unknown));
+        let main = resolved(Some("/h/.local/bin/amp"), Some(InstallSource::Unknown));
         let check = check_single_ai_agent(
-            agent("ai-agent-claude"),
+            agent("ai-agent-amp"),
             true,
             std::slice::from_ref(&bridge_missing),
             Some(&main),
@@ -757,6 +800,94 @@ mod tests {
         );
         assert!(check.bridge.is_none(), "no bridge resolved");
         assert_eq!(check.install_source, Some(InstallSource::CurlPipe));
+    }
+
+    /// A binary resolved from the embedding app's bundled tools dir carries
+    /// `InstallSource::Bundled` and the readout's `bundled` flag, so the UI can
+    /// label it without re-deriving the prefix match. Uses Copilot — the same
+    /// single-binary shape as claude/codex (`main_command: None`, so the
+    /// readout lands under `main`) but with no auth-status probe, so the check
+    /// runs without shelling out.
+    #[test]
+    fn agent_check_bundled_source_stamps_bundled_readout() {
+        let bridge = resolved(
+            Some("/Applications/App.app/resources/acp/bin/copilot"),
+            Some(InstallSource::Bundled),
+        );
+        let check = check_single_ai_agent(
+            agent("ai-agent-copilot"),
+            true,
+            std::slice::from_ref(&bridge),
+            None,
+            None,
+            None,
+        );
+
+        let m = check.main.expect("main readout present");
+        assert_eq!(m.install_source, Some(InstallSource::Bundled));
+        assert_eq!(m.bundled, Some(true));
+        assert_eq!(check.install_source, Some(InstallSource::Bundled));
+    }
+
+    /// The claude/codex checks are single-binary: the ACP bridge vendors the
+    /// full harness CLI, so no separate main command is resolved and all
+    /// auth/install commands go through the bridge passthrough.
+    #[test]
+    fn claude_and_codex_probe_through_bridge_passthrough() {
+        let claude = agent("ai-agent-claude");
+        assert_eq!(claude.main_command, None);
+        assert_eq!(
+            claude.auth_status_command,
+            Some("claude-agent-acp --cli auth status"),
+        );
+        assert_eq!(
+            claude.auth_command,
+            Some("claude-agent-acp --cli auth login")
+        );
+        assert_eq!(
+            claude.install_command,
+            Some("npm install -g @agentclientprotocol/claude-agent-acp"),
+        );
+        assert_eq!(
+            claude.bundled_version_args,
+            Some(&["--cli", "--version"][..])
+        );
+
+        let codex = agent("ai-agent-codex");
+        assert_eq!(codex.main_command, None);
+        assert_eq!(
+            codex.auth_status_command,
+            Some("codex-acp cli login status")
+        );
+        assert_eq!(codex.auth_command, Some("codex-acp cli login"));
+        assert_eq!(
+            codex.install_command,
+            Some("npm install -g @agentclientprotocol/codex-acp"),
+        );
+        assert_eq!(codex.bundled_version_args, Some(&["cli", "--version"][..]));
+    }
+
+    #[test]
+    fn bundled_version_probe_args_apply_only_to_bundled_sources() {
+        assert_eq!(
+            bundled_version_probe_args("ai-agent-claude", Some(&InstallSource::Bundled)),
+            Some(&["--cli", "--version"][..]),
+        );
+        assert_eq!(
+            bundled_version_probe_args("ai-agent-codex", Some(&InstallSource::Bundled)),
+            Some(&["cli", "--version"][..]),
+        );
+        // Registry installs keep their registry-consistent probes.
+        assert_eq!(
+            bundled_version_probe_args("ai-agent-claude", Some(&InstallSource::Npm)),
+            None,
+        );
+        assert_eq!(bundled_version_probe_args("ai-agent-claude", None), None);
+        // Bundled agents without a passthrough fall back to the default probe.
+        assert_eq!(
+            bundled_version_probe_args("ai-agent-goose", Some(&InstallSource::Bundled)),
+            None,
+        );
     }
 
     /// An agent with no separate bridge reports its single binary under `main`,
@@ -785,18 +916,17 @@ mod tests {
         let tmp = unique_tmp_dir("auth-env-vs-hermit");
         let snapshot_bin = tmp.join("snapshot/bin");
         let hermit_bin = tmp.join("hermit/bin");
-        let claude = snapshot_bin.join("claude");
         let bridge = snapshot_bin.join("claude-agent-acp");
+        // The auth probe is the bridge passthrough (`--cli auth status`).
         write_executable(
-            &claude,
+            &bridge,
             "#!/bin/sh\n\
              test \"$DOCTOR_AGENT_ENV\" = snapshot || exit 43\n\
-             test \"$1\" = auth || exit 44\n\
-             test \"$2\" = status || exit 45\n\
+             test \"$1\" = --cli || exit 44\n\
+             test \"$2\" = auth || exit 45\n\
+             test \"$3\" = status || exit 46\n\
              exit 0\n",
         );
-        write_executable(&bridge, "#!/bin/sh\nexit 0\n");
-        write_executable(&hermit_bin.join("claude"), "#!/bin/sh\nexit 42\n");
         write_executable(&hermit_bin.join("claude-agent-acp"), "#!/bin/sh\nexit 42\n");
         write_login_path_rewrite_profiles(&tmp, &hermit_bin);
 
@@ -804,11 +934,6 @@ mod tests {
             path: Some(bridge.clone()),
             search_output: "BRIDGE-SNAPSHOT-SEARCH".to_string(),
             install_source: Some(InstallSource::Npm),
-        };
-        let main_resolved = ResolvedBinary {
-            path: Some(claude.clone()),
-            search_output: "MAIN-SNAPSHOT-SEARCH".to_string(),
-            install_source: Some(InstallSource::CurlPipe),
         };
         let env = DoctorEnv::new(vec![
             ("DOCTOR_AGENT_ENV".to_string(), "snapshot".to_string()),
@@ -825,21 +950,19 @@ mod tests {
             agent("ai-agent-claude"),
             true,
             std::slice::from_ref(&bridge_resolved),
-            Some(&main_resolved),
+            None,
             None,
             Some(&env),
         );
 
         assert_eq!(check.status, CheckStatus::Pass);
         assert_eq!(check.auth_status, Some(AuthStatus::Authenticated));
+        // Single-binary shape: the bridge reports under `path`/`main`.
         assert_eq!(
             check.path.as_deref(),
-            Some(claude.to_string_lossy().as_ref())
-        );
-        assert_eq!(
-            check.bridge_path.as_deref(),
             Some(bridge.to_string_lossy().as_ref())
         );
+        assert!(check.bridge_path.is_none());
         let raw = check.raw_output.unwrap_or_default();
         assert!(
             !raw.contains(&hermit_bin.to_string_lossy().to_string()),
@@ -869,7 +992,11 @@ mod tests {
     fn auth_fix_lookup_returns_agent_auth_command() {
         assert_eq!(
             lookup_fix_command("ai-agent-claude", &FixType::Auth).as_deref(),
-            Some("claude auth login"),
+            Some("claude-agent-acp --cli auth login"),
+        );
+        assert_eq!(
+            lookup_fix_command("ai-agent-codex", &FixType::Auth).as_deref(),
+            Some("codex-acp cli login"),
         );
         assert_eq!(
             lookup_fix_command("ai-agent-copilot", &FixType::Auth).as_deref(),
@@ -911,7 +1038,7 @@ mod tests {
 
     #[test]
     fn curl_native_agents_declare_curl_pipe_override() {
-        for id in ["ai-agent-claude", "ai-agent-amp", "ai-agent-cursor"] {
+        for id in ["ai-agent-amp", "ai-agent-cursor"] {
             let info = AI_AGENT_CHECKS.iter().find(|i| i.id == id).unwrap();
             assert_eq!(
                 info.install_source_override,
@@ -919,12 +1046,11 @@ mod tests {
                 "{id} should declare a CurlPipe override",
             );
         }
-        // Registry-installed agents declare no override.
-        let codex = AI_AGENT_CHECKS
-            .iter()
-            .find(|i| i.id == "ai-agent-codex")
-            .unwrap();
-        assert_eq!(codex.install_source_override, None);
+        // Bridge-only and registry-installed agents declare no override.
+        for id in ["ai-agent-claude", "ai-agent-codex"] {
+            let info = AI_AGENT_CHECKS.iter().find(|i| i.id == id).unwrap();
+            assert_eq!(info.install_source_override, None, "{id}");
+        }
     }
 
     #[test]
@@ -951,8 +1077,11 @@ mod tests {
             curl,
         );
         assert_eq!(
-            apply_npm_registry("claude auth login", Some("https://artifactory/npm")),
-            "claude auth login",
+            apply_npm_registry(
+                "claude-agent-acp --cli auth login",
+                Some("https://artifactory/npm"),
+            ),
+            "claude-agent-acp --cli auth login",
         );
     }
 
@@ -1030,9 +1159,12 @@ mod tests {
     #[test]
     fn derive_update_command_npm_emits_at_latest() {
         assert_eq!(
-            derive_update_command(Some(&InstallSource::Npm), Some("@anthropic-ai/claude-code"),)
-                .as_deref(),
-            Some("npm install -g @anthropic-ai/claude-code@latest"),
+            derive_update_command(
+                Some(&InstallSource::Npm),
+                Some("@agentclientprotocol/claude-agent-acp"),
+            )
+            .as_deref(),
+            Some("npm install -g @agentclientprotocol/claude-agent-acp@latest"),
         );
     }
 
@@ -1056,6 +1188,7 @@ mod tests {
     fn derive_update_command_self_updating_and_opaque_sources_return_none() {
         for src in [
             InstallSource::CurlPipe,
+            InstallSource::Bundled,
             InstallSource::Mise,
             InstallSource::Asdf,
             InstallSource::Unknown,

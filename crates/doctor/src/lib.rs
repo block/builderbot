@@ -21,16 +21,19 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use agents::{check_single_ai_agent, derive_update_command, lookup_fix_command, AI_AGENT_CHECKS};
+use agents::{
+    bundled_version_probe_args, check_single_ai_agent, derive_update_command, lookup_fix_command,
+    AI_AGENT_CHECKS,
+};
 use checks::{check_clonefile, check_gh, check_gh_auth, check_git, check_git_lfs};
 use command::{
     format_duration, run_command_with_timeout, CommandError, CommandTimeout, DEFAULT_PROBE_TIMEOUT,
 };
 use freshness::{
     fetch_version_info, is_self_updating, load_cache, save_cache, select_installed_probe,
-    FetchVersionInfoOptions,
+    FetchVersionInfoOptions, InstalledProbe,
 };
-use package_ids::{lookup_package_id_for_binary, LatestSource, Role};
+use package_ids::{lookup_package_id, LatestSource, Role};
 use resolve::resolve_binary_with_diagnostics;
 use types::{InstallSource, ResolvedBinary};
 
@@ -82,6 +85,14 @@ pub struct RunChecksOptions {
     /// resolution, checks, freshness probes, and fixes all see the same shell
     /// environment. `None` preserves the previous per-call-site behavior.
     pub env: Option<DoctorEnv>,
+    /// Directory holding agent binaries bundled inside the embedding app
+    /// (e.g. Staged's `resources/acp/bin`). Binaries that resolve from inside
+    /// this dir are labeled [`InstallSource::Bundled`] and their readouts get
+    /// `bundled: Some(true)` — versions are pinned by the app's lock and ship
+    /// with app updates, so no registry install/update fix is offered. The
+    /// caller remains responsible for putting the dir on the probe PATH (via
+    /// `env`); this option only affects labeling.
+    pub bundled_tools_dir: Option<PathBuf>,
 }
 
 impl RunChecksOptions {
@@ -105,10 +116,11 @@ pub async fn run_checks_with_options(opts: RunChecksOptions) -> DoctorReport {
         offline,
         npm_registry,
         env,
+        bundled_tools_dir,
     } = opts;
     let env = env.map(Arc::new);
     let npm_registry = npm_registry.as_deref();
-    let report = collect_base_report(npm_registry, env.clone()).await;
+    let report = collect_base_report(npm_registry, env.clone(), bundled_tools_dir.as_deref()).await;
 
     if check_freshness {
         populate_freshness(report, offline, npm_registry, env).await
@@ -120,6 +132,7 @@ pub async fn run_checks_with_options(opts: RunChecksOptions) -> DoctorReport {
 async fn collect_base_report(
     npm_registry: Option<&str>,
     env: Option<Arc<DoctorEnv>>,
+    bundled_tools_dir: Option<&Path>,
 ) -> DoctorReport {
     let mut binary_names: Vec<&'static str> = vec!["git", "gh", "git-lfs"];
     for info in AI_AGENT_CHECKS {
@@ -153,6 +166,10 @@ async fn collect_base_report(
             resolved.insert(name, rb);
             resolution_timeouts.extend(timeouts);
         }
+    }
+
+    if let Some(dir) = bundled_tools_dir {
+        apply_bundled_install_source(&mut resolved, dir);
     }
 
     let fallback = ResolvedBinary {
@@ -255,6 +272,20 @@ async fn collect_base_report(
     checks.extend(timeout_diagnostic_checks(resolution_timeouts));
 
     DoctorReport { checks }
+}
+
+/// Re-label binaries that resolved from inside the embedding app's bundled
+/// tools dir as [`InstallSource::Bundled`]. Runs before the checks consume the
+/// resolution results, so the label flows into readouts (which also stamp
+/// `bundled: Some(true)`), the flat `install_source`, and the freshness pass —
+/// where `Bundled` has no registry entry and therefore never yields an update
+/// nag or a registry fix command.
+fn apply_bundled_install_source(resolved: &mut HashMap<&str, ResolvedBinary>, dir: &Path) {
+    for rb in resolved.values_mut() {
+        if rb.path.as_deref().is_some_and(|p| p.starts_with(dir)) {
+            rb.install_source = Some(InstallSource::Bundled);
+        }
+    }
 }
 
 fn timeout_diagnostic_checks(timeouts: Vec<CommandTimeout>) -> Vec<DoctorCheck> {
@@ -381,12 +412,11 @@ fn resolve_package(
     check_id: &str,
     source: Option<&InstallSource>,
     role: Role,
-    binary_path: Option<&Path>,
 ) -> (Option<String>, Option<LatestSource>) {
     source
         .cloned()
-        .and_then(|src| lookup_package_id_for_binary(check_id, src, role, binary_path))
-        .map(|(pkg, latest)| (Some(pkg), Some(latest)))
+        .and_then(|src| lookup_package_id(check_id, src, role))
+        .map(|(pkg, latest)| (Some(pkg.to_string()), Some(latest)))
         .unwrap_or((None, None))
 }
 
@@ -493,12 +523,8 @@ async fn populate_freshness(
         if is_agent {
             if let (Some(readout), Some(path)) = (&check.main, check.path.as_deref()) {
                 let path = PathBuf::from(path);
-                let (package_id, latest_source) = resolve_package(
-                    &check.id,
-                    readout.install_source.as_ref(),
-                    Role::Main,
-                    Some(&path),
-                );
+                let (package_id, latest_source) =
+                    resolve_package(&check.id, readout.install_source.as_ref(), Role::Main);
                 targets.push(FreshnessTarget {
                     id: check.id.clone(),
                     slot: ReadoutSlot::Main,
@@ -506,16 +532,19 @@ async fn populate_freshness(
                     latest_source,
                     package_id,
                     install_source: readout.install_source.clone(),
+                    // Bundled bridges probe the vendored harness CLI's version
+                    // through the bridge passthrough (e.g. Claude Code 2.1.x),
+                    // not the bridge package's own pinned version.
+                    version_args: bundled_version_probe_args(
+                        &check.id,
+                        readout.install_source.as_ref(),
+                    ),
                 });
             }
             if let (Some(readout), Some(path)) = (&check.bridge, check.bridge_path.as_deref()) {
                 let path = PathBuf::from(path);
-                let (package_id, latest_source) = resolve_package(
-                    &check.id,
-                    readout.install_source.as_ref(),
-                    Role::Bridge,
-                    Some(&path),
-                );
+                let (package_id, latest_source) =
+                    resolve_package(&check.id, readout.install_source.as_ref(), Role::Bridge);
                 targets.push(FreshnessTarget {
                     id: check.id.clone(),
                     slot: ReadoutSlot::Bridge,
@@ -523,6 +552,7 @@ async fn populate_freshness(
                     latest_source,
                     package_id,
                     install_source: readout.install_source.clone(),
+                    version_args: None,
                 });
             }
         } else {
@@ -531,12 +561,8 @@ async fn populate_freshness(
             let path_str = check.bridge_path.as_deref().or(check.path.as_deref());
             let Some(path_str) = path_str else { continue };
             let path = PathBuf::from(path_str);
-            let (package_id, latest_source) = resolve_package(
-                &check.id,
-                check.install_source.as_ref(),
-                Role::Any,
-                Some(&path),
-            );
+            let (package_id, latest_source) =
+                resolve_package(&check.id, check.install_source.as_ref(), Role::Any);
             targets.push(FreshnessTarget {
                 id: check.id.clone(),
                 slot: ReadoutSlot::Flat,
@@ -544,6 +570,7 @@ async fn populate_freshness(
                 latest_source,
                 package_id,
                 install_source: check.install_source.clone(),
+                version_args: None,
             });
         }
     }
@@ -553,9 +580,14 @@ async fn populate_freshness(
         let npm_registry = npm_registry.clone();
         let env = env.clone();
         async move {
-            // npm-distributed bridges don't honor `--version`; read their
-            // installed version straight from the owning `package.json`.
-            let probe = select_installed_probe(t.install_source.as_ref(), t.package_id.as_deref());
+            // Bundled bridges probe through their explicit passthrough args.
+            // Otherwise: npm-distributed bridges don't honor `--version`, so
+            // their installed version is read straight from the owning
+            // `package.json`; everything else runs `<binary> --version`.
+            let probe = match t.version_args {
+                Some(args) => InstalledProbe::Cli(args),
+                None => select_installed_probe(t.install_source.as_ref(), t.package_id.as_deref()),
+            };
             let info = fetch_version_info(
                 t.latest_source,
                 t.package_id.as_deref(),
@@ -642,6 +674,9 @@ struct FreshnessTarget {
     latest_source: Option<LatestSource>,
     package_id: Option<String>,
     install_source: Option<InstallSource>,
+    /// Explicit installed-version probe args (bridge passthrough for bundled
+    /// installs). `None` selects the source-derived default probe.
+    version_args: Option<&'static [&'static str]>,
 }
 
 /// Options for executing a doctor fix command.
@@ -1344,62 +1379,97 @@ mod tests {
             &mut readout,
             &info,
             ReadoutSlot::Main,
-            Some("@anthropic-ai/claude-code"),
+            Some("@agentclientprotocol/claude-agent-acp"),
         );
         assert_eq!(
             readout.update_command.as_deref(),
-            Some("npm install -g @anthropic-ai/claude-code@latest"),
+            Some("npm install -g @agentclientprotocol/claude-agent-acp@latest"),
         );
         assert_eq!(readout.update_fix_type, Some(FixType::UpdateMain));
     }
 
-    /// Claude Code's Homebrew cask should update as the main CLI via brew, not
-    /// via the npm package used by npm-managed installs.
+    /// A brew-installed main CLI updates via `brew upgrade <pkg>`.
     #[tokio::test]
-    async fn apply_freshness_brew_main_emits_claude_code_update_command() {
+    async fn apply_freshness_brew_main_emits_update_main_command() {
         let mut readout = AgentVersionInfo {
             install_source: Some(InstallSource::Brew),
             ..AgentVersionInfo::default()
         };
         let info = freshness::VersionInfo {
-            installed: Some("2.1.152".into()),
-            latest: Some("2.1.153".into()),
+            installed: Some("0.1.0".into()),
+            latest: Some("0.2.0".into()),
             update_available: Some(true),
             command_timeouts: Vec::new(),
         };
-        apply_freshness(&mut readout, &info, ReadoutSlot::Main, Some("claude-code"));
+        apply_freshness(&mut readout, &info, ReadoutSlot::Main, Some("ampcode"));
         assert_eq!(
             readout.update_command.as_deref(),
-            Some("brew upgrade claude-code"),
+            Some("brew upgrade ampcode"),
         );
         assert_eq!(readout.update_fix_type, Some(FixType::UpdateMain));
     }
 
-    /// The Homebrew latest-channel cask should keep its token all the way
-    /// through to the generated update command.
+    /// Bundled readouts report the probed version but never an update nag or
+    /// command — the binary is pinned by the embedding app's lock and updates
+    /// ship with the app.
     #[tokio::test]
-    async fn apply_freshness_brew_main_emits_claude_code_latest_update_command() {
+    async fn apply_freshness_bundled_suppresses_update() {
         let mut readout = AgentVersionInfo {
-            install_source: Some(InstallSource::Brew),
+            bundled: Some(true),
+            install_source: Some(InstallSource::Bundled),
             ..AgentVersionInfo::default()
         };
         let info = freshness::VersionInfo {
-            installed: Some("2.1.152".into()),
-            latest: Some("2.1.153".into()),
+            installed: Some("2.1.205".into()),
+            latest: Some("2.2.0".into()),
             update_available: Some(true),
             command_timeouts: Vec::new(),
         };
-        apply_freshness(
-            &mut readout,
-            &info,
-            ReadoutSlot::Main,
-            Some("claude-code@latest"),
+        apply_freshness(&mut readout, &info, ReadoutSlot::Main, None);
+        assert_eq!(readout.installed_version.as_deref(), Some("2.1.205"));
+        assert!(readout.update_available.is_none());
+        assert!(readout.update_command.is_none());
+        assert!(readout.update_fix_type.is_none());
+    }
+
+    /// Binaries resolved from inside the bundled tools dir are re-labeled
+    /// `Bundled`; everything else keeps its detected source.
+    #[test]
+    fn apply_bundled_install_source_relabels_only_bundled_paths() {
+        let mut resolved: HashMap<&str, ResolvedBinary> = HashMap::new();
+        resolved.insert(
+            "codex-acp",
+            ResolvedBinary {
+                path: Some(PathBuf::from("/bundle/resources/acp/bin/codex-acp")),
+                search_output: String::new(),
+                install_source: Some(InstallSource::Unknown),
+            },
         );
+        resolved.insert(
+            "pi-acp",
+            ResolvedBinary {
+                path: Some(PathBuf::from("/Users/me/.npm-global/bin/pi-acp")),
+                search_output: String::new(),
+                install_source: Some(InstallSource::Npm),
+            },
+        );
+        resolved.insert(
+            "goose",
+            ResolvedBinary {
+                path: None,
+                search_output: String::new(),
+                install_source: None,
+            },
+        );
+
+        apply_bundled_install_source(&mut resolved, Path::new("/bundle/resources/acp/bin"));
+
         assert_eq!(
-            readout.update_command.as_deref(),
-            Some("brew upgrade claude-code@latest"),
+            resolved["codex-acp"].install_source,
+            Some(InstallSource::Bundled),
         );
-        assert_eq!(readout.update_fix_type, Some(FixType::UpdateMain));
+        assert_eq!(resolved["pi-acp"].install_source, Some(InstallSource::Npm));
+        assert_eq!(resolved["goose"].install_source, None);
     }
 
     /// Bridge slot with a brew install upgrades via `brew upgrade <pkg>` and
@@ -1600,7 +1670,7 @@ mod tests {
         ]);
         let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let lines_clone = lines.clone();
-        let command = "npm install -g @anthropic-ai/claude-code@latest";
+        let command = "npm install -g @agentclientprotocol/claude-agent-acp@latest";
 
         let result = execute_fix_streaming_with_env_options(
             "ai-agent-claude".to_string(),
@@ -1620,9 +1690,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         assert!(result.is_ok(), "snapshot npm update failed: {result:?}");
         assert!(
-            captured
-                .iter()
-                .any(|line| line == "snapshot-npm install -g @anthropic-ai/claude-code@latest"),
+            captured.iter().any(|line| line
+                == "snapshot-npm install -g @agentclientprotocol/claude-agent-acp@latest"),
             "expected update to run through snapshot npm; captured: {captured:?}",
         );
         assert!(

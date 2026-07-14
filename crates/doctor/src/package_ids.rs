@@ -8,8 +8,6 @@
 //! Checks not listed here (or with no matching source) skip the latest-version
 //! probe.
 
-use std::path::Path;
-
 use crate::types::InstallSource;
 
 /// How to fetch the "latest available" version for a package.
@@ -30,12 +28,11 @@ pub(crate) enum LatestSource {
     GitHubReleases,
 }
 
-/// Which binary an entry describes. An AI-agent check fronts up to two distinct
-/// binaries — the agent's own CLI (`Main`) and its ACP bridge (`Bridge`). When
-/// both are installed from the same registry (e.g. both via npm, as with
-/// Claude) the install source alone is ambiguous and the role is what
-/// disambiguates them. Non-agent checks (and agents whose two binaries already
-/// have distinct install sources) use `Any`.
+/// Which binary an entry describes. An AI-agent check can front two distinct
+/// binaries — the agent's own CLI (`Main`) and its ACP bridge (`Bridge`) —
+/// and the role keeps their entries from answering each other's lookups when
+/// they could share an install source. Non-agent checks and single-binary
+/// agent checks use `Any`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Role {
     Main,
@@ -62,11 +59,9 @@ type PackageEntry = (InstallSource, &'static str, LatestSource, Role);
 /// Static table of `check_id -> &[PackageEntry]`.
 ///
 /// A single check can have multiple entries when the same agent ships through
-/// different registries (e.g. brew for the main binary, npm for the ACP bridge)
-/// or when both binaries share an install source but have distinct package ids
-/// (Claude: `@anthropic-ai/claude-code` for the main CLI, `@agentclientprotocol
-/// /claude-agent-acp` for the bridge — both npm). `lookup_package_id` picks the
-/// first entry whose `(install_source, role)` matches the query.
+/// different registries (e.g. Amp: brew for the main binary, npm for the ACP
+/// bridge). `lookup_package_id` picks the first entry whose
+/// `(install_source, role)` matches the query.
 pub(crate) const PACKAGE_IDS: &[(&str, &[PackageEntry])] = &[
     (
         "git",
@@ -87,62 +82,28 @@ pub(crate) const PACKAGE_IDS: &[(&str, &[PackageEntry])] = &[
     ),
     // ai-agent-goose: brew tap exists but no canonical formula yet — skip.
     // TODO: revisit when block/goose lands a stable brew formula.
+    //
+    // ai-agent-claude / ai-agent-codex: the ACP bridge is the only binary the
+    // check fronts (it vendors the full harness CLI), so the single npm entry
+    // is untagged. Bundled installs have no registry entry — their versions
+    // are pinned by the embedding app's lock.
     (
         "ai-agent-claude",
-        &[
-            // Official Homebrew cask (`brew install --cask claude-code`) for
-            // the main Claude Code CLI.
-            (
-                InstallSource::Brew,
-                "claude-code",
-                LatestSource::Brew,
-                Role::Main,
-            ),
-            // Main CLI when installed via npm (e.g. under nvm). The native
-            // curl-pipe install is fingerprinted as `CurlPipe` (no registry
-            // entry here, self-updating) so this only applies when Claude
-            // landed via `npm i -g @anthropic-ai/claude-code`.
-            (
-                InstallSource::Npm,
-                "@anthropic-ai/claude-code",
-                LatestSource::Npm,
-                Role::Main,
-            ),
-            // ACP bridge — separate npm package.
-            (
-                InstallSource::Npm,
-                "@agentclientprotocol/claude-agent-acp",
-                LatestSource::Npm,
-                Role::Bridge,
-            ),
-        ],
-        // TODO: the main `claude` native (CurlPipe) install has no registry
-        // entry — its latest is published via the native installer's channel
-        // manifest, which we don't parse yet. Claude native is self-updating
-        // (see `freshness::is_self_updating`), so it stays report-only for now.
+        &[(
+            InstallSource::Npm,
+            "@agentclientprotocol/claude-agent-acp",
+            LatestSource::Npm,
+            Role::Any,
+        )],
     ),
     (
         "ai-agent-codex",
-        &[
-            // Bridge ships via npm; main CLI via brew or npm. Role tags
-            // disambiguate the two npm packages (bridge vs main).
-            (
-                InstallSource::Npm,
-                "@zed-industries/codex-acp",
-                LatestSource::Npm,
-                Role::Bridge,
-            ),
-            (InstallSource::Brew, "codex", LatestSource::Brew, Role::Main),
-            // Main CLI when installed via npm. WARNING: the unscoped `codex`
-            // package on npm is an unrelated 2012 project; only the scoped
-            // `@openai/codex` is OpenAI's CLI.
-            (
-                InstallSource::Npm,
-                "@openai/codex",
-                LatestSource::Npm,
-                Role::Main,
-            ),
-        ],
+        &[(
+            InstallSource::Npm,
+            "@agentclientprotocol/codex-acp",
+            LatestSource::Npm,
+            Role::Any,
+        )],
     ),
     (
         "ai-agent-pi",
@@ -240,112 +201,9 @@ pub(crate) fn lookup_package_id(
     None
 }
 
-/// Pick the package id and latest-version source for a resolved binary.
-///
-/// Most entries are static. Claude Code's Homebrew casks are the exception:
-/// both `claude-code` and `claude-code@latest` expose the same `claude`
-/// command, so the command name alone cannot distinguish the installed cask
-/// channel. When the resolved binary points into Homebrew's Caskroom, preserve
-/// the owning Claude cask token, but only for the known allowlisted tokens.
-pub(crate) fn lookup_package_id_for_binary(
-    check_id: &str,
-    source: InstallSource,
-    role: Role,
-    binary_path: Option<&Path>,
-) -> Option<(String, LatestSource)> {
-    if let Some(package_id) = path_package_id_override(check_id, source.clone(), role, binary_path)
-    {
-        return Some((package_id.to_string(), LatestSource::Brew));
-    }
-
-    lookup_package_id(check_id, source, role)
-        .map(|(package_id, latest)| (package_id.to_string(), latest))
-}
-
-fn path_package_id_override(
-    check_id: &str,
-    source: InstallSource,
-    role: Role,
-    binary_path: Option<&Path>,
-) -> Option<&'static str> {
-    if check_id != "ai-agent-claude" || source != InstallSource::Brew || role != Role::Main {
-        return None;
-    }
-
-    let binary_path = binary_path?;
-    claude_code_cask_token_from_path(binary_path)
-}
-
-fn claude_code_cask_token_from_path(path: &Path) -> Option<&'static str> {
-    if let Some(token) = claude_code_cask_token_from_caskroom_path(path) {
-        return Some(token);
-    }
-
-    if let Some(target) = immediate_symlink_target(path) {
-        if let Some(token) = claude_code_cask_token_from_caskroom_path(&target) {
-            return Some(token);
-        }
-    }
-
-    if let Ok(canonical) = path.canonicalize() {
-        if let Some(token) = claude_code_cask_token_from_caskroom_path(&canonical) {
-            return Some(token);
-        }
-    }
-
-    None
-}
-
-fn immediate_symlink_target(path: &Path) -> Option<std::path::PathBuf> {
-    let target = std::fs::read_link(path).ok()?;
-    Some(if target.is_absolute() {
-        target
-    } else {
-        path.parent()
-            .map(|parent| parent.join(&target))
-            .unwrap_or(target)
-    })
-}
-
-fn claude_code_cask_token_from_caskroom_path(path: &Path) -> Option<&'static str> {
-    let mut components = path.components().filter_map(|c| c.as_os_str().to_str());
-    while let Some(component) = components.next() {
-        if !component.eq_ignore_ascii_case("Caskroom") {
-            continue;
-        }
-
-        return allowed_claude_code_cask_token(components.next()?);
-    }
-
-    None
-}
-
-fn allowed_claude_code_cask_token(token: &str) -> Option<&'static str> {
-    match token {
-        "claude-code" => Some("claude-code"),
-        "claude-code@latest" => Some("claude-code@latest"),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-
-    fn scratch_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "doctor-package-ids-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
-    }
 
     #[test]
     fn lookup_matches_source_with_any_role() {
@@ -373,144 +231,49 @@ mod tests {
     }
 
     #[test]
-    fn codex_has_role_tagged_entries() {
-        assert_eq!(
-            lookup_package_id("ai-agent-codex", InstallSource::Npm, Role::Bridge),
-            Some(("@zed-industries/codex-acp", LatestSource::Npm)),
-        );
-        assert_eq!(
-            lookup_package_id("ai-agent-codex", InstallSource::Brew, Role::Main),
-            Some(("codex", LatestSource::Brew)),
-        );
-    }
-
-    #[test]
     fn cursor_curl_pipe_resolves_to_github_releases() {
         let (_, latest) = lookup_package_id("ai-agent-cursor", InstallSource::CurlPipe, Role::Any)
             .expect("cursor entry");
         assert_eq!(latest, LatestSource::GitHubReleases);
     }
 
-    /// The whole point of the role split: claude's main CLI under npm must
-    /// resolve to `@anthropic-ai/claude-code`, not the bridge package.
+    /// Claude's single binary is the ACP bridge, reported under the main slot:
+    /// its untagged entry must answer both Main and Any queries with the bridge
+    /// npm package.
     #[test]
-    fn claude_main_npm_resolves_to_main_package() {
-        assert_eq!(
-            lookup_package_id("ai-agent-claude", InstallSource::Npm, Role::Main),
-            Some(("@anthropic-ai/claude-code", LatestSource::Npm)),
-        );
+    fn claude_npm_resolves_to_bridge_package_for_main_and_any() {
+        for role in [Role::Main, Role::Any] {
+            assert_eq!(
+                lookup_package_id("ai-agent-claude", InstallSource::Npm, role),
+                Some(("@agentclientprotocol/claude-agent-acp", LatestSource::Npm)),
+            );
+        }
     }
 
+    /// Same single-binary shape for codex — and the package id must be the
+    /// maintained `@agentclientprotocol` scope, not the retired
+    /// `@zed-industries` one.
     #[test]
-    fn claude_main_brew_resolves_to_claude_code_cask() {
-        assert_eq!(
-            lookup_package_id("ai-agent-claude", InstallSource::Brew, Role::Main),
-            Some(("claude-code", LatestSource::Brew)),
-        );
+    fn codex_npm_resolves_to_bridge_package_for_main_and_any() {
+        for role in [Role::Main, Role::Any] {
+            assert_eq!(
+                lookup_package_id("ai-agent-codex", InstallSource::Npm, role),
+                Some(("@agentclientprotocol/codex-acp", LatestSource::Npm)),
+            );
+        }
     }
 
+    /// Bundled installs are pinned by the embedding app's lock and have no
+    /// registry entry — no latest-version probe, no update nag.
     #[test]
-    fn claude_main_brew_preserves_latest_cask_token_from_caskroom_path() {
-        let path = Path::new("/opt/homebrew/Caskroom/claude-code@latest/2.1.153/claude");
-
-        assert_eq!(
-            lookup_package_id_for_binary(
-                "ai-agent-claude",
-                InstallSource::Brew,
-                Role::Main,
-                Some(path),
-            ),
-            Some(("claude-code@latest".to_string(), LatestSource::Brew)),
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn claude_main_brew_preserves_latest_cask_token_through_bin_symlink() {
-        let root = scratch_dir("claude-cask-symlink");
-        let target = root.join("Caskroom/claude-code@latest/2.1.153/claude");
-        fs::create_dir_all(target.parent().unwrap()).unwrap();
-        fs::write(&target, "#!/bin/sh\n").unwrap();
-        fs::create_dir_all(root.join("bin")).unwrap();
-        let link = root.join("bin/claude");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-
-        assert_eq!(
-            lookup_package_id_for_binary(
-                "ai-agent-claude",
-                InstallSource::Brew,
-                Role::Main,
-                Some(&link),
-            ),
-            Some(("claude-code@latest".to_string(), LatestSource::Brew)),
-        );
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn claude_main_brew_preserves_latest_cask_token_from_immediate_symlink_target() {
-        let root = scratch_dir("claude-cask-immediate-symlink");
-        let npm_entry = root.join(
-            "home/.nvm/versions/node/v23.7.0/lib/node_modules/@anthropic-ai/claude-code/cli/claude.js",
-        );
-        fs::create_dir_all(npm_entry.parent().unwrap()).unwrap();
-        fs::write(&npm_entry, "#!/usr/bin/env node\n").unwrap();
-
-        let cask_bin = root.join("Caskroom/claude-code@latest/2.1.153/claude");
-        fs::create_dir_all(cask_bin.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(&npm_entry, &cask_bin).unwrap();
-
-        fs::create_dir_all(root.join("bin")).unwrap();
-        let active = root.join("bin/claude");
-        std::os::unix::fs::symlink(&cask_bin, &active).unwrap();
-
-        assert_eq!(
-            lookup_package_id_for_binary(
-                "ai-agent-claude",
-                InstallSource::Brew,
-                Role::Main,
-                Some(&active),
-            ),
-            Some(("claude-code@latest".to_string(), LatestSource::Brew)),
-        );
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn claude_main_brew_ignores_unallowlisted_caskroom_token() {
-        let path = Path::new("/opt/homebrew/Caskroom/not-claude/1.0.0/claude");
-
-        assert_eq!(
-            lookup_package_id_for_binary(
-                "ai-agent-claude",
-                InstallSource::Brew,
-                Role::Main,
-                Some(path),
-            ),
-            Some(("claude-code".to_string(), LatestSource::Brew)),
-        );
-    }
-
-    /// And the bridge readout still resolves to the bridge package even though
-    /// they share an install source.
-    #[test]
-    fn claude_bridge_npm_resolves_to_bridge_package() {
-        assert_eq!(
-            lookup_package_id("ai-agent-claude", InstallSource::Npm, Role::Bridge),
-            Some(("@agentclientprotocol/claude-agent-acp", LatestSource::Npm)),
-        );
-    }
-
-    /// A `Role::Any` query on a role-tagged check returns the first matching
-    /// entry — used by non-agent (flat) lookups and as a permissive fallback.
-    #[test]
-    fn claude_npm_with_any_role_returns_first_match() {
-        // The Main entry appears first in the table; Any should hit it.
-        let (pkg, _) = lookup_package_id("ai-agent-claude", InstallSource::Npm, Role::Any).unwrap();
-        assert_eq!(pkg, "@anthropic-ai/claude-code");
+    fn bundled_installs_have_no_registry_entry() {
+        for id in ["ai-agent-claude", "ai-agent-codex"] {
+            assert_eq!(
+                lookup_package_id(id, InstallSource::Bundled, Role::Any),
+                None,
+                "{id}",
+            );
+        }
     }
 
     /// `Role::Any` entries match any query role — confirms copilot's single
@@ -564,24 +327,6 @@ mod tests {
         assert_eq!(
             lookup_package_id("ai-agent-copilot", InstallSource::Npm, Role::Any),
             Some(("@github/copilot", LatestSource::Npm)),
-        );
-    }
-
-    #[test]
-    fn codex_npm_main_resolves_to_openai_codex() {
-        assert_eq!(
-            lookup_package_id("ai-agent-codex", InstallSource::Npm, Role::Main),
-            Some(("@openai/codex", LatestSource::Npm)),
-        );
-    }
-
-    /// Guard that adding the Main npm entry didn't shadow the existing Bridge
-    /// entry — the role-tagged lookup must still pick the bridge package.
-    #[test]
-    fn codex_npm_bridge_unchanged() {
-        assert_eq!(
-            lookup_package_id("ai-agent-codex", InstallSource::Npm, Role::Bridge),
-            Some(("@zed-industries/codex-acp", LatestSource::Npm)),
         );
     }
 }

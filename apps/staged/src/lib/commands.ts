@@ -1294,7 +1294,7 @@ export function squashCommits(branchId: string, provider?: string): Promise<stri
 export type DoctorFixType = 'command' | 'bridge' | 'auth' | 'updateMain' | 'updateBridge';
 
 export type DoctorInstallSource =
-  'brew' | 'npm' | 'cargo' | 'mise' | 'asdf' | 'curlPipe' | 'system' | 'unknown';
+  'brew' | 'npm' | 'cargo' | 'mise' | 'asdf' | 'curlPipe' | 'system' | 'bundled' | 'unknown';
 
 /**
  * Version + install-source readout for one binary behind an agent check.
@@ -1316,7 +1316,8 @@ export interface AgentVersionInfo {
   /** 'updateMain' or 'updateBridge', matching this readout's slot. */
   updateFixType: 'updateMain' | 'updateBridge' | null;
   /** True when this binary ships bundled with Staged (resolved from the app's
-   *  bundled ACP tools dir rather than a user install). */
+   *  bundled ACP tools dir rather than a user install). Stamped by the doctor
+   *  crate alongside installSource === 'bundled'. */
   bundled: boolean | null;
 }
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { execFile } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { promisify } from "node:util";
@@ -20,6 +21,12 @@ const SUPPORTED_TARGETS = [
 // Zed package.
 const CODEX_ACP_PACKAGE = "@agentclientprotocol/codex-acp";
 
+// `passthroughArgs` is the bridge's CLI-passthrough invocation that prints the
+// vendored harness CLI's version. Doctor probes auth (and, for bundled
+// installs, freshness) through these same passthrough subcommands
+// (`claude-agent-acp --cli …`, `codex-acp cli …`), so a bridge release that
+// drops or renames them must fail the smoke check here instead of silently
+// breaking every doctor probe in the field.
 const TOOL_SPECS = [
   {
     id: "claude-acp",
@@ -28,6 +35,7 @@ const TOOL_SPECS = [
     dependencyPackage: "@anthropic-ai/claude-agent-sdk",
     nativePackageKey: "claudeAgentSdk",
     includeClaudeCodeVersion: true,
+    passthroughArgs: ["--cli", "--version"],
   },
   {
     id: "codex-acp",
@@ -35,6 +43,7 @@ const TOOL_SPECS = [
     package: CODEX_ACP_PACKAGE,
     dependencyPackage: "@openai/codex",
     nativePackageKey: "openaiCodex",
+    passthroughArgs: ["cli", "--version"],
   },
 ];
 
@@ -95,12 +104,18 @@ const npmViewCache = new Map();
 const execFileAsync = promisify(execFile);
 
 function usage() {
-  console.log(`Usage: scripts/update-acp-tools-lock.mjs [--target <triple>]... [--lock-file <path>]
+  console.log(`Usage: scripts/update-acp-tools-lock.mjs [--target <triple>]... [--lock-file <path>] [--skip-smoke]
 
 Queries npm for the latest release of each supported ACP bridge tool and
 writes acp-tools.lock.json. Fails loudly when a package or one of its
 per-target native dependencies cannot be resolved — never silently pins an
 older version.
+
+Before writing the lock, each tool's CLI passthrough (the subcommand doctor's
+auth/version probes rely on) is smoke-checked against the resolved release by
+installing it into a temp prefix and running it on the current platform.
+--skip-smoke bypasses this (e.g. on hosts that cannot execute the vendored
+binaries).
 
 Supported targets:
   ${SUPPORTED_TARGETS.join("\n  ")}
@@ -114,6 +129,7 @@ Environment:
 function parseArgs(argv) {
   const targets = [];
   let lockFile = process.env.ACP_TOOLS_LOCK_FILE ?? defaultLockFile;
+  let skipSmoke = false;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "-h" || arg === "--help") {
@@ -132,6 +148,10 @@ function parseArgs(argv) {
       lockFile = path.resolve(value);
       continue;
     }
+    if (arg === "--skip-smoke") {
+      skipSmoke = true;
+      continue;
+    }
     throw new Error(`Unknown argument: ${arg}`);
   }
 
@@ -141,7 +161,7 @@ function parseArgs(argv) {
       throw new Error(`Unsupported target '${target}'`);
     }
   }
-  return { targets: selectedTargets, lockFile };
+  return { targets: selectedTargets, lockFile, skipSmoke };
 }
 
 async function npmView(spec, fields) {
@@ -341,8 +361,59 @@ async function lockToolForTarget(tool, target) {
   };
 }
 
+// Install the resolved release into a temp npm prefix and run the bridge's
+// CLI passthrough on the current platform, requiring exit 0 and a
+// version-shaped token in the output. Guards the interface doctor's probes
+// depend on: the passthrough flags are bridge behavior, not a documented
+// stable contract, so a release that breaks them must fail here before it
+// gets pinned.
+async function smokeCheckPassthrough(tool, version) {
+  const invocation = `${tool.binary} ${tool.passthroughArgs.join(" ")}`;
+  const prefix = await mkdtemp(path.join(os.tmpdir(), "acp-tools-smoke-"));
+  try {
+    await execFileAsync(
+      "npm",
+      [
+        "install",
+        "--prefix",
+        prefix,
+        "--no-fund",
+        "--no-audit",
+        "--loglevel=error",
+        `${tool.package}@${version}`,
+      ],
+      { maxBuffer: 10 * 1024 * 1024, timeout: 10 * 60 * 1000 },
+    );
+    const binary = path.join(prefix, "node_modules", ".bin", tool.binary);
+    let output;
+    try {
+      const { stdout, stderr } = await execFileAsync(
+        binary,
+        tool.passthroughArgs,
+        { timeout: 60 * 1000 },
+      );
+      output = `${stdout}\n${stderr}`.trim();
+    } catch (error) {
+      throw new Error(
+        `Passthrough smoke check failed for ${tool.package}@${version}: ` +
+          `\`${invocation}\` did not exit 0 — doctor's auth/version probes ` +
+          `would break on this release. ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (!/\d+\.\d+\.\d+/.test(output)) {
+      throw new Error(
+        `Passthrough smoke check failed for ${tool.package}@${version}: ` +
+          `\`${invocation}\` printed no version: ${output || "(empty output)"}`,
+      );
+    }
+    console.log(`Smoke-checked \`${invocation}\`: ${output.split("\n")[0]}`);
+  } finally {
+    await rm(prefix, { recursive: true, force: true });
+  }
+}
+
 async function main() {
-  const { targets, lockFile } = parseArgs(process.argv.slice(2));
+  const { targets, lockFile, skipSmoke } = parseArgs(process.argv.slice(2));
   const tools = [];
   for (const tool of TOOL_SPECS) {
     for (const target of targets) {
@@ -352,6 +423,16 @@ async function main() {
   tools.sort((left, right) =>
     `${left.id}:${left.target}`.localeCompare(`${right.id}:${right.target}`),
   );
+  if (skipSmoke) {
+    console.log("Skipping passthrough smoke checks (--skip-smoke)");
+  } else {
+    for (const tool of TOOL_SPECS) {
+      const locked = tools.find((entry) => entry.id === tool.id);
+      if (locked) {
+        await smokeCheckPassthrough(tool, locked.version);
+      }
+    }
+  }
   await mkdir(path.dirname(lockFile), { recursive: true });
   await writeFile(lockFile, `${JSON.stringify({ tools }, null, 2)}\n`);
   console.log(`Updated ${path.relative(process.cwd(), lockFile)}`);

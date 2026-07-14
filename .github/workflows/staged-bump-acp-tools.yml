@@ -44,13 +44,23 @@ jobs:
           fi
 
       # PR CI does not consume the lockfile, so a broken pin would otherwise
-      # surface only at release time. Install the new pins (with integrity
-      # validation) before pushing them anywhere. The target is passed
-      # explicitly because the script's auto-detection needs rustc, which
-      # this job otherwise does not use.
-      - name: Smoke-check new pins
+      # surface only at release time (aarch64-apple-darwin) or on a dev
+      # machine's next `just dev`. Install the new pins (with integrity
+      # validation) for every target in the lockfile before pushing them
+      # anywhere; npm's --os/--cpu flags let this Linux runner install the
+      # foreign-platform entries too. Targets are passed explicitly because
+      # the script's auto-detection needs rustc, which this job otherwise
+      # does not use.
+      - name: Smoke-check new pins for all lockfile targets
         if: steps.bump.outputs.changed == 'true'
-        run: apps/staged/scripts/ensure-acp-tools.sh --target x86_64-unknown-linux-gnu
+        run: |
+          targets="$(node -e '
+            const { tools } = require("./apps/staged/acp-tools.lock.json");
+            process.stdout.write([...new Set(tools.map((tool) => tool.target))].sort().join("\n"));
+          ')"
+          while IFS= read -r target; do
+            apps/staged/scripts/ensure-acp-tools.sh --target "$target"
+          done <<< "$targets"
 
       - name: Commit and force-push
         if: steps.bump.outputs.changed == 'true'
@@ -75,7 +85,7 @@ jobs:
               --base main \
               --head automation/update-acp-pins \
               --title "chore(staged): bump bundled ACP tools to latest" \
-              --body "Automated daily bump of the ACP bridge tool pins in \`apps/staged/acp-tools.lock.json\` via \`just bump-acp-tools\`. The new pins were smoke-checked in the workflow run by installing them with \`scripts/ensure-acp-tools.sh\`. While this PR is open, each daily run force-pushes the latest pins to this branch."
+              --body "Automated daily bump of the ACP bridge tool pins in \`apps/staged/acp-tools.lock.json\` via \`just bump-acp-tools\`. The new pins were smoke-checked in the workflow run by installing them for every lockfile target with \`scripts/ensure-acp-tools.sh\`. While this PR is open, each daily run force-pushes the latest pins to this branch."
           else
             echo "Open PR already exists for automation/update-acp-pins; it now shows the fresh pins."
           fi

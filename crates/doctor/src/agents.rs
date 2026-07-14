@@ -101,7 +101,10 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         auth_command: Some("codex-acp cli login"),
         auth_status_command: Some("codex-acp cli login status"),
         install_source_override: None,
-        bundled_version_args: Some(&["cli", "--version"]),
+        // `-V`, not `--version`: the bridge entrypoint intercepts a literal
+        // `--version` anywhere in argv and prints its own version, so only
+        // codex's clap short flag reaches the vendored binary.
+        bundled_version_args: Some(&["cli", "-V"]),
     },
     AgentCheckInfo {
         id: "ai-agent-pi",
@@ -864,7 +867,9 @@ mod tests {
             codex.install_command,
             Some("npm install -g @agentclientprotocol/codex-acp"),
         );
-        assert_eq!(codex.bundled_version_args, Some(&["cli", "--version"][..]));
+        // `--version` would be swallowed by the bridge's own version handler;
+        // clap's `-V` passes through to the vendored codex.
+        assert_eq!(codex.bundled_version_args, Some(&["cli", "-V"][..]));
     }
 
     #[test]
@@ -875,7 +880,7 @@ mod tests {
         );
         assert_eq!(
             bundled_version_probe_args("ai-agent-codex", Some(&InstallSource::Bundled)),
-            Some(&["cli", "--version"][..]),
+            Some(&["cli", "-V"][..]),
         );
         // Registry installs keep their registry-consistent probes.
         assert_eq!(

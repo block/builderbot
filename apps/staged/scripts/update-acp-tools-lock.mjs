@@ -27,6 +27,10 @@ const CODEX_ACP_PACKAGE = "@agentclientprotocol/codex-acp";
 // (`claude-agent-acp --cli …`, `codex-acp cli …`), so a bridge release that
 // drops or renames them must fail the smoke check here instead of silently
 // breaking every doctor probe in the field.
+//
+// codex-acp uses `-V` because its entrypoint intercepts a literal `--version`
+// anywhere in argv and prints the bridge's own version; only codex's clap
+// short flag reaches the vendored binary.
 const TOOL_SPECS = [
   {
     id: "claude-acp",
@@ -43,7 +47,7 @@ const TOOL_SPECS = [
     package: CODEX_ACP_PACKAGE,
     dependencyPackage: "@openai/codex",
     nativePackageKey: "openaiCodex",
-    passthroughArgs: ["cli", "--version"],
+    passthroughArgs: ["cli", "-V"],
   },
 ];
 
@@ -362,13 +366,17 @@ async function lockToolForTarget(tool, target) {
 }
 
 // Install the resolved release into a temp npm prefix and run the bridge's
-// CLI passthrough on the current platform, requiring exit 0 and a
-// version-shaped token in the output. Guards the interface doctor's probes
-// depend on: the passthrough flags are bridge behavior, not a documented
-// stable contract, so a release that breaks them must fail here before it
-// gets pinned.
-async function smokeCheckPassthrough(tool, version) {
+// CLI passthrough on the current platform, requiring exit 0 and the locked
+// vendored-harness version in the output. Guards the interface doctor's
+// probes depend on: the passthrough flags are bridge behavior, not a
+// documented stable contract, so a release that breaks them — or one whose
+// entrypoint starts answering the probe with the bridge's own version
+// instead of the vendored CLI's — must fail here before it gets pinned.
+async function smokeCheckPassthrough(tool, locked) {
   const invocation = `${tool.binary} ${tool.passthroughArgs.join(" ")}`;
+  const version = locked.version;
+  // The version doctor surfaces: the vendored harness CLI's, not the bridge's.
+  const harnessVersion = locked.claudeCodeVersion ?? locked.dependencyVersion;
   const prefix = await mkdtemp(path.join(os.tmpdir(), "acp-tools-smoke-"));
   try {
     await execFileAsync(
@@ -400,10 +408,14 @@ async function smokeCheckPassthrough(tool, version) {
           `would break on this release. ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    if (!/\d+\.\d+\.\d+/.test(output)) {
+    if (!output.includes(harnessVersion)) {
       throw new Error(
         `Passthrough smoke check failed for ${tool.package}@${version}: ` +
-          `\`${invocation}\` printed no version: ${output || "(empty output)"}`,
+          `\`${invocation}\` did not print the vendored ` +
+          `${tool.dependencyPackage} version ${harnessVersion}: ` +
+          `${output || "(empty output)"}. If the output shows the bridge's ` +
+          `own version, its entrypoint is intercepting the probe before the ` +
+          `passthrough dispatch and doctor's freshness readout would be wrong.`,
       );
     }
     console.log(`Smoke-checked \`${invocation}\`: ${output.split("\n")[0]}`);
@@ -429,7 +441,7 @@ async function main() {
     for (const tool of TOOL_SPECS) {
       const locked = tools.find((entry) => entry.id === tool.id);
       if (locked) {
-        await smokeCheckPassthrough(tool, locked.version);
+        await smokeCheckPassthrough(tool, locked);
       }
     }
   }

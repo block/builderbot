@@ -85,7 +85,28 @@ async fn run_doctor_report(app_handle: &tauri::AppHandle, check_freshness: bool)
     if let Some(check) = node_runtime {
         report.checks.push(check);
     }
+    mark_bundled_bridges(&mut report, bundled_dir.as_deref());
     report
+}
+
+/// Stamp `bundled` on bridge readouts whose resolved path lives inside the
+/// app's bundled ACP tools dir. The doctor crate resolves those bridges via
+/// the PATH prefix `apply_bundled_tools_env` injects, so a prefix match
+/// against the same dir identifies them; the UI then presents them as
+/// bundled instead of showing an app-internal resource path.
+fn mark_bundled_bridges(report: &mut DoctorReport, bundled_dir: Option<&Path>) {
+    let Some(dir) = bundled_dir else { return };
+    for check in &mut report.checks {
+        let in_bundled_dir = check
+            .bridge_path
+            .as_deref()
+            .is_some_and(|p| Path::new(p).starts_with(dir));
+        if in_bundled_dir {
+            if let Some(bridge) = check.bridge.as_mut() {
+                bridge.bundled = Some(true);
+            }
+        }
+    }
 }
 
 /// Run a fix for a doctor check, identified by check ID and fix type.
@@ -631,5 +652,53 @@ mod tests {
         assert_eq!(parse_node_major("v20.11.1\n"), Some(20));
         assert_eq!(parse_node_major("not-a-version"), None);
         assert_eq!(parse_node_major(""), None);
+    }
+
+    fn agent_check_with_bridge(id: &str, bridge_path: &str) -> DoctorCheck {
+        let mut check =
+            node_runtime_doctor_check(CheckStatus::Pass, "Installed".to_string(), None, None);
+        check.id = id.to_string();
+        check.bridge_path = Some(bridge_path.to_string());
+        check.bridge = Some(AgentVersionInfo::default());
+        check
+    }
+
+    #[test]
+    fn mark_bundled_bridges_stamps_only_bridges_inside_bundled_dir() {
+        let mut report = DoctorReport {
+            checks: vec![
+                agent_check_with_bridge(
+                    "ai-agent-claude",
+                    "/bundle/resources/acp/bin/claude-agent-acp",
+                ),
+                agent_check_with_bridge("ai-agent-pi", "/Users/me/.npm-global/bin/pi-acp"),
+            ],
+        };
+
+        mark_bundled_bridges(&mut report, Some(Path::new("/bundle/resources/acp/bin")));
+
+        assert_eq!(
+            report.checks[0].bridge.as_ref().unwrap().bundled,
+            Some(true),
+        );
+        assert_eq!(
+            report.checks[1].bridge.as_ref().unwrap().bundled,
+            None,
+            "a user-installed bridge outside the bundled dir must not be stamped",
+        );
+    }
+
+    #[test]
+    fn mark_bundled_bridges_without_bundled_dir_is_a_no_op() {
+        let mut report = DoctorReport {
+            checks: vec![agent_check_with_bridge(
+                "ai-agent-claude",
+                "/bundle/resources/acp/bin/claude-agent-acp",
+            )],
+        };
+
+        mark_bundled_bridges(&mut report, None);
+
+        assert_eq!(report.checks[0].bridge.as_ref().unwrap().bundled, None);
     }
 }

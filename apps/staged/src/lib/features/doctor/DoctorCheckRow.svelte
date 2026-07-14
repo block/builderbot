@@ -49,19 +49,11 @@
       check.status !== 'pass'
   );
 
-  /** Readouts (main + bridge) that have any version info worth surfacing. */
-  interface ReadoutEntry {
-    slot: 'main' | 'bridge';
-    info: AgentVersionInfo;
+  /** Whether a readout surfaces an update badge (under its own path line). */
+  function showsUpdateBadge(info: AgentVersionInfo | null): boolean {
+    return info?.updateAvailable === true;
   }
-  const readouts = $derived(
-    (
-      [
-        { slot: 'main', info: check.main },
-        { slot: 'bridge', info: check.bridge },
-      ] as { slot: 'main' | 'bridge'; info: AgentVersionInfo | null }[]
-    ).filter((r): r is ReadoutEntry => r.info?.updateAvailable === true)
-  );
+  const anyUpdateBadge = $derived(showsUpdateBadge(check.main) || showsUpdateBadge(check.bridge));
 
   /** Update commands that will run when the user confirms (actionable only). */
   const updateCommands = $derived(
@@ -81,7 +73,7 @@
   // is noise — and skip rows that already surface a result (Update button or
   // badge) so the spinner and the result never display together.
   const showFreshnessSpinner = $derived(
-    doctorState.freshnessLoading && check.status !== 'fail' && !canUpdate && readouts.length === 0
+    doctorState.freshnessLoading && check.status !== 'fail' && !canUpdate && !anyUpdateBadge
   );
 
   let showUpdateDialog = $state(false);
@@ -141,6 +133,16 @@
   }
 </script>
 
+{#snippet updateBadge(slot: 'main' | 'bridge', info: AgentVersionInfo | null)}
+  {#if info?.updateAvailable === true}
+    <span class="update-badge" class:info-only={!info.updateCommand}>
+      <ArrowUpCircle size={11} />
+      {slot === 'bridge' ? 'Bridge update' : 'Update'} available:
+      {info.installedVersion ?? '?'} → {info.latestVersion ?? '?'}
+    </span>
+  {/if}
+{/snippet}
+
 <div
   class="check-row"
   class:pass={check.status === 'pass'}
@@ -167,17 +169,16 @@
     <span class="check-message">{check.message}</span>
     {#if check.path}
       <span class="check-path">{check.path}</span>
+      {@render updateBadge('main', check.main)}
     {/if}
     {#if check.bridgePath}
-      <span class="check-path">{check.bridgePath}</span>
+      {#if check.bridge?.bundled}
+        <span class="check-path">ACP bundled with Staged</span>
+      {:else}
+        <span class="check-path">{check.bridgePath}</span>
+      {/if}
+      {@render updateBadge('bridge', check.bridge)}
     {/if}
-    {#each readouts as readout (readout.slot)}
-      <span class="update-badge" class:info-only={!readout.info.updateCommand}>
-        <ArrowUpCircle size={11} />
-        {readout.slot === 'bridge' ? 'Bridge update' : 'Update'} available:
-        {readout.info.installedVersion ?? '?'} → {readout.info.latestVersion ?? '?'}
-      </span>
-    {/each}
   </div>
 
   {#if showFreshnessSpinner}

@@ -285,8 +285,8 @@ fn resolved_binary(
 /// (mirroring the dirs in [`npm_search_dirs`]), and the System dirs. When those
 /// fall through to [`InstallSource::Unknown`] for a binary in a user-local bin
 /// dir, a cheap filesystem fingerprint (see [`fingerprint_curl_pipe`]) is
-/// attempted to recognise curl/native installers (Claude native, Cursor, Amp),
-/// using the caller snapshot's `HOME` when one is supplied.
+/// attempted to recognise curl/native installers (Cursor, Amp), using the
+/// caller snapshot's `HOME` when one is supplied.
 fn detect_install_source_with_env(path: &Path, env: Option<&DoctorEnv>) -> InstallSource {
     let home = env
         .and_then(|env| env.get("HOME").map(PathBuf::from))
@@ -439,11 +439,6 @@ struct CurlInstallerFootprint {
 /// listed so a bare `~/.local/bin/<x>` with no installer footprint stays
 /// [`InstallSource::Unknown`].
 const CURL_INSTALLER_FOOTPRINTS: &[CurlInstallerFootprint] = &[
-    // Claude native installer — claude.ai/install.sh.
-    CurlInstallerFootprint {
-        binary: "claude",
-        markers: &[".local/share/claude", ".claude/local", ".claude/bin"],
-    },
     // Cursor CLI installer — cursor.com/install.
     CurlInstallerFootprint {
         binary: "cursor-agent",
@@ -463,7 +458,7 @@ const CURL_INSTALLER_FOOTPRINTS: &[CurlInstallerFootprint] = &[
 /// 1. A known installer footprint marker (see [`CURL_INSTALLER_FOOTPRINTS`])
 ///    exists under `$HOME` and the binary name matches that installer.
 /// 2. The bin entry is a symlink into a *versioned* install dir under `$HOME`
-///    (the layout Cursor's and Claude's native installers use:
+///    (the layout Cursor's native installer uses:
 ///    `~/.local/bin/<tool>` → `…/versions/<ver>/<tool>`).
 ///
 /// No subprocess or network access — only `read_link`/`exists`/`canonicalize`.
@@ -1198,10 +1193,10 @@ mod tests {
     fn fingerprint_curl_pipe_matches_known_installer_marker() {
         let home = std::env::temp_dir().join(format!("doctor-fp-marker-{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
-        // Claude native installer: ~/.local/bin/claude + ~/.local/share/claude.
+        // Amp installer: ~/.local/bin/amp + ~/.local/share/amp.
         fs::create_dir_all(home.join(".local/bin")).unwrap();
-        fs::create_dir_all(home.join(".local/share/claude")).unwrap();
-        let bin = home.join(".local/bin/claude");
+        fs::create_dir_all(home.join(".local/share/amp")).unwrap();
+        let bin = home.join(".local/bin/amp");
         File::create(&bin).unwrap();
 
         assert!(fingerprint_curl_pipe(&bin, &home));
@@ -1247,8 +1242,8 @@ mod tests {
         let home = std::env::temp_dir().join(format!("doctor-fp-outside-{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
         // Marker exists, but the binary is elsewhere — must not fingerprint.
-        fs::create_dir_all(home.join(".local/share/claude")).unwrap();
-        let bin = PathBuf::from("/tmp/elsewhere/claude");
+        fs::create_dir_all(home.join(".local/share/amp")).unwrap();
+        let bin = PathBuf::from("/tmp/elsewhere/amp");
 
         assert!(!fingerprint_curl_pipe(&bin, &home));
         let _ = fs::remove_dir_all(&home);

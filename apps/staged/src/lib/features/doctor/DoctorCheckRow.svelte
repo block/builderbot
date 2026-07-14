@@ -168,12 +168,16 @@
     </span>
     <span class="check-message">{check.message}</span>
     {#if check.path}
-      <span class="check-path">{check.path}</span>
+      {#if check.main?.bundled}
+        <span class="check-path">Bundled with Staged</span>
+      {:else}
+        <span class="check-path">{check.path}</span>
+      {/if}
       {@render updateBadge('main', check.main)}
     {/if}
     {#if check.bridgePath}
       {#if check.bridge?.bundled}
-        <span class="check-path">ACP bundled with Staged</span>
+        <span class="check-path">Bundled with Staged</span>
       {:else}
         <span class="check-path">{check.bridgePath}</span>
       {/if}

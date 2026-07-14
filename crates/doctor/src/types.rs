@@ -59,6 +59,11 @@ pub enum InstallSource {
     Asdf,
     CurlPipe,
     System,
+    /// Shipped inside the embedding app's bundle (resolved from
+    /// [`crate::RunChecksOptions::bundled_tools_dir`] rather than a user
+    /// install). Versions are pinned by the app and updated with it, so
+    /// bundled readouts never get an update nag or a registry fix command.
+    Bundled,
     Unknown,
 }
 
@@ -95,9 +100,11 @@ pub struct AgentVersionInfo {
     /// slot. Always paired with `update_command`: both `Some` or both `None`.
     pub update_fix_type: Option<FixType>,
     /// Whether this binary ships bundled with the embedding app (resolved from
-    /// the app's bundled tools dir rather than a user install). The crate never
-    /// populates this — it has no notion of an app bundle; the embedding app
-    /// stamps it after checks run so the UI can present the binary as bundled.
+    /// the app's bundled tools dir rather than a user install). Populated by
+    /// the crate when the caller supplies
+    /// [`crate::RunChecksOptions::bundled_tools_dir`] and the readout's binary
+    /// resolved from inside it; the UI can then present the binary as bundled
+    /// instead of showing an app-internal resource path.
     #[serde(default)]
     pub bundled: Option<bool>,
 }

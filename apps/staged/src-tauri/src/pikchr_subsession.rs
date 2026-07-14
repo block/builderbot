@@ -6,12 +6,12 @@
 //! [`crate::pikchr_mcp`]) to render and analyze each candidate, inspects the
 //! returned image and layout report, and revises until satisfied. Every
 //! successful render overwrites the shared [`LastRenderSlot`]; the specialist
-//! accepts by ending its turn with the [`ACCEPT_SENTINEL`] token. Acceptance
-//! points at the slot's validated contents rather than carrying source in
-//! text, so unvalidated source can never reach the caller no matter what the
-//! reply says. The host loop here only checks for the sentinel and re-prompts
-//! on protocol misses — a reply without the sentinel, or acceptance before
-//! anything rendered — bounded by [`MAX_ATTEMPTS`].
+//! accepts by ending its reply with [`ACCEPT_SENTINEL`] as the final line.
+//! Acceptance points at the slot's validated contents rather than carrying
+//! source in text, so unvalidated source can never reach the caller no matter
+//! what the reply says. The host loop here only checks for the sentinel line
+//! and re-prompts on protocol misses — a reply without it, or acceptance
+//! before anything rendered — bounded by [`MAX_ATTEMPTS`].
 //!
 //! The sub-session is persisted as a normal `sessions` row. Each prompt and
 //! assistant reply is written into that child session so the parent tool call
@@ -31,9 +31,11 @@ use crate::store::{CompletionReason, MessageRole, SessionStatus, Store};
 const MAX_ATTEMPTS: usize = 3;
 
 /// Token the specialist ends its turn with to accept the last successful
-/// render. Detected with a case-insensitive contains-check, which is safe
-/// because the unnatural compound token doesn't occur in prose by accident —
-/// unlike a word such as "approved".
+/// render. It only counts when it is the reply's final line (see
+/// [`reply_accepts_last_render`]): the token appears verbatim in the prompts
+/// and every `render_pikchr` result, so a model echoing the instructions
+/// mid-prose ("I'll end with AcceptLastRender once…") must not read as
+/// acceptance — a contains-check would.
 pub(crate) const ACCEPT_SENTINEL: &str = "AcceptLastRender";
 
 /// Result of a `generate_pikchr` sub-session: the render the specialist
@@ -53,8 +55,8 @@ pub(crate) struct GenOutcome {
 /// The last *successful* render produced through the specialist's
 /// `render_pikchr` tool. The tool server overwrites it on every successful
 /// render (last write wins; parse failures leave it untouched) and the host
-/// loop takes it when the specialist replies with [`ACCEPT_SENTINEL`] — the
-/// render gate is the only way anything reaches this slot.
+/// loop takes it when the specialist ends its reply with [`ACCEPT_SENTINEL`]
+/// — the render gate is the only way anything reaches this slot.
 pub(crate) struct LastRenderSlot(Mutex<Option<GenOutcome>>);
 
 impl LastRenderSlot {
@@ -266,10 +268,15 @@ fn latest_assistant_reply_since(
         })
 }
 
+/// The whole reply must end with [`ACCEPT_SENTINEL`] as its own line.
+/// Case, surrounding backticks (the prompts quote the token in backticks),
+/// and trailing sentence punctuation are forgiven; extra words on the line
+/// are not.
 fn reply_accepts_last_render(reply: &str) -> bool {
-    reply
-        .to_ascii_lowercase()
-        .contains(&ACCEPT_SENTINEL.to_ascii_lowercase())
+    reply.trim_end().lines().next_back().is_some_and(|line| {
+        line.trim_matches(|c: char| c.is_whitespace() || matches!(c, '`' | '.' | '!'))
+            .eq_ignore_ascii_case(ACCEPT_SENTINEL)
+    })
 }
 
 // =============================================================================
@@ -284,8 +291,9 @@ consult it for exact syntax.\n\
 Workflow: draft the diagram source, then call the `render_pikchr` tool with it (no code fences). \
 Inspect the returned image and layout analysis, then revise and render again until the diagram \
 renders cleanly, the analysis reports no warnings (unless a warning is intentional), and the image \
-matches the request. When you are satisfied, end your turn with exactly `{ACCEPT_SENTINEL}`. The \
-accepted diagram is your last successful render — the rest of your reply text is ignored."
+matches the request. When you are satisfied, accept the render: your whole message must end with \
+`{ACCEPT_SENTINEL}` as its own line. The accepted diagram is your last successful render — the \
+rest of your reply text is ignored."
     );
     if let Some(previous) = previous_pikchr {
         prompt.push_str(&format!(
@@ -300,16 +308,17 @@ Revise it per the request below."
 fn accepted_without_render_prompt() -> String {
     format!(
         "Nothing has been rendered successfully yet, so there is no render to accept. Call the \
-`render_pikchr` tool with your Pikchr source, then reply `{ACCEPT_SENTINEL}` once you are \
-satisfied with a successful render."
+`render_pikchr` tool with your Pikchr source; once you are satisfied with a successful render, \
+end your message with `{ACCEPT_SENTINEL}` as its own line."
     )
 }
 
 fn missing_sentinel_prompt() -> String {
     format!(
         "Iterate with the `render_pikchr` tool; when you are satisfied with a successful render, \
-end your turn with exactly `{ACCEPT_SENTINEL}`. Pikchr source sent as reply text is ignored — \
-only rendered output can be accepted."
+accept it by ending your message with `{ACCEPT_SENTINEL}` as its own line — it must be the final \
+line of the whole message. Pikchr source sent as reply text is ignored — only rendered output can \
+be accepted."
     )
 }
 
@@ -496,12 +505,35 @@ mod tests {
         assert_eq!(messages[1].content, ACCEPT_SENTINEL);
     }
 
-    #[tokio::test]
-    async fn accepts_sentinel_in_prose_and_odd_casing() {
+    #[test]
+    fn sentinel_must_be_the_final_line() {
         for reply in [
-            "Looks good. AcceptLastRender",
+            ACCEPT_SENTINEL,
             "acceptlastrender",
-            "Done — ACCEPTLASTRENDER.",
+            "Looks good.\nAcceptLastRender",
+            "Overlap fixed, boxes aligned.\n\n`AcceptLastRender`",
+            "Done.\nACCEPTLASTRENDER.",
+            "`AcceptLastRender`.",
+            "AcceptLastRender\n\n",
+        ] {
+            assert!(reply_accepts_last_render(reply), "should accept {reply:?}");
+        }
+        for reply in [
+            "",
+            "Looks good. AcceptLastRender",
+            "I'll end with AcceptLastRender once the overlap is fixed.",
+            "AcceptLastRender\nOne more tweak first.",
+            "AcceptLastRenders",
+        ] {
+            assert!(!reply_accepts_last_render(reply), "should reject {reply:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn accepts_sentinel_as_final_line_after_prose() {
+        for reply in [
+            "Looks good.\nAcceptLastRender",
+            "Done — the boxes no longer overlap.\n\n`acceptlastrender`",
         ] {
             let slot = Arc::new(LastRenderSlot::new());
             let driver = FakeDriver::new(
@@ -523,6 +555,38 @@ mod tests {
             assert_eq!(outcome.source, CLEAN_SOURCE);
             assert_eq!(*driver.calls.lock().unwrap(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn reprompts_when_the_sentinel_is_only_echoed_in_prose() {
+        // Models echo instructions; a mid-sentence mention is not acceptance.
+        // The render stays in the slot for the turn that actually ends with
+        // the sentinel line.
+        let slot = Arc::new(LastRenderSlot::new());
+        let driver = FakeDriver::new(
+            Arc::clone(&slot),
+            vec![
+                turn(
+                    Some(render(CLEAN_SOURCE)),
+                    "I'll end with AcceptLastRender once the overlap is fixed.",
+                ),
+                turn(None, ACCEPT_SENTINEL),
+            ],
+        );
+        let (store, session_id) = child_session();
+
+        let outcome = run_generation(
+            &driver,
+            &store,
+            &session_id,
+            &slot,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("should accept on the turn that ends with the sentinel");
+
+        assert_eq!(outcome.source, CLEAN_SOURCE);
+        assert_eq!(*driver.calls.lock().unwrap(), 2);
     }
 
     #[tokio::test]

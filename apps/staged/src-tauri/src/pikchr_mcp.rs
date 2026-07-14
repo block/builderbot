@@ -1066,8 +1066,8 @@ impl PikchrPreviewHandler {
 /// Standing instruction ending every successful `render_pikchr` result.
 fn accept_instruction() -> String {
     format!(
-        "When you are satisfied with this render, end your turn with the text \
-`{ACCEPT_SENTINEL}`. Otherwise revise the source and render again."
+        "When you are satisfied with this render, accept it by ending your message with \
+`{ACCEPT_SENTINEL}` as its own final line. Otherwise revise the source and render again."
     )
 }
 
@@ -1077,7 +1077,8 @@ impl PikchrPreviewHandler {
         description = "Render candidate Pikchr source and inspect the result. Returns the rendered \
 image plus a layout analysis (dimensions, overlapping elements, content extending beyond the \
 diagram bounds). Each successful render replaces the previous one as the current candidate; \
-ending your turn with `AcceptLastRender` accepts the most recent successful render."
+ending your message with `AcceptLastRender` as its own final line accepts the most recent \
+successful render."
     )]
     async fn render_pikchr(
         &self,
@@ -1090,8 +1091,8 @@ ending your turn with `AcceptLastRender` accepts the most recent successful rend
             let slot_note = if self.slot.is_empty() {
                 "No successful render is stored yet — fix the source and render again."
             } else {
-                "The previous successful render is still stored; replying `AcceptLastRender` now \
-would accept that earlier version, not this source."
+                "The previous successful render is still stored; accepting with `AcceptLastRender` \
+now would accept that earlier version, not this source."
             };
             return Ok(CallToolResult::error(vec![Content::text(format!(
                 "{}\n{slot_note}",

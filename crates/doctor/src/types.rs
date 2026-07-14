@@ -94,6 +94,12 @@ pub struct AgentVersionInfo {
     /// `FixType::UpdateMain` or `FixType::UpdateBridge` matching this readout's
     /// slot. Always paired with `update_command`: both `Some` or both `None`.
     pub update_fix_type: Option<FixType>,
+    /// Whether this binary ships bundled with the embedding app (resolved from
+    /// the app's bundled tools dir rather than a user install). The crate never
+    /// populates this — it has no notion of an app bundle; the embedding app
+    /// stamps it after checks run so the UI can present the binary as bundled.
+    #[serde(default)]
+    pub bundled: Option<bool>,
 }
 
 /// A single health-check result shown in the UI.

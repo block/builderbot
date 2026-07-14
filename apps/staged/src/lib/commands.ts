@@ -1315,6 +1315,9 @@ export interface AgentVersionInfo {
   updateCommand: string | null;
   /** 'updateMain' or 'updateBridge', matching this readout's slot. */
   updateFixType: 'updateMain' | 'updateBridge' | null;
+  /** True when this binary ships bundled with Staged (resolved from the app's
+   *  bundled ACP tools dir rather than a user install). */
+  bundled: boolean | null;
 }
 
 export interface DoctorCheck {

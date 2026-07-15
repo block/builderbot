@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   extractMarkdownDiagramFences,
+  fencedDiagramMarkdown,
   getMarkdownDiagramFormat,
   isMarkdownDiagramFormat,
   MARKDOWN_DIAGRAM_FORMATS,
@@ -35,6 +36,25 @@ describe('markdown diagram format registry', () => {
   it('reports whether a fence language is a known markdown diagram format', () => {
     expect(isMarkdownDiagramFormat('pikchr')).toBe(true);
     expect(isMarkdownDiagramFormat('rust')).toBe(false);
+  });
+});
+
+describe('fencedDiagramMarkdown', () => {
+  it('wraps diagram source in a pikchr fence', () => {
+    expect(fencedDiagramMarkdown('pikchr', 'box "Start" fit')).toBe(
+      '```pikchr\nbox "Start" fit\n```'
+    );
+  });
+
+  it('outgrows backtick runs in the source so they cannot close the fence', () => {
+    const source = 'box "label"\n```\ncircle "Hub"';
+
+    const markdown = fencedDiagramMarkdown('pikchr', source);
+
+    expect(markdown).toBe('````pikchr\nbox "label"\n```\ncircle "Hub"\n````');
+    expect(extractMarkdownDiagramFences(markdown)).toEqual([
+      expect.objectContaining({ language: 'pikchr', source }),
+    ]);
   });
 });
 

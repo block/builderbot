@@ -353,6 +353,89 @@ describe('buildAcpTranscriptGroups', () => {
     }
   });
 
+  it('extracts the Pikchr source from a successful render_pikchr call', () => {
+    const groups = buildAcpTranscriptGroups(
+      [
+        message({
+          id: 1,
+          role: 'tool_call',
+          content: JSON.stringify({
+            name: 'mcp__pikchr-preview__render_pikchr',
+            input: { pikchr: 'box "Clean" fit' },
+          }),
+          acpEventKind: 'tool_call',
+          acpToolCallId: 'tc-render',
+          acpRawInput: { pikchr: 'box "Clean" fit' },
+        }),
+      ],
+      [
+        message({
+          id: 2,
+          role: 'assistant',
+          acpEventKind: 'tool_call_update',
+          acpToolCallId: 'tc-render',
+          acpToolStatus: 'completed',
+        }),
+      ]
+    );
+
+    expect(groups[0].type).toBe('tools');
+    if (groups[0].type === 'tools') {
+      expect(groups[0].items[0].pikchrRenderSource).toBe('box "Clean" fit');
+      expect(groups[0].items[0].isPikchrDiagramTool).toBe(false);
+    }
+  });
+
+  it('extracts the render_pikchr source from the call content when raw input is missing', () => {
+    const groups = buildAcpTranscriptGroups(
+      [
+        message({
+          id: 1,
+          role: 'tool_call',
+          content: JSON.stringify({
+            name: 'pikchr_preview.render_pikchr',
+            input: { pikchr: 'circle "Hub"' },
+          }),
+          acpEventKind: 'tool_call',
+          acpToolCallId: 'tc-render',
+          acpToolStatus: 'completed',
+        }),
+      ],
+      []
+    );
+
+    expect(groups[0].type).toBe('tools');
+    if (groups[0].type === 'tools') {
+      expect(groups[0].items[0].pikchrRenderSource).toBe('circle "Hub"');
+    }
+  });
+
+  it('keeps failed and still-running render_pikchr calls as plain tool cards', () => {
+    const renderCall = (id: number, toolCallId: string, status: string) =>
+      message({
+        id,
+        role: 'tool_call',
+        content: JSON.stringify({
+          name: 'mcp__pikchr-preview__render_pikchr',
+          input: { pikchr: 'box "Broken" fit' },
+        }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: toolCallId,
+        acpToolStatus: status,
+        acpRawInput: { pikchr: 'box "Broken" fit' },
+      });
+
+    const groups = buildAcpTranscriptGroups(
+      [renderCall(1, 'tc-failed', 'failed'), renderCall(2, 'tc-running', 'in_progress')],
+      []
+    );
+
+    expect(groups[0].type).toBe('tools');
+    if (groups[0].type === 'tools') {
+      expect(groups[0].items.map((item) => item.pikchrRenderSource)).toEqual([null, null]);
+    }
+  });
+
   it('recognizes delimiter-qualified generate_pikchr tool names', () => {
     const groups = buildAcpTranscriptGroups(
       [
@@ -514,6 +597,30 @@ describe('groupRichToolsByVerb', () => {
       ['tool:2'],
     ]);
   });
+
+  it('keeps inline-diagram render_pikchr tools out of generic verb groups', () => {
+    const groups = groupRichToolsByVerb([
+      richTool({
+        key: 'tool:render-1',
+        verb: 'Ran',
+        detail: 'render_pikchr',
+        pikchrRenderSource: 'box "First"',
+      }),
+      richTool({
+        key: 'tool:render-2',
+        verb: 'Ran',
+        detail: 'render_pikchr',
+        pikchrRenderSource: 'box "Second"',
+      }),
+      richTool({ key: 'tool:1', verb: 'Ran', detail: 'npm test' }),
+    ]);
+
+    expect(groups.map((group) => group.items.map((item) => item.key))).toEqual([
+      ['tool:render-1'],
+      ['tool:render-2'],
+      ['tool:1'],
+    ]);
+  });
 });
 
 describe('latestAvailableCommands', () => {
@@ -563,6 +670,7 @@ function richTool(
     locations: undefined,
     isPikchrDiagramTool: false,
     innerSessionId: null,
+    pikchrRenderSource: null,
     ...overrides,
   };
 }

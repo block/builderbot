@@ -43,6 +43,19 @@ export function isMarkdownDiagramFormat(infoString: string | null | undefined): 
   return getMarkdownDiagramFormat(infoString) !== null;
 }
 
+/**
+ * Wrap raw diagram source in a fenced code block so it renders through the
+ * regular Markdown diagram pipeline. The fence is made longer than any
+ * backtick run in the source, so a source line of backticks cannot close it
+ * early.
+ */
+export function fencedDiagramMarkdown(language: MarkdownDiagramLanguage, source: string): string {
+  const longestBacktickRun =
+    source.match(/`+/g)?.reduce((longest, run) => Math.max(longest, run.length), 0) ?? 0;
+  const fence = '`'.repeat(Math.max(3, longestBacktickRun + 1));
+  return `${fence}${language}\n${source}\n${fence}`;
+}
+
 export function extractMarkdownDiagramFences(markdown: string): MarkdownDiagramFence[] {
   const lines = markdown.split(/\r\n|\n|\r/);
   const diagrams: MarkdownDiagramFence[] = [];

@@ -128,7 +128,10 @@
   import PipelineSteps from './PipelineSteps.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import '../../shared/markdown/diagramStyles.css';
-  import { extractMarkdownDiagramFences } from '../../shared/markdown/diagramFormats';
+  import {
+    extractMarkdownDiagramFences,
+    fencedDiagramMarkdown,
+  } from '../../shared/markdown/diagramFormats';
   import DiagramViewerModal from '../../shared/markdown/DiagramViewerModal.svelte';
   import {
     getMarkdownDiagramSvgMarkup,
@@ -243,13 +246,29 @@
       .map((message) => message.content)
       .join('\n\n')
   );
-  let sessionHasPikchr = $derived(
-    extractMarkdownDiagramFences(assistantMarkdownContent).some(
-      (diagram) => diagram.language === 'pikchr'
+  let grouped = $derived.by(() =>
+    buildAcpTranscriptGroups(messages, acpMetadataMessages, displayRoots)
+  );
+  /** Pikchr sources of successful render_pikchr tool calls, shown inline as diagrams. */
+  let pikchrToolSources = $derived(
+    grouped.flatMap((group) =>
+      group.type === 'tools'
+        ? group.items
+            .map((item) => item.pikchrRenderSource)
+            .filter((source): source is string => source !== null)
+        : []
     )
   );
+  let sessionHasPikchr = $derived(
+    pikchrToolSources.length > 0 ||
+      extractMarkdownDiagramFences(assistantMarkdownContent).some(
+        (diagram) => diagram.language === 'pikchr'
+      )
+  );
   let pikchrRenderer = $state<PikchrRenderer | null>(null);
-  let pikchrRendererLoadKey = $derived(`${sessionId}\0${assistantMarkdownContent}`);
+  let pikchrRendererLoadKey = $derived(
+    `${sessionId}\0${assistantMarkdownContent}\0${pikchrToolSources.join('\0')}`
+  );
   let pikchrRendererLoadFailedKey = $state<string | null>(null);
   let pikchrRendererLoadFailed = $derived(pikchrRendererLoadFailedKey === pikchrRendererLoadKey);
   let diagramViewerSvg = $state<string | null>(null);
@@ -1477,9 +1496,6 @@
     }
   }
 
-  let grouped = $derived.by(() =>
-    buildAcpTranscriptGroups(messages, acpMetadataMessages, displayRoots)
-  );
   let slashCommands = $derived.by(() => latestAvailableCommands(acpMetadataMessages));
   let slashQuery = $derived.by(() => {
     const trimmed = inputText.trimStart();
@@ -1659,8 +1675,13 @@
     locations.length > 0 ||
     terminalRefs.length > 0}
   {@const showSessionButton = !!(item.isPikchrDiagramTool && item.innerSessionId && onOpenSession)}
+  {@const showInlineDiagram = item.pikchrRenderSource !== null}
   <div class="tool-card" class:tool-card-nested={nested}>
-    {#if showSessionButton}
+    {#if showInlineDiagram}
+      <div class="tool-diagram markdown-content">
+        {@html renderMarkdown(fencedDiagramMarkdown('pikchr', item.pikchrRenderSource!))}
+      </div>
+    {:else if showSessionButton}
       <Button
         variant="outline"
         size="sm"
@@ -1691,7 +1712,7 @@
         {/if}
       </div>
     {/if}
-    {#if isExpanded && hasDetails && !showSessionButton}
+    {#if isExpanded && hasDetails && !showSessionButton && !showInlineDiagram}
       <div class="tool-code-block" transition:slide={{ duration: SLIDE_DURATION }}>
         {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
           <div class="tool-code-command">$ {item.detail}</div>
@@ -2523,6 +2544,14 @@
     border-color: var(--border-emphasis);
     background: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  /* Inline diagram from a successful render_pikchr call — rendered through the
+     markdown pipeline, so it picks up the shared diagram styles (fullscreen
+     zoom affordance included); only the message margins are tightened to sit
+     inside the tool group. */
+  .tool-diagram :global(.markdown-diagram) {
+    margin: 4px 0;
   }
 
   .tool-caret {

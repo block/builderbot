@@ -27,6 +27,8 @@ export interface RichToolItem {
   locations: unknown;
   isPikchrDiagramTool: boolean;
   innerSessionId: string | null;
+  /** Pikchr source of a successful `render_pikchr` call, shown inline as a diagram. */
+  pikchrRenderSource: string | null;
 }
 
 export interface RichToolVerbGroup {
@@ -234,15 +236,18 @@ export function terminalRefsFromAcpContent(content: unknown): string[] {
     .filter((id): id is string => !!id);
 }
 
+/** Tool items that render as their own block (diagram session button, inline
+ *  render preview) rather than a generic header row never merge into verb
+ *  groups — collapsing them would hide the block. */
+function rendersStandalone(item: RichToolItem | undefined): boolean {
+  return !!item && (item.isPikchrDiagramTool || item.pikchrRenderSource !== null);
+}
+
 export function groupRichToolsByVerb(items: RichToolItem[]): RichToolVerbGroup[] {
   const groups: Array<Omit<RichToolVerbGroup, 'summary' | 'statusTone'>> = [];
   for (const item of items) {
     const last = groups[groups.length - 1];
-    if (
-      !item.isPikchrDiagramTool &&
-      last?.verb === item.verb &&
-      !last.items[0]?.isPikchrDiagramTool
-    ) {
+    if (!rendersStandalone(item) && last?.verb === item.verb && !rendersStandalone(last.items[0])) {
       last.items.push(item);
     } else {
       groups.push({
@@ -532,6 +537,7 @@ function richToolItem(
     innerSessionId: isPikchrDiagramTool
       ? (extractInnerSessionId(tool) ?? announcedSessionId)
       : null,
+    pikchrRenderSource: pikchrRenderSourceForTool(tool, status),
   };
 }
 
@@ -539,6 +545,33 @@ function isPikchrTool(tool: ToolAssembly): boolean {
   return [tool.call.content, tool.metadata.toolKind]
     .map(normalizedToolName)
     .some((name) => /(?:^|[._]+)generate_pikchr$/.test(name));
+}
+
+/**
+ * The Pikchr source a successful `render_pikchr` call previewed — the tool the
+ * diagram specialist iterates with inside a `generate_pikchr` child session.
+ * Only completed calls surface their source: those passed the render gate, so
+ * the transcript shows them inline as diagrams; failed or still-running calls
+ * keep the regular tool card with their error details.
+ */
+function pikchrRenderSourceForTool(tool: ToolAssembly, status: ToolStatus): string | null {
+  if (status !== 'completed' || !isPikchrRenderTool(tool)) return null;
+  return (
+    pikchrSourceFromInput(tool.metadata.rawInput) ??
+    pikchrSourceFromInput(parseToolCall(tool.call.content)?.args)
+  );
+}
+
+function isPikchrRenderTool(tool: ToolAssembly): boolean {
+  return [tool.call.content, tool.metadata.toolKind]
+    .map(normalizedToolName)
+    .some((name) => /(?:^|[._]+)render_pikchr$/.test(name));
+}
+
+function pikchrSourceFromInput(input: unknown): string | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const source = (input as Record<string, unknown>).pikchr;
+  return typeof source === 'string' && source.trim() ? source : null;
 }
 
 function normalizedToolName(value: unknown): string {

@@ -21,7 +21,7 @@ const SUPPORTED_TARGETS = [
 // within a day or two of publish, so waiting out the window keeps the daily
 // bump from shipping them. When `latest` is still inside the window, the
 // newest older stable release that has aged past it is pinned instead.
-const DEFAULT_COOLING_OFF_HOURS = 48;
+const DEFAULT_COOLING_OFF_HOURS = 50;
 
 // The Codex ACP executable stays `codex-acp`, but bundled installs must come
 // from the maintained Agent Client Protocol package rather than the stale
@@ -500,18 +500,33 @@ async function smokeCheckPassthrough(tool, locked) {
   const harnessVersion = locked.claudeCodeVersion ?? locked.dependencyVersion;
   const prefix = await mkdtemp(path.join(os.tmpdir(), "acp-tools-smoke-"));
   try {
+    // npm resolves the bridge's dependency range at install time, so a plain
+    // install picks the newest in-range release — not the locked one whenever
+    // the cooling-off window pinned older. The override forces the locked
+    // resolution (ensure-acp-tools.sh installs the same way), so the check
+    // exercises the exact bridge + vendored-harness pair the lock ships.
+    // npm silently ignores root overrides when --prefix is passed, so the
+    // install must run with the prefix as its working directory instead;
+    // writing package.json first makes the prefix the project root, keeping
+    // repo config out of the install just as --prefix did.
+    await writeFile(
+      path.join(prefix, "package.json"),
+      `${JSON.stringify({
+        name: "acp-tools-smoke",
+        private: true,
+        overrides: { [locked.dependencyPackage]: locked.dependencyVersion },
+      })}\n`,
+    );
     await execFileAsync(
       "npm",
       [
         "install",
-        "--prefix",
-        prefix,
         "--no-fund",
         "--no-audit",
         "--loglevel=error",
         `${tool.package}@${version}`,
       ],
-      { maxBuffer: 10 * 1024 * 1024, timeout: 10 * 60 * 1000 },
+      { cwd: prefix, maxBuffer: 10 * 1024 * 1024, timeout: 10 * 60 * 1000 },
     );
     const binary = path.join(prefix, "node_modules", ".bin", tool.binary);
     let output;

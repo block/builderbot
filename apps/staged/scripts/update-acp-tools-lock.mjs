@@ -16,6 +16,13 @@ const SUPPORTED_TARGETS = [
   "x86_64-unknown-linux-gnu",
 ];
 
+// Releases must age past a cooling-off window before they are eligible to
+// pin: broken or compromised releases are typically yanked or superseded
+// within a day or two of publish, so waiting out the window keeps the daily
+// bump from shipping them. When `latest` is still inside the window, the
+// newest older stable release that has aged past it is pinned instead.
+const DEFAULT_COOLING_OFF_HOURS = 48;
+
 // The Codex ACP executable stays `codex-acp`, but bundled installs must come
 // from the maintained Agent Client Protocol package rather than the stale
 // Zed package.
@@ -108,12 +115,13 @@ const npmViewCache = new Map();
 const execFileAsync = promisify(execFile);
 
 function usage() {
-  console.log(`Usage: scripts/update-acp-tools-lock.mjs [--target <triple>]... [--lock-file <path>] [--skip-smoke]
+  console.log(`Usage: scripts/update-acp-tools-lock.mjs [--target <triple>]... [--lock-file <path>] [--skip-smoke] [--cooling-off-hours <hours>]
 
-Queries npm for the latest release of each supported ACP bridge tool and
+Queries npm for the newest release of each supported ACP bridge tool that has
+aged past the cooling-off window (default ${DEFAULT_COOLING_OFF_HOURS} hours, 0 disables it) and
 writes acp-tools.lock.json. Fails loudly when a package or one of its
 per-target native dependencies cannot be resolved — never silently pins an
-older version.
+older version than the cooling-off window calls for.
 
 Before writing the lock, each tool's CLI passthrough (the subcommand doctor's
 auth/version probes rely on) is smoke-checked against the resolved release by
@@ -134,6 +142,7 @@ function parseArgs(argv) {
   const targets = [];
   let lockFile = process.env.ACP_TOOLS_LOCK_FILE ?? defaultLockFile;
   let skipSmoke = false;
+  let coolingOffHours = DEFAULT_COOLING_OFF_HOURS;
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === "-h" || arg === "--help") {
@@ -156,6 +165,15 @@ function parseArgs(argv) {
       skipSmoke = true;
       continue;
     }
+    if (arg === "--cooling-off-hours") {
+      const value = argv[++i];
+      if (!value) throw new Error("--cooling-off-hours requires a value");
+      coolingOffHours = Number(value);
+      if (!Number.isFinite(coolingOffHours) || coolingOffHours < 0) {
+        throw new Error("--cooling-off-hours must be a non-negative number");
+      }
+      continue;
+    }
     throw new Error(`Unknown argument: ${arg}`);
   }
 
@@ -165,7 +183,7 @@ function parseArgs(argv) {
       throw new Error(`Unsupported target '${target}'`);
     }
   }
-  return { targets: selectedTargets, lockFile, skipSmoke };
+  return { targets: selectedTargets, lockFile, skipSmoke, coolingOffHours };
 }
 
 async function npmView(spec, fields) {
@@ -218,22 +236,116 @@ function compareSemver(left, right) {
   return (left.includes("-") ? 0 : 1) - (right.includes("-") ? 0 : 1);
 }
 
+// Publish timestamp of a version from a packument `time` map, or null when
+// the registry does not report one (an unknown publish time never counts as
+// aged — the cooling-off window cannot be silently waived).
+function publishedAtMs(timeMap, version) {
+  const published = Date.parse(timeMap?.[version] ?? "");
+  return Number.isFinite(published) ? published : null;
+}
+
+function hasAged(timeMap, version, coolingOffHours, now) {
+  if (coolingOffHours <= 0) return true;
+  const published = publishedAtMs(timeMap, version);
+  return published !== null && now - published >= coolingOffHours * 3600_000;
+}
+
+// Resolve the version to pin for a package: the `latest` dist-tag once it has
+// aged past the cooling-off window, otherwise the newest older stable release
+// that has. Never resolves past `latest`, so an upstream dist-tag rollback
+// (e.g. after a bad release) is honored even when newer versions exist.
+async function resolveLatestAgedVersion(packageName, coolingOffHours, now) {
+  const packument = await npmView(packageName, [
+    "dist-tags",
+    "time",
+    "versions",
+  ]);
+  const latest = requireString(
+    packument["dist-tags"]?.latest,
+    `${packageName} dist-tags.latest`,
+  );
+  const timeMap = packument.time ?? {};
+  if (hasAged(timeMap, latest, coolingOffHours, now)) return latest;
+  // npm view returns a bare string instead of a one-element array when the
+  // package has a single version.
+  const versions = Array.isArray(packument.versions)
+    ? packument.versions
+    : [packument.versions];
+  const candidates = versions.filter(
+    (version) =>
+      typeof version === "string" &&
+      !version.includes("-") &&
+      compareSemver(version, latest) < 0 &&
+      hasAged(timeMap, version, coolingOffHours, now),
+  );
+  if (candidates.length === 0) {
+    throw new Error(
+      `${packageName} has no stable release that has aged past the ` +
+        `${coolingOffHours}h cooling-off window (latest ${latest} published ` +
+        `${timeMap[latest] ?? "at an unknown time"})`,
+    );
+  }
+  const resolved = candidates.reduce((best, candidate) =>
+    compareSemver(candidate, best) > 0 ? candidate : best,
+  );
+  console.log(
+    `${packageName}: latest ${latest} (published ${timeMap[latest]}) is ` +
+      `inside the ${coolingOffHours}h cooling-off window; pinning ` +
+      `${resolved} instead.`,
+  );
+  return resolved;
+}
+
+const coolingOffLogDedup = new Set();
+
 // npm view returns a single object when a spec matches one version, but an
 // array of per-version objects when a range matches several. Pick the highest
-// matching version so a ranged dependency still pins the newest release.
-function pickLatestMatch(metadata, label) {
-  if (!Array.isArray(metadata)) return metadata;
-  if (metadata.length === 0) {
+// matching version that has aged past the cooling-off window, so a ranged
+// dependency still pins the newest eligible release. A bridge release that
+// aged past the window had at least one in-range dependency version at
+// publish time — necessarily just as aged — so an empty result means the
+// range never matched anything, not an over-strict window.
+function pickLatestAgedMatch(metadata, label, timeMap, coolingOffHours, now) {
+  const matches = Array.isArray(metadata) ? metadata : [metadata];
+  if (matches.length === 0) {
     throw new Error(`No versions match ${label}`);
   }
-  return metadata.reduce((best, candidate) =>
-    compareSemver(
+  const pickNewest = (candidates) =>
+    candidates.reduce((best, candidate) =>
+      compareSemver(
+        requireString(candidate?.version, `${label} version`),
+        requireString(best?.version, `${label} version`),
+      ) > 0
+        ? candidate
+        : best,
+    );
+  const aged = matches.filter((candidate) =>
+    hasAged(
+      timeMap,
       requireString(candidate?.version, `${label} version`),
-      requireString(best?.version, `${label} version`),
-    ) > 0
-      ? candidate
-      : best,
+      coolingOffHours,
+      now,
+    ),
   );
+  if (aged.length === 0) {
+    throw new Error(
+      `All versions matching ${label} were published within the ` +
+        `${coolingOffHours}h cooling-off window`,
+    );
+  }
+  const best = pickNewest(aged);
+  const newest = pickNewest(matches);
+  // Deduped because this runs once per target with identical inputs.
+  if (newest.version !== best.version && !coolingOffLogDedup.has(label)) {
+    coolingOffLogDedup.add(label);
+    console.log(
+      `${label}: newest match ${newest.version} (published ` +
+        `${timeMap?.[newest.version] ?? "at an unknown time"}) is inside ` +
+        `the ${coolingOffHours}h cooling-off window; pinning ` +
+        `${best.version} instead.`,
+    );
+  }
+  return best;
 }
 
 function parseNpmAliasSpec(spec, fallbackPackage) {
@@ -251,14 +363,20 @@ function parseNpmAliasSpec(spec, fallbackPackage) {
   };
 }
 
-async function lockToolForTarget(tool, target) {
+async function lockToolForTarget(
+  tool,
+  target,
+  agedVersion,
+  coolingOffHours,
+  now,
+) {
   const npmTarget = NPM_TARGET_CONFIG[target];
   if (!npmTarget) {
     throw new Error(`No npm target mapping for ${target}`);
   }
 
   const packageName = tool.package;
-  const packageMetadata = await npmView(`${packageName}@latest`, [
+  const packageMetadata = await npmView(`${packageName}@${agedVersion}`, [
     "name",
     "version",
     "dist",
@@ -297,7 +415,7 @@ async function lockToolForTarget(tool, target) {
     packageMetadata.dependencies?.[tool.dependencyPackage],
     `${packageName} dependency ${tool.dependencyPackage}`,
   );
-  const dependencyMetadata = pickLatestMatch(
+  const dependencyMetadata = pickLatestAgedMatch(
     await npmView(`${tool.dependencyPackage}@${dependencyRange}`, [
       "name",
       "version",
@@ -306,6 +424,9 @@ async function lockToolForTarget(tool, target) {
       "claudeCodeVersion",
     ]),
     `${tool.dependencyPackage}@${dependencyRange}`,
+    await npmView(tool.dependencyPackage, ["time"]),
+    coolingOffHours,
+    now,
   );
   const dependencyVersion = requireString(
     dependencyMetadata.version,
@@ -425,11 +546,21 @@ async function smokeCheckPassthrough(tool, locked) {
 }
 
 async function main() {
-  const { targets, lockFile, skipSmoke } = parseArgs(process.argv.slice(2));
+  const { targets, lockFile, skipSmoke, coolingOffHours } = parseArgs(
+    process.argv.slice(2),
+  );
+  const now = Date.now();
   const tools = [];
   for (const tool of TOOL_SPECS) {
+    const agedVersion = await resolveLatestAgedVersion(
+      tool.package,
+      coolingOffHours,
+      now,
+    );
     for (const target of targets) {
-      tools.push(await lockToolForTarget(tool, target));
+      tools.push(
+        await lockToolForTarget(tool, target, agedVersion, coolingOffHours, now),
+      );
     }
   }
   tools.sort((left, right) =>

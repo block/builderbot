@@ -137,7 +137,7 @@ release version:
 
     echo "Pushed tag staged/v{{version}} — CI will build and publish the release."
 
-# Query the latest npm releases of the bundled ACP bridge tools and update acp-tools.lock.json
+# Update acp-tools.lock.json to the newest npm releases of the bundled ACP bridge tools that have aged past the 48h cooling-off window
 bump-acp-tools *ARGS:
     node scripts/update-acp-tools-lock.mjs {{ ARGS }}
 

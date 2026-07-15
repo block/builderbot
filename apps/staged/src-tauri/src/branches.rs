@@ -818,9 +818,11 @@ pub(crate) fn cleanup_branch_resources_best_effort(store: &Arc<Store>, branch: &
     }
 }
 
-pub(crate) fn infer_branch_name(project_name: &str) -> String {
-    let branch = project_name
-        .to_lowercase()
+/// Reduce `name` to a valid single branch-name component: lowercased,
+/// separators collapsed to `-`, everything else dropped. May return an empty
+/// string.
+fn normalize_branch_component(name: &str) -> String {
+    name.to_lowercase()
         .replace([' ', '_'], "-")
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '/' || *c == '.')
@@ -829,12 +831,66 @@ pub(crate) fn infer_branch_name(project_name: &str) -> String {
         .split('-')
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
-        .join("-");
+        .join("-")
+}
+
+pub(crate) fn infer_branch_name(project_name: &str) -> String {
+    let branch = normalize_branch_component(project_name);
     if branch.is_empty() {
         "feature".to_string()
     } else {
         branch
     }
+}
+
+/// Normalize a configured branch prefix with the same rules
+/// [`infer_branch_name`] applies to project names, per `/`-separated segment
+/// so multi-level prefixes like `team/alice` keep their hierarchy. Empty
+/// segments are dropped, so leading, trailing, and doubled slashes cannot
+/// produce an invalid ref. Returns `None` when nothing valid remains.
+fn normalize_branch_prefix(prefix: &str) -> Option<String> {
+    let normalized = prefix
+        .split('/')
+        .map(normalize_branch_component)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("/");
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+/// Read the user's configured branch prefix (General settings → Branch
+/// prefix) from the preferences store, normalized via
+/// [`normalize_branch_prefix`]. Returns `None` when unset or when nothing
+/// valid remains after normalization.
+fn read_branch_prefix() -> Option<String> {
+    let path = crate::preferences_store_path_buf()?;
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let json = serde_json::from_str::<serde_json::Value>(&contents).ok()?;
+    normalize_branch_prefix(json.get("branch-prefix")?.as_str()?)
+}
+
+/// Join the normalized branch prefix onto `branch` with a `/` separator.
+fn apply_branch_prefix(prefix: Option<&str>, branch: &str) -> String {
+    match prefix {
+        Some(p) => format!("{p}/{branch}"),
+        None => branch.to_string(),
+    }
+}
+
+/// Infer a branch name from the project name, applying the user's configured
+/// branch prefix. Used whenever a repo is added without an explicit branch
+/// name. The [`resolve_project_workspace_name`] fallback stays on the
+/// unprefixed [`infer_branch_name`] so existing workspace identities are
+/// unaffected by the setting.
+pub(crate) fn infer_prefixed_branch_name(project_name: &str) -> String {
+    apply_branch_prefix(
+        read_branch_prefix().as_deref(),
+        &infer_branch_name(project_name),
+    )
 }
 
 pub(crate) fn infer_workspace_name(branch_name: &str) -> String {
@@ -2587,6 +2643,61 @@ pub(crate) async fn run_prerun_actions_for_branch(
 mod tests {
     use super::*;
     use crate::test_utils::TempGitRepo;
+
+    #[test]
+    fn apply_branch_prefix_joins_with_slash() {
+        assert_eq!(
+            apply_branch_prefix(Some("alice"), "my-project"),
+            "alice/my-project"
+        );
+    }
+
+    #[test]
+    fn apply_branch_prefix_without_prefix_returns_branch_unchanged() {
+        assert_eq!(apply_branch_prefix(None, "my-project"), "my-project");
+    }
+
+    #[test]
+    fn normalize_branch_prefix_sanitizes_like_project_names() {
+        assert_eq!(
+            normalize_branch_prefix("Alice Doe"),
+            Some("alice-doe".to_string())
+        );
+        assert_eq!(
+            normalize_branch_prefix("branch.lock"),
+            Some("branch-lock".to_string())
+        );
+        assert_eq!(
+            normalize_branch_prefix("~fix..up"),
+            Some("fix-up".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_branch_prefix_preserves_multi_level_prefixes() {
+        assert_eq!(
+            normalize_branch_prefix("team/alice"),
+            Some("team/alice".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_branch_prefix_drops_empty_segments() {
+        assert_eq!(normalize_branch_prefix("alice/"), Some("alice".to_string()));
+        assert_eq!(normalize_branch_prefix("/alice"), Some("alice".to_string()));
+        assert_eq!(
+            normalize_branch_prefix("foo//bar"),
+            Some("foo/bar".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_branch_prefix_rejects_prefixes_with_nothing_valid() {
+        assert_eq!(normalize_branch_prefix(""), None);
+        assert_eq!(normalize_branch_prefix("  "), None);
+        assert_eq!(normalize_branch_prefix("///"), None);
+        assert_eq!(normalize_branch_prefix("~/.."), None);
+    }
 
     #[test]
     fn local_base_ref_for_worktree_accepts_existing_origin_ref() {

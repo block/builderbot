@@ -48,6 +48,8 @@ const RECENT_AGENTS_STORE_KEY = 'recent-agents';
 /** Per-provider last explicitly chosen model/effort selector values. */
 const ACP_CONFIG_PREFS_STORE_KEY = 'acp-config-prefs';
 const AUTO_REVIEW_STORE_KEY = 'auto-start-code-reviews';
+/** Prefix applied to branch names inferred from project names (backend-read). */
+const BRANCH_PREFIX_STORE_KEY = 'branch-prefix';
 /** Maximum number of recent agents to remember. */
 const RECENT_AGENTS_MAX = 10;
 
@@ -139,6 +141,12 @@ export const preferences = $state({
   acpConfigPrefs: {} as Record<string, AcpConfigPref>,
   /** Whether auto code reviews are triggered after commits */
   autoReviewMode: 'after-changes' as AutoReviewMode,
+  /**
+   * Prefix for branch names generated from project names (e.g. when adding a
+   * repo without picking a branch). Joined with a `/` unless it already ends
+   * in one. Empty means no prefix. Read by the backend from the store file.
+   */
+  branchPrefix: '',
   /** Whether all preferences have been loaded from storage */
   loaded: false,
 });
@@ -296,6 +304,12 @@ export async function initPreferences(): Promise<void> {
   } else {
     preferences.autoReviewMode = (await loadSqAvailabilityForDefault()) ? 'after-changes' : 'never';
   }
+
+  // Load branch prefix
+  const savedBranchPrefix = await getStoreValue<string>(BRANCH_PREFIX_STORE_KEY);
+  if (typeof savedBranchPrefix === 'string') {
+    preferences.branchPrefix = savedBranchPrefix;
+  }
 }
 
 // =============================================================================
@@ -340,6 +354,20 @@ export async function selectDiffTheme(name: string): Promise<void> {
 export function setAutoReviewMode(mode: AutoReviewMode): void {
   preferences.autoReviewMode = mode;
   setStoreValue(AUTO_REVIEW_STORE_KEY, mode);
+}
+
+// =============================================================================
+// Branch Prefix Actions
+// =============================================================================
+
+/**
+ * Set the branch prefix applied to branch names generated from project names.
+ * Stored trimmed; the backend reads it directly from the store file when
+ * inferring branch names.
+ */
+export function setBranchPrefix(prefix: string): void {
+  preferences.branchPrefix = prefix;
+  setStoreValue(BRANCH_PREFIX_STORE_KEY, prefix.trim());
 }
 
 // =============================================================================

@@ -436,6 +436,22 @@ fn get_store(store: &Mutex<Option<Arc<Store>>>) -> Result<Arc<Store>, String> {
         .ok_or_else(|| "Database not initialized".to_string())
 }
 
+/// Open the shared preferences store (`~/.staged/preferences.json`) through
+/// the store plugin. Returns the desktop frontend's already-loaded instance
+/// when one exists, so web writes can't be clobbered by a stale in-memory
+/// copy; the backend paths that read the file directly (e.g. `branch-prefix`
+/// in `branches.rs`) see web writes because every mutation is saved to disk.
+fn preferences_store(
+    app_handle: &tauri::AppHandle,
+) -> Result<Arc<tauri_plugin_store::Store<tauri::Wry>>, String> {
+    use tauri_plugin_store::StoreExt;
+    let path =
+        crate::preferences_store_path_buf().ok_or("Cannot determine preferences store path")?;
+    app_handle
+        .store(path)
+        .map_err(|e| format!("Failed to load preferences store: {e}"))
+}
+
 /// The big dispatcher. Maps command names to handler logic.
 ///
 /// Each arm extracts arguments from the JSON body and calls the same
@@ -498,7 +514,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .map(ToOwned::to_owned)
-                .unwrap_or_else(|| crate::branches::infer_branch_name(trimmed));
+                .unwrap_or_else(|| crate::branches::infer_prefixed_branch_name(trimmed));
 
             let mut project = crate::store::Project::named(trimmed);
             project.location = project_location;
@@ -3684,6 +3700,33 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map(|p| p.to_string_lossy().to_string())
                 .ok_or("Cannot determine preferences store path")?;
             Ok(serde_json::to_value(path).unwrap())
+        }
+        "get_preference" => {
+            let key: String = arg(&args, "key")?;
+            let store = preferences_store(app_handle)?;
+            Ok(store.get(&key).unwrap_or(Value::Null))
+        }
+        "set_preference" => {
+            let key: String = arg(&args, "key")?;
+            let value = args
+                .get("value")
+                .cloned()
+                .ok_or("missing argument: value")?;
+            let store = preferences_store(app_handle)?;
+            store.set(key, value);
+            store
+                .save()
+                .map_err(|e| format!("Failed to save preferences: {e}"))?;
+            Ok(Value::Null)
+        }
+        "delete_preference" => {
+            let key: String = arg(&args, "key")?;
+            let store = preferences_store(app_handle)?;
+            store.delete(&key);
+            store
+                .save()
+                .map_err(|e| format!("Failed to save preferences: {e}"))?;
+            Ok(Value::Null)
         }
         "check_blox_auth" => {
             tauri::async_runtime::spawn_blocking(crate::blox::check_auth)

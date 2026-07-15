@@ -7,6 +7,7 @@
   import * as Select from '$lib/components/ui/select';
   import * as Popover from '$lib/components/ui/popover';
   import * as ToggleGroup from '$lib/components/ui/toggle-group';
+  import { Input } from '$lib/components/ui/input';
   import { Label } from '$lib/components/ui/label';
   import {
     preferences,
@@ -14,6 +15,7 @@
     selectDiffTheme,
     setMode,
     setAutoReviewMode,
+    setBranchPrefix,
     loadAllThemePreviewColors,
     isLightTheme,
     type AppMode,
@@ -60,6 +62,12 @@
     selectDiffTheme(name);
     dropdownOpen = false;
   }
+
+  const branchPrefixExample = $derived.by(() => {
+    const prefix = preferences.branchPrefix.trim();
+    if (!prefix) return 'my-project';
+    return prefix.endsWith('/') ? `${prefix}my-project` : `${prefix}/my-project`;
+  });
 </script>
 
 <div class="general-settings-panel">
@@ -176,6 +184,28 @@
           A code review will automatically start after each commit session completes.
         {:else}
           Code reviews will only start when you manually request them.
+        {/if}
+      </p>
+    </div>
+
+    <div class="field">
+      <Label for="branch-prefix-input" class="text-foreground text-sm font-semibold"
+        >Branch prefix</Label
+      >
+      <Input
+        id="branch-prefix-input"
+        type="text"
+        placeholder="e.g. alice"
+        class="max-w-[320px]"
+        value={preferences.branchPrefix}
+        oninput={(e) => setBranchPrefix(e.currentTarget.value)}
+      />
+      <p class="field-description">
+        <Info size={12} />
+        {#if preferences.branchPrefix.trim()}
+          Branch names generated from project names will look like {branchPrefixExample}.
+        {:else}
+          This prefix will be added to branch names along with a slash separator.
         {/if}
       </p>
     </div>

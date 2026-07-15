@@ -31,7 +31,7 @@ pub(crate) async fn add_project_repo_impl(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| branches::infer_branch_name(&project.name));
+        .unwrap_or_else(|| branches::infer_prefixed_branch_name(&project.name));
     // If this github_repo is already attached to the project (i.e. being added
     // again with a different subpath), make the branch name unique by appending
     // a subpath-derived suffix.  Without this, `git worktree add -b <branch>`

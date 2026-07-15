@@ -91,6 +91,13 @@
 
 <DialogPortal {...portalProps}>
   <Dialog.Overlay />
+  <!--
+    preventOverflowTextSelection is off: bits-ui's selection lock rewrites
+    user-select on <body> and the content on pointerup, and WKWebView collapses
+    the just-dragged selection when that style changes — making dialog text
+    unselectable in the Tauri app. The overlay already covers the page behind,
+    so selection overflow has nothing visible to leak into.
+  -->
   <DialogPrimitive.Content
     bind:ref
     data-slot="dialog-content"
@@ -104,6 +111,7 @@
     style={contentStyle}
     onOpenAutoFocus={(e) => e.preventDefault()}
     onpointerdown={handlePointerDown}
+    preventOverflowTextSelection={false}
     {...restProps}
   >
     {@render children?.()}

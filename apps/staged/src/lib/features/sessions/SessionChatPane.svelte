@@ -1685,11 +1685,17 @@
       <Button
         variant="outline"
         size="sm"
-        class="tool-session-button"
+        class="tool-session-button {item.statusTone === 'danger'
+          ? 'tool-session-button-danger'
+          : ''}"
         onclick={() => onOpenSession?.(item.innerSessionId!)}
       >
         {@render toolStatusDot(item.statusTone)}
-        <span>Open diagram session</span>
+        <span
+          >{item.statusTone === 'danger'
+            ? 'Open failed diagram session'
+            : 'Open diagram session'}</span
+        >
         <ExternalLink size={12} />
       </Button>
     {:else}
@@ -2064,7 +2070,10 @@
       </div>
     {/if}
 
-    {#if session?.status === 'error' && session.errorMessage}
+    <!-- Cancelled sessions normally carry no message; one appears when the run
+         was killed from outside with a recorded reason (e.g. a Pikchr child
+         session whose generate_pikchr call timed out) and reads as an error. -->
+    {#if (session?.status === 'error' || session?.status === 'cancelled') && session.errorMessage}
       <Alert.Root variant="destructive" class="mt-3">
         <AlertCircle />
         <Alert.Description>{session.errorMessage}</Alert.Description>
@@ -2544,6 +2553,14 @@
     border-color: var(--border-emphasis);
     background: var(--bg-hover);
     color: var(--text-primary);
+  }
+
+  /* A failed generate_pikchr call keeps its session button (the child session
+     records the failure); tint it so the error is visible without expanding. */
+  :global(.tool-session-button-danger),
+  :global(.tool-session-button-danger:hover) {
+    border-color: var(--ui-danger);
+    color: var(--ui-danger);
   }
 
   /* Inline diagram from a successful render_pikchr call — rendered through the

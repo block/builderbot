@@ -38,6 +38,46 @@ const MAX_ATTEMPTS: usize = 3;
 /// acceptance — a contains-check would.
 pub(crate) const ACCEPT_SENTINEL: &str = "AcceptLastRender";
 
+/// Explanation used when the cancellation token fired without a recorded
+/// reason: nothing inside the worker arms the token, so the parent MCP request
+/// must have been dropped — the caller cancelled, crashed, or hit its own
+/// client-side timeout.
+const ABANDONED_CANCEL_MESSAGE: &str = "The generate_pikchr call was abandoned by its caller \
+(cancelled, or timed out on the caller's side) before the specialist finished, so the diagram \
+run was cancelled.";
+
+/// Why the sub-session's cancellation token was armed, recorded by the
+/// initiator before it cancels (the pikchr worker's wall-clock timeout is the
+/// only in-process one). Read when the run winds down so the cancelled child
+/// session — and the error handed back to the caller — can say what killed the
+/// run instead of a bare "cancelled". No recorded reason resolves to
+/// [`ABANDONED_CANCEL_MESSAGE`].
+pub(crate) struct CancelReason(Mutex<Option<String>>);
+
+impl CancelReason {
+    pub(crate) fn new() -> Self {
+        Self(Mutex::new(None))
+    }
+
+    /// Record why the token is about to be cancelled. The first reason wins:
+    /// a timeout that fires while the parent is already tearing down should
+    /// not have its message replaced.
+    pub(crate) fn record(&self, reason: String) {
+        let mut slot = self.0.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(reason);
+        }
+    }
+
+    fn resolve(&self) -> String {
+        self.0
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| ABANDONED_CANCEL_MESSAGE.to_string())
+    }
+}
+
 /// Result of a `generate_pikchr` sub-session: the render the specialist
 /// accepted.
 pub(crate) struct GenOutcome {
@@ -93,6 +133,7 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
     previous_pikchr: Option<&str>,
     slot: &LastRenderSlot,
     cancel_token: &CancellationToken,
+    cancel_reason: &CancelReason,
 ) -> Result<GenOutcome, String> {
     let result = generate_pikchr_source_inner(
         driver,
@@ -105,6 +146,13 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
         cancel_token,
     )
     .await;
+
+    // A token cancellation is externally imposed — the wall-clock timeout or
+    // the caller abandoning the MCP request — so resolve the recorded reason
+    // once and tell the same story on the child session's status row and in
+    // the error handed back to the caller.
+    let cancel_message =
+        matches!(&result, Err(GenerationError::Cancelled)).then(|| cancel_reason.resolve());
 
     // Terminal status goes through `transition_from_running`: this child
     // session is driven by the pikchr worker thread rather than the
@@ -121,7 +169,7 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
         Err(GenerationError::Cancelled) => store.transition_from_running(
             session_id,
             SessionStatus::Cancelled,
-            None,
+            cancel_message.as_deref(),
             Some(&CompletionReason::Interrupted),
         ),
         Err(GenerationError::Failed(message)) => store.transition_from_running(
@@ -154,11 +202,23 @@ not marking it completed"
             );
             Ok(outcome)
         }
-        (Err(e), Ok(_)) => Err(e.to_string()),
+        (Err(e), Ok(_)) => Err(generation_error_text(e, cancel_message)),
         (Err(e), Err(status_error)) => Err(format!(
             "{}; additionally failed to update Pikchr session status: {status_error}",
-            e
+            generation_error_text(e, cancel_message)
         )),
+    }
+}
+
+/// The error text handed back to the `generate_pikchr` caller. A cancellation
+/// reports its resolved reason (always `Some` when the error is `Cancelled`)
+/// so a timeout reads as a timeout rather than a generic cancel.
+fn generation_error_text(error: GenerationError, cancel_message: Option<String>) -> String {
+    match error {
+        GenerationError::Failed(message) => message,
+        GenerationError::Cancelled => {
+            cancel_message.unwrap_or_else(|| ABANDONED_CANCEL_MESSAGE.to_string())
+        }
     }
 }
 
@@ -246,16 +306,9 @@ async fn generate_pikchr_source_inner<D: AgentDriver + ?Sized>(
 #[derive(Debug)]
 enum GenerationError {
     Failed(String),
+    /// The cancellation token fired; the "why" lives in [`CancelReason`] and
+    /// is resolved by [`generation_error_text`].
     Cancelled,
-}
-
-impl std::fmt::Display for GenerationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Failed(message) => write!(f, "{message}"),
-            Self::Cancelled => write!(f, "The Pikchr specialist was cancelled."),
-        }
-    }
 }
 
 fn stored_agent_session_id(
@@ -460,6 +513,25 @@ mod tests {
         slot: &LastRenderSlot,
         cancel: &CancellationToken,
     ) -> Result<GenOutcome, String> {
+        run_generation_with_reason(
+            driver,
+            store,
+            session_id,
+            slot,
+            cancel,
+            &CancelReason::new(),
+        )
+        .await
+    }
+
+    async fn run_generation_with_reason<D: AgentDriver>(
+        driver: &D,
+        store: &Arc<Store>,
+        session_id: &str,
+        slot: &LastRenderSlot,
+        cancel: &CancellationToken,
+        cancel_reason: &CancelReason,
+    ) -> Result<GenOutcome, String> {
         generate_pikchr_source(
             driver,
             Arc::clone(store),
@@ -469,6 +541,7 @@ mod tests {
             None,
             slot,
             cancel,
+            cancel_reason,
         )
         .await
     }
@@ -738,7 +811,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancellation_marks_the_session_cancelled() {
+    async fn cancellation_without_a_recorded_reason_reads_as_abandoned() {
         let slot = Arc::new(LastRenderSlot::new());
         let driver = FakeDriver::new(Arc::clone(&slot), vec![]);
         let (store, session_id) = child_session();
@@ -747,7 +820,7 @@ mod tests {
 
         let result = run_generation(&driver, &store, &session_id, &slot, &cancel).await;
 
-        assert!(result.is_err());
+        assert_eq!(result.err().as_deref(), Some(ABANDONED_CANCEL_MESSAGE));
         assert_eq!(*driver.calls.lock().unwrap(), 0);
 
         let session = store
@@ -755,6 +828,46 @@ mod tests {
             .expect("load session")
             .expect("session exists");
         assert_eq!(session.status, SessionStatus::Cancelled);
+        assert_eq!(
+            session.error_message.as_deref(),
+            Some(ABANDONED_CANCEL_MESSAGE),
+            "the cancelled child session should explain why it ended"
+        );
+        assert_eq!(
+            session.completion_reason.as_ref(),
+            Some(&CompletionReason::Interrupted)
+        );
+    }
+
+    #[tokio::test]
+    async fn recorded_cancel_reason_lands_on_the_session_and_the_error() {
+        let slot = Arc::new(LastRenderSlot::new());
+        let driver = FakeDriver::new(Arc::clone(&slot), vec![]);
+        let (store, session_id) = child_session();
+        let cancel = CancellationToken::new();
+        let reason = CancelReason::new();
+        reason.record("generate_pikchr hit its 10-minute time limit.".to_string());
+        // A later initiator must not overwrite the recorded reason.
+        reason.record("some competing reason".to_string());
+        cancel.cancel();
+
+        let result =
+            run_generation_with_reason(&driver, &store, &session_id, &slot, &cancel, &reason).await;
+
+        assert_eq!(
+            result.err().as_deref(),
+            Some("generate_pikchr hit its 10-minute time limit.")
+        );
+
+        let session = store
+            .get_session(&session_id)
+            .expect("load session")
+            .expect("session exists");
+        assert_eq!(session.status, SessionStatus::Cancelled);
+        assert_eq!(
+            session.error_message.as_deref(),
+            Some("generate_pikchr hit its 10-minute time limit.")
+        );
         assert_eq!(
             session.completion_reason.as_ref(),
             Some(&CompletionReason::Interrupted)
@@ -835,6 +948,10 @@ mod tests {
             .expect("load session")
             .expect("session exists");
         assert_eq!(session.status, SessionStatus::Cancelled);
+        assert!(
+            session.error_message.is_none(),
+            "a user cancel carries no explanation and must not gain one"
+        );
         assert_eq!(
             session.completion_reason.as_ref(),
             Some(&CompletionReason::Interrupted)

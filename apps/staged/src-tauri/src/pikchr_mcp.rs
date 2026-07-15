@@ -52,7 +52,7 @@ use rmcp::transport::streamable_http_server::{
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, ServerHandler};
 
 use crate::agent::AcpDriver;
-use crate::pikchr_subsession::{GenOutcome, LastRenderSlot, ACCEPT_SENTINEL};
+use crate::pikchr_subsession::{CancelReason, GenOutcome, LastRenderSlot, ACCEPT_SENTINEL};
 use crate::store::{AcpMessageMetadata, CompletionReason, Session, SessionStatus, Store};
 
 /// Wall-clock cap for one `generate_pikchr` call. Each call spins a provider
@@ -814,9 +814,13 @@ specialist deliberately accepted."
         // `DropGuard`. If the MCP client abandons this tool call, the future is
         // dropped, the guard cancels the token, and the sub-session's provider
         // subprocess is torn down promptly — rather than running detached until
-        // the wall-clock timeout. The worker arms this same token on timeout.
+        // the wall-clock timeout. The worker arms this same token on timeout,
+        // recording the reason first so the cancelled child session can say
+        // "timed out" rather than a bare cancel; a guard-driven cancel records
+        // nothing and reads as the caller abandoning the call.
         let cancel = CancellationToken::new();
         let worker_cancel = cancel.clone();
+        let worker_cancel_reason = Arc::new(CancelReason::new());
         let _cancel_on_drop = cancel.drop_guard();
 
         // The ACP driver spawns tasks via `spawn_local`, which requires a
@@ -874,8 +878,14 @@ specialist deliberately accepted."
                 // parent's `DropGuard` cancels this same token if the MCP
                 // client abandons the call before the timeout fires.
                 let timeout_cancel = worker_cancel.clone();
+                let timeout_reason = Arc::clone(&worker_cancel_reason);
                 tokio::task::spawn_local(async move {
                     tokio::time::sleep(GENERATE_PIKCHR_TIMEOUT).await;
+                    timeout_reason.record(format!(
+                        "generate_pikchr hit its {}-minute time limit before the specialist \
+accepted a render, so the diagram run was cancelled.",
+                        GENERATE_PIKCHR_TIMEOUT.as_secs() / 60
+                    ));
                     timeout_cancel.cancel();
                 });
                 crate::pikchr_subsession::generate_pikchr_source(
@@ -887,6 +897,7 @@ specialist deliberately accepted."
                     p.previous_pikchr.as_deref(),
                     &slot,
                     &worker_cancel,
+                    &worker_cancel_reason,
                 )
                 .await
             });
@@ -940,9 +951,12 @@ fn create_pikchr_child_session(store: &Store, provider_id: &str) -> Result<Sessi
 
 /// Write a hidden metadata row into the parent session's transcript naming the
 /// just-created child diagram session, so the UI can attach an "open diagram
-/// session" button to the running `generate_pikchr` tool card. The tool result
-/// remains the authoritative id source once the call completes; a failure here
-/// is non-fatal — the button simply appears at completion as before.
+/// session" button to the running `generate_pikchr` tool card. A successful
+/// tool result remains the authoritative id source once the call completes; a
+/// failed call carries no id in its result, so this announcement is also what
+/// keeps the diagram session (which records the failure) reachable from the
+/// failed tool card. A write failure here is non-fatal — the button is simply
+/// missing until (and unless) the call completes successfully.
 fn announce_pikchr_child_session(store: &Store, parent_session_id: &str, child_session_id: &str) {
     let metadata = AcpMessageMetadata {
         acp_event_kind: Some(PIKCHR_SESSION_STARTED_EVENT.to_string()),

@@ -514,10 +514,12 @@ function richToolItem(
   const pending = status === 'pending' || status === 'in_progress';
   const display = formatToolDisplay(tool.call.content, displayRoots, pending);
   const isPikchrDiagramTool = isPikchrTool(tool);
-  // The tool result names the child session authoritatively once the call
-  // completes; while it is still running, fall back to the start-of-run
-  // announcement so the diagram session can be opened mid-generation.
-  const announcedSessionId = pending ? (announcedPikchrSessions?.get(tool.key) ?? null) : null;
+  // A successful tool result names the child session authoritatively; tools
+  // without an output-derived id — still running, or failed before the result
+  // could carry one (e.g. a timeout) — fall back to the start-of-run
+  // announcement, so the diagram session stays reachable mid-generation and
+  // after a failure (its transcript and status record what went wrong).
+  const announcedSessionId = announcedPikchrSessions?.get(tool.key) ?? null;
   return {
     key: tool.key,
     call: tool.call,

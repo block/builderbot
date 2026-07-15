@@ -429,6 +429,46 @@ fn test_transition_from_running_succeeds_when_running() {
 }
 
 #[test]
+fn test_transition_from_running_keeps_message_for_cancelled() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("timed out", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    // A cancelled run may carry an explanation (e.g. a Pikchr sub-session
+    // killed by its tool-call timeout); completed runs still clear it.
+    let transitioned = store
+        .transition_from_running(
+            &session.id,
+            SessionStatus::Cancelled,
+            Some("the call timed out"),
+            Some(&CompletionReason::Interrupted),
+        )
+        .unwrap();
+    assert!(transitioned);
+
+    let final_state = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(final_state.status, SessionStatus::Cancelled);
+    assert_eq!(
+        final_state.error_message.as_deref(),
+        Some("the call timed out")
+    );
+
+    let completed = Session::new_running("clean finish", Path::new("/tmp"));
+    store.create_session(&completed).unwrap();
+    store
+        .transition_from_running(
+            &completed.id,
+            SessionStatus::Completed,
+            Some("should be dropped"),
+            None,
+        )
+        .unwrap();
+    let completed_state = store.get_session(&completed.id).unwrap().unwrap();
+    assert!(completed_state.error_message.is_none());
+}
+
+#[test]
 fn test_transition_from_active_succeeds_when_queued() {
     let store = Store::in_memory().unwrap();
 

@@ -322,7 +322,10 @@ describe('buildAcpTranscriptGroups', () => {
     expect(ids).toEqual(['child-done', 'child-running']);
   });
 
-  it('does not attach announcements to finished pikchr tools', () => {
+  it('keeps failed pikchr tools linked to their announced child session', () => {
+    // A failed call's result carries no structured content, so the
+    // announcement is the only id source — dropping it would leave the
+    // failure (recorded in the child session) unreachable from the chat.
     const groups = buildAcpTranscriptGroups(
       [
         message({
@@ -349,7 +352,8 @@ describe('buildAcpTranscriptGroups', () => {
 
     expect(groups[0].type).toBe('tools');
     if (groups[0].type === 'tools') {
-      expect(groups[0].items[0].innerSessionId).toBeNull();
+      expect(groups[0].items[0].status).toBe('failed');
+      expect(groups[0].items[0].innerSessionId).toBe('child-session-failed');
     }
   });
 

@@ -88,14 +88,18 @@
     </aside>
 
     <section class="settings-content">
-      {#if navigation.settingsSection === 'general'}
-        <GeneralSettingsPanel />
-      {:else if navigation.settingsSection === 'repo'}
+      {#if navigation.settingsSection === 'repo'}
         <ActionsSettingsPanel />
-      {:else if navigation.settingsSection === 'keyboard'}
-        <KeyboardSettingsPanel />
       {:else}
-        <DoctorSettingsPanel />
+        <div class="panel-pad">
+          {#if navigation.settingsSection === 'general'}
+            <GeneralSettingsPanel />
+          {:else if navigation.settingsSection === 'keyboard'}
+            <KeyboardSettingsPanel />
+          {:else}
+            <DoctorSettingsPanel />
+          {/if}
+        </div>
       {/if}
     </section>
   </div>
@@ -107,7 +111,7 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-    background: var(--bg-primary);
+    background: var(--bg-chrome);
   }
 
   .settings-body {
@@ -119,36 +123,43 @@
   }
 
   .settings-nav {
+    --settings-nav-hover-bg: color-mix(in srgb, var(--text-primary) 4%, transparent);
+
     border-right: 1px solid color-mix(in srgb, var(--border-subtle) 60%, transparent);
     padding: 0;
     display: flex;
     flex-direction: column;
     min-height: 0;
-    background: color-mix(in srgb, var(--bg-chrome) 75%, transparent);
+    background: var(--bg-app-bar);
   }
 
   .settings-nav-list {
+    --settings-row-bleed: 8px;
+
     display: flex;
     flex-direction: column;
     gap: 4px;
-    padding: 0 8px 10px;
+    padding: 0 var(--settings-row-bleed) 10px;
     overflow: auto;
   }
 
   .nav-item {
     border: none;
-    border-radius: 8px;
+    border-radius: 0;
     background: transparent;
     color: var(--text-primary);
     display: flex;
     align-items: center;
     justify-content: space-between;
-    width: 100%;
+    width: calc(100% + (2 * var(--settings-row-bleed)));
+    margin: 0 calc(-1 * var(--settings-row-bleed));
     padding: 8px 10px;
     cursor: pointer;
     text-align: left;
     font-size: var(--size-sm);
-    transition: all 0.15s ease;
+    transition:
+      background-color 0.15s ease,
+      color 0.15s ease;
   }
 
   .nav-item:focus-visible {
@@ -157,7 +168,7 @@
   }
 
   .nav-item:hover {
-    background: var(--ui-selection);
+    background: var(--settings-nav-hover-bg);
   }
 
   .nav-item.active {
@@ -207,6 +218,22 @@
 
   .settings-content {
     min-height: 0;
+    min-width: 0;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  /* Panels share the single cell so a deselected repos panel stays stacked
+     under the incoming panel while its sidebar slides out. */
+  .settings-content > :global(*) {
+    grid-area: 1 / 1;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .panel-pad {
     padding: 14px;
     overflow: hidden;
   }
@@ -220,7 +247,7 @@
     .settings-nav {
       border-right: 0;
       border-bottom: 1px solid color-mix(in srgb, var(--border-subtle) 60%, transparent);
-      background: color-mix(in srgb, var(--bg-chrome) 65%, transparent);
+      background: var(--bg-app-bar);
     }
 
     .settings-nav-list {
@@ -233,6 +260,7 @@
 
     .nav-item {
       width: auto;
+      margin: 0;
       min-width: max-content;
       padding: 8px 12px;
     }

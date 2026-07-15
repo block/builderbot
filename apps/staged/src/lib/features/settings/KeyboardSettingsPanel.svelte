@@ -403,9 +403,9 @@
     display: flex;
     flex-direction: column;
     border: 1px solid var(--border-subtle);
-    border-radius: 12px;
+    border-radius: 8px;
     overflow: hidden;
-    background: var(--bg-chrome);
+    background: var(--bg-primary);
   }
 
   .panel-intro {
@@ -480,18 +480,18 @@
 
   .shortcut-row {
     border: 1px solid var(--border-subtle);
-    border-radius: 10px;
+    border-radius: 8px;
     padding: 10px;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
-    background: color-mix(in srgb, var(--bg-primary) 88%, transparent);
+    background: var(--bg-elevated);
   }
 
   .shortcut-row.editing {
     border-color: var(--border-emphasis);
-    background: color-mix(in srgb, var(--bg-hover) 55%, transparent);
+    background: var(--bg-hover);
   }
 
   .shortcut-main {

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from 'svelte';
-  import { quintIn } from 'svelte/easing';
+  import { cubicInOut } from 'svelte/easing';
   import FolderGit2 from '@lucide/svelte/icons/folder-git-2';
   import Play from '@lucide/svelte/icons/play';
   import Hammer from '@lucide/svelte/icons/hammer';
@@ -478,35 +478,21 @@
     }
   }
 
-  const sidebarExitMs = 350;
-
-  /** Same motion as the projects sidebar open (see ProjectsSidebar.svelte). */
-  function spring(t: number): number {
-    const decay = 12;
-    const frequency = 2;
-    return 1 - Math.exp(-decay * t) * Math.cos(frequency * Math.PI * t);
-  }
-
-  function sidebarSlideIn(node: HTMLElement) {
-    const w = node.offsetWidth;
-    return {
-      duration: 550,
-      easing: spring,
-      css: (t: number) => `margin-left: ${(t - 1) * w}px`,
-    };
-  }
+  const sidebarSlideMs = 350;
 
   /**
-   * Slides the sidebar back out when Repos is deselected. SettingsPage keeps
-   * this panel stacked under the incoming panel until the outro finishes; the
-   * z-index lifts the sidebar above it so the slide stays visible. Skipped
-   * when the whole settings view is being torn down.
+   * Slides the sidebar in from the left when Repos is selected and back out
+   * when it is deselected — the same S-curve motion in both directions. On
+   * the way out, SettingsPage keeps this panel stacked under the incoming
+   * panel until the outro finishes; the z-index lifts the sidebar above it
+   * so the slide stays visible. Skipped when the whole settings view is
+   * being torn down.
    */
-  function sidebarSlideOut(node: HTMLElement) {
+  function sidebarSlide(node: HTMLElement) {
     const w = node.offsetWidth;
     return {
-      duration: navigation.activeView === 'settings' ? sidebarExitMs : 0,
-      easing: quintIn,
+      duration: navigation.activeView === 'settings' ? sidebarSlideMs : 0,
+      easing: cubicInOut,
       css: (t: number) => `margin-left: ${(t - 1) * w}px; z-index: 1;`,
     };
   }
@@ -515,7 +501,7 @@
       incoming panel shows through immediately. */
   function hideOnExit(_node: HTMLElement) {
     return {
-      duration: navigation.activeView === 'settings' ? sidebarExitMs : 0,
+      duration: navigation.activeView === 'settings' ? sidebarSlideMs : 0,
       css: () => 'opacity: 0; pointer-events: none;',
     };
   }
@@ -578,7 +564,7 @@
 
 <div class="actions-settings-panel">
   <div class="panel-body">
-    <aside class="sidebar" in:sidebarSlideIn|global out:sidebarSlideOut|global>
+    <aside class="sidebar" transition:sidebarSlide|global>
       <div class="sidebar-header">
         <h2>
           <FolderGit2 size={16} />

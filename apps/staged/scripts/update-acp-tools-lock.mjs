@@ -21,7 +21,7 @@ const SUPPORTED_TARGETS = [
 // within a day or two of publish, so waiting out the window keeps the daily
 // bump from shipping them. When `latest` is still inside the window, the
 // newest older stable release that has aged past it is pinned instead.
-const DEFAULT_COOLING_OFF_HOURS = 48;
+const DEFAULT_COOLING_OFF_HOURS = 50;
 
 // The Codex ACP executable stays `codex-acp`, but bundled installs must come
 // from the maintained Agent Client Protocol package rather than the stale

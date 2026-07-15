@@ -29,7 +29,7 @@ jobs:
         run: git switch --force-create automation/update-acp-pins
 
       # The recipe pins the newest releases that have aged past the script's
-      # 48-hour cooling-off window (its default), not bare `latest`, so a
+      # 50-hour cooling-off window (its default), not bare `latest`, so a
       # release that is about to be yanked or superseded never lands here.
       - name: Bump ACP tool pins
         run: just -f apps/staged/justfile bump-acp-tools
@@ -88,7 +88,7 @@ jobs:
               --base main \
               --head automation/update-acp-pins \
               --title "chore(staged): bump bundled ACP tools" \
-              --body "Automated daily bump of the ACP bridge tool pins in \`apps/staged/acp-tools.lock.json\` via \`just bump-acp-tools\`, which pins the newest releases that have aged past a 48-hour cooling-off window rather than bare \`latest\`. The new pins were smoke-checked in the workflow run by installing them for every lockfile target with \`scripts/ensure-acp-tools.sh\`. While this PR is open, each daily run force-pushes the freshest eligible pins to this branch."
+              --body "Automated daily bump of the ACP bridge tool pins in \`apps/staged/acp-tools.lock.json\` via \`just bump-acp-tools\`, which pins the newest releases that have aged past a 50-hour cooling-off window rather than bare \`latest\`. The new pins were smoke-checked in the workflow run by installing them for every lockfile target with \`scripts/ensure-acp-tools.sh\`. While this PR is open, each daily run force-pushes the freshest eligible pins to this branch."
           else
             echo "Open PR already exists for automation/update-acp-pins; it now shows the fresh pins."
           fi

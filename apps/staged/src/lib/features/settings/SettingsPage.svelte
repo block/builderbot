@@ -87,19 +87,19 @@
       </div>
     </aside>
 
-    <section
-      class={navigation.settingsSection === 'repo'
-        ? 'settings-content has-secondary-sidebar'
-        : 'settings-content'}
-    >
-      {#if navigation.settingsSection === 'general'}
-        <GeneralSettingsPanel />
-      {:else if navigation.settingsSection === 'repo'}
+    <section class="settings-content">
+      {#if navigation.settingsSection === 'repo'}
         <ActionsSettingsPanel />
-      {:else if navigation.settingsSection === 'keyboard'}
-        <KeyboardSettingsPanel />
       {:else}
-        <DoctorSettingsPanel />
+        <div class="panel-pad">
+          {#if navigation.settingsSection === 'general'}
+            <GeneralSettingsPanel />
+          {:else if navigation.settingsSection === 'keyboard'}
+            <KeyboardSettingsPanel />
+          {:else}
+            <DoctorSettingsPanel />
+          {/if}
+        </div>
       {/if}
     </section>
   </div>
@@ -218,12 +218,24 @@
 
   .settings-content {
     min-height: 0;
-    padding: 14px;
+    min-width: 0;
+    display: grid;
+    grid-template-rows: minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     overflow: hidden;
   }
 
-  .settings-content.has-secondary-sidebar {
-    padding: 0;
+  /* Panels share the single cell so a deselected repos panel stays stacked
+     under the incoming panel while its sidebar slides out. */
+  .settings-content > :global(*) {
+    grid-area: 1 / 1;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .panel-pad {
+    padding: 14px;
+    overflow: hidden;
   }
 
   @media (max-width: 920px) {

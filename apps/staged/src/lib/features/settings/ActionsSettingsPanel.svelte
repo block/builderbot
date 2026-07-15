@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from 'svelte';
+  import { quintIn } from 'svelte/easing';
   import FolderGit2 from '@lucide/svelte/icons/folder-git-2';
   import Play from '@lucide/svelte/icons/play';
   import Hammer from '@lucide/svelte/icons/hammer';
@@ -36,6 +37,7 @@
   import { toast } from 'svelte-sonner';
   import { getPreferredAgent } from './preferences.svelte';
   import { agentState } from '../agents/agent.svelte';
+  import { navigation } from '../layout/navigation.svelte';
 
   type RepoAttachment = {
     projectId: string;
@@ -476,6 +478,48 @@
     }
   }
 
+  const sidebarExitMs = 350;
+
+  /** Same motion as the projects sidebar open (see ProjectsSidebar.svelte). */
+  function spring(t: number): number {
+    const decay = 12;
+    const frequency = 2;
+    return 1 - Math.exp(-decay * t) * Math.cos(frequency * Math.PI * t);
+  }
+
+  function sidebarSlideIn(node: HTMLElement) {
+    const w = node.offsetWidth;
+    return {
+      duration: 550,
+      easing: spring,
+      css: (t: number) => `margin-left: ${(t - 1) * w}px`,
+    };
+  }
+
+  /**
+   * Slides the sidebar back out when Repos is deselected. SettingsPage keeps
+   * this panel stacked under the incoming panel until the outro finishes; the
+   * z-index lifts the sidebar above it so the slide stays visible. Skipped
+   * when the whole settings view is being torn down.
+   */
+  function sidebarSlideOut(node: HTMLElement) {
+    const w = node.offsetWidth;
+    return {
+      duration: navigation.activeView === 'settings' ? sidebarExitMs : 0,
+      easing: quintIn,
+      css: (t: number) => `margin-left: ${(t - 1) * w}px; z-index: 1;`,
+    };
+  }
+
+  /** Hides everything but the sliding sidebar during the outro so the
+      incoming panel shows through immediately. */
+  function hideOnExit(_node: HTMLElement) {
+    return {
+      duration: navigation.activeView === 'settings' ? sidebarExitMs : 0,
+      css: () => 'opacity: 0; pointer-events: none;',
+    };
+  }
+
   function getActionIcon(actionType: string) {
     switch (actionType) {
       case 'prerun':
@@ -534,7 +578,7 @@
 
 <div class="actions-settings-panel">
   <div class="panel-body">
-    <aside class="sidebar">
+    <aside class="sidebar" in:sidebarSlideIn|global out:sidebarSlideOut|global>
       <div class="sidebar-header">
         <h2>
           <FolderGit2 size={16} />
@@ -589,7 +633,7 @@
       {/if}
     </aside>
 
-    <section class="main-panel">
+    <section class="main-panel" out:hideOnExit|global>
       <div class="main-panel-scroll">
         {#if !selectedEntry}
           <div class="empty-main">Select a repo to configure actions</div>
@@ -865,8 +909,7 @@
   }
 
   .panel-body {
-    display: grid;
-    grid-template-columns: 260px 1fr;
+    display: flex;
     flex: 1;
     min-height: 0;
     overflow: hidden;
@@ -876,6 +919,9 @@
     --repo-row-bleed: 10px;
     --repo-sidebar-hover-bg: color-mix(in srgb, var(--text-primary) 4%, transparent);
 
+    position: relative;
+    width: 260px;
+    flex-shrink: 0;
     border-right: 1px solid color-mix(in srgb, var(--border-subtle) 50%, transparent);
     background: var(--bg-app-bar);
     padding: 0 var(--repo-row-bleed) 10px;
@@ -988,6 +1034,8 @@
   }
 
   .main-panel {
+    flex: 1;
+    min-width: 0;
     background: var(--bg-chrome);
     padding: 14px;
     overflow: hidden;
@@ -1234,10 +1282,11 @@
 
   @media (max-width: 900px) {
     .panel-body {
-      grid-template-columns: 1fr;
+      flex-direction: column;
     }
 
     .sidebar {
+      width: auto;
       border-right: none;
       border-bottom: 1px solid var(--border-subtle);
       max-height: 160px;

@@ -302,16 +302,26 @@ for (const entry of entries) {
   echo "Installing ACP tool $id $version from npm for $target..." >&2
   rm -rf "$install_dir"
   mkdir -p "$install_dir" "$bin_dir"
-  # `npm --prefix` reads project config from the (freshly wiped) prefix dir
-  # rather than the repo, so repo .npmrc files can't influence this install;
-  # only user/global config and this optional override apply. There is no
-  # hard-coded registry.npmjs.org default on purpose: Block's Cloudflare
-  # gateway blocks that host outright on managed devices (dependency
-  # confusion policy), so a corporate-mirror ~/.npmrc must keep winning by
-  # default and this override is the escape hatch for other environments.
+  # npm resolves the bridge's range for its vendored harness dependency at
+  # install time, so a plain install picks the newest in-range release — not
+  # the locked one whenever the lock's cooling-off window pinned older (or
+  # upstream published in-range after the lock landed). The override forces
+  # the locked resolution; without it validate_npm_install below rejects the
+  # install. Package names and semver versions cannot contain JSON
+  # metacharacters, so printf-templated JSON is safe.
+  printf '{ "name": "acp-tools-install", "private": true, "overrides": { "%s": "%s" } }\n' \
+    "$dependency_package" "$dependency_version" > "$install_dir/package.json"
+  # The install runs with the (freshly wiped) install dir as cwd — npm
+  # silently ignores root overrides when --prefix is passed — and the
+  # package.json written above makes it the project root, so repo .npmrc
+  # files can't influence this install; only user/global config and the
+  # optional ACP_TOOLS_NPM_REGISTRY flag apply. There is no hard-coded
+  # registry.npmjs.org default on purpose: Block's Cloudflare gateway blocks
+  # that host outright on managed devices (dependency confusion policy), so a
+  # corporate-mirror ~/.npmrc must keep winning by default and that flag is
+  # the escape hatch for other environments.
   npm_args=(
     install
-    --prefix "$install_dir"
     --omit=dev
     --include=optional
     --ignore-scripts
@@ -327,7 +337,7 @@ for (const entry of entries) {
     npm_args+=(--libc "$npm_libc")
   fi
   npm_args+=("$package@$version")
-  if ! npm "${npm_args[@]}" >&2; then
+  if ! (cd "$install_dir" && npm "${npm_args[@]}") >&2; then
     echo "Failed to install $package@$version. If your configured registry is a corporate mirror that has not synced this version yet, retry once it catches up, or set ACP_TOOLS_NPM_REGISTRY to a registry that has it." >&2
     exit 1
   fi

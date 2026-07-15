@@ -89,6 +89,8 @@ interface TimelineEntry {
 }
 
 const TOOL_EVENT_KINDS = new Set(['tool_call', 'tool_call_update']);
+/** Hidden metadata row announcing a `generate_pikchr` child session at start. */
+const PIKCHR_SESSION_STARTED_EVENT = 'pikchr_session_started';
 const VISIBLE_STANDALONE_EVENT_KINDS = new Set<AcpTranscriptEventKind>([
   'plan_update',
   'session_info_update',
@@ -103,6 +105,7 @@ export function buildAcpTranscriptGroups(
     [...visibleMessages.filter(hasAcpMetadata), ...acpMetadataMessages].filter(hasAcpMetadata)
   );
   const toolAssemblies = assembleTools(visibleMessages, metadataRows);
+  const announcedPikchrSessions = assignAnnouncedPikchrSessions(toolAssemblies, metadataRows);
   const assignedResultIds = new Set<number>();
   for (const item of toolAssemblies.values()) {
     if (item.result) assignedResultIds.add(item.result.id);
@@ -128,14 +131,14 @@ export function buildAcpTranscriptGroups(
         const key = toolKeyForMessage(message);
         const assembly = toolAssemblies.get(key);
         if (assembly && !emittedTools.has(key)) {
-          pushToolGroup(groups, richToolItem(assembly, displayRoots));
+          pushToolGroup(groups, richToolItem(assembly, displayRoots, announcedPikchrSessions));
           emittedTools.add(key);
         }
       } else if (!assignedResultIds.has(message.id)) {
         const key = `result:${message.id}`;
         const assembly = toolAssemblies.get(key);
         if (assembly && !emittedTools.has(key)) {
-          pushToolGroup(groups, richToolItem(assembly, displayRoots));
+          pushToolGroup(groups, richToolItem(assembly, displayRoots, announcedPikchrSessions));
           emittedTools.add(key);
         }
       }
@@ -143,7 +146,7 @@ export function buildAcpTranscriptGroups(
       const key = entry.toolKey!;
       const assembly = toolAssemblies.get(key);
       if (assembly && !emittedTools.has(key)) {
-        pushToolGroup(groups, richToolItem(assembly, displayRoots));
+        pushToolGroup(groups, richToolItem(assembly, displayRoots, announcedPikchrSessions));
         emittedTools.add(key);
       }
     } else if (entry.event) {
@@ -497,11 +500,19 @@ function eventTitle(kind: AcpTranscriptEventKind): string {
   }
 }
 
-function richToolItem(tool: ToolAssembly, displayRoots?: DisplayRootInput): RichToolItem {
+function richToolItem(
+  tool: ToolAssembly,
+  displayRoots?: DisplayRootInput,
+  announcedPikchrSessions?: Map<string, string>
+): RichToolItem {
   const status = tool.metadata.status ?? (tool.result ? 'completed' : 'pending');
   const pending = status === 'pending' || status === 'in_progress';
   const display = formatToolDisplay(tool.call.content, displayRoots, pending);
   const isPikchrDiagramTool = isPikchrTool(tool);
+  // The tool result names the child session authoritatively once the call
+  // completes; while it is still running, fall back to the start-of-run
+  // announcement so the diagram session can be opened mid-generation.
+  const announcedSessionId = pending ? (announcedPikchrSessions?.get(tool.key) ?? null) : null;
   return {
     key: tool.key,
     call: tool.call,
@@ -518,7 +529,9 @@ function richToolItem(tool: ToolAssembly, displayRoots?: DisplayRootInput): Rich
     content: tool.metadata.content,
     locations: tool.metadata.locations,
     isPikchrDiagramTool,
-    innerSessionId: isPikchrDiagramTool ? extractInnerSessionId(tool) : null,
+    innerSessionId: isPikchrDiagramTool
+      ? (extractInnerSessionId(tool) ?? announcedSessionId)
+      : null,
   };
 }
 
@@ -536,6 +549,47 @@ function normalizedToolName(value: unknown): string {
     .trim()
     .toLowerCase()
     .replace(/[\s-]+/g, '_');
+}
+
+/**
+ * Pair `pikchr_session_started` announcements with the Pikchr tool items they
+ * belong to, keyed by tool key. The backend writes an announcement into the
+ * parent transcript the moment `generate_pikchr` creates its child session —
+ * before any tool output exists — so the transcript can link to the diagram
+ * session mid-run. Ids already claimed by a tool's output are skipped; the
+ * rest pair FIFO with Pikchr tools lacking an output-derived id, preferring
+ * tools recorded before the announcement row.
+ */
+function assignAnnouncedPikchrSessions(
+  tools: Map<string, ToolAssembly>,
+  metadataRows: SessionMessage[]
+): Map<string, string> {
+  const assigned = new Map<string, string>();
+  const announcements = metadataRows.filter(
+    (row) => row.acpEventKind === PIKCHR_SESSION_STARTED_EVENT
+  );
+  if (announcements.length === 0) return assigned;
+
+  const claimed = new Set<string>();
+  const unmatched: ToolAssembly[] = [];
+  for (const tool of [...tools.values()].sort((a, b) => a.positionId - b.positionId)) {
+    if (!isPikchrTool(tool)) continue;
+    const fromOutput = extractInnerSessionId(tool);
+    if (fromOutput) claimed.add(fromOutput);
+    else unmatched.push(tool);
+  }
+
+  for (const row of announcements) {
+    const sessionId = innerSessionIdFromValue(row.acpContent);
+    if (!sessionId || claimed.has(sessionId)) continue;
+    const index = unmatched.findIndex((tool) => tool.positionId < row.id);
+    // An announcement racing ahead of its tool_call row still pairs with the
+    // earliest unmatched tool rather than being dropped.
+    const tool = index === -1 ? unmatched.shift() : unmatched.splice(index, 1)[0];
+    if (!tool) continue;
+    assigned.set(tool.key, sessionId);
+  }
+  return assigned;
 }
 
 function extractInnerSessionId(tool: ToolAssembly): string | null {

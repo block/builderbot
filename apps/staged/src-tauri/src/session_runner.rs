@@ -582,6 +582,7 @@ pub fn start_session(
                 let pikchr_provider = resolved_provider_id.clone().unwrap_or_default();
                 match crate::pikchr_mcp::start_pikchr_mcp_server(
                     pikchr_provider,
+                    config.session_id.clone(),
                     app_handle.clone(),
                     Arc::clone(&store),
                 )

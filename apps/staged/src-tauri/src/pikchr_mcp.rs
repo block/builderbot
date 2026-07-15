@@ -53,7 +53,7 @@ use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, ServerHandler};
 
 use crate::agent::AcpDriver;
 use crate::pikchr_subsession::{GenOutcome, LastRenderSlot, ACCEPT_SENTINEL};
-use crate::store::{CompletionReason, Session, SessionStatus, Store};
+use crate::store::{AcpMessageMetadata, CompletionReason, Session, SessionStatus, Store};
 
 /// Wall-clock cap for one `generate_pikchr` call. Each call spins a provider
 /// subprocess and runs several turns; the cap keeps a stuck sub-agent from
@@ -79,6 +79,11 @@ const MAX_LABEL_CHARS: usize = 48;
 /// Temp-file prefix for generated Pikchr preview PNGs.
 const TEMP_IMAGE_PREFIX: &str = "staged-pikchr-preview-";
 const PIKCHR_CHILD_SESSION_PROMPT: &str = "Generate Pikchr diagram";
+/// Hidden ACP metadata event written to the *parent* session's transcript the
+/// moment `generate_pikchr` creates its child diagram session. The tool result
+/// only names the child session once the specialist finishes, so this early
+/// announcement is what lets the UI offer "open diagram session" mid-run.
+const PIKCHR_SESSION_STARTED_EVENT: &str = "pikchr_session_started";
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct GeneratePikchrParams {
@@ -747,6 +752,10 @@ struct PikchrToolsHandler {
     /// Provider id the `generate_pikchr` sub-session runs under (the parent
     /// session's agent, so the sub-agent matches what the user chose).
     provider_id: String,
+    /// Session whose transcript hosts the `generate_pikchr` tool calls —
+    /// child-session announcements are written into it so the UI can link to
+    /// the diagram session while the specialist is still running.
+    parent_session_id: String,
     /// Handle used to resolve the bundled Pikchr grammar reference for the
     /// sub-agent's prompt.
     app_handle: tauri::AppHandle,
@@ -756,9 +765,15 @@ struct PikchrToolsHandler {
 }
 
 impl PikchrToolsHandler {
-    fn new(provider_id: String, app_handle: tauri::AppHandle, store: Arc<Store>) -> Self {
+    fn new(
+        provider_id: String,
+        parent_session_id: String,
+        app_handle: tauri::AppHandle,
+        store: Arc<Store>,
+    ) -> Self {
         Self {
             provider_id,
+            parent_session_id,
             app_handle,
             store,
             tool_router: Self::tool_router(),
@@ -787,6 +802,7 @@ specialist deliberately accepted."
         let session = create_pikchr_child_session(&self.store, &provider_id)
             .map_err(|e| ErrorData::internal_error(e, None))?;
         let inner_session_id = session.id.clone();
+        announce_pikchr_child_session(&self.store, &self.parent_session_id, &inner_session_id);
         let store = Arc::clone(&self.store);
         // The sub-session always runs locally, so resolve a local grammar path
         // (workspace_name = None).
@@ -922,6 +938,25 @@ fn create_pikchr_child_session(store: &Store, provider_id: &str) -> Result<Sessi
     Ok(session)
 }
 
+/// Write a hidden metadata row into the parent session's transcript naming the
+/// just-created child diagram session, so the UI can attach an "open diagram
+/// session" button to the running `generate_pikchr` tool card. The tool result
+/// remains the authoritative id source once the call completes; a failure here
+/// is non-fatal — the button simply appears at completion as before.
+fn announce_pikchr_child_session(store: &Store, parent_session_id: &str, child_session_id: &str) {
+    let metadata = AcpMessageMetadata {
+        acp_event_kind: Some(PIKCHR_SESSION_STARTED_EVENT.to_string()),
+        acp_content: Some(serde_json::json!({ "innerSessionId": child_session_id })),
+        ..Default::default()
+    };
+    if let Err(e) = store.add_acp_metadata_message(parent_session_id, &metadata) {
+        log::warn!(
+            "Failed to announce Pikchr child session {child_session_id} in parent \
+             session {parent_session_id}: {e}"
+        );
+    }
+}
+
 fn mark_pikchr_child_session_error(store: &Store, session_id: &str, message: &str) {
     // `transition_from_running` so a status the child session already reached
     // — a concurrent user cancel, or the terminal status recorded by
@@ -1000,10 +1035,13 @@ impl ServerHandler for PikchrToolsHandler {
 /// (and its parent `LocalSet`) is dropped. `provider_id` is the parent
 /// session's agent, used by `generate_pikchr` to run its sub-session (an empty
 /// string is tolerated — the server still starts and `generate_pikchr` then
-/// fails per-call rather than failing session startup). `app_handle` resolves
-/// the bundled Pikchr grammar reference for the sub-agent.
+/// fails per-call rather than failing session startup). `parent_session_id` is
+/// the session this server is attached to; child diagram sessions are
+/// announced into its transcript as they start. `app_handle` resolves the
+/// bundled Pikchr grammar reference for the sub-agent.
 pub async fn start_pikchr_mcp_server(
     provider_id: String,
+    parent_session_id: String,
     app_handle: tauri::AppHandle,
     store: Arc<Store>,
 ) -> Result<(u16, JoinHandle<()>), String> {
@@ -1019,6 +1057,7 @@ pub async fn start_pikchr_mcp_server(
         move || {
             Ok(PikchrToolsHandler::new(
                 provider_id.clone(),
+                parent_session_id.clone(),
                 app_handle.clone(),
                 Arc::clone(&store),
             ))
@@ -1231,6 +1270,34 @@ arrow from COLL.e to SNOW.w"#;
         assert_eq!(persisted.prompt, PIKCHR_CHILD_SESSION_PROMPT);
         assert_eq!(persisted.status, SessionStatus::Running);
         assert_eq!(persisted.provider.as_deref(), Some("fake-agent"));
+    }
+
+    #[test]
+    fn announce_pikchr_child_session_writes_hidden_parent_metadata_row() {
+        let store = Store::in_memory().expect("in-memory store");
+        let parent = Session::new_running("parent prompt", &std::env::temp_dir());
+        store
+            .create_session(&parent)
+            .expect("create parent session");
+
+        announce_pikchr_child_session(&store, &parent.id, "child-session-1");
+
+        let rows = store
+            .get_session_acp_metadata_messages(&parent.id)
+            .expect("load metadata rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].acp.acp_event_kind.as_deref(),
+            Some(PIKCHR_SESSION_STARTED_EVENT)
+        );
+        assert_eq!(
+            rows[0].acp.acp_content.as_ref().expect("content")["innerSessionId"],
+            "child-session-1"
+        );
+        assert_eq!(
+            rows[0].content, "",
+            "announcement rows must stay hidden from the visible transcript"
+        );
     }
 
     #[test]

@@ -29,10 +29,10 @@
 //! extents differ by a hair (and font fallback can differ); label thresholds
 //! are kept forgiving to match, and this is acceptable for a preview.
 //!
-//! Unlike `project_mcp`, this handler touches no registry or project. It
-//! carries only the provider id, app handle, and shared store that
-//! `generate_pikchr` needs to spin up and persist its sub-session, so it remains
-//! safe to attach to any local session.
+//! Unlike `project_mcp`, this handler touches no project. It carries only the
+//! provider id, app handle, shared store, and session registry that
+//! `generate_pikchr` needs to spin up, persist, and cancel its sub-session, so
+//! it remains safe to attach to any local session.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -53,6 +53,7 @@ use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, ServerHandler};
 
 use crate::agent::AcpDriver;
 use crate::pikchr_subsession::{CancelReason, GenOutcome, LastRenderSlot, ACCEPT_SENTINEL};
+use crate::session_runner::SessionRegistry;
 use crate::store::{AcpMessageMetadata, CompletionReason, Session, SessionStatus, Store};
 
 /// Wall-clock cap for one `generate_pikchr` call. Each call spins a provider
@@ -761,6 +762,10 @@ struct PikchrToolsHandler {
     app_handle: tauri::AppHandle,
     /// Shared app store used to persist the child diagram session.
     store: Arc<Store>,
+    /// Session registry the child diagram session is registered in while it
+    /// runs, so the Stop control in its UI cancels the actual worker instead
+    /// of falling back to a bare store write the worker never observes.
+    registry: Arc<SessionRegistry>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -770,12 +775,14 @@ impl PikchrToolsHandler {
         parent_session_id: String,
         app_handle: tauri::AppHandle,
         store: Arc<Store>,
+        registry: Arc<SessionRegistry>,
     ) -> Self {
         Self {
             provider_id,
             parent_session_id,
             app_handle,
             store,
+            registry,
             tool_router: Self::tool_router(),
         }
     }
@@ -822,6 +829,16 @@ specialist deliberately accepted."
         let worker_cancel = cancel.clone();
         let worker_cancel_reason = Arc::new(CancelReason::new());
         let _cancel_on_drop = cancel.drop_guard();
+
+        // Register the child session in the SessionRegistry under its own
+        // token so the Stop control in the opened diagram session terminates
+        // the actual work: `cancel_session` fires the registered token, which
+        // the worker forwards onto its own token (recording the reason first)
+        // — instead of taking the fallback path that just writes Cancelled to
+        // a store row this worker never re-reads. The registration guard
+        // deregisters when this call ends, however it ends.
+        let registration = self.registry.register_external(&inner_session_id);
+        let user_cancel = registration.token().clone();
 
         // The ACP driver spawns tasks via `spawn_local`, which requires a
         // `LocalSet`; the MCP server's request tasks don't run inside one. So
@@ -888,6 +905,15 @@ accepted a render, so the diagram run was cancelled.",
                     ));
                     timeout_cancel.cancel();
                 });
+                // A Stop pressed in the child diagram session fires the token
+                // registered in the SessionRegistry; forward it to the
+                // worker's token so the run actually terminates. Both watcher
+                // tasks are dropped with this LocalSet.
+                tokio::task::spawn_local(forward_user_cancel(
+                    user_cancel,
+                    Arc::clone(&worker_cancel_reason),
+                    worker_cancel.clone(),
+                ));
                 crate::pikchr_subsession::generate_pikchr_source(
                     &driver,
                     worker_store,
@@ -936,6 +962,27 @@ accepted a render, so the diagram run was cancelled.",
             outcome.warnings.as_deref(),
         ))
     }
+}
+
+/// Cancel reason recorded when the user stops the child diagram session from
+/// its own UI, distinguishing a deliberate stop from caller abandonment on
+/// both the cancelled session row and the parent tool error.
+const USER_STOP_CANCEL_MESSAGE: &str =
+    "The diagram session was stopped before the specialist accepted a render, so the \
+generate_pikchr call was cancelled.";
+
+/// Wait for a user Stop on the child diagram session — `cancel_session` fires
+/// `user_cancel`, the token registered in the SessionRegistry — and forward it
+/// to the worker's own token, recording the reason first so the cancelled
+/// session and the parent tool error read as a deliberate stop.
+async fn forward_user_cancel(
+    user_cancel: CancellationToken,
+    reason: Arc<CancelReason>,
+    worker_cancel: CancellationToken,
+) {
+    user_cancel.cancelled().await;
+    reason.record(USER_STOP_CANCEL_MESSAGE.to_string());
+    worker_cancel.cancel();
 }
 
 fn create_pikchr_child_session(store: &Store, provider_id: &str) -> Result<Session, String> {
@@ -1052,12 +1099,14 @@ impl ServerHandler for PikchrToolsHandler {
 /// fails per-call rather than failing session startup). `parent_session_id` is
 /// the session this server is attached to; child diagram sessions are
 /// announced into its transcript as they start. `app_handle` resolves the
-/// bundled Pikchr grammar reference for the sub-agent.
+/// bundled Pikchr grammar reference for the sub-agent. `registry` holds each
+/// child diagram session while it runs so a user Stop reaches its worker.
 pub async fn start_pikchr_mcp_server(
     provider_id: String,
     parent_session_id: String,
     app_handle: tauri::AppHandle,
     store: Arc<Store>,
+    registry: Arc<SessionRegistry>,
 ) -> Result<(u16, JoinHandle<()>), String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -1074,6 +1123,7 @@ pub async fn start_pikchr_mcp_server(
                 parent_session_id.clone(),
                 app_handle.clone(),
                 Arc::clone(&store),
+                Arc::clone(&registry),
             ))
         },
         Arc::new(LocalSessionManager::default()),
@@ -1284,6 +1334,108 @@ arrow from COLL.e to SNOW.w"#;
         assert_eq!(persisted.prompt, PIKCHR_CHILD_SESSION_PROMPT);
         assert_eq!(persisted.status, SessionStatus::Running);
         assert_eq!(persisted.provider.as_deref(), Some("fake-agent"));
+    }
+
+    #[tokio::test]
+    async fn forward_user_cancel_records_reason_and_arms_worker_token() {
+        let user_cancel = CancellationToken::new();
+        let reason = Arc::new(CancelReason::new());
+        let worker_cancel = CancellationToken::new();
+        user_cancel.cancel();
+
+        forward_user_cancel(user_cancel, Arc::clone(&reason), worker_cancel.clone()).await;
+
+        assert!(worker_cancel.is_cancelled());
+        assert_eq!(reason.resolve(), USER_STOP_CANCEL_MESSAGE);
+    }
+
+    /// Stands in for a live specialist turn during which the user presses Stop
+    /// in the child diagram session's UI: `cancel_session` fires the token
+    /// registered for the session, and the driver — like a real one — winds
+    /// down once its own cancellation token is armed.
+    struct RegistryStopDriver {
+        registry: Arc<SessionRegistry>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl crate::agent::AgentDriver for RegistryStopDriver {
+        async fn run(
+            &self,
+            session_id: &str,
+            _prompt: &str,
+            _images: &[(String, String)],
+            _working_dir: &std::path::Path,
+            _store: &Arc<dyn acp_client::Store>,
+            _writer: &Arc<dyn acp_client::MessageWriter>,
+            cancel_token: &CancellationToken,
+            _agent_session_id: Option<&str>,
+            _config_options: &[acp_client::AcpSessionConfigOptionSelection],
+        ) -> Result<acp_client::AgentRunOutcome, String> {
+            assert!(
+                self.registry.cancel(session_id),
+                "the child session should be registered while the worker runs"
+            );
+            cancel_token.cancelled().await;
+            Ok(acp_client::AgentRunOutcome::Cancelled)
+        }
+    }
+
+    /// A Stop pressed in the child diagram session mid-run must terminate the
+    /// specialist and read as a deliberate stop — not caller abandonment — on
+    /// both the session row and the tool error.
+    #[tokio::test]
+    async fn registry_stop_terminates_the_run_and_reads_as_a_user_stop() {
+        let registry = Arc::new(SessionRegistry::new());
+        let store = Arc::new(Store::in_memory().expect("in-memory store"));
+        let session =
+            create_pikchr_child_session(&store, "fake-agent").expect("create child session");
+
+        let registration = registry.register_external(&session.id);
+        let worker_cancel = CancellationToken::new();
+        let reason = Arc::new(CancelReason::new());
+        let driver = RegistryStopDriver {
+            registry: Arc::clone(&registry),
+        };
+        let slot = LastRenderSlot::new();
+
+        let local = tokio::task::LocalSet::new();
+        let result = local
+            .run_until(async {
+                tokio::task::spawn_local(forward_user_cancel(
+                    registration.token().clone(),
+                    Arc::clone(&reason),
+                    worker_cancel.clone(),
+                ));
+                crate::pikchr_subsession::generate_pikchr_source(
+                    &driver,
+                    Arc::clone(&store),
+                    &session.id,
+                    "/tmp/grammar.md",
+                    "a friendly box",
+                    None,
+                    &slot,
+                    &worker_cancel,
+                    &reason,
+                )
+                .await
+            })
+            .await;
+
+        assert_eq!(result.err().as_deref(), Some(USER_STOP_CANCEL_MESSAGE));
+
+        let persisted = store
+            .get_session(&session.id)
+            .expect("load session")
+            .expect("session exists");
+        assert_eq!(persisted.status, SessionStatus::Cancelled);
+        assert_eq!(
+            persisted.error_message.as_deref(),
+            Some(USER_STOP_CANCEL_MESSAGE)
+        );
+        assert_eq!(
+            persisted.completion_reason.as_ref(),
+            Some(&CompletionReason::Interrupted)
+        );
     }
 
     #[test]

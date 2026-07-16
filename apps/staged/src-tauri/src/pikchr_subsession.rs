@@ -47,11 +47,11 @@ const ABANDONED_CANCEL_MESSAGE: &str = "The generate_pikchr call was abandoned b
 run was cancelled.";
 
 /// Why the sub-session's cancellation token was armed, recorded by the
-/// initiator before it cancels (the pikchr worker's wall-clock timeout is the
-/// only in-process one). Read when the run winds down so the cancelled child
-/// session — and the error handed back to the caller — can say what killed the
-/// run instead of a bare "cancelled". No recorded reason resolves to
-/// [`ABANDONED_CANCEL_MESSAGE`].
+/// initiator before it cancels (the pikchr worker's wall-clock timeout, or a
+/// user Stop on the child session forwarded from its registered token). Read
+/// when the run winds down so the cancelled child session — and the error
+/// handed back to the caller — can say what killed the run instead of a bare
+/// "cancelled". No recorded reason resolves to [`ABANDONED_CANCEL_MESSAGE`].
 pub(crate) struct CancelReason(Mutex<Option<String>>);
 
 impl CancelReason {
@@ -69,7 +69,7 @@ impl CancelReason {
         }
     }
 
-    fn resolve(&self) -> String {
+    pub(crate) fn resolve(&self) -> String {
         self.0
             .lock()
             .unwrap()
@@ -154,11 +154,12 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
     let cancel_message =
         matches!(&result, Err(GenerationError::Cancelled)).then(|| cancel_reason.resolve());
 
-    // Terminal status goes through `transition_from_running`: this child
-    // session is driven by the pikchr worker thread rather than the
-    // SessionRegistry, so a user cancel takes `cancel_session`'s fallback path
-    // and writes Cancelled straight to the store — an unconditional write here
-    // would silently clobber it.
+    // Terminal status goes through `transition_from_running`: a user cancel
+    // normally fires this run's registered token (and lands here as
+    // `Cancelled`), but one arriving before the worker registers the child
+    // session takes `cancel_session`'s fallback path and writes Cancelled
+    // straight to the store — an unconditional write here would silently
+    // clobber it.
     let status_result = match &result {
         Ok(_) => store.transition_from_running(
             session_id,
@@ -874,9 +875,10 @@ mod tests {
         );
     }
 
-    /// Simulates `cancel_session`'s fallback path: this child session is never
-    /// in the SessionRegistry, so a user cancel writes Cancelled straight to
-    /// the store while the specialist turn is still running.
+    /// Simulates `cancel_session`'s fallback path: a user cancel that lands
+    /// before the worker registers the child session in the SessionRegistry
+    /// writes Cancelled straight to the store while the specialist turn is
+    /// still running.
     struct CancelRacingDriver {
         inner: FakeDriver,
         store: Arc<Store>,

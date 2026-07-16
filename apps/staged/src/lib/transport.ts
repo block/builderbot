@@ -101,11 +101,6 @@ export async function invokeCommand<T>(
     body: JSON.stringify(args ?? {}),
   });
 
-  if (response.status === 401) {
-    redirectToLogin();
-    throw new Error('Authentication required');
-  }
-
   if (!response.ok) {
     const text = await response.text();
     let message = text;
@@ -121,35 +116,6 @@ export async function invokeCommand<T>(
   }
 
   return (await response.json()) as T;
-}
-
-// ---------------------------------------------------------------------------
-// Web authentication
-// ---------------------------------------------------------------------------
-
-let loginRedirectPending = false;
-
-function redirectToLogin(): void {
-  if (loginRedirectPending) return;
-  loginRedirectPending = true;
-  // Use a small delay to batch multiple 401s that fire simultaneously
-  setTimeout(() => {
-    window.location.hash = '#/login';
-    loginRedirectPending = false;
-  }, 50);
-}
-
-/**
- * Submit a bearer token to the web server's auth endpoint.
- * On success the server sets a session cookie and subsequent requests are authenticated.
- */
-export async function submitWebToken(token: string): Promise<boolean> {
-  const response = await fetch('/api/auth', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ token }),
-  });
-  return response.ok;
 }
 
 // ---------------------------------------------------------------------------

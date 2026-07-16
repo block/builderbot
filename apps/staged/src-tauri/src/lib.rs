@@ -66,10 +66,6 @@ struct DbState {
     needs_reset: Mutex<Option<StoreIncompatibility>>,
 }
 
-/// Holds the bearer token for web server authentication so it can be
-/// retrieved by the frontend (Tauri command) and shown to the user.
-struct WebAccessToken(String);
-
 pub(crate) fn preferences_store_path_buf() -> Option<PathBuf> {
     crate::paths::data_dir().map(|d| d.join("preferences.json"))
 }
@@ -276,12 +272,6 @@ fn start_store_services(
 // =============================================================================
 // Store status commands
 // =============================================================================
-
-/// Returns the bearer token used to authenticate web browser clients.
-#[tauri::command]
-fn get_web_access_token(token: tauri::State<'_, WebAccessToken>) -> String {
-    token.0.clone()
-}
 
 /// Returns null if the store is ready, or version info if a reset is needed.
 #[tauri::command]
@@ -2196,18 +2186,10 @@ pub fn run() {
                 .unwrap_or(false);
 
             if web_server_enabled {
-                let auth_token = web_server::generate_token();
-                app.manage(WebAccessToken(auth_token.clone()));
                 web_server::start(web_server::WebAppState {
                     app_handle: app.handle().clone(),
                     event_tx,
-                    auth_token,
-                    sessions: std::sync::Arc::new(std::sync::Mutex::new(
-                        std::collections::HashSet::new(),
-                    )),
                 });
-            } else {
-                app.manage(WebAccessToken(String::new()));
             }
 
             if cfg!(debug_assertions) {
@@ -2281,7 +2263,6 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            get_web_access_token,
             get_store_status,
             confirm_reset_store,
             // Windows

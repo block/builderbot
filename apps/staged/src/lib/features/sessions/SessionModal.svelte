@@ -37,6 +37,7 @@
     /** When set, shows a button to open the associated note. */
     noteInfo?: LinkedNoteContext | null;
     onOpenNote?: (note: LinkedNoteContext) => void;
+    onOpenSession?: (sessionId: string) => void;
     referenceNav?: ReferenceNavState;
     onHashtagClick?: (click: HashtagClickInfo) => void;
   }
@@ -60,6 +61,7 @@
     hashtagItems,
     noteInfo,
     onOpenNote,
+    onOpenSession,
     referenceNav,
     onHashtagClick,
   }: Props = $props();
@@ -178,6 +180,7 @@
       {repoLabel}
       {hashtagItems}
       {noteInfo}
+      {onOpenSession}
       {onHashtagClick}
       onSessionChange={(next) => (session = next)}
       onSearchStateChange={(state) => {

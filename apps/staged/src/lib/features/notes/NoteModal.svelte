@@ -75,6 +75,7 @@
     onClose,
     sessionId,
     noteUpdatedAt,
+    onOpenSession,
     noteId,
     noteKind = 'branch',
     branchId,
@@ -640,6 +641,7 @@
             {repoLabel}
             {hashtagItems}
             {noteInfo}
+            {onOpenSession}
             onSessionChange={handlePaneSessionChange}
             {onHashtagClick}
           />

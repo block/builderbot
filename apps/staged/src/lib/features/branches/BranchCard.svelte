@@ -1452,6 +1452,23 @@
     }
   }
 
+  function handleOpenInnerSession(sessionId: string) {
+    const current = currentDialogReferenceEntry();
+    if (current) pushReferenceEntry(current);
+    pushReferenceEntry({
+      kind: 'chat',
+      ref: `#chat:${sessionId}`,
+      sessionId,
+      branchId: branch.id,
+      projectId: branch.projectId,
+      repoDir: branch.worktreePath,
+      repoLabel,
+      hashtagItems,
+      diffContext: referenceDiffContext,
+    });
+    closeReferenceDialogs();
+  }
+
   function handleDeleteImage(imageId: string, opts?: { altKey: boolean }) {
     const doDelete = async () => {
       confirmDelete = null;
@@ -1899,6 +1916,7 @@
     nextSteps={openNote.nextSteps}
     {hashtagItems}
     referenceNav={disabledReferenceNav}
+    onOpenSession={handleOpenInnerSession}
     onClose={() => (openNote = null)}
     onHashtagClick={handleHashtagClick}
     onStartSession={(mode, prefill) => {
@@ -1985,6 +2003,7 @@
     {repoLabel}
     referenceNav={disabledReferenceNav}
     onClose={handleSessionModalClose}
+    onOpenSession={handleOpenInnerSession}
     onHashtagClick={handleHashtagClick}
   />
 {/if}

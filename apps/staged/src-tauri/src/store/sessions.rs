@@ -81,6 +81,11 @@ impl Store {
     /// exist. This is the safe path for background threads — it prevents
     /// a late-arriving "completed" write from overwriting a "cancelled"
     /// status that was set by a concurrent cancel request.
+    ///
+    /// Unlike the other status writers, `error_message` is persisted for
+    /// `Cancelled` as well as `Error`: a run cancelled from outside (e.g. a
+    /// Pikchr sub-session hitting its tool-call timeout) can carry an
+    /// explanation of why it ended. Other statuses clear the message.
     pub fn transition_from_running(
         &self,
         id: &str,
@@ -89,7 +94,7 @@ impl Store {
         completion_reason: Option<&CompletionReason>,
     ) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
-        let error_msg = if new_status == SessionStatus::Error {
+        let error_msg = if matches!(new_status, SessionStatus::Error | SessionStatus::Cancelled) {
             error_message
         } else {
             None

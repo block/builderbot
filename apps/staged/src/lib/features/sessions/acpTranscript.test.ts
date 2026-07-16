@@ -168,6 +168,347 @@ describe('buildAcpTranscriptGroups', () => {
     expect(groups).toHaveLength(1);
     expect(groups[0].type).toBe('acp');
   });
+
+  it('marks generate_pikchr tools and extracts the inner session id', () => {
+    const groups = buildAcpTranscriptGroups(
+      [
+        message({
+          id: 1,
+          role: 'tool_call',
+          content: JSON.stringify({
+            name: 'generate_pikchr',
+            input: { description: 'Show the signup flow' },
+          }),
+          acpEventKind: 'tool_call',
+          acpToolCallId: 'tc-pikchr',
+        }),
+      ],
+      [
+        message({
+          id: 2,
+          role: 'assistant',
+          acpEventKind: 'tool_call_update',
+          acpToolCallId: 'tc-pikchr',
+          acpToolStatus: 'completed',
+          acpRawOutput: {
+            structuredContent: {
+              innerSessionId: 'child-session-1',
+              previewImagePath: '/tmp/preview.png',
+            },
+          },
+        }),
+      ]
+    );
+
+    expect(groups[0].type).toBe('tools');
+    if (groups[0].type === 'tools') {
+      expect(groups[0].items[0].isPikchrDiagramTool).toBe(true);
+      expect(groups[0].items[0].innerSessionId).toBe('child-session-1');
+    }
+  });
+
+  it('extracts Pikchr inner session ids from nested snake-case structured output', () => {
+    const groups = buildAcpTranscriptGroups(
+      [
+        message({
+          id: 1,
+          role: 'tool_call',
+          content: JSON.stringify({
+            name: 'mcp.generate_pikchr',
+            input: { description: 'Show the signup flow' },
+          }),
+          acpEventKind: 'tool_call',
+          acpToolCallId: 'tc-pikchr',
+        }),
+      ],
+      [
+        message({
+          id: 2,
+          role: 'assistant',
+          acpEventKind: 'tool_call_update',
+          acpToolCallId: 'tc-pikchr',
+          acpRawOutput: {
+            result: {
+              structured_content: {
+                inner_session_id: 'child-session-2',
+              },
+            },
+          },
+        }),
+      ]
+    );
+
+    expect(groups[0].type).toBe('tools');
+    if (groups[0].type === 'tools') {
+      expect(groups[0].items[0].innerSessionId).toBe('child-session-2');
+    }
+  });
+
+  it('links a running generate_pikchr tool to its announced child session', () => {
+    const groups = buildAcpTranscriptGroups(
+      [
+        message({
+          id: 1,
+          role: 'tool_call',
+          content: JSON.stringify({
+            name: 'mcp__pikchr__generate_pikchr',
+            input: { description: 'Show the signup flow' },
+          }),
+          acpEventKind: 'tool_call',
+          acpToolCallId: 'tc-pikchr',
+          acpToolStatus: 'in_progress',
+        }),
+      ],
+      [
+        message({
+          id: 2,
+          role: 'assistant',
+          acpEventKind: 'pikchr_session_started',
+          acpContent: { innerSessionId: 'child-session-live' },
+        }),
+      ]
+    );
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].type).toBe('tools');
+    if (groups[0].type === 'tools') {
+      expect(groups[0].items[0].status).toBe('in_progress');
+      expect(groups[0].items[0].innerSessionId).toBe('child-session-live');
+    }
+  });
+
+  it('prefers the tool output id and pairs remaining announcements in order', () => {
+    const pikchrCall = (id: number, toolCallId: string) =>
+      message({
+        id,
+        role: 'tool_call',
+        content: JSON.stringify({
+          name: 'generate_pikchr',
+          input: { description: 'diagram' },
+        }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: toolCallId,
+      });
+
+    const groups = buildAcpTranscriptGroups(
+      [pikchrCall(1, 'tc-done'), pikchrCall(4, 'tc-running')],
+      [
+        message({
+          id: 2,
+          role: 'assistant',
+          acpEventKind: 'pikchr_session_started',
+          acpContent: { innerSessionId: 'child-done' },
+        }),
+        message({
+          id: 3,
+          role: 'assistant',
+          acpEventKind: 'tool_call_update',
+          acpToolCallId: 'tc-done',
+          acpToolStatus: 'completed',
+          acpRawOutput: { structuredContent: { innerSessionId: 'child-done' } },
+        }),
+        message({
+          id: 5,
+          role: 'assistant',
+          acpEventKind: 'pikchr_session_started',
+          acpContent: { innerSessionId: 'child-running' },
+        }),
+      ]
+    );
+
+    const ids = groups.flatMap((group) =>
+      group.type === 'tools' ? group.items.map((item) => item.innerSessionId) : []
+    );
+    expect(ids).toEqual(['child-done', 'child-running']);
+  });
+
+  it('does not let a stale unannounced pikchr tool steal a later announcement', () => {
+    // A generate_pikchr call with neither an output-derived id nor its own
+    // announcement (a pre-announcement transcript, or the backend's
+    // announcement write failed) has no id source at all. A later call's
+    // announcement must pair with the nearest preceding tool — its own call —
+    // leaving the stale card unlinked rather than pointing it at the wrong
+    // diagram session.
+    const pikchrCall = (id: number, toolCallId: string) =>
+      message({
+        id,
+        role: 'tool_call',
+        content: JSON.stringify({
+          name: 'generate_pikchr',
+          input: { description: 'diagram' },
+        }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: toolCallId,
+      });
+
+    const groups = buildAcpTranscriptGroups(
+      [pikchrCall(1, 'tc-stale'), pikchrCall(2, 'tc-new')],
+      [
+        message({
+          id: 3,
+          role: 'assistant',
+          acpEventKind: 'pikchr_session_started',
+          acpContent: { innerSessionId: 'child-new' },
+        }),
+      ]
+    );
+
+    const ids = groups.flatMap((group) =>
+      group.type === 'tools' ? group.items.map((item) => item.innerSessionId) : []
+    );
+    expect(ids).toEqual([null, 'child-new']);
+  });
+
+  it('keeps failed pikchr tools linked to their announced child session', () => {
+    // A failed call's result carries no structured content, so the
+    // announcement is the only id source — dropping it would leave the
+    // failure (recorded in the child session) unreachable from the chat.
+    const groups = buildAcpTranscriptGroups(
+      [
+        message({
+          id: 1,
+          role: 'tool_call',
+          content: JSON.stringify({
+            name: 'generate_pikchr',
+            input: { description: 'diagram' },
+          }),
+          acpEventKind: 'tool_call',
+          acpToolCallId: 'tc-pikchr',
+          acpToolStatus: 'failed',
+        }),
+      ],
+      [
+        message({
+          id: 2,
+          role: 'assistant',
+          acpEventKind: 'pikchr_session_started',
+          acpContent: { innerSessionId: 'child-session-failed' },
+        }),
+      ]
+    );
+
+    expect(groups[0].type).toBe('tools');
+    if (groups[0].type === 'tools') {
+      expect(groups[0].items[0].status).toBe('failed');
+      expect(groups[0].items[0].innerSessionId).toBe('child-session-failed');
+    }
+  });
+
+  it('extracts the Pikchr source from a successful render_pikchr call', () => {
+    const groups = buildAcpTranscriptGroups(
+      [
+        message({
+          id: 1,
+          role: 'tool_call',
+          content: JSON.stringify({
+            name: 'mcp__pikchr-preview__render_pikchr',
+            input: { pikchr: 'box "Clean" fit' },
+          }),
+          acpEventKind: 'tool_call',
+          acpToolCallId: 'tc-render',
+          acpRawInput: { pikchr: 'box "Clean" fit' },
+        }),
+      ],
+      [
+        message({
+          id: 2,
+          role: 'assistant',
+          acpEventKind: 'tool_call_update',
+          acpToolCallId: 'tc-render',
+          acpToolStatus: 'completed',
+        }),
+      ]
+    );
+
+    expect(groups[0].type).toBe('tools');
+    if (groups[0].type === 'tools') {
+      expect(groups[0].items[0].pikchrRenderSource).toBe('box "Clean" fit');
+      expect(groups[0].items[0].isPikchrDiagramTool).toBe(false);
+    }
+  });
+
+  it('extracts the render_pikchr source from the call content when raw input is missing', () => {
+    const groups = buildAcpTranscriptGroups(
+      [
+        message({
+          id: 1,
+          role: 'tool_call',
+          content: JSON.stringify({
+            name: 'pikchr_preview.render_pikchr',
+            input: { pikchr: 'circle "Hub"' },
+          }),
+          acpEventKind: 'tool_call',
+          acpToolCallId: 'tc-render',
+          acpToolStatus: 'completed',
+        }),
+      ],
+      []
+    );
+
+    expect(groups[0].type).toBe('tools');
+    if (groups[0].type === 'tools') {
+      expect(groups[0].items[0].pikchrRenderSource).toBe('circle "Hub"');
+    }
+  });
+
+  it('keeps failed and still-running render_pikchr calls as plain tool cards', () => {
+    const renderCall = (id: number, toolCallId: string, status: string) =>
+      message({
+        id,
+        role: 'tool_call',
+        content: JSON.stringify({
+          name: 'mcp__pikchr-preview__render_pikchr',
+          input: { pikchr: 'box "Broken" fit' },
+        }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: toolCallId,
+        acpToolStatus: status,
+        acpRawInput: { pikchr: 'box "Broken" fit' },
+      });
+
+    const groups = buildAcpTranscriptGroups(
+      [renderCall(1, 'tc-failed', 'failed'), renderCall(2, 'tc-running', 'in_progress')],
+      []
+    );
+
+    expect(groups[0].type).toBe('tools');
+    if (groups[0].type === 'tools') {
+      expect(groups[0].items.map((item) => item.pikchrRenderSource)).toEqual([null, null]);
+    }
+  });
+
+  it('recognizes delimiter-qualified generate_pikchr tool names', () => {
+    const groups = buildAcpTranscriptGroups(
+      [
+        message({
+          id: 1,
+          role: 'tool_call',
+          content: JSON.stringify({
+            name: 'pikchr_generate_pikchr',
+            input: { description: 'Show the signup flow' },
+          }),
+          acpEventKind: 'tool_call',
+          acpToolCallId: 'tc-pikchr-single-underscore',
+        }),
+        message({
+          id: 2,
+          role: 'tool_call',
+          content: JSON.stringify({
+            name: 'mcp__pikchr__generate_pikchr',
+            input: { description: 'Show the signup flow' },
+          }),
+          acpEventKind: 'tool_call',
+          acpToolCallId: 'tc-pikchr-double-underscore',
+        }),
+      ],
+      []
+    );
+
+    expect(groups[0].type).toBe('tools');
+    if (groups[0].type === 'tools') {
+      expect(groups[0].items.map((item) => item.isPikchrDiagramTool)).toEqual([true, true]);
+    }
+  });
 });
 
 describe('groupRichToolsByVerb', () => {
@@ -276,6 +617,51 @@ describe('groupRichToolsByVerb', () => {
       expect(groups[0].items[1].locations).toEqual([{ path: '/repo/b.ts', line: 12 }]);
     }
   });
+
+  it('keeps Pikchr tools out of generic verb groups', () => {
+    const groups = groupRichToolsByVerb([
+      richTool({ key: 'tool:1', verb: 'Ran', detail: 'npm test' }),
+      richTool({
+        key: 'tool:pikchr',
+        verb: 'Ran',
+        detail: 'generate_pikchr',
+        isPikchrDiagramTool: true,
+        innerSessionId: 'child-session-1',
+      }),
+      richTool({ key: 'tool:2', verb: 'Ran', detail: 'npm build' }),
+    ]);
+
+    expect(groups).toHaveLength(3);
+    expect(groups.map((group) => group.items.map((item) => item.key))).toEqual([
+      ['tool:1'],
+      ['tool:pikchr'],
+      ['tool:2'],
+    ]);
+  });
+
+  it('keeps inline-diagram render_pikchr tools out of generic verb groups', () => {
+    const groups = groupRichToolsByVerb([
+      richTool({
+        key: 'tool:render-1',
+        verb: 'Ran',
+        detail: 'render_pikchr',
+        pikchrRenderSource: 'box "First"',
+      }),
+      richTool({
+        key: 'tool:render-2',
+        verb: 'Ran',
+        detail: 'render_pikchr',
+        pikchrRenderSource: 'box "Second"',
+      }),
+      richTool({ key: 'tool:1', verb: 'Ran', detail: 'npm test' }),
+    ]);
+
+    expect(groups.map((group) => group.items.map((item) => item.key))).toEqual([
+      ['tool:render-1'],
+      ['tool:render-2'],
+      ['tool:1'],
+    ]);
+  });
 });
 
 describe('latestAvailableCommands', () => {
@@ -323,6 +709,9 @@ function richTool(
     rawOutput: undefined,
     content: undefined,
     locations: undefined,
+    isPikchrDiagramTool: false,
+    innerSessionId: null,
+    pikchrRenderSource: null,
     ...overrides,
   };
 }

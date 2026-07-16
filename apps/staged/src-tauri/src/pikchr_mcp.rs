@@ -4,14 +4,19 @@
 //! author and validate their Pikchr diagrams before shipping them:
 //!
 //! `generate_pikchr` turns a natural-language description into validated Pikchr
-//! by running a focused internal agent sub-session that renders and repairs its
-//! own output (via [`crate::pikchr_subsession`]) before returning the final
-//! source plus a path to a saved preview image. Revisions pass the current
-//! diagram's source back in so the sub-agent edits real Pikchr rather than
-//! re-describing from scratch.
-//! The sub-session renders and inspects candidate diagrams through the internal
-//! [`run_preview`] path — the same engine the tool ultimately hands back — so
-//! the agent never has to hand-write Pikchr or drive a separate preview step.
+//! by running a focused internal agent sub-session (via
+//! [`crate::pikchr_subsession`]) before returning the final source plus a path
+//! to a saved preview image. Revisions pass the current diagram's source back
+//! in so the sub-agent edits real Pikchr rather than re-describing from
+//! scratch.
+//! The specialist iterates in its own session through the `render_pikchr` tool
+//! served by [`PikchrPreviewHandler`]: each call renders and analyzes a
+//! candidate through the internal [`run_preview`] path — the same engine the
+//! tool ultimately hands back — returning the rendered image plus a layout
+//! report, and recording every successful render in a shared last-render slot.
+//! The specialist accepts by ending its turn with the
+//! [`crate::pikchr_subsession::ACCEPT_SENTINEL`] token, and the host returns
+//! the slot's contents — so unvalidated source can never reach the caller.
 //!
 //! Fidelity: rendering goes through the `pikchr` crate, which bundles the same
 //! official `pikchr.c` that the frontend's `pikchr-js` compiles to WASM. The
@@ -24,10 +29,10 @@
 //! extents differ by a hair (and font fallback can differ); label thresholds
 //! are kept forgiving to match, and this is acceptable for a preview.
 //!
-//! Unlike `project_mcp`, this handler touches no store, registry, or project.
-//! It carries only the provider id and `AppHandle` that `generate_pikchr` needs
-//! to spin up its sub-session, so it remains safe to attach to any local
-//! session.
+//! Unlike `project_mcp`, this handler touches no project. It carries only the
+//! provider id, app handle, shared store, and session registry that
+//! `generate_pikchr` needs to spin up, persist, and cancel its sub-session, so
+//! it remains safe to attach to any local session.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -36,7 +41,9 @@ use std::time::Duration;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use acp_client::{McpServer, McpServerHttp};
 use axum::Router;
+use base64::Engine as _;
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use rmcp::transport::streamable_http_server::{
@@ -45,6 +52,9 @@ use rmcp::transport::streamable_http_server::{
 use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, ServerHandler};
 
 use crate::agent::AcpDriver;
+use crate::pikchr_subsession::{CancelReason, GenOutcome, LastRenderSlot, ACCEPT_SENTINEL};
+use crate::session_runner::SessionRegistry;
+use crate::store::{AcpMessageMetadata, CompletionReason, Session, SessionStatus, Store};
 
 /// Wall-clock cap for one `generate_pikchr` call. Each call spins a provider
 /// subprocess and runs several turns; the cap keeps a stuck sub-agent from
@@ -69,6 +79,12 @@ const MIN_TEXT_OVERLAP_PX: f64 = 3.0;
 const MAX_LABEL_CHARS: usize = 48;
 /// Temp-file prefix for generated Pikchr preview PNGs.
 const TEMP_IMAGE_PREFIX: &str = "staged-pikchr-preview-";
+const PIKCHR_CHILD_SESSION_PROMPT: &str = "Generate Pikchr diagram";
+/// Hidden ACP metadata event written to the *parent* session's transcript the
+/// moment `generate_pikchr` creates its child diagram session. The tool result
+/// only names the child session once the specialist finishes, so this early
+/// announcement is what lets the UI offer "open diagram session" mid-run.
+const PIKCHR_SESSION_STARTED_EVENT: &str = "pikchr_session_started";
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct GeneratePikchrParams {
@@ -490,24 +506,23 @@ fn describe_overhang(oob: &OutOfBounds) -> String {
     .join(", ")
 }
 
-/// Build the text summary used by the specialist retry loop. Text matters
-/// because vision-less models can act on a textual layout report.
-fn build_summary(
-    width: i64,
-    height: i64,
+/// Build the layout-warning portion of the render analysis — overlap and
+/// out-of-bounds reports with repair guidance — or `None` when the layout is
+/// clean. Text matters because vision-less models can act on a textual layout
+/// report.
+fn build_warnings(
     elements: &[Element],
     overlaps: &[Overlap],
     out_of_bounds: &[OutOfBounds],
-) -> String {
-    let mut out = format!("Rendered Pikchr diagram: {width}×{height} px.");
+) -> Option<String> {
     if overlaps.is_empty() && out_of_bounds.is_empty() {
-        out.push_str("\nNo layout issues detected.");
-        return out;
+        return None;
     }
+    let mut out = String::new();
 
     if !overlaps.is_empty() {
         out.push_str(&format!(
-            "\n⚠ {} overlapping pair(s) detected:",
+            "⚠ {} overlapping pair(s) detected:",
             overlaps.len()
         ));
         for o in overlaps {
@@ -527,8 +542,11 @@ give long labels room or shorten them, and avoid percentage-length arrows betwee
     }
 
     if !out_of_bounds.is_empty() {
+        if !out.is_empty() {
+            out.push('\n');
+        }
         out.push_str(&format!(
-            "\n⚠ {} element(s) extend beyond the diagram bounds:",
+            "⚠ {} element(s) extend beyond the diagram bounds:",
             out_of_bounds.len()
         ));
         for oob in out_of_bounds {
@@ -545,7 +563,18 @@ holding them, keep free-standing text away from the edges, and add canvas margin
 (`margin = 0.25in`) if the content needs breathing room.",
         );
     }
-    out
+    Some(out)
+}
+
+/// Compose the full analysis summary: dimensions plus the warning report (or
+/// an all-clear line).
+fn build_summary(width: i64, height: i64, warnings: Option<&str>) -> String {
+    match warnings {
+        None => {
+            format!("Rendered Pikchr diagram: {width}×{height} px.\nNo layout issues detected.")
+        }
+        Some(warnings) => format!("Rendered Pikchr diagram: {width}×{height} px.\n{warnings}"),
+    }
 }
 
 // =============================================================================
@@ -627,17 +656,16 @@ fn rasterize_tree_to_png(tree: &usvg::Tree, scale: f32) -> Option<Vec<u8>> {
 
 /// Outcome of rendering a candidate diagram: the PNG (if rasterization
 /// succeeded), a text summary of dimensions and layout warnings, whether the
-/// source failed to render at all, and whether renderable geometry still
-/// overlaps or extends beyond the diagram bounds.
-///
-/// `pub(crate)` so the `generate_pikchr` sub-session loop can render and
-/// inspect candidate diagrams through this shared render/analysis path.
+/// source failed to render at all, and the warning report on its own when
+/// renderable geometry still overlaps or extends beyond the diagram bounds.
 pub(crate) struct PreviewOutcome {
     pub(crate) png: Option<Vec<u8>>,
     pub(crate) summary: String,
     pub(crate) is_error: bool,
-    pub(crate) has_overlaps: bool,
-    pub(crate) has_out_of_bounds: bool,
+    /// The layout-warning portion of `summary`, when any warnings were
+    /// detected — carried separately so an accepted render's warnings can be
+    /// surfaced to the calling agent on their own.
+    pub(crate) warnings: Option<String>,
 }
 
 /// Render + analyze a candidate Pikchr source.
@@ -649,8 +677,7 @@ pub(crate) fn run_preview(source: &str, scale: f32) -> PreviewOutcome {
             png: None,
             summary: "Pikchr source is empty — nothing to render.".to_string(),
             is_error: true,
-            has_overlaps: false,
-            has_out_of_bounds: false,
+            warnings: None,
         };
     }
     let rendered = match render_pikchr_svg(source) {
@@ -660,8 +687,7 @@ pub(crate) fn run_preview(source: &str, scale: f32) -> PreviewOutcome {
                 png: None,
                 summary: format!("Pikchr could not render this diagram:\n{}", err.trim()),
                 is_error: true,
-                has_overlaps: false,
-                has_out_of_bounds: false,
+                warnings: None,
             };
         }
     };
@@ -679,21 +705,13 @@ the rendered SVG could not be parsed.)",
                 rendered.width, rendered.height
             ),
             is_error: false,
-            has_overlaps: false,
-            has_out_of_bounds: false,
+            warnings: None,
         };
     };
 
     let (elements, overlaps, out_of_bounds) = analyze_layout(&tree);
-    let has_overlaps = !overlaps.is_empty();
-    let has_out_of_bounds = !out_of_bounds.is_empty();
-    let mut summary = build_summary(
-        rendered.width,
-        rendered.height,
-        &elements,
-        &overlaps,
-        &out_of_bounds,
-    );
+    let warnings = build_warnings(&elements, &overlaps, &out_of_bounds);
+    let mut summary = build_summary(rendered.width, rendered.height, warnings.as_deref());
 
     let png = rasterize_tree_to_png(&tree, scale);
     if png.is_none() {
@@ -704,8 +722,7 @@ the rendered SVG could not be parsed.)",
         png,
         summary,
         is_error: false,
-        has_overlaps,
-        has_out_of_bounds,
+        warnings,
     }
 }
 
@@ -736,17 +753,36 @@ struct PikchrToolsHandler {
     /// Provider id the `generate_pikchr` sub-session runs under (the parent
     /// session's agent, so the sub-agent matches what the user chose).
     provider_id: String,
+    /// Session whose transcript hosts the `generate_pikchr` tool calls —
+    /// child-session announcements are written into it so the UI can link to
+    /// the diagram session while the specialist is still running.
+    parent_session_id: String,
     /// Handle used to resolve the bundled Pikchr grammar reference for the
     /// sub-agent's prompt.
     app_handle: tauri::AppHandle,
+    /// Shared app store used to persist the child diagram session.
+    store: Arc<Store>,
+    /// Session registry the child diagram session is registered in while it
+    /// runs, so the Stop control in its UI cancels the actual worker instead
+    /// of falling back to a bare store write the worker never observes.
+    registry: Arc<SessionRegistry>,
     tool_router: ToolRouter<Self>,
 }
 
 impl PikchrToolsHandler {
-    fn new(provider_id: String, app_handle: tauri::AppHandle) -> Self {
+    fn new(
+        provider_id: String,
+        parent_session_id: String,
+        app_handle: tauri::AppHandle,
+        store: Arc<Store>,
+        registry: Arc<SessionRegistry>,
+    ) -> Self {
         Self {
             provider_id,
+            parent_session_id,
             app_handle,
+            store,
+            registry,
             tool_router: Self::tool_router(),
         }
     }
@@ -756,11 +792,13 @@ impl PikchrToolsHandler {
 impl PikchrToolsHandler {
     #[tool(
         description = "Generate a validated Pikchr diagram from a natural-language description. \
-An internal Pikchr specialist writes the diagram, renders it, and repairs syntax and layout warnings on its own \
-before returning. Prefer this over hand-writing Pikchr. Pass a fine-grained `description` (boxes, \
-arrows, labels, layout, relationships). To revise an existing diagram, also pass its current source \
-as `previous_pikchr` so it is edited rather than redrawn. Returns the validated Pikchr source (drop \
-it into a ```pikchr fenced code block) and a filesystem path to a rendered PNG preview."
+An internal Pikchr specialist writes the diagram, then renders and visually reviews it in its own \
+session, iterating until it is satisfied. Prefer this over hand-writing Pikchr. Pass a fine-grained \
+`description` (boxes, arrows, labels, layout, relationships). To revise an existing diagram, also \
+pass its current source as `previous_pikchr` so it is edited rather than redrawn. Returns the \
+validated Pikchr source (drop it into a ```pikchr fenced code block), a filesystem path to a \
+rendered PNG preview you may open as an optional final check, and any layout warnings the \
+specialist deliberately accepted."
     )]
     async fn generate_pikchr(
         &self,
@@ -768,6 +806,11 @@ it into a ```pikchr fenced code block) and a filesystem path to a rendered PNG p
     ) -> Result<CallToolResult, ErrorData> {
         let scale = p.scale.unwrap_or(DEFAULT_SCALE);
         let provider_id = self.provider_id.clone();
+        let session = create_pikchr_child_session(&self.store, &provider_id)
+            .map_err(|e| ErrorData::internal_error(e, None))?;
+        let inner_session_id = session.id.clone();
+        announce_pikchr_child_session(&self.store, &self.parent_session_id, &inner_session_id);
+        let store = Arc::clone(&self.store);
         // The sub-session always runs locally, so resolve a local grammar path
         // (workspace_name = None).
         let grammar_reference =
@@ -778,16 +821,32 @@ it into a ```pikchr fenced code block) and a filesystem path to a rendered PNG p
         // `DropGuard`. If the MCP client abandons this tool call, the future is
         // dropped, the guard cancels the token, and the sub-session's provider
         // subprocess is torn down promptly — rather than running detached until
-        // the wall-clock timeout. The worker arms this same token on timeout.
+        // the wall-clock timeout. The worker arms this same token on timeout,
+        // recording the reason first so the cancelled child session can say
+        // "timed out" rather than a bare cancel; a guard-driven cancel records
+        // nothing and reads as the caller abandoning the call.
         let cancel = CancellationToken::new();
         let worker_cancel = cancel.clone();
+        let worker_cancel_reason = Arc::new(CancelReason::new());
         let _cancel_on_drop = cancel.drop_guard();
+
+        // Register the child session in the SessionRegistry under its own
+        // token so the Stop control in the opened diagram session terminates
+        // the actual work: `cancel_session` fires the registered token, which
+        // the worker forwards onto its own token (recording the reason first)
+        // — instead of taking the fallback path that just writes Cancelled to
+        // a store row this worker never re-reads. The registration guard
+        // deregisters when this call ends, however it ends.
+        let registration = self.registry.register_external(&inner_session_id);
+        let user_cancel = registration.token().clone();
 
         // The ACP driver spawns tasks via `spawn_local`, which requires a
         // `LocalSet`; the MCP server's request tasks don't run inside one. So
         // drive the whole generation loop on a dedicated thread with its own
         // current-thread runtime + LocalSet, mirroring `session_runner`.
         let (tx, rx) = tokio::sync::oneshot::channel();
+        let worker_store = Arc::clone(&store);
+        let worker_session_id = inner_session_id.clone();
         std::thread::spawn(move || {
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -795,31 +854,76 @@ it into a ```pikchr fenced code block) and a filesystem path to a rendered PNG p
             {
                 Ok(rt) => rt,
                 Err(e) => {
-                    let _ = tx.send(Err(format!(
-                        "Failed to create runtime for generate_pikchr: {e}"
-                    )));
+                    let message = format!("Failed to create runtime for generate_pikchr: {e}");
+                    mark_pikchr_child_session_error(&worker_store, &worker_session_id, &message);
+                    let _ = tx.send(Err(message));
                     return;
                 }
             };
             let local = tokio::task::LocalSet::new();
             let result = local.block_on(&rt, async move {
-                let driver = AcpDriver::new(&provider_id)?;
+                // The last-render slot the specialist's `render_pikchr` tool
+                // writes and the host loop takes from on acceptance. The
+                // preview server's handle drops with this worker's runtime.
+                let slot = Arc::new(LastRenderSlot::new());
+                let (preview_port, _preview_server) =
+                    match start_pikchr_preview_mcp_server(scale, Arc::clone(&slot)).await {
+                        Ok(started) => started,
+                        Err(e) => {
+                            mark_pikchr_child_session_error(&worker_store, &worker_session_id, &e);
+                            return Err(e);
+                        }
+                    };
+                // Providers without HTTP MCP support fail the required-
+                // transport check and the call errors — acceptable, since the
+                // parent session already requires an MCP-capable provider to
+                // have `generate_pikchr` at all.
+                let driver = match AcpDriver::new(&provider_id) {
+                    Ok(driver) => {
+                        driver.with_mcp_servers(vec![McpServer::Http(McpServerHttp::new(
+                            "pikchr-preview",
+                            format!("http://127.0.0.1:{preview_port}/mcp"),
+                        ))])
+                    }
+                    Err(e) => {
+                        mark_pikchr_child_session_error(&worker_store, &worker_session_id, &e);
+                        return Err(e);
+                    }
+                };
                 // Enforce the wall-clock cap by cancelling the sub-session's
                 // token; the driver shuts its subprocess down gracefully. The
                 // parent's `DropGuard` cancels this same token if the MCP
                 // client abandons the call before the timeout fires.
                 let timeout_cancel = worker_cancel.clone();
+                let timeout_reason = Arc::clone(&worker_cancel_reason);
                 tokio::task::spawn_local(async move {
                     tokio::time::sleep(GENERATE_PIKCHR_TIMEOUT).await;
+                    timeout_reason.record(format!(
+                        "generate_pikchr hit its {}-minute time limit before the specialist \
+accepted a render, so the diagram run was cancelled.",
+                        GENERATE_PIKCHR_TIMEOUT.as_secs() / 60
+                    ));
                     timeout_cancel.cancel();
                 });
+                // A Stop pressed in the child diagram session fires the token
+                // registered in the SessionRegistry; forward it to the
+                // worker's token so the run actually terminates. Both watcher
+                // tasks are dropped with this LocalSet.
+                tokio::task::spawn_local(forward_user_cancel(
+                    user_cancel,
+                    Arc::clone(&worker_cancel_reason),
+                    worker_cancel.clone(),
+                ));
                 crate::pikchr_subsession::generate_pikchr_source(
                     &driver,
+                    worker_store,
+                    &worker_session_id,
                     &grammar_reference,
                     &p.description,
                     p.previous_pikchr.as_deref(),
-                    scale,
+                    &slot,
                     &worker_cancel,
+                    &worker_cancel_reason,
                 )
                 .await
             });
@@ -829,26 +933,151 @@ it into a ```pikchr fenced code block) and a filesystem path to a rendered PNG p
         let outcome = rx
             .await
             .map_err(|e| {
-                ErrorData::internal_error(format!("generate_pikchr worker dropped: {e}"), None)
+                let message = format!("generate_pikchr worker dropped: {e}");
+                mark_pikchr_child_session_error(&store, &inner_session_id, &message);
+                ErrorData::internal_error(message, None)
             })?
             .map_err(|e| ErrorData::internal_error(e, None))?;
 
-        let mut content = Vec::new();
-        if let Some(png) = &outcome.png {
+        let preview_image_path = if let Some(png) = &outcome.png {
+            // A temp-file failure here is the parent's bookkeeping problem, not
+            // the specialist's: the sub-session already succeeded and recorded
+            // its own terminal status, so leave that intact and let this tool
+            // result's error explain the failure to the caller.
             let path = write_png_to_temp_file(png).map_err(|e| {
                 ErrorData::internal_error(
                     format!("Failed to write Pikchr preview image to temp dir: {e}"),
                     None,
                 )
             })?;
-            content.push(Content::text(format!(
-                "Rendered preview image path: {}",
-                path.display()
-            )));
-        }
-        content.push(Content::text(outcome.source));
-        Ok(CallToolResult::success(content))
+            Some(path.display().to_string())
+        } else {
+            None
+        };
+
+        Ok(build_generate_pikchr_result(
+            &inner_session_id,
+            preview_image_path.as_deref(),
+            &outcome.source,
+            outcome.warnings.as_deref(),
+        ))
     }
+}
+
+/// Cancel reason recorded when the user stops the child diagram session from
+/// its own UI, distinguishing a deliberate stop from caller abandonment on
+/// both the cancelled session row and the parent tool error.
+const USER_STOP_CANCEL_MESSAGE: &str =
+    "The diagram session was stopped before the specialist accepted a render, so the \
+generate_pikchr call was cancelled.";
+
+/// Wait for a user Stop on the child diagram session — `cancel_session` fires
+/// `user_cancel`, the token registered in the SessionRegistry — and forward it
+/// to the worker's own token, recording the reason first so the cancelled
+/// session and the parent tool error read as a deliberate stop.
+async fn forward_user_cancel(
+    user_cancel: CancellationToken,
+    reason: Arc<CancelReason>,
+    worker_cancel: CancellationToken,
+) {
+    user_cancel.cancelled().await;
+    reason.record(USER_STOP_CANCEL_MESSAGE.to_string());
+    worker_cancel.cancel();
+}
+
+fn create_pikchr_child_session(store: &Store, provider_id: &str) -> Result<Session, String> {
+    let mut session = Session::new_running(PIKCHR_CHILD_SESSION_PROMPT, &std::env::temp_dir());
+    if !provider_id.is_empty() {
+        session = session.with_provider(provider_id);
+    }
+    store
+        .create_session(&session)
+        .map_err(|e| format!("Failed to create Pikchr child session: {e}"))?;
+    Ok(session)
+}
+
+/// Write a hidden metadata row into the parent session's transcript naming the
+/// just-created child diagram session, so the UI can attach an "open diagram
+/// session" button to the running `generate_pikchr` tool card. A successful
+/// tool result remains the authoritative id source once the call completes; a
+/// failed call carries no id in its result, so this announcement is also what
+/// keeps the diagram session (which records the failure) reachable from the
+/// failed tool card. A write failure here is non-fatal — the button is simply
+/// missing until (and unless) the call completes successfully.
+fn announce_pikchr_child_session(store: &Store, parent_session_id: &str, child_session_id: &str) {
+    let metadata = AcpMessageMetadata {
+        acp_event_kind: Some(PIKCHR_SESSION_STARTED_EVENT.to_string()),
+        acp_content: Some(serde_json::json!({ "innerSessionId": child_session_id })),
+        ..Default::default()
+    };
+    if let Err(e) = store.add_acp_metadata_message(parent_session_id, &metadata) {
+        log::warn!(
+            "Failed to announce Pikchr child session {child_session_id} in parent \
+             session {parent_session_id}: {e}"
+        );
+    }
+}
+
+fn mark_pikchr_child_session_error(store: &Store, session_id: &str, message: &str) {
+    // `transition_from_running` so a status the child session already reached
+    // — a concurrent user cancel, or the terminal status recorded by
+    // `generate_pikchr_source` — is not clobbered by this bookkeeping write.
+    if let Err(e) = store.transition_from_running(
+        session_id,
+        SessionStatus::Error,
+        Some(message),
+        Some(&CompletionReason::Crashed),
+    ) {
+        log::error!("Failed to mark Pikchr child session {session_id} errored: {e}");
+    }
+}
+
+fn build_generate_pikchr_result(
+    inner_session_id: &str,
+    preview_image_path: Option<&str>,
+    source: &str,
+    warnings: Option<&str>,
+) -> CallToolResult {
+    let mut content = Vec::new();
+    if let Some(path) = preview_image_path {
+        content.push(Content::text(format!(
+            "Rendered preview image path: {path}"
+        )));
+    }
+    // The specialist saw these warnings in its render results and accepted
+    // anyway, so they're deliberate — surface them rather than swallow them.
+    if let Some(warnings) = warnings {
+        content.push(Content::text(format!(
+            "The specialist accepted this render despite layout warnings:\n{warnings}"
+        )));
+    }
+    content.push(Content::text(source.to_string()));
+
+    let mut structured = serde_json::Map::new();
+    structured.insert(
+        "innerSessionId".to_string(),
+        serde_json::Value::String(inner_session_id.to_string()),
+    );
+    if let Some(path) = preview_image_path {
+        structured.insert(
+            "previewImagePath".to_string(),
+            serde_json::Value::String(path.to_string()),
+        );
+    }
+    if let Some(warnings) = warnings {
+        structured.insert(
+            "renderWarnings".to_string(),
+            serde_json::Value::String(warnings.to_string()),
+        );
+    }
+    structured.insert(
+        "source".to_string(),
+        serde_json::Value::String(source.to_string()),
+    );
+
+    let mut result = CallToolResult::success(content);
+    result.structured_content = Some(serde_json::Value::Object(structured));
+    result
 }
 
 #[tool_handler]
@@ -867,11 +1096,17 @@ impl ServerHandler for PikchrToolsHandler {
 /// (and its parent `LocalSet`) is dropped. `provider_id` is the parent
 /// session's agent, used by `generate_pikchr` to run its sub-session (an empty
 /// string is tolerated — the server still starts and `generate_pikchr` then
-/// fails per-call rather than failing session startup). `app_handle` resolves
-/// the bundled Pikchr grammar reference for the sub-agent.
+/// fails per-call rather than failing session startup). `parent_session_id` is
+/// the session this server is attached to; child diagram sessions are
+/// announced into its transcript as they start. `app_handle` resolves the
+/// bundled Pikchr grammar reference for the sub-agent. `registry` holds each
+/// child diagram session while it runs so a user Stop reaches its worker.
 pub async fn start_pikchr_mcp_server(
     provider_id: String,
+    parent_session_id: String,
     app_handle: tauri::AppHandle,
+    store: Arc<Store>,
+    registry: Arc<SessionRegistry>,
 ) -> Result<(u16, JoinHandle<()>), String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -885,7 +1120,10 @@ pub async fn start_pikchr_mcp_server(
         move || {
             Ok(PikchrToolsHandler::new(
                 provider_id.clone(),
+                parent_session_id.clone(),
                 app_handle.clone(),
+                Arc::clone(&store),
+                Arc::clone(&registry),
             ))
         },
         Arc::new(LocalSessionManager::default()),
@@ -899,6 +1137,142 @@ pub async fn start_pikchr_mcp_server(
     let handle = tokio::task::spawn(async move {
         if let Err(e) = axum::serve(listener, router).await {
             log::error!("[pikchr_mcp] HTTP server error: {e}");
+        }
+    });
+
+    Ok((port, handle))
+}
+
+// =============================================================================
+// render_pikchr — the specialist sub-session's preview tool
+// =============================================================================
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+struct RenderPikchrParams {
+    /// The candidate Pikchr source to render, without code fences.
+    pub pikchr: String,
+}
+
+/// Handler for the specialist sub-session's `render_pikchr` tool. Separate
+/// from [`PikchrToolsHandler`] so the sub-session sees only this tool and
+/// cannot recurse into `generate_pikchr`. Every connection shares the parent
+/// call's rasterization scale and last-render slot.
+#[derive(Clone)]
+struct PikchrPreviewHandler {
+    scale: f32,
+    slot: Arc<LastRenderSlot>,
+    tool_router: ToolRouter<Self>,
+}
+
+impl PikchrPreviewHandler {
+    fn new(scale: f32, slot: Arc<LastRenderSlot>) -> Self {
+        Self {
+            scale,
+            slot,
+            tool_router: Self::tool_router(),
+        }
+    }
+}
+
+/// Standing instruction ending every successful `render_pikchr` result.
+fn accept_instruction() -> String {
+    format!(
+        "When you are satisfied with this render, accept it by ending your message with \
+`{ACCEPT_SENTINEL}` as its own final line. Otherwise revise the source and render again."
+    )
+}
+
+#[tool_router]
+impl PikchrPreviewHandler {
+    #[tool(
+        description = "Render candidate Pikchr source and inspect the result. Returns the rendered \
+image plus a layout analysis (dimensions, overlapping elements, content extending beyond the \
+diagram bounds). Each successful render replaces the previous one as the current candidate; \
+ending your message with `AcceptLastRender` as its own final line accepts the most recent \
+successful render."
+    )]
+    async fn render_pikchr(
+        &self,
+        Parameters(p): Parameters<RenderPikchrParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let preview = run_preview(&p.pikchr, self.scale);
+        if preview.is_error {
+            // The slot keeps the previous successful render, so acceptance
+            // after a failed attempt is informed: say what it would accept.
+            let slot_note = if self.slot.is_empty() {
+                "No successful render is stored yet — fix the source and render again."
+            } else {
+                "The previous successful render is still stored; accepting with `AcceptLastRender` \
+now would accept that earlier version, not this source."
+            };
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "{}\n{slot_note}",
+                preview.summary
+            ))]));
+        }
+
+        let mut content = vec![Content::text(preview.summary)];
+        if let Some(png) = &preview.png {
+            content.push(Content::image(
+                base64::engine::general_purpose::STANDARD.encode(png),
+                "image/png",
+            ));
+        }
+        content.push(Content::text(accept_instruction()));
+
+        self.slot.store(GenOutcome {
+            source: p.pikchr,
+            png: preview.png,
+            warnings: preview.warnings,
+        });
+
+        Ok(CallToolResult::success(content))
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for PikchrPreviewHandler {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            ..Default::default()
+        }
+    }
+}
+
+/// Start a local MCP HTTP server exposing the `render_pikchr` tool for one
+/// `generate_pikchr` call's sub-session.
+///
+/// Returns the bound port and a `JoinHandle`. The server lives as long as the
+/// worker thread's runtime that spawned it; the caller keeps the handle for
+/// the duration of the call and both drop with the worker. All connections
+/// share `scale` and `slot`, so the host loop reads the same last-render slot
+/// the tool writes.
+async fn start_pikchr_preview_mcp_server(
+    scale: f32,
+    slot: Arc<LastRenderSlot>,
+) -> Result<(u16, JoinHandle<()>), String> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("Failed to bind pikchr preview MCP listener: {e}"))?;
+    let port = listener
+        .local_addr()
+        .map_err(|e| format!("Failed to get local address: {e}"))?
+        .port();
+
+    let service = StreamableHttpService::new(
+        move || Ok(PikchrPreviewHandler::new(scale, Arc::clone(&slot))),
+        Arc::new(LocalSessionManager::default()),
+        StreamableHttpServerConfig::default(),
+    );
+
+    let router = Router::new().route_service("/mcp", service);
+
+    log::debug!("[pikchr_mcp] preview HTTP server bound on port {port}");
+
+    let handle = tokio::task::spawn(async move {
+        if let Err(e) = axum::serve(listener, router).await {
+            log::error!("[pikchr_mcp] preview HTTP server error: {e}");
         }
     });
 
@@ -940,6 +1314,230 @@ COLL: box "Block OTel Collector" "OTel→UAP mapping (from CDF manifest)" fit fi
 arrow from OTLP.e to COLL.w "OTLP /v1/logs + auth" above
 SNOW: box "unifiedevents/batch" "→ Snowflake (UAP unchanged)" fit fill 0xffd6d6 with .w at 0.6 right of COLL.e
 arrow from COLL.e to SNOW.w"#;
+
+    #[test]
+    fn create_pikchr_child_session_persists_running_provider_session() {
+        let store = Store::in_memory().expect("in-memory store");
+
+        let session =
+            create_pikchr_child_session(&store, "fake-agent").expect("create child session");
+
+        assert_eq!(session.prompt, PIKCHR_CHILD_SESSION_PROMPT);
+        assert_eq!(session.status, SessionStatus::Running);
+        assert_eq!(session.provider.as_deref(), Some("fake-agent"));
+        assert!(!session.working_dir.is_empty());
+
+        let persisted = store
+            .get_session(&session.id)
+            .expect("load session")
+            .expect("session exists");
+        assert_eq!(persisted.prompt, PIKCHR_CHILD_SESSION_PROMPT);
+        assert_eq!(persisted.status, SessionStatus::Running);
+        assert_eq!(persisted.provider.as_deref(), Some("fake-agent"));
+    }
+
+    #[tokio::test]
+    async fn forward_user_cancel_records_reason_and_arms_worker_token() {
+        let user_cancel = CancellationToken::new();
+        let reason = Arc::new(CancelReason::new());
+        let worker_cancel = CancellationToken::new();
+        user_cancel.cancel();
+
+        forward_user_cancel(user_cancel, Arc::clone(&reason), worker_cancel.clone()).await;
+
+        assert!(worker_cancel.is_cancelled());
+        assert_eq!(reason.resolve(), USER_STOP_CANCEL_MESSAGE);
+    }
+
+    /// Stands in for a live specialist turn during which the user presses Stop
+    /// in the child diagram session's UI: `cancel_session` fires the token
+    /// registered for the session, and the driver — like a real one — winds
+    /// down once its own cancellation token is armed.
+    struct RegistryStopDriver {
+        registry: Arc<SessionRegistry>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl crate::agent::AgentDriver for RegistryStopDriver {
+        async fn run(
+            &self,
+            session_id: &str,
+            _prompt: &str,
+            _images: &[(String, String)],
+            _working_dir: &std::path::Path,
+            _store: &Arc<dyn acp_client::Store>,
+            _writer: &Arc<dyn acp_client::MessageWriter>,
+            cancel_token: &CancellationToken,
+            _agent_session_id: Option<&str>,
+            _config_options: &[acp_client::AcpSessionConfigOptionSelection],
+        ) -> Result<acp_client::AgentRunOutcome, String> {
+            assert!(
+                self.registry.cancel(session_id),
+                "the child session should be registered while the worker runs"
+            );
+            cancel_token.cancelled().await;
+            Ok(acp_client::AgentRunOutcome::Cancelled)
+        }
+    }
+
+    /// A Stop pressed in the child diagram session mid-run must terminate the
+    /// specialist and read as a deliberate stop — not caller abandonment — on
+    /// both the session row and the tool error.
+    #[tokio::test]
+    async fn registry_stop_terminates_the_run_and_reads_as_a_user_stop() {
+        let registry = Arc::new(SessionRegistry::new());
+        let store = Arc::new(Store::in_memory().expect("in-memory store"));
+        let session =
+            create_pikchr_child_session(&store, "fake-agent").expect("create child session");
+
+        let registration = registry.register_external(&session.id);
+        let worker_cancel = CancellationToken::new();
+        let reason = Arc::new(CancelReason::new());
+        let driver = RegistryStopDriver {
+            registry: Arc::clone(&registry),
+        };
+        let slot = LastRenderSlot::new();
+
+        let local = tokio::task::LocalSet::new();
+        let result = local
+            .run_until(async {
+                tokio::task::spawn_local(forward_user_cancel(
+                    registration.token().clone(),
+                    Arc::clone(&reason),
+                    worker_cancel.clone(),
+                ));
+                crate::pikchr_subsession::generate_pikchr_source(
+                    &driver,
+                    Arc::clone(&store),
+                    &session.id,
+                    "/tmp/grammar.md",
+                    "a friendly box",
+                    None,
+                    &slot,
+                    &worker_cancel,
+                    &reason,
+                )
+                .await
+            })
+            .await;
+
+        assert_eq!(result.err().as_deref(), Some(USER_STOP_CANCEL_MESSAGE));
+
+        let persisted = store
+            .get_session(&session.id)
+            .expect("load session")
+            .expect("session exists");
+        assert_eq!(persisted.status, SessionStatus::Cancelled);
+        assert_eq!(
+            persisted.error_message.as_deref(),
+            Some(USER_STOP_CANCEL_MESSAGE)
+        );
+        assert_eq!(
+            persisted.completion_reason.as_ref(),
+            Some(&CompletionReason::Interrupted)
+        );
+    }
+
+    #[test]
+    fn announce_pikchr_child_session_writes_hidden_parent_metadata_row() {
+        let store = Store::in_memory().expect("in-memory store");
+        let parent = Session::new_running("parent prompt", &std::env::temp_dir());
+        store
+            .create_session(&parent)
+            .expect("create parent session");
+
+        announce_pikchr_child_session(&store, &parent.id, "child-session-1");
+
+        let rows = store
+            .get_session_acp_metadata_messages(&parent.id)
+            .expect("load metadata rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].acp.acp_event_kind.as_deref(),
+            Some(PIKCHR_SESSION_STARTED_EVENT)
+        );
+        assert_eq!(
+            rows[0].acp.acp_content.as_ref().expect("content")["innerSessionId"],
+            "child-session-1"
+        );
+        assert_eq!(
+            rows[0].content, "",
+            "announcement rows must stay hidden from the visible transcript"
+        );
+    }
+
+    #[test]
+    fn generate_pikchr_result_preserves_text_and_adds_structured_session_metadata() {
+        let result = build_generate_pikchr_result(
+            "child-session-1",
+            Some("/tmp/staged-pikchr-preview.png"),
+            "box \"Clean\" fit",
+            None,
+        );
+
+        let texts: Vec<String> = result
+            .content
+            .iter()
+            .filter_map(|content| content.as_text().map(|text| text.text.clone()))
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "Rendered preview image path: /tmp/staged-pikchr-preview.png".to_string(),
+                "box \"Clean\" fit".to_string(),
+            ]
+        );
+
+        let structured = result
+            .structured_content
+            .as_ref()
+            .expect("structured content");
+        assert_eq!(structured["innerSessionId"], "child-session-1");
+        assert_eq!(
+            structured["previewImagePath"],
+            "/tmp/staged-pikchr-preview.png"
+        );
+        assert_eq!(structured["source"], "box \"Clean\" fit");
+        assert!(
+            structured.get("renderWarnings").is_none(),
+            "no warnings field for a clean render"
+        );
+    }
+
+    #[test]
+    fn generate_pikchr_result_surfaces_accepted_warnings() {
+        let result = build_generate_pikchr_result(
+            "child-session-1",
+            None,
+            "box \"Busy\" fit",
+            Some("⚠ 1 overlapping pair(s) detected"),
+        );
+
+        let texts: Vec<String> = result
+            .content
+            .iter()
+            .filter_map(|content| content.as_text().map(|text| text.text.clone()))
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "The specialist accepted this render despite layout warnings:\n\
+⚠ 1 overlapping pair(s) detected"
+                    .to_string(),
+                "box \"Busy\" fit".to_string(),
+            ]
+        );
+
+        let structured = result
+            .structured_content
+            .as_ref()
+            .expect("structured content");
+        assert_eq!(
+            structured["renderWarnings"],
+            "⚠ 1 overlapping pair(s) detected"
+        );
+        assert_eq!(structured["source"], "box \"Busy\" fit");
+    }
 
     /// Render `source` and parse it into a usvg tree the way `run_preview` does,
     /// so geometry tests read the exact same rectangles the tool reports.
@@ -1091,30 +1689,35 @@ arrow from COLL.e to SNOW.w"#;
     fn valid_source_produces_png_and_dimensions() {
         let outcome = run_preview("box \"hello\"", DEFAULT_SCALE);
         assert!(!outcome.is_error);
-        assert!(!outcome.has_overlaps);
-        assert!(!outcome.has_out_of_bounds);
+        assert!(outcome.warnings.is_none());
         assert!(outcome.png.is_some(), "expected a PNG for valid source");
         assert!(!outcome.png.unwrap().is_empty());
         assert!(outcome.summary.contains("px"));
     }
 
     #[test]
-    fn overlapping_source_sets_overlap_flag() {
+    fn overlapping_source_reports_warnings() {
         let outcome = run_preview(OVERLAPPING_SOURCE, DEFAULT_SCALE);
         assert!(!outcome.is_error);
-        assert!(outcome.has_overlaps);
         assert!(outcome.summary.contains("overlapping pair"));
+        let warnings = outcome.warnings.expect("overlaps produce warnings");
+        assert!(warnings.contains("overlapping pair"));
+        assert!(
+            outcome.summary.contains(&warnings),
+            "the summary embeds the warning report"
+        );
     }
 
     #[test]
-    fn out_of_bounds_source_sets_out_of_bounds_flag() {
+    fn out_of_bounds_source_reports_warnings() {
         // A negative margin shrinks Pikchr's computed canvas below its content,
         // so the box geometry (font-independent, unlike spilling text) crosses
         // the diagram edges on every host.
         let outcome = run_preview("margin = -0.2in\nbox \"Out\"", DEFAULT_SCALE);
         assert!(!outcome.is_error);
-        assert!(outcome.has_out_of_bounds);
         assert!(outcome.summary.contains("beyond the diagram bounds"));
+        let warnings = outcome.warnings.expect("out-of-bounds produces warnings");
+        assert!(warnings.contains("beyond the diagram bounds"));
     }
 
     #[test]
@@ -1137,8 +1740,7 @@ arrow from COLL.e to SNOW.w"#;
     fn malformed_source_reports_error() {
         let outcome = run_preview("box \"unterminated", DEFAULT_SCALE);
         assert!(outcome.is_error);
-        assert!(!outcome.has_overlaps);
-        assert!(!outcome.has_out_of_bounds);
+        assert!(outcome.warnings.is_none());
         assert!(outcome.png.is_none());
         assert!(outcome.summary.to_lowercase().contains("pikchr"));
     }
@@ -1147,8 +1749,7 @@ arrow from COLL.e to SNOW.w"#;
     fn empty_source_reports_error() {
         let outcome = run_preview("   \n  ", DEFAULT_SCALE);
         assert!(outcome.is_error);
-        assert!(!outcome.has_overlaps);
-        assert!(!outcome.has_out_of_bounds);
+        assert!(outcome.warnings.is_none());
         assert!(outcome.png.is_none());
     }
 
@@ -1157,13 +1758,8 @@ arrow from COLL.e to SNOW.w"#;
         let rendered = render_pikchr_svg(OVERLAPPING_SOURCE).unwrap();
         let tree = tree_for(OVERLAPPING_SOURCE);
         let (elements, overlaps, out_of_bounds) = analyze_layout(&tree);
-        let summary = build_summary(
-            rendered.width,
-            rendered.height,
-            &elements,
-            &overlaps,
-            &out_of_bounds,
-        );
+        let warnings = build_warnings(&elements, &overlaps, &out_of_bounds);
+        let summary = build_summary(rendered.width, rendered.height, warnings.as_deref());
         assert!(summary.contains("overlapping pair"));
         assert!(summary.contains('⚠'));
     }
@@ -1228,10 +1824,120 @@ arrow from COLL.e to SNOW.w"#;
             24.0,
         )];
         let oob = find_out_of_bounds(&elements, &diagram);
-        let summary = build_summary(100, 50, &elements, &[], &oob);
+        let warnings = build_warnings(&elements, &[], &oob);
+        let summary = build_summary(100, 50, warnings.as_deref());
         assert!(summary.contains('⚠'));
         assert!(summary.contains("beyond the diagram bounds"));
         assert!(summary.contains("label \"wide label\""));
         assert!(summary.contains("right edge"));
+    }
+
+    // -------------------------------------------------------------------------
+    // render_pikchr tool (the specialist sub-session's preview tool)
+    // -------------------------------------------------------------------------
+
+    async fn call_render(handler: &PikchrPreviewHandler, pikchr: &str) -> CallToolResult {
+        handler
+            .render_pikchr(Parameters(RenderPikchrParams {
+                pikchr: pikchr.to_string(),
+            }))
+            .await
+            .expect("render_pikchr should not fail at the protocol level")
+    }
+
+    fn result_texts(result: &CallToolResult) -> Vec<String> {
+        result
+            .content
+            .iter()
+            .filter_map(|content| content.as_text().map(|text| text.text.clone()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn render_tool_returns_summary_image_and_fills_slot() {
+        let slot = Arc::new(LastRenderSlot::new());
+        let handler = PikchrPreviewHandler::new(DEFAULT_SCALE, Arc::clone(&slot));
+
+        let result = call_render(&handler, "box \"hello\"").await;
+
+        assert_ne!(result.is_error, Some(true));
+        let texts = result_texts(&result);
+        assert!(texts[0].contains("Rendered Pikchr diagram"));
+        assert!(
+            texts.last().unwrap().contains(ACCEPT_SENTINEL),
+            "the result ends with the acceptance instruction"
+        );
+        let images: Vec<_> = result
+            .content
+            .iter()
+            .filter_map(|content| content.as_image())
+            .collect();
+        assert_eq!(images.len(), 1, "one rendered PNG");
+        assert_eq!(images[0].mime_type, "image/png");
+        assert!(!images[0].data.is_empty());
+
+        let stored = slot.take().expect("slot holds the render");
+        assert_eq!(stored.source, "box \"hello\"");
+        assert!(stored.png.is_some());
+        assert!(stored.warnings.is_none());
+    }
+
+    #[tokio::test]
+    async fn render_tool_parse_failure_reports_error_and_keeps_prior_render() {
+        let slot = Arc::new(LastRenderSlot::new());
+        let handler = PikchrPreviewHandler::new(DEFAULT_SCALE, Arc::clone(&slot));
+
+        call_render(&handler, "box \"first\"").await;
+        let result = call_render(&handler, "box \"unterminated").await;
+
+        assert_eq!(result.is_error, Some(true));
+        let texts = result_texts(&result);
+        assert!(texts[0].contains("Pikchr could not render"));
+        assert!(texts[0].contains("previous successful render is still stored"));
+
+        let stored = slot.take().expect("slot keeps the earlier render");
+        assert_eq!(stored.source, "box \"first\"");
+    }
+
+    #[tokio::test]
+    async fn render_tool_parse_failure_with_empty_slot_says_so() {
+        let slot = Arc::new(LastRenderSlot::new());
+        let handler = PikchrPreviewHandler::new(DEFAULT_SCALE, Arc::clone(&slot));
+
+        let result = call_render(&handler, "box \"unterminated").await;
+
+        assert_eq!(result.is_error, Some(true));
+        assert!(result_texts(&result)[0].contains("No successful render is stored yet"));
+        assert!(slot.is_empty());
+    }
+
+    #[tokio::test]
+    async fn render_tool_second_success_overwrites_slot() {
+        let slot = Arc::new(LastRenderSlot::new());
+        let handler = PikchrPreviewHandler::new(DEFAULT_SCALE, Arc::clone(&slot));
+
+        call_render(&handler, "box \"first\"").await;
+        call_render(&handler, "box \"second\"").await;
+
+        let stored = slot.take().expect("slot holds the latest render");
+        assert_eq!(stored.source, "box \"second\"");
+    }
+
+    #[tokio::test]
+    async fn render_tool_stores_warnings_for_overlapping_source() {
+        let slot = Arc::new(LastRenderSlot::new());
+        let handler = PikchrPreviewHandler::new(DEFAULT_SCALE, Arc::clone(&slot));
+
+        let result = call_render(&handler, OVERLAPPING_SOURCE).await;
+
+        // Warnings don't gate the slot: the render succeeds and lands, with
+        // the report visible in the summary for the specialist to weigh.
+        assert_ne!(result.is_error, Some(true));
+        assert!(result_texts(&result)[0].contains("overlapping pair"));
+
+        let stored = slot.take().expect("slot holds the flagged render");
+        assert_eq!(stored.source, OVERLAPPING_SOURCE);
+        let warnings = stored.warnings.expect("warnings recorded on the render");
+        assert!(warnings.contains("overlapping pair"));
     }
 }

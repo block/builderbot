@@ -3,6 +3,7 @@ import type { DisplayRootInput } from './pathDisplayRoots';
 import {
   formatToolDisplay,
   makePathsRelative,
+  parseToolCall,
   stripCodeFences,
   verbGroupSummary,
 } from './sessionModalHelpers';
@@ -24,6 +25,10 @@ export interface RichToolItem {
   rawOutput: unknown;
   content: unknown;
   locations: unknown;
+  isPikchrDiagramTool: boolean;
+  innerSessionId: string | null;
+  /** Pikchr source of a successful `render_pikchr` call, shown inline as a diagram. */
+  pikchrRenderSource: string | null;
 }
 
 export interface RichToolVerbGroup {
@@ -86,6 +91,8 @@ interface TimelineEntry {
 }
 
 const TOOL_EVENT_KINDS = new Set(['tool_call', 'tool_call_update']);
+/** Hidden metadata row announcing a `generate_pikchr` child session at start. */
+const PIKCHR_SESSION_STARTED_EVENT = 'pikchr_session_started';
 const VISIBLE_STANDALONE_EVENT_KINDS = new Set<AcpTranscriptEventKind>([
   'plan_update',
   'session_info_update',
@@ -100,6 +107,7 @@ export function buildAcpTranscriptGroups(
     [...visibleMessages.filter(hasAcpMetadata), ...acpMetadataMessages].filter(hasAcpMetadata)
   );
   const toolAssemblies = assembleTools(visibleMessages, metadataRows);
+  const announcedPikchrSessions = assignAnnouncedPikchrSessions(toolAssemblies, metadataRows);
   const assignedResultIds = new Set<number>();
   for (const item of toolAssemblies.values()) {
     if (item.result) assignedResultIds.add(item.result.id);
@@ -125,14 +133,14 @@ export function buildAcpTranscriptGroups(
         const key = toolKeyForMessage(message);
         const assembly = toolAssemblies.get(key);
         if (assembly && !emittedTools.has(key)) {
-          pushToolGroup(groups, richToolItem(assembly, displayRoots));
+          pushToolGroup(groups, richToolItem(assembly, displayRoots, announcedPikchrSessions));
           emittedTools.add(key);
         }
       } else if (!assignedResultIds.has(message.id)) {
         const key = `result:${message.id}`;
         const assembly = toolAssemblies.get(key);
         if (assembly && !emittedTools.has(key)) {
-          pushToolGroup(groups, richToolItem(assembly, displayRoots));
+          pushToolGroup(groups, richToolItem(assembly, displayRoots, announcedPikchrSessions));
           emittedTools.add(key);
         }
       }
@@ -140,7 +148,7 @@ export function buildAcpTranscriptGroups(
       const key = entry.toolKey!;
       const assembly = toolAssemblies.get(key);
       if (assembly && !emittedTools.has(key)) {
-        pushToolGroup(groups, richToolItem(assembly, displayRoots));
+        pushToolGroup(groups, richToolItem(assembly, displayRoots, announcedPikchrSessions));
         emittedTools.add(key);
       }
     } else if (entry.event) {
@@ -228,11 +236,18 @@ export function terminalRefsFromAcpContent(content: unknown): string[] {
     .filter((id): id is string => !!id);
 }
 
+/** Tool items that render as their own block (diagram session button, inline
+ *  render preview) rather than a generic header row never merge into verb
+ *  groups — collapsing them would hide the block. */
+function rendersStandalone(item: RichToolItem | undefined): boolean {
+  return !!item && (item.isPikchrDiagramTool || item.pikchrRenderSource !== null);
+}
+
 export function groupRichToolsByVerb(items: RichToolItem[]): RichToolVerbGroup[] {
   const groups: Array<Omit<RichToolVerbGroup, 'summary' | 'statusTone'>> = [];
   for (const item of items) {
     const last = groups[groups.length - 1];
-    if (last?.verb === item.verb) {
+    if (!rendersStandalone(item) && last?.verb === item.verb && !rendersStandalone(last.items[0])) {
       last.items.push(item);
     } else {
       groups.push({
@@ -490,10 +505,21 @@ function eventTitle(kind: AcpTranscriptEventKind): string {
   }
 }
 
-function richToolItem(tool: ToolAssembly, displayRoots?: DisplayRootInput): RichToolItem {
+function richToolItem(
+  tool: ToolAssembly,
+  displayRoots?: DisplayRootInput,
+  announcedPikchrSessions?: Map<string, string>
+): RichToolItem {
   const status = tool.metadata.status ?? (tool.result ? 'completed' : 'pending');
   const pending = status === 'pending' || status === 'in_progress';
   const display = formatToolDisplay(tool.call.content, displayRoots, pending);
+  const isPikchrDiagramTool = isPikchrTool(tool);
+  // A successful tool result names the child session authoritatively; tools
+  // without an output-derived id — still running, or failed before the result
+  // could carry one (e.g. a timeout) — fall back to the start-of-run
+  // announcement, so the diagram session stays reachable mid-generation and
+  // after a failure (its transcript and status record what went wrong).
+  const announcedSessionId = announcedPikchrSessions?.get(tool.key) ?? null;
   return {
     key: tool.key,
     call: tool.call,
@@ -509,7 +535,161 @@ function richToolItem(tool: ToolAssembly, displayRoots?: DisplayRootInput): Rich
     rawOutput: tool.metadata.rawOutput,
     content: tool.metadata.content,
     locations: tool.metadata.locations,
+    isPikchrDiagramTool,
+    innerSessionId: isPikchrDiagramTool
+      ? (extractInnerSessionId(tool) ?? announcedSessionId)
+      : null,
+    pikchrRenderSource: pikchrRenderSourceForTool(tool, status),
   };
+}
+
+function isPikchrTool(tool: ToolAssembly): boolean {
+  return [tool.call.content, tool.metadata.toolKind]
+    .map(normalizedToolName)
+    .some((name) => /(?:^|[._]+)generate_pikchr$/.test(name));
+}
+
+/**
+ * The Pikchr source a successful `render_pikchr` call previewed — the tool the
+ * diagram specialist iterates with inside a `generate_pikchr` child session.
+ * Only completed calls surface their source: those passed the render gate, so
+ * the transcript shows them inline as diagrams; failed or still-running calls
+ * keep the regular tool card with their error details.
+ */
+function pikchrRenderSourceForTool(tool: ToolAssembly, status: ToolStatus): string | null {
+  if (status !== 'completed' || !isPikchrRenderTool(tool)) return null;
+  return (
+    pikchrSourceFromInput(tool.metadata.rawInput) ??
+    pikchrSourceFromInput(parseToolCall(tool.call.content)?.args)
+  );
+}
+
+function isPikchrRenderTool(tool: ToolAssembly): boolean {
+  return [tool.call.content, tool.metadata.toolKind]
+    .map(normalizedToolName)
+    .some((name) => /(?:^|[._]+)render_pikchr$/.test(name));
+}
+
+function pikchrSourceFromInput(input: unknown): string | null {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
+  const source = (input as Record<string, unknown>).pikchr;
+  return typeof source === 'string' && source.trim() ? source : null;
+}
+
+function normalizedToolName(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const parsed = parseToolCall(value);
+  const name = (parsed?.name ?? value).trim().split(/\s+/)[0] ?? '';
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
+}
+
+/**
+ * Pair `pikchr_session_started` announcements with the Pikchr tool items they
+ * belong to, keyed by tool key. The backend writes an announcement into the
+ * parent transcript the moment `generate_pikchr` creates its child session —
+ * before any tool output exists — so the transcript can link to the diagram
+ * session mid-run. Ids already claimed by a tool's output are skipped; each
+ * remaining announcement pairs with the nearest preceding Pikchr tool lacking
+ * an output-derived id — the backend records the tool_call row before the
+ * announcement, so that tool is the announcement's own call. Older unmatched
+ * tools (legacy transcripts, failed announcement writes) stay unclaimed
+ * rather than stealing a later call's link.
+ */
+function assignAnnouncedPikchrSessions(
+  tools: Map<string, ToolAssembly>,
+  metadataRows: SessionMessage[]
+): Map<string, string> {
+  const assigned = new Map<string, string>();
+  const announcements = metadataRows.filter(
+    (row) => row.acpEventKind === PIKCHR_SESSION_STARTED_EVENT
+  );
+  if (announcements.length === 0) return assigned;
+
+  const claimed = new Set<string>();
+  const unmatched: ToolAssembly[] = [];
+  for (const tool of [...tools.values()].sort((a, b) => a.positionId - b.positionId)) {
+    if (!isPikchrTool(tool)) continue;
+    const fromOutput = extractInnerSessionId(tool);
+    if (fromOutput) claimed.add(fromOutput);
+    else unmatched.push(tool);
+  }
+
+  for (const row of announcements) {
+    const sessionId = innerSessionIdFromValue(row.acpContent);
+    if (!sessionId || claimed.has(sessionId)) continue;
+    // `unmatched` is sorted ascending, so the last entry before the row is
+    // the nearest preceding tool.
+    let index = -1;
+    for (let i = unmatched.length - 1; i >= 0; i--) {
+      if (unmatched[i].positionId < row.id) {
+        index = i;
+        break;
+      }
+    }
+    // An announcement racing ahead of its tool_call row still pairs with the
+    // earliest unmatched tool rather than being dropped.
+    const tool = index === -1 ? unmatched.shift() : unmatched.splice(index, 1)[0];
+    if (!tool) continue;
+    assigned.set(tool.key, sessionId);
+  }
+  return assigned;
+}
+
+function extractInnerSessionId(tool: ToolAssembly): string | null {
+  return (
+    innerSessionIdFromValue(tool.metadata.rawOutput) ??
+    innerSessionIdFromValue(tool.metadata.content) ??
+    innerSessionIdFromValue(tool.result?.acpRawOutput) ??
+    innerSessionIdFromValue(tool.result?.acpContent) ??
+    innerSessionIdFromValue(tool.result?.content) ??
+    null
+  );
+}
+
+function innerSessionIdFromValue(value: unknown): string | null {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) return null;
+    try {
+      return innerSessionIdFromValue(JSON.parse(trimmed));
+    } catch {
+      return null;
+    }
+  }
+  if (!value || typeof value !== 'object') return null;
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const sessionId = innerSessionIdFromValue(item);
+      if (sessionId) return sessionId;
+    }
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const direct = stringValue(record.innerSessionId) ?? stringValue(record.inner_session_id);
+  if (direct) return direct;
+
+  for (const key of [
+    'structuredContent',
+    'structured_content',
+    'meta',
+    'metadata',
+    'data',
+    'result',
+  ]) {
+    const sessionId = innerSessionIdFromValue(record[key]);
+    if (sessionId) return sessionId;
+  }
+
+  return null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null;
 }
 
 function normalizeToolStatus(status: string | undefined): ToolStatus | undefined {

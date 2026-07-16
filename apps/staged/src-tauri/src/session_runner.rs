@@ -289,6 +289,42 @@ impl SessionRegistry {
     pub fn is_running(&self, session_id: &str) -> bool {
         self.inner.lock().unwrap().running.contains_key(session_id)
     }
+
+    /// Register a session whose work is driven outside `start_session` (e.g. a
+    /// pikchr diagram child session run by a `generate_pikchr` worker thread),
+    /// so a user cancel reaches the actual work instead of taking
+    /// `cancel_session`'s store-write fallback, which the worker never
+    /// observes. Returns a guard exposing the session's cancellation token;
+    /// dropping the guard deregisters the session.
+    pub fn register_external(self: &Arc<Self>, session_id: &str) -> ExternalSessionRegistration {
+        ExternalSessionRegistration {
+            token: self.register(session_id),
+            registry: Arc::clone(self),
+            session_id: session_id.to_string(),
+        }
+    }
+}
+
+/// Registry entry for an externally driven session, from
+/// [`SessionRegistry::register_external`]. Holds the session in the registry —
+/// where [`SessionRegistry::cancel`] can reach its token — until dropped.
+pub struct ExternalSessionRegistration {
+    registry: Arc<SessionRegistry>,
+    session_id: String,
+    token: CancellationToken,
+}
+
+impl ExternalSessionRegistration {
+    /// The token [`SessionRegistry::cancel`] fires for this session.
+    pub fn token(&self) -> &CancellationToken {
+        &self.token
+    }
+}
+
+impl Drop for ExternalSessionRegistration {
+    fn drop(&mut self) {
+        self.registry.deregister(&self.session_id);
+    }
 }
 
 // =============================================================================
@@ -582,7 +618,10 @@ pub fn start_session(
                 let pikchr_provider = resolved_provider_id.clone().unwrap_or_default();
                 match crate::pikchr_mcp::start_pikchr_mcp_server(
                     pikchr_provider,
+                    config.session_id.clone(),
                     app_handle.clone(),
+                    Arc::clone(&store),
+                    Arc::clone(&registry),
                 )
                 .await
                 {
@@ -3447,6 +3486,26 @@ mod tests {
         assert_eq!(
             registry.cancellation_completion_reason("session-startup"),
             Some(CompletionReason::ProjectSessionInterrupted)
+        );
+    }
+
+    #[test]
+    fn register_external_exposes_token_to_registry_cancel_until_dropped() {
+        let registry = Arc::new(SessionRegistry::new());
+
+        let registration = registry.register_external("diagram-child");
+        let token = registration.token().clone();
+        assert!(registry.is_running("diagram-child"));
+        assert!(!token.is_cancelled());
+
+        assert!(registry.cancel("diagram-child"));
+        assert!(token.is_cancelled());
+
+        drop(registration);
+        assert!(!registry.is_running("diagram-child"));
+        assert!(
+            !registry.cancel("diagram-child"),
+            "a dropped registration must leave nothing behind for cancel to find"
         );
     }
 

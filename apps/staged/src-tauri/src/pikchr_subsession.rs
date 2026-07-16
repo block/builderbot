@@ -1,81 +1,265 @@
 //! Internal agent sub-session that turns a natural-language description into
 //! validated Pikchr source, used by the `generate_pikchr` MCP tool.
 //!
-//! A focused ACP sub-agent is asked for a single fenced ```pikchr block, whose
-//! source is rendered through the internal [`crate::pikchr_mcp::run_preview`]
-//! path. On a parse error the sub-agent is re-prompted with the specific
-//! failure, resuming the *same* sub-session so the grammar and prior attempts
-//! stay in context — a diagram that doesn't render is useless to hand back. The
-//! same loop now re-prompts on layout warnings too — overlapping elements or
-//! elements extending beyond the diagram bounds — so the calling note agent
-//! only receives the final source and preview path. The loop is bounded by
-//! [`MAX_ATTEMPTS`].
+//! The specialist owns the whole iteration loop inside its own ACP session: it
+//! drafts Pikchr, calls the `render_pikchr` MCP tool (served per-call by
+//! [`crate::pikchr_mcp`]) to render and analyze each candidate, inspects the
+//! returned image and layout report, and revises until satisfied. Every
+//! successful render overwrites the shared [`LastRenderSlot`]; the specialist
+//! accepts by ending its reply with [`ACCEPT_SENTINEL`] as the final line.
+//! Acceptance points at the slot's validated contents rather than carrying
+//! source in text, so unvalidated source can never reach the caller no matter
+//! what the reply says. The host loop here only checks for the sentinel line
+//! and re-prompts on protocol misses — a reply without it, or acceptance
+//! before anything rendered — bounded by [`MAX_ATTEMPTS`].
 //!
-//! The sub-session is deliberately **not** persisted: it uses in-memory `Store`
-//! and `MessageWriter` stubs so its transcript never pollutes the user's
-//! session messages. The store stub captures the agent session id so it can be
-//! threaded into the next turn for resumption; the writer stub just accumulates
-//! assistant text so the loop can read the candidate diagram back.
+//! The sub-session is persisted as a normal `sessions` row. Each prompt and
+//! assistant reply is written into that child session so the parent tool call
+//! can later link to the specialist transcript.
 
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use crate::agent::AgentDriver;
-use crate::pikchr_mcp::run_preview;
+use crate::agent::{AgentDriver, MessageWriter};
+use crate::store::{CompletionReason, MessageRole, SessionStatus, Store};
 
-/// Total sub-agent turns before giving up. Each parse error or empty reply
-/// consumes one, and each renderable candidate flagged with layout warnings
-/// (overlaps, out-of-bounds elements) also consumes one. 5 leaves room for a
-/// couple of repair rounds without letting a hopeless request run the provider
-/// subprocess forever.
-const MAX_ATTEMPTS: usize = 5;
-/// Synthetic session id for the sub-session. The in-memory store keys nothing
-/// meaningful on it; any stable string is fine.
-const SUBSESSION_ID: &str = "pikchr-subsession";
+/// Total sub-agent turns before giving up. The specialist iterates on the
+/// diagram *within* a turn via `render_pikchr`, so this only bounds protocol
+/// misses — a reply without the sentinel, or acceptance before anything
+/// rendered successfully — not design iteration. Exhaustion is the error case.
+const MAX_ATTEMPTS: usize = 3;
 
-/// Result of a `generate_pikchr` sub-session.
+/// Token the specialist ends its turn with to accept the last successful
+/// render. It only counts when it is the reply's final line (see
+/// [`reply_accepts_last_render`]): the token appears verbatim in the prompts
+/// and every `render_pikchr` result, so a model echoing the instructions
+/// mid-prose ("I'll end with AcceptLastRender once…") must not read as
+/// acceptance — a contains-check would.
+pub(crate) const ACCEPT_SENTINEL: &str = "AcceptLastRender";
+
+/// Explanation used when the cancellation token fired without a recorded
+/// reason: nothing inside the worker arms the token, so the parent MCP request
+/// must have been dropped — the caller cancelled, crashed, or hit its own
+/// client-side timeout.
+const ABANDONED_CANCEL_MESSAGE: &str = "The generate_pikchr call was abandoned by its caller \
+(cancelled, or timed out on the caller's side) before the specialist finished, so the diagram \
+run was cancelled.";
+
+/// Why the sub-session's cancellation token was armed, recorded by the
+/// initiator before it cancels (the pikchr worker's wall-clock timeout, or a
+/// user Stop on the child session forwarded from its registered token). Read
+/// when the run winds down so the cancelled child session — and the error
+/// handed back to the caller — can say what killed the run instead of a bare
+/// "cancelled". No recorded reason resolves to [`ABANDONED_CANCEL_MESSAGE`].
+pub(crate) struct CancelReason(Mutex<Option<String>>);
+
+impl CancelReason {
+    pub(crate) fn new() -> Self {
+        Self(Mutex::new(None))
+    }
+
+    /// Record why the token is about to be cancelled. The first reason wins:
+    /// a timeout that fires while the parent is already tearing down should
+    /// not have its message replaced.
+    pub(crate) fn record(&self, reason: String) {
+        let mut slot = self.0.lock().unwrap();
+        if slot.is_none() {
+            *slot = Some(reason);
+        }
+    }
+
+    pub(crate) fn resolve(&self) -> String {
+        self.0
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| ABANDONED_CANCEL_MESSAGE.to_string())
+    }
+}
+
+/// Result of a `generate_pikchr` sub-session: the render the specialist
+/// accepted.
 pub(crate) struct GenOutcome {
     /// The validated Pikchr source (no fences) — drop it into a ```pikchr block.
     pub(crate) source: String,
     /// Rendered PNG preview, if rasterization succeeded.
     pub(crate) png: Option<Vec<u8>>,
+    /// Layout warnings on the accepted render (overlaps, out-of-bounds
+    /// elements). The specialist saw these in the tool result and accepted
+    /// anyway, so they're deliberate — surfaced to the caller rather than
+    /// swallowed.
+    pub(crate) warnings: Option<String>,
+}
+
+/// The last *successful* render produced through the specialist's
+/// `render_pikchr` tool. The tool server overwrites it on every successful
+/// render (last write wins; parse failures leave it untouched) and the host
+/// loop takes it when the specialist ends its reply with [`ACCEPT_SENTINEL`]
+/// — the render gate is the only way anything reaches this slot.
+pub(crate) struct LastRenderSlot(Mutex<Option<GenOutcome>>);
+
+impl LastRenderSlot {
+    pub(crate) fn new() -> Self {
+        Self(Mutex::new(None))
+    }
+
+    /// Overwrite the slot with a new successful render.
+    pub(crate) fn store(&self, outcome: GenOutcome) {
+        *self.0.lock().unwrap() = Some(outcome);
+    }
+
+    /// Take the accepted render out of the slot, leaving it empty.
+    pub(crate) fn take(&self) -> Option<GenOutcome> {
+        self.0.lock().unwrap().take()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.lock().unwrap().is_none()
+    }
 }
 
 /// Drive the sub-agent to produce validated Pikchr for `description`.
 ///
 /// Generic over [`AgentDriver`] so it can be unit-tested with a fake driver
 /// instead of spawning a real provider subprocess.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
     driver: &D,
+    store: Arc<Store>,
+    session_id: &str,
     grammar_reference: &str,
     description: &str,
     previous_pikchr: Option<&str>,
-    scale: f32,
+    slot: &LastRenderSlot,
     cancel_token: &CancellationToken,
+    cancel_reason: &CancelReason,
 ) -> Result<GenOutcome, String> {
+    let result = generate_pikchr_source_inner(
+        driver,
+        Arc::clone(&store),
+        session_id,
+        grammar_reference,
+        description,
+        previous_pikchr,
+        slot,
+        cancel_token,
+    )
+    .await;
+
+    // A token cancellation is externally imposed — the wall-clock timeout or
+    // the caller abandoning the MCP request — so resolve the recorded reason
+    // once and tell the same story on the child session's status row and in
+    // the error handed back to the caller.
+    let cancel_message =
+        matches!(&result, Err(GenerationError::Cancelled)).then(|| cancel_reason.resolve());
+
+    // Terminal status goes through `transition_from_running`: a user cancel
+    // normally fires this run's registered token (and lands here as
+    // `Cancelled`), but one arriving before the worker registers the child
+    // session takes `cancel_session`'s fallback path and writes Cancelled
+    // straight to the store — an unconditional write here would silently
+    // clobber it.
+    let status_result = match &result {
+        Ok(_) => store.transition_from_running(
+            session_id,
+            SessionStatus::Completed,
+            None,
+            Some(&CompletionReason::TurnComplete),
+        ),
+        Err(GenerationError::Cancelled) => store.transition_from_running(
+            session_id,
+            SessionStatus::Cancelled,
+            cancel_message.as_deref(),
+            Some(&CompletionReason::Interrupted),
+        ),
+        Err(GenerationError::Failed(message)) => store.transition_from_running(
+            session_id,
+            SessionStatus::Error,
+            Some(message),
+            Some(&CompletionReason::Crashed),
+        ),
+    };
+
+    match (result, status_result) {
+        (Ok(outcome), Ok(transitioned)) => {
+            if !transitioned {
+                // A concurrent transition (e.g. a user cancel) won the race;
+                // its status stands, but the generated diagram still goes back
+                // to the caller.
+                log::info!(
+                    "[pikchr_subsession] Pikchr session {session_id} already left Running; \
+not marking it completed"
+                );
+            }
+            Ok(outcome)
+        }
+        // The diagram was generated successfully; a status-bookkeeping failure
+        // shouldn't discard it. The session stays Running until dead-session
+        // recovery on the next launch.
+        (Ok(outcome), Err(e)) => {
+            log::warn!(
+                "[pikchr_subsession] failed to mark Pikchr session {session_id} completed: {e}"
+            );
+            Ok(outcome)
+        }
+        (Err(e), Ok(_)) => Err(generation_error_text(e, cancel_message)),
+        (Err(e), Err(status_error)) => Err(format!(
+            "{}; additionally failed to update Pikchr session status: {status_error}",
+            generation_error_text(e, cancel_message)
+        )),
+    }
+}
+
+/// The error text handed back to the `generate_pikchr` caller. A cancellation
+/// reports its resolved reason (always `Some` when the error is `Cancelled`)
+/// so a timeout reads as a timeout rather than a generic cancel.
+fn generation_error_text(error: GenerationError, cancel_message: Option<String>) -> String {
+    match error {
+        GenerationError::Failed(message) => message,
+        GenerationError::Cancelled => {
+            cancel_message.unwrap_or_else(|| ABANDONED_CANCEL_MESSAGE.to_string())
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn generate_pikchr_source_inner<D: AgentDriver + ?Sized>(
+    driver: &D,
+    store: Arc<Store>,
+    session_id: &str,
+    grammar_reference: &str,
+    description: &str,
+    previous_pikchr: Option<&str>,
+    slot: &LastRenderSlot,
+    cancel_token: &CancellationToken,
+) -> Result<GenOutcome, GenerationError> {
     // The sub-agent needs no repo access; the grammar path is absolute.
     let working_dir = std::env::temp_dir();
-    let store_capture = Arc::new(SessionIdCapture::default());
-    let store_dyn: Arc<dyn acp_client::Store> = store_capture.clone();
+    let store_dyn: Arc<dyn acp_client::Store> = store.clone();
 
     let mut prompt = initial_prompt(grammar_reference, description, previous_pikchr);
     let mut agent_session_id: Option<String> = None;
 
     for _ in 0..MAX_ATTEMPTS {
         if cancel_token.is_cancelled() {
-            break;
+            return Err(GenerationError::Cancelled);
         }
 
-        // Fresh writer per turn: it only accumulates and never clears on
-        // finalize, so we read the whole turn's text back after `run` returns.
-        let writer = Arc::new(CapturingWriter::default());
+        let prompt_message_id = store
+            .add_session_message(session_id, MessageRole::User, &prompt)
+            .map_err(|e| {
+                GenerationError::Failed(format!("Failed to persist Pikchr prompt: {e}"))
+            })?;
+        let writer = Arc::new(MessageWriter::new(
+            session_id.to_string(),
+            Arc::clone(&store),
+        ));
         let writer_dyn: Arc<dyn acp_client::MessageWriter> = writer.clone();
 
-        driver
+        let run_outcome = driver
             .run(
-                SUBSESSION_ID,
+                session_id,
                 &prompt,
                 &[],
                 &working_dir,
@@ -85,59 +269,86 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
                 agent_session_id.as_deref(),
                 &[],
             )
-            .await?;
+            .await;
+        writer_dyn.finalize().await;
+
+        let run_outcome = run_outcome.map_err(GenerationError::Failed)?;
+        if run_outcome == acp_client::AgentRunOutcome::Cancelled || cancel_token.is_cancelled() {
+            return Err(GenerationError::Cancelled);
+        }
 
         // Resume the same sub-session next turn so context is retained. The
-        // driver only sets this on the first (new-session) turn.
-        if let Some(id) = store_capture.agent_session_id() {
+        // real store implementation persists this when the driver creates the
+        // ACP session on the first turn.
+        if let Some(id) = stored_agent_session_id(&store, session_id)? {
             agent_session_id = Some(id);
         }
 
-        // A cancelled run returns Ok with partial text; don't treat that as a
-        // real attempt.
-        if cancel_token.is_cancelled() {
-            break;
+        let reply = latest_assistant_reply_since(&store, session_id, prompt_message_id)?;
+        if reply_accepts_last_render(&reply) {
+            // Acceptance points at the slot, not at the reply text: only a
+            // render that passed through `render_pikchr` can be handed back.
+            match slot.take() {
+                Some(outcome) => return Ok(outcome),
+                None => {
+                    prompt = accepted_without_render_prompt();
+                    continue;
+                }
+            }
         }
-
-        let source = extract_pikchr_source(&writer.text());
-        if source.trim().is_empty() {
-            prompt = empty_reply_prompt();
-            continue;
-        }
-
-        let preview = run_preview(&source, scale);
-        if preview.is_error {
-            prompt = parse_error_prompt(&preview.summary);
-            continue;
-        }
-
-        if preview.has_overlaps || preview.has_out_of_bounds {
-            prompt = layout_warning_prompt(&source, &preview.summary);
-            continue;
-        }
-
-        // It renders cleanly, with no layout warnings for the caller to
-        // interpret.
-        return Ok(GenOutcome {
-            source,
-            png: preview.png,
-        });
+        prompt = missing_sentinel_prompt();
     }
 
-    Err("The Pikchr specialist could not produce a diagram that renders cleanly.".to_string())
+    Err(GenerationError::Failed(
+        "The Pikchr specialist did not accept a rendered diagram.".to_string(),
+    ))
 }
 
-/// Pull the Pikchr source out of a sub-agent reply. Prefers a real
-/// ```pikchr / ~~~pikchr fence; falls back to stripping a generic code fence
-/// (or using the trimmed reply as-is when the agent skipped fences entirely).
-fn extract_pikchr_source(reply: &str) -> String {
-    if let Some(block) = crate::pikchr_validation::extract_pikchr_blocks(reply)
-        .into_iter()
-        .next()
-    {
-        return block.source;
-    }
-    acp_client::strip_code_fences(reply).trim().to_string()
+#[derive(Debug)]
+enum GenerationError {
+    Failed(String),
+    /// The cancellation token fired; the "why" lives in [`CancelReason`] and
+    /// is resolved by [`generation_error_text`].
+    Cancelled,
+}
+
+fn stored_agent_session_id(
+    store: &Store,
+    session_id: &str,
+) -> Result<Option<String>, GenerationError> {
+    store
+        .get_session(session_id)
+        .map(|session| session.and_then(|s| s.agent_id))
+        .map_err(|e| GenerationError::Failed(format!("Failed to load Pikchr child session: {e}")))
+}
+
+fn latest_assistant_reply_since(
+    store: &Store,
+    session_id: &str,
+    since_id: i64,
+) -> Result<String, GenerationError> {
+    store
+        .get_session_messages_since(session_id, since_id)
+        .map_err(|e| GenerationError::Failed(format!("Failed to load Pikchr assistant reply: {e}")))
+        .map(|messages| {
+            messages
+                .into_iter()
+                .rev()
+                .find(|message| message.role == MessageRole::Assistant)
+                .map(|message| message.content)
+                .unwrap_or_default()
+        })
+}
+
+/// The whole reply must end with [`ACCEPT_SENTINEL`] as its own line.
+/// Case, surrounding backticks (the prompts quote the token in backticks),
+/// and trailing sentence punctuation are forgiven; extra words on the line
+/// are not.
+fn reply_accepts_last_render(reply: &str) -> bool {
+    reply.trim_end().lines().next_back().is_some_and(|line| {
+        line.trim_matches(|c: char| c.is_whitespace() || matches!(c, '`' | '.' | '!'))
+            .eq_ignore_ascii_case(ACCEPT_SENTINEL)
+    })
 }
 
 // =============================================================================
@@ -146,9 +357,15 @@ fn extract_pikchr_source(reply: &str) -> String {
 
 fn initial_prompt(reference: &str, description: &str, previous_pikchr: Option<&str>) -> String {
     let mut prompt = format!(
-        "You are a Pikchr diagram specialist. Reply with ONLY the diagram as a single fenced \
-```pikchr code block — no prose, no explanation. The Pikchr grammar reference is at `{reference}`; \
-consult it for exact syntax."
+        "You are a Pikchr diagram specialist. The Pikchr grammar reference is at `{reference}`; \
+consult it for exact syntax.\n\
+\n\
+Workflow: draft the diagram source, then call the `render_pikchr` tool with it (no code fences). \
+Inspect the returned image and layout analysis, then revise and render again until the diagram \
+renders cleanly, the analysis reports no warnings (unless a warning is intentional), and the image \
+matches the request. When you are satisfied, accept the render: your whole message must end with \
+`{ACCEPT_SENTINEL}` as its own line. The accepted diagram is your last successful render — the \
+rest of your reply text is ignored."
     );
     if let Some(previous) = previous_pikchr {
         prompt.push_str(&format!(
@@ -160,97 +377,21 @@ Revise it per the request below."
     prompt
 }
 
-fn empty_reply_prompt() -> String {
-    "Your reply did not contain a Pikchr diagram. Resend ONLY a single fenced ```pikchr code block \
-containing the diagram — no prose."
-        .to_string()
-}
-
-fn parse_error_prompt(error: &str) -> String {
+fn accepted_without_render_prompt() -> String {
     format!(
-        "That failed to render. Pikchr reported:\n{error}\n\
-Fix it and resend ONLY the ```pikchr code block."
+        "Nothing has been rendered successfully yet, so there is no render to accept. Call the \
+`render_pikchr` tool with your Pikchr source; once you are satisfied with a successful render, \
+end your message with `{ACCEPT_SENTINEL}` as its own line."
     )
 }
 
-fn layout_warning_prompt(source: &str, summary: &str) -> String {
+fn missing_sentinel_prompt() -> String {
     format!(
-        "That diagram rendered, but the preview analysis found layout warnings:\n{summary}\n\
-\n\
-Current source:\n```pikchr\n{source}\n```\n\
-Fix the reported layout issues while preserving the requested diagram content. Resend ONLY the \
-corrected ```pikchr code block."
+        "Iterate with the `render_pikchr` tool; when you are satisfied with a successful render, \
+accept it by ending your message with `{ACCEPT_SENTINEL}` as its own line — it must be the final \
+line of the whole message. Pikchr source sent as reply text is ignored — only rendered output can \
+be accepted."
     )
-}
-
-// =============================================================================
-// In-memory Store + MessageWriter stubs
-// =============================================================================
-
-/// Captures the ACP agent session id set on the first (new-session) turn so it
-/// can be threaded into later turns for resumption. `get_session_messages`
-/// keeps the trait default (empty), so no user transcript is replayed.
-#[derive(Default)]
-struct SessionIdCapture {
-    agent_session_id: Mutex<Option<String>>,
-}
-
-impl SessionIdCapture {
-    fn agent_session_id(&self) -> Option<String> {
-        self.agent_session_id.lock().unwrap().clone()
-    }
-}
-
-impl acp_client::Store for SessionIdCapture {
-    fn set_agent_session_id(
-        &self,
-        _session_id: &str,
-        agent_session_id: &str,
-    ) -> Result<(), String> {
-        *self.agent_session_id.lock().unwrap() = Some(agent_session_id.to_string());
-        Ok(())
-    }
-}
-
-/// Accumulates the assistant text for one turn. Unlike the DB-backed writer,
-/// `finalize` does **not** clear the buffer — the loop reads the whole turn's
-/// text after `run` returns — and a fresh writer is created for each turn.
-#[derive(Default)]
-struct CapturingWriter {
-    text: Mutex<String>,
-}
-
-impl CapturingWriter {
-    fn text(&self) -> String {
-        self.text.lock().unwrap().clone()
-    }
-}
-
-#[async_trait]
-impl acp_client::MessageWriter for CapturingWriter {
-    async fn append_text(&self, text: &str) {
-        self.text.lock().unwrap().push_str(text);
-    }
-
-    async fn finalize(&self) {}
-
-    async fn record_tool_call(
-        &self,
-        _tool_call_id: &str,
-        _title: &str,
-        _raw_input: Option<&serde_json::Value>,
-    ) {
-    }
-
-    async fn update_tool_call_title(
-        &self,
-        _tool_call_id: &str,
-        _title: Option<&str>,
-        _raw_input: Option<&serde_json::Value>,
-    ) {
-    }
-
-    async fn record_tool_result(&self, _tool_call_id: &str, _content: &str) {}
 }
 
 #[cfg(test)]
@@ -258,39 +399,50 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    /// A diagram known to render with overlapping boxes (percentage-length
-    /// arrows between large `fit` boxes with no explicit flow direction).
-    const OVERLAPPING_SOURCE: &str = r#"linerad = 4px
-box "goose-internal (OPEN SOURCE)" "typed OTel catalog → TelemetrySink facade" fit fill 0xeef6ff
-arrow down 35%
-box "Sink = OTLP exporter (Block build)" "via Tauri native export_otel_logs (CORS)" fit fill 0xfff3d6
-arrow right 60% "OTLP /v1/logs + auth" above
-box "Block OTel Collector" "OTel→UAP mapping (from CDF manifest)" fit fill 0xffe6e6
-arrow right 50%
-box "unifiedevents/batch" "→ Snowflake (UAP unchanged)" fit fill 0xffd6d6
-arrow down 30% from 1st box.s
-box "Sink = NO-OP (default / external clone)" "no socket, no Block deps → builds anywhere" fit fill 0xe8f5e9"#;
+    use async_trait::async_trait;
+
+    use crate::store::{Session, Store};
 
     const CLEAN_SOURCE: &str = r#"box "Clean" fit"#;
 
-    /// Renders fine, but a negative margin shrinks Pikchr's computed canvas
-    /// below its content, so the box geometry (font-independent) crosses the
-    /// diagram edges.
-    const OUT_OF_BOUNDS_SOURCE: &str = "margin = -0.2in\nbox \"Out\"";
+    /// One scripted specialist turn: optionally store a render into the slot
+    /// (as a real `render_pikchr` call would mid-turn), then reply with `reply`.
+    struct FakeTurn {
+        store_render: Option<GenOutcome>,
+        reply: String,
+    }
 
-    /// Scripted driver that replays canned replies turn by turn and records the
-    /// `agent_session_id` it was handed each turn (to assert resumption).
+    fn turn(store_render: Option<GenOutcome>, reply: &str) -> FakeTurn {
+        FakeTurn {
+            store_render,
+            reply: reply.to_string(),
+        }
+    }
+
+    fn render(source: &str) -> GenOutcome {
+        GenOutcome {
+            source: source.to_string(),
+            png: Some(vec![1, 2, 3]),
+            warnings: None,
+        }
+    }
+
+    /// Scripted driver that replays canned turns (writing the shared slot the
+    /// way the `render_pikchr` tool would) and records the `agent_session_id`
+    /// it was handed each turn (to assert resumption).
     struct FakeDriver {
-        replies: Vec<String>,
+        slot: Arc<LastRenderSlot>,
+        turns: Mutex<Vec<FakeTurn>>,
         calls: Mutex<usize>,
         seen_session_ids: Mutex<Vec<Option<String>>>,
         prompts: Mutex<Vec<String>>,
     }
 
     impl FakeDriver {
-        fn new(replies: Vec<String>) -> Self {
+        fn new(slot: Arc<LastRenderSlot>, turns: Vec<FakeTurn>) -> Self {
             Self {
-                replies,
+                slot,
+                turns: Mutex::new(turns),
                 calls: Mutex::new(0),
                 seen_session_ids: Mutex::new(Vec::new()),
                 prompts: Mutex::new(Vec::new()),
@@ -312,12 +464,7 @@ box "Sink = NO-OP (default / external clone)" "no socket, no Block deps → buil
             agent_session_id: Option<&str>,
             _config_options: &[acp_client::AcpSessionConfigOptionSelection],
         ) -> Result<acp_client::AgentRunOutcome, String> {
-            let idx = {
-                let mut calls = self.calls.lock().unwrap();
-                let idx = *calls;
-                *calls += 1;
-                idx
-            };
+            *self.calls.lock().unwrap() += 1;
             self.seen_session_ids
                 .lock()
                 .unwrap()
@@ -332,159 +479,505 @@ box "Sink = NO-OP (default / external clone)" "no socket, no Block deps → buil
                     .unwrap();
             }
 
-            let reply = self.replies.get(idx).cloned().unwrap_or_default();
-            writer.append_text(&reply).await;
+            let turn = {
+                let mut turns = self.turns.lock().unwrap();
+                if turns.is_empty() {
+                    turn(None, "")
+                } else {
+                    turns.remove(0)
+                }
+            };
+            if let Some(outcome) = turn.store_render {
+                self.slot.store(outcome);
+            }
+            writer.append_text(&turn.reply).await;
             writer.finalize().await;
             Ok(acp_client::AgentRunOutcome::Completed)
         }
     }
 
-    fn fenced(source: &str) -> String {
-        format!("```pikchr\n{source}\n```")
+    fn child_session() -> (Arc<Store>, String) {
+        let store = Arc::new(Store::in_memory().expect("in-memory store"));
+        let session = Session::new_running("Generate Pikchr diagram", &std::env::temp_dir())
+            .with_provider("fake-agent");
+        let session_id = session.id.clone();
+        store
+            .create_session(&session)
+            .expect("create child session");
+        (store, session_id)
     }
 
-    #[tokio::test]
-    async fn repairs_overlapping_render_before_returning() {
-        let driver = FakeDriver::new(vec![fenced(OVERLAPPING_SOURCE), fenced(CLEAN_SOURCE)]);
-
-        let outcome = generate_pikchr_source(
-            &driver,
-            "/tmp/grammar.md",
-            "a busy diagram",
-            None,
-            2.0,
-            &CancellationToken::new(),
+    async fn run_generation<D: AgentDriver>(
+        driver: &D,
+        store: &Arc<Store>,
+        session_id: &str,
+        slot: &LastRenderSlot,
+        cancel: &CancellationToken,
+    ) -> Result<GenOutcome, String> {
+        run_generation_with_reason(
+            driver,
+            store,
+            session_id,
+            slot,
+            cancel,
+            &CancelReason::new(),
         )
         .await
-        .expect("should repair the overlapping render");
-
-        assert_eq!(outcome.source, CLEAN_SOURCE);
-        assert!(outcome.png.is_some());
-        assert_eq!(*driver.calls.lock().unwrap(), 2);
-
-        let prompts = driver.prompts.lock().unwrap();
-        assert!(prompts[1].contains("layout warnings"));
-        assert!(prompts[1].contains("overlapping pair"));
-        assert!(prompts[1].contains(OVERLAPPING_SOURCE));
     }
 
-    #[tokio::test]
-    async fn repairs_out_of_bounds_render_before_returning() {
-        let driver = FakeDriver::new(vec![fenced(OUT_OF_BOUNDS_SOURCE), fenced(CLEAN_SOURCE)]);
-
-        let outcome = generate_pikchr_source(
-            &driver,
-            "/tmp/grammar.md",
-            "a cramped diagram",
-            None,
-            2.0,
-            &CancellationToken::new(),
-        )
-        .await
-        .expect("should repair the out-of-bounds render");
-
-        assert_eq!(outcome.source, CLEAN_SOURCE);
-        assert_eq!(*driver.calls.lock().unwrap(), 2);
-
-        let prompts = driver.prompts.lock().unwrap();
-        assert!(prompts[1].contains("layout warnings"));
-        assert!(prompts[1].contains("beyond the diagram bounds"));
-        assert!(prompts[1].contains(OUT_OF_BOUNDS_SOURCE));
-    }
-
-    #[tokio::test]
-    async fn repairs_parse_error_then_overlap_before_returning() {
-        let driver = FakeDriver::new(vec![
-            fenced("box \"unterminated"), // parse error, repaired
-            fenced(OVERLAPPING_SOURCE),   // renders with overlaps, repaired
-            fenced(CLEAN_SOURCE),
-        ]);
-
-        let outcome = generate_pikchr_source(
-            &driver,
+    async fn run_generation_with_reason<D: AgentDriver>(
+        driver: &D,
+        store: &Arc<Store>,
+        session_id: &str,
+        slot: &LastRenderSlot,
+        cancel: &CancellationToken,
+        cancel_reason: &CancelReason,
+    ) -> Result<GenOutcome, String> {
+        generate_pikchr_source(
+            driver,
+            Arc::clone(store),
+            session_id,
             "/tmp/grammar.md",
             "a friendly box",
             None,
-            2.0,
+            slot,
+            cancel,
+            cancel_reason,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn accepts_last_render_in_one_turn() {
+        let slot = Arc::new(LastRenderSlot::new());
+        let driver = FakeDriver::new(
+            Arc::clone(&slot),
+            vec![turn(Some(render(CLEAN_SOURCE)), ACCEPT_SENTINEL)],
+        );
+        let (store, session_id) = child_session();
+
+        let outcome = run_generation(
+            &driver,
+            &store,
+            &session_id,
+            &slot,
             &CancellationToken::new(),
         )
         .await
-        .expect("should repair the parse error and overlap");
+        .expect("should accept the rendered diagram");
 
         assert_eq!(outcome.source, CLEAN_SOURCE);
         assert!(outcome.png.is_some());
-        assert_eq!(*driver.calls.lock().unwrap(), 3);
+        assert!(outcome.warnings.is_none());
+        assert_eq!(*driver.calls.lock().unwrap(), 1);
+        assert!(slot.is_empty(), "acceptance takes the slot");
+
+        let session = store
+            .get_session(&session_id)
+            .expect("load session")
+            .expect("session exists");
+        assert_eq!(session.status, SessionStatus::Completed);
+        assert_eq!(session.provider.as_deref(), Some("fake-agent"));
+        assert_eq!(session.agent_id.as_deref(), Some("fake-agent-session"));
+        assert_eq!(
+            session.completion_reason.as_ref(),
+            Some(&CompletionReason::TurnComplete)
+        );
+
+        let messages = store
+            .get_session_messages(&session_id)
+            .expect("load messages");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, MessageRole::User);
+        assert!(messages[0].content.contains("render_pikchr"));
+        assert!(messages[0]
+            .content
+            .contains("Diagram to produce: a friendly box"));
+        assert_eq!(messages[1].role, MessageRole::Assistant);
+        assert_eq!(messages[1].content, ACCEPT_SENTINEL);
+    }
+
+    #[test]
+    fn sentinel_must_be_the_final_line() {
+        for reply in [
+            ACCEPT_SENTINEL,
+            "acceptlastrender",
+            "Looks good.\nAcceptLastRender",
+            "Overlap fixed, boxes aligned.\n\n`AcceptLastRender`",
+            "Done.\nACCEPTLASTRENDER.",
+            "`AcceptLastRender`.",
+            "AcceptLastRender\n\n",
+        ] {
+            assert!(reply_accepts_last_render(reply), "should accept {reply:?}");
+        }
+        for reply in [
+            "",
+            "Looks good. AcceptLastRender",
+            "I'll end with AcceptLastRender once the overlap is fixed.",
+            "AcceptLastRender\nOne more tweak first.",
+            "AcceptLastRenders",
+        ] {
+            assert!(!reply_accepts_last_render(reply), "should reject {reply:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn accepts_sentinel_as_final_line_after_prose() {
+        for reply in [
+            "Looks good.\nAcceptLastRender",
+            "Done — the boxes no longer overlap.\n\n`acceptlastrender`",
+        ] {
+            let slot = Arc::new(LastRenderSlot::new());
+            let driver = FakeDriver::new(
+                Arc::clone(&slot),
+                vec![turn(Some(render(CLEAN_SOURCE)), reply)],
+            );
+            let (store, session_id) = child_session();
+
+            let outcome = run_generation(
+                &driver,
+                &store,
+                &session_id,
+                &slot,
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("reply {reply:?} should accept, got {e}"));
+
+            assert_eq!(outcome.source, CLEAN_SOURCE);
+            assert_eq!(*driver.calls.lock().unwrap(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn reprompts_when_the_sentinel_is_only_echoed_in_prose() {
+        // Models echo instructions; a mid-sentence mention is not acceptance.
+        // The render stays in the slot for the turn that actually ends with
+        // the sentinel line.
+        let slot = Arc::new(LastRenderSlot::new());
+        let driver = FakeDriver::new(
+            Arc::clone(&slot),
+            vec![
+                turn(
+                    Some(render(CLEAN_SOURCE)),
+                    "I'll end with AcceptLastRender once the overlap is fixed.",
+                ),
+                turn(None, ACCEPT_SENTINEL),
+            ],
+        );
+        let (store, session_id) = child_session();
+
+        let outcome = run_generation(
+            &driver,
+            &store,
+            &session_id,
+            &slot,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("should accept on the turn that ends with the sentinel");
+
+        assert_eq!(outcome.source, CLEAN_SOURCE);
+        assert_eq!(*driver.calls.lock().unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn accepted_render_keeps_its_warnings() {
+        let slot = Arc::new(LastRenderSlot::new());
+        let mut accepted = render(CLEAN_SOURCE);
+        accepted.warnings = Some("⚠ 1 overlapping pair(s) detected".to_string());
+        let driver = FakeDriver::new(
+            Arc::clone(&slot),
+            vec![turn(Some(accepted), ACCEPT_SENTINEL)],
+        );
+        let (store, session_id) = child_session();
+
+        let outcome = run_generation(
+            &driver,
+            &store,
+            &session_id,
+            &slot,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("warnings don't block acceptance");
+
+        assert_eq!(
+            outcome.warnings.as_deref(),
+            Some("⚠ 1 overlapping pair(s) detected")
+        );
+    }
+
+    #[tokio::test]
+    async fn reprompts_when_accepting_before_any_render() {
+        let slot = Arc::new(LastRenderSlot::new());
+        let driver = FakeDriver::new(
+            Arc::clone(&slot),
+            vec![
+                turn(None, ACCEPT_SENTINEL),
+                turn(Some(render(CLEAN_SOURCE)), ACCEPT_SENTINEL),
+            ],
+        );
+        let (store, session_id) = child_session();
+
+        let outcome = run_generation(
+            &driver,
+            &store,
+            &session_id,
+            &slot,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("should succeed on the second turn");
+
+        assert_eq!(outcome.source, CLEAN_SOURCE);
+        assert_eq!(*driver.calls.lock().unwrap(), 2);
 
         let prompts = driver.prompts.lock().unwrap();
-        assert!(prompts[1].contains("failed to render"));
-        assert!(prompts[2].contains("overlapping pair"));
+        assert!(prompts[1].contains("Nothing has been rendered successfully yet"));
+        assert!(prompts[1].contains("render_pikchr"));
 
-        // First turn starts a session; repair turns resume it.
+        // First turn starts a session; the re-prompt resumes it.
         let seen = driver.seen_session_ids.lock().unwrap();
-        assert_eq!(seen.len(), 3);
+        assert_eq!(seen.len(), 2);
         assert_eq!(seen[0], None);
         assert_eq!(seen[1].as_deref(), Some("fake-agent-session"));
-        assert_eq!(seen[2].as_deref(), Some("fake-agent-session"));
     }
 
     #[tokio::test]
-    async fn errors_when_nothing_ever_renders() {
-        let driver = FakeDriver::new(vec![fenced("box \"unterminated"); MAX_ATTEMPTS + 2]);
+    async fn reprompts_when_reply_lacks_the_sentinel() {
+        // A stray fenced reply — the old protocol's habit — is not acceptance,
+        // but the render already in the slot survives to the next turn.
+        let slot = Arc::new(LastRenderSlot::new());
+        let driver = FakeDriver::new(
+            Arc::clone(&slot),
+            vec![
+                turn(
+                    Some(render(CLEAN_SOURCE)),
+                    "```pikchr\nbox \"Clean\" fit\n```",
+                ),
+                turn(None, ACCEPT_SENTINEL),
+            ],
+        );
+        let (store, session_id) = child_session();
 
-        let result = generate_pikchr_source(
+        let outcome = run_generation(
             &driver,
-            "/tmp/grammar.md",
-            "impossible",
-            None,
-            2.0,
+            &store,
+            &session_id,
+            &slot,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("should accept the carried-over render on the second turn");
+
+        assert_eq!(outcome.source, CLEAN_SOURCE);
+        assert_eq!(*driver.calls.lock().unwrap(), 2);
+
+        let prompts = driver.prompts.lock().unwrap();
+        assert!(prompts[1].contains(ACCEPT_SENTINEL));
+    }
+
+    #[tokio::test]
+    async fn errors_when_the_specialist_never_accepts() {
+        let slot = Arc::new(LastRenderSlot::new());
+        let turns = (0..MAX_ATTEMPTS + 2)
+            .map(|_| turn(None, "Here is some prose without the token."))
+            .collect();
+        let driver = FakeDriver::new(Arc::clone(&slot), turns);
+        let (store, session_id) = child_session();
+
+        let result = run_generation(
+            &driver,
+            &store,
+            &session_id,
+            &slot,
             &CancellationToken::new(),
         )
         .await;
 
         assert!(result.is_err());
-        // The loop is bounded by MAX_ATTEMPTS even when every reply fails.
+        // The loop is bounded by MAX_ATTEMPTS even when every reply misses.
         assert_eq!(*driver.calls.lock().unwrap(), MAX_ATTEMPTS);
+
+        let session = store
+            .get_session(&session_id)
+            .expect("load session")
+            .expect("session exists");
+        assert_eq!(session.status, SessionStatus::Error);
+        assert_eq!(
+            session.error_message.as_deref(),
+            Some("The Pikchr specialist did not accept a rendered diagram.")
+        );
     }
 
     #[tokio::test]
-    async fn errors_when_overlaps_never_repair() {
-        let driver = FakeDriver::new(vec![fenced(OVERLAPPING_SOURCE); MAX_ATTEMPTS + 2]);
+    async fn cancellation_without_a_recorded_reason_reads_as_abandoned() {
+        let slot = Arc::new(LastRenderSlot::new());
+        let driver = FakeDriver::new(Arc::clone(&slot), vec![]);
+        let (store, session_id) = child_session();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
 
-        let result = generate_pikchr_source(
+        let result = run_generation(&driver, &store, &session_id, &slot, &cancel).await;
+
+        assert_eq!(result.err().as_deref(), Some(ABANDONED_CANCEL_MESSAGE));
+        assert_eq!(*driver.calls.lock().unwrap(), 0);
+
+        let session = store
+            .get_session(&session_id)
+            .expect("load session")
+            .expect("session exists");
+        assert_eq!(session.status, SessionStatus::Cancelled);
+        assert_eq!(
+            session.error_message.as_deref(),
+            Some(ABANDONED_CANCEL_MESSAGE),
+            "the cancelled child session should explain why it ended"
+        );
+        assert_eq!(
+            session.completion_reason.as_ref(),
+            Some(&CompletionReason::Interrupted)
+        );
+    }
+
+    #[tokio::test]
+    async fn recorded_cancel_reason_lands_on_the_session_and_the_error() {
+        let slot = Arc::new(LastRenderSlot::new());
+        let driver = FakeDriver::new(Arc::clone(&slot), vec![]);
+        let (store, session_id) = child_session();
+        let cancel = CancellationToken::new();
+        let reason = CancelReason::new();
+        reason.record("generate_pikchr hit its 10-minute time limit.".to_string());
+        // A later initiator must not overwrite the recorded reason.
+        reason.record("some competing reason".to_string());
+        cancel.cancel();
+
+        let result =
+            run_generation_with_reason(&driver, &store, &session_id, &slot, &cancel, &reason).await;
+
+        assert_eq!(
+            result.err().as_deref(),
+            Some("generate_pikchr hit its 10-minute time limit.")
+        );
+
+        let session = store
+            .get_session(&session_id)
+            .expect("load session")
+            .expect("session exists");
+        assert_eq!(session.status, SessionStatus::Cancelled);
+        assert_eq!(
+            session.error_message.as_deref(),
+            Some("generate_pikchr hit its 10-minute time limit.")
+        );
+        assert_eq!(
+            session.completion_reason.as_ref(),
+            Some(&CompletionReason::Interrupted)
+        );
+    }
+
+    /// Simulates `cancel_session`'s fallback path: a user cancel that lands
+    /// before the worker registers the child session in the SessionRegistry
+    /// writes Cancelled straight to the store while the specialist turn is
+    /// still running.
+    struct CancelRacingDriver {
+        inner: FakeDriver,
+        store: Arc<Store>,
+    }
+
+    #[async_trait(?Send)]
+    impl AgentDriver for CancelRacingDriver {
+        async fn run(
+            &self,
+            session_id: &str,
+            prompt: &str,
+            images: &[(String, String)],
+            working_dir: &Path,
+            store: &Arc<dyn acp_client::Store>,
+            writer: &Arc<dyn acp_client::MessageWriter>,
+            cancel_token: &CancellationToken,
+            agent_session_id: Option<&str>,
+            config_options: &[acp_client::AcpSessionConfigOptionSelection],
+        ) -> Result<acp_client::AgentRunOutcome, String> {
+            self.store
+                .update_session_status(
+                    session_id,
+                    SessionStatus::Cancelled,
+                    None,
+                    Some(&CompletionReason::Interrupted),
+                )
+                .expect("write concurrent cancel");
+            self.inner
+                .run(
+                    session_id,
+                    prompt,
+                    images,
+                    working_dir,
+                    store,
+                    writer,
+                    cancel_token,
+                    agent_session_id,
+                    config_options,
+                )
+                .await
+        }
+    }
+
+    #[tokio::test]
+    async fn late_completion_does_not_clobber_concurrent_cancel() {
+        let slot = Arc::new(LastRenderSlot::new());
+        let (store, session_id) = child_session();
+        let driver = CancelRacingDriver {
+            inner: FakeDriver::new(
+                Arc::clone(&slot),
+                vec![turn(Some(render(CLEAN_SOURCE)), ACCEPT_SENTINEL)],
+            ),
+            store: Arc::clone(&store),
+        };
+
+        let outcome = run_generation(
             &driver,
-            "/tmp/grammar.md",
-            "impossible",
-            None,
-            2.0,
+            &store,
+            &session_id,
+            &slot,
             &CancellationToken::new(),
         )
-        .await;
+        .await
+        .expect("the generated diagram still goes back to the caller");
+        assert_eq!(outcome.source, CLEAN_SOURCE);
 
-        assert!(result.is_err());
-        assert_eq!(*driver.calls.lock().unwrap(), MAX_ATTEMPTS);
+        let session = store
+            .get_session(&session_id)
+            .expect("load session")
+            .expect("session exists");
+        assert_eq!(session.status, SessionStatus::Cancelled);
+        assert!(
+            session.error_message.is_none(),
+            "a user cancel carries no explanation and must not gain one"
+        );
+        assert_eq!(
+            session.completion_reason.as_ref(),
+            Some(&CompletionReason::Interrupted)
+        );
     }
 
     #[test]
-    fn extract_prefers_pikchr_fence() {
-        let reply = "Here you go:\n```pikchr\nbox \"A\"\n```\nhope that helps";
-        assert_eq!(extract_pikchr_source(reply), "box \"A\"");
-    }
-
-    #[test]
-    fn extract_falls_back_to_generic_fence() {
-        let reply = "```\nbox \"B\"\n```";
-        assert_eq!(extract_pikchr_source(reply), "box \"B\"");
-    }
-
-    #[test]
-    fn extract_uses_raw_reply_without_fence() {
-        assert_eq!(extract_pikchr_source("  box \"C\"  "), "box \"C\"");
+    fn slot_overwrites_and_takes() {
+        let slot = LastRenderSlot::new();
+        assert!(slot.is_empty());
+        slot.store(render("box \"first\""));
+        slot.store(render("box \"second\""));
+        assert!(!slot.is_empty());
+        assert_eq!(slot.take().expect("stored render").source, "box \"second\"");
+        assert!(slot.take().is_none());
+        assert!(slot.is_empty());
     }
 
     #[test]
     fn initial_prompt_embeds_previous_source_when_revising() {
         let prompt = initial_prompt("/tmp/grammar.md", "add a box", Some("box \"old\""));
         assert!(prompt.contains("/tmp/grammar.md"));
+        assert!(prompt.contains("render_pikchr"));
+        assert!(prompt.contains(ACCEPT_SENTINEL));
         assert!(prompt.contains("current diagram to modify"));
         assert!(prompt.contains("box \"old\""));
         assert!(prompt.contains("add a box"));
@@ -494,6 +987,8 @@ box "Sink = NO-OP (default / external clone)" "no socket, no Block deps → buil
     fn initial_prompt_omits_revision_block_for_fresh_diagram() {
         let prompt = initial_prompt("/tmp/grammar.md", "a fresh box", None);
         assert!(!prompt.contains("current diagram to modify"));
+        assert!(prompt.contains("render_pikchr"));
+        assert!(prompt.contains(ACCEPT_SENTINEL));
         assert!(prompt.contains("a fresh box"));
     }
 }

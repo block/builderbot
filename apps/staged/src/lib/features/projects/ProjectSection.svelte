@@ -379,6 +379,21 @@
     }
   }
 
+  function handleOpenInnerSession(sessionId: string) {
+    const current = currentDialogReferenceEntry();
+    if (current) pushReferenceEntry(current);
+    pushReferenceEntry({
+      kind: 'chat',
+      ref: `#chat:${sessionId}`,
+      sessionId,
+      projectId: project.id,
+      repoDir: projectDisplayRootCandidates,
+      hashtagItems,
+      diffContext: referenceDiffContext,
+    });
+    closeReferenceDialogs();
+  }
+
   // ── Lifecycle ──────────────────────────────────────────────────────────
 
   onMount(() => {
@@ -567,6 +582,7 @@
       openNote = null;
       void loadProjectNotes();
     }}
+    onOpenSession={handleOpenInnerSession}
     onHashtagClick={handleHashtagClick}
   />
 {/if}

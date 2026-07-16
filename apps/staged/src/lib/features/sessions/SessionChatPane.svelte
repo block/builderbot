@@ -45,6 +45,7 @@
   import Zap from '@lucide/svelte/icons/zap';
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import FileText from '@lucide/svelte/icons/file-text';
+  import ExternalLink from '@lucide/svelte/icons/external-link';
   import ImagePlus from '@lucide/svelte/icons/image-plus';
   import Spinner from '../../shared/Spinner.svelte';
   import { isResumableReason } from '../../types';
@@ -127,7 +128,10 @@
   import PipelineSteps from './PipelineSteps.svelte';
   import { highlightMatches, clearHighlights, scrollToMatch } from '../../shared/textHighlight';
   import '../../shared/markdown/diagramStyles.css';
-  import { extractMarkdownDiagramFences } from '../../shared/markdown/diagramFormats';
+  import {
+    extractMarkdownDiagramFences,
+    fencedDiagramMarkdown,
+  } from '../../shared/markdown/diagramFormats';
   import DiagramViewerModal from '../../shared/markdown/DiagramViewerModal.svelte';
   import {
     getMarkdownDiagramSvgMarkup,
@@ -156,6 +160,7 @@
     hashtagItems?: HashtagItem[];
     /** Linked note context for note-related chat actions. */
     noteInfo?: LinkedNoteContext | null;
+    onOpenSession?: (sessionId: string) => void;
     onHashtagClick?: (click: HashtagClickInfo) => void;
     onSessionChange?: (session: Session | null) => void;
     onSearchStateChange?: (state: { matchCount: number; currentIndex: number }) => void;
@@ -176,6 +181,7 @@
     repoLabel = null,
     hashtagItems: providedHashtagItems,
     noteInfo,
+    onOpenSession,
     onHashtagClick,
     onSessionChange,
     onSearchStateChange,
@@ -240,13 +246,29 @@
       .map((message) => message.content)
       .join('\n\n')
   );
-  let sessionHasPikchr = $derived(
-    extractMarkdownDiagramFences(assistantMarkdownContent).some(
-      (diagram) => diagram.language === 'pikchr'
+  let grouped = $derived.by(() =>
+    buildAcpTranscriptGroups(messages, acpMetadataMessages, displayRoots)
+  );
+  /** Pikchr sources of successful render_pikchr tool calls, shown inline as diagrams. */
+  let pikchrToolSources = $derived(
+    grouped.flatMap((group) =>
+      group.type === 'tools'
+        ? group.items
+            .map((item) => item.pikchrRenderSource)
+            .filter((source): source is string => source !== null)
+        : []
     )
   );
+  let sessionHasPikchr = $derived(
+    pikchrToolSources.length > 0 ||
+      extractMarkdownDiagramFences(assistantMarkdownContent).some(
+        (diagram) => diagram.language === 'pikchr'
+      )
+  );
   let pikchrRenderer = $state<PikchrRenderer | null>(null);
-  let pikchrRendererLoadKey = $derived(`${sessionId}\0${assistantMarkdownContent}`);
+  let pikchrRendererLoadKey = $derived(
+    `${sessionId}\0${assistantMarkdownContent}\0${pikchrToolSources.join('\0')}`
+  );
   let pikchrRendererLoadFailedKey = $state<string | null>(null);
   let pikchrRendererLoadFailed = $derived(pikchrRendererLoadFailedKey === pikchrRendererLoadKey);
   let diagramViewerSvg = $state<string | null>(null);
@@ -1474,9 +1496,6 @@
     }
   }
 
-  let grouped = $derived.by(() =>
-    buildAcpTranscriptGroups(messages, acpMetadataMessages, displayRoots)
-  );
   let slashCommands = $derived.by(() => latestAvailableCommands(acpMetadataMessages));
   let slashQuery = $derived.by(() => {
     const trimmed = inputText.trimStart();
@@ -1618,18 +1637,26 @@
 
 <svelte:window onpaste={handleImagePaste} />
 
-{#snippet toolStatusIcon(statusTone: RichToolItem['statusTone'])}
-  {#if statusTone === 'running'}
-    <Clock size={11} />
-  {:else if statusTone === 'success'}
-    <CircleCheck size={11} />
-  {:else if statusTone === 'danger'}
-    <CircleAlert size={11} />
-  {:else if statusTone === 'cancelled'}
-    <CircleSlash size={11} />
-  {:else}
-    <CircleDot size={11} />
-  {/if}
+{#snippet toolStatusDot(statusTone: RichToolItem['statusTone'])}
+  <span
+    class="tool-status-dot"
+    class:status-running={statusTone === 'running'}
+    class:status-success={statusTone === 'success'}
+    class:status-danger={statusTone === 'danger'}
+    class:status-cancelled={statusTone === 'cancelled'}
+  >
+    {#if statusTone === 'running'}
+      <Clock size={11} />
+    {:else if statusTone === 'success'}
+      <CircleCheck size={11} />
+    {:else if statusTone === 'danger'}
+      <CircleAlert size={11} />
+    {:else if statusTone === 'cancelled'}
+      <CircleSlash size={11} />
+    {:else}
+      <CircleDot size={11} />
+    {/if}
+  </span>
 {/snippet}
 
 {#snippet richToolCard(item: RichToolItem, nested: boolean)}
@@ -1647,34 +1674,51 @@
     diffs.length > 0 ||
     locations.length > 0 ||
     terminalRefs.length > 0}
+  {@const showSessionButton = !!(item.isPikchrDiagramTool && item.innerSessionId && onOpenSession)}
+  {@const showInlineDiagram = item.pikchrRenderSource !== null}
   <div class="tool-card" class:tool-card-nested={nested}>
-    <!-- svelte-ignore a11y_click_events_have_key_events -->
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div
-      class="tool-header"
-      class:tool-header-expandable={hasDetails}
-      onclick={() => hasDetails && toggleTool(item.key)}
-    >
-      <span
-        class="tool-caret"
-        class:tool-caret-expanded={isExpanded}
-        class:tool-caret-hidden={!hasDetails}>›</span
+    {#if showInlineDiagram}
+      <div class="tool-diagram markdown-content">
+        {@html renderMarkdown(fencedDiagramMarkdown('pikchr', item.pikchrRenderSource!))}
+      </div>
+    {:else if showSessionButton}
+      <Button
+        variant="outline"
+        size="sm"
+        class="tool-session-button {item.statusTone === 'danger'
+          ? 'tool-session-button-danger'
+          : ''}"
+        onclick={() => onOpenSession?.(item.innerSessionId!)}
       >
-      <span
-        class="tool-status-dot"
-        class:status-running={item.statusTone === 'running'}
-        class:status-success={item.statusTone === 'success'}
-        class:status-danger={item.statusTone === 'danger'}
-        class:status-cancelled={item.statusTone === 'cancelled'}
+        {@render toolStatusDot(item.statusTone)}
+        <span
+          >{item.statusTone === 'danger'
+            ? 'Open failed diagram session'
+            : 'Open diagram session'}</span
+        >
+        <ExternalLink size={12} />
+      </Button>
+    {:else}
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <!-- svelte-ignore a11y_no_static_element_interactions -->
+      <div
+        class="tool-header"
+        class:tool-header-expandable={hasDetails}
+        onclick={() => hasDetails && toggleTool(item.key)}
       >
-        {@render toolStatusIcon(item.statusTone)}
-      </span>
-      <span class="tool-name">{item.verb}</span>
-      {#if item.detail}
-        <span class="tool-args-preview">{item.detail}</span>
-      {/if}
-    </div>
-    {#if isExpanded && hasDetails}
+        <span
+          class="tool-caret"
+          class:tool-caret-expanded={isExpanded}
+          class:tool-caret-hidden={!hasDetails}>›</span
+        >
+        {@render toolStatusDot(item.statusTone)}
+        <span class="tool-name">{item.verb}</span>
+        {#if item.detail}
+          <span class="tool-args-preview">{item.detail}</span>
+        {/if}
+      </div>
+    {/if}
+    {#if isExpanded && hasDetails && !showSessionButton && !showInlineDiagram}
       <div class="tool-code-block" transition:slide={{ duration: SLIDE_DURATION }}>
         {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
           <div class="tool-code-command">$ {item.detail}</div>
@@ -1911,15 +1955,7 @@
                       >
                         <span class="tool-caret" class:tool-caret-expanded={isGroupExpanded}>›</span
                         >
-                        <span
-                          class="tool-status-dot"
-                          class:status-running={verbGroup.statusTone === 'running'}
-                          class:status-success={verbGroup.statusTone === 'success'}
-                          class:status-danger={verbGroup.statusTone === 'danger'}
-                          class:status-cancelled={verbGroup.statusTone === 'cancelled'}
-                        >
-                          {@render toolStatusIcon(verbGroup.statusTone)}
-                        </span>
+                        {@render toolStatusDot(verbGroup.statusTone)}
                         <span class="tool-name">{verbGroup.verb}</span>
                         <span class="tool-args-preview">{verbGroup.summary}</span>
                       </div>
@@ -2034,7 +2070,10 @@
       </div>
     {/if}
 
-    {#if session?.status === 'error' && session.errorMessage}
+    <!-- Cancelled sessions normally carry no message; one appears when the run
+         was killed from outside with a recorded reason (e.g. a Pikchr child
+         session whose generate_pikchr call timed out) and reads as an error. -->
+    {#if (session?.status === 'error' || session?.status === 'cancelled') && session.errorMessage}
       <Alert.Root variant="destructive" class="mt-3">
         <AlertCircle />
         <Alert.Description>{session.errorMessage}</Alert.Description>
@@ -2497,6 +2536,39 @@
 
   .tool-header-expandable:hover .tool-name {
     text-decoration: underline;
+  }
+
+  :global(.tool-session-button) {
+    height: 26px;
+    gap: 6px;
+    border-color: var(--border-muted);
+    padding: 0 8px;
+    color: var(--text-muted);
+    font-size: var(--size-xs);
+    font-weight: 500;
+    box-shadow: none;
+  }
+
+  :global(.tool-session-button:hover) {
+    border-color: var(--border-emphasis);
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  /* A failed generate_pikchr call keeps its session button (the child session
+     records the failure); tint it so the error is visible without expanding. */
+  :global(.tool-session-button-danger),
+  :global(.tool-session-button-danger:hover) {
+    border-color: var(--ui-danger);
+    color: var(--ui-danger);
+  }
+
+  /* Inline diagram from a successful render_pikchr call — rendered through the
+     markdown pipeline, so it picks up the shared diagram styles (fullscreen
+     zoom affordance included); only the message margins are tightened to sit
+     inside the tool group. */
+  .tool-diagram :global(.markdown-diagram) {
+    margin: 4px 0;
   }
 
   .tool-caret {

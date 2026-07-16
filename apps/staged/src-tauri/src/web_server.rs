@@ -5,13 +5,8 @@
 //!
 //! - `POST /api/invoke/{command}` — dispatches to the same logic as Tauri commands
 //! - `GET  /api/events`           — WebSocket that broadcasts Tauri events as JSON
-//! - `POST /api/auth`             — accepts bearer token and sets session cookie
 //! - `GET  /*`                    — static files from `../dist` (the built Svelte frontend)
-//!
-//! All `/api/*` routes (except `/api/auth`) require authentication via either
-//! an `Authorization: Bearer <token>` header or a valid `staged_session` cookie.
 
-use std::collections::HashSet;
 use std::io;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -19,19 +14,15 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
-use axum::extract::{Path, Query, Request, State, WebSocketUpgrade};
+use axum::extract::{Path, Query, State, WebSocketUpgrade};
 use axum::http::StatusCode;
-use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
 use axum::serve::Listener;
 use axum::Router;
-use axum_extra::extract::cookie::{Cookie, CookieJar};
-use rand::Rng;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use serde_json::Value;
-use subtle::ConstantTimeEq;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_rustls::server::TlsStream;
@@ -58,10 +49,6 @@ use crate::store::{self, Store};
 pub struct WebAppState {
     pub app_handle: tauri::AppHandle,
     pub event_tx: broadcast::Sender<WebEvent>,
-    /// Hex-encoded 256-bit token required to authenticate web clients.
-    pub auth_token: String,
-    /// Set of valid session IDs, one per authenticated client.
-    pub sessions: Arc<Mutex<HashSet<String>>>,
 }
 
 /// A serialized event for WebSocket broadcast.
@@ -124,12 +111,6 @@ pub fn emit_to_all<R: tauri::Runtime, S: serde::Serialize + Clone>(
 // =============================================================================
 // Server startup
 // =============================================================================
-
-/// Generate a cryptographically random hex-encoded token (256-bit).
-pub fn generate_token() -> String {
-    let bytes: [u8; 32] = rand::rng().random();
-    hex::encode(bytes)
-}
 
 const CERT_PATH_ENV: &str = "STAGED_WEB_CERT_PATH";
 const KEY_PATH_ENV: &str = "STAGED_WEB_KEY_PATH";
@@ -207,7 +188,6 @@ impl Listener for TlsListener {
 /// This should be called from the Tauri `setup` hook after all managed state
 /// has been registered.
 pub fn start(state: WebAppState) {
-    let token = state.auth_token.clone();
     tauri::async_runtime::spawn(async move {
         let dist_dir = std::env::current_exe()
             .ok()
@@ -227,17 +207,9 @@ pub fn start(state: WebAppState) {
             })
             .unwrap_or_else(|| PathBuf::from("../dist"));
 
-        // Protected API routes require auth (Bearer token or session cookie)
-        let api_routes = Router::new()
+        let app = Router::new()
             .route("/api/invoke/{command}", post(invoke_command))
             .route("/api/events", get(ws_events))
-            .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
-
-        // Auth endpoint is public (it's where you submit the token)
-        let auth_route = Router::new().route("/api/auth", post(authenticate));
-
-        let app = api_routes
-            .merge(auth_route)
             .fallback_service(ServeDir::new(&dist_dir).append_index_html_on_directories(true))
             .layer(CorsLayer::permissive())
             .with_state(state);
@@ -254,7 +226,6 @@ pub fn start(state: WebAppState) {
             "[web_server] starting HTTPS on {addr}, serving static files from {}",
             dist_dir.display()
         );
-        log::info!("[web_server] web access token: {token}");
         let listener = match tokio::net::TcpListener::bind(addr).await {
             Ok(l) => l,
             Err(e) => {
@@ -266,91 +237,6 @@ pub fn start(state: WebAppState) {
             log::error!("[web_server] server error: {e}");
         }
     });
-}
-
-// =============================================================================
-// Authentication
-// =============================================================================
-
-const SESSION_COOKIE_NAME: &str = "staged_session";
-const SESSION_MAX_AGE_DAYS: i64 = 7;
-
-/// Constant-time string comparison to prevent timing side-channel attacks.
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    a.as_bytes().ct_eq(b.as_bytes()).into()
-}
-
-/// Middleware that rejects unauthenticated requests to protected routes.
-///
-/// Accepts either:
-/// - `Authorization: Bearer <token>` header matching the server's auth token
-/// - `staged_session` cookie matching the server's session ID
-async fn require_auth(
-    State(state): State<WebAppState>,
-    jar: CookieJar,
-    request: Request,
-    next: Next,
-) -> Response {
-    // Check Authorization header (constant-time comparison to prevent timing attacks)
-    if let Some(auth_header) = request.headers().get("authorization") {
-        if let Ok(value) = auth_header.to_str() {
-            if let Some(token) = value.strip_prefix("Bearer ") {
-                if constant_time_eq(token, &state.auth_token) {
-                    return next.run(request).await;
-                }
-            }
-        }
-    }
-
-    // Check session cookie against the set of valid sessions
-    if let Some(cookie) = jar.get(SESSION_COOKIE_NAME) {
-        let is_valid = {
-            let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
-            let cookie_val = cookie.value();
-            sessions.iter().any(|s| constant_time_eq(cookie_val, s))
-        };
-        if is_valid {
-            return next.run(request).await;
-        }
-    }
-
-    (StatusCode::UNAUTHORIZED, "Authentication required").into_response()
-}
-
-/// POST /api/auth — validate the bearer token and issue a session cookie.
-///
-/// Expects JSON body: `{ "token": "<auth_token>" }`
-async fn authenticate(
-    State(state): State<WebAppState>,
-    jar: CookieJar,
-    Json(body): Json<Value>,
-) -> Response {
-    let token = body
-        .get("token")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-
-    if !constant_time_eq(token, &state.auth_token) {
-        return (StatusCode::UNAUTHORIZED, "Invalid token").into_response();
-    }
-
-    // Generate a unique session ID for this client and register it.
-    let new_session_id = generate_token();
-    state
-        .sessions
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(new_session_id.clone());
-
-    let cookie = Cookie::build((SESSION_COOKIE_NAME, new_session_id))
-        .path("/")
-        .http_only(true)
-        .secure(true)
-        .max_age(time::Duration::days(SESSION_MAX_AGE_DAYS))
-        .same_site(axum_extra::extract::cookie::SameSite::Lax)
-        .build();
-
-    (jar.add(cookie), Json(serde_json::json!({ "ok": true }))).into_response()
 }
 
 // =============================================================================
@@ -588,7 +474,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         // =====================================================================
         // Store status
         // =====================================================================
-        "get_web_access_token" => Ok(serde_json::to_value(&state.auth_token).unwrap()),
         "get_store_status" => {
             // We don't have DbState in web context — return null (store ready)
             Ok(Value::Null)

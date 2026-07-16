@@ -11,7 +11,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
- "axum-extra",
  "base64 0.22.1",
  "blox-cli",
  "builderbot-actions",
@@ -24,7 +23,6 @@ dependencies = [
  "libc",
  "log",
  "pikchr",
- "rand 0.9.5",
  "regex",
  "reqwest",
  "resvg",
@@ -36,7 +34,6 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "strip-ansi-escapes",
- "subtle",
  "tar",
  "tauri",
  "tauri-build",
@@ -50,7 +47,6 @@ dependencies = [
  "tauri-plugin-window-state",
  "tempfile",
  "thiserror 2.0.20",
- "time",
  "tiny-skia",
  "tokio",
  "tokio-rustls",
@@ -474,29 +470,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "axum-extra"
-version = "0.10.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9963ff19f40c6102c76756ef0a46004c0d58957d87259fc9208ff8441c12ab96"
-dependencies = [
- "axum",
- "axum-core",
- "bytes",
- "cookie",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "mime",
- "pin-project-lite",
- "rustversion",
- "serde_core",
- "tower-layer",
- "tower-service",
- "tracing",
-]
-
-[[package]]
 name = "base64"
 version = "0.21.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -873,7 +846,6 @@ version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1a373e3602691c3cdea496d2f0ee5935151e6168fe87739483c463db1b2f2f87"
 dependencies = [
- "percent-encoding",
  "time",
  "version_check",
 ]

@@ -13,7 +13,6 @@
     listenToEvent,
     type UnlistenFn,
   } from './lib/transport';
-  import WebLogin from './lib/features/layout/WebLogin.svelte';
   import * as commands from './lib/api/commands';
   import TopBar from './lib/features/layout/TopBar.svelte';
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
@@ -71,8 +70,6 @@
   const updaterCheckIntervalMs = 15 * 60 * 1000;
 
   let showSessionLab = $state(false);
-  let currentHash = $state(window.location.hash);
-  const showLogin = $derived(!isTauri && currentHash === '#/login');
   let unlistenMenu: UnlistenFn | undefined;
   let unlistenSessionStatus: UnlistenFn | undefined;
   let unlistenCacheInvalidation: UnlistenFn | undefined;
@@ -325,34 +322,11 @@
     void ensureUpdaterLoopStarted();
   }
 
-  function onHashChange() {
-    currentHash = window.location.hash;
-  }
-
   onMount(async () => {
     darkMode.init();
     // Wire up PR-polling interest hints (window focus + backend lifecycle events).
     prPollingService.init();
     document.addEventListener('keydown', handleKonamiKey);
-    window.addEventListener('hashchange', onHashChange);
-
-    // In web mode, verify we have a valid session before loading the app.
-    // This shows the login page immediately rather than after the first
-    // failed API call triggers a 401 redirect.
-    if (!isTauri) {
-      try {
-        const resp = await fetch('/api/invoke/get_store_status', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: '{}',
-        });
-        if (resp.status === 401) {
-          window.location.hash = '#/login';
-        }
-      } catch {
-        // Server unreachable — login page won't help, continue loading
-      }
-    }
 
     // Web resume accelerator: the restored project id is available synchronously
     // (navigation seeds it from localStorage at module load). Warm that project's
@@ -586,7 +560,6 @@
     destroyed = true;
     prPollingService.dispose();
     document.removeEventListener('keydown', handleKonamiKey);
-    window.removeEventListener('hashchange', onHashChange);
     unregisterShortcuts?.();
     unlistenMenu?.();
     unlistenSessionStatus?.();
@@ -618,9 +591,7 @@
   }
 </script>
 
-{#if showLogin}
-  <WebLogin />
-{:else if preferences.loaded}
+{#if preferences.loaded}
   {#if storeIncompat && storeIncompat.kind === 'needs_reset'}
     <main class="reset-shell">
       <div class="update-state">

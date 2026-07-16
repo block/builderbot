@@ -591,9 +591,12 @@ function normalizedToolName(value: unknown): string {
  * belong to, keyed by tool key. The backend writes an announcement into the
  * parent transcript the moment `generate_pikchr` creates its child session —
  * before any tool output exists — so the transcript can link to the diagram
- * session mid-run. Ids already claimed by a tool's output are skipped; the
- * rest pair FIFO with Pikchr tools lacking an output-derived id, preferring
- * tools recorded before the announcement row.
+ * session mid-run. Ids already claimed by a tool's output are skipped; each
+ * remaining announcement pairs with the nearest preceding Pikchr tool lacking
+ * an output-derived id — the backend records the tool_call row before the
+ * announcement, so that tool is the announcement's own call. Older unmatched
+ * tools (legacy transcripts, failed announcement writes) stay unclaimed
+ * rather than stealing a later call's link.
  */
 function assignAnnouncedPikchrSessions(
   tools: Map<string, ToolAssembly>,
@@ -617,7 +620,15 @@ function assignAnnouncedPikchrSessions(
   for (const row of announcements) {
     const sessionId = innerSessionIdFromValue(row.acpContent);
     if (!sessionId || claimed.has(sessionId)) continue;
-    const index = unmatched.findIndex((tool) => tool.positionId < row.id);
+    // `unmatched` is sorted ascending, so the last entry before the row is
+    // the nearest preceding tool.
+    let index = -1;
+    for (let i = unmatched.length - 1; i >= 0; i--) {
+      if (unmatched[i].positionId < row.id) {
+        index = i;
+        break;
+      }
+    }
     // An announcement racing ahead of its tool_call row still pairs with the
     // earliest unmatched tool rather than being dropped.
     const tool = index === -1 ? unmatched.shift() : unmatched.splice(index, 1)[0];

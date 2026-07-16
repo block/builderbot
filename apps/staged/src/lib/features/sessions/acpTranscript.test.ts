@@ -322,6 +322,43 @@ describe('buildAcpTranscriptGroups', () => {
     expect(ids).toEqual(['child-done', 'child-running']);
   });
 
+  it('does not let a stale unannounced pikchr tool steal a later announcement', () => {
+    // A generate_pikchr call with neither an output-derived id nor its own
+    // announcement (a pre-announcement transcript, or the backend's
+    // announcement write failed) has no id source at all. A later call's
+    // announcement must pair with the nearest preceding tool — its own call —
+    // leaving the stale card unlinked rather than pointing it at the wrong
+    // diagram session.
+    const pikchrCall = (id: number, toolCallId: string) =>
+      message({
+        id,
+        role: 'tool_call',
+        content: JSON.stringify({
+          name: 'generate_pikchr',
+          input: { description: 'diagram' },
+        }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: toolCallId,
+      });
+
+    const groups = buildAcpTranscriptGroups(
+      [pikchrCall(1, 'tc-stale'), pikchrCall(2, 'tc-new')],
+      [
+        message({
+          id: 3,
+          role: 'assistant',
+          acpEventKind: 'pikchr_session_started',
+          acpContent: { innerSessionId: 'child-new' },
+        }),
+      ]
+    );
+
+    const ids = groups.flatMap((group) =>
+      group.type === 'tools' ? group.items.map((item) => item.innerSessionId) : []
+    );
+    expect(ids).toEqual([null, 'child-new']);
+  });
+
   it('keeps failed pikchr tools linked to their announced child session', () => {
     // A failed call's result carries no structured content, so the
     // announcement is the only id source — dropping it would leave the

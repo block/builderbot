@@ -814,7 +814,17 @@ rendered PNG preview you may open as an optional final check."
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let scale = p.scale.unwrap_or(DEFAULT_SCALE);
-        let provider_id = self.provider_id.clone();
+        // Resolve the agent/model/effort the diagram sub-session runs under. The
+        // user can point it at a specific agent — and that agent's model and
+        // effort — via General settings → Diagram generation, distinct from the
+        // session that invoked this tool. When unset, fall back to the invoking
+        // session's agent (the field this handler was built with) at its
+        // default model/effort, reproducing the pre-setting behaviour.
+        let diagram_config = crate::acp_config::read_diagram_subsession_config();
+        let (provider_id, config_options) = match diagram_config.provider_id() {
+            Some(configured) => (configured.to_string(), diagram_config.config_options()),
+            None => (self.provider_id.clone(), Vec::new()),
+        };
         let session = create_pikchr_child_session(&self.store, &provider_id)
             .map_err(|e| ErrorData::internal_error(e, None))?;
         let inner_session_id = session.id.clone();
@@ -933,6 +943,7 @@ accepted a render, so the diagram run was cancelled.",
                     grammar.as_deref(),
                     &p.description,
                     p.previous_pikchr.as_deref(),
+                    &config_options,
                     &slot,
                     &worker_cancel,
                     &worker_cancel_reason,
@@ -1475,6 +1486,7 @@ arrow from COLL.e to SNOW.w"#;
                     Some("test grammar body"),
                     "a friendly box",
                     None,
+                    &[],
                     &slot,
                     &worker_cancel,
                     &reason,

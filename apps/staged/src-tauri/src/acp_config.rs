@@ -86,6 +86,75 @@ fn selected_config_option(
     }
 }
 
+/// Preferences-store key holding the diagram sub-session override (General
+/// settings → Diagram generation). Written by the frontend preferences store
+/// and read directly from `preferences.json` here, mirroring `branch-prefix`.
+const DIAGRAM_SUBSESSION_CONFIG_KEY: &str = "diagram-subsession-config";
+
+/// The agent/model/effort the `generate_pikchr` diagram sub-session runs under,
+/// distinct from the session that invoked the tool. Every field is optional: an
+/// unset (or empty) provider falls the sub-session back to the invoking
+/// session's agent, and unset model/effort fall back to that agent's defaults —
+/// so an all-unset config reproduces the pre-setting behaviour. Model/effort
+/// value ids are meaningful only relative to the provider they were chosen for,
+/// so they are applied only when a provider is configured (see
+/// [`Self::config_options`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiagramSubsessionConfig {
+    #[serde(default)]
+    pub(crate) provider: Option<String>,
+    #[serde(default)]
+    pub(crate) model: Option<AcpConfigValueSelection>,
+    #[serde(default)]
+    pub(crate) effort: Option<AcpConfigValueSelection>,
+}
+
+impl DiagramSubsessionConfig {
+    /// The configured provider id to run the sub-session under, if any. Blank
+    /// (whitespace-only) values read as unset.
+    pub(crate) fn provider_id(&self) -> Option<&str> {
+        self.provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|provider| !provider.is_empty())
+    }
+
+    /// The model/effort selections as ACP config options to apply per turn.
+    ///
+    /// Returns empty when no provider is configured: the stored model/effort
+    /// value ids belong to the configured provider, so applying them against a
+    /// different (inherited) agent would be meaningless.
+    pub(crate) fn config_options(&self) -> Vec<AcpSessionConfigOptionSelection> {
+        if self.provider_id().is_none() {
+            return Vec::new();
+        }
+        selected_acp_config_options(Some(&AcpConfigSelection {
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+        }))
+    }
+}
+
+/// Read the diagram sub-session override from the preferences store. Any
+/// failure — missing file, unparseable JSON, absent or malformed key — yields
+/// the default (all-unset) config, so the sub-session simply inherits the
+/// invoking session's agent at its default model/effort.
+pub(crate) fn read_diagram_subsession_config() -> DiagramSubsessionConfig {
+    let Some(path) = crate::preferences_store_path_buf() else {
+        return DiagramSubsessionConfig::default();
+    };
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return DiagramSubsessionConfig::default();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return DiagramSubsessionConfig::default();
+    };
+    json.get(DIAGRAM_SUBSESSION_CONFIG_KEY)
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default()
+}
+
 fn normalize_selector_for_category(
     config_options: &[SessionConfigOption],
     category: &SessionConfigOptionCategory,
@@ -344,5 +413,73 @@ mod tests {
         );
         assert_eq!(selected[1].config_id, "reasoning");
         assert_eq!(selected[1].value_id, "high");
+    }
+
+    #[test]
+    fn diagram_config_deserializes_provider_model_and_effort() {
+        let config: DiagramSubsessionConfig = serde_json::from_value(serde_json::json!({
+            "provider": "claude",
+            "model": { "configId": "model", "valueId": "opus", "label": "Opus" },
+            "effort": { "configId": "reasoning", "valueId": "high", "label": "High" },
+        }))
+        .expect("valid diagram config");
+
+        assert_eq!(config.provider_id(), Some("claude"));
+
+        let options = config.config_options();
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].category, SessionConfigOptionCategory::Model);
+        assert_eq!(options[0].value_id, "opus");
+        assert_eq!(
+            options[1].category,
+            SessionConfigOptionCategory::ThoughtLevel
+        );
+        assert_eq!(options[1].value_id, "high");
+    }
+
+    #[test]
+    fn diagram_config_treats_blank_provider_as_unset() {
+        let config = DiagramSubsessionConfig {
+            provider: Some("   ".to_string()),
+            model: Some(AcpConfigValueSelection {
+                config_id: "model".to_string(),
+                value_id: "opus".to_string(),
+                label: None,
+            }),
+            effort: None,
+        };
+
+        assert_eq!(config.provider_id(), None);
+    }
+
+    #[test]
+    fn diagram_config_without_provider_applies_no_config_options() {
+        // Model/effort value ids are provider-specific; with no configured
+        // provider the sub-session inherits the invoking agent and must not
+        // apply overrides meant for a different one.
+        let config = DiagramSubsessionConfig {
+            provider: None,
+            model: Some(AcpConfigValueSelection {
+                config_id: "model".to_string(),
+                value_id: "opus".to_string(),
+                label: None,
+            }),
+            effort: Some(AcpConfigValueSelection {
+                config_id: "reasoning".to_string(),
+                value_id: "high".to_string(),
+                label: None,
+            }),
+        };
+
+        assert!(config.config_options().is_empty());
+    }
+
+    #[test]
+    fn diagram_config_defaults_when_missing() {
+        let config: DiagramSubsessionConfig =
+            serde_json::from_value(serde_json::json!({})).expect("empty object is valid");
+        assert_eq!(config, DiagramSubsessionConfig::default());
+        assert_eq!(config.provider_id(), None);
+        assert!(config.config_options().is_empty());
     }
 }

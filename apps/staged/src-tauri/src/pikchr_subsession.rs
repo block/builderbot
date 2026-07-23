@@ -127,6 +127,7 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
     grammar: Option<&str>,
     description: &str,
     previous_pikchr: Option<&str>,
+    config_options: &[acp_client::AcpSessionConfigOptionSelection],
     slot: &LastRenderSlot,
     cancel_token: &CancellationToken,
     cancel_reason: &CancelReason,
@@ -138,6 +139,7 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
         grammar,
         description,
         previous_pikchr,
+        config_options,
         slot,
         cancel_token,
     )
@@ -227,6 +229,7 @@ async fn generate_pikchr_source_inner<D: AgentDriver + ?Sized>(
     grammar: Option<&str>,
     description: &str,
     previous_pikchr: Option<&str>,
+    config_options: &[acp_client::AcpSessionConfigOptionSelection],
     slot: &LastRenderSlot,
     cancel_token: &CancellationToken,
 ) -> Result<GenOutcome, GenerationError> {
@@ -263,7 +266,7 @@ async fn generate_pikchr_source_inner<D: AgentDriver + ?Sized>(
                 &writer_dyn,
                 cancel_token,
                 agent_session_id.as_deref(),
-                &[],
+                config_options,
             )
             .await;
         writer_dyn.finalize().await;
@@ -446,13 +449,15 @@ mod tests {
 
     /// Scripted driver that replays canned turns (writing the shared slot the
     /// way the `render_pikchr` tool would) and records the `agent_session_id`
-    /// it was handed each turn (to assert resumption).
+    /// and `config_options` it was handed each turn (to assert resumption and
+    /// that the diagram model/effort selections reach the driver).
     struct FakeDriver {
         slot: Arc<LastRenderSlot>,
         turns: Mutex<Vec<FakeTurn>>,
         calls: Mutex<usize>,
         seen_session_ids: Mutex<Vec<Option<String>>>,
         prompts: Mutex<Vec<String>>,
+        seen_config_options: Mutex<Vec<Vec<acp_client::AcpSessionConfigOptionSelection>>>,
     }
 
     impl FakeDriver {
@@ -463,6 +468,7 @@ mod tests {
                 calls: Mutex::new(0),
                 seen_session_ids: Mutex::new(Vec::new()),
                 prompts: Mutex::new(Vec::new()),
+                seen_config_options: Mutex::new(Vec::new()),
             }
         }
     }
@@ -479,7 +485,7 @@ mod tests {
             writer: &Arc<dyn acp_client::MessageWriter>,
             _cancel_token: &CancellationToken,
             agent_session_id: Option<&str>,
-            _config_options: &[acp_client::AcpSessionConfigOptionSelection],
+            config_options: &[acp_client::AcpSessionConfigOptionSelection],
         ) -> Result<acp_client::AgentRunOutcome, String> {
             *self.calls.lock().unwrap() += 1;
             self.seen_session_ids
@@ -487,6 +493,10 @@ mod tests {
                 .unwrap()
                 .push(agent_session_id.map(str::to_string));
             self.prompts.lock().unwrap().push(prompt.to_string());
+            self.seen_config_options
+                .lock()
+                .unwrap()
+                .push(config_options.to_vec());
 
             // Mimic a new-session turn: register an agent session id so the
             // loop resumes it next time.
@@ -557,6 +567,7 @@ mod tests {
             Some("test grammar body"),
             "a friendly box",
             None,
+            &[],
             slot,
             cancel,
             cancel_reason,
@@ -611,6 +622,59 @@ mod tests {
             .contains("Diagram to produce: a friendly box"));
         assert_eq!(messages[1].role, MessageRole::Assistant);
         assert_eq!(messages[1].content, ACCEPT_SENTINEL);
+    }
+
+    #[tokio::test]
+    async fn forwards_config_options_to_the_driver_each_turn() {
+        use acp_client::AcpSessionConfigOptionSelection;
+        use agent_client_protocol::schema::v1::SessionConfigOptionCategory;
+
+        let slot = Arc::new(LastRenderSlot::new());
+        // Two turns: a protocol miss (no sentinel) then acceptance, so the loop
+        // resumes and the selections must accompany the resumed turn too.
+        let driver = FakeDriver::new(
+            Arc::clone(&slot),
+            vec![
+                turn(Some(render(CLEAN_SOURCE)), "still working on it"),
+                turn(Some(render(CLEAN_SOURCE)), ACCEPT_SENTINEL),
+            ],
+        );
+        let (store, session_id) = child_session();
+
+        let config_options = vec![
+            AcpSessionConfigOptionSelection {
+                category: SessionConfigOptionCategory::Model,
+                config_id: "model".to_string(),
+                value_id: "opus".to_string(),
+            },
+            AcpSessionConfigOptionSelection {
+                category: SessionConfigOptionCategory::ThoughtLevel,
+                config_id: "reasoning".to_string(),
+                value_id: "high".to_string(),
+            },
+        ];
+
+        generate_pikchr_source(
+            &driver,
+            Arc::clone(&store),
+            &session_id,
+            "/tmp/grammar.md",
+            "a friendly box",
+            None,
+            &config_options,
+            &slot,
+            &CancellationToken::new(),
+            &CancelReason::new(),
+        )
+        .await
+        .expect("should accept the rendered diagram");
+
+        let seen = driver.seen_config_options.lock().unwrap();
+        assert_eq!(seen.len(), 2, "one entry per driver turn");
+        assert!(
+            seen.iter().all(|options| *options == config_options),
+            "every turn (including the resumed one) receives the diagram selections"
+        );
     }
 
     #[test]

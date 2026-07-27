@@ -17,6 +17,10 @@
 //! The specialist accepts by ending its turn with the
 //! [`crate::pikchr_subsession::ACCEPT_SENTINEL`] token, and the host returns
 //! the slot's contents — so unvalidated source can never reach the caller.
+//! While the specialist runs, `generate_pikchr` ticks MCP progress
+//! notifications back to its caller (when the request carries a progress
+//! token) so client-side idle timers don't abort a call whose run outlasts
+//! them.
 //!
 //! Fidelity: rendering goes through the `pikchr` crate, which bundles the same
 //! official `pikchr.c` that the frontend's `pikchr-js` compiles to WASM. The
@@ -45,11 +49,15 @@ use acp_client::{McpServer, McpServerHttp};
 use axum::Router;
 use base64::Engine as _;
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
-use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
+use rmcp::model::{
+    CallToolResult, Content, ProgressNotificationParam, ProgressToken, ServerCapabilities,
+    ServerInfo,
+};
+use rmcp::service::RequestContext;
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
-use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, ServerHandler};
+use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData, Peer, RoleServer, ServerHandler};
 
 use crate::agent::AcpDriver;
 use crate::pikchr_subsession::{CancelReason, GenOutcome, LastRenderSlot, ACCEPT_SENTINEL};
@@ -60,6 +68,15 @@ use crate::store::{AcpMessageMetadata, CompletionReason, Session, SessionStatus,
 /// subprocess and runs several turns; the cap keeps a stuck sub-agent from
 /// running indefinitely. Enforced by cancelling the sub-session's token.
 const GENERATE_PIKCHR_TIMEOUT: Duration = Duration::from_secs(1200);
+
+/// Interval between MCP progress keep-alives sent to the caller while
+/// `generate_pikchr` waits on its specialist run. Without them the whole run
+/// is one silent request, and MCP clients cut those off long before
+/// [`GENERATE_PIKCHR_TIMEOUT`]: Claude Code aborts any tool call that produces
+/// no response or progress notification for 300 s, orphaning a worker that
+/// then finishes into the void. 30 s keeps a generous margin under that (and
+/// any comparable client-side idle timer) at negligible cost.
+const PROGRESS_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Cap the rasterized PNG so a runaway diagram can't allocate a huge pixmap.
 const MAX_RENDER_DIMENSION: u32 = 4096;
@@ -794,6 +811,7 @@ rendered PNG preview you may open as an optional final check."
     async fn generate_pikchr(
         &self,
         Parameters(p): Parameters<GeneratePikchrParams>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         let scale = p.scale.unwrap_or(DEFAULT_SCALE);
         let provider_id = self.provider_id.clone();
@@ -924,8 +942,17 @@ accepted a render, so the diagram run was cancelled.",
             let _ = tx.send(result);
         });
 
-        let outcome = rx
-            .await
+        // Await the worker while ticking progress keep-alives back to the
+        // caller so its idle timer doesn't sever a long run. The keep-alive
+        // loop never completes; the select ends when the worker reports (or
+        // this future is dropped, which also stops the keep-alives).
+        let received = tokio::select! {
+            received = rx => received,
+            _ = send_progress_keepalives(&ctx.peer, ctx.meta.get_progress_token()) => {
+                unreachable!("the progress keep-alive loop never completes")
+            }
+        };
+        let outcome = received
             .map_err(|e| {
                 let message = format!("generate_pikchr worker dropped: {e}");
                 mark_pikchr_child_session_error(&store, &inner_session_id, &message);
@@ -954,6 +981,49 @@ accepted a render, so the diagram run was cancelled.",
             preview_image_path.as_deref(),
             &outcome.source,
         ))
+    }
+}
+
+/// Build the progress keep-alive notification sent `elapsed_secs` into a
+/// `generate_pikchr` run. Progress reports elapsed seconds with no total:
+/// monotonically increasing, as the spec asks of an unbounded operation.
+fn progress_keepalive(
+    progress_token: ProgressToken,
+    elapsed_secs: u64,
+) -> ProgressNotificationParam {
+    ProgressNotificationParam {
+        progress_token,
+        progress: elapsed_secs as f64,
+        total: None,
+        message: Some(format!(
+            "Diagram specialist still working ({elapsed_secs}s elapsed)."
+        )),
+    }
+}
+
+/// Tick an MCP progress notification to the caller every
+/// [`PROGRESS_KEEPALIVE_INTERVAL`] for as long as this future is polled.
+/// Never completes — run it under `select!` against the awaited work so it
+/// stops when the work does. Progress notifications may only reference a
+/// token the caller provided, so when the request carries none this pends
+/// forever (rather than returning, which the caller treats as unreachable)
+/// and the call proceeds without keep-alives.
+async fn send_progress_keepalives(peer: &Peer<RoleServer>, progress_token: Option<ProgressToken>) {
+    let Some(progress_token) = progress_token else {
+        return std::future::pending().await;
+    };
+    let started = tokio::time::Instant::now();
+    loop {
+        tokio::time::sleep(PROGRESS_KEEPALIVE_INTERVAL).await;
+        let elapsed_secs = started.elapsed().as_secs();
+        if let Err(e) = peer
+            .notify_progress(progress_keepalive(progress_token.clone(), elapsed_secs))
+            .await
+        {
+            // A failed keep-alive usually means the caller is gone; the
+            // worker result (or this future being dropped) settles the call.
+            log::debug!("[pikchr_mcp] failed to send generate_pikchr progress keep-alive: {e}");
+        }
     }
 }
 
@@ -1312,6 +1382,20 @@ arrow from COLL.e to SNOW.w"#;
         assert_eq!(persisted.prompt, PIKCHR_CHILD_SESSION_PROMPT);
         assert_eq!(persisted.status, SessionStatus::Running);
         assert_eq!(persisted.provider.as_deref(), Some("fake-agent"));
+    }
+
+    #[test]
+    fn progress_keepalive_reports_elapsed_seconds_with_no_total() {
+        let token = ProgressToken(rmcp::model::NumberOrString::Number(7));
+
+        let notification = progress_keepalive(token.clone(), 90);
+
+        assert_eq!(notification.progress_token, token);
+        // Elapsed seconds as the progress value keeps successive keep-alives
+        // monotonically increasing, and an unbounded run reports no total.
+        assert_eq!(notification.progress, 90.0);
+        assert_eq!(notification.total, None);
+        assert!(notification.message.expect("message").contains("90s"));
     }
 
     #[tokio::test]

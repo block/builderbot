@@ -44,6 +44,7 @@
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import Zap from '@lucide/svelte/icons/zap';
   import GitBranch from '@lucide/svelte/icons/git-branch';
+  import BookOpen from '@lucide/svelte/icons/book-open';
   import FileText from '@lucide/svelte/icons/file-text';
   import ExternalLink from '@lucide/svelte/icons/external-link';
   import ImagePlus from '@lucide/svelte/icons/image-plus';
@@ -103,7 +104,7 @@
     isMaybeTextFile,
     insertFilePathsAtCursor,
   } from '../branches/branchCardHelpers';
-  import { hasXmlBlocks, sessionEndMessage } from './sessionModalHelpers';
+  import { hasXmlBlocks, sessionEndMessage, XML_BLOCK_TAGS } from './sessionModalHelpers';
   import {
     buildAcpTranscriptGroups,
     diffsFromAcpContent,
@@ -1112,7 +1113,7 @@
     const segments: ContentSegment[] = [];
     let remaining = content;
 
-    const tagPattern = /<(action|branch-history|launch-context)>([\s\S]*?)<\/\1>/g;
+    const tagPattern = new RegExp(`<(${XML_BLOCK_TAGS.join('|')})>([\\s\\S]*?)</\\1>`, 'g');
     let lastIndex = 0;
     let match: RegExpExecArray | null;
 
@@ -1129,8 +1130,10 @@
           ? 'Action instructions'
           : tag === 'branch-history'
             ? 'Branch history'
-            : 'Launch context';
-      const icon = tag === 'action' ? Zap : GitBranch;
+            : tag === 'pikchr-grammar'
+              ? 'Pikchr grammar'
+              : 'Launch context';
+      const icon = tag === 'action' ? Zap : tag === 'pikchr-grammar' ? BookOpen : GitBranch;
       segments.push({ type: 'xml-block', tag, label, content: match[2].trim(), icon });
 
       lastIndex = match.index + match[0].length;

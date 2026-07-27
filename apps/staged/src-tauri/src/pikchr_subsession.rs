@@ -362,7 +362,8 @@ fn initial_prompt(
 ) -> String {
     let grammar_line = match grammar {
         Some(_) => {
-            "Consult the full Pikchr grammar reference included below for exact syntax.".to_string()
+            "Consult the full Pikchr grammar reference included in the `<pikchr-grammar>` block below for exact syntax."
+                .to_string()
         }
         None => format!(
             "The Pikchr grammar reference is at {PIKCHR_GRAMMAR_URL}; consult it for exact syntax."
@@ -380,7 +381,7 @@ rest of your reply text is ignored."
     );
     if let Some(grammar) = grammar {
         prompt.push_str(&format!(
-            "\n\nPikchr grammar reference:\n\n{}",
+            "\n\n<pikchr-grammar>\n{}\n</pikchr-grammar>",
             grammar.trim_end()
         ));
     }
@@ -963,7 +964,7 @@ mod tests {
     #[test]
     fn initial_prompt_embeds_previous_source_when_revising() {
         let prompt = initial_prompt(Some("GRAMMAR BODY"), "add a box", Some("box \"old\""));
-        assert!(prompt.contains("Pikchr grammar reference:\n\nGRAMMAR BODY"));
+        assert!(prompt.contains("<pikchr-grammar>\nGRAMMAR BODY\n</pikchr-grammar>"));
         assert!(prompt.contains("render_pikchr"));
         assert!(prompt.contains(ACCEPT_SENTINEL));
         assert!(prompt.contains("current diagram to modify"));
@@ -984,6 +985,6 @@ mod tests {
     fn initial_prompt_falls_back_to_grammar_url_without_bundled_grammar() {
         let prompt = initial_prompt(None, "a fresh box", None);
         assert!(prompt.contains(PIKCHR_GRAMMAR_URL));
-        assert!(!prompt.contains("Pikchr grammar reference:\n"));
+        assert!(!prompt.contains("<pikchr-grammar>"));
     }
 }

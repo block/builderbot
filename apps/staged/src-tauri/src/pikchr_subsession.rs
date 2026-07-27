@@ -22,6 +22,7 @@ use std::sync::{Arc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{AgentDriver, MessageWriter};
+use crate::session_commands::PIKCHR_GRAMMAR_URL;
 use crate::store::{CompletionReason, MessageRole, SessionStatus, Store};
 
 /// Total sub-agent turns before giving up. The specialist iterates on the
@@ -85,11 +86,6 @@ pub(crate) struct GenOutcome {
     pub(crate) source: String,
     /// Rendered PNG preview, if rasterization succeeded.
     pub(crate) png: Option<Vec<u8>>,
-    /// Layout warnings on the accepted render (overlaps, out-of-bounds
-    /// elements). The specialist saw these in the tool result and accepted
-    /// anyway, so they're deliberate — surfaced to the caller rather than
-    /// swallowed.
-    pub(crate) warnings: Option<String>,
 }
 
 /// The last *successful* render produced through the specialist's
@@ -128,7 +124,7 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
     driver: &D,
     store: Arc<Store>,
     session_id: &str,
-    grammar_reference: &str,
+    grammar: Option<&str>,
     description: &str,
     previous_pikchr: Option<&str>,
     slot: &LastRenderSlot,
@@ -139,7 +135,7 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
         driver,
         Arc::clone(&store),
         session_id,
-        grammar_reference,
+        grammar,
         description,
         previous_pikchr,
         slot,
@@ -228,17 +224,17 @@ async fn generate_pikchr_source_inner<D: AgentDriver + ?Sized>(
     driver: &D,
     store: Arc<Store>,
     session_id: &str,
-    grammar_reference: &str,
+    grammar: Option<&str>,
     description: &str,
     previous_pikchr: Option<&str>,
     slot: &LastRenderSlot,
     cancel_token: &CancellationToken,
 ) -> Result<GenOutcome, GenerationError> {
-    // The sub-agent needs no repo access; the grammar path is absolute.
+    // The sub-agent needs no repo access; the grammar is inlined in the prompt.
     let working_dir = std::env::temp_dir();
     let store_dyn: Arc<dyn acp_client::Store> = store.clone();
 
-    let mut prompt = initial_prompt(grammar_reference, description, previous_pikchr);
+    let mut prompt = initial_prompt(grammar, description, previous_pikchr);
     let mut agent_session_id: Option<String> = None;
 
     for _ in 0..MAX_ATTEMPTS {
@@ -355,10 +351,25 @@ fn reply_accepts_last_render(reply: &str) -> bool {
 // Prompt templates
 // =============================================================================
 
-fn initial_prompt(reference: &str, description: &str, previous_pikchr: Option<&str>) -> String {
+/// `grammar` is the full grammar text to inline into the message — the
+/// sub-session has no repo access, so a file path would be a dead reference.
+/// `None` (bundled grammar missing or unreadable) falls back to naming the
+/// public grammar URL instead.
+fn initial_prompt(
+    grammar: Option<&str>,
+    description: &str,
+    previous_pikchr: Option<&str>,
+) -> String {
+    let grammar_line = match grammar {
+        Some(_) => {
+            "Consult the full Pikchr grammar reference included below for exact syntax.".to_string()
+        }
+        None => format!(
+            "The Pikchr grammar reference is at {PIKCHR_GRAMMAR_URL}; consult it for exact syntax."
+        ),
+    };
     let mut prompt = format!(
-        "You are a Pikchr diagram specialist. The Pikchr grammar reference is at `{reference}`; \
-consult it for exact syntax.\n\
+        "You are a Pikchr diagram specialist. {grammar_line}\n\
 \n\
 Workflow: draft the diagram source, then call the `render_pikchr` tool with it (no code fences). \
 Inspect the returned image and layout analysis, then revise and render again until the diagram \
@@ -367,6 +378,12 @@ matches the request. When you are satisfied, accept the render: your whole messa
 `{ACCEPT_SENTINEL}` as its own line. The accepted diagram is your last successful render — the \
 rest of your reply text is ignored."
     );
+    if let Some(grammar) = grammar {
+        prompt.push_str(&format!(
+            "\n\nPikchr grammar reference:\n\n{}",
+            grammar.trim_end()
+        ));
+    }
     if let Some(previous) = previous_pikchr {
         prompt.push_str(&format!(
             "\n\nHere is the current diagram to modify:\n```pikchr\n{previous}\n```\n\
@@ -423,7 +440,6 @@ mod tests {
         GenOutcome {
             source: source.to_string(),
             png: Some(vec![1, 2, 3]),
-            warnings: None,
         }
     }
 
@@ -537,7 +553,7 @@ mod tests {
             driver,
             Arc::clone(store),
             session_id,
-            "/tmp/grammar.md",
+            Some("test grammar body"),
             "a friendly box",
             None,
             slot,
@@ -568,7 +584,6 @@ mod tests {
 
         assert_eq!(outcome.source, CLEAN_SOURCE);
         assert!(outcome.png.is_some());
-        assert!(outcome.warnings.is_none());
         assert_eq!(*driver.calls.lock().unwrap(), 1);
         assert!(slot.is_empty(), "acceptance takes the slot");
 
@@ -679,33 +694,6 @@ mod tests {
 
         assert_eq!(outcome.source, CLEAN_SOURCE);
         assert_eq!(*driver.calls.lock().unwrap(), 2);
-    }
-
-    #[tokio::test]
-    async fn accepted_render_keeps_its_warnings() {
-        let slot = Arc::new(LastRenderSlot::new());
-        let mut accepted = render(CLEAN_SOURCE);
-        accepted.warnings = Some("⚠ 1 overlapping pair(s) detected".to_string());
-        let driver = FakeDriver::new(
-            Arc::clone(&slot),
-            vec![turn(Some(accepted), ACCEPT_SENTINEL)],
-        );
-        let (store, session_id) = child_session();
-
-        let outcome = run_generation(
-            &driver,
-            &store,
-            &session_id,
-            &slot,
-            &CancellationToken::new(),
-        )
-        .await
-        .expect("warnings don't block acceptance");
-
-        assert_eq!(
-            outcome.warnings.as_deref(),
-            Some("⚠ 1 overlapping pair(s) detected")
-        );
     }
 
     #[tokio::test]
@@ -974,8 +962,8 @@ mod tests {
 
     #[test]
     fn initial_prompt_embeds_previous_source_when_revising() {
-        let prompt = initial_prompt("/tmp/grammar.md", "add a box", Some("box \"old\""));
-        assert!(prompt.contains("/tmp/grammar.md"));
+        let prompt = initial_prompt(Some("GRAMMAR BODY"), "add a box", Some("box \"old\""));
+        assert!(prompt.contains("Pikchr grammar reference:\n\nGRAMMAR BODY"));
         assert!(prompt.contains("render_pikchr"));
         assert!(prompt.contains(ACCEPT_SENTINEL));
         assert!(prompt.contains("current diagram to modify"));
@@ -985,10 +973,17 @@ mod tests {
 
     #[test]
     fn initial_prompt_omits_revision_block_for_fresh_diagram() {
-        let prompt = initial_prompt("/tmp/grammar.md", "a fresh box", None);
+        let prompt = initial_prompt(Some("GRAMMAR BODY"), "a fresh box", None);
         assert!(!prompt.contains("current diagram to modify"));
         assert!(prompt.contains("render_pikchr"));
         assert!(prompt.contains(ACCEPT_SENTINEL));
         assert!(prompt.contains("a fresh box"));
+    }
+
+    #[test]
+    fn initial_prompt_falls_back_to_grammar_url_without_bundled_grammar() {
+        let prompt = initial_prompt(None, "a fresh box", None);
+        assert!(prompt.contains(PIKCHR_GRAMMAR_URL));
+        assert!(!prompt.contains("Pikchr grammar reference:\n"));
     }
 }

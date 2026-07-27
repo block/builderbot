@@ -59,7 +59,7 @@ use crate::store::{AcpMessageMetadata, CompletionReason, Session, SessionStatus,
 /// Wall-clock cap for one `generate_pikchr` call. Each call spins a provider
 /// subprocess and runs several turns; the cap keeps a stuck sub-agent from
 /// running indefinitely. Enforced by cancelling the sub-session's token.
-const GENERATE_PIKCHR_TIMEOUT: Duration = Duration::from_secs(600);
+const GENERATE_PIKCHR_TIMEOUT: Duration = Duration::from_secs(1200);
 
 /// Cap the rasterized PNG so a runaway diagram can't allocate a huge pixmap.
 const MAX_RENDER_DIMENSION: u32 = 4096;
@@ -655,17 +655,13 @@ fn rasterize_tree_to_png(tree: &usvg::Tree, scale: f32) -> Option<Vec<u8>> {
 // =============================================================================
 
 /// Outcome of rendering a candidate diagram: the PNG (if rasterization
-/// succeeded), a text summary of dimensions and layout warnings, whether the
-/// source failed to render at all, and the warning report on its own when
-/// renderable geometry still overlaps or extends beyond the diagram bounds.
+/// succeeded), a text summary of dimensions and layout warnings, and whether
+/// the source failed to render at all. Layout warnings live inside `summary`
+/// for the specialist to weigh; they are not carried past acceptance.
 pub(crate) struct PreviewOutcome {
     pub(crate) png: Option<Vec<u8>>,
     pub(crate) summary: String,
     pub(crate) is_error: bool,
-    /// The layout-warning portion of `summary`, when any warnings were
-    /// detected — carried separately so an accepted render's warnings can be
-    /// surfaced to the calling agent on their own.
-    pub(crate) warnings: Option<String>,
 }
 
 /// Render + analyze a candidate Pikchr source.
@@ -677,7 +673,6 @@ pub(crate) fn run_preview(source: &str, scale: f32) -> PreviewOutcome {
             png: None,
             summary: "Pikchr source is empty — nothing to render.".to_string(),
             is_error: true,
-            warnings: None,
         };
     }
     let rendered = match render_pikchr_svg(source) {
@@ -687,7 +682,6 @@ pub(crate) fn run_preview(source: &str, scale: f32) -> PreviewOutcome {
                 png: None,
                 summary: format!("Pikchr could not render this diagram:\n{}", err.trim()),
                 is_error: true,
-                warnings: None,
             };
         }
     };
@@ -705,7 +699,6 @@ the rendered SVG could not be parsed.)",
                 rendered.width, rendered.height
             ),
             is_error: false,
-            warnings: None,
         };
     };
 
@@ -722,7 +715,6 @@ the rendered SVG could not be parsed.)",
         png,
         summary,
         is_error: false,
-        warnings,
     }
 }
 
@@ -757,7 +749,7 @@ struct PikchrToolsHandler {
     /// child-session announcements are written into it so the UI can link to
     /// the diagram session while the specialist is still running.
     parent_session_id: String,
-    /// Handle used to resolve the bundled Pikchr grammar reference for the
+    /// Handle used to load the bundled Pikchr grammar text inlined into the
     /// sub-agent's prompt.
     app_handle: tauri::AppHandle,
     /// Shared app store used to persist the child diagram session.
@@ -796,9 +788,8 @@ An internal Pikchr specialist writes the diagram, then renders and visually revi
 session, iterating until it is satisfied. Prefer this over hand-writing Pikchr. Pass a fine-grained \
 `description` (boxes, arrows, labels, layout, relationships). To revise an existing diagram, also \
 pass its current source as `previous_pikchr` so it is edited rather than redrawn. Returns the \
-validated Pikchr source (drop it into a ```pikchr fenced code block), a filesystem path to a \
-rendered PNG preview you may open as an optional final check, and any layout warnings the \
-specialist deliberately accepted."
+validated Pikchr source (drop it into a ```pikchr fenced code block) and a filesystem path to a \
+rendered PNG preview you may open as an optional final check."
     )]
     async fn generate_pikchr(
         &self,
@@ -811,10 +802,13 @@ specialist deliberately accepted."
         let inner_session_id = session.id.clone();
         announce_pikchr_child_session(&self.store, &self.parent_session_id, &inner_session_id);
         let store = Arc::clone(&self.store);
-        // The sub-session always runs locally, so resolve a local grammar path
-        // (workspace_name = None).
-        let grammar_reference =
-            crate::session_commands::resolve_pikchr_grammar_reference(&self.app_handle, None);
+        // The full grammar text is inlined into the sub-agent's prompt rather
+        // than referenced by file path (the sub-session has no repo access).
+        // Remote note sessions keep referencing an uploaded grammar file —
+        // that path is resolved separately in `session_commands`. `None`
+        // (bundled grammar missing or unreadable) makes the prompt fall back
+        // to naming the public grammar URL.
+        let grammar = crate::session_commands::bundled_pikchr_grammar_text(&self.app_handle);
 
         // Cancellation token owned by *this* future (the parent MCP request).
         // The worker gets a clone; the parent keeps the token alive through a
@@ -918,7 +912,7 @@ accepted a render, so the diagram run was cancelled.",
                     &driver,
                     worker_store,
                     &worker_session_id,
-                    &grammar_reference,
+                    grammar.as_deref(),
                     &p.description,
                     p.previous_pikchr.as_deref(),
                     &slot,
@@ -959,7 +953,6 @@ accepted a render, so the diagram run was cancelled.",
             &inner_session_id,
             preview_image_path.as_deref(),
             &outcome.source,
-            outcome.warnings.as_deref(),
         ))
     }
 }
@@ -1036,19 +1029,11 @@ fn build_generate_pikchr_result(
     inner_session_id: &str,
     preview_image_path: Option<&str>,
     source: &str,
-    warnings: Option<&str>,
 ) -> CallToolResult {
     let mut content = Vec::new();
     if let Some(path) = preview_image_path {
         content.push(Content::text(format!(
             "Rendered preview image path: {path}"
-        )));
-    }
-    // The specialist saw these warnings in its render results and accepted
-    // anyway, so they're deliberate — surface them rather than swallow them.
-    if let Some(warnings) = warnings {
-        content.push(Content::text(format!(
-            "The specialist accepted this render despite layout warnings:\n{warnings}"
         )));
     }
     content.push(Content::text(source.to_string()));
@@ -1062,12 +1047,6 @@ fn build_generate_pikchr_result(
         structured.insert(
             "previewImagePath".to_string(),
             serde_json::Value::String(path.to_string()),
-        );
-    }
-    if let Some(warnings) = warnings {
-        structured.insert(
-            "renderWarnings".to_string(),
-            serde_json::Value::String(warnings.to_string()),
         );
     }
     structured.insert(
@@ -1098,8 +1077,8 @@ impl ServerHandler for PikchrToolsHandler {
 /// string is tolerated — the server still starts and `generate_pikchr` then
 /// fails per-call rather than failing session startup). `parent_session_id` is
 /// the session this server is attached to; child diagram sessions are
-/// announced into its transcript as they start. `app_handle` resolves the
-/// bundled Pikchr grammar reference for the sub-agent. `registry` holds each
+/// announced into its transcript as they start. `app_handle` loads the
+/// bundled Pikchr grammar text for the sub-agent. `registry` holds each
 /// child diagram session while it runs so a user Stop reaches its worker.
 pub async fn start_pikchr_mcp_server(
     provider_id: String,
@@ -1223,7 +1202,6 @@ now would accept that earlier version, not this source."
         self.slot.store(GenOutcome {
             source: p.pikchr,
             png: preview.png,
-            warnings: preview.warnings,
         });
 
         Ok(CallToolResult::success(content))
@@ -1410,7 +1388,7 @@ arrow from COLL.e to SNOW.w"#;
                     &driver,
                     Arc::clone(&store),
                     &session.id,
-                    "/tmp/grammar.md",
+                    Some("test grammar body"),
                     "a friendly box",
                     None,
                     &slot,
@@ -1472,7 +1450,6 @@ arrow from COLL.e to SNOW.w"#;
             "child-session-1",
             Some("/tmp/staged-pikchr-preview.png"),
             "box \"Clean\" fit",
-            None,
         );
 
         let texts: Vec<String> = result
@@ -1498,45 +1475,6 @@ arrow from COLL.e to SNOW.w"#;
             "/tmp/staged-pikchr-preview.png"
         );
         assert_eq!(structured["source"], "box \"Clean\" fit");
-        assert!(
-            structured.get("renderWarnings").is_none(),
-            "no warnings field for a clean render"
-        );
-    }
-
-    #[test]
-    fn generate_pikchr_result_surfaces_accepted_warnings() {
-        let result = build_generate_pikchr_result(
-            "child-session-1",
-            None,
-            "box \"Busy\" fit",
-            Some("⚠ 1 overlapping pair(s) detected"),
-        );
-
-        let texts: Vec<String> = result
-            .content
-            .iter()
-            .filter_map(|content| content.as_text().map(|text| text.text.clone()))
-            .collect();
-        assert_eq!(
-            texts,
-            vec![
-                "The specialist accepted this render despite layout warnings:\n\
-⚠ 1 overlapping pair(s) detected"
-                    .to_string(),
-                "box \"Busy\" fit".to_string(),
-            ]
-        );
-
-        let structured = result
-            .structured_content
-            .as_ref()
-            .expect("structured content");
-        assert_eq!(
-            structured["renderWarnings"],
-            "⚠ 1 overlapping pair(s) detected"
-        );
-        assert_eq!(structured["source"], "box \"Busy\" fit");
     }
 
     /// Render `source` and parse it into a usvg tree the way `run_preview` does,
@@ -1689,7 +1627,7 @@ arrow from COLL.e to SNOW.w"#;
     fn valid_source_produces_png_and_dimensions() {
         let outcome = run_preview("box \"hello\"", DEFAULT_SCALE);
         assert!(!outcome.is_error);
-        assert!(outcome.warnings.is_none());
+        assert!(outcome.summary.contains("No layout issues detected"));
         assert!(outcome.png.is_some(), "expected a PNG for valid source");
         assert!(!outcome.png.unwrap().is_empty());
         assert!(outcome.summary.contains("px"));
@@ -1699,13 +1637,8 @@ arrow from COLL.e to SNOW.w"#;
     fn overlapping_source_reports_warnings() {
         let outcome = run_preview(OVERLAPPING_SOURCE, DEFAULT_SCALE);
         assert!(!outcome.is_error);
+        assert!(outcome.summary.contains('⚠'));
         assert!(outcome.summary.contains("overlapping pair"));
-        let warnings = outcome.warnings.expect("overlaps produce warnings");
-        assert!(warnings.contains("overlapping pair"));
-        assert!(
-            outcome.summary.contains(&warnings),
-            "the summary embeds the warning report"
-        );
     }
 
     #[test]
@@ -1715,9 +1648,8 @@ arrow from COLL.e to SNOW.w"#;
         // the diagram edges on every host.
         let outcome = run_preview("margin = -0.2in\nbox \"Out\"", DEFAULT_SCALE);
         assert!(!outcome.is_error);
+        assert!(outcome.summary.contains('⚠'));
         assert!(outcome.summary.contains("beyond the diagram bounds"));
-        let warnings = outcome.warnings.expect("out-of-bounds produces warnings");
-        assert!(warnings.contains("beyond the diagram bounds"));
     }
 
     #[test]
@@ -1740,7 +1672,6 @@ arrow from COLL.e to SNOW.w"#;
     fn malformed_source_reports_error() {
         let outcome = run_preview("box \"unterminated", DEFAULT_SCALE);
         assert!(outcome.is_error);
-        assert!(outcome.warnings.is_none());
         assert!(outcome.png.is_none());
         assert!(outcome.summary.to_lowercase().contains("pikchr"));
     }
@@ -1749,7 +1680,6 @@ arrow from COLL.e to SNOW.w"#;
     fn empty_source_reports_error() {
         let outcome = run_preview("   \n  ", DEFAULT_SCALE);
         assert!(outcome.is_error);
-        assert!(outcome.warnings.is_none());
         assert!(outcome.png.is_none());
     }
 
@@ -1879,7 +1809,6 @@ arrow from COLL.e to SNOW.w"#;
         let stored = slot.take().expect("slot holds the render");
         assert_eq!(stored.source, "box \"hello\"");
         assert!(stored.png.is_some());
-        assert!(stored.warnings.is_none());
     }
 
     #[tokio::test]
@@ -1924,7 +1853,7 @@ arrow from COLL.e to SNOW.w"#;
     }
 
     #[tokio::test]
-    async fn render_tool_stores_warnings_for_overlapping_source() {
+    async fn render_tool_stores_overlapping_render_despite_warnings() {
         let slot = Arc::new(LastRenderSlot::new());
         let handler = PikchrPreviewHandler::new(DEFAULT_SCALE, Arc::clone(&slot));
 
@@ -1937,7 +1866,5 @@ arrow from COLL.e to SNOW.w"#;
 
         let stored = slot.take().expect("slot holds the flagged render");
         assert_eq!(stored.source, OVERLAPPING_SOURCE);
-        let warnings = stored.warnings.expect("warnings recorded on the render");
-        assert!(warnings.contains("overlapping pair"));
     }
 }

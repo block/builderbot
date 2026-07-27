@@ -132,6 +132,17 @@ fn bundled_pikchr_grammar_bytes(app_handle: &tauri::AppHandle) -> Option<Vec<u8>
     }
 }
 
+/// Full text of the bundled Pikchr grammar, for prompts that inline the
+/// grammar rather than referencing it by path (the local `generate_pikchr`
+/// sub-session). Remote note sessions keep referencing an uploaded grammar
+/// file instead — see [`resolve_pikchr_grammar_reference`]. `None` when the
+/// bundled resource is missing or unreadable; callers fall back to pointing
+/// at [`PIKCHR_GRAMMAR_URL`].
+pub(crate) fn bundled_pikchr_grammar_text(app_handle: &tauri::AppHandle) -> Option<String> {
+    bundled_pikchr_grammar_bytes(app_handle)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
 fn generated_pikchr_grammar_remote_path() -> String {
     format!(
         "{PIKCHR_GRAMMAR_REMOTE_PATH_PREFIX}{}{PIKCHR_GRAMMAR_REMOTE_PATH_SUFFIX}",

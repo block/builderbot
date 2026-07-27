@@ -115,6 +115,32 @@ impl LastRenderSlot {
     }
 }
 
+/// Fallback identity for a run pinned to the configured diagram override: the
+/// invoking session's agent at its default model/effort — exactly what the run
+/// would have used with no override. Consulted only when the override itself
+/// can't run (see [`is_diagram_override_unavailable_error`]).
+pub(crate) struct DiagramFallback<'a, D: AgentDriver + ?Sized> {
+    pub(crate) driver: &'a D,
+    /// Provider id written back onto the child session row when the fallback
+    /// takes over, so the transcript names the agent that actually drew the
+    /// diagram.
+    pub(crate) provider_id: &'a str,
+}
+
+/// Whether a generation failure is attributable to the configured diagram
+/// override rather than to the request itself: the pinned model/effort
+/// selection no longer resolves on the agent, or the pinned agent doesn't
+/// support the HTTP MCP transport the `render_pikchr` tool server requires.
+/// The transport fragment mirrors the message produced by the acp-client
+/// driver's required-transport check — the same producer/matcher string
+/// coupling `is_config_selection_unavailable_error` itself relies on; if the
+/// producer is reworded this degrades to today's hard error, never to a
+/// spurious fallback.
+fn is_diagram_override_unavailable_error(error: &str) -> bool {
+    acp_client::is_config_selection_unavailable_error(error)
+        || error.contains("does not support required MCP transports")
+}
+
 /// Drive the sub-agent to produce validated Pikchr for `description`.
 ///
 /// Generic over [`AgentDriver`] so it can be unit-tested with a fake driver
@@ -128,11 +154,12 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
     description: &str,
     previous_pikchr: Option<&str>,
     config_options: &[acp_client::AcpSessionConfigOptionSelection],
+    fallback: Option<DiagramFallback<'_, D>>,
     slot: &LastRenderSlot,
     cancel_token: &CancellationToken,
     cancel_reason: &CancelReason,
 ) -> Result<GenOutcome, String> {
-    let result = generate_pikchr_source_inner(
+    let mut result = generate_pikchr_source_inner(
         driver,
         Arc::clone(&store),
         session_id,
@@ -144,6 +171,42 @@ pub(crate) async fn generate_pikchr_source<D: AgentDriver + ?Sized>(
         cancel_token,
     )
     .await;
+
+    // The configured diagram override can drift stale between runs: an agent
+    // update can drop the pinned model/effort id, or the pinned agent may not
+    // support the transport the render tool needs. Those failures are
+    // properties of the override, not of this request — retry once on the
+    // invoking session's agent at its defaults instead of failing the tool.
+    // The stored preference is deliberately left intact (the settings UI
+    // surfaces its stale state) so a later agent update can revive it.
+    if let Some(fallback) = fallback {
+        if let Err(GenerationError::Failed(message)) = &result {
+            if is_diagram_override_unavailable_error(message) {
+                log::warn!(
+                    "[pikchr_subsession] configured diagram agent can't run ({message}); \
+retrying with the invoking session's agent"
+                );
+                if let Err(e) = store.set_session_provider(session_id, fallback.provider_id) {
+                    log::warn!(
+                        "[pikchr_subsession] failed to move Pikchr session {session_id} to the \
+fallback provider: {e}"
+                    );
+                }
+                result = generate_pikchr_source_inner(
+                    fallback.driver,
+                    Arc::clone(&store),
+                    session_id,
+                    grammar_reference,
+                    description,
+                    previous_pikchr,
+                    &[],
+                    slot,
+                    cancel_token,
+                )
+                .await;
+            }
+        }
+    }
 
     // A token cancellation is externally imposed — the wall-clock timeout or
     // the caller abandoning the MCP request — so resolve the recorded reason
@@ -427,16 +490,28 @@ mod tests {
     const CLEAN_SOURCE: &str = r#"box "Clean" fit"#;
 
     /// One scripted specialist turn: optionally store a render into the slot
-    /// (as a real `render_pikchr` call would mid-turn), then reply with `reply`.
+    /// (as a real `render_pikchr` call would mid-turn), then reply with `reply`
+    /// — or fail the whole turn with `error` (as a run whose session setup
+    /// failed would, e.g. on a stale config selection).
     struct FakeTurn {
         store_render: Option<GenOutcome>,
         reply: String,
+        error: Option<String>,
     }
 
     fn turn(store_render: Option<GenOutcome>, reply: &str) -> FakeTurn {
         FakeTurn {
             store_render,
             reply: reply.to_string(),
+            error: None,
+        }
+    }
+
+    fn failing(error: &str) -> FakeTurn {
+        FakeTurn {
+            store_render: None,
+            reply: String::new(),
+            error: Some(error.to_string()),
         }
     }
 
@@ -498,14 +573,6 @@ mod tests {
                 .unwrap()
                 .push(config_options.to_vec());
 
-            // Mimic a new-session turn: register an agent session id so the
-            // loop resumes it next time.
-            if agent_session_id.is_none() {
-                store
-                    .set_agent_session_id(session_id, "fake-agent-session")
-                    .unwrap();
-            }
-
             let turn = {
                 let mut turns = self.turns.lock().unwrap();
                 if turns.is_empty() {
@@ -514,6 +581,20 @@ mod tests {
                     turns.remove(0)
                 }
             };
+            // A failing turn dies during session setup: no agent session comes
+            // up and nothing is written.
+            if let Some(error) = turn.error {
+                return Err(error);
+            }
+
+            // Mimic a new-session turn: register an agent session id so the
+            // loop resumes it next time.
+            if agent_session_id.is_none() {
+                store
+                    .set_agent_session_id(session_id, "fake-agent-session")
+                    .unwrap();
+            }
+
             if let Some(outcome) = turn.store_render {
                 self.slot.store(outcome);
             }
@@ -568,6 +649,7 @@ mod tests {
             "a friendly box",
             None,
             &[],
+            None,
             slot,
             cancel,
             cancel_reason,
@@ -662,6 +744,7 @@ mod tests {
             "a friendly box",
             None,
             &config_options,
+            None,
             &slot,
             &CancellationToken::new(),
             &CancelReason::new(),
@@ -675,6 +758,137 @@ mod tests {
             seen.iter().all(|options| *options == config_options),
             "every turn (including the resumed one) receives the diagram selections"
         );
+    }
+
+    #[tokio::test]
+    async fn stale_override_falls_back_to_the_invoking_agent_at_defaults() {
+        use acp_client::AcpSessionConfigOptionSelection;
+        use agent_client_protocol::schema::v1::SessionConfigOptionCategory;
+
+        let slot = Arc::new(LastRenderSlot::new());
+        // The override run dies applying its pinned model — the message shape
+        // acp-client produces when a stored selection no longer resolves.
+        let override_driver = FakeDriver::new(
+            Arc::clone(&slot),
+            vec![failing(
+                "Selected ACP model value 'opus-legacy' is no longer available \
+for config option 'model'",
+            )],
+        );
+        let fallback_driver = FakeDriver::new(
+            Arc::clone(&slot),
+            vec![turn(Some(render(CLEAN_SOURCE)), ACCEPT_SENTINEL)],
+        );
+        let (store, session_id) = child_session();
+
+        let config_options = vec![AcpSessionConfigOptionSelection {
+            category: SessionConfigOptionCategory::Model,
+            config_id: "model".to_string(),
+            value_id: "opus-legacy".to_string(),
+        }];
+
+        let outcome = generate_pikchr_source(
+            &override_driver,
+            Arc::clone(&store),
+            &session_id,
+            "/tmp/grammar.md",
+            "a friendly box",
+            None,
+            &config_options,
+            Some(DiagramFallback {
+                driver: &fallback_driver,
+                provider_id: "parent-agent",
+            }),
+            &slot,
+            &CancellationToken::new(),
+            &CancelReason::new(),
+        )
+        .await
+        .expect("the fallback run should accept the rendered diagram");
+
+        assert_eq!(outcome.source, CLEAN_SOURCE);
+        assert_eq!(*override_driver.calls.lock().unwrap(), 1);
+        assert_eq!(*fallback_driver.calls.lock().unwrap(), 1);
+        // The fallback runs the invoking agent at its defaults — the stale
+        // selections belong to the override agent and must not follow along.
+        assert!(fallback_driver.seen_config_options.lock().unwrap()[0].is_empty());
+        // ...in a fresh agent session, not a resume of the failed attempt.
+        assert_eq!(fallback_driver.seen_session_ids.lock().unwrap()[0], None);
+
+        let session = store
+            .get_session(&session_id)
+            .expect("load session")
+            .expect("session exists");
+        assert_eq!(session.status, SessionStatus::Completed);
+        assert_eq!(
+            session.provider.as_deref(),
+            Some("parent-agent"),
+            "the session row names the agent that actually drew the diagram"
+        );
+    }
+
+    #[tokio::test]
+    async fn unrelated_failures_do_not_trigger_the_fallback() {
+        let slot = Arc::new(LastRenderSlot::new());
+        let override_driver =
+            FakeDriver::new(Arc::clone(&slot), vec![failing("agent subprocess crashed")]);
+        let fallback_driver = FakeDriver::new(Arc::clone(&slot), vec![]);
+        let (store, session_id) = child_session();
+
+        let result = generate_pikchr_source(
+            &override_driver,
+            Arc::clone(&store),
+            &session_id,
+            "/tmp/grammar.md",
+            "a friendly box",
+            None,
+            &[],
+            Some(DiagramFallback {
+                driver: &fallback_driver,
+                provider_id: "parent-agent",
+            }),
+            &slot,
+            &CancellationToken::new(),
+            &CancelReason::new(),
+        )
+        .await;
+
+        assert_eq!(result.err().as_deref(), Some("agent subprocess crashed"));
+        assert_eq!(
+            *fallback_driver.calls.lock().unwrap(),
+            0,
+            "a failure not attributable to the override must surface, not reroute"
+        );
+
+        let session = store
+            .get_session(&session_id)
+            .expect("load session")
+            .expect("session exists");
+        assert_eq!(session.status, SessionStatus::Error);
+        assert_eq!(session.provider.as_deref(), Some("fake-agent"));
+    }
+
+    #[test]
+    fn override_unavailable_matcher_covers_stale_selections_and_transport() {
+        // Stale/missing config selections (the acp-client matcher's cases).
+        assert!(is_diagram_override_unavailable_error(
+            "Selected ACP model value 'opus-legacy' is no longer available for config option 'model'"
+        ));
+        assert!(is_diagram_override_unavailable_error(
+            "Agent did not return ACP config options needed to apply selected model before prompting"
+        ));
+        // The pinned agent can't host the render tool's HTTP MCP server.
+        assert!(is_diagram_override_unavailable_error(
+            "Agent does not support required MCP transports (required: http=true, sse=false; \
+agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE."
+        ));
+        // Anything else is a real failure and must not reroute.
+        assert!(!is_diagram_override_unavailable_error(
+            "agent subprocess crashed"
+        ));
+        assert!(!is_diagram_override_unavailable_error(
+            "The Pikchr specialist did not accept a rendered diagram."
+        ));
     }
 
     #[test]

@@ -820,10 +820,23 @@ rendered PNG preview you may open as an optional final check."
         // session that invoked this tool. When unset, fall back to the invoking
         // session's agent (the field this handler was built with) at its
         // default model/effort, reproducing the pre-setting behaviour.
+        //
+        // An override run additionally carries the invoking session's agent as
+        // a fallback (`fallback_provider_id`): the stored preference can drift
+        // stale between runs — agent uninstalled, model/effort id dropped by an
+        // agent update, agent without the HTTP MCP support the render tool
+        // needs — and a stale override degrades to the no-override behaviour
+        // instead of failing every call until the setting is fixed. The stored
+        // preference stays untouched; the settings UI surfaces its stale state.
         let diagram_config = crate::acp_config::read_diagram_subsession_config();
-        let (provider_id, config_options) = match diagram_config.provider_id() {
-            Some(configured) => (configured.to_string(), diagram_config.config_options()),
-            None => (self.provider_id.clone(), Vec::new()),
+        let (provider_id, config_options, fallback_provider_id) = match diagram_config.provider_id()
+        {
+            Some(configured) => (
+                configured.to_string(),
+                diagram_config.config_options(),
+                Some(self.provider_id.clone()),
+            ),
+            None => (self.provider_id.clone(), Vec::new(), None),
         };
         let session = create_pikchr_child_session(&self.store, &provider_id)
             .map_err(|e| ErrorData::internal_error(e, None))?;
@@ -896,22 +909,87 @@ rendered PNG preview you may open as an optional final check."
                             return Err(e);
                         }
                     };
-                // Providers without HTTP MCP support fail the required-
-                // transport check and the call errors — acceptable, since the
-                // parent session already requires an MCP-capable provider to
-                // have `generate_pikchr` at all.
-                let driver = match AcpDriver::new(&provider_id) {
-                    Ok(driver) => {
-                        driver.with_mcp_servers(vec![McpServer::Http(McpServerHttp::new(
-                            "pikchr-preview",
-                            format!("http://127.0.0.1:{preview_port}/mcp"),
-                        ))])
-                    }
-                    Err(e) => {
-                        mark_pikchr_child_session_error(&worker_store, &worker_session_id, &e);
-                        return Err(e);
-                    }
+                let preview_mcp_server = || {
+                    vec![McpServer::Http(McpServerHttp::new(
+                        "pikchr-preview",
+                        format!("http://127.0.0.1:{preview_port}/mcp"),
+                    ))]
                 };
+                // Providers without HTTP MCP support fail the required-
+                // transport check inside the run. For a no-override run that
+                // errors the call — acceptable, since the parent session
+                // already requires an MCP-capable provider to have
+                // `generate_pikchr` at all. An override run instead falls back
+                // to that same invoking agent (below), which the same argument
+                // makes a safe harbour.
+                let mut config_options = config_options;
+                let mut fallback_provider_id = fallback_provider_id;
+                let driver = match AcpDriver::new(&provider_id) {
+                    Ok(driver) => driver,
+                    // The configured diagram agent no longer resolves (e.g.
+                    // uninstalled since it was chosen): fall back to the
+                    // invoking session's agent up front rather than after a
+                    // doomed run.
+                    Err(e) => match fallback_provider_id.take() {
+                        Some(parent_provider) => match AcpDriver::new(&parent_provider) {
+                            Ok(driver) => {
+                                log::warn!(
+                                    "[pikchr_mcp] configured diagram agent unavailable ({e}); \
+falling back to the invoking session's agent"
+                                );
+                                if let Err(store_error) = worker_store
+                                    .set_session_provider(&worker_session_id, &parent_provider)
+                                {
+                                    log::warn!(
+                                        "[pikchr_mcp] failed to move Pikchr session \
+{worker_session_id} to the fallback provider: {store_error}"
+                                    );
+                                }
+                                config_options = Vec::new();
+                                driver
+                            }
+                            Err(parent_error) => {
+                                mark_pikchr_child_session_error(
+                                    &worker_store,
+                                    &worker_session_id,
+                                    &parent_error,
+                                );
+                                return Err(parent_error);
+                            }
+                        },
+                        None => {
+                            mark_pikchr_child_session_error(&worker_store, &worker_session_id, &e);
+                            return Err(e);
+                        }
+                    },
+                };
+                let driver = driver.with_mcp_servers(preview_mcp_server());
+                // The fallback driver for override failures that only surface
+                // inside the run (stale model/effort selection, unsupported
+                // MCP transport) — see generate_pikchr_source. An invoking
+                // agent that itself doesn't resolve simply leaves those
+                // failures as the hard errors they were.
+                let fallback_driver = fallback_provider_id.as_deref().and_then(|parent| {
+                    match AcpDriver::new(parent) {
+                        Ok(driver) => Some(driver.with_mcp_servers(preview_mcp_server())),
+                        Err(e) => {
+                            log::warn!(
+                                "[pikchr_mcp] invoking session's agent unavailable as the \
+diagram fallback: {e}"
+                            );
+                            None
+                        }
+                    }
+                });
+                let fallback = fallback_driver
+                    .as_ref()
+                    .zip(fallback_provider_id.as_deref())
+                    .map(
+                        |(driver, provider_id)| crate::pikchr_subsession::DiagramFallback {
+                            driver,
+                            provider_id,
+                        },
+                    );
                 // Enforce the wall-clock cap by cancelling the sub-session's
                 // token; the driver shuts its subprocess down gracefully. The
                 // parent's `DropGuard` cancels this same token if the MCP
@@ -944,6 +1022,7 @@ accepted a render, so the diagram run was cancelled.",
                     &p.description,
                     p.previous_pikchr.as_deref(),
                     &config_options,
+                    fallback,
                     &slot,
                     &worker_cancel,
                     &worker_cancel_reason,
@@ -1487,6 +1566,7 @@ arrow from COLL.e to SNOW.w"#;
                     "a friendly box",
                     None,
                     &[],
+                    None,
                     &slot,
                     &worker_cancel,
                     &reason,

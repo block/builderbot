@@ -14,6 +14,7 @@
 -->
 <script lang="ts">
   import Info from '@lucide/svelte/icons/info';
+  import TriangleAlert from '@lucide/svelte/icons/triangle-alert';
   import AgentIcon from '../agents/AgentIcon.svelte';
   import AcpConfigPickerSection from '../agents/AcpConfigPickerSection.svelte';
   import AcpConfigPickerShell from '../agents/AcpConfigPickerShell.svelte';
@@ -88,8 +89,35 @@
     };
   });
 
-  // Reconcile the stored value id against the live options so a stale id (options
-  // vary by agent version) falls back to the agent's default for display.
+  // The stored choice can go stale out from under the preference: the agent
+  // can be uninstalled, or an agent update can drop the pinned model/effort
+  // value id. The backend then falls back to the invoking session's agent per
+  // call (the preference itself is kept, so a later agent update can revive
+  // it) — surface that as an error here instead of silently rendering the
+  // agent default as if it were the active choice.
+  const providerMissing = $derived(
+    !!selectedProvider && agentState.loaded && !selectedProviderInfo
+  );
+  const modelStale = $derived(
+    !configLoading &&
+      !!modelSelector &&
+      !!selectedModel &&
+      !selectorHasValue(modelSelector, selectedModel.valueId)
+  );
+  const effortStale = $derived(
+    !configLoading &&
+      !!effortSelector &&
+      !!selectedEffort &&
+      !selectorHasValue(effortSelector, selectedEffort.valueId)
+  );
+  const configUnavailable = $derived(providerMissing || modelStale || effortStale);
+  const staleSelectionNoun = $derived(
+    modelStale && effortStale ? 'model and effort' : modelStale ? 'model' : 'effort'
+  );
+
+  // Reconcile the stored value id against the live options for the column
+  // highlight (options vary by agent version); a stale id highlights the
+  // agent's default as the value a re-pick would start from.
   const modelDisplayValue = $derived(
     selectorHasValue(modelSelector, selectedModel?.valueId ?? null)
       ? (selectedModel?.valueId ?? null)
@@ -101,8 +129,18 @@
       : defaultSelectorValue(effortSelector)
   );
 
-  const modelTriggerLabel = $derived(selectorValueLabel(modelSelector, modelDisplayValue));
-  const effortTriggerLabel = $derived(selectorValueLabel(effortSelector, effortDisplayValue));
+  // The trigger keeps showing the stale stored label (not the reconciled
+  // default) so the error text below reads against what was actually chosen.
+  const modelTriggerLabel = $derived(
+    modelStale
+      ? (selectedModel?.label ?? selectedModel?.valueId ?? null)
+      : selectorValueLabel(modelSelector, modelDisplayValue)
+  );
+  const effortTriggerLabel = $derived(
+    effortStale
+      ? (selectedEffort?.label ?? selectedEffort?.valueId ?? null)
+      : selectorValueLabel(effortSelector, effortDisplayValue)
+  );
   const loadingEffortOptions = $derived(configLoading && !!modelSelector && !effortSelector);
 
   // The provider is carried by the trigger icon; the two text rows show the
@@ -182,7 +220,9 @@
     loading={triggerLoading}
     layout="vertical"
     {canOpen}
-    triggerClass="max-w-[260px] border border-[var(--border-muted)] bg-[var(--bg-elevated)]"
+    triggerClass={`max-w-[260px] border bg-[var(--bg-elevated)] ${
+      configUnavailable ? 'border-[var(--ui-danger)]' : 'border-[var(--border-muted)]'
+    }`}
   >
     <div class="picker-column" data-picker-column="provider">
       <DropdownMenu.Label class="picker-section-label">Agent</DropdownMenu.Label>
@@ -240,7 +280,11 @@
     {/if}
 
     {#snippet footer()}
-      {#if selectedProvider && configError && !modelSelector && !effortSelector}
+      {#if providerMissing}
+        <DropdownMenu.Item disabled>
+          <span class="picker-status-row">Agent no longer available</span>
+        </DropdownMenu.Item>
+      {:else if selectedProvider && configError && !modelSelector && !effortSelector}
         <DropdownMenu.Item disabled>
           <span class="picker-status-row">Using agent defaults</span>
         </DropdownMenu.Item>
@@ -248,11 +292,21 @@
     {/snippet}
   </AcpConfigPickerShell>
 
-  <p class="field-description">
-    <Info size={12} />
+  <p class="field-description" class:field-description-error={configUnavailable}>
+    {#if configUnavailable}
+      <TriangleAlert size={12} />
+    {:else}
+      <Info size={12} />
+    {/if}
     {#if !selectedProvider}
       Diagrams are drawn by a sub-agent using the same agent as the session that requested them.
       Pick an agent to always draw diagrams with a specific agent, model, and effort instead.
+    {:else if providerMissing}
+      {providerTriggerLabel} is no longer available. Diagrams will use the requesting session's own agent
+      until you choose a different agent.
+    {:else if modelStale || effortStale}
+      {providerTriggerLabel} no longer offers the chosen {staleSelectionNoun}. Diagrams will use the
+      requesting session's own agent until you update the selection.
     {:else if configError && !modelSelector && !effortSelector}
       Diagrams will use {providerTriggerLabel} at its default model and effort.
     {:else}
@@ -285,5 +339,9 @@
     display: flex;
     align-items: baseline;
     gap: 4px;
+  }
+
+  .field-description-error {
+    color: var(--ui-danger);
   }
 </style>

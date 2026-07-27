@@ -159,6 +159,109 @@ export function buildAcpTranscriptGroups(
   return groups;
 }
 
+/** Stable identity key for a transcript group, used both as the keyed-each key
+ *  and to pair groups across rebuilds in [`stabilizeAcpTranscriptGroups`]. */
+export function transcriptGroupKey(group: AcpTranscriptGroup): string {
+  if (group.type === 'tools') return `t-${group.items[0].key}`;
+  if (group.type === 'acp') return `a-${group.event.id}`;
+  return `m-${group.message.id}`;
+}
+
+/**
+ * Reuse group (and tool item) object identities from a previous build for
+ * entries whose underlying data is unchanged. buildAcpTranscriptGroups creates
+ * every object from scratch, which would make a keyed each re-evaluate the
+ * whole transcript on every poll tick; with reused identities only groups that
+ * actually changed re-render. Returns `previous` itself when nothing changed
+ * at all, so downstream deriveds short-circuit too.
+ */
+export function stabilizeAcpTranscriptGroups(
+  previous: AcpTranscriptGroup[],
+  next: AcpTranscriptGroup[]
+): AcpTranscriptGroup[] {
+  if (previous.length === 0) return next;
+  const previousByKey = new Map<string, AcpTranscriptGroup>();
+  for (const group of previous) previousByKey.set(transcriptGroupKey(group), group);
+
+  const stabilized = next.map((group) => {
+    const prior = previousByKey.get(transcriptGroupKey(group));
+    return prior ? reuseTranscriptGroup(prior, group) : group;
+  });
+
+  if (
+    stabilized.length === previous.length &&
+    stabilized.every((group, index) => group === previous[index])
+  ) {
+    return previous;
+  }
+  return stabilized;
+}
+
+function reuseTranscriptGroup(
+  prior: AcpTranscriptGroup,
+  next: AcpTranscriptGroup
+): AcpTranscriptGroup {
+  if (prior.type !== next.type) return next;
+  if (next.type === 'user' || next.type === 'assistant') {
+    return (prior as typeof next).message === next.message ? prior : next;
+  }
+  if (next.type === 'acp') {
+    const priorEvent = (prior as typeof next).event;
+    return priorEvent.id === next.event.id &&
+      priorEvent.kind === next.event.kind &&
+      priorEvent.content === next.event.content &&
+      priorEvent.message === next.event.message
+      ? prior
+      : next;
+  }
+
+  const priorItems = (prior as typeof next).items;
+  const priorByKey = new Map(priorItems.map((item) => [item.key, item]));
+  let reusedInPlace = priorItems.length === next.items.length;
+  const items = next.items.map((item, index) => {
+    const priorItem = priorByKey.get(item.key);
+    if (!priorItem || !richToolItemsEqual(priorItem, item)) {
+      reusedInPlace = false;
+      return item;
+    }
+    if (priorItem !== priorItems[index]) reusedInPlace = false;
+    return priorItem;
+  });
+  return reusedInPlace ? prior : { ...next, items };
+}
+
+/** All fields are primitives or references into the source message rows, so
+ *  strict equality detects change as long as unchanged rows keep identity. */
+function richToolItemsEqual(a: RichToolItem, b: RichToolItem): boolean {
+  return (
+    a.key === b.key &&
+    a.call === b.call &&
+    a.result === b.result &&
+    a.verb === b.verb &&
+    a.detail === b.detail &&
+    a.status === b.status &&
+    a.toolCallId === b.toolCallId &&
+    a.toolKind === b.toolKind &&
+    a.rawInput === b.rawInput &&
+    a.rawOutput === b.rawOutput &&
+    a.content === b.content &&
+    a.locations === b.locations &&
+    a.isPikchrDiagramTool === b.isPikchrDiagramTool &&
+    a.innerSessionId === b.innerSessionId &&
+    a.pikchrRenderSource === b.pikchrRenderSource
+  );
+}
+
+/**
+ * Whether a metadata row for a tool call has reached a terminal status. Rows
+ * that haven't may still be mutated in place by the backend message writer,
+ * so incremental metadata polling must re-request them by id.
+ */
+export function isToolMetadataSettled(message: SessionMessage): boolean {
+  const status = normalizeToolStatus(message.acpToolStatus);
+  return status === 'completed' || status === 'failed' || status === 'cancelled';
+}
+
 export function latestAvailableCommands(metadataMessages: SessionMessage[]): AcpCommand[] {
   const latest = [...metadataMessages]
     .reverse()
@@ -791,4 +894,53 @@ export function toolResultText(item: RichToolItem): string {
   if (item.rawOutput !== undefined && item.rawOutput !== null) return formatJson(item.rawOutput);
   if (item.result?.content) return stripCodeFences(item.result.content);
   return '';
+}
+
+/**
+ * Whether an expanded tool card would have anything to show. Equivalent to
+ * checking the formatted values (`formatJson`, `toolResultText`,
+ * `diffsFromAcpContent`, …) for emptiness, but without building them — the
+ * formatted strings are only needed once a card is actually expanded, and
+ * pretty-printing large raw payloads for every collapsed card is what made
+ * live-transcript re-renders expensive.
+ */
+export function toolHasDetails(item: RichToolItem): boolean {
+  return (
+    hasJsonValue(item.rawInput) ||
+    hasJsonValue(item.rawOutput) ||
+    acpContentHasDiff(item.content) ||
+    acpContentHasTerminalRef(item.content) ||
+    hasLocation(item.locations) ||
+    !!toolResultText(item)
+  );
+}
+
+/** Mirrors `!!formatJson(value)`: only undefined/null/'' format to ''. */
+function hasJsonValue(value: unknown): boolean {
+  return value !== undefined && value !== null && value !== '';
+}
+
+/** Mirrors `diffsFromAcpContent(content).length > 0`. */
+function acpContentHasDiff(content: unknown): boolean {
+  if (!Array.isArray(content)) return false;
+  return content.some(
+    (item) =>
+      stringProp(item, 'type') === 'diff' &&
+      !!stringProp(item, 'path') &&
+      stringProp(item, 'newText') !== null
+  );
+}
+
+/** Mirrors `terminalRefsFromAcpContent(content).length > 0`. */
+function acpContentHasTerminalRef(content: unknown): boolean {
+  if (!Array.isArray(content)) return false;
+  return content.some(
+    (item) => stringProp(item, 'type') === 'terminal' && !!stringProp(item, 'terminalId')
+  );
+}
+
+/** Mirrors `displayLocations(locations).length > 0`. */
+function hasLocation(locations: unknown): boolean {
+  if (!Array.isArray(locations)) return false;
+  return locations.some((location) => !!stringProp(location, 'path'));
 }

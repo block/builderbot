@@ -776,6 +776,23 @@ export function getSessionAcpMetadataMessages(sessionId: string): Promise<Sessio
   return invokeCommand('get_session_acp_metadata_messages', { sessionId });
 }
 
+/**
+ * Incremental variant of getSessionAcpMetadataMessages: returns metadata rows
+ * with id > sinceId plus fresh copies of refetchIds — rows the caller knows
+ * may still be mutated in place (tool calls without a terminal status).
+ */
+export function getSessionAcpMetadataMessagesSince(
+  sessionId: string,
+  sinceId: number,
+  refetchIds: number[]
+): Promise<SessionMessage[]> {
+  return invokeCommand('get_session_acp_metadata_messages_since', {
+    sessionId,
+    sinceId,
+    refetchIds,
+  });
+}
+
 export function countAssistantMessagesAfter(
   sessionId: string,
   afterTimestamp: number

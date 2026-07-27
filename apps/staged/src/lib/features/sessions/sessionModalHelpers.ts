@@ -25,14 +25,21 @@ export function sessionEndMessage(current: Pick<Session, 'completionReason'>): s
   return 'This session can be resumed.';
 }
 
+/** Tags wrapping injected context blocks in prompts/messages (rendered as collapsed cards). */
+export const XML_BLOCK_TAGS = ['action', 'branch-history', 'launch-context', 'pikchr-grammar'];
+
+const TAG_ALTERNATION = XML_BLOCK_TAGS.join('|');
+
 /** Pattern matching XML-tagged context blocks embedded in prompts/messages. */
-const XML_BLOCK_PATTERN = /<(action|branch-history|launch-context)>[\s\S]*?<\/\1>/g;
+const XML_BLOCK_PATTERN = new RegExp(`<(${TAG_ALTERNATION})>[\\s\\S]*?</\\1>`, 'g');
+
+const XML_OPEN_TAG_PATTERN = new RegExp(`<(${TAG_ALTERNATION})>`);
 
 export function hasXmlBlocks(content: string): boolean {
-  return /<(action|branch-history|launch-context)>/.test(content);
+  return XML_OPEN_TAG_PATTERN.test(content);
 }
 
-/** Strip XML-tagged context blocks (action, branch-history, launch-context) from display text. */
+/** Strip XML-tagged context blocks (XML_BLOCK_TAGS) from display text. */
 export function stripXmlTags(text: string): string {
   return text.replace(XML_BLOCK_PATTERN, '').trim();
 }

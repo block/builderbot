@@ -1204,6 +1204,91 @@ fn test_acp_metadata_messages_query_includes_hidden_rows() {
 }
 
 #[test]
+fn test_acp_metadata_messages_since_returns_new_and_refetched_rows() {
+    let store = Store::in_memory().unwrap();
+
+    let session = Session::new_running("test", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    // A visible tool_call row whose ACP metadata is later mutated in place —
+    // the pattern the writer uses for tool status updates.
+    let tool_id = store
+        .add_session_message(&session.id, MessageRole::ToolCall, "Run tests")
+        .unwrap();
+    store
+        .update_message_acp_metadata(
+            tool_id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("tool_call".to_string()),
+                acp_tool_call_id: Some("tc-1".to_string()),
+                acp_tool_status: Some("in_progress".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let usage_id = store
+        .add_acp_metadata_message(
+            &session.id,
+            &AcpMessageMetadata {
+                acp_event_kind: Some("usage_update".to_string()),
+                acp_usage: Some(serde_json::json!({"used": 1})),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    // A visible row without ACP metadata never shows up in the metadata query.
+    store
+        .add_session_message(&session.id, MessageRole::Assistant, "text")
+        .unwrap();
+
+    // Cursor past everything, no refetch ids: nothing to return.
+    let none = store
+        .get_session_acp_metadata_messages_since(&session.id, usage_id, &[])
+        .unwrap();
+    assert!(none.is_empty());
+
+    // Only rows after the cursor are returned.
+    let after_tool = store
+        .get_session_acp_metadata_messages_since(&session.id, tool_id, &[])
+        .unwrap();
+    assert_eq!(after_tool.len(), 1);
+    assert_eq!(after_tool[0].id, usage_id);
+
+    // An in-place status update on a row behind the cursor is only observable
+    // when the caller re-requests that row explicitly.
+    store
+        .update_message_acp_metadata(
+            tool_id,
+            &AcpMessageMetadata {
+                acp_tool_status: Some("completed".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let refetched = store
+        .get_session_acp_metadata_messages_since(&session.id, usage_id, &[tool_id])
+        .unwrap();
+    assert_eq!(refetched.len(), 1);
+    assert_eq!(refetched[0].id, tool_id);
+    assert_eq!(
+        refetched[0].acp.acp_tool_status.as_deref(),
+        Some("completed")
+    );
+
+    // The full metadata query and the since-query with a zero cursor agree.
+    let full = store
+        .get_session_acp_metadata_messages(&session.id)
+        .unwrap();
+    let since_zero = store
+        .get_session_acp_metadata_messages_since(&session.id, 0, &[])
+        .unwrap();
+    assert_eq!(
+        full.iter().map(|m| m.id).collect::<Vec<_>>(),
+        since_zero.iter().map(|m| m.id).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn test_acp_initialization_metadata_is_queryable() {
     let store = Store::in_memory().unwrap();
 

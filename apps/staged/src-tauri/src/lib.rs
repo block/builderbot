@@ -2325,6 +2325,7 @@ pub fn run() {
             session_commands::get_session_messages,
             session_commands::get_session_messages_since,
             session_commands::get_session_acp_metadata_messages,
+            session_commands::get_session_acp_metadata_messages_since,
             session_commands::get_session_acp_initialization,
             session_commands::count_assistant_messages_after,
             session_commands::start_session,

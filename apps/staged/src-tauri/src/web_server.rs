@@ -2828,6 +2828,16 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(messages).unwrap())
         }
+        "get_session_acp_metadata_messages_since" => {
+            let store = get_store(store_mutex)?;
+            let session_id: String = arg(&args, "sessionId")?;
+            let since_id: i64 = arg(&args, "sinceId")?;
+            let refetch_ids: Vec<i64> = arg(&args, "refetchIds")?;
+            let messages = store
+                .get_session_acp_metadata_messages_since(&session_id, since_id, &refetch_ids)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(messages).unwrap())
+        }
         "get_session_acp_initialization" => {
             let store = get_store(store_mutex)?;
             let session_id: String = arg(&args, "sessionId")?;

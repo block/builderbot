@@ -69,6 +69,7 @@
     getImageData,
     getSession,
     getSessionAcpMetadataMessages,
+    getSessionAcpMetadataMessagesSince,
     getSessionMessages,
     getSessionMessagesSince,
     handleExternalLinkClick,
@@ -110,10 +111,14 @@
     displayLocations,
     formatJson,
     groupRichToolsByVerb,
+    isToolMetadataSettled,
     latestAvailableCommands,
     simpleUnifiedDiff,
+    stabilizeAcpTranscriptGroups,
     terminalRefsFromAcpContent,
+    toolHasDetails,
     toolResultText,
+    transcriptGroupKey,
     type AcpCommand,
     type AcpTranscriptEvent,
     type AcpTranscriptGroup,
@@ -246,9 +251,21 @@
       .map((message) => message.content)
       .join('\n\n')
   );
-  let grouped = $derived.by(() =>
-    buildAcpTranscriptGroups(messages, acpMetadataMessages, displayRoots)
-  );
+  // Reuse group/item identities across rebuilds so the keyed each only
+  // re-evaluates groups whose data actually changed — a rebuild happens twice
+  // per second while a session streams.
+  let previousGrouped: AcpTranscriptGroup[] = [];
+  let grouped = $derived.by(() => {
+    previousGrouped = stabilizeAcpTranscriptGroups(
+      previousGrouped,
+      buildAcpTranscriptGroups(messages, acpMetadataMessages, displayRoots)
+    );
+    return previousGrouped;
+  });
+  /** Number-valued so per-group template expressions can depend on "am I the
+   *  last group?" without re-running whenever the grouped array identity
+   *  changes — deriveds cut propagation when the value is equal. */
+  let lastGroupIndex = $derived(grouped.length - 1);
   /** Pikchr sources of successful render_pikchr tool calls, shown inline as diagrams. */
   let pikchrToolSources = $derived(
     grouped.flatMap((group) =>
@@ -693,7 +710,12 @@
     }
   }
 
-  /** Incremental poll — re-fetch last message (may have grown) + any new ones. */
+  /** Incremental poll — re-fetch last message (may have grown) + any new ones.
+   *
+   *  State assignments are skipped whenever a tick brings no actual change:
+   *  reassigning the same data under a fresh identity would invalidate the
+   *  grouped transcript and re-render the entire message list twice a second.
+   */
   async function poll() {
     if (!session || closed || pollInFlight) return;
     pollInFlight = true;
@@ -703,30 +725,39 @@
       const s = await getSession(sessionId);
       if (closed) return;
       const statusEventDuringFetch = statusEventVersion !== statusVersionBeforeFetch;
-      if (s && !statusEventDuringFetch) session = s;
+      if (s && !statusEventDuringFetch && JSON.stringify(s) !== JSON.stringify(session)) {
+        session = s;
+      }
       await refreshQueuedMessages();
 
-      // Incremental message fetch
+      // Incremental message fetch. Metadata rows for unsettled tool calls are
+      // mutated in place by the backend writer rather than re-inserted, so
+      // they're re-requested by id alongside rows past the cursor.
+      const metadataCursor =
+        acpMetadataMessages.length > 0 ? acpMetadataMessages[acpMetadataMessages.length - 1].id : 0;
+      const unsettledIds = acpMetadataMessages
+        .filter((message) => message.acpToolCallId && !isToolMetadataSettled(message))
+        .map((message) => message.id);
       if (messages.length === 0) {
-        const [{ data: msgs }, acpMsgs] = await Promise.all([
+        const [{ data: msgs }, acpUpdates] = await Promise.all([
           getSessionMessages(sessionId),
-          getSessionAcpMetadataMessages(sessionId),
+          getSessionAcpMetadataMessagesSince(sessionId, metadataCursor, unsettledIds),
         ]);
         if (closed) return;
-        acpMetadataMessages = acpMsgs;
+        applyAcpMetadataUpdates(acpUpdates);
         if (msgs.length > 0) {
           messages = msgs;
           scrollToBottomIfNear(true);
         }
       } else {
         const lastId = messages[messages.length - 1].id;
-        const [updated, acpMsgs] = await Promise.all([
+        const [updated, acpUpdates] = await Promise.all([
           getSessionMessagesSince(sessionId, lastId),
-          getSessionAcpMetadataMessages(sessionId),
+          getSessionAcpMetadataMessagesSince(sessionId, metadataCursor, unsettledIds),
         ]);
         if (closed) return;
-        acpMetadataMessages = acpMsgs;
-        if (updated.length > 0) {
+        applyAcpMetadataUpdates(acpUpdates);
+        if (updated.length > 0 && !isUnchangedTail(updated, lastId)) {
           const prev = messages.slice(0, -1);
           messages = [...prev, ...updated];
           if (updated.length > 1 || updated[0].id !== lastId) {
@@ -748,10 +779,45 @@
     }
   }
 
+  /**
+   * Merge incremental metadata rows into the cached array. Row identity is
+   * preserved when a re-fetched unsettled row comes back unchanged, and array
+   * identity is preserved when no row changed at all, so unchanged transcript
+   * groups keep their identity downstream.
+   */
+  function applyAcpMetadataUpdates(updates: SessionMessage[]) {
+    if (updates.length === 0) return;
+    const byId = new Map(acpMetadataMessages.map((message) => [message.id, message]));
+    let changed = false;
+    for (const update of updates) {
+      const current = byId.get(update.id);
+      if (current && JSON.stringify(current) === JSON.stringify(update)) continue;
+      byId.set(update.id, update);
+      changed = true;
+    }
+    if (!changed) return;
+    acpMetadataMessages = [...byId.values()].sort((a, b) => a.id - b.id);
+  }
+
+  /** Whether the since-fetch returned only an identical copy of the last
+   *  known message. Content is compared separately so the common streaming
+   *  case (the tail grew) skips the JSON pass over the metadata fields. */
+  function isUnchangedTail(updated: SessionMessage[], lastId: number): boolean {
+    if (updated.length !== 1 || updated[0].id !== lastId) return false;
+    const current = messages[messages.length - 1];
+    if (updated[0].content !== current.content) return false;
+    return (
+      JSON.stringify({ ...updated[0], content: '' }) === JSON.stringify({ ...current, content: '' })
+    );
+  }
+
   async function refreshQueuedMessages() {
     if (!sessionId || closed) return;
     try {
-      queuedMessages = await listQueuedSessionMessages(sessionId);
+      const queued = await listQueuedSessionMessages(sessionId);
+      if (JSON.stringify(queued) !== JSON.stringify(queuedMessages)) {
+        queuedMessages = queued;
+      }
     } catch (e) {
       console.error('Failed to refresh queued messages:', e);
     }
@@ -1014,13 +1080,41 @@
     }
   }
 
+  /** LRU cache for rendered markdown, keyed by source string. Live-transcript
+   *  re-renders mostly re-request unchanged content, and each render is a full
+   *  marked parse + DOMPurify sanitize (plus synchronous WASM renders for
+   *  pikchr fences). Output is deterministic per content for a given renderer
+   *  and hashtag context, so the cache resets when either changes. */
+  const MARKDOWN_CACHE_LIMIT = 500;
+  const markdownHtmlCache = new Map<string, string>();
+  let markdownCacheRenderer: PikchrRenderer | null = null;
+  let markdownCacheHashtagItems: HashtagItem[] | null = null;
+
   function renderMarkdown(content: string): string {
-    return renderSharedMarkdown(content, {
-      pikchrRenderer,
-      renderInlineText: hashtagItems.length
-        ? (text) => renderHashtagTokens(text, hashtagItems)
-        : undefined,
+    // Read both reactive inputs unconditionally so cached calls keep the same
+    // dependency tracking as uncached ones.
+    const renderer = pikchrRenderer;
+    const items = hashtagItems;
+    if (markdownCacheRenderer !== renderer || markdownCacheHashtagItems !== items) {
+      markdownHtmlCache.clear();
+      markdownCacheRenderer = renderer;
+      markdownCacheHashtagItems = items;
+    }
+    const cached = markdownHtmlCache.get(content);
+    if (cached !== undefined) {
+      markdownHtmlCache.delete(content);
+      markdownHtmlCache.set(content, cached);
+      return cached;
+    }
+    const html = renderSharedMarkdown(content, {
+      pikchrRenderer: renderer,
+      renderInlineText: items.length ? (text) => renderHashtagTokens(text, items) : undefined,
     });
+    markdownHtmlCache.set(content, html);
+    if (markdownHtmlCache.size > MARKDOWN_CACHE_LIMIT) {
+      markdownHtmlCache.delete(markdownHtmlCache.keys().next().value!);
+    }
+    return html;
   }
 
   function openDiagramViewerFromEvent(event: MouseEvent | KeyboardEvent): boolean {
@@ -1508,11 +1602,22 @@
       .slice(0, 6);
   });
 
+  /** Note-indicator scans keyed on the message object: rows keep identity
+   *  across polls except the re-fetched tail, so stale entries self-evict. */
+  const noteIndicatorCache = new WeakMap<SessionMessage, boolean>();
+
+  function messageHasNoteIndicator(message: SessionMessage): boolean {
+    let hasNote = noteIndicatorCache.get(message);
+    if (hasNote === undefined) {
+      hasNote = splitAtNoteIndicator(message.content).hasNote;
+      noteIndicatorCache.set(message, hasNote);
+    }
+    return hasNote;
+  }
+
   let noteBearingMessageIds = $derived.by(() => {
     return messages
-      .filter(
-        (message) => message.role === 'assistant' && splitAtNoteIndicator(message.content).hasNote
-      )
+      .filter((message) => message.role === 'assistant' && messageHasNoteIndicator(message))
       .map((message) => message.id);
   });
 
@@ -1622,12 +1727,6 @@
     return text.length > 72 ? `${text.slice(0, 72)}…` : text;
   }
 
-  function groupKey(group: AcpTranscriptGroup): string {
-    if (group.type === 'tools') return `t-${group.items[0].key}`;
-    if (group.type === 'acp') return `a-${group.event.id}`;
-    return `m-${group.message.id}`;
-  }
-
   /** Slide-in transition that is suppressed during the initial load. */
   function messageSlide(node: Element) {
     if (!animateNewMessages) return { duration: 0 };
@@ -1661,19 +1760,7 @@
 
 {#snippet richToolCard(item: RichToolItem, nested: boolean)}
   {@const isExpanded = expandedTools.has(item.key)}
-  {@const resultText = toolResultText(item)}
-  {@const rawInputText = formatJson(item.rawInput)}
-  {@const rawOutputText = formatJson(item.rawOutput)}
-  {@const diffs = diffsFromAcpContent(item.content, displayRoots)}
-  {@const locations = displayLocations(item.locations, displayRoots)}
-  {@const terminalRefs = terminalRefsFromAcpContent(item.content)}
-  {@const hasDetails =
-    !!resultText ||
-    !!rawInputText ||
-    !!rawOutputText ||
-    diffs.length > 0 ||
-    locations.length > 0 ||
-    terminalRefs.length > 0}
+  {@const hasDetails = toolHasDetails(item)}
   {@const showSessionButton = !!(item.isPikchrDiagramTool && item.innerSessionId && onOpenSession)}
   {@const showInlineDiagram = item.pikchrRenderSource !== null}
   <div class="tool-card" class:tool-card-nested={nested}>
@@ -1719,6 +1806,14 @@
       </div>
     {/if}
     {#if isExpanded && hasDetails && !showSessionButton && !showInlineDiagram}
+      <!-- Formatted only once expanded: pretty-printing every collapsed
+           card's raw payloads made live re-renders expensive. -->
+      {@const resultText = toolResultText(item)}
+      {@const rawInputText = formatJson(item.rawInput)}
+      {@const rawOutputText = formatJson(item.rawOutput)}
+      {@const diffs = diffsFromAcpContent(item.content, displayRoots)}
+      {@const locations = displayLocations(item.locations, displayRoots)}
+      {@const terminalRefs = terminalRefsFromAcpContent(item.content)}
       <div class="tool-code-block" transition:slide={{ duration: SLIDE_DURATION }}>
         {#if (item.verb === 'Ran' || item.verb === 'Running') && item.detail}
           <div class="tool-code-command">$ {item.detail}</div>
@@ -1809,7 +1904,7 @@
       <!-- Pipeline is present but no messages yet — pipeline steps are the entire view -->
     {:else}
       <div class="messages">
-        {#each grouped as group, groupIdx (groupKey(group))}
+        {#each grouped as group, groupIdx (transcriptGroupKey(group))}
           <div in:messageSlide class={group.type === 'user' ? 'user-group' : ''}>
             {#if group.type === 'user'}
               {@const hasBlocks = cachedHasXmlBlocks(group.message.content)}
@@ -1897,7 +1992,7 @@
               {/if}
             {:else if group.type === 'assistant'}
               {@const split = splitAtNoteIndicator(group.message.content, {
-                streaming: isLive && groupIdx === grouped.length - 1,
+                streaming: isLive && groupIdx === lastGroupIndex,
               })}
               {@const firstNoteMessageId = noteBearingMessageIds[0]}
               {@const hasPreamble = split.preamble.trim().length > 0}
@@ -1916,7 +2011,7 @@
                     <NoteActivityCard
                       label={noteActivityLabel({
                         isLive,
-                        isLastGroup: groupIdx === grouped.length - 1,
+                        isLastGroup: groupIdx === lastGroupIndex,
                         isFirstNoteMessage: group.message.id === firstNoteMessageId,
                       })}
                     />

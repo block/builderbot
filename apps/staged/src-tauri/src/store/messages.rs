@@ -348,6 +348,43 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Incremental variant of [`Self::get_session_acp_metadata_messages`]:
+    /// returns metadata rows with `id > since_id`, plus fresh copies of
+    /// `refetch_ids`. Rows for tool calls that have not reached a terminal
+    /// status are updated in place by the message writer rather than
+    /// re-inserted, so callers pass those ids to observe the mutations.
+    pub fn get_session_acp_metadata_messages_since(
+        &self,
+        session_id: &str,
+        since_id: i64,
+        refetch_ids: &[i64],
+    ) -> Result<Vec<SessionMessage>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let refetch_placeholders = refetch_ids
+            .iter()
+            .map(|_| "?")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let id_filter = if refetch_ids.is_empty() {
+            "id > ?".to_string()
+        } else {
+            format!("(id > ? OR id IN ({refetch_placeholders}))")
+        };
+        let sql = format!(
+            "SELECT {SESSION_MESSAGE_COLUMNS}
+             FROM session_messages
+             WHERE session_id = ? AND acp_event_kind IS NOT NULL AND {id_filter}
+             ORDER BY id ASC"
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut query_params: Vec<&dyn rusqlite::ToSql> = vec![&session_id, &since_id];
+        for id in refetch_ids {
+            query_params.push(id);
+        }
+        let rows = stmt.query_map(&query_params[..], session_message_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Return the latest ACP initialization metadata row for a session.
     ///
     /// This exposes negotiated provider/protocol/capability data without

@@ -3,7 +3,10 @@ import type { SessionMessage } from '../../types';
 import {
   buildAcpTranscriptGroups,
   groupRichToolsByVerb,
+  isToolMetadataSettled,
   latestAvailableCommands,
+  stabilizeAcpTranscriptGroups,
+  toolHasDetails,
   type RichToolItem,
 } from './acpTranscript';
 
@@ -690,6 +693,152 @@ describe('latestAvailableCommands', () => {
         inputHint: 'goal',
       },
     ]);
+  });
+});
+
+describe('stabilizeAcpTranscriptGroups', () => {
+  const transcript = (visible: SessionMessage[], metadata: SessionMessage[]) =>
+    buildAcpTranscriptGroups(visible, metadata, '/repo');
+
+  it('returns the previous array identity when nothing changed', () => {
+    const visible = [
+      message({ id: 1, role: 'user', content: 'go' }),
+      message({
+        id: 2,
+        role: 'tool_call',
+        content: JSON.stringify({ name: 'Read', input: { file_path: '/repo/a.ts' } }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: 'tc-1',
+        acpToolStatus: 'completed',
+      }),
+      message({ id: 3, role: 'assistant', content: 'done' }),
+    ];
+    const metadata = [visible[1]];
+
+    const first = transcript(visible, metadata);
+    const second = stabilizeAcpTranscriptGroups(first, transcript(visible, metadata));
+
+    expect(second).toBe(first);
+  });
+
+  it('reuses unchanged groups while replacing the changed tail', () => {
+    const user = message({ id: 1, role: 'user', content: 'go' });
+    const first = transcript([user, message({ id: 2, role: 'assistant', content: 'partial' })], []);
+    const grown = transcript(
+      [user, message({ id: 2, role: 'assistant', content: 'partial plus more' })],
+      []
+    );
+
+    const stabilized = stabilizeAcpTranscriptGroups(first, grown);
+
+    expect(stabilized).not.toBe(first);
+    expect(stabilized[0]).toBe(first[0]);
+    expect(stabilized[1]).not.toBe(first[1]);
+    if (stabilized[1].type === 'assistant') {
+      expect(stabilized[1].message.content).toBe('partial plus more');
+    }
+  });
+
+  it('reuses unchanged tool items inside a changed tools group', () => {
+    const toolCall = (id: number, toolCallId: string, status: string) =>
+      message({
+        id,
+        role: 'tool_call',
+        content: JSON.stringify({ name: 'Read', input: { file_path: `/repo/${toolCallId}.ts` } }),
+        acpEventKind: 'tool_call',
+        acpToolCallId: toolCallId,
+        acpToolStatus: status,
+      });
+
+    const settled = toolCall(1, 'tc-1', 'completed');
+    const first = transcript([settled, toolCall(2, 'tc-2', 'in_progress')], []);
+    const next = transcript([settled, toolCall(2, 'tc-2', 'completed')], []);
+
+    const stabilized = stabilizeAcpTranscriptGroups(first, next);
+
+    expect(stabilized[0]).not.toBe(first[0]);
+    if (stabilized[0].type === 'tools' && first[0].type === 'tools') {
+      expect(stabilized[0].items[0]).toBe(first[0].items[0]);
+      expect(stabilized[0].items[1]).not.toBe(first[0].items[1]);
+      expect(stabilized[0].items[1].status).toBe('completed');
+    }
+  });
+
+  it('detects in-place metadata changes on an existing tool row', () => {
+    const call = message({
+      id: 1,
+      role: 'tool_call',
+      content: JSON.stringify({ name: 'Run', input: { command: 'npm test' } }),
+      acpEventKind: 'tool_call',
+      acpToolCallId: 'tc-1',
+      acpToolStatus: 'in_progress',
+    });
+    const first = transcript([call], [call]);
+    const updated = { ...call, acpToolStatus: 'completed', acpRawOutput: { exitCode: 0 } };
+    const next = transcript([call], [updated]);
+
+    const stabilized = stabilizeAcpTranscriptGroups(first, next);
+
+    expect(stabilized[0]).not.toBe(first[0]);
+    if (stabilized[0].type === 'tools') {
+      expect(stabilized[0].items[0].status).toBe('completed');
+    }
+  });
+});
+
+describe('toolHasDetails', () => {
+  it('matches the formatted-value emptiness checks', () => {
+    expect(toolHasDetails(richTool({ key: 'tool:1', verb: 'Ran' }))).toBe(false);
+    expect(toolHasDetails(richTool({ key: 'tool:1', verb: 'Ran', rawInput: '' }))).toBe(false);
+    expect(toolHasDetails(richTool({ key: 'tool:1', verb: 'Ran', rawInput: { a: 1 } }))).toBe(true);
+    expect(toolHasDetails(richTool({ key: 'tool:1', verb: 'Ran', rawOutput: 'ok' }))).toBe(true);
+    expect(
+      toolHasDetails(
+        richTool({
+          key: 'tool:1',
+          verb: 'Ran',
+          content: [{ type: 'diff', path: '/repo/a.ts', newText: 'new' }],
+        })
+      )
+    ).toBe(true);
+    expect(
+      toolHasDetails(
+        richTool({ key: 'tool:1', verb: 'Ran', content: [{ type: 'terminal', terminalId: 't-1' }] })
+      )
+    ).toBe(true);
+    expect(
+      toolHasDetails(
+        richTool({ key: 'tool:1', verb: 'Ran', locations: [{ path: '/repo/a.ts', line: 3 }] })
+      )
+    ).toBe(true);
+    expect(
+      toolHasDetails(
+        richTool({
+          key: 'tool:1',
+          verb: 'Ran',
+          result: message({ id: 9, role: 'tool_result', content: 'output' }),
+        })
+      )
+    ).toBe(true);
+    // Presence-only fields that the expanded card ignores stay hidden.
+    expect(
+      toolHasDetails(richTool({ key: 'tool:1', verb: 'Ran', content: [{ type: 'diff' }] }))
+    ).toBe(false);
+    expect(toolHasDetails(richTool({ key: 'tool:1', verb: 'Ran', locations: [{}] }))).toBe(false);
+  });
+});
+
+describe('isToolMetadataSettled', () => {
+  it('treats terminal statuses as settled and everything else as mutable', () => {
+    const row = (status?: string) =>
+      message({ id: 1, role: 'assistant', acpToolCallId: 'tc-1', acpToolStatus: status });
+
+    expect(isToolMetadataSettled(row('completed'))).toBe(true);
+    expect(isToolMetadataSettled(row('failed'))).toBe(true);
+    expect(isToolMetadataSettled(row('cancelled'))).toBe(true);
+    expect(isToolMetadataSettled(row('in_progress'))).toBe(false);
+    expect(isToolMetadataSettled(row('pending'))).toBe(false);
+    expect(isToolMetadataSettled(row(undefined))).toBe(false);
   });
 });
 

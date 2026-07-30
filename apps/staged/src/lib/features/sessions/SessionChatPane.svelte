@@ -1741,7 +1741,7 @@
 
 {#snippet toolStatusDot(statusTone: RichToolItem['statusTone'])}
   <span
-    class="tool-status-dot"
+    class="tool-status-dot stable-raster-glyphs"
     class:status-running={statusTone === 'running'}
     class:status-success={statusTone === 'success'}
     class:status-danger={statusTone === 'danger'}

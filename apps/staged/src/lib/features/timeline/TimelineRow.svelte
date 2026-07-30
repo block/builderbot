@@ -362,7 +362,7 @@
             {/if}
             {#if badges}
               {#each badges as badge}
-                <span class="meta-badge stable-raster stable-raster-glyphs">
+                <span class="meta-badge stable-raster">
                   {#if badge.icon === 'warning'}
                     <AlertTriangle size={10} />
                   {:else}

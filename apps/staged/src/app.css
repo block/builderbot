@@ -216,7 +216,18 @@ body {
   background: var(--scrollbar-thumb-hover);
 }
 
-/* Keep compositor hints limited to tiny glyph and badge surfaces. */
+/* Pin tiny glyph rasters on their own compositor layer so repaints
+   can't re-snap them (WKWebView subpixel wobble). Every lucide icon
+   is covered by default; .stable-raster(-glyphs) remain for the few
+   non-lucide raster surfaces.
+
+   Spinning icons are excluded: Tailwind's spin keyframes only define
+   `to { rotate(360deg) }`, so the implicit `from` frame would inherit
+   this translateZ(0) — mismatched transform lists then interpolate via
+   matrices, where rotate(360deg) is the identity, freezing the spinner.
+   A continuously rotating icon can't wobble and is layer-promoted while
+   animating anyway. */
+svg.lucide:not(.animate-spin),
 .stable-raster,
 .stable-raster-glyphs svg {
   transform: translateZ(0);

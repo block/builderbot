@@ -19,7 +19,6 @@
     includeRaw?: boolean;
     includeStatus?: boolean;
     includeStreams?: boolean;
-    primaryLabel?: string;
   }
 
   let {
@@ -29,13 +28,10 @@
     includeRaw = true,
     includeStatus = true,
     includeStreams = true,
-    primaryLabel = 'Output',
   }: Props = $props();
 
   let copiedKey = $state<string | null>(null);
-  let blocks = $derived(
-    outputBlocks(viewModel, { includePrimary, includeRaw, includeStreams, primaryLabel })
-  );
+  let blocks = $derived(outputBlocks(viewModel, { includePrimary, includeRaw, includeStreams }));
 
   async function copyOutput(text: string, key: string) {
     try {
@@ -54,7 +50,7 @@
   // projects them through the renderer's include options.
   function outputBlocks(
     model: ToolCallViewModel,
-    options: Pick<Props, 'includePrimary' | 'includeRaw' | 'includeStreams' | 'primaryLabel'>
+    options: Pick<Props, 'includePrimary' | 'includeRaw' | 'includeStreams'>
   ): OutputBlock[] {
     const result: OutputBlock[] = [];
     const defaultTone = model.status === 'cancelled' ? 'cancelled' : 'normal';
@@ -66,7 +62,10 @@
         if (section.source === 'primary' && !options.includePrimary) continue;
         result.push({
           key: section.source,
-          label: section.source === 'primary' ? (options.primaryLabel ?? 'Output') : section.label,
+          // The primary block is the tool's main result — a "Content"/"Output"
+          // header just restates what the card already makes obvious, so it
+          // renders bare. Stdout/stderr/error keep labels to tell them apart.
+          label: section.source === 'primary' ? '' : section.label,
           text: section.text,
           tone: section.tone,
         });
@@ -85,25 +84,30 @@
 </script>
 
 {#each blocks as block}
+  {@const copyLabel = block.label || 'output'}
   <section class="tool-output-section">
-    <div class="tool-output-header">
-      <div class="tool-panel-label">{block.label}</div>
-      {#if copyable}
-        <button
-          type="button"
-          class="tool-copy-button"
-          title={copiedKey === block.key ? 'Copied' : `Copy ${block.label.toLowerCase()}`}
-          aria-label={copiedKey === block.key ? 'Copied' : `Copy ${block.label.toLowerCase()}`}
-          onclick={() => copyOutput(block.text, block.key)}
-        >
-          {#if copiedKey === block.key}
-            <Check size={12} />
-          {:else}
-            <Copy size={12} />
-          {/if}
-        </button>
-      {/if}
-    </div>
+    {#if block.label || copyable}
+      <div class="tool-output-header">
+        {#if block.label}
+          <div class="tool-panel-label">{block.label}</div>
+        {/if}
+        {#if copyable}
+          <button
+            type="button"
+            class="tool-copy-button"
+            title={copiedKey === block.key ? 'Copied' : `Copy ${copyLabel.toLowerCase()}`}
+            aria-label={copiedKey === block.key ? 'Copied' : `Copy ${copyLabel.toLowerCase()}`}
+            onclick={() => copyOutput(block.text, block.key)}
+          >
+            {#if copiedKey === block.key}
+              <Check size={12} />
+            {:else}
+              <Copy size={12} />
+            {/if}
+          </button>
+        {/if}
+      </div>
+    {/if}
     <pre
       class="tool-code-output"
       class:tool-output-danger={block.tone === 'danger'}
@@ -115,15 +119,15 @@
   <div class="tool-empty-row">{viewModel.output.emptyLabel}</div>
 {/if}
 
-{#if includeStatus}
+<!-- A success row only echoes the green check already in the card header, so
+     the footer status shows only when it adds something (failed, cancelled,
+     still running). -->
+{#if includeStatus && viewModel.statusTone !== 'success'}
   <div
     class="tool-code-status"
     class:status-danger={viewModel.statusTone === 'danger'}
     class:status-cancelled={viewModel.statusTone === 'cancelled'}
   >
-    {#if viewModel.statusTone === 'success'}
-      <Check size={11} />
-    {/if}
     {viewModel.statusLabel}
   </div>
 {/if}

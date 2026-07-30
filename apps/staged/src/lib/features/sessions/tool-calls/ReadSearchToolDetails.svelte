@@ -129,6 +129,5 @@
     {viewModel}
     includePrimary={matches.length === 0}
     includeRaw={matches.length === 0}
-    primaryLabel={viewModel.category === 'read' ? 'Content' : 'Output'}
   />
 </div>

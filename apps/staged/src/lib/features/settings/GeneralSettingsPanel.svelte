@@ -9,6 +9,7 @@
   import * as ToggleGroup from '$lib/components/ui/toggle-group';
   import { Input } from '$lib/components/ui/input';
   import { Label } from '$lib/components/ui/label';
+  import DiagramConfigSetting from './DiagramConfigSetting.svelte';
   import {
     preferences,
     getAvailableSyntaxThemes,
@@ -186,6 +187,10 @@
           Code reviews will only start when you manually request them.
         {/if}
       </p>
+    </div>
+
+    <div class="field">
+      <DiagramConfigSetting />
     </div>
 
     <div class="field">

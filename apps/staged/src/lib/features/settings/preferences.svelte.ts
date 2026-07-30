@@ -21,9 +21,25 @@ import {
 import { initPersistentStore, getStoreValue, setStoreValue } from '../../shared/persistentStore';
 import { createAdaptiveTheme, themeToVarMap, type ThemeGitColors } from '../../theme';
 import { mergeAcpConfigPref, type AcpConfigPref, type AcpConfigPrefPatch } from './acpConfigPrefs';
+import type { AcpConfigValueSelection } from '../../types';
 
 // Re-export so picker code can import the type alongside the actions.
 export type { AcpConfigPref, AcpConfigPrefPatch };
+
+/**
+ * The agent/model/effort the `generate_pikchr` diagram sub-session runs under,
+ * distinct from the session that invokes the tool. Read directly from
+ * `preferences.json` by the backend (see `read_diagram_subsession_config`), so
+ * the on-disk shape here must stay in sync with the Rust `DiagramSubsessionConfig`.
+ * All fields optional: an unset provider inherits the invoking session's agent
+ * (and its default model/effort). Model/effort are provider-specific, so they
+ * are only ever stored alongside a chosen provider.
+ */
+export interface DiagramSubsessionConfig {
+  provider?: string | null;
+  model?: AcpConfigValueSelection | null;
+  effort?: AcpConfigValueSelection | null;
+}
 
 // Re-export for convenience
 export { isLightTheme, loadAllThemePreviewColors, type ThemePreviewColors };
@@ -47,6 +63,11 @@ const APP_MODE_STORE_KEY = 'app-mode';
 const RECENT_AGENTS_STORE_KEY = 'recent-agents';
 /** Per-provider last explicitly chosen model/effort selector values. */
 const ACP_CONFIG_PREFS_STORE_KEY = 'acp-config-prefs';
+/**
+ * Agent/model/effort override for diagram sub-sessions (backend-read). Kept in
+ * sync with the Rust `DIAGRAM_SUBSESSION_CONFIG_KEY`.
+ */
+const DIAGRAM_SUBSESSION_CONFIG_STORE_KEY = 'diagram-subsession-config';
 const AUTO_REVIEW_STORE_KEY = 'auto-start-code-reviews';
 /** Prefix applied to branch names inferred from project names (backend-read). */
 const BRANCH_PREFIX_STORE_KEY = 'branch-prefix';
@@ -139,6 +160,12 @@ export const preferences = $state({
    * discovery options on restore, so stale ids fall back silently.
    */
   acpConfigPrefs: {} as Record<string, AcpConfigPref>,
+  /**
+   * Agent/model/effort override for the diagram-generation sub-session, or
+   * `null` to inherit the invoking session's agent. Read by the backend from
+   * the store file.
+   */
+  diagramSubsessionConfig: null as DiagramSubsessionConfig | null,
   /** Whether auto code reviews are triggered after commits */
   autoReviewMode: 'after-changes' as AutoReviewMode,
   /**
@@ -297,6 +324,18 @@ export async function initPreferences(): Promise<void> {
     preferences.acpConfigPrefs = savedConfigPrefs;
   }
 
+  // Load the diagram sub-session agent/model/effort override
+  const savedDiagramConfig = await getStoreValue<DiagramSubsessionConfig>(
+    DIAGRAM_SUBSESSION_CONFIG_STORE_KEY
+  );
+  if (
+    savedDiagramConfig &&
+    typeof savedDiagramConfig === 'object' &&
+    !Array.isArray(savedDiagramConfig)
+  ) {
+    preferences.diagramSubsessionConfig = savedDiagramConfig;
+  }
+
   // Load auto-review mode
   const savedAutoReview = await getStoreValue<AutoReviewMode>(AUTO_REVIEW_STORE_KEY);
   if (savedAutoReview === 'never' || savedAutoReview === 'after-changes') {
@@ -440,6 +479,23 @@ export function setAcpConfigPref(providerId: string, patch: AcpConfigPrefPatch):
 /** The last explicitly chosen model/effort for a provider, if any. */
 export function getAcpConfigPref(providerId: string): AcpConfigPref | null {
   return preferences.acpConfigPrefs[providerId] ?? null;
+}
+
+// =============================================================================
+// Diagram Sub-session Config Actions
+// =============================================================================
+
+/**
+ * Persist the diagram sub-session agent/model/effort override.
+ *
+ * `null` clears the override so diagram generation inherits the invoking
+ * session's agent (and its default model/effort). Dropping empty configs to
+ * `null` keeps the store tidy and the backend on its inherit path.
+ */
+export function setDiagramSubsessionConfig(config: DiagramSubsessionConfig | null): void {
+  const normalized = config && config.provider ? config : null;
+  preferences.diagramSubsessionConfig = normalized;
+  setStoreValue(DIAGRAM_SUBSESSION_CONFIG_STORE_KEY, normalized);
 }
 
 /**

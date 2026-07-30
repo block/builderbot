@@ -19,8 +19,7 @@
 <div class="tool-detail-stack">
   <div class="tool-command-panel">
     <div class="tool-command-line">
-      <span class="tool-command-prefix">$</span>
-      <span class="tool-command-text">{commandText}</span>
+      <span class="tool-command-prefix">$</span><span class="tool-command-text">{commandText}</span>
     </div>
     {#if viewModel.metadata.workingDirectory || failureExitCode !== null}
       <div class="tool-field-list">

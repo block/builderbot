@@ -105,7 +105,6 @@
     background: var(--bg-primary);
   }
 
-  .tool-code-block :global(.tool-command-line),
   .tool-code-block :global(.tool-network-line) {
     display: flex;
     flex-wrap: wrap;
@@ -116,12 +115,29 @@
     font-weight: 500;
   }
 
-  .tool-code-block :global(.tool-command-prefix) {
-    flex-shrink: 0;
-    color: var(--text-faint);
+  /* Lay the command out like a terminal line: the "$" sits in a fixed-width
+     gutter and the command flows beside it, wrapping under itself with a
+     hanging indent instead of stranding the prompt on its own row. */
+  .tool-code-block :global(.tool-command-line) {
+    min-width: 0;
+    padding-left: 1.25em;
+    color: var(--text-primary);
+    font-weight: 500;
   }
 
-  .tool-code-block :global(.tool-command-text),
+  .tool-code-block :global(.tool-command-prefix) {
+    display: inline-block;
+    width: 1.25em;
+    margin-left: -1.25em;
+    color: var(--text-faint);
+    user-select: none;
+  }
+
+  .tool-code-block :global(.tool-command-text) {
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
+
   .tool-code-block :global(.tool-network-url) {
     min-width: 0;
     overflow-wrap: anywhere;
@@ -168,6 +184,18 @@
     min-width: 0;
   }
 
+  .tool-code-block :global(.tool-output-body) {
+    position: relative;
+    min-width: 0;
+  }
+
+  .tool-code-block :global(.tool-output-body-actions) {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    z-index: 1;
+  }
+
   .tool-code-block :global(.tool-output-header) {
     display: flex;
     align-items: center;
@@ -199,6 +227,17 @@
     background: var(--bg-hover);
     color: var(--text-muted);
     outline: none;
+  }
+
+  /* The overlaid button sits over the top-right of the output, so give it the
+     block's own background to mask any text it covers. */
+  .tool-code-block :global(.tool-output-body-actions .tool-copy-button) {
+    background: color-mix(in srgb, var(--bg-chrome) 82%, var(--bg-primary));
+  }
+
+  .tool-code-block :global(.tool-output-body-actions .tool-copy-button:hover),
+  .tool-code-block :global(.tool-output-body-actions .tool-copy-button:focus-visible) {
+    background: var(--bg-hover);
   }
 
   .tool-code-block :global(.tool-code-output) {

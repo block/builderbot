@@ -83,35 +83,47 @@
   }
 </script>
 
+{#snippet copyButton(block: OutputBlock, copyLabel: string)}
+  <button
+    type="button"
+    class="tool-copy-button"
+    title={copiedKey === block.key ? 'Copied' : `Copy ${copyLabel.toLowerCase()}`}
+    aria-label={copiedKey === block.key ? 'Copied' : `Copy ${copyLabel.toLowerCase()}`}
+    onclick={() => copyOutput(block.text, block.key)}
+  >
+    {#if copiedKey === block.key}
+      <Check size={12} />
+    {:else}
+      <Copy size={12} />
+    {/if}
+  </button>
+{/snippet}
+
 {#each blocks as block}
   {@const copyLabel = block.label || 'output'}
   <section class="tool-output-section">
-    {#if block.label || copyable}
+    {#if block.label}
       <div class="tool-output-header">
-        {#if block.label}
-          <div class="tool-panel-label">{block.label}</div>
-        {/if}
+        <div class="tool-panel-label">{block.label}</div>
         {#if copyable}
-          <button
-            type="button"
-            class="tool-copy-button"
-            title={copiedKey === block.key ? 'Copied' : `Copy ${copyLabel.toLowerCase()}`}
-            aria-label={copiedKey === block.key ? 'Copied' : `Copy ${copyLabel.toLowerCase()}`}
-            onclick={() => copyOutput(block.text, block.key)}
-          >
-            {#if copiedKey === block.key}
-              <Check size={12} />
-            {:else}
-              <Copy size={12} />
-            {/if}
-          </button>
+          {@render copyButton(block, copyLabel)}
         {/if}
       </div>
     {/if}
-    <pre
-      class="tool-code-output"
-      class:tool-output-danger={block.tone === 'danger'}
-      class:tool-output-cancelled={block.tone === 'cancelled'}>{block.text}</pre>
+    <div class="tool-output-body">
+      <!-- A label-less output gets no header row; its copy affordance tucks
+           into the top-right corner so the "$" and the button don't each eat a
+           full row. -->
+      {#if copyable && !block.label}
+        <div class="tool-output-body-actions">
+          {@render copyButton(block, copyLabel)}
+        </div>
+      {/if}
+      <pre
+        class="tool-code-output"
+        class:tool-output-danger={block.tone === 'danger'}
+        class:tool-output-cancelled={block.tone === 'cancelled'}>{block.text}</pre>
+    </div>
   </section>
 {/each}
 

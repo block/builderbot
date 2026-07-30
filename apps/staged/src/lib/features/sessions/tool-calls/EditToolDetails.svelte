@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ToolCallViewModel } from '../toolCallViewModel';
+  import { summarizeToolCallLocations, type ToolCallViewModel } from '../toolCallViewModel';
   import InlineToolDiff from './InlineToolDiff.svelte';
   import OutputSections from './OutputSections.svelte';
 
@@ -13,11 +13,11 @@
     !!viewModel.metadata.targetPath &&
       !viewModel.metadata.diffs.some((diff) => diff.path === viewModel.metadata.targetPath)
   );
-  let locations = $derived(
-    viewModel.metadata.locations.filter(
-      (location) =>
-        location.display !== viewModel.metadata.targetPath &&
-        !viewModel.metadata.diffs.some((diff) => diff.path === location.display)
+  let locationSummary = $derived(
+    summarizeToolCallLocations(
+      viewModel.metadata.locations,
+      showPath ? viewModel.metadata.targetPath : null,
+      [viewModel.metadata.targetPath, ...viewModel.metadata.diffs.map((diff) => diff.path)]
     )
   );
 </script>
@@ -26,14 +26,16 @@
   {#if showPath}
     <div class="tool-primary-row">
       <span class="tool-field-label">Path</span>
-      <span class="tool-field-value">{viewModel.metadata.targetPath}</span>
+      <span class="tool-field-value"
+        >{viewModel.metadata.targetPath}{locationSummary.pathSuffix}</span
+      >
     </div>
   {/if}
 
-  {#if locations.length > 0}
+  {#if locationSummary.chips.length > 0}
     <div class="tool-meta-row">
-      {#each locations as location}
-        <span class="tool-chip">{location.display}</span>
+      {#each locationSummary.chips as chip}
+        <span class="tool-chip">{chip}</span>
       {/each}
     </div>
   {/if}

@@ -1,7 +1,13 @@
 <script lang="ts">
   import type { RichToolItem } from '../acpTranscript';
   import { formatJson } from '../acpTranscript';
-  import { isRecord, type ToolCallViewModel } from '../toolCallViewModel';
+  import type { DisplayRootInput } from '../pathDisplayRoots';
+  import { makePathsRelative } from '../sessionModalHelpers';
+  import {
+    isRecord,
+    summarizeToolCallLocations,
+    type ToolCallViewModel,
+  } from '../toolCallViewModel';
   import OutputSections from './OutputSections.svelte';
 
   interface MatchRow {
@@ -13,23 +19,24 @@
   interface Props {
     item: RichToolItem;
     viewModel: ToolCallViewModel;
+    displayRoots?: DisplayRootInput;
   }
 
-  let { item, viewModel }: Props = $props();
-  let matches = $derived(extractMatches(item.rawOutput));
-  // The Path field already names the file; only chip locations that add line info.
-  let locations = $derived(
-    viewModel.metadata.locations.filter(
-      (location) => location.display !== viewModel.metadata.targetPath
-    )
+  let { item, viewModel, displayRoots }: Props = $props();
+  let matches = $derived(extractMatches(item.rawOutput, displayRoots));
+  // The Path field names the file (with its line suffix folded in); chips only
+  // carry locations it doesn't already cover.
+  let locationSummary = $derived(
+    summarizeToolCallLocations(viewModel.metadata.locations, viewModel.metadata.targetPath)
   );
 
-  function extractMatches(rawOutput: unknown): MatchRow[] {
+  function extractMatches(rawOutput: unknown, roots?: DisplayRootInput): MatchRow[] {
     const candidates = matchCandidates(rawOutput);
     return candidates
       .map((candidate, index) => {
         if (!isRecord(candidate)) return null;
-        const path = firstString(candidate, ['path', 'file', 'file_path', 'filename']) ?? '';
+        const rawPath = firstString(candidate, ['path', 'file', 'file_path', 'filename']) ?? '';
+        const path = rawPath ? makePathsRelative(rawPath, roots) : '';
         const line = firstNumber(candidate, ['line', 'lineNumber', 'line_number']);
         const snippet = firstText(candidate, ['snippet', 'text', 'content', 'match', 'line']);
         if (!path && !snippet) return null;
@@ -83,7 +90,9 @@
   <div class="tool-field-list">
     {#if viewModel.metadata.targetPath}
       <span class="tool-field-label">Path</span>
-      <span class="tool-field-value">{viewModel.metadata.targetPath}</span>
+      <span class="tool-field-value"
+        >{viewModel.metadata.targetPath}{locationSummary.pathSuffix}</span
+      >
     {/if}
     {#if viewModel.metadata.query}
       <span class="tool-field-label">{viewModel.category === 'search' ? 'Query' : 'Selector'}</span>
@@ -91,10 +100,10 @@
     {/if}
   </div>
 
-  {#if locations.length > 0}
+  {#if locationSummary.chips.length > 0}
     <div class="tool-meta-row">
-      {#each locations as location}
-        <span class="tool-chip">{location.display}</span>
+      {#each locationSummary.chips as chip}
+        <span class="tool-chip">{chip}</span>
       {/each}
     </div>
   {/if}

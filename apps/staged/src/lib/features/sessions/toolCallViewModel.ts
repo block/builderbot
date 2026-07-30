@@ -267,7 +267,9 @@ export function classifyToolCall(
 export function extractToolCallOutput(item: RichToolItem): ToolCallOutput {
   const rawRecord = recordOrNull(item.rawOutput);
   const rawText = formatJson(item.rawOutput);
-  const contentText = textFromAcpContent(item.content);
+  // ACP content text is markdown-formatted for display; agents (e.g. goose)
+  // wrap file/command output in code fences that a <pre> would show literally.
+  const contentText = stripCodeFences(textFromAcpContent(item.content));
   const errorText = extractErrorText(rawRecord, item.status);
   const stdout = valueText(firstValue(rawRecord, ['stdout', 'standardOutput', 'standard_output']));
   const stderr = valueText(firstValue(rawRecord, ['stderr', 'standardError', 'standard_error']));
@@ -441,6 +443,52 @@ export function extractToolCallLocations(
       };
     })
     .filter((location): location is ToolCallLocation => location !== null);
+}
+
+export interface ToolCallLocationSummary {
+  /** ":line[:column]" from the first location matching the Path field's path. */
+  pathSuffix: string;
+  /** Labels for the remaining locations the card doesn't already name. */
+  chips: string[];
+}
+
+/**
+ * Fold locations into a card's Path field and chips without repeating paths
+ * the card already names. The first location matching `pathFieldPath` becomes
+ * a ":line" suffix on the Path field; the rest become chips — full
+ * "path:line" displays for new paths, bare "Line N" labels for covered paths,
+ * and dropped entirely when they add no line info.
+ */
+export function summarizeToolCallLocations(
+  locations: ToolCallLocation[],
+  pathFieldPath: string | null,
+  coveredPaths: Array<string | null> = []
+): ToolCallLocationSummary {
+  const covered = new Set<string>();
+  for (const path of [pathFieldPath, ...coveredPaths]) {
+    if (path) covered.add(path);
+  }
+
+  const suffixIndex = pathFieldPath
+    ? locations.findIndex((location) => location.path === pathFieldPath && location.line !== null)
+    : -1;
+
+  const chips = locations.flatMap((location, index) => {
+    if (index === suffixIndex) return [];
+    if (!covered.has(location.path)) return [location.display];
+    if (location.line === null) return [];
+    return [`Line ${location.line}${location.column !== null ? `:${location.column}` : ''}`];
+  });
+
+  return {
+    pathSuffix: suffixIndex >= 0 ? locationLineSuffix(locations[suffixIndex]) : '',
+    chips,
+  };
+}
+
+function locationLineSuffix(location: ToolCallLocation): string {
+  if (location.line === null) return '';
+  return `:${location.line}${location.column !== null ? `:${location.column}` : ''}`;
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { SessionMessage } from '../../types';
 import type { RichToolItem, ToolStatus } from './acpTranscript';
-import { buildToolCallViewModel } from './toolCallViewModel';
+import {
+  buildToolCallViewModel,
+  summarizeToolCallLocations,
+  type ToolCallLocation,
+} from './toolCallViewModel';
 
 function message(
   overrides: Partial<SessionMessage> & Pick<SessionMessage, 'id' | 'role'>
@@ -238,6 +242,22 @@ describe('buildToolCallViewModel output handling', () => {
     expect(model.sections.some((section) => section.kind === 'raw_output')).toBe(false);
   });
 
+  it('strips wrapping markdown fences from ACP content text', () => {
+    const model = buildToolCallViewModel(
+      richTool({
+        toolKind: 'read',
+        content: [
+          {
+            type: 'content',
+            content: { type: 'text', text: '```\n1952\tasync fn list()\n1953\t{}\n```' },
+          },
+        ],
+      })
+    );
+
+    expect(model.output.primaryText).toBe('1952\tasync fn list()\n1953\t{}');
+  });
+
   it('falls back to legacy tool_result content when ACP output is absent', () => {
     const model = buildToolCallViewModel(
       richTool({
@@ -292,5 +312,57 @@ describe('buildToolCallViewModel output handling', () => {
     const model = buildToolCallViewModel(richTool({ rawInput: { option: 'value' } }));
 
     expect(model.hasDetails).toBe(true);
+  });
+});
+
+describe('summarizeToolCallLocations', () => {
+  function location(overrides: Partial<ToolCallLocation> = {}): ToolCallLocation {
+    const path = overrides.path ?? 'src/a.ts';
+    const line = overrides.line ?? null;
+    const column = overrides.column ?? null;
+    return {
+      path,
+      display: `${path}${line !== null ? `:${line}` : ''}${column !== null ? `:${column}` : ''}`,
+      line,
+      column,
+      ...overrides,
+    };
+  }
+
+  it('folds the target path location into a line suffix instead of a chip', () => {
+    const summary = summarizeToolCallLocations([location({ line: 1952 })], 'src/a.ts');
+
+    expect(summary.pathSuffix).toBe(':1952');
+    expect(summary.chips).toEqual([]);
+  });
+
+  it('includes columns in the folded suffix', () => {
+    const summary = summarizeToolCallLocations([location({ line: 12, column: 4 })], 'src/a.ts');
+
+    expect(summary.pathSuffix).toBe(':12:4');
+  });
+
+  it('collapses extra covered-path locations to line labels and keeps other paths in full', () => {
+    const summary = summarizeToolCallLocations(
+      [location({ line: 12 }), location({ line: 40 }), location({ path: 'src/b.ts', line: 3 })],
+      'src/a.ts'
+    );
+
+    expect(summary.pathSuffix).toBe(':12');
+    expect(summary.chips).toEqual(['Line 40', 'src/b.ts:3']);
+  });
+
+  it('drops covered locations that add no line info', () => {
+    const summary = summarizeToolCallLocations([location()], 'src/a.ts');
+
+    expect(summary.pathSuffix).toBe('');
+    expect(summary.chips).toEqual([]);
+  });
+
+  it('keeps line labels for paths covered elsewhere when no path field is shown', () => {
+    const summary = summarizeToolCallLocations([location({ line: 12 })], null, ['src/a.ts']);
+
+    expect(summary.pathSuffix).toBe('');
+    expect(summary.chips).toEqual(['Line 12']);
   });
 });

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { RichToolItem } from '../acpTranscript';
+  import type { DisplayRootInput } from '../pathDisplayRoots';
   import type { ToolCallViewModel } from '../toolCallViewModel';
   import CommandToolDetails from './CommandToolDetails.svelte';
   import EditToolDetails from './EditToolDetails.svelte';
@@ -10,9 +11,10 @@
   interface Props {
     item: RichToolItem;
     viewModel: ToolCallViewModel;
+    displayRoots?: DisplayRootInput;
   }
 
-  let { item, viewModel }: Props = $props();
+  let { item, viewModel, displayRoots }: Props = $props();
 </script>
 
 <div class="tool-code-block">
@@ -21,7 +23,7 @@
   {:else if viewModel.category === 'command'}
     <CommandToolDetails {viewModel} />
   {:else if viewModel.category === 'read' || viewModel.category === 'search'}
-    <ReadSearchToolDetails {item} {viewModel} />
+    <ReadSearchToolDetails {item} {viewModel} {displayRoots} />
   {:else if viewModel.category === 'network'}
     <NetworkToolDetails {item} {viewModel} />
   {:else}

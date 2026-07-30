@@ -72,7 +72,7 @@
   {/if}
   {#if expanded && viewModel.hasDetails && !showInlineDiagram && !showSessionButton}
     <div transition:slide={{ duration: slideDuration }}>
-      <ToolCallDetails {item} {viewModel} />
+      <ToolCallDetails {item} {viewModel} {displayRoots} />
     </div>
   {/if}
 </div>

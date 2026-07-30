@@ -131,14 +131,12 @@ pub(crate) struct DiagramFallback<'a, D: AgentDriver + ?Sized> {
 /// override rather than to the request itself: the pinned model/effort
 /// selection no longer resolves on the agent, or the pinned agent doesn't
 /// support the HTTP MCP transport the `render_pikchr` tool server requires.
-/// The transport fragment mirrors the message produced by the acp-client
-/// driver's required-transport check — the same producer/matcher string
-/// coupling `is_config_selection_unavailable_error` itself relies on; if the
-/// producer is reworded this degrades to today's hard error, never to a
-/// spurious fallback.
+/// Both halves go through acp-client matchers kept in lockstep with their
+/// producers, so rewording an error message over there can't silently turn
+/// the graceful fallback back into a hard error.
 fn is_diagram_override_unavailable_error(error: &str) -> bool {
     acp_client::is_config_selection_unavailable_error(error)
-        || error.contains("does not support required MCP transports")
+        || acp_client::is_missing_mcp_transport_error(error)
 }
 
 /// Drive the sub-agent to produce validated Pikchr for `description`.

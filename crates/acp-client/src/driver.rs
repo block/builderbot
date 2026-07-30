@@ -2126,6 +2126,19 @@ pub fn is_config_selection_unavailable_error(error: &str) -> bool {
                 || error.contains(CONFIG_SELECTION_STALE_NOT_SELECT)))
 }
 
+// Fragment shared by `setup_acp_session`'s required-transport check and
+// [`is_missing_mcp_transport_error`] — the same producer/matcher contract as
+// the config-selection constants above.
+const MISSING_MCP_TRANSPORT_PREFIX: &str = "Agent does not support required MCP transports";
+
+/// Whether a session-establishment error means the agent lacks a transport
+/// required by the session's MCP servers (e.g. no HTTP MCP support), rather
+/// than the run failing for its own reasons. Callers that pin work to a
+/// specific agent use this to reroute to one that can host the servers.
+pub fn is_missing_mcp_transport_error(error: &str) -> bool {
+    error.contains(MISSING_MCP_TRANSPORT_PREFIX)
+}
+
 async fn apply_or_record_session_config_options(
     connection: &ConnectionTo<Agent>,
     agent_session_id: &str,
@@ -2349,7 +2362,7 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
             .any(|server| matches!(server, McpServer::Sse(_)));
 
         return Err(format!(
-            "Agent does not support required MCP transports (required: http={}, sse={}; agent: http={}, sse={}). Select a provider that supports MCP over HTTP/SSE.",
+            "{MISSING_MCP_TRANSPORT_PREFIX} (required: http={}, sse={}; agent: http={}, sse={}). Select a provider that supports MCP over HTTP/SSE.",
             requires_http, requires_sse, mcp_caps.http, mcp_caps.sse
         ));
     }
@@ -2648,13 +2661,14 @@ mod tests {
     use super::{
         acp_spawn_command, apply_or_record_session_config_options, autoapprove_permission_decision,
         build_prompt_content_blocks, consume_remote_acp_line, decode_remote_acp_line,
-        is_config_selection_unavailable_error, mcp_server_transport_supported,
-        permission_response_for_options, remote_acp_segments, resolve_acp_working_dir,
-        resolve_session_config_option_selection, resolve_spawn_working_dir,
-        sanitize_remote_acp_chunk, shell_exec_line, shell_quote, AcpDriver, AcpEventMetadata,
-        AcpNotificationHandler, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
-        AcpSessionConfigOptionSelection, AgentRunOutcome, BasicMessageWriter, MessageWriter,
-        RemoteLineOutcome, ReplayBoundary, ReplayBuffer, ReplayEvent,
+        is_config_selection_unavailable_error, is_missing_mcp_transport_error,
+        mcp_server_transport_supported, permission_response_for_options, remote_acp_segments,
+        resolve_acp_working_dir, resolve_session_config_option_selection,
+        resolve_spawn_working_dir, sanitize_remote_acp_chunk, shell_exec_line, shell_quote,
+        AcpDriver, AcpEventMetadata, AcpNotificationHandler, AcpPermissionOption,
+        AcpPermissionOptionKind, AcpPermissionRequest, AcpSessionConfigOptionSelection,
+        AgentRunOutcome, BasicMessageWriter, MessageWriter, RemoteLineOutcome, ReplayBoundary,
+        ReplayBuffer, ReplayEvent,
     };
     use agent_client_protocol::schema::v1::{
         ContentBlock as AcpContentBlock, McpCapabilities, McpServer, McpServerHttp, McpServerSse,
@@ -2843,6 +2857,17 @@ mod tests {
             "Selected ACP effort config option 'reasoning' is not a select option"
         ));
         assert!(!is_config_selection_unavailable_error(
+            "Failed to create ACP session: transport closed"
+        ));
+    }
+
+    #[test]
+    fn detects_missing_mcp_transport_errors() {
+        assert!(is_missing_mcp_transport_error(
+            "Agent does not support required MCP transports (required: http=true, sse=false; \
+agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE."
+        ));
+        assert!(!is_missing_mcp_transport_error(
             "Failed to create ACP session: transport closed"
         ));
     }

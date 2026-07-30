@@ -216,7 +216,11 @@ body {
   background: var(--scrollbar-thumb-hover);
 }
 
-/* Keep compositor hints limited to tiny glyph and badge surfaces. */
+/* Pin tiny glyph rasters on their own compositor layer so repaints
+   can't re-snap them (WKWebView subpixel wobble). Every lucide icon
+   is covered by default; .stable-raster(-glyphs) remain for the few
+   non-lucide raster surfaces. */
+svg.lucide,
 .stable-raster,
 .stable-raster-glyphs svg {
   transform: translateZ(0);

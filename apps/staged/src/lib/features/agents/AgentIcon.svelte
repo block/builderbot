@@ -16,6 +16,10 @@
   monochrome and inherit currentColor. Goose is a PNG tinted via a CSS mask
   (ported from goose-internal's GooseIcon).
 
+  The raw brand marks aren't lucide icons, so the global svg.lucide
+  compositor pin doesn't reach them — they opt into stable-raster to
+  avoid WKWebView subpixel wobble.
+
   Props:
     id    - provider id (the join key shared by the picker and Doctor)
     size  - icon dimensions in px (default 16)
@@ -40,11 +44,14 @@
 </script>
 
 {#if id === 'goose'}
-  <span class="agent-icon goose {className}" aria-hidden="true" style="--agent-icon-size: {size}px"
+  <span
+    class="agent-icon goose stable-raster {className}"
+    aria-hidden="true"
+    style="--agent-icon-size: {size}px"
   ></span>
 {:else if id === 'claude'}
   <svg
-    class={className}
+    class="stable-raster {className}"
     width={size}
     height={size}
     viewBox="0 0 24 24"
@@ -60,7 +67,7 @@
   </svg>
 {:else if id === 'codex'}
   <svg
-    class={className}
+    class="stable-raster {className}"
     width={size}
     height={size}
     viewBox="0 0 24 24"
@@ -86,7 +93,7 @@
   </svg>
 {:else if id === 'amp'}
   <svg
-    class={className}
+    class="stable-raster {className}"
     width={size}
     height={size}
     viewBox="0 0 24 24"
@@ -109,7 +116,7 @@
   </svg>
 {:else if id === 'copilot'}
   <svg
-    class={className}
+    class="stable-raster {className}"
     width={size}
     height={size}
     viewBox="0 0 24 24"
@@ -126,7 +133,7 @@
   </svg>
 {:else if id === 'cursor'}
   <svg
-    class={className}
+    class="stable-raster {className}"
     width={size}
     height={size}
     viewBox="0 0 24 24"

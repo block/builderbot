@@ -87,7 +87,9 @@ flate2 = "1"
 
 [features]
 # no-block-npm-registry: downloads the managed Node.js runtime from upstream
-# nodejs.org instead of Block's Artifactory mirror.
+# nodejs.org instead of Block's Artifactory mirror, and lets npm-backed
+# doctor checks and fixes use npm's default public registry instead of
+# Artifactory's square-npm proxy.
 no-block-npm-registry = []
 
 # Debug binaries archived — uncomment when needed

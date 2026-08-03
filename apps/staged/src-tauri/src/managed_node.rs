@@ -284,6 +284,10 @@ async fn lock_packages_dir(packages_root: &Path) -> Result<PackagesDirLock, Mana
         let file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
+            // The file carries no content — it exists only to be flocked —
+            // but truncating on open would be a needless mutation of a file
+            // other processes hold open.
+            .truncate(false)
             .open(packages_root.join(PACKAGES_LOCK_FILENAME))
             .map_err(|error| ManagedNodeError::Io(format!("open packages lock file: {error}")))?;
         if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
@@ -808,10 +812,21 @@ mod tests {
         );
 
         drop(guard);
-        assert_eq!(
-            unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
-            0
-        );
+        // Retry briefly instead of asserting a single non-blocking attempt:
+        // a child process forked by a concurrently-running test can hold a
+        // duplicate of the just-closed lock fd until its exec closes it
+        // (CLOEXEC), keeping the flock alive for a moment after the drop.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if unsafe { libc::flock(contender.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "dropped packages lock was never released to the contender"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     #[tokio::test]

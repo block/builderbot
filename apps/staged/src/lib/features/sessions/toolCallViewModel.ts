@@ -35,7 +35,10 @@ export interface ToolCallMetadata {
   toolKind: string | null;
   toolName: string | null;
   input: Record<string, unknown> | null;
+  /** Pretty-printed input JSON. Lazily formatted — read only when expanded. */
   inputText: string;
+  /** Whether {@link inputText} would render anything, without formatting it. */
+  hasInputText: boolean;
   parsedCommands: ParsedToolCommand[];
   command: string | null;
   workingDirectory: string | null;
@@ -51,7 +54,10 @@ export interface ToolCallMetadata {
 export interface ToolCallOutput {
   state: ToolCallOutputState;
   primaryText: string;
+  /** Pretty-printed raw output JSON. Lazily formatted — read only when expanded. */
   rawText: string;
+  /** Whether {@link rawText} would render anything, without formatting it. */
+  hasRawText: boolean;
   errorText: string;
   stdout: string;
   stderr: string;
@@ -151,20 +157,12 @@ const COMMAND_KEYS = ['command', 'cmd', 'script'];
 const CWD_KEYS = ['cwd', 'workingDirectory', 'working_directory', 'workdir'];
 const URL_KEYS = ['url', 'uri', 'href'];
 const METHOD_KEYS = ['method', 'httpMethod', 'http_method'];
-const NETWORK_KEYS = new Set([
-  'body',
-  'headers',
-  'method',
-  'request',
-  'response',
-  'screenshot',
-  'selector',
-  'status',
-  'statusCode',
-  'status_code',
-  'title',
-  'url',
-]);
+// Only strong request/response evidence promotes an unknown tool to the
+// network renderer. Generic keys like `status` or `title` show up on plenty of
+// non-network payloads; classifying those as network routes the card through
+// NetworkToolDetails, which treats the status as a structured response and
+// hides the rest of the raw output.
+const NETWORK_KEYS = new Set([...URL_KEYS, ...METHOD_KEYS, 'request', 'response']);
 
 export function buildToolCallViewModel(
   item: RichToolItem,
@@ -200,12 +198,16 @@ export function extractToolCallMetadata(
   const parsedArgs = parsed ? recordOrNull(parsed.args) : null;
   const rawInput = recordOrNull(item.rawInput);
   const input = rawInput ?? parsedArgs;
-  const inputText =
+  // Formatting input to JSON is costly for large payloads and a collapsed card
+  // never shows it, so keep `inputText` behind a memoized getter and decide
+  // whether to render it from the cheap `hasInputText` flag instead.
+  const inputSource =
     item.rawInput !== undefined && item.rawInput !== null
-      ? formatJson(item.rawInput)
+      ? item.rawInput
       : parsedArgs && Object.keys(parsedArgs).length > 0
-        ? formatJson(parsedArgs)
-        : '';
+        ? parsedArgs
+        : null;
+  let inputTextCache: string | undefined;
   const parsedCommands = [...parsedCommandsFrom(input), ...parsedCommandsFrom(parsedArgs)].filter(
     uniqueParsedCommand
   );
@@ -216,7 +218,10 @@ export function extractToolCallMetadata(
     toolKind: normalizeToken(item.toolKind),
     toolName: parsed?.name ?? null,
     input,
-    inputText,
+    get inputText() {
+      return (inputTextCache ??= formatJson(inputSource));
+    },
+    hasInputText: hasFormattableJson(inputSource),
     parsedCommands,
     command: relativeValue(
       firstString(input, COMMAND_KEYS) ?? firstCommandValue(parsedCommands),
@@ -266,7 +271,12 @@ export function classifyToolCall(
 
 export function extractToolCallOutput(item: RichToolItem): ToolCallOutput {
   const rawRecord = recordOrNull(item.rawOutput);
-  const rawText = formatJson(item.rawOutput);
+  // Pretty-printing the whole raw output is the expensive path a collapsed card
+  // must not pay, and it's discarded outright when structured output exists, so
+  // keep it lazy and gate its section on the cheap `hasRawText` flag.
+  const rawOutput = item.rawOutput;
+  const hasRawText = hasFormattableJson(rawOutput);
+  let rawTextCache: string | undefined;
   // ACP content text is markdown-formatted for display; agents (e.g. goose)
   // wrap file/command output in code fences that a <pre> would show literally.
   const contentText = stripCodeFences(textFromAcpContent(item.content));
@@ -285,13 +295,16 @@ export function extractToolCallOutput(item: RichToolItem): ToolCallOutput {
     stdout ||
     stderr ||
     resultText;
-  const hasAnyOutput = !!(primaryText || rawText || errorText || stdout || stderr);
+  const hasAnyOutput = !!(primaryText || hasRawText || errorText || stdout || stderr);
   const isWaiting = item.status === 'pending' || item.status === 'in_progress';
 
   return {
     state: hasAnyOutput ? 'output' : isWaiting ? 'waiting' : 'empty',
     primaryText,
-    rawText,
+    get rawText() {
+      return (rawTextCache ??= formatJson(rawOutput));
+    },
+    hasRawText,
     errorText,
     stdout,
     stderr,
@@ -311,8 +324,16 @@ export function buildToolCallSections(
     sections.push({ kind: 'locations', locations: metadata.locations });
   }
 
-  if (metadata.inputText) {
-    sections.push({ kind: 'input', label: 'Input', text: metadata.inputText });
+  if (metadata.hasInputText) {
+    // `text` defers to the metadata's memoized getter so the caret-driven
+    // `hasDetails` check (which only reads `kind`) never triggers formatting.
+    sections.push({
+      kind: 'input',
+      label: 'Input',
+      get text() {
+        return metadata.inputText;
+      },
+    });
   }
 
   for (const diff of metadata.diffs) {
@@ -376,8 +397,14 @@ export function buildToolCallSections(
 
   // Raw JSON is a fallback for output we could not render structurally,
   // never a companion to structured output sections.
-  if (output.rawText && !hasStructuredOutput) {
-    sections.push({ kind: 'raw_output', label: 'Raw output', text: output.rawText });
+  if (output.hasRawText && !hasStructuredOutput) {
+    sections.push({
+      kind: 'raw_output',
+      label: 'Raw output',
+      get text() {
+        return output.rawText;
+      },
+    });
   }
 
   if (output.emptyLabel) {
@@ -640,6 +667,13 @@ function valueText(value: unknown): string {
   if (typeof value === 'string') return value;
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   return formatJson(value);
+}
+
+/** Mirrors when {@link formatJson} yields a non-empty string, without formatting. */
+function hasFormattableJson(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === 'string') return value.length > 0;
+  return true;
 }
 
 function extractErrorText(rawOutput: Record<string, unknown> | null, status: ToolStatus): string {

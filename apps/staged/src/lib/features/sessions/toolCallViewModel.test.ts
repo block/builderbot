@@ -203,6 +203,36 @@ describe('buildToolCallViewModel classification', () => {
       ])
     );
   });
+
+  it('does not treat generic status output as a network payload', () => {
+    const model = buildToolCallViewModel(
+      richTool({
+        verb: 'Processed',
+        rawOutput: { status: 'ok', id: 42, title: 'Done' },
+      })
+    );
+
+    // A stray `status`/`title` key is not network evidence, so the payload must
+    // stay generic and keep its raw fallback instead of vanishing behind the
+    // network renderer's structured-response view.
+    expect(model.category).toBe('generic');
+    expect(model.sections).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: 'raw_output', text: expect.stringContaining('"id": 42') }),
+      ])
+    );
+  });
+
+  it('still classifies unknown tools as network on request/response evidence', () => {
+    const model = buildToolCallViewModel(
+      richTool({
+        verb: 'Processed',
+        rawOutput: { response: { status: 200, body: 'ok' } },
+      })
+    );
+
+    expect(model.category).toBe('network');
+  });
 });
 
 describe('buildToolCallViewModel output handling', () => {
@@ -312,6 +342,28 @@ describe('buildToolCallViewModel output handling', () => {
     const model = buildToolCallViewModel(richTool({ rawInput: { option: 'value' } }));
 
     expect(model.hasDetails).toBe(true);
+  });
+
+  it('defers raw output JSON formatting until the value is read', () => {
+    let reads = 0;
+    const rawOutput = {
+      get payload() {
+        reads += 1;
+        return 'value';
+      },
+    };
+
+    const model = buildToolCallViewModel(richTool({ verb: 'Processed', rawOutput }));
+
+    // Building the view model for a collapsed card must not pretty-print the
+    // raw output; that only happens once an expanded card reads `rawText`.
+    expect(reads).toBe(0);
+    expect(model.output.hasRawText).toBe(true);
+    expect(model.hasDetails).toBe(true);
+    expect(reads).toBe(0);
+
+    expect(model.output.rawText).toContain('value');
+    expect(reads).toBe(1);
   });
 });
 

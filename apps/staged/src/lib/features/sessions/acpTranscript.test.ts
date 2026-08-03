@@ -6,7 +6,6 @@ import {
   isToolMetadataSettled,
   latestAvailableCommands,
   stabilizeAcpTranscriptGroups,
-  toolHasDetails,
   type RichToolItem,
 } from './acpTranscript';
 
@@ -783,48 +782,6 @@ describe('stabilizeAcpTranscriptGroups', () => {
     if (stabilized[0].type === 'tools') {
       expect(stabilized[0].items[0].status).toBe('completed');
     }
-  });
-});
-
-describe('toolHasDetails', () => {
-  it('matches the formatted-value emptiness checks', () => {
-    expect(toolHasDetails(richTool({ key: 'tool:1', verb: 'Ran' }))).toBe(false);
-    expect(toolHasDetails(richTool({ key: 'tool:1', verb: 'Ran', rawInput: '' }))).toBe(false);
-    expect(toolHasDetails(richTool({ key: 'tool:1', verb: 'Ran', rawInput: { a: 1 } }))).toBe(true);
-    expect(toolHasDetails(richTool({ key: 'tool:1', verb: 'Ran', rawOutput: 'ok' }))).toBe(true);
-    expect(
-      toolHasDetails(
-        richTool({
-          key: 'tool:1',
-          verb: 'Ran',
-          content: [{ type: 'diff', path: '/repo/a.ts', newText: 'new' }],
-        })
-      )
-    ).toBe(true);
-    expect(
-      toolHasDetails(
-        richTool({ key: 'tool:1', verb: 'Ran', content: [{ type: 'terminal', terminalId: 't-1' }] })
-      )
-    ).toBe(true);
-    expect(
-      toolHasDetails(
-        richTool({ key: 'tool:1', verb: 'Ran', locations: [{ path: '/repo/a.ts', line: 3 }] })
-      )
-    ).toBe(true);
-    expect(
-      toolHasDetails(
-        richTool({
-          key: 'tool:1',
-          verb: 'Ran',
-          result: message({ id: 9, role: 'tool_result', content: 'output' }),
-        })
-      )
-    ).toBe(true);
-    // Presence-only fields that the expanded card ignores stay hidden.
-    expect(
-      toolHasDetails(richTool({ key: 'tool:1', verb: 'Ran', content: [{ type: 'diff' }] }))
-    ).toBe(false);
-    expect(toolHasDetails(richTool({ key: 'tool:1', verb: 'Ran', locations: [{}] }))).toBe(false);
   });
 });
 

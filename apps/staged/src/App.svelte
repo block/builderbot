@@ -48,6 +48,7 @@
   import { listenForSessionStatus } from './lib/listeners/sessionStatusListener';
   import { listenForCacheInvalidation } from './lib/listeners/cacheInvalidationListener';
   import { listenForPageLifecycle } from './lib/listeners/pageLifecycleListener';
+  import { listenForAcpToolsReconciled } from './lib/listeners/acpToolsListener';
   import { darkMode } from './lib/stores/isDark.svelte';
   import * as prPollingService from './lib/services/prPollingService';
   import { reposUiEnabled } from './lib/featureFlags';
@@ -68,6 +69,7 @@
   let unlistenSessionStatus: UnlistenFn | undefined;
   let unlistenCacheInvalidation: UnlistenFn | undefined;
   let unlistenPageLifecycle: (() => void) | undefined;
+  let unlistenAcpToolsReconciled: UnlistenFn | undefined;
   let unregisterShortcuts: (() => void) | null = null;
   let stopUpdaterLoop: (() => void) | null = null;
   let storeIncompat = $state<StoreIncompatibility | null>(null);
@@ -299,6 +301,9 @@
     unlistenSessionStatus = listenForSessionStatus();
     unlistenCacheInvalidation = listenForCacheInvalidation();
     unlistenPageLifecycle = listenForPageLifecycle();
+    // Refresh provider discovery (and any loaded doctor report) once the
+    // backend finishes installing/upgrading the managed ACP bridges.
+    unlistenAcpToolsReconciled = listenForAcpToolsReconciled();
 
     try {
       await initPreferences();
@@ -487,6 +492,7 @@
     unlistenSessionStatus?.();
     unlistenCacheInvalidation?.();
     unlistenPageLifecycle?.();
+    unlistenAcpToolsReconciled?.();
     stopUpdaterLoop?.();
   });
 

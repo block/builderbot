@@ -92,6 +92,13 @@ flate2 = "1"
 # Artifactory's square-npm proxy.
 no-block-npm-registry = []
 
+# no-managed-acp-tools: compiles the managed ACP bridge set empty for
+# restricted builds — the startup reconciler installs nothing, doctor fixes
+# fall back to the doctor crate's regular commands, and the managed shim dir
+# is hidden from PATH prepends so shims another build left in the shared
+# ~/.staged/packages tree cannot resolve.
+no-managed-acp-tools = []
+
 # Debug binaries archived — uncomment when needed
 # [[bin]]
 # name = "debug_diff"

@@ -267,16 +267,21 @@ fn install_serialization_lock() -> &'static tokio::sync::Mutex<()> {
 /// Held cross-process advisory lock on `<packages>/.lock`; dropping it
 /// (closing the descriptor) releases the lock, and a crashed holder's lock
 /// dies with its process.
-struct PackagesDirLock {
+pub(crate) struct PackagesDirLock {
     _file: std::fs::File,
 }
 
 /// Take the exclusive cross-process lock serializing mutations of the shared
-/// `~/.staged/packages` tree. The in-process [`install_serialization_lock`]
-/// must already be held so at most one task per process parks a blocking
-/// thread waiting here. Blocks until whichever other Staged process holds the
-/// lock finishes.
-async fn lock_packages_dir(packages_root: &Path) -> Result<PackagesDirLock, ManagedNodeError> {
+/// `~/.staged/packages` tree. An in-process mutex (this module's
+/// [`install_serialization_lock`], or `managed_acp_tools`' tool-install
+/// mutex) must already be held so at most one task per process parks a
+/// blocking thread waiting here. Blocks until whichever other Staged process
+/// holds the lock finishes. Never acquire while already holding a
+/// [`PackagesDirLock`]: flock ownership is per open file description, so the
+/// second acquisition in the same process deadlocks against the first.
+pub(crate) async fn lock_packages_dir(
+    packages_root: &Path,
+) -> Result<PackagesDirLock, ManagedNodeError> {
     let packages_root = packages_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
         std::fs::create_dir_all(&packages_root)

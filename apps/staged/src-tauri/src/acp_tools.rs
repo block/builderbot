@@ -1,15 +1,17 @@
-//! Bundled ACP bridge tool resolution and spawn-environment shaping.
+//! ACP bridge tool resolution and spawn-environment shaping.
 //!
-//! Staged ships pinned ACP bridge CLIs (`claude-agent-acp`, `codex-acp`) as
-//! application resources (see `acp-tools.lock.json` and
-//! `scripts/prepare-acp-tools-resource.sh`). This module resolves the staged
-//! bin directory at runtime and shapes captured shell-env snapshots so the
-//! bundled bridges win over user-installed copies while everything else on
-//! the user's PATH (including installed harness CLIs and their auth state)
-//! stays discoverable. The Staged-managed install dirs (`managed_acp_tools`:
-//! bridge shims, the private npm prefix's bin, the managed Node runtime's
-//! bin) are folded into the same shaping, so sessions and doctor share one
-//! PATH layout.
+//! The claude/codex ACP bridges resolve, in precedence order, from the
+//! `STAGED_ACP_TOOLS_DIR` dev override, the Staged-managed bridge shims the
+//! startup reconciler installs (`managed_acp_tools`), and — until the step-4
+//! bundle flip — the pinned bridges Staged still ships as application
+//! resources (see `acp-tools.lock.json` and
+//! `scripts/prepare-acp-tools-resource.sh`). This module resolves those
+//! directories at runtime and shapes captured shell-env snapshots so they
+//! win over user-installed copies while everything else on the user's PATH
+//! (including installed harness CLIs and their auth state) stays
+//! discoverable. The other Staged-managed install dirs (the private npm
+//! prefix's bin, the managed Node runtime's bin) are folded into the same
+//! shaping, so sessions and doctor share one PATH layout.
 
 use std::path::{Path, PathBuf};
 
@@ -30,16 +32,35 @@ const NODE_RUNTIME_MANIFEST_FILE: &str = "node-runtime.json";
 /// Goose reads extra binary search dirs from this env var as a JSON array.
 const GOOSE_SEARCH_PATHS_ENV: &str = "GOOSE_SEARCH_PATHS";
 
-/// Resolve the directory holding the bundled ACP bridge executables: the dev
-/// env override wins, then the Tauri resource dir for packaged apps.
-pub fn resolve_bundled_acp_tools_dir(app_handle: &tauri::AppHandle) -> Option<PathBuf> {
-    bundled_acp_tools_dir_from_parts(
+/// The resolved ACP bridge directories for this build and environment.
+#[derive(Clone, Debug, Default)]
+pub struct AcpToolsDirs {
+    /// The highest-precedence bridge dir: the `STAGED_ACP_TOOLS_DIR` dev
+    /// override, else the managed shim dir (when this build manages
+    /// bridges), else the bundled resource dir. Registered with
+    /// `acp_client::set_bundled_tools_dir` and labeled `Bundled` by doctor —
+    /// Staged owns updates for whatever resolves here, so the user is never
+    /// nagged to update it manually.
+    pub primary: Option<PathBuf>,
+    /// The bundled resource dir when it is not already the primary: it stays
+    /// on the spawned-env search path as the last-resort fallback until the
+    /// step-4 bundle flip, so the bundled bridges keep working (for doctor
+    /// checks and agent subprocesses) on profiles the reconciler has not
+    /// populated yet.
+    pub resource_fallback: Option<PathBuf>,
+}
+
+/// Resolve the ACP bridge directories: dev env override → managed shim dir →
+/// bundled resource dir, with the resource dir kept as a trailing search-dir
+/// fallback while it is not the primary.
+pub fn resolve_acp_tools_dirs(app_handle: &tauri::AppHandle) -> AcpToolsDirs {
+    acp_tools_dirs_from_parts(
         crate::managed_acp_tools::dev_tools_override_dir(),
+        crate::managed_acp_tools::managed_shim_bin_dir(),
         app_handle
             .path()
             .resolve(ACP_TOOLS_RESOURCE_DIR, BaseDirectory::Resource)
-            .ok()
-            .as_deref(),
+            .ok(),
     )
 }
 
@@ -53,21 +74,29 @@ pub fn node_runtime_manifest_path(bin_dir: &Path) -> Option<PathBuf> {
         .map(|dir| dir.join(NODE_RUNTIME_MANIFEST_FILE))
 }
 
-fn bundled_acp_tools_dir_from_parts(
+fn acp_tools_dirs_from_parts(
     env_override: Option<PathBuf>,
-    resource_dir: Option<&Path>,
-) -> Option<PathBuf> {
-    env_override.or_else(|| resource_dir.map(Path::to_path_buf))
+    managed_shim_dir: Option<PathBuf>,
+    resource_dir: Option<PathBuf>,
+) -> AcpToolsDirs {
+    let primary = env_override
+        .or(managed_shim_dir)
+        .or_else(|| resource_dir.clone());
+    let resource_fallback = resource_dir.filter(|dir| primary.as_deref() != Some(dir));
+    AcpToolsDirs {
+        primary,
+        resource_fallback,
+    }
 }
 
-/// Shape a captured shell-env snapshot so the bundled ACP bridges — and the
-/// Staged-managed npm install locations — win:
+/// Shape a captured shell-env snapshot so the managed/bundled ACP bridges —
+/// and the Staged-managed npm install locations — win:
 ///
 /// - Prepend the tool search dirs (see [`tool_search_dirs`]) to the
 ///   snapshot's PATH, keeping the rest of the imported shell PATH intact so
 ///   user-installed CLIs (and their auth state) remain discoverable.
 /// - Pin `GOOSE_SEARCH_PATHS` *after* the shell-env import so same-named
-///   values from the user's shell cannot override the bundled tools. The
+///   values from the user's shell cannot override the managed tools. The
 ///   value is a JSON array to match Goose's config env parsing, scoped to
 ///   the same search dirs plus any explicit pre-existing Goose search dirs —
 ///   never the whole shell PATH.
@@ -75,34 +104,38 @@ fn bundled_acp_tools_dir_from_parts(
 /// Sessions and doctor checks/fixes both shape their snapshots here, so an
 /// agent installed by a doctor fix into the private npm prefix resolves
 /// identically at check time and at spawn time.
-pub fn apply_bundled_tools_env(vars: &mut Vec<(String, String)>, bundled_dir: &Path) {
-    let dirs = tool_search_dirs(bundled_dir);
-    prepend_dirs_to_path(vars, &dirs);
-    apply_goose_search_paths(vars, &dirs);
+pub fn apply_bundled_tools_env(vars: &mut Vec<(String, String)>, dirs: &AcpToolsDirs) {
+    let search_dirs = tool_search_dirs(dirs);
+    if search_dirs.is_empty() {
+        return;
+    }
+    prepend_dirs_to_path(vars, &search_dirs);
+    apply_goose_search_paths(vars, &search_dirs);
 }
 
-/// Every dir agent binaries resolve from, in precedence order: the bundled
-/// (or `STAGED_ACP_TOOLS_DIR`) bridge dir, then the managed dirs — bridge
-/// shims, the private npm prefix's bin, and the managed Node runtime's bin,
+/// Every dir agent binaries resolve from, in precedence order: the primary
+/// bridge dir (dev override or managed shims), then the remaining managed
+/// dirs — the private npm prefix's bin and the managed Node runtime's bin,
 /// which also lets the bundled bridge wrappers find `node` without a host
-/// install once the managed runtime exists.
-fn tool_search_dirs(bundled_dir: &Path) -> Vec<PathBuf> {
-    tool_search_dirs_from_parts(
-        bundled_dir,
-        crate::managed_acp_tools::managed_prepend_dirs(),
-    )
+/// install once the managed runtime exists — and the bundled resource dir
+/// last, as the fallback for bridges the reconciler has not installed yet.
+fn tool_search_dirs(dirs: &AcpToolsDirs) -> Vec<PathBuf> {
+    tool_search_dirs_from_parts(dirs, crate::managed_acp_tools::managed_prepend_dirs())
 }
 
-fn tool_search_dirs_from_parts(bundled_dir: &Path, managed_dirs: Vec<PathBuf>) -> Vec<PathBuf> {
-    // The dev override dir appears both as `bundled_dir` and as the first
-    // managed prepend when the env var is set; keep the first occurrence.
-    let mut dirs = vec![bundled_dir.to_path_buf()];
-    for dir in managed_dirs {
-        if !dirs.contains(&dir) {
-            dirs.push(dir);
+fn tool_search_dirs_from_parts(dirs: &AcpToolsDirs, managed_dirs: Vec<PathBuf>) -> Vec<PathBuf> {
+    // The primary dir also appears as the first managed prepend (the dev
+    // override or the shim dir); keep the first occurrence of each dir.
+    let mut search_dirs: Vec<PathBuf> = dirs.primary.clone().into_iter().collect();
+    for dir in managed_dirs
+        .into_iter()
+        .chain(dirs.resource_fallback.clone())
+    {
+        if !search_dirs.contains(&dir) {
+            search_dirs.push(dir);
         }
     }
-    dirs
+    search_dirs
 }
 
 fn prepend_dirs_to_path(vars: &mut Vec<(String, String)>, dirs: &[PathBuf]) {
@@ -152,8 +185,8 @@ fn parse_goose_search_paths(value: &str) -> Result<Vec<String>, serde_json::Erro
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_goose_search_paths, bundled_acp_tools_dir_from_parts, prepend_dirs_to_path,
-        tool_search_dirs_from_parts,
+        acp_tools_dirs_from_parts, apply_goose_search_paths, prepend_dirs_to_path,
+        tool_search_dirs_from_parts, AcpToolsDirs,
     };
     use std::path::{Path, PathBuf};
 
@@ -166,29 +199,55 @@ mod tests {
     }
 
     #[test]
-    fn env_override_wins_over_resource_dir() {
-        assert_eq!(
-            bundled_acp_tools_dir_from_parts(
-                Some(PathBuf::from("/dev/acp/bin")),
-                Some(Path::new("/bundle/resources/acp/bin")),
-            )
-            .as_deref(),
-            Some(Path::new("/dev/acp/bin")),
+    fn env_override_wins_over_shim_and_resource_dirs() {
+        let resolved = acp_tools_dirs_from_parts(
+            Some(PathBuf::from("/dev/acp/bin")),
+            Some(PathBuf::from("/data/packages/bin")),
+            Some(PathBuf::from("/bundle/resources/acp/bin")),
         );
-    }
-
-    #[test]
-    fn missing_env_override_falls_back_to_resource_dir() {
+        assert_eq!(resolved.primary.as_deref(), Some(Path::new("/dev/acp/bin")));
         assert_eq!(
-            bundled_acp_tools_dir_from_parts(None, Some(Path::new("/bundle/resources/acp/bin")))
-                .as_deref(),
+            resolved.resource_fallback.as_deref(),
             Some(Path::new("/bundle/resources/acp/bin")),
         );
     }
 
     #[test]
+    fn managed_shim_dir_wins_over_resource_dir() {
+        let resolved = acp_tools_dirs_from_parts(
+            None,
+            Some(PathBuf::from("/data/packages/bin")),
+            Some(PathBuf::from("/bundle/resources/acp/bin")),
+        );
+        assert_eq!(
+            resolved.primary.as_deref(),
+            Some(Path::new("/data/packages/bin")),
+        );
+        assert_eq!(
+            resolved.resource_fallback.as_deref(),
+            Some(Path::new("/bundle/resources/acp/bin")),
+        );
+    }
+
+    #[test]
+    fn resource_dir_as_primary_is_not_repeated_as_fallback() {
+        // No override and no managed shims (e.g. no-managed-acp-tools
+        // builds): the resource dir is the primary and must not double as
+        // the fallback.
+        let resolved =
+            acp_tools_dirs_from_parts(None, None, Some(PathBuf::from("/bundle/resources/acp/bin")));
+        assert_eq!(
+            resolved.primary.as_deref(),
+            Some(Path::new("/bundle/resources/acp/bin")),
+        );
+        assert!(resolved.resource_fallback.is_none());
+    }
+
+    #[test]
     fn missing_inputs_resolve_to_none() {
-        assert!(bundled_acp_tools_dir_from_parts(None, None).is_none());
+        let resolved = acp_tools_dirs_from_parts(None, None, None);
+        assert!(resolved.primary.is_none());
+        assert!(resolved.resource_fallback.is_none());
     }
 
     #[test]
@@ -200,17 +259,24 @@ mod tests {
         assert!(super::node_runtime_manifest_path(Path::new("/")).is_none());
     }
 
+    fn tools_dirs(primary: &str, resource_fallback: Option<&str>) -> AcpToolsDirs {
+        AcpToolsDirs {
+            primary: Some(PathBuf::from(primary)),
+            resource_fallback: resource_fallback.map(PathBuf::from),
+        }
+    }
+
     #[test]
-    fn tool_search_dirs_start_with_bundled_then_managed() {
+    fn tool_search_dirs_order_shims_then_managed_then_resource_fallback() {
         assert_eq!(
             tool_search_dirs_from_parts(
-                Path::new("/bundle/acp/bin"),
+                &tools_dirs("/data/packages/bin", Some("/bundle/acp/bin")),
                 dirs(&["/data/packages/bin", "/data/packages/npm-prefix/bin"]),
             ),
             dirs(&[
-                "/bundle/acp/bin",
                 "/data/packages/bin",
                 "/data/packages/npm-prefix/bin",
+                "/bundle/acp/bin",
             ])
         );
     }
@@ -218,13 +284,30 @@ mod tests {
     #[test]
     fn tool_search_dirs_dedupe_the_dev_override() {
         // With STAGED_ACP_TOOLS_DIR set, the override dir arrives both as the
-        // bundled dir and as the first managed prepend; it must appear once.
+        // primary and as the first managed prepend; it must appear once.
         assert_eq!(
             tool_search_dirs_from_parts(
-                Path::new("/dev/acp/bin"),
+                &tools_dirs("/dev/acp/bin", Some("/bundle/acp/bin")),
                 dirs(&["/dev/acp/bin", "/data/packages/npm-prefix/bin"]),
             ),
-            dirs(&["/dev/acp/bin", "/data/packages/npm-prefix/bin"])
+            dirs(&[
+                "/dev/acp/bin",
+                "/data/packages/npm-prefix/bin",
+                "/bundle/acp/bin",
+            ])
+        );
+    }
+
+    #[test]
+    fn tool_search_dirs_handle_a_resource_only_resolution() {
+        // Bundled-resource primary (nothing managed): no duplicate, managed
+        // prefix dirs still searched.
+        assert_eq!(
+            tool_search_dirs_from_parts(
+                &tools_dirs("/bundle/acp/bin", None),
+                dirs(&["/data/packages/npm-prefix/bin"]),
+            ),
+            dirs(&["/bundle/acp/bin", "/data/packages/npm-prefix/bin"])
         );
     }
 

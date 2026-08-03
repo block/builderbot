@@ -10,19 +10,17 @@ pub use doctor::{
 
 /// Environment snapshot for doctor checks and fixes. Shaped through
 /// `apply_bundled_tools_env` so checks resolve binaries from the same PATH
-/// the agent spawn path uses — a bridge Staged bundles must never be
-/// reported missing (or prompt an install) just because the user has no
+/// the agent spawn path uses — a bridge Staged manages or bundles must never
+/// be reported missing (or prompt an install) just because the user has no
 /// global copy. The managed npm env is overlaid on top, so checks probe npm
 /// state (`npm prefix -g`, version lookups) with the same private-prefix view
 /// the fixes install into — a check never contradicts the fix that just ran.
-async fn doctor_env_vars(bundled_dir: Option<&Path>) -> Vec<(String, String)> {
+async fn doctor_env_vars(dirs: &crate::acp_tools::AcpToolsDirs) -> Vec<(String, String)> {
     let mut env_vars = crate::shell_env::home_env_vars_with_extended_path(
         crate::session_runner::shell_env_cache().as_ref(),
     )
     .await;
-    if let Some(dir) = bundled_dir {
-        crate::acp_tools::apply_bundled_tools_env(&mut env_vars, dir);
-    }
+    crate::acp_tools::apply_bundled_tools_env(&mut env_vars, dirs);
     crate::managed_acp_tools::apply_managed_npm_env(
         &mut env_vars,
         &crate::managed_acp_tools::managed_npm_env(),
@@ -46,8 +44,9 @@ fn run_checks_options(
         env: None,
         // Doctor labels binaries resolved from this dir as bundled (install
         // source + readout flag) and suppresses registry update fixes for
-        // them — versions are pinned by acp-tools.lock.json and ship with
-        // Staged updates.
+        // them — Staged owns their updates, whether they are managed shims
+        // the startup reconciler floats to @latest or bridges pinned by
+        // acp-tools.lock.json shipping with Staged updates.
         bundled_tools_dir: bundled_dir,
     }
     .with_env_snapshot(env_vars)
@@ -93,13 +92,13 @@ pub async fn run_doctor_freshness(app_handle: tauri::AppHandle) -> DoctorReport 
 /// readouts are labeled by the doctor crate itself via
 /// `RunChecksOptions::bundled_tools_dir`.
 async fn run_doctor_report(app_handle: &tauri::AppHandle, check_freshness: bool) -> DoctorReport {
-    let bundled_dir = crate::acp_tools::resolve_bundled_acp_tools_dir(app_handle);
-    let env_vars = doctor_env_vars(bundled_dir.as_deref()).await;
+    let acp_tools_dirs = crate::acp_tools::resolve_acp_tools_dirs(app_handle);
+    let env_vars = doctor_env_vars(&acp_tools_dirs).await;
     let (mut report, node_runtime) = tokio::join!(
         doctor::run_checks_with_options(run_checks_options(
             check_freshness,
             env_vars.clone(),
-            bundled_dir.clone(),
+            acp_tools_dirs.primary.clone(),
         )),
         run_node_runtime_check(),
     );
@@ -112,11 +111,14 @@ async fn run_doctor_report(app_handle: &tauri::AppHandle, check_freshness: bool)
 /// Run a fix for a doctor check, identified by check ID and fix type.
 ///
 /// The actual shell command is looked up from the static check definitions —
-/// the caller never sends a raw command string. The node-runtime fix is
-/// native — (re)install the pinned managed runtime — not a shell command;
-/// npm-backed fixes install the managed runtime first, since they run npm
-/// from it into the private prefix (the existing "Running…" spinner covers
-/// the one-time download).
+/// the caller never sends a raw command string. Two families of fixes are
+/// native rather than shell commands: the node-runtime fix (re)installs the
+/// pinned managed runtime, and install fixes for the managed ACP bridges run
+/// the floating managed installer so the bridge lands in
+/// `~/.staged/packages/tools` with an absolute-path shim instead of the
+/// crate's `npm install -g`. Remaining npm-backed fixes install the managed
+/// runtime first, since they run npm from it into the private prefix (the
+/// existing "Running…" spinner covers the one-time download).
 #[tauri::command]
 pub async fn run_doctor_fix(
     app_handle: tauri::AppHandle,
@@ -126,8 +128,13 @@ pub async fn run_doctor_fix(
     if check_id == NODE_RUNTIME_CHECK_ID {
         return ensure_managed_node_runtime_for_fix().await;
     }
-    let bundled_dir = crate::acp_tools::resolve_bundled_acp_tools_dir(&app_handle);
-    let env_vars = doctor_env_vars(bundled_dir.as_deref()).await;
+    if matches!(fix_type, FixType::Command | FixType::Bridge) {
+        if let Some(tool_id) = managed_tool_for_check(&check_id) {
+            return install_managed_tool_logged(tool_id, &check_id).await;
+        }
+    }
+    let acp_tools_dirs = crate::acp_tools::resolve_acp_tools_dirs(&app_handle);
+    let env_vars = doctor_env_vars(&acp_tools_dirs).await;
     if doctor::agents::lookup_fix_command(&check_id, &fix_type)
         .as_deref()
         .is_some_and(crate::managed_acp_tools::is_npm_backed_command)
@@ -136,6 +143,31 @@ pub async fn run_doctor_fix(
     }
     doctor::execute_fix_with_env_options(check_id, fix_type, execute_fix_options(None, env_vars))
         .await
+}
+
+/// The managed ACP bridge behind a doctor check id, when this build manages
+/// it. `None` routes the check to the doctor crate's regular fix commands —
+/// which is also the correct fallback whenever bridge management is off (dev
+/// override, `no-managed-acp-tools`, unsupported target).
+fn managed_tool_for_check(check_id: &str) -> Option<&'static str> {
+    let tool_id = match check_id {
+        "ai-agent-claude" => "claude-acp",
+        "ai-agent-codex" => "codex-acp",
+        _ => return None,
+    };
+    crate::managed_acp_tools::managed_tool(tool_id).map(|tool| tool.id)
+}
+
+/// Install (or float-upgrade) a managed bridge for a doctor fix/update.
+/// Progress goes to the log — doctor fixes have no streamed-output channel,
+/// only a button spinner.
+async fn install_managed_tool_logged(tool_id: &str, check_id: &str) -> Result<(), String> {
+    let log_prefix = format!("[doctor fix {check_id}]");
+    crate::managed_acp_tools::install_managed_tool(tool_id, &|line| {
+        log::info!("{log_prefix} {line}");
+    })
+    .await
+    .map_err(|error| error.to_string())
 }
 
 /// Install (or repair) the managed Node.js runtime ahead of a fix that needs
@@ -166,10 +198,26 @@ pub async fn run_doctor_update(
     fix_type: FixType,
     command: String,
 ) -> Result<(), String> {
-    let bundled_dir = crate::acp_tools::resolve_bundled_acp_tools_dir(&app_handle);
-    let env_vars = doctor_env_vars(bundled_dir.as_deref()).await;
-    let expected =
-        expected_update_command(&check_id, &fix_type, env_vars.clone(), bundled_dir).await?;
+    // Updates for the managed ACP bridges are the floating installer itself
+    // (`<pkg>@latest` onto the managed runtime) — no shell command runs, so
+    // the frontend-supplied command needs no validation here. Readouts
+    // resolved from the managed shim dir derive no update command at all
+    // (they are labeled bundled), so this arm only fires for a bridge copy
+    // that resolved elsewhere (e.g. the resource fallback on a profile the
+    // reconciler has not populated yet) — and the managed install is the
+    // correct upgrade for that state too.
+    if let Some(tool_id) = managed_tool_for_check(&check_id) {
+        return install_managed_tool_logged(tool_id, &check_id).await;
+    }
+    let acp_tools_dirs = crate::acp_tools::resolve_acp_tools_dirs(&app_handle);
+    let env_vars = doctor_env_vars(&acp_tools_dirs).await;
+    let expected = expected_update_command(
+        &check_id,
+        &fix_type,
+        env_vars.clone(),
+        acp_tools_dirs.primary.clone(),
+    )
+    .await?;
     if expected != command {
         return Err(format!(
             "Update command mismatch for {check_id}: refusing to run a command \
@@ -485,6 +533,25 @@ mod tests {
 
         let opts = run_checks_options(false, Vec::new(), None);
         assert!(opts.bundled_tools_dir.is_none());
+    }
+
+    /// Fixes and updates for the two bridge checks route to the managed
+    /// installer exactly when this build manages bridges; every other check
+    /// keeps the doctor crate's regular fix commands.
+    #[test]
+    fn managed_bridge_checks_route_to_the_managed_installer() {
+        let managed = crate::managed_acp_tools::managed_tools_enabled();
+        assert_eq!(
+            managed_tool_for_check("ai-agent-claude"),
+            managed.then_some("claude-acp")
+        );
+        assert_eq!(
+            managed_tool_for_check("ai-agent-codex"),
+            managed.then_some("codex-acp")
+        );
+        assert_eq!(managed_tool_for_check("ai-agent-copilot"), None);
+        assert_eq!(managed_tool_for_check("ai-agent-amp"), None);
+        assert_eq!(managed_tool_for_check(NODE_RUNTIME_CHECK_ID), None);
     }
 
     /// Checks and fixes must agree on the registry: both option builders take

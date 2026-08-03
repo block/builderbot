@@ -141,6 +141,10 @@ release version:
 bump-acp-tools *ARGS:
     node scripts/update-acp-tools-lock.mjs {{ ARGS }}
 
+# Fetch official Node.js release checksums and update node-runtime.lock.json (e.g. `just bump-node-runtime v24.12.0`)
+bump-node-runtime *ARGS:
+    node scripts/update-node-runtime-lock.mjs {{ ARGS }}
+
 # ============================================================================
 # Code Quality
 # ============================================================================

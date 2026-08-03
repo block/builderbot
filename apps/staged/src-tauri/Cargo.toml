@@ -81,6 +81,15 @@ resvg = "0.47"
 usvg = "0.47"
 tiny-skia = "0.12"
 
+# Managed Node.js runtime: tarball extraction for runtime installs
+tar = "0.4"
+flate2 = "1"
+
+[features]
+# no-block-npm-registry: downloads the managed Node.js runtime from upstream
+# nodejs.org instead of Block's Artifactory mirror.
+no-block-npm-registry = []
+
 # Debug binaries archived — uncomment when needed
 # [[bin]]
 # name = "debug_diff"

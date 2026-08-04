@@ -291,7 +291,14 @@ fn detect_install_source_with_env(path: &Path, env: Option<&DoctorEnv>) -> Insta
     let home = env
         .and_then(|env| env.get("HOME").map(PathBuf::from))
         .or_else(std::env::home_dir);
-    let base = detect_install_source_with_home(path, home.as_deref());
+    let pnpm_home = env_or_process_var(env, "PNPM_HOME").map(PathBuf::from);
+    let bun_install = env_or_process_var(env, "BUN_INSTALL").map(PathBuf::from);
+    let base = detect_install_source_inner(
+        path,
+        home.as_deref(),
+        pnpm_home.as_deref(),
+        bun_install.as_deref(),
+    );
     if base == InstallSource::Unknown {
         if let Some(home) = home.as_deref() {
             if fingerprint_curl_pipe(path, home) {
@@ -300,6 +307,17 @@ fn detect_install_source_with_env(path: &Path, env: Option<&DoctorEnv>) -> Insta
         }
     }
     base
+}
+
+/// Read a variable from the caller snapshot when one is supplied, otherwise
+/// from the process environment. Empty values are treated as absent.
+fn env_or_process_var(env: Option<&DoctorEnv>, name: &str) -> Option<String> {
+    let value = if let Some(env) = env {
+        env.get(name).map(str::to_string)
+    } else {
+        std::env::var(name).ok()
+    };
+    value.filter(|s| !s.is_empty())
 }
 
 fn shell_lookup_commands(cmd: &str) -> [(&'static str, String); 2] {
@@ -449,33 +467,67 @@ const CURL_INSTALLER_FOOTPRINTS: &[CurlInstallerFootprint] = &[
         binary: "amp",
         markers: &[".local/share/amp", ".cache/amp"],
     },
+    // Pi installer — pi.dev/install.sh. When the global npm prefix isn't
+    // writable it runs `npm install -g --prefix ~/.local`, leaving the package
+    // tree under `~/.local/lib/node_modules` (always) and a standalone Node
+    // runtime under `~/.local/share/pi-node` (only when no usable node was
+    // found). The package-tree marker must be checked *before* the generic
+    // npm-layout classification — the bin entry canonicalizes into
+    // `node_modules/`, but a plain `npm install -g` can't update this prefix;
+    // `pi update --self` can.
+    CurlInstallerFootprint {
+        binary: "pi",
+        markers: &[
+            ".local/lib/node_modules/@earendil-works/pi-coding-agent",
+            ".local/share/pi-node",
+        ],
+    },
 ];
 
-/// Cheap filesystem fingerprint for curl/native installs that path-prefix
-/// heuristics can't classify. Only considers binaries inside a user-local bin
-/// dir (`~/.local/bin`, `~/bin`) and uses two low-false-positive signals:
-///
-/// 1. A known installer footprint marker (see [`CURL_INSTALLER_FOOTPRINTS`])
-///    exists under `$HOME` and the binary name matches that installer.
-/// 2. The bin entry is a symlink into a *versioned* install dir under `$HOME`
-///    (the layout Cursor's native installer uses:
-///    `~/.local/bin/<tool>` → `…/versions/<ver>/<tool>`).
-///
-/// No subprocess or network access — only `read_link`/`exists`/`canonicalize`.
-fn fingerprint_curl_pipe(path: &Path, home: &Path) -> bool {
-    let in_user_local_bin =
-        path.starts_with(home.join(".local/bin")) || path.starts_with(home.join("bin"));
-    if !in_user_local_bin {
+/// Signal 1 of the curl-pipe fingerprint: the binary sits in a user-local bin
+/// dir (`~/.local/bin`, `~/bin`) and a known installer footprint marker for
+/// that binary name exists under `$HOME`. Low-false-positive enough to run
+/// *before* the npm-layout classification (some installers, e.g. Pi's, lay
+/// down npm-shaped trees that `npm install -g` nevertheless can't update).
+fn matches_curl_installer_footprint(path: &Path, home: &Path) -> bool {
+    if !in_user_local_bin(path, home) {
         return false;
     }
-
-    // Signal 1 — a known installer footprint marker exists under $HOME.
     if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
         for fp in CURL_INSTALLER_FOOTPRINTS {
             if fp.binary == name && fp.markers.iter().any(|m| home.join(m).exists()) {
                 return true;
             }
         }
+    }
+    false
+}
+
+fn in_user_local_bin(path: &Path, home: &Path) -> bool {
+    path.starts_with(home.join(".local/bin")) || path.starts_with(home.join("bin"))
+}
+
+/// Cheap filesystem fingerprint for curl/native installs that path-prefix
+/// heuristics can't classify. Only considers binaries inside a user-local bin
+/// dir (`~/.local/bin`, `~/bin`) and uses two low-false-positive signals:
+///
+/// 1. A known installer footprint marker (see [`CURL_INSTALLER_FOOTPRINTS`])
+///    exists under `$HOME` and the binary name matches that installer
+///    ([`matches_curl_installer_footprint`], which also runs earlier in the
+///    detection chain, ahead of the npm-layout check).
+/// 2. The bin entry is a symlink into a *versioned* install dir under `$HOME`
+///    (the layout Cursor's native installer uses:
+///    `~/.local/bin/<tool>` → `…/versions/<ver>/<tool>`).
+///
+/// No subprocess or network access — only `read_link`/`exists`/`canonicalize`.
+fn fingerprint_curl_pipe(path: &Path, home: &Path) -> bool {
+    if !in_user_local_bin(path, home) {
+        return false;
+    }
+
+    // Signal 1 — a known installer footprint marker exists under $HOME.
+    if matches_curl_installer_footprint(path, home) {
+        return true;
     }
 
     // Signal 2 — the bin entry is a symlink into a versioned install dir under
@@ -548,15 +600,73 @@ fn looks_like_npm_global(path: &Path) -> bool {
     target.components().any(|c| c.as_os_str() == "node_modules")
 }
 
-/// Testable inner: same logic as [`detect_install_source`] but takes the home
-/// directory as a parameter so unit tests can inject a fixed value.
+/// Whether the binary lives in pnpm's global install dir — `$PNPM_HOME` when
+/// the caller environment declares it, else the platform defaults
+/// (`~/Library/pnpm` on macOS, `~/.local/share/pnpm` on Linux). pnpm links
+/// global bins directly inside this dir, so a prefix check on the resolved
+/// path is sufficient; no symlink chasing needed.
+fn looks_like_pnpm_global(path: &Path, home: Option<&Path>, pnpm_home: Option<&Path>) -> bool {
+    if pnpm_home.is_some_and(|dir| path.starts_with(dir)) {
+        return true;
+    }
+    let Some(home) = home else {
+        return false;
+    };
+    path.starts_with(home.join("Library/pnpm")) || path.starts_with(home.join(".local/share/pnpm"))
+}
+
+/// Whether the binary lives in bun's install dir — `$BUN_INSTALL` when the
+/// caller environment declares it, else the default `~/.bun`. `bun add -g`
+/// links bins at `<install>/bin/<tool>` pointing into
+/// `<install>/install/global/node_modules/…`.
+fn looks_like_bun_global(path: &Path, home: Option<&Path>, bun_install: Option<&Path>) -> bool {
+    if bun_install.is_some_and(|dir| path.starts_with(dir)) {
+        return true;
+    }
+    home.is_some_and(|home| path.starts_with(home.join(".bun")))
+}
+
+/// Test-only shorthand for [`detect_install_source_inner`] with no
+/// environment-declared pnpm/bun dirs — unit tests inject a fixed home and
+/// rely on the platform-default locations.
+#[cfg(test)]
 fn detect_install_source_with_home(path: &Path, home: Option<&Path>) -> InstallSource {
+    detect_install_source_inner(path, home, None, None)
+}
+
+fn detect_install_source_inner(
+    path: &Path,
+    home: Option<&Path>,
+    pnpm_home: Option<&Path>,
+    bun_install: Option<&Path>,
+) -> InstallSource {
     // Homebrew cask ownership beats npm internals. In a mixed Claude install,
     // the active `/opt/homebrew/bin/claude` can be a cask symlink while an
     // unrelated npm global package also exists; update planning must follow
     // the active Caskroom binary back to Brew.
     if looks_like_homebrew_cask(path) {
         return InstallSource::Brew;
+    }
+
+    // Known curl-installer footprints in user-local bin dirs beat the npm
+    // layout check below: Pi's installer lays down an npm-shaped tree under
+    // `~/.local` (bin symlink into `~/.local/lib/node_modules/…`) that a plain
+    // `npm install -g` can't update — the install is owned by the installer's
+    // own update path, not the user's global npm prefix.
+    if let Some(home) = home {
+        if matches_curl_installer_footprint(path, home) {
+            return InstallSource::CurlPipe;
+        }
+    }
+
+    // pnpm/bun global installs also canonicalize into `node_modules/` trees,
+    // but `npm install -g` doesn't own them either — classify by their global
+    // install dirs before the npm check.
+    if looks_like_pnpm_global(path, home, pnpm_home) {
+        return InstallSource::Pnpm;
+    }
+    if looks_like_bun_global(path, home, bun_install) {
+        return InstallSource::Bun;
     }
 
     // npm global install (any node distribution). Checked first: the bin entry
@@ -1222,6 +1332,182 @@ mod tests {
             assert!(fingerprint_curl_pipe(&link, &home));
             let _ = fs::remove_dir_all(&home);
         }
+    }
+
+    /// Pi's curl installer fallback layout: `~/.local/bin/pi` symlinked into
+    /// `~/.local/lib/node_modules/@earendil-works/pi-coding-agent/…`. The tree
+    /// is npm-shaped (the npm-layout check alone would say `Npm`), but a plain
+    /// `npm install -g` can't update this prefix — the footprint check must win
+    /// and classify it `CurlPipe`.
+    #[test]
+    fn pi_curl_installer_user_local_layout_classifies_as_curl_pipe() {
+        #[cfg(unix)]
+        {
+            let home = std::env::temp_dir().join(format!("doctor-pi-curl-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&home);
+            let pkg = home.join(".local/lib/node_modules/@earendil-works/pi-coding-agent/dist");
+            fs::create_dir_all(&pkg).unwrap();
+            let real = pkg.join("cli.js");
+            File::create(&real).unwrap();
+            fs::create_dir_all(home.join(".local/bin")).unwrap();
+            let link = home.join(".local/bin/pi");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+
+            assert!(
+                looks_like_npm_global(&link),
+                "layout is npm-shaped — the footprint must be what reclassifies it",
+            );
+            assert!(matches_curl_installer_footprint(&link, &home));
+            assert_eq!(
+                detect_install_source_with_home(&link, Some(home.as_path())),
+                InstallSource::CurlPipe,
+            );
+            let _ = fs::remove_dir_all(&home);
+        }
+    }
+
+    /// The standalone-node marker (`~/.local/share/pi-node`, laid down when the
+    /// installer had no usable Node.js) also fingerprints the curl install.
+    #[test]
+    fn pi_standalone_node_marker_classifies_as_curl_pipe() {
+        let home = std::env::temp_dir().join(format!("doctor-pi-node-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(home.join(".local/share/pi-node")).unwrap();
+        fs::create_dir_all(home.join(".local/bin")).unwrap();
+        let bin = home.join(".local/bin/pi");
+        File::create(&bin).unwrap();
+
+        assert_eq!(
+            detect_install_source_with_home(&bin, Some(home.as_path())),
+            InstallSource::CurlPipe,
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
+    /// A `pi` on the global npm prefix (installed with plain `npm install -g`,
+    /// or by the curl installer when the prefix was writable) stays `Npm` even
+    /// when a stale `~/.local` footprint marker exists — the footprint only
+    /// claims binaries inside user-local bin dirs.
+    #[test]
+    fn pi_on_npm_prefix_stays_npm_despite_footprint_marker() {
+        #[cfg(unix)]
+        {
+            let root = std::env::temp_dir().join(format!("doctor-pi-npm-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            let home = root.join("home");
+            fs::create_dir_all(home.join(".local/share/pi-node")).unwrap();
+            let pkg = root.join("prefix/lib/node_modules/@earendil-works/pi-coding-agent/dist");
+            fs::create_dir_all(&pkg).unwrap();
+            let real = pkg.join("cli.js");
+            File::create(&real).unwrap();
+            fs::create_dir_all(root.join("prefix/bin")).unwrap();
+            let link = root.join("prefix/bin/pi");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+
+            assert_eq!(
+                detect_install_source_with_home(&link, Some(home.as_path())),
+                InstallSource::Npm,
+            );
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
+    /// pnpm global installs live under `$PNPM_HOME` (defaults `~/Library/pnpm`
+    /// on macOS, `~/.local/share/pnpm` on Linux) and must classify `Pnpm`, not
+    /// `Npm` — `npm install -g` neither owns nor updates them.
+    #[test]
+    fn pnpm_default_dirs_classify_as_pnpm() {
+        let home = PathBuf::from("/home/test");
+        assert_eq!(
+            detect_install_source_with_home(&home.join("Library/pnpm/pi"), Some(home.as_path())),
+            InstallSource::Pnpm,
+        );
+        assert_eq!(
+            detect_install_source_with_home(
+                &home.join(".local/share/pnpm/pi"),
+                Some(home.as_path()),
+            ),
+            InstallSource::Pnpm,
+        );
+    }
+
+    /// A custom `$PNPM_HOME` from the caller snapshot wins even outside the
+    /// default locations.
+    #[test]
+    fn custom_pnpm_home_from_env_classifies_as_pnpm() {
+        let env = crate::DoctorEnv::new(vec![
+            ("HOME".to_string(), "/home/test".to_string()),
+            ("PNPM_HOME".to_string(), "/data/pnpm".to_string()),
+        ]);
+        assert_eq!(
+            detect_install_source_with_env(Path::new("/data/pnpm/pi"), Some(&env)),
+            InstallSource::Pnpm,
+        );
+    }
+
+    /// The pnpm check must beat the npm-layout check even when the bin entry is
+    /// a real symlink into pnpm's global `node_modules` store.
+    #[test]
+    fn pnpm_symlink_into_global_store_classifies_as_pnpm_not_npm() {
+        #[cfg(unix)]
+        {
+            let home = std::env::temp_dir().join(format!("doctor-pnpm-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&home);
+            let pkg = home
+                .join("Library/pnpm/global/5/node_modules/@earendil-works/pi-coding-agent/dist");
+            fs::create_dir_all(&pkg).unwrap();
+            let real = pkg.join("cli.js");
+            File::create(&real).unwrap();
+            fs::create_dir_all(home.join("Library/pnpm")).unwrap();
+            let link = home.join("Library/pnpm/pi");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+
+            assert!(looks_like_npm_global(&link), "pnpm layout is npm-shaped");
+            assert_eq!(
+                detect_install_source_with_home(&link, Some(home.as_path())),
+                InstallSource::Pnpm,
+            );
+            let _ = fs::remove_dir_all(&home);
+        }
+    }
+
+    /// bun global installs live under `~/.bun` (or `$BUN_INSTALL`) with bin
+    /// symlinks into `~/.bun/install/global/node_modules` — `Bun`, not `Npm`.
+    #[test]
+    fn bun_global_symlink_classifies_as_bun_not_npm() {
+        #[cfg(unix)]
+        {
+            let home = std::env::temp_dir().join(format!("doctor-bun-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&home);
+            let pkg =
+                home.join(".bun/install/global/node_modules/@earendil-works/pi-coding-agent/dist");
+            fs::create_dir_all(&pkg).unwrap();
+            let real = pkg.join("cli.js");
+            File::create(&real).unwrap();
+            fs::create_dir_all(home.join(".bun/bin")).unwrap();
+            let link = home.join(".bun/bin/pi");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+
+            assert!(looks_like_npm_global(&link), "bun layout is npm-shaped");
+            assert_eq!(
+                detect_install_source_with_home(&link, Some(home.as_path())),
+                InstallSource::Bun,
+            );
+            let _ = fs::remove_dir_all(&home);
+        }
+    }
+
+    /// A custom `$BUN_INSTALL` from the caller snapshot classifies as `Bun`.
+    #[test]
+    fn custom_bun_install_from_env_classifies_as_bun() {
+        let env = crate::DoctorEnv::new(vec![
+            ("HOME".to_string(), "/home/test".to_string()),
+            ("BUN_INSTALL".to_string(), "/data/bun".to_string()),
+        ]);
+        assert_eq!(
+            detect_install_source_with_env(Path::new("/data/bun/bin/pi"), Some(&env)),
+            InstallSource::Bun,
+        );
     }
 
     #[test]

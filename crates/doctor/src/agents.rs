@@ -49,6 +49,15 @@ pub struct AgentCheckInfo {
     /// by the embedding app's lock and the version worth surfacing is the
     /// vendored harness CLI's (e.g. Claude Code 2.1.x).
     pub bundled_version_args: Option<&'static [&'static str]>,
+    /// Shell command that runs the agent's own updater for its main CLI (e.g.
+    /// `pi update --self`). Used by the freshness pass as the update command
+    /// for a [`InstallSource::CurlPipe`] main readout, where registry-derived
+    /// recipes would target the wrong prefix (Pi's installer lays down an
+    /// npm-shaped tree under `~/.local` that a plain `npm install -g` can't
+    /// reach) but the tool's own updater re-installs in place. Unlike
+    /// Cursor/Amp-style background auto-updaters, a declared self-update
+    /// command marks the install as user-actioned: the update nag stays.
+    pub self_update_command: Option<&'static str>,
 }
 
 /// All AI agents we check for individually.
@@ -66,6 +75,7 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         auth_status_command: None,
         install_source_override: None,
         bundled_version_args: None,
+        self_update_command: None,
     },
     // The claude-agent-acp bridge vendors the complete Claude Code CLI and
     // forwards `--cli <args>` to it, sharing the user's credential store
@@ -84,6 +94,7 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         auth_status_command: Some("claude-agent-acp --cli auth status"),
         install_source_override: None,
         bundled_version_args: Some(&["--cli", "--version"]),
+        self_update_command: None,
     },
     // The codex-acp bridge vendors the full `codex` binary and forwards
     // `cli <args>` to it, sharing the user's ~/.codex/auth.json — same
@@ -104,20 +115,33 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         // `--version` anywhere in argv and prints its own version, so only
         // codex's clap short flag reaches the vendored binary.
         bundled_version_args: Some(&["cli", "-V"]),
+        self_update_command: None,
     },
+    // Pi (pi.dev, github.com/earendil-works/pi) is npm-under-the-hood in every
+    // install method: `npm install -g --ignore-scripts` (its docs and its
+    // pi.dev/install.sh curl installer both use --ignore-scripts), pnpm, or
+    // bun. The ACP bridge is the separately-maintained `pi-acp` npm package
+    // (the same one Zed's ACP registry spawns). No auth commands: Pi owns its
+    // provider/model configuration (`pi` manages API keys itself).
     AgentCheckInfo {
         id: "ai-agent-pi",
         label: "Pi",
         commands: &["pi-acp"],
         main_command: Some("pi"),
-        install_url: None,
-        install_command: None,
-        bridge_install_url: None,
-        bridge_install_command: None,
+        install_url: Some("https://pi.dev"),
+        install_command: Some("npm install -g --ignore-scripts @earendil-works/pi-coding-agent"),
+        bridge_install_url: Some("https://www.npmjs.com/package/pi-acp"),
+        bridge_install_command: Some("npm install -g pi-acp"),
         auth_command: None,
         auth_status_command: None,
         install_source_override: None,
         bundled_version_args: None,
+        // Pi's curl installer (pi.dev/install.sh) falls back to an npm-shaped
+        // tree under `~/.local` when the global npm prefix isn't writable;
+        // `pi update --self` re-installs in place for every layout (it infers
+        // its own prefix/package manager), where `npm install -g …@latest`
+        // would target the wrong prefix.
+        self_update_command: Some("pi update --self"),
     },
     AgentCheckInfo {
         id: "ai-agent-amp",
@@ -133,6 +157,7 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         // Main `amp` curl installer; bridge `amp-acp` is npm (detected positively).
         install_source_override: Some(InstallSource::CurlPipe),
         bundled_version_args: None,
+        self_update_command: None,
     },
     AgentCheckInfo {
         id: "ai-agent-copilot",
@@ -147,6 +172,7 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         auth_status_command: None,
         install_source_override: None,
         bundled_version_args: None,
+        self_update_command: None,
     },
     AgentCheckInfo {
         id: "ai-agent-cursor",
@@ -163,6 +189,7 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         // resolved binary is the curl install — the override's primary use case.
         install_source_override: Some(InstallSource::CurlPipe),
         bundled_version_args: None,
+        self_update_command: None,
     },
 ];
 
@@ -202,6 +229,8 @@ pub fn derive_update_command(
     let pkg = package_id?;
     match install_source? {
         InstallSource::Npm => Some(format!("npm install -g {pkg}@latest")),
+        InstallSource::Pnpm => Some(format!("pnpm add -g {pkg}@latest")),
+        InstallSource::Bun => Some(format!("bun add -g {pkg}@latest")),
         InstallSource::Brew => Some(format!("brew upgrade {pkg}")),
         InstallSource::Cargo => Some(format!("cargo install --force {pkg}")),
         InstallSource::CurlPipe
@@ -211,6 +240,17 @@ pub fn derive_update_command(
         | InstallSource::Unknown
         | InstallSource::System => None,
     }
+}
+
+/// The agent's declared self-update command for its main CLI (e.g. Pi's
+/// `pi update --self`), when one exists. Consulted by the freshness pass for
+/// [`InstallSource::CurlPipe`] main readouts — see
+/// [`AgentCheckInfo::self_update_command`].
+pub(crate) fn agent_self_update_command(check_id: &str) -> Option<&'static str> {
+    AI_AGENT_CHECKS
+        .iter()
+        .find(|info| info.id == check_id)
+        .and_then(|info| info.self_update_command)
 }
 
 /// Append `--registry=<url>` to `command` when a registry override is supplied
@@ -1049,6 +1089,113 @@ mod tests {
             let info = AI_AGENT_CHECKS.iter().find(|i| i.id == id).unwrap();
             assert_eq!(info.install_source_override, None, "{id}");
         }
+    }
+
+    /// Pi's registry entry: npm-shaped install commands for both binaries (so
+    /// the registry override applies), no auth commands (Pi owns its own
+    /// provider/model configuration), and its own updater for curl installs.
+    #[test]
+    fn pi_declares_install_bridge_and_self_update_commands() {
+        let pi = agent("ai-agent-pi");
+        assert_eq!(pi.main_command, Some("pi"));
+        assert_eq!(pi.commands, &["pi-acp"]);
+        assert_eq!(pi.install_url, Some("https://pi.dev"));
+        assert_eq!(
+            pi.install_command,
+            Some("npm install -g --ignore-scripts @earendil-works/pi-coding-agent"),
+        );
+        assert_eq!(
+            pi.bridge_install_url,
+            Some("https://www.npmjs.com/package/pi-acp"),
+        );
+        assert_eq!(pi.bridge_install_command, Some("npm install -g pi-acp"));
+        assert_eq!(pi.auth_command, None);
+        assert_eq!(pi.auth_status_command, None);
+        assert_eq!(pi.install_source_override, None);
+        assert_eq!(pi.self_update_command, Some("pi update --self"));
+    }
+
+    /// Main CLI present, bridge missing → `FixType::Bridge` with the
+    /// registry-routed bridge install command. Berd treats a missing bridge as
+    /// not-installed (ACP sessions spawn `pi-acp`), so without
+    /// `bridge_install_command` this state would look ready but be unusable.
+    #[test]
+    fn pi_main_only_offers_registry_routed_bridge_fix() {
+        let bridge_missing = resolved(None, None);
+        let main = resolved(Some("/opt/homebrew/bin/pi"), Some(InstallSource::Npm));
+        let check = check_single_ai_agent(
+            agent("ai-agent-pi"),
+            true,
+            std::slice::from_ref(&bridge_missing),
+            Some(&main),
+            Some("https://artifactory/npm"),
+            None,
+        );
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert_eq!(check.fix_type, Some(FixType::Bridge));
+        assert_eq!(
+            check.fix_command.as_deref(),
+            Some("npm install -g pi-acp --registry=https://artifactory/npm"),
+        );
+        assert_eq!(check.path.as_deref(), Some("/opt/homebrew/bin/pi"));
+        assert!(check.bridge_path.is_none());
+    }
+
+    /// Neither binary installed → `FixType::Command` with the registry-routed
+    /// main-CLI install command and the pi.dev fix URL.
+    #[test]
+    fn pi_not_installed_offers_registry_routed_install_command() {
+        let missing = resolved(None, None);
+        let check = check_single_ai_agent(
+            agent("ai-agent-pi"),
+            true,
+            std::slice::from_ref(&missing),
+            Some(&missing),
+            Some("https://artifactory/npm"),
+            None,
+        );
+
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert_eq!(check.fix_type, Some(FixType::Command));
+        assert_eq!(
+            check.fix_command.as_deref(),
+            Some(
+                "npm install -g --ignore-scripts @earendil-works/pi-coding-agent \
+                 --registry=https://artifactory/npm"
+            ),
+        );
+        assert_eq!(check.fix_url.as_deref(), Some("https://pi.dev"));
+        assert!(check.path.is_none());
+        assert!(check.bridge_path.is_none());
+    }
+
+    #[test]
+    fn self_update_command_lookup_only_for_declaring_agents() {
+        assert_eq!(
+            agent_self_update_command("ai-agent-pi"),
+            Some("pi update --self"),
+        );
+        // Cursor/Amp curl installs auto-update in the background — they keep
+        // the self-updating suppression, not a user-actioned updater.
+        assert_eq!(agent_self_update_command("ai-agent-cursor"), None);
+        assert_eq!(agent_self_update_command("ai-agent-amp"), None);
+    }
+
+    #[test]
+    fn derive_update_command_pnpm_and_bun_emit_add_g_latest() {
+        assert_eq!(
+            derive_update_command(
+                Some(&InstallSource::Pnpm),
+                Some("@earendil-works/pi-coding-agent"),
+            )
+            .as_deref(),
+            Some("pnpm add -g @earendil-works/pi-coding-agent@latest"),
+        );
+        assert_eq!(
+            derive_update_command(Some(&InstallSource::Bun), Some("pi-acp")).as_deref(),
+            Some("bun add -g pi-acp@latest"),
+        );
     }
 
     #[test]

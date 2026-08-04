@@ -420,18 +420,29 @@ fn resolve_package(
 /// source-aware `update_command` + `update_fix_type` from the readout's install
 /// source and the supplied package id. The flat (non-agent) slot never gets an
 /// update command — non-agent updates are out of scope.
+///
+/// `self_update_command` is the agent's own updater for this readout's binary
+/// (e.g. Pi's `pi update --self`), if it declares one. For a `CurlPipe` install
+/// it replaces both halves of the usual curl-pipe treatment: the install is
+/// *not* marked self-updating (the updater is user-actioned, unlike Cursor's
+/// background auto-update), and the declared command — which re-installs in
+/// place regardless of prefix — is emitted instead of a registry recipe.
 fn apply_freshness(
     readout: &mut AgentVersionInfo,
     info: &freshness::VersionInfo,
     slot: ReadoutSlot,
     package_id: Option<&str>,
+    self_update_command: Option<&str>,
 ) {
     readout.installed_version = info.installed.clone();
     readout.latest_version = info.latest.clone();
+    let own_updater = self_update_command
+        .filter(|_| matches!(readout.install_source, Some(InstallSource::CurlPipe)));
     // Self-updating tools (curl/native installers) manage their own freshness:
     // report installed/latest for display, but never raise an "update available"
-    // nag — the update isn't the user's to action.
-    let self_updating = is_self_updating(readout.install_source.as_ref());
+    // nag — the update isn't the user's to action. An agent-declared updater
+    // (`own_updater`) opts back in: that update *is* the user's to action.
+    let self_updating = own_updater.is_none() && is_self_updating(readout.install_source.as_ref());
     readout.self_updating = Some(self_updating);
     readout.update_available = if self_updating {
         None
@@ -446,7 +457,10 @@ fn apply_freshness(
         ReadoutSlot::Flat => None,
     };
     if let (true, Some(fix_type)) = (actionable, slot_fix_type) {
-        if let Some(cmd) = derive_update_command(readout.install_source.as_ref(), package_id) {
+        let command = own_updater
+            .map(str::to_string)
+            .or_else(|| derive_update_command(readout.install_source.as_ref(), package_id));
+        if let Some(cmd) = command {
             readout.update_command = Some(cmd);
             readout.update_fix_type = Some(fix_type);
         }
@@ -612,13 +626,22 @@ async fn populate_freshness(
             let mut freshness_timeouts = Vec::new();
             if let Some((info, pkg)) = by_target.remove(&(check.id.clone(), ReadoutSlot::Main)) {
                 if let Some(readout) = check.main.as_mut() {
-                    apply_freshness(readout, &info, ReadoutSlot::Main, pkg.as_deref());
+                    apply_freshness(
+                        readout,
+                        &info,
+                        ReadoutSlot::Main,
+                        pkg.as_deref(),
+                        // The declared self-update command targets the agent's
+                        // main CLI (`pi update --self` updates `pi`); bridges
+                        // keep their registry recipes.
+                        agents::agent_self_update_command(&check.id),
+                    );
                 }
                 freshness_timeouts.extend(info.command_timeouts);
             }
             if let Some((info, pkg)) = by_target.remove(&(check.id.clone(), ReadoutSlot::Bridge)) {
                 if let Some(readout) = check.bridge.as_mut() {
-                    apply_freshness(readout, &info, ReadoutSlot::Bridge, pkg.as_deref());
+                    apply_freshness(readout, &info, ReadoutSlot::Bridge, pkg.as_deref(), None);
                 }
                 freshness_timeouts.extend(info.command_timeouts);
             }
@@ -1374,6 +1397,7 @@ mod tests {
             &info,
             ReadoutSlot::Main,
             Some("@agentclientprotocol/claude-agent-acp"),
+            None,
         );
         assert_eq!(
             readout.update_command.as_deref(),
@@ -1395,7 +1419,13 @@ mod tests {
             update_available: Some(true),
             command_timeouts: Vec::new(),
         };
-        apply_freshness(&mut readout, &info, ReadoutSlot::Main, Some("ampcode"));
+        apply_freshness(
+            &mut readout,
+            &info,
+            ReadoutSlot::Main,
+            Some("ampcode"),
+            None,
+        );
         assert_eq!(
             readout.update_command.as_deref(),
             Some("brew upgrade ampcode"),
@@ -1419,7 +1449,7 @@ mod tests {
             update_available: Some(true),
             command_timeouts: Vec::new(),
         };
-        apply_freshness(&mut readout, &info, ReadoutSlot::Main, None);
+        apply_freshness(&mut readout, &info, ReadoutSlot::Main, None, None);
         assert_eq!(readout.installed_version.as_deref(), Some("2.1.205"));
         assert!(readout.update_available.is_none());
         assert!(readout.update_command.is_none());
@@ -1480,14 +1510,14 @@ mod tests {
             update_available: Some(true),
             command_timeouts: Vec::new(),
         };
-        apply_freshness(&mut readout, &info, ReadoutSlot::Bridge, Some("amp"));
+        apply_freshness(&mut readout, &info, ReadoutSlot::Bridge, Some("amp"), None);
         assert_eq!(readout.update_command.as_deref(), Some("brew upgrade amp"),);
         assert_eq!(readout.update_fix_type, Some(FixType::UpdateBridge));
     }
 
-    /// Self-updating (CurlPipe) readouts never get an update command, even when
-    /// upstream reports a newer version — `is_self_updating` suppresses both
-    /// `update_available` and the derived update command.
+    /// A CurlPipe readout with no agent-declared updater never gets an update
+    /// command, even when upstream reports a newer version — `is_self_updating`
+    /// suppresses both `update_available` and the derived update command.
     #[tokio::test]
     async fn apply_freshness_curl_pipe_never_emits_update_command() {
         let mut readout = AgentVersionInfo {
@@ -1505,6 +1535,7 @@ mod tests {
             &info,
             ReadoutSlot::Main,
             Some("getcursor/cursor"),
+            None,
         );
         assert!(readout.update_command.is_none());
         assert!(readout.update_fix_type.is_none());
@@ -1513,6 +1544,90 @@ mod tests {
             readout.update_available.is_none(),
             "self-updating readout suppresses update_available too",
         );
+    }
+
+    /// A CurlPipe readout whose agent declares its own updater (Pi's
+    /// `pi update --self`) keeps the update nag and emits that command instead
+    /// of a registry recipe: the updater is user-actioned, so the install is
+    /// not marked self-updating.
+    #[tokio::test]
+    async fn apply_freshness_curl_pipe_own_updater_emits_self_update_command() {
+        let mut readout = AgentVersionInfo {
+            install_source: Some(InstallSource::CurlPipe),
+            ..AgentVersionInfo::default()
+        };
+        let info = freshness::VersionInfo {
+            installed: Some("0.82.1".into()),
+            latest: Some("0.83.0".into()),
+            update_available: Some(true),
+            command_timeouts: Vec::new(),
+        };
+        apply_freshness(
+            &mut readout,
+            &info,
+            ReadoutSlot::Main,
+            Some("@earendil-works/pi-coding-agent"),
+            Some("pi update --self"),
+        );
+        assert_eq!(readout.update_command.as_deref(), Some("pi update --self"));
+        assert_eq!(readout.update_fix_type, Some(FixType::UpdateMain));
+        assert_eq!(readout.self_updating, Some(false));
+        assert_eq!(readout.update_available, Some(true));
+    }
+
+    /// The declared updater is still gated on an actionable update: already
+    /// up to date -> no command, no fix type.
+    #[tokio::test]
+    async fn apply_freshness_own_updater_requires_actionable_update() {
+        let mut readout = AgentVersionInfo {
+            install_source: Some(InstallSource::CurlPipe),
+            ..AgentVersionInfo::default()
+        };
+        let info = freshness::VersionInfo {
+            installed: Some("0.83.0".into()),
+            latest: Some("0.83.0".into()),
+            update_available: Some(false),
+            command_timeouts: Vec::new(),
+        };
+        apply_freshness(
+            &mut readout,
+            &info,
+            ReadoutSlot::Main,
+            Some("@earendil-works/pi-coding-agent"),
+            Some("pi update --self"),
+        );
+        assert!(readout.update_command.is_none());
+        assert!(readout.update_fix_type.is_none());
+        assert_eq!(readout.update_available, Some(false));
+    }
+
+    /// The declared updater only overrides CurlPipe installs — a registry
+    /// install (npm) keeps its source-consistent registry recipe.
+    #[tokio::test]
+    async fn apply_freshness_own_updater_ignored_for_registry_installs() {
+        let mut readout = AgentVersionInfo {
+            install_source: Some(InstallSource::Npm),
+            ..AgentVersionInfo::default()
+        };
+        let info = freshness::VersionInfo {
+            installed: Some("0.82.1".into()),
+            latest: Some("0.83.0".into()),
+            update_available: Some(true),
+            command_timeouts: Vec::new(),
+        };
+        apply_freshness(
+            &mut readout,
+            &info,
+            ReadoutSlot::Main,
+            Some("@earendil-works/pi-coding-agent"),
+            Some("pi update --self"),
+        );
+        assert_eq!(
+            readout.update_command.as_deref(),
+            Some("npm install -g @earendil-works/pi-coding-agent@latest"),
+        );
+        assert_eq!(readout.update_fix_type, Some(FixType::UpdateMain));
+        assert_eq!(readout.self_updating, Some(false));
     }
 
     /// No update available -> no update command, even on a registry source.
@@ -1528,7 +1643,13 @@ mod tests {
             update_available: Some(false),
             command_timeouts: Vec::new(),
         };
-        apply_freshness(&mut readout, &info, ReadoutSlot::Main, Some("amp-acp"));
+        apply_freshness(
+            &mut readout,
+            &info,
+            ReadoutSlot::Main,
+            Some("amp-acp"),
+            None,
+        );
         assert!(readout.update_command.is_none());
         assert!(readout.update_fix_type.is_none());
     }

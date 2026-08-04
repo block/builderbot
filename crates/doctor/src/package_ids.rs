@@ -105,14 +105,59 @@ pub(crate) const PACKAGE_IDS: &[(&str, &[PackageEntry])] = &[
             Role::Any,
         )],
     ),
+    // ai-agent-pi: every install method is npm-under-the-hood, so `latest`
+    // always comes from the npm registry. The main CLI ships as
+    // `@earendil-works/pi-coding-agent` via npm/pnpm/bun, plus the pi.dev curl
+    // installer (classified `CurlPipe` when it lands in its `~/.local`
+    // fallback prefix — updated via `pi update --self`, see the agent's
+    // `self_update_command`). The ACP bridge is the separately-maintained
+    // `pi-acp` npm package.
     (
         "ai-agent-pi",
-        &[(
-            InstallSource::Npm,
-            "pi-acp",
-            LatestSource::Npm,
-            Role::Bridge,
-        )],
+        &[
+            (
+                InstallSource::Npm,
+                "@earendil-works/pi-coding-agent",
+                LatestSource::Npm,
+                Role::Main,
+            ),
+            (
+                InstallSource::Pnpm,
+                "@earendil-works/pi-coding-agent",
+                LatestSource::Npm,
+                Role::Main,
+            ),
+            (
+                InstallSource::Bun,
+                "@earendil-works/pi-coding-agent",
+                LatestSource::Npm,
+                Role::Main,
+            ),
+            (
+                InstallSource::CurlPipe,
+                "@earendil-works/pi-coding-agent",
+                LatestSource::Npm,
+                Role::Main,
+            ),
+            (
+                InstallSource::Npm,
+                "pi-acp",
+                LatestSource::Npm,
+                Role::Bridge,
+            ),
+            (
+                InstallSource::Pnpm,
+                "pi-acp",
+                LatestSource::Npm,
+                Role::Bridge,
+            ),
+            (
+                InstallSource::Bun,
+                "pi-acp",
+                LatestSource::Npm,
+                Role::Bridge,
+            ),
+        ],
     ),
     (
         "ai-agent-amp",
@@ -312,6 +357,56 @@ mod tests {
                 .expect("cursor curl-pipe entry");
         assert_eq!(pkg, "getcursor/cursor");
         assert_eq!(latest, LatestSource::GitHubReleases);
+    }
+
+    /// Pi's main CLI ships from the npm registry through every install method
+    /// (npm, pnpm, bun, and the curl installer's npm-under-the-hood layout) —
+    /// each source must resolve the same package with an npm latest lookup.
+    #[test]
+    fn pi_main_resolves_for_all_npm_backed_sources() {
+        for source in [
+            InstallSource::Npm,
+            InstallSource::Pnpm,
+            InstallSource::Bun,
+            InstallSource::CurlPipe,
+        ] {
+            assert_eq!(
+                lookup_package_id("ai-agent-pi", source.clone(), Role::Main),
+                Some(("@earendil-works/pi-coding-agent", LatestSource::Npm)),
+                "{source:?}",
+            );
+        }
+    }
+
+    /// The pi-acp bridge is registry-installed only (npm/pnpm/bun) — there is
+    /// no curl install of the bridge, so CurlPipe must miss.
+    #[test]
+    fn pi_bridge_resolves_for_registry_sources_only() {
+        for source in [InstallSource::Npm, InstallSource::Pnpm, InstallSource::Bun] {
+            assert_eq!(
+                lookup_package_id("ai-agent-pi", source.clone(), Role::Bridge),
+                Some(("pi-acp", LatestSource::Npm)),
+                "{source:?}",
+            );
+        }
+        assert_eq!(
+            lookup_package_id("ai-agent-pi", InstallSource::CurlPipe, Role::Bridge),
+            None,
+        );
+    }
+
+    /// Role tagging keeps the two Pi binaries from answering each other's
+    /// lookups even though both ship via npm.
+    #[test]
+    fn pi_roles_do_not_cross_answer() {
+        assert_eq!(
+            lookup_package_id("ai-agent-pi", InstallSource::Npm, Role::Main),
+            Some(("@earendil-works/pi-coding-agent", LatestSource::Npm)),
+        );
+        assert_eq!(
+            lookup_package_id("ai-agent-pi", InstallSource::Npm, Role::Bridge),
+            Some(("pi-acp", LatestSource::Npm)),
+        );
     }
 
     #[test]

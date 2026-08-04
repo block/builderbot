@@ -1866,7 +1866,9 @@ mod tests {
 
     #[test]
     fn parse_commit_lines_takes_its_timestamp_from_author_time() {
-        let commit = parsed_commit("abc123|abc123a|Test|test@example.com|9100|1100|feat: parser");
+        let commit = parsed_commit(
+            "abc123\x1fabc123a\x1fTest\x1ftest@example.com\x1f9100\x1f1100\x1ffeat: parser",
+        );
 
         assert_eq!(commit.subject, "feat: parser");
         assert_eq!(commit.timestamp, 1100);

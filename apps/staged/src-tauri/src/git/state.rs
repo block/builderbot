@@ -1144,7 +1144,7 @@ const BATCH_FAST_SCRIPT: &str = concat!(
     // Same fields as `BRANCH_COMMIT_LOG_FIELDS`, inlined because this is a
     // script rather than an argument list; `fast_script_emits_the_shared_commit_fields`
     // keeps the two from drifting.
-    "git log --format='%H|%h|%an|%ae|%ct|%at|%s' \"$range\" 2>/dev/null || true\n",
+    "git log --format='%H%x1f%h%x1f%an%x1f%ae%x1f%ct%x1f%at%x1f%s' \"$range\" 2>/dev/null || true\n",
     "echo COMMITS_END\n",
     "exit 0\n",
 );

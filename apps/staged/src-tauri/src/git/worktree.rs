@@ -302,7 +302,7 @@ pub fn get_head_sha(worktree: &Path) -> Result<String, GitError> {
 /// The `git log` field list behind [`BRANCH_COMMIT_LOG_FORMAT`], for the one
 /// producer that inlines it into a shell script (`state::BATCH_FAST_SCRIPT`)
 /// instead of passing it as an argument.
-pub const BRANCH_COMMIT_LOG_FIELDS: &str = "%H|%h|%an|%ae|%ct|%at|%s";
+pub const BRANCH_COMMIT_LOG_FIELDS: &str = "%H%x1f%h%x1f%an%x1f%ae%x1f%ct%x1f%at%x1f%s";
 
 /// `git log` format for every commit producer that feeds a
 /// [`CommitTimelineItem`](crate::CommitTimelineItem).
@@ -312,10 +312,12 @@ pub const BRANCH_COMMIT_LOG_FIELDS: &str = "%H|%h|%an|%ae|%ct|%at|%s";
 /// rebase preserves, so it answers "when was this commit written" and is what
 /// the branch timeline sorts on.
 ///
-/// The subject goes last because it's the only field that can contain the
-/// delimiter, so [`parse_branch_commit_line`] can take it as the remainder —
-/// the same shape as `commit_reassociation`'s format.
-pub const BRANCH_COMMIT_LOG_FORMAT: &str = "--format=%H|%h|%an|%ae|%ct|%at|%s";
+/// Fields are separated by `%x1f` (the unit separator) because no printable
+/// delimiter is safe: git permits `|` in author names — and technically in
+/// emails — and a delimiter inside a field shifts every field after it. The
+/// subject still goes last so [`parse_branch_commit_line`] can take it as the
+/// remainder — the same shape as `commit_reassociation`'s format.
+pub const BRANCH_COMMIT_LOG_FORMAT: &str = "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%ct%x1f%at%x1f%s";
 
 /// One [`BRANCH_COMMIT_LOG_FORMAT`] line, borrowed from the log output.
 #[derive(Debug, Clone)]
@@ -332,10 +334,11 @@ pub struct BranchCommitFields<'a> {
 }
 
 /// Parse one [`BRANCH_COMMIT_LOG_FORMAT`] line. The subject is the remainder,
-/// so subjects containing `|` survive intact. Returns `None` for a line that
-/// doesn't carry every field — a blank line, or output from some other format.
+/// so even a subject containing the separator byte survives intact. Returns
+/// `None` for a line that doesn't carry every field — a blank line, or output
+/// from some other format.
 pub fn parse_branch_commit_line(line: &str) -> Option<BranchCommitFields<'_>> {
-    let mut parts = line.splitn(7, '|');
+    let mut parts = line.splitn(7, '\x1f');
     let sha = parts.next().filter(|sha| !sha.is_empty())?;
     let short_sha = parts.next()?;
     let author = parts.next()?;
@@ -841,8 +844,8 @@ mod tests {
     #[test]
     fn parses_both_clocks_and_orders_from_the_oldest_commit() {
         let commits = parse_commit_info_lines(concat!(
-            "def456|def456a|Test|test@example.com|9200|1200|fix: lexer\n",
-            "abc123|abc123a|Test|test@example.com|9100|1100|feat: parser\n",
+            "def456\x1fdef456a\x1fTest\x1ftest@example.com\x1f9200\x1f1200\x1ffix: lexer\n",
+            "abc123\x1fabc123a\x1fTest\x1ftest@example.com\x1f9100\x1f1100\x1ffeat: parser\n",
         ));
 
         assert_eq!(commits.len(), 2);
@@ -857,16 +860,33 @@ mod tests {
         assert_eq!(commits[1].order, 0);
     }
 
-    /// The subject is the trailing field precisely so a `|` in it can't shift
-    /// the timestamps out from under the parse.
+    /// git permits `|` in `user.name` (and technically in emails) and it's
+    /// common in subjects, which is why the separator is `%x1f` — none of
+    /// these shift the fields after them.
     #[test]
-    fn keeps_a_subject_containing_the_delimiter_intact() {
+    fn keeps_pipes_in_names_emails_and_subjects_intact() {
         let commits = parse_commit_info_lines(
-            "abc123|abc123a|Test|test@example.com|9100|1100|feat: parse a|b unions\n",
+            "abc123\x1fabc123a\x1fFoo | Bar\x1fa|b@example.com\x1f9100\x1f1100\x1ffeat: parse a|b unions\n",
         );
 
         assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].author, "Foo | Bar");
+        assert_eq!(commits[0].author_email, "a|b@example.com");
         assert_eq!(commits[0].subject, "feat: parse a|b unions");
+        assert_eq!(commits[0].timestamp, 9100);
+        assert_eq!(commits[0].author_timestamp, 1100);
+    }
+
+    /// The subject is the trailing field so even a separator byte in it can't
+    /// shift the timestamps out from under the parse.
+    #[test]
+    fn keeps_a_subject_containing_the_separator_intact() {
+        let commits = parse_commit_info_lines(
+            "abc123\x1fabc123a\x1fTest\x1ftest@example.com\x1f9100\x1f1100\x1ffeat: a\x1fb\n",
+        );
+
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "feat: a\x1fb");
         assert_eq!(commits[0].timestamp, 9100);
         assert_eq!(commits[0].author_timestamp, 1100);
     }
@@ -874,9 +894,15 @@ mod tests {
     #[test]
     fn skips_lines_that_are_missing_fields() {
         assert!(parse_branch_commit_line("").is_none());
-        assert!(parse_branch_commit_line("abc123|abc123a|Test|test@example.com|9100").is_none());
+        assert!(
+            parse_branch_commit_line("abc123\x1fabc123a\x1fTest\x1ftest@example.com\x1f9100")
+                .is_none()
+        );
         // A record with no SHA isn't a commit.
-        assert!(parse_branch_commit_line("|abc123a|Test|test@example.com|9100|1100|s").is_none());
+        assert!(parse_branch_commit_line(
+            "\x1fabc123a\x1fTest\x1ftest@example.com\x1f9100\x1f1100\x1fs"
+        )
+        .is_none());
     }
 
     #[test]

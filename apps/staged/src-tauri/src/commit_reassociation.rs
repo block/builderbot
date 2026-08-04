@@ -54,10 +54,12 @@ pub struct ShaRemap {
     pub new_sha: String,
 }
 
-/// `%H|%ae|%at|%s` — subject last, since it's the only field that can contain
-/// the delimiter. Deliberately not `CommitInfo`'s format, which carries `%ct`
-/// (committer time), the one timestamp a rebase rewrites.
-const REASSOCIATION_LOG_FORMAT: &str = "--format=%H|%ae|%at|%s";
+/// `%H`, `%ae`, `%at`, `%s`, separated by `%x1f` (the unit separator, as in
+/// `BRANCH_COMMIT_LOG_FORMAT`) since git technically permits `|` in emails;
+/// the subject still goes last as the remainder. Deliberately not
+/// `CommitInfo`'s format, which carries `%ct` (committer time), the one
+/// timestamp a rebase rewrites.
+const REASSOCIATION_LOG_FORMAT: &str = "--format=%H%x1f%ae%x1f%at%x1f%s";
 
 /// Pair orphaned rows with the commits that replaced them.
 ///
@@ -267,10 +269,10 @@ where
     Ok(output.lines().filter_map(parse_identity_line).collect())
 }
 
-/// Parse one `%H|%ae|%at|%s` line. The subject is the remainder, so subjects
-/// containing `|` survive intact.
+/// Parse one [`REASSOCIATION_LOG_FORMAT`] line. The subject is the remainder,
+/// so even a subject containing the separator byte survives intact.
 fn parse_identity_line(line: &str) -> Option<(String, CommitIdentity)> {
-    let mut parts = line.splitn(4, '|');
+    let mut parts = line.splitn(4, '\x1f');
     let sha = parts.next()?;
     let author_email = parts.next()?;
     let author_timestamp = parts.next()?;
@@ -411,19 +413,23 @@ mod tests {
         assert!(remaps.is_empty());
     }
 
+    /// A `|` is ordinary text in every field now that the separator is
+    /// `%x1f`; only a separator byte in the subject needs the remainder rule.
     #[test]
-    fn parses_subject_containing_the_delimiter() {
+    fn parses_pipes_and_trailing_separators_intact() {
         let (sha, identity) =
-            parse_identity_line("abc111|a@example.com|100|chore: rename a|b to c").unwrap();
+            parse_identity_line("abc111\x1fa|b@example.com\x1f100\x1fchore: rename a\x1fb to c")
+                .unwrap();
         assert_eq!(sha, "abc111");
-        assert_eq!(identity.subject, "chore: rename a|b to c");
+        assert_eq!(identity.author_email, "a|b@example.com");
+        assert_eq!(identity.subject, "chore: rename a\x1fb to c");
         assert_eq!(identity.author_timestamp, "100");
     }
 
     #[test]
     fn ignores_malformed_log_lines() {
         assert!(parse_identity_line("").is_none());
-        assert!(parse_identity_line("abc111|a@example.com|100").is_none());
+        assert!(parse_identity_line("abc111\x1fa@example.com\x1f100").is_none());
     }
 
     /// Mid-rebase, `symbolic-ref` exits non-zero because HEAD is detached; a

@@ -3547,7 +3547,9 @@ fn latest_git_commit_ms(store: &Arc<Store>, branch_id: &str) -> i64 {
         Ok(c) => c,
         Err(_) => return 0,
     };
-    // CommitInfo.timestamp is in seconds; convert to milliseconds.
+    // `timestamp` is committer time, not the author time the timeline sorts
+    // on: a rebase *should* read as new activity here. In seconds, so convert
+    // to milliseconds.
     commits.iter().map(|c| c.timestamp).max().unwrap_or(0) * 1000
 }
 
@@ -3719,7 +3721,10 @@ fn build_remote_branch_context(
             "git",
             "log",
             "--reverse",
-            "--format=%x00%ct%x01commit %H%nAuthor: %an%nDate: %ci%n%n%B",
+            // %at (author time) rather than %ct: the prefix only orders the
+            // interleave, and author time survives a rebase — see
+            // `git::get_full_commit_log`, the local counterpart.
+            "--format=%x00%at%x01commit %H%nAuthor: %an%nDate: %ci%n%n%B",
             &range,
         ],
     ) {
@@ -4147,7 +4152,7 @@ fn render_timeline(mut timeline: Vec<TimelineEntry>, error: Option<String>) -> S
 
 /// Parse a timestamped git log into timeline entries.
 ///
-/// Expects the format produced by `--format=%x00%ct%x01commit %H…`:
+/// Expects the format produced by `--format=%x00%at%x01commit %H…`:
 /// `\0<unix_ts>\x01<display_text>` per commit.
 fn parse_timestamped_log(output: &str) -> Vec<TimelineEntry> {
     let mut entries = Vec::new();

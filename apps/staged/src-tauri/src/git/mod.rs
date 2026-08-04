@@ -52,8 +52,9 @@ pub use worktree::{
     create_worktree_for_existing_branch_at_path, create_worktree_from_pr,
     create_worktree_from_pr_at_path, discard_worktree_changes, fetch_pr_head_sha,
     get_commits_since_base, get_full_commit_log, get_head_sha, get_parent_commit,
-    has_unpushed_commits, list_worktree_change_paths, list_worktrees, parse_worktree_status_paths,
-    project_worktree_path_for, project_worktree_root_for, remote_branch_exists, remove_worktree,
-    reset_to_commit, set_upstream_to_origin, switch_branch, update_branch_from_pr,
-    worktree_path_for, CommitInfo, UpdateFromPrResult, WorktreeChangePaths,
+    has_unpushed_commits, list_worktree_change_paths, list_worktrees, parse_author_timestamp,
+    parse_worktree_status_paths, project_worktree_path_for, project_worktree_root_for,
+    remote_branch_exists, remove_worktree, reset_to_commit, set_upstream_to_origin, switch_branch,
+    update_branch_from_pr, worktree_path_for, CommitInfo, UpdateFromPrResult, WorktreeChangePaths,
+    BRANCH_COMMIT_LOG_FORMAT,
 };

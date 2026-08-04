@@ -176,7 +176,7 @@ fn parse_parent_commit_lines(lines: &[String]) -> Vec<ParentBranchCommit> {
     commits
 }
 
-/// Parse `%H|%h|%s|%an|%ae|%ct` formatted commit lines into timeline items,
+/// Parse [`git::BRANCH_COMMIT_LOG_FORMAT`] commit lines into timeline items,
 /// looking up DB metadata for session linkage.
 fn parse_commit_lines(
     store: &Arc<Store>,
@@ -185,12 +185,13 @@ fn parse_commit_lines(
 ) -> Vec<CommitTimelineItem> {
     let mut commits = Vec::new();
     for line in lines {
-        let parts: Vec<&str> = line.splitn(6, '|').collect();
+        let parts: Vec<&str> = line.splitn(7, '|').collect();
         if parts.len() >= 6 {
             let sha = parts[0].to_string();
             let our_commit = store.get_commit_by_sha(branch_id, &sha).unwrap_or(None);
             let resolved = store
                 .resolve_session_status(our_commit.as_ref().and_then(|c| c.session_id.as_deref()));
+            let committer_timestamp = parts[5].parse().unwrap_or(0);
             commits.push(CommitTimelineItem {
                 id: our_commit.as_ref().map(|c| c.id.clone()),
                 sha,
@@ -198,7 +199,7 @@ fn parse_commit_lines(
                 subject: parts[2].to_string(),
                 author: parts[3].to_string(),
                 author_email: parts[4].to_string(),
-                timestamp: parts[5].parse().unwrap_or(0),
+                timestamp: git::parse_author_timestamp(parts.get(6).copied(), committer_timestamp),
                 order: 0,
                 session_id: resolved.session_id,
                 session_status: resolved.status,
@@ -230,9 +231,12 @@ fn fetch_remote_commits(
     } else {
         format!("{base_ref}..HEAD")
     };
-    let format_arg = "--format=%H|%h|%s|%an|%ae|%ct";
-    let output = branches::run_workspace_git(ws_name, repo_subpath, &["log", format_arg, &range])
-        .map_err(|e| format!("Failed to load commits from workspace: {e}"))?;
+    let output = branches::run_workspace_git(
+        ws_name,
+        repo_subpath,
+        &["log", git::BRANCH_COMMIT_LOG_FORMAT, &range],
+    )
+    .map_err(|e| format!("Failed to load commits from workspace: {e}"))?;
     let lines: Vec<String> = output
         .lines()
         .filter(|l| !l.is_empty())
@@ -260,7 +264,7 @@ fn map_local_commits(
                 subject: gc.subject.clone(),
                 author: gc.author.clone(),
                 author_email: gc.author_email.clone(),
-                timestamp: gc.timestamp,
+                timestamp: gc.author_timestamp,
                 order: gc.order,
                 session_id: resolved.session_id,
                 session_status: resolved.status,
@@ -283,6 +287,25 @@ fn non_empty_acp_title(resolved: &ResolvedSession) -> Option<String> {
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .map(str::to_string)
+}
+
+/// Clamp commit timestamps so they never decrease in branch order.
+///
+/// Committer dates are naturally non-decreasing along a branch; the author
+/// dates the timeline sorts on aren't — a cherry-pick keeps its original
+/// author date, and an interactive rebase can reorder commits — so a commit
+/// could otherwise sort above one that precedes it in `git log`. Walking
+/// oldest-first with a running max pins each commit to at least its
+/// predecessor's effective time, keeping the rendered order the same as git's.
+///
+/// `commits` arrives in `git log` order (newest first), as both producers emit
+/// it, so the walk runs in reverse.
+fn clamp_commit_timestamps_monotonic(commits: &mut [CommitTimelineItem]) {
+    let mut floor = i64::MIN;
+    for commit in commits.iter_mut().rev() {
+        floor = commit.timestamp.max(floor);
+        commit.timestamp = floor;
+    }
 }
 
 /// Public wrapper for `build_branch_timeline` for use by the web server.
@@ -412,6 +435,8 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
             commits = map_local_commits(store, branch_id, &git_commits);
         }
     }
+
+    clamp_commit_timestamps_monotonic(&mut commits);
 
     // Mark commits authored by the current user
     for commit in &mut commits {
@@ -1815,5 +1840,185 @@ mod tests {
         assert_eq!(landed.subject, "visible change");
         assert_eq!(timeline.notes[0].title, "Final note title");
         assert_eq!(timeline.reviews[0].title, None);
+    }
+
+    // ── timeline ordering across a rebase ───────────────────────────────
+
+    fn parsed_commit(line: &str) -> CommitTimelineItem {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let commits = parse_commit_lines(&store, "branch-1", &[line.to_string()]);
+        commits.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn parse_commit_lines_takes_its_timestamp_from_author_time() {
+        let commit = parsed_commit("abc123|abc123a|feat: parser|Test|test@example.com|9100|1100");
+
+        assert_eq!(commit.timestamp, 1100);
+    }
+
+    #[test]
+    fn parse_commit_lines_falls_back_to_committer_time_for_six_field_lines() {
+        let commit = parsed_commit("abc123|abc123a|feat: parser|Test|test@example.com|9100");
+
+        assert_eq!(commit.timestamp, 9100);
+    }
+
+    fn commit_at(subject: &str, timestamp: i64, order: i64) -> CommitTimelineItem {
+        CommitTimelineItem {
+            id: None,
+            sha: format!("sha-{order}"),
+            short_sha: format!("sha-{order}"),
+            subject: subject.to_string(),
+            author: "Test".to_string(),
+            author_email: "test@example.com".to_string(),
+            timestamp,
+            order,
+            session_id: None,
+            session_status: None,
+            completion_reason: None,
+            is_own_commit: false,
+        }
+    }
+
+    /// A cherry-picked commit keeps its original author date, which would sort
+    /// it above the commit it actually follows. The clamp pins it down instead.
+    #[test]
+    fn clamp_keeps_out_of_order_author_dates_in_branch_order() {
+        // Newest-first, as `git log` emits.
+        let mut commits = vec![
+            commit_at("fix: lexer", 300, 2),
+            commit_at("chore: cherry-picked", 100, 1),
+            commit_at("feat: parser", 200, 0),
+        ];
+
+        clamp_commit_timestamps_monotonic(&mut commits);
+
+        assert_eq!(
+            commits.iter().map(|c| c.timestamp).collect::<Vec<_>>(),
+            vec![300, 200, 200]
+        );
+    }
+
+    #[test]
+    fn clamp_leaves_already_increasing_author_dates_alone() {
+        let mut commits = vec![commit_at("fix: lexer", 300, 1), commit_at("feat", 200, 0)];
+
+        clamp_commit_timestamps_monotonic(&mut commits);
+
+        assert_eq!(
+            commits.iter().map(|c| c.timestamp).collect::<Vec<_>>(),
+            vec![300, 200]
+        );
+    }
+
+    /// Commit the working tree with a fixed author date, leaving the committer
+    /// date at "now" — the same split a rebase creates.
+    fn commit_authored_at(repo: &TempGitRepo, message: &str, author_epoch: i64) -> String {
+        repo.run_git(&["add", "."]);
+        repo.run_git(&[
+            "commit",
+            "--date",
+            &format!("@{author_epoch} +0000"),
+            "-m",
+            message,
+        ]);
+        repo.run_git(&["rev-parse", "HEAD"]).trim().to_string()
+    }
+
+    fn committer_time(repo: &TempGitRepo, sha: &str) -> i64 {
+        repo.run_git(&["show", "-s", "--format=%ct", sha])
+            .trim()
+            .parse()
+            .unwrap()
+    }
+
+    /// The timeline interleaves commits with notes by timestamp. A rebase
+    /// rewrites every committer date to "now" while notes keep their DB times,
+    /// so sorting on committer time would sink every commit below every note.
+    /// Author dates survive the rewrite, so the interleaving does too.
+    #[test]
+    fn build_branch_timeline_keeps_notes_interleaved_across_a_rebase() {
+        const FIRST_AUTHORED_AT: i64 = 1_700_000_000;
+        const NOTE_WRITTEN_AT: i64 = 1_700_000_100;
+        const SECOND_AUTHORED_AT: i64 = 1_700_000_200;
+
+        let repo = TempGitRepo::new();
+        repo.write_file("base.txt", "base\n");
+        let base_sha = repo.commit("chore: base");
+        repo.run_git(&["update-ref", "refs/remotes/origin/main", &base_sha]);
+
+        repo.run_git(&["checkout", "-b", "feature"]);
+        repo.write_file("parser.txt", "parser\n");
+        commit_authored_at(&repo, "feat: parser", FIRST_AUTHORED_AT);
+        repo.write_file("lexer.txt", "lexer\n");
+        let old_head = commit_authored_at(&repo, "fix: lexer", SECOND_AUTHORED_AT);
+
+        let (store, branch) = store_with_branch(&repo);
+        let mut note = Note::new(&branch.id, "Plan", "the plan");
+        note.created_at = NOTE_WRITTEN_AT * 1000;
+        note.updated_at = note.created_at;
+        note.completed_at = Some(note.created_at);
+        store.create_note(&note).unwrap();
+
+        let before = build_branch_timeline(&store, &branch.id).unwrap();
+        assert_eq!(
+            timeline_order(&before),
+            vec!["feat: parser", "Plan", "fix: lexer"],
+            "the note was written between the two commits"
+        );
+
+        // Move the base out from under the branch, then really rebase onto it.
+        repo.run_git(&["checkout", "main"]);
+        repo.write_file("moved.txt", "moved\n");
+        let moved_base = repo.commit("chore: move base");
+        repo.run_git(&["update-ref", "refs/remotes/origin/main", &moved_base]);
+        repo.run_git(&["checkout", "feature"]);
+        repo.run_git(&["rebase", "--signoff", "origin/main"]);
+        let new_head = repo.run_git(&["rev-parse", "HEAD"]).trim().to_string();
+        assert_ne!(new_head, old_head, "the rebase must rewrite the SHAs");
+
+        let after = build_branch_timeline(&store, &branch.id).unwrap();
+
+        assert_eq!(
+            timeline_order(&after),
+            vec!["feat: parser", "Plan", "fix: lexer"],
+            "the note must stay between the two commits after the rebase"
+        );
+        assert_eq!(
+            after
+                .commits
+                .iter()
+                .map(|c| c.timestamp)
+                .collect::<Vec<_>>(),
+            vec![SECOND_AUTHORED_AT, FIRST_AUTHORED_AT],
+            "the rewritten commits keep their original author dates"
+        );
+        // The committer dates really are elsewhere — a `%ct` sort would put
+        // both commits after the note rather than around it.
+        assert!(
+            committer_time(&repo, &new_head) > NOTE_WRITTEN_AT,
+            "committer time is 'now', long after the note was written"
+        );
+    }
+
+    /// Commit subjects and note titles, merged and sorted the way the frontend
+    /// does it (`BranchTimeline.svelte`): ascending timestamp, `order` breaking
+    /// ties between commits.
+    fn timeline_order(timeline: &BranchTimeline) -> Vec<&str> {
+        let mut items: Vec<(i64, i64, &str)> = timeline
+            .commits
+            .iter()
+            .map(|c| (c.timestamp, c.order, c.subject.as_str()))
+            .chain(timeline.notes.iter().map(|n| {
+                (
+                    n.completed_at.unwrap_or(n.created_at) / 1000,
+                    0,
+                    n.title.as_str(),
+                )
+            }))
+            .collect();
+        items.sort_by_key(|(timestamp, order, _)| (*timestamp, *order));
+        items.into_iter().map(|(_, _, label)| label).collect()
     }
 }

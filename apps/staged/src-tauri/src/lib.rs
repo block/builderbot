@@ -142,6 +142,10 @@ pub struct CommitTimelineItem {
     pub subject: String,
     pub author: String,
     pub author_email: String,
+    /// Unix seconds the timeline sorts on. Branch commits carry author time
+    /// (`%at`), which a rebase preserves, so they keep their place among the
+    /// notes and reviews they're interleaved with; pending rows carry their DB
+    /// `created_at`, and repo-browse listings carry committer time.
     pub timestamp: i64,
     /// Position in git's topological order (0 = oldest on the branch).
     /// Used as a tiebreaker when multiple commits share the same second-level timestamp.

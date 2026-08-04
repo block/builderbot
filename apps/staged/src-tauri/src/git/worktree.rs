@@ -299,6 +299,23 @@ pub fn get_head_sha(worktree: &Path) -> Result<String, GitError> {
     Ok(output.trim().to_string())
 }
 
+/// `git log` format for the branch-timeline commit producers.
+///
+/// Carries both clocks: `%ct` (committer time) is what a rebase rewrites, so
+/// it answers "did the branch change since?"; `%at` (author time) is what a
+/// rebase preserves, so it answers "when was this commit written" and is what
+/// the timeline sorts on.
+pub const BRANCH_COMMIT_LOG_FORMAT: &str = "--format=%H|%h|%s|%an|%ae|%ct|%at";
+
+/// Read the author timestamp from a [`BRANCH_COMMIT_LOG_FORMAT`] line's
+/// trailing field, falling back to the committer timestamp for six-field lines
+/// from a producer still on the older format.
+pub fn parse_author_timestamp(field: Option<&str>, committer_timestamp: i64) -> i64 {
+    field
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(committer_timestamp)
+}
+
 /// Get commits on a branch since it diverged from base.
 /// Returns commits in reverse chronological order (newest first).
 #[derive(Debug, Clone)]
@@ -308,7 +325,10 @@ pub struct CommitInfo {
     pub subject: String,
     pub author: String,
     pub author_email: String,
+    /// Committer time (`%ct`), in unix seconds. Rewritten by a rebase.
     pub timestamp: i64,
+    /// Author time (`%at`), in unix seconds. Preserved by a rebase.
+    pub author_timestamp: i64,
     /// Position in git's topological order (0 = oldest on the branch).
     /// Used as a tiebreaker when multiple commits share the same second-level timestamp.
     pub order: i64,
@@ -329,25 +349,32 @@ pub fn get_commits_since_base(worktree: &Path, base: &str) -> Result<Vec<CommitI
     let mb_output = cli::run_smart(worktree, &["merge-base", base, "HEAD"])?;
     let merge_base = mb_output.trim().to_string();
 
-    let format = "--format=%H|%h|%s|%an|%ae|%ct";
     let range = format!("{merge_base}..HEAD");
 
-    let output = cli::run_smart(worktree, &["log", format, &range])?;
+    let output = cli::run_smart(worktree, &["log", BRANCH_COMMIT_LOG_FORMAT, &range])?;
 
+    Ok(parse_commit_info_lines(&output))
+}
+
+/// Parse [`BRANCH_COMMIT_LOG_FORMAT`] lines, newest first as `git log` emits
+/// them, assigning `order` so that 0 is the oldest commit on the branch.
+fn parse_commit_info_lines(output: &str) -> Vec<CommitInfo> {
     let mut commits = Vec::new();
     for line in output.lines() {
         if line.is_empty() {
             continue;
         }
-        let parts: Vec<&str> = line.splitn(6, '|').collect();
+        let parts: Vec<&str> = line.splitn(7, '|').collect();
         if parts.len() >= 6 {
+            let timestamp = parts[5].parse().unwrap_or(0);
             commits.push(CommitInfo {
                 sha: parts[0].to_string(),
                 short_sha: parts[1].to_string(),
                 subject: parts[2].to_string(),
                 author: parts[3].to_string(),
                 author_email: parts[4].to_string(),
-                timestamp: parts[5].parse().unwrap_or(0),
+                timestamp,
+                author_timestamp: parse_author_timestamp(parts.get(6).copied(), timestamp),
                 order: 0, // placeholder, assigned below
             });
         }
@@ -359,7 +386,7 @@ pub fn get_commits_since_base(worktree: &Path, base: &str) -> Result<Vec<CommitI
         commit.order = len - 1 - i as i64;
     }
 
-    Ok(commits)
+    commits
 }
 
 /// Get the full commit log (with bodies) between base and HEAD.
@@ -383,14 +410,17 @@ pub fn get_full_commit_log(worktree: &Path, base: &str) -> Result<String, GitErr
     let range = format!("{merge_base}..HEAD");
 
     // --reverse gives oldest-first ordering
-    // %x00 = record separator, %x01 = field separator, %ct = unix timestamp
+    // %x00 = record separator, %x01 = field separator
+    // %at = author time — the prefix is purely an ordering key, and author
+    // time is the one a rebase preserves, so rewritten commits keep their
+    // place among the session messages they're interleaved with
     // %B is the full commit message (subject + body)
     let output = cli::run(
         worktree,
         &[
             "log",
             "--reverse",
-            "--format=%x00%ct%x01commit %H%nAuthor: %an%nDate: %ci%n%n%B",
+            "--format=%x00%at%x01commit %H%nAuthor: %an%nDate: %ci%n%n%B",
             &range,
         ],
     )?;
@@ -767,6 +797,35 @@ pub fn has_unpushed_commits(worktree: &Path, branch: &str) -> Result<bool, GitEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_both_clocks_and_orders_from_the_oldest_commit() {
+        let commits = parse_commit_info_lines(concat!(
+            "def456|def456a|fix: lexer|Test|test@example.com|9200|1200\n",
+            "abc123|abc123a|feat: parser|Test|test@example.com|9100|1100\n",
+        ));
+
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].timestamp, 9200);
+        assert_eq!(commits[0].author_timestamp, 1200);
+        assert_eq!(commits[1].timestamp, 9100);
+        assert_eq!(commits[1].author_timestamp, 1100);
+        // git log is newest-first, so the last line is the oldest commit.
+        assert_eq!(commits[0].order, 1);
+        assert_eq!(commits[1].order, 0);
+    }
+
+    /// A producer still on the six-field format keeps parsing; its commits just
+    /// fall back to committer time.
+    #[test]
+    fn falls_back_to_committer_time_when_the_author_field_is_absent() {
+        let commits =
+            parse_commit_info_lines("abc123|abc123a|feat: parser|Test|test@example.com|9100\n");
+
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].timestamp, 9100);
+        assert_eq!(commits[0].author_timestamp, 9100);
+    }
 
     #[test]
     fn test_worktree_path_sanitization() {

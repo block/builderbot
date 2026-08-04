@@ -2333,6 +2333,7 @@ pub fn run() {
             // Sessions
             session_commands::discover_acp_providers,
             session_commands::discover_acp_config,
+            session_commands::get_active_sessions,
             session_commands::get_session,
             session_commands::get_session_messages,
             session_commands::get_session_messages_since,

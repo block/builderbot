@@ -546,6 +546,33 @@ fn test_transition_queued_to_running_does_not_overwrite_cancelled_session() {
 }
 
 #[test]
+fn test_get_active_sessions_returns_running_and_queued_only() {
+    let store = Store::in_memory().unwrap();
+
+    let running = Session::new_running("running", Path::new("/tmp"));
+    store.create_session(&running).unwrap();
+    let queued = Session::new_queued("queued");
+    store.create_session(&queued).unwrap();
+
+    for status in [
+        SessionStatus::Completed,
+        SessionStatus::Error,
+        SessionStatus::Cancelled,
+    ] {
+        let terminal = Session::new_running("terminal", Path::new("/tmp"));
+        store.create_session(&terminal).unwrap();
+        store
+            .update_session_status(&terminal.id, status, None, None)
+            .unwrap();
+    }
+
+    let active = store.get_active_sessions().unwrap();
+    assert_eq!(active.len(), 2);
+    assert!(active.iter().any(|s| s.id == running.id));
+    assert!(active.iter().any(|s| s.id == queued.id));
+}
+
+#[test]
 fn test_queued_session_messages_order_and_image_ids() {
     let store = Store::in_memory().unwrap();
     let session = Session::new_running("work", Path::new("/tmp"));

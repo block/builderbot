@@ -233,6 +233,24 @@ impl Store {
         Ok(sessions)
     }
 
+    /// Get all running and queued sessions, oldest first.
+    ///
+    /// Backs the `get_active_sessions` busy-state snapshot command, which
+    /// clients hydrate from on load or reconnect instead of relying solely on
+    /// accumulated `session-status-changed` events.
+    pub fn get_active_sessions(&self) -> Result<Vec<Session>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection
+             FROM sessions WHERE status IN ('running', 'queued')
+             ORDER BY created_at ASC",
+        )?;
+        let sessions = stmt
+            .query_map([], Self::row_to_session)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sessions)
+    }
+
     /// Store the ACP session ID returned by the agent after `new_session`.
     /// This is used by `load_session` to resume the conversation on follow-up turns.
     pub fn set_agent_session_id(&self, id: &str, agent_session_id: &str) -> Result<(), StoreError> {

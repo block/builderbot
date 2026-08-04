@@ -901,6 +901,99 @@ pub async fn discover_acp_config(
 // Read-only queries (used by frontend polling)
 // =============================================================================
 
+/// A running or queued session projected to its branch/project context.
+///
+/// This is the busy-state snapshot clients hydrate from on load or reconnect.
+/// It carries the same discriminators as `SessionStatusEvent` so the snapshot
+/// and the `session-status-changed` delta stream describe sessions identically.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveSessionInfo {
+    pub session_id: String,
+    pub project_id: Option<String>,
+    pub branch_id: Option<String>,
+    pub session_type: Option<String>,
+    pub status: String,
+    pub is_auto_review: bool,
+}
+
+/// Project one session to branch/project context and session type.
+///
+/// Keep the derivation aligned with `resume_session_for_store`, which stamps
+/// the same fields onto the `"running"` event for resumed sessions. Pipeline
+/// sessions (pr/push) link no artifact, so their branch and project stay
+/// unresolved and their type falls back to prompt inference.
+fn project_active_session(store: &Store, session: &store::Session) -> ActiveSessionInfo {
+    let project_note = store
+        .get_project_note_by_session(&session.id)
+        .ok()
+        .flatten();
+    let linked_commit = store.get_commit_by_session(&session.id).ok().flatten();
+    let linked_note = store.get_note_by_session(&session.id).ok().flatten();
+    let linked_review = store.get_review_by_session(&session.id).ok().flatten();
+
+    let session_type = if project_note.is_some() {
+        // Project notes and branch notes intentionally share the "note"
+        // session type because the frontend only needs a single "note work is
+        // running" signal for project-level activity indicators.
+        Some("note".to_string())
+    } else if linked_commit.is_some() {
+        Some("commit".to_string())
+    } else if linked_note.is_some() {
+        Some("note".to_string())
+    } else if linked_review.is_some() {
+        Some("review".to_string())
+    } else {
+        infer_branch_resume_session_type(&session.prompt).map(str::to_string)
+    };
+
+    let branch_id = linked_commit
+        .as_ref()
+        .map(|commit| commit.branch_id.clone())
+        .or_else(|| linked_note.as_ref().map(|note| note.branch_id.clone()))
+        .or_else(|| {
+            linked_review
+                .as_ref()
+                .map(|review| review.branch_id.clone())
+        });
+
+    let project_id = if let Some(note) = &project_note {
+        Some(note.project_id.clone())
+    } else {
+        branch_id
+            .as_deref()
+            .and_then(|bid| store.get_branch(bid).ok().flatten())
+            .map(|branch| branch.project_id)
+    };
+
+    ActiveSessionInfo {
+        session_id: session.id.clone(),
+        project_id,
+        branch_id,
+        session_type,
+        status: session.status.as_str().to_string(),
+        is_auto_review: linked_review.map(|review| review.is_auto).unwrap_or(false),
+    }
+}
+
+/// Synchronous body of [`get_active_sessions`], shared with the web-mode
+/// `dispatch()` arm.
+pub(crate) fn get_active_sessions_impl(store: &Store) -> Result<Vec<ActiveSessionInfo>, String> {
+    let sessions = store.get_active_sessions().map_err(|e| e.to_string())?;
+    Ok(sessions
+        .iter()
+        .map(|session| project_active_session(store, session))
+        .collect())
+}
+
+#[tauri::command]
+pub fn get_active_sessions(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+) -> Result<Vec<ActiveSessionInfo>, String> {
+    let store = get_store(&store)?;
+    get_active_sessions_impl(&store)
+}
+
 #[tauri::command]
 pub fn get_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -5320,6 +5413,117 @@ mod tests {
             BranchSessionScheduleKind::Review,
             &active
         ));
+    }
+
+    #[test]
+    fn active_sessions_snapshot_projects_branch_sessions() {
+        let (store, branch) = setup_branch_store();
+        let commit_session =
+            create_branch_commit_session(&store, &branch.id, store::SessionStatus::Running);
+        let note_session =
+            create_branch_note_session(&store, &branch.id, store::SessionStatus::Queued);
+        let review_session =
+            create_branch_review_session(&store, &branch.id, store::SessionStatus::Running);
+
+        let snapshot = get_active_sessions_impl(&store).unwrap();
+        assert_eq!(snapshot.len(), 3);
+
+        let info_for = |session_id: &str| {
+            snapshot
+                .iter()
+                .find(|info| info.session_id == session_id)
+                .unwrap()
+        };
+
+        let commit_info = info_for(&commit_session.id);
+        assert_eq!(commit_info.branch_id.as_deref(), Some(branch.id.as_str()));
+        assert_eq!(
+            commit_info.project_id.as_deref(),
+            Some(branch.project_id.as_str())
+        );
+        assert_eq!(commit_info.session_type.as_deref(), Some("commit"));
+        assert_eq!(commit_info.status, "running");
+        assert!(!commit_info.is_auto_review);
+
+        let note_info = info_for(&note_session.id);
+        assert_eq!(note_info.session_type.as_deref(), Some("note"));
+        assert_eq!(note_info.status, "queued");
+
+        let review_info = info_for(&review_session.id);
+        assert_eq!(review_info.session_type.as_deref(), Some("review"));
+        assert!(!review_info.is_auto_review);
+    }
+
+    #[test]
+    fn active_sessions_snapshot_marks_auto_reviews() {
+        let (store, branch) = setup_branch_store();
+        let (session, _review) =
+            create_auto_review(&store, &branch.id, store::SessionStatus::Running);
+
+        let snapshot = get_active_sessions_impl(&store).unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].session_id, session.id);
+        assert_eq!(snapshot[0].session_type.as_deref(), Some("review"));
+        assert!(snapshot[0].is_auto_review);
+    }
+
+    #[test]
+    fn active_sessions_snapshot_projects_project_note_sessions() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let project = store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let session =
+            create_session_with_status(&store, "project note", store::SessionStatus::Running);
+        let note = store::ProjectNote::new(&project.id, "note", "").with_session(&session.id);
+        store.create_project_note(&note).unwrap();
+
+        let snapshot = get_active_sessions_impl(&store).unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].project_id.as_deref(), Some(project.id.as_str()));
+        assert_eq!(snapshot[0].branch_id, None);
+        assert_eq!(snapshot[0].session_type.as_deref(), Some("note"));
+    }
+
+    #[test]
+    fn active_sessions_snapshot_infers_pipeline_session_type_from_prompt() {
+        let store = Arc::new(Store::in_memory().unwrap());
+        // pr/push pipeline sessions link no artifact, so the type falls back
+        // to the same prompt inference the resume path uses.
+        let pr_session = create_session_with_status(
+            &store,
+            "Create a pull request for the current branch.",
+            store::SessionStatus::Running,
+        );
+        let unknown_session =
+            create_session_with_status(&store, "anything else", store::SessionStatus::Running);
+
+        let snapshot = get_active_sessions_impl(&store).unwrap();
+        assert_eq!(snapshot.len(), 2);
+
+        let pr_info = snapshot
+            .iter()
+            .find(|info| info.session_id == pr_session.id)
+            .unwrap();
+        assert_eq!(pr_info.session_type.as_deref(), Some("pr"));
+        assert_eq!(pr_info.branch_id, None);
+        assert_eq!(pr_info.project_id, None);
+
+        let unknown_info = snapshot
+            .iter()
+            .find(|info| info.session_id == unknown_session.id)
+            .unwrap();
+        assert_eq!(unknown_info.session_type, None);
+    }
+
+    #[test]
+    fn active_sessions_snapshot_excludes_terminal_sessions() {
+        let (store, branch) = setup_branch_store();
+        let session = create_branch_note_session(&store, &branch.id, store::SessionStatus::Running);
+        store
+            .update_session_status(&session.id, store::SessionStatus::Completed, None, None)
+            .unwrap();
+
+        assert!(get_active_sessions_impl(&store).unwrap().is_empty());
     }
 
     #[test]

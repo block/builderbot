@@ -4154,6 +4154,11 @@ fn render_timeline(mut timeline: Vec<TimelineEntry>, error: Option<String>) -> S
 ///
 /// Expects the format produced by `--format=%x00%at%x01commit %H…`:
 /// `\0<unix_ts>\x01<display_text>` per commit.
+///
+/// The prefix is author time, which a rebase preserves — but author dates
+/// aren't monotonic along a branch (a cherry-pick keeps its old one), so the
+/// entries are clamped the same way the branch card's are, keeping
+/// "Branch History (oldest first)" in `git log` order.
 fn parse_timestamped_log(output: &str) -> Vec<TimelineEntry> {
     let mut entries = Vec::new();
     // The log is produced with --reverse (oldest-first), so index 0 = oldest.
@@ -4174,6 +4179,7 @@ fn parse_timestamped_log(output: &str) -> Vec<TimelineEntry> {
             }
         }
     }
+    crate::timeline::clamp_timestamps_monotonic(entries.iter_mut().map(|e| &mut e.timestamp));
     entries
 }
 
@@ -6761,6 +6767,29 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert!(entries[0].content.contains("user kept this review alive"));
+    }
+
+    /// The log's prefix is author time, so a cherry-picked commit can carry a
+    /// date older than the commit it follows. "Branch History (oldest first)"
+    /// sorts on that prefix, so the entries have to be clamped into branch
+    /// order the same way the branch card's commits are.
+    #[test]
+    fn parse_timestamped_log_clamps_out_of_order_author_dates() {
+        // --reverse output: oldest first, with a cherry-pick in the middle.
+        let log = "\u{0}200\u{1}commit aaa\nfirst\
+            \u{0}100\u{1}commit bbb\ncherry-picked\
+            \u{0}300\u{1}commit ccc\nthird";
+
+        let entries = parse_timestamped_log(log);
+
+        assert_eq!(
+            entries.iter().map(|e| e.timestamp).collect::<Vec<_>>(),
+            vec![200, 200, 300]
+        );
+        assert_eq!(
+            entries.iter().map(|e| e.order).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
     }
 
     #[test]

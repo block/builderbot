@@ -39,6 +39,14 @@ impl TempGitRepo {
     }
 
     pub fn run_git(&self, args: &[&str]) -> String {
+        self.try_run_git(args)
+            .unwrap_or_else(|stderr| panic!("git {args:?} failed: {stderr}"))
+    }
+
+    /// Run git and report the exit status instead of asserting on it, for
+    /// commands whose failure is the point — a `git rebase` that stops on a
+    /// conflict, say. `Err` carries stderr.
+    pub fn try_run_git(&self, args: &[&str]) -> Result<String, String> {
         let mut command = Command::new("git");
         command
             .arg("-c")
@@ -50,14 +58,11 @@ impl TempGitRepo {
 
         let output = command.output().unwrap();
 
-        assert!(
-            output.status.success(),
-            "git {:?} failed: {}",
-            args,
-            String::from_utf8_lossy(&output.stderr)
-        );
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+        }
 
-        String::from_utf8(output.stdout).unwrap()
+        Ok(String::from_utf8(output.stdout).unwrap())
     }
 }
 

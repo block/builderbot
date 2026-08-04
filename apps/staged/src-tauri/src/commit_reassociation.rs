@@ -98,7 +98,9 @@ pub fn match_rewritten_commits(
 /// rebase rewrote them into. Returns how many rows were remapped.
 ///
 /// Safe to call when nothing was rewritten: with no orphaned rows it stops
-/// after listing the branch and returns 0.
+/// after listing the branch and returns 0. Also safe to call while a rebase is
+/// still in flight — it returns 0 without touching a row (see
+/// [`head_is_on_branch`]).
 pub fn reassociate_after_rebase(
     store: &Store,
     branch_id: &str,
@@ -123,6 +125,15 @@ pub fn reassociate_after_rebase(
             None => crate::git::cli_run_smart(working_dir, args).map_err(|e| e.to_string()),
         }
     };
+
+    let branch_name = crate::git::branch_name_without_origin(&branch.branch_name);
+    if !head_is_on_branch(&git, branch_name) {
+        log::warn!(
+            "Skipping commit reassociation on branch {branch_id}: HEAD isn't on {branch_name} \
+             (rebase still in progress?)"
+        );
+        return Ok(0);
+    }
 
     let base_ref = crate::git::origin_ref_for_branch(&branch.base_branch);
     let on_branch = list_branch_commits(&git, &base_ref)?;
@@ -180,6 +191,30 @@ pub fn reassociate_after_rebase(
     store
         .remap_commit_shas(branch_id, &pairs)
         .map_err(|e| e.to_string())
+}
+
+/// Whether HEAD is the branch we're about to reassociate, rather than a
+/// detached commit.
+///
+/// This is how we tell a finished rebase from one still in flight: a rebase
+/// detaches HEAD for the whole rewrite and only moves the branch ref at the
+/// end. If the agent stops with conflicts unresolved — or its turn simply ends
+/// — HEAD sits on a partially applied commit, and repointing rows there would
+/// be strictly worse than leaving them orphaned: a later `git rebase --abort`
+/// restores the original SHAs, and the rows (plus their reviews) would then
+/// name commits that are on no branch at all. Any other detached or
+/// wrong-branch HEAD is skipped for the same reason — `merge-base..HEAD` isn't
+/// the branch's history, so nothing it lists can be trusted as a rewrite of it.
+fn head_is_on_branch<F>(git: &F, branch_name: &str) -> bool
+where
+    F: Fn(&[&str]) -> Result<String, String>,
+{
+    // Exits non-zero on a detached HEAD; a failure for any other reason also
+    // reads as "don't touch anything", which is the safe direction.
+    match git(&["symbolic-ref", "--quiet", "--short", "HEAD"]) {
+        Ok(head) => head.trim() == branch_name,
+        Err(_) => false,
+    }
 }
 
 /// List the branch's commits as `(sha, identity)` pairs, oldest first.
@@ -389,5 +424,20 @@ mod tests {
     fn ignores_malformed_log_lines() {
         assert!(parse_identity_line("").is_none());
         assert!(parse_identity_line("abc111|a@example.com|100").is_none());
+    }
+
+    /// Mid-rebase, `symbolic-ref` exits non-zero because HEAD is detached; a
+    /// checkout of some other branch answers with its name. Neither is the
+    /// branch we were asked to reassociate.
+    #[test]
+    fn head_is_on_branch_requires_an_attached_matching_head() {
+        let on_feature = |_: &[&str]| -> Result<String, String> { Ok("feature\n".to_string()) };
+        assert!(head_is_on_branch(&on_feature, "feature"));
+        assert!(!head_is_on_branch(&on_feature, "other"));
+
+        let detached = |_: &[&str]| -> Result<String, String> {
+            Err("fatal: ref HEAD is not a symbolic ref".to_string())
+        };
+        assert!(!head_is_on_branch(&detached, "feature"));
     }
 }

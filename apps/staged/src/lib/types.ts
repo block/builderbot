@@ -126,8 +126,13 @@ export interface CommitTimelineItem {
   subject: string;
   author: string;
   authorEmail: string;
-  /** Unix timestamp in seconds */
+  /** Unix timestamp in seconds — author time for branch commits, so it survives a rebase. */
   timestamp: number;
+  /**
+   * Unix timestamp in seconds to sort on, clamped so it can't decrease in
+   * branch order. Order only — render `timestamp`.
+   */
+  sortTimestamp: number;
   /** Position in git's topological order (0 = oldest). Tiebreaker for same-second timestamps. */
   order: number;
   sessionId: string | null;

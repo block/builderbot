@@ -225,7 +225,7 @@ function timelineToSortableHashtagItems(
       repoSubpath,
       branchId,
       projectId,
-      sortTimestamp: commit.timestamp,
+      sortTimestamp: commit.sortTimestamp,
       sortOrder: commit.order,
     });
   }

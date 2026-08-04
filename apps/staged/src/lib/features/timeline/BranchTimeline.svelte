@@ -217,6 +217,7 @@
     secondaryMeta?: string;
     tertiaryMeta?: string;
     deleting?: boolean;
+    /** Sort key in unix seconds. Commits pass their clamped `sortTimestamp`; displayed times come from `meta`. */
     timestamp: number;
     /** Position in git's topological order (0 = oldest). Tiebreaker for same-second timestamps. */
     order: number;
@@ -552,7 +553,7 @@
         secondaryMeta: isDeleting || isRunning ? undefined : commit.shortSha || undefined,
         tertiaryMeta: showAuthor ? commit.author : undefined,
         deleting: isDeleting,
-        timestamp: commit.timestamp,
+        timestamp: commit.sortTimestamp,
         order: commit.order,
         sessionId: commit.sessionId ?? undefined,
         commitSha: commit.sha || undefined,
@@ -568,7 +569,7 @@
 
       if (type === 'commit' && commit.sha) {
         commitAnchors.set(commit.sha, {
-          timestamp: commit.timestamp,
+          timestamp: commit.sortTimestamp,
           order: commit.order,
           shortSha: commit.shortSha || undefined,
         });

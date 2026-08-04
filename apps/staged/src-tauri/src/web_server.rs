@@ -995,34 +995,37 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 let max_count = limit.unwrap_or(50);
                 let origin_ref = format!("origin/{default_branch}");
                 let limit_arg = format!("-{max_count}");
-                let format_arg = "--format=%H|%h|%s|%an|%ae|%ct";
-                let output =
-                    crate::git::cli_run(&clone_path, &["log", &limit_arg, format_arg, &origin_ref])
-                        .map_err(|e| format!("Failed to get commits: {e}"))?;
+                let output = crate::git::cli_run(
+                    &clone_path,
+                    &[
+                        "log",
+                        &limit_arg,
+                        crate::git::BRANCH_COMMIT_LOG_FORMAT,
+                        &origin_ref,
+                    ],
+                )
+                .map_err(|e| format!("Failed to get commits: {e}"))?;
                 let commits: Vec<crate::CommitTimelineItem> = output
                     .lines()
-                    .filter(|l| !l.is_empty())
                     .enumerate()
                     .filter_map(|(i, line)| {
-                        let parts: Vec<&str> = line.splitn(6, '|').collect();
-                        if parts.len() >= 6 {
-                            Some(crate::CommitTimelineItem {
-                                id: None,
-                                sha: parts[0].to_string(),
-                                short_sha: parts[1].to_string(),
-                                subject: parts[2].to_string(),
-                                author: parts[3].to_string(),
-                                author_email: parts[4].to_string(),
-                                timestamp: parts[5].parse().unwrap_or(0),
-                                order: (max_count - 1 - i) as i64,
-                                session_id: None,
-                                session_status: None,
-                                completion_reason: None,
-                                is_own_commit: false,
-                            })
-                        } else {
-                            None
-                        }
+                        let fields = crate::git::parse_branch_commit_line(line)?;
+                        Some(crate::CommitTimelineItem {
+                            id: None,
+                            sha: fields.sha.to_string(),
+                            short_sha: fields.short_sha.to_string(),
+                            subject: fields.subject.to_string(),
+                            author: fields.author.to_string(),
+                            author_email: fields.author_email.to_string(),
+                            // Committer time, as in the Tauri command this mirrors.
+                            timestamp: fields.committer_timestamp,
+                            sort_timestamp: fields.committer_timestamp,
+                            order: (max_count - 1 - i) as i64,
+                            session_id: None,
+                            session_status: None,
+                            completion_reason: None,
+                            is_own_commit: false,
+                        })
                     })
                     .collect();
                 Ok(crate::RepoDefaultBranchTimeline {

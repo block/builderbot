@@ -3865,6 +3865,94 @@ mod tests {
         assert_reassociated(&fixture);
     }
 
+    /// The handoff also runs when the agent's turn ends with the rebase still
+    /// stopped on a conflict. HEAD is detached on a partially applied rewrite
+    /// there, and those SHAs only survive until someone runs `git rebase
+    /// --abort` — which restores the originals — so reassociating onto them
+    /// would leave every row, and its reviews, naming commits on no branch at
+    /// all. The rows have to stay put until the rebase finishes.
+    #[test]
+    fn rebase_stopped_on_a_conflict_leaves_the_rows_alone() {
+        use crate::store::{Commit, Review, ReviewScope, Session};
+
+        let repo = crate::test_utils::TempGitRepo::new();
+        repo.write_file("shared.txt", "base\n");
+        let base_sha = repo.commit("chore: base");
+        repo.run_git(&["update-ref", "refs/remotes/origin/main", &base_sha]);
+
+        // Two commits: the first rebases cleanly, the second conflicts — so the
+        // stopped rebase leaves a rewritten commit on a detached HEAD.
+        repo.run_git(&["checkout", "-b", "feature"]);
+        repo.write_file("parser.txt", "parser\n");
+        let old_first = repo.commit("feat: parser");
+        repo.write_file("shared.txt", "feature\n");
+        let old_head = repo.commit("fix: lexer");
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let project = crate::store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = crate::store::Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+
+        let mut rows = Vec::new();
+        for (index, sha) in [&old_first, &old_head].into_iter().enumerate() {
+            let session = Session::new_running("Author a commit", repo.path());
+            store.create_session(&session).unwrap();
+            let mut row = Commit::new_with_sha(&branch.id, sha).with_session(&session.id);
+            row.created_at = 1_000 + index as i64;
+            row.updated_at = row.created_at;
+            store.create_commit(&row).unwrap();
+            rows.push(row.id);
+        }
+        let review = Review::new(&branch.id, &old_head, ReviewScope::Commit);
+        store.create_review(&review).unwrap();
+
+        let mut rebase_session = Session::new_running("Rebase branch", repo.path());
+        rebase_session.pipeline =
+            Some(PipelineExecution::from_steps(&[]).with_kind(PipelineKind::Rebase));
+        store.create_session(&rebase_session).unwrap();
+        let pending = Commit::new_pending(&branch.id).with_session(&rebase_session.id);
+        store.create_commit(&pending).unwrap();
+
+        // Move the base with a conflicting change, then rebase into the conflict.
+        repo.run_git(&["checkout", "main"]);
+        repo.write_file("shared.txt", "moved\n");
+        let moved_base = repo.commit("chore: move base");
+        repo.run_git(&["update-ref", "refs/remotes/origin/main", &moved_base]);
+        repo.run_git(&["checkout", "feature"]);
+        assert!(
+            repo.try_run_git(&["rebase", "origin/main"]).is_err(),
+            "the rebase must stop on the conflict"
+        );
+        assert_ne!(
+            repo.run_git(&["rev-parse", "HEAD"]).trim(),
+            old_head,
+            "the stopped rebase must have moved HEAD off the branch"
+        );
+
+        run_post_completion_hooks(
+            &rebase_session.id,
+            repo.path(),
+            Some(&old_head),
+            None,
+            &store,
+        );
+
+        assert_eq!(
+            store.get_commit(&rows[0]).unwrap().unwrap().sha.as_deref(),
+            Some(old_first.as_str()),
+            "the first commit's row must keep the SHA an abort would restore"
+        );
+        assert_eq!(
+            store.get_commit(&rows[1]).unwrap().unwrap().sha.as_deref(),
+            Some(old_head.as_str())
+        );
+        assert_eq!(
+            store.get_review(&review.id).unwrap().unwrap().commit_sha,
+            old_head
+        );
+    }
+
     // ── find_closing_fence ──────────────────────────────────────────────
 
     #[test]

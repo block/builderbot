@@ -299,21 +299,59 @@ pub fn get_head_sha(worktree: &Path) -> Result<String, GitError> {
     Ok(output.trim().to_string())
 }
 
-/// `git log` format for the branch-timeline commit producers.
+/// The `git log` field list behind [`BRANCH_COMMIT_LOG_FORMAT`], for the one
+/// producer that inlines it into a shell script (`state::BATCH_FAST_SCRIPT`)
+/// instead of passing it as an argument.
+pub const BRANCH_COMMIT_LOG_FIELDS: &str = "%H|%h|%an|%ae|%ct|%at|%s";
+
+/// `git log` format for every commit producer that feeds a
+/// [`CommitTimelineItem`](crate::CommitTimelineItem).
 ///
 /// Carries both clocks: `%ct` (committer time) is what a rebase rewrites, so
 /// it answers "did the branch change since?"; `%at` (author time) is what a
 /// rebase preserves, so it answers "when was this commit written" and is what
-/// the timeline sorts on.
-pub const BRANCH_COMMIT_LOG_FORMAT: &str = "--format=%H|%h|%s|%an|%ae|%ct|%at";
+/// the branch timeline sorts on.
+///
+/// The subject goes last because it's the only field that can contain the
+/// delimiter, so [`parse_branch_commit_line`] can take it as the remainder —
+/// the same shape as `commit_reassociation`'s format.
+pub const BRANCH_COMMIT_LOG_FORMAT: &str = "--format=%H|%h|%an|%ae|%ct|%at|%s";
 
-/// Read the author timestamp from a [`BRANCH_COMMIT_LOG_FORMAT`] line's
-/// trailing field, falling back to the committer timestamp for six-field lines
-/// from a producer still on the older format.
-pub fn parse_author_timestamp(field: Option<&str>, committer_timestamp: i64) -> i64 {
-    field
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(committer_timestamp)
+/// One [`BRANCH_COMMIT_LOG_FORMAT`] line, borrowed from the log output.
+#[derive(Debug, Clone)]
+pub struct BranchCommitFields<'a> {
+    pub sha: &'a str,
+    pub short_sha: &'a str,
+    pub author: &'a str,
+    pub author_email: &'a str,
+    /// Committer time (`%ct`), in unix seconds. Rewritten by a rebase.
+    pub committer_timestamp: i64,
+    /// Author time (`%at`), in unix seconds. Preserved by a rebase.
+    pub author_timestamp: i64,
+    pub subject: &'a str,
+}
+
+/// Parse one [`BRANCH_COMMIT_LOG_FORMAT`] line. The subject is the remainder,
+/// so subjects containing `|` survive intact. Returns `None` for a line that
+/// doesn't carry every field — a blank line, or output from some other format.
+pub fn parse_branch_commit_line(line: &str) -> Option<BranchCommitFields<'_>> {
+    let mut parts = line.splitn(7, '|');
+    let sha = parts.next().filter(|sha| !sha.is_empty())?;
+    let short_sha = parts.next()?;
+    let author = parts.next()?;
+    let author_email = parts.next()?;
+    let committer_timestamp = parts.next()?;
+    let author_timestamp = parts.next()?;
+    let subject = parts.next()?;
+    Some(BranchCommitFields {
+        sha,
+        short_sha,
+        author,
+        author_email,
+        committer_timestamp: committer_timestamp.parse().unwrap_or(0),
+        author_timestamp: author_timestamp.parse().unwrap_or(0),
+        subject,
+    })
 }
 
 /// Get commits on a branch since it diverged from base.
@@ -359,26 +397,20 @@ pub fn get_commits_since_base(worktree: &Path, base: &str) -> Result<Vec<CommitI
 /// Parse [`BRANCH_COMMIT_LOG_FORMAT`] lines, newest first as `git log` emits
 /// them, assigning `order` so that 0 is the oldest commit on the branch.
 fn parse_commit_info_lines(output: &str) -> Vec<CommitInfo> {
-    let mut commits = Vec::new();
-    for line in output.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        let parts: Vec<&str> = line.splitn(7, '|').collect();
-        if parts.len() >= 6 {
-            let timestamp = parts[5].parse().unwrap_or(0);
-            commits.push(CommitInfo {
-                sha: parts[0].to_string(),
-                short_sha: parts[1].to_string(),
-                subject: parts[2].to_string(),
-                author: parts[3].to_string(),
-                author_email: parts[4].to_string(),
-                timestamp,
-                author_timestamp: parse_author_timestamp(parts.get(6).copied(), timestamp),
-                order: 0, // placeholder, assigned below
-            });
-        }
-    }
+    let mut commits: Vec<CommitInfo> = output
+        .lines()
+        .filter_map(parse_branch_commit_line)
+        .map(|fields| CommitInfo {
+            sha: fields.sha.to_string(),
+            short_sha: fields.short_sha.to_string(),
+            subject: fields.subject.to_string(),
+            author: fields.author.to_string(),
+            author_email: fields.author_email.to_string(),
+            timestamp: fields.committer_timestamp,
+            author_timestamp: fields.author_timestamp,
+            order: 0, // placeholder, assigned below
+        })
+        .collect();
 
     // git log returns newest-first; assign order so that 0 = oldest.
     let len = commits.len() as i64;
@@ -799,15 +831,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn format_arg_wraps_the_shared_field_list() {
+        assert_eq!(
+            BRANCH_COMMIT_LOG_FORMAT,
+            format!("--format={BRANCH_COMMIT_LOG_FIELDS}")
+        );
+    }
+
+    #[test]
     fn parses_both_clocks_and_orders_from_the_oldest_commit() {
         let commits = parse_commit_info_lines(concat!(
-            "def456|def456a|fix: lexer|Test|test@example.com|9200|1200\n",
-            "abc123|abc123a|feat: parser|Test|test@example.com|9100|1100\n",
+            "def456|def456a|Test|test@example.com|9200|1200|fix: lexer\n",
+            "abc123|abc123a|Test|test@example.com|9100|1100|feat: parser\n",
         ));
 
         assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].subject, "fix: lexer");
         assert_eq!(commits[0].timestamp, 9200);
         assert_eq!(commits[0].author_timestamp, 1200);
+        assert_eq!(commits[1].subject, "feat: parser");
         assert_eq!(commits[1].timestamp, 9100);
         assert_eq!(commits[1].author_timestamp, 1100);
         // git log is newest-first, so the last line is the oldest commit.
@@ -815,16 +857,26 @@ mod tests {
         assert_eq!(commits[1].order, 0);
     }
 
-    /// A producer still on the six-field format keeps parsing; its commits just
-    /// fall back to committer time.
+    /// The subject is the trailing field precisely so a `|` in it can't shift
+    /// the timestamps out from under the parse.
     #[test]
-    fn falls_back_to_committer_time_when_the_author_field_is_absent() {
-        let commits =
-            parse_commit_info_lines("abc123|abc123a|feat: parser|Test|test@example.com|9100\n");
+    fn keeps_a_subject_containing_the_delimiter_intact() {
+        let commits = parse_commit_info_lines(
+            "abc123|abc123a|Test|test@example.com|9100|1100|feat: parse a|b unions\n",
+        );
 
         assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "feat: parse a|b unions");
         assert_eq!(commits[0].timestamp, 9100);
-        assert_eq!(commits[0].author_timestamp, 9100);
+        assert_eq!(commits[0].author_timestamp, 1100);
+    }
+
+    #[test]
+    fn skips_lines_that_are_missing_fields() {
+        assert!(parse_branch_commit_line("").is_none());
+        assert!(parse_branch_commit_line("abc123|abc123a|Test|test@example.com|9100").is_none());
+        // A record with no SHA isn't a commit.
+        assert!(parse_branch_commit_line("|abc123a|Test|test@example.com|9100|1100|s").is_none());
     }
 
     #[test]

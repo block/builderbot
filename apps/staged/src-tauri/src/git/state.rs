@@ -1141,7 +1141,10 @@ const BATCH_FAST_SCRIPT: &str = concat!(
     "  range=\"$2..HEAD\"\n",
     "fi\n",
     "echo COMMITS_START\n",
-    "git log --format='%H|%h|%s|%an|%ae|%ct' \"$range\" 2>/dev/null || true\n",
+    // Same fields as `BRANCH_COMMIT_LOG_FIELDS`, inlined because this is a
+    // script rather than an argument list; `fast_script_emits_the_shared_commit_fields`
+    // keeps the two from drifting.
+    "git log --format='%H|%h|%an|%ae|%ct|%at|%s' \"$range\" 2>/dev/null || true\n",
     "echo COMMITS_END\n",
     "exit 0\n",
 );
@@ -1516,6 +1519,17 @@ pub fn update_repo_fetch_cache(repo_path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fast script's commit lines are parsed by the same code as every
+    /// other producer's, so its field list has to match theirs exactly.
+    #[test]
+    fn fast_script_emits_the_shared_commit_fields() {
+        assert!(
+            BATCH_FAST_SCRIPT.contains(super::super::BRANCH_COMMIT_LOG_FIELDS),
+            "BATCH_FAST_SCRIPT must log {}",
+            super::super::BRANCH_COMMIT_LOG_FIELDS
+        );
+    }
 
     fn assert_worktree(
         input: &str,

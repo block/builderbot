@@ -30,13 +30,13 @@
   import { openSettings, selectProject, showAllRepos } from '../layout/navigation.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
   import { getProjectStatus } from './projectStatus';
+  import { projectActions } from './projectActions.svelte';
   import * as ContextMenu from '$lib/components/ui/context-menu';
   import SplashScreen from './SplashScreen.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import SineWave from '../../shared/SineWave.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import { toast } from 'svelte-sonner';
-  import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
 
   import {
@@ -47,7 +47,6 @@
   import { darkMode } from '../../stores/isDark.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { badgeBg, badgeFg, badgeBgHover } from '../../shared/badgeColors';
-  import { canDeleteProjectWithoutConfirmation } from './projectDeleteSafety';
   import { viewport } from '../../shared/viewport.svelte';
   import { reposUiEnabled } from '../../featureFlags';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
@@ -60,7 +59,6 @@
   let projects = $derived(projectsDataStore.projects);
   let projectBranches = $derived(projectsDataStore.branchesByProject);
   let reposByProject = $derived(projectsDataStore.reposByProject);
-  let repoCountsByProject = $derived(projectsDataStore.repoCountsByProject);
   let deletingProjectNames = $derived(projectsDataStore.deletingProjectNames);
   let homeRepos = $derived(projectsDataStore.homeRepos);
   let loading = $derived(projectsDataStore.loading || !projectsDataStore.loaded);
@@ -68,7 +66,6 @@
 
   let showNewProjectModal = $state(false);
   let isCommandKeyHeld = $state(false);
-  let projectToDelete = $state<Project | null>(null);
   let mainPanelEl = $state<HTMLDivElement | null>(null);
   let activeFilters = $state<Set<string>>(new Set());
   let restoreInProgress = false;
@@ -311,55 +308,6 @@
       setProjectsListScrollTop(mainPanelEl.scrollTop);
     }
     selectProject(projectId);
-  }
-
-  function handleMarkProjectUnread(project: Project) {
-    if (isProjectDeleting(project.id)) return;
-    projectStateStore.markAsUnread(project.id);
-  }
-
-  async function handleRemoveProject(project: Project) {
-    if (isProjectDeleting(project.id)) return;
-
-    const deleteImmediately = await canDeleteProjectWithoutConfirmation({
-      branches: projectBranches.get(project.id) || [],
-      repoCount: repoCountsByProject.get(project.id) ?? (project.githubRepo ? 1 : 0),
-      hasUnpushedCommits: commands.hasUnpushedCommits,
-      onCheckError: (e) => console.error('Failed to check unpushed commits:', e),
-    });
-
-    if (deleteImmediately) {
-      await deleteProject(project);
-    } else {
-      projectToDelete = project;
-    }
-  }
-
-  async function confirmDeleteProject() {
-    if (!projectToDelete) return;
-    await deleteProject(projectToDelete);
-  }
-
-  async function deleteProject(project: Project) {
-    if (isProjectDeleting(project.id)) return;
-
-    const id = project.id;
-    const name = projectDisplayName(project);
-    const branchesToClear = projectBranches.get(id) || [];
-    projectToDelete = null;
-    projectsDataStore.projectDeleteStarted(id, name);
-
-    try {
-      await commands.deleteProject(id);
-      projectStateStore.markAsRead(id);
-      commands.invalidateProjectBranchTimelines(branchesToClear.map((branch) => branch.id));
-      projectsDataStore.projectDeleteFinished(id, { removed: true });
-    } catch (e) {
-      console.error('Failed to delete project:', e);
-      const message = e instanceof Error ? e.message : String(e);
-      toast.error('Unable to delete project', { description: message });
-      projectsDataStore.projectDeleteFinished(id);
-    }
   }
 
   function getProjectPrStatus(
@@ -688,14 +636,14 @@
                 <ContextMenu.Content class="min-w-[172px]">
                   <ContextMenu.Item
                     disabled={status.kind === 'deleting'}
-                    onSelect={() => handleMarkProjectUnread(project)}
+                    onSelect={() => projectActions.markProjectUnread(project)}
                   >
                     <Mail size={14} /> Mark as Unread
                   </ContextMenu.Item>
                   <ContextMenu.Item
                     variant="destructive"
                     disabled={status.kind === 'deleting'}
-                    onSelect={() => handleRemoveProject(project)}
+                    onSelect={() => projectActions.requestRemoveProject(project)}
                   >
                     <Trash2 size={14} /> Remove Project
                   </ContextMenu.Item>
@@ -719,28 +667,6 @@
   onCreated={handleProjectCreated}
   onClose={() => (showNewProjectModal = false)}
 />
-
-<AlertDialog.Root
-  open={projectToDelete !== null}
-  onOpenChange={(v) => !v && (projectToDelete = null)}
->
-  <AlertDialog.Content>
-    {#if projectToDelete}
-      <AlertDialog.Header>
-        <AlertDialog.Title>Remove Project</AlertDialog.Title>
-        <AlertDialog.Description>
-          {`Remove "${projectDisplayName(projectToDelete)}" from Staged? There are unmerged changes in this project's branches. Deleting this project will lose any changes not pushed to GitHub.`}
-        </AlertDialog.Description>
-      </AlertDialog.Header>
-      <AlertDialog.Footer>
-        <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
-        <AlertDialog.Action variant="destructive" onclick={confirmDeleteProject}>
-          Remove
-        </AlertDialog.Action>
-      </AlertDialog.Footer>
-    {/if}
-  </AlertDialog.Content>
-</AlertDialog.Root>
 
 <style>
   .projects-list-page {

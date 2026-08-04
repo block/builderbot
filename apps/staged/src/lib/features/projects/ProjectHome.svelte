@@ -29,16 +29,15 @@
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
   import AddRepoModal from './AddRepoModal.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
-  import ProjectsSidebar from './ProjectsSidebar.svelte';
   import SplashScreen from './SplashScreen.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
   import { toast } from 'svelte-sonner';
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
+  import { projectActions } from './projectActions.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
-  import { projectStateStore } from '../../stores/projectState.svelte';
   import {
     canDeleteProjectWithoutConfirmation,
     computeSafeToDeleteSignature,
@@ -98,12 +97,13 @@
   let projectTitleElement = $state<HTMLHeadingElement | null>(null);
   let showTopBarProjectName = $state(false);
 
-  // Delete confirmation state
-  let projectToDelete = $state<Project | null>(null);
+  // Delete confirmation state (remove-project confirmation lives in the
+  // shared projectActions module + App-level ProjectDeleteDialog)
   let branchToDelete = $state<{ branch: Branch; project: Project } | null>(null);
   let deletingBranches = $state<Set<string>>(new Set());
   // Guards the delete shortcut while the async safe-to-delete check is in flight,
-  // before projectToDelete/deletingProjectNames are set, so a held key only deletes once.
+  // before projectActions.pendingDelete/deletingProjectNames are set, so a held
+  // key only deletes once.
   let deleteShortcutPending = $state(false);
 
   // Setup errors come from the shared workspace lifecycle orchestrator.
@@ -503,11 +503,6 @@
     showNewProjectModal = true;
   }
 
-  function handleMarkProjectUnread(project: Project) {
-    if (deletingProjectNames.has(project.id)) return;
-    projectStateStore.markAsUnread(project.id);
-  }
-
   function handleProjectCreated(project: Project) {
     // The store registers the project synchronously and hydrates branches and
     // repos in the background, so the modal closes instantly.
@@ -516,33 +511,12 @@
     selectProject(project.id);
   }
 
-  async function handleDeleteProjectRequest(project: Project) {
-    const branches = branchesByProject.get(project.id) || [];
-    const repoCount = repoCountsByProject.get(project.id) || 0;
-
-    const isSafeToDelete = await canDeleteProjectWithoutConfirmation({
-      branches,
-      repoCount,
-      hasUnpushedCommits: commands.hasUnpushedCommits,
-      onCheckError: (e) => console.error('Failed to check unpushed commits:', e),
-    });
-
-    if (isSafeToDelete) {
-      // Safe to delete without confirmation
-      projectToDelete = project;
-      await confirmDeleteProject();
-    } else {
-      // Show confirmation dialog
-      projectToDelete = project;
-    }
-  }
-
   function handleDeleteCurrentProjectShortcut(event: Event) {
     if (
       !selectedProject ||
       deleteShortcutPending ||
       selectedProjectDeleting ||
-      projectToDelete ||
+      projectActions.pendingDelete ||
       branchToDelete ||
       showNewProjectModal ||
       showAddRepoModal
@@ -552,45 +526,9 @@
 
     event.preventDefault();
     deleteShortcutPending = true;
-    void handleDeleteProjectRequest(selectedProject).finally(() => {
+    void projectActions.requestRemoveProject(selectedProject).finally(() => {
       deleteShortcutPending = false;
     });
-  }
-
-  async function confirmDeleteProject() {
-    if (!projectToDelete) return;
-    const id = projectToDelete.id;
-    const name = projectDisplayName(projectToDelete);
-    const branchesToClear = branchesByProject.get(id) || [];
-    projectToDelete = null;
-    projectsDataStore.projectDeleteStarted(id, name);
-
-    // Navigate away immediately so the user doesn't have to wait for backend deletion.
-    // Skip projects that are already being deleted.
-    const currentIndex = projects.findIndex((p) => p.id === id);
-    const alive = projects.filter((p) => p.id !== id && !projectsDataStore.isProjectDeleting(p.id));
-    if (alive.length > 0) {
-      // Prefer the next project after the current one; fall back to the closest earlier one
-      const next = alive.find((p) => projects.indexOf(p) > currentIndex) ?? alive[alive.length - 1];
-      selectProject(next.id);
-    } else {
-      goHome();
-    }
-
-    try {
-      await commands.deleteProject(id);
-      projectStateStore.markAsRead(id);
-      projectsDataStore.projectDeleteFinished(id, { removed: true });
-      commands.invalidateProjectBranchTimelines(branchesToClear.map((b) => b.id));
-      for (const branch of branchesToClear) {
-        workspaceLifecycle.clearBranchState(branch.id);
-      }
-    } catch (e) {
-      console.error('Failed to delete project:', e);
-      const message = e instanceof Error ? e.message : String(e);
-      toast.error('Unable to delete project', { description: message });
-      projectsDataStore.projectDeleteFinished(id);
-    }
   }
 
   // ── Branch actions ──
@@ -845,7 +783,7 @@
         selectedProjectSafeToDelete && 'border border-destructive text-destructive',
       ]}
       title="Remove project"
-      onclick={() => handleDeleteProjectRequest(selectedProject)}
+      onclick={() => projectActions.requestRemoveProject(selectedProject)}
     >
       <span
         class={[
@@ -862,13 +800,8 @@
   {/if}
 {/snippet}
 
+<!-- The projects sidebar renders alongside this view from App.svelte. -->
 <div class="project-home">
-  <ProjectsSidebar
-    showAllProjectsRow={true}
-    onMarkProjectUnread={handleMarkProjectUnread}
-    onRemoveProject={handleDeleteProjectRequest}
-  />
-
   <div
     class="main-panel"
     class:no-pad={!loading && !hasContent}
@@ -968,29 +901,6 @@
     showAddRepoModal = false;
   }}
 />
-
-<!-- Delete project confirmation -->
-<AlertDialog.Root
-  open={projectToDelete !== null}
-  onOpenChange={(v) => !v && (projectToDelete = null)}
->
-  <AlertDialog.Content>
-    {#if projectToDelete}
-      <AlertDialog.Header>
-        <AlertDialog.Title>Remove Project</AlertDialog.Title>
-        <AlertDialog.Description>
-          {`Remove "${projectDisplayName(projectToDelete)}" from Staged? There are unmerged changes in this project's branches. Deleting this project will lose any changes not pushed to GitHub.`}
-        </AlertDialog.Description>
-      </AlertDialog.Header>
-      <AlertDialog.Footer>
-        <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
-        <AlertDialog.Action variant="destructive" onclick={confirmDeleteProject}>
-          Remove
-        </AlertDialog.Action>
-      </AlertDialog.Footer>
-    {/if}
-  </AlertDialog.Content>
-</AlertDialog.Root>
 
 <!-- Delete branch confirmation -->
 <AlertDialog.Root

@@ -42,6 +42,7 @@
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
   import SidebarPinnedRepo from './SidebarPinnedRepo.svelte';
   import * as commands from '../../api/commands';
+  import { projectActions } from './projectActions.svelte';
   import * as ContextMenu from '$lib/components/ui/context-menu';
   import { reposUiEnabled } from '../../featureFlags';
   import { Button } from '$lib/components/ui/button';
@@ -50,11 +51,9 @@
 
   interface Props {
     showAllProjectsRow?: boolean;
-    onMarkProjectUnread?: (project: Project) => void;
-    onRemoveProject?: (project: Project) => void | Promise<void>;
   }
 
-  let { showAllProjectsRow = true, onMarkProjectUnread, onRemoveProject }: Props = $props();
+  let { showAllProjectsRow = true }: Props = $props();
 
   // All rendered data comes from the shared projectsData store; only UI
   // state (width, scroll, drag) lives here or in projectsSidebarState.
@@ -483,10 +482,7 @@
                 .sort((a, b) => a.shortName.localeCompare(b.shortName))}
               {@const activity = projectActivity(sessionTypes, status.runActionPhase)}
               <ContextMenu.Root>
-                <ContextMenu.Trigger
-                  class="contents"
-                  disabled={status.kind === 'deleting' || !onMarkProjectUnread || !onRemoveProject}
-                >
+                <ContextMenu.Trigger class="contents" disabled={status.kind === 'deleting'}>
                   <button
                     class="project-row project-item"
                     use:scrollIfActive={navigation.selectedProjectId === project.id}
@@ -582,23 +578,21 @@
                     </div>
                   </button>
                 </ContextMenu.Trigger>
-                {#if onMarkProjectUnread && onRemoveProject}
-                  <ContextMenu.Content class="min-w-[172px]">
-                    <ContextMenu.Item
-                      disabled={status.kind === 'deleting'}
-                      onSelect={() => onMarkProjectUnread!(project)}
-                    >
-                      <Mail size={14} /> Mark as Unread
-                    </ContextMenu.Item>
-                    <ContextMenu.Item
-                      variant="destructive"
-                      disabled={status.kind === 'deleting'}
-                      onSelect={() => onRemoveProject!(project)}
-                    >
-                      <Trash2 size={14} /> Remove Project
-                    </ContextMenu.Item>
-                  </ContextMenu.Content>
-                {/if}
+                <ContextMenu.Content class="min-w-[172px]">
+                  <ContextMenu.Item
+                    disabled={status.kind === 'deleting'}
+                    onSelect={() => projectActions.markProjectUnread(project)}
+                  >
+                    <Mail size={14} /> Mark as Unread
+                  </ContextMenu.Item>
+                  <ContextMenu.Item
+                    variant="destructive"
+                    disabled={status.kind === 'deleting'}
+                    onSelect={() => projectActions.requestRemoveProject(project)}
+                  >
+                    <Trash2 size={14} /> Remove Project
+                  </ContextMenu.Item>
+                </ContextMenu.Content>
               </ContextMenu.Root>
             {/each}
           {/if}

@@ -9,18 +9,18 @@ pub use doctor::{
 };
 
 /// Environment snapshot for doctor checks and fixes. Shaped through
-/// `apply_bundled_tools_env` so checks resolve binaries from the same PATH
-/// the agent spawn path uses — a bridge Staged manages or bundles must never
-/// be reported missing (or prompt an install) just because the user has no
+/// `apply_managed_tools_env` so checks resolve binaries from the same PATH
+/// the agent spawn path uses — a bridge Staged manages must never be
+/// reported missing (or prompt an install) just because the user has no
 /// global copy. The managed npm env is overlaid on top, so checks probe npm
 /// state (`npm prefix -g`, version lookups) with the same private-prefix view
 /// the fixes install into — a check never contradicts the fix that just ran.
-async fn doctor_env_vars(dirs: &crate::acp_tools::AcpToolsDirs) -> Vec<(String, String)> {
+async fn doctor_env_vars() -> Vec<(String, String)> {
     let mut env_vars = crate::shell_env::home_env_vars_with_extended_path(
         crate::session_runner::shell_env_cache().as_ref(),
     )
     .await;
-    crate::acp_tools::apply_bundled_tools_env(&mut env_vars, dirs);
+    crate::acp_tools::apply_managed_tools_env(&mut env_vars);
     crate::managed_acp_tools::apply_managed_npm_env(
         &mut env_vars,
         &crate::managed_acp_tools::managed_npm_env(),
@@ -44,9 +44,8 @@ fn run_checks_options(
         env: None,
         // Doctor labels binaries resolved from this dir as bundled (install
         // source + readout flag) and suppresses registry update fixes for
-        // them — Staged owns their updates, whether they are managed shims
-        // the startup reconciler floats to @latest or bridges pinned by
-        // acp-tools.lock.json shipping with Staged updates.
+        // them — the startup reconciler floats the managed shims to @latest,
+        // so Staged owns their updates.
         bundled_tools_dir: bundled_dir,
     }
     .with_env_snapshot(env_vars)
@@ -71,8 +70,8 @@ fn execute_fix_options(
 /// The frontend calls this first for an instant paint, then follows up with
 /// [`run_doctor_freshness`] to fill in version/update information.
 #[tauri::command]
-pub async fn run_doctor(app_handle: tauri::AppHandle) -> DoctorReport {
-    run_doctor_report(&app_handle, false).await
+pub async fn run_doctor() -> DoctorReport {
+    run_doctor_report(false).await
 }
 
 /// Run all health checks with version freshness enabled.
@@ -83,22 +82,21 @@ pub async fn run_doctor(app_handle: tauri::AppHandle) -> DoctorReport {
 /// `updateAvailable`, and the source-aware `updateCommand`/`updateFixType` on
 /// each readout. Hits the network, so it must never block first paint.
 #[tauri::command]
-pub async fn run_doctor_freshness(app_handle: tauri::AppHandle) -> DoctorReport {
-    run_doctor_report(&app_handle, true).await
+pub async fn run_doctor_freshness() -> DoctorReport {
+    run_doctor_report(true).await
 }
 
 /// Run the doctor crate's checks plus Staged-local ones (currently the
 /// managed Node.js runtime check) over one shared env snapshot. Bundled
 /// readouts are labeled by the doctor crate itself via
 /// `RunChecksOptions::bundled_tools_dir`.
-async fn run_doctor_report(app_handle: &tauri::AppHandle, check_freshness: bool) -> DoctorReport {
-    let acp_tools_dirs = crate::acp_tools::resolve_acp_tools_dirs(app_handle);
-    let env_vars = doctor_env_vars(&acp_tools_dirs).await;
+async fn run_doctor_report(check_freshness: bool) -> DoctorReport {
+    let env_vars = doctor_env_vars().await;
     let (mut report, node_runtime) = tokio::join!(
         doctor::run_checks_with_options(run_checks_options(
             check_freshness,
             env_vars.clone(),
-            acp_tools_dirs.primary.clone(),
+            crate::acp_tools::primary_tools_dir(),
         )),
         run_node_runtime_check(),
     );
@@ -120,11 +118,7 @@ async fn run_doctor_report(app_handle: &tauri::AppHandle, check_freshness: bool)
 /// runtime first, since they run npm from it into the private prefix (the
 /// existing "Running…" spinner covers the one-time download).
 #[tauri::command]
-pub async fn run_doctor_fix(
-    app_handle: tauri::AppHandle,
-    check_id: String,
-    fix_type: FixType,
-) -> Result<(), String> {
+pub async fn run_doctor_fix(check_id: String, fix_type: FixType) -> Result<(), String> {
     if check_id == NODE_RUNTIME_CHECK_ID {
         return ensure_managed_node_runtime_for_fix().await;
     }
@@ -133,8 +127,7 @@ pub async fn run_doctor_fix(
             return install_managed_tool_logged(tool_id, &check_id).await;
         }
     }
-    let acp_tools_dirs = crate::acp_tools::resolve_acp_tools_dirs(&app_handle);
-    let env_vars = doctor_env_vars(&acp_tools_dirs).await;
+    let env_vars = doctor_env_vars().await;
     if doctor::agents::lookup_fix_command(&check_id, &fix_type)
         .as_deref()
         .is_some_and(crate::managed_acp_tools::is_npm_backed_command)
@@ -193,7 +186,6 @@ async fn ensure_managed_node_runtime_for_fix() -> Result<(), String> {
 /// validated against the authoritative backend derivation.
 #[tauri::command]
 pub async fn run_doctor_update(
-    app_handle: tauri::AppHandle,
     check_id: String,
     fix_type: FixType,
     command: String,
@@ -203,19 +195,18 @@ pub async fn run_doctor_update(
     // the frontend-supplied command needs no validation here. Readouts
     // resolved from the managed shim dir derive no update command at all
     // (they are labeled bundled), so this arm only fires for a bridge copy
-    // that resolved elsewhere (e.g. the resource fallback on a profile the
-    // reconciler has not populated yet) — and the managed install is the
-    // correct upgrade for that state too.
+    // that resolved elsewhere (e.g. a user install found on PATH before the
+    // first reconcile lands) — and the managed install is the correct
+    // upgrade for that state too.
     if let Some(tool_id) = managed_tool_for_check(&check_id) {
         return install_managed_tool_logged(tool_id, &check_id).await;
     }
-    let acp_tools_dirs = crate::acp_tools::resolve_acp_tools_dirs(&app_handle);
-    let env_vars = doctor_env_vars(&acp_tools_dirs).await;
+    let env_vars = doctor_env_vars().await;
     let expected = expected_update_command(
         &check_id,
         &fix_type,
         env_vars.clone(),
-        acp_tools_dirs.primary.clone(),
+        crate::acp_tools::primary_tools_dir(),
     )
     .await?;
     if expected != command {
@@ -523,11 +514,11 @@ mod tests {
         assert!(installed_npm_tool_names(&dir.path().join("absent")).is_empty());
     }
 
-    /// Bundled-readout labeling lives in the doctor crate now; Staged's job is
-    /// only to hand the resolved bundled dir into the run options.
+    /// Bundled-readout labeling lives in the doctor crate; Staged's job is
+    /// only to hand the managed shim dir into the run options.
     #[test]
     fn run_checks_options_carries_bundled_tools_dir() {
-        let dir = PathBuf::from("/bundle/resources/acp/bin");
+        let dir = PathBuf::from("/data/packages/bin");
         let opts = run_checks_options(false, Vec::new(), Some(dir.clone()));
         assert_eq!(opts.bundled_tools_dir, Some(dir));
 

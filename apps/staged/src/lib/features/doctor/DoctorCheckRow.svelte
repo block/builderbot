@@ -167,9 +167,8 @@
       {check.label}
     </span>
     <span class="check-message">{check.message}</span>
-    <!-- "Managed by Staged": resolved from a dir whose installs and updates
-         Staged owns (the managed bridge shims, or the bundled resources
-         still shipped until the bundle flip) — no manual update nag. -->
+    <!-- "Managed by Staged": resolved from the managed bridge shim dir,
+         whose installs and updates Staged owns — no manual update nag. -->
     {#if check.path}
       {#if check.main?.bundled}
         <span class="check-path">Managed by Staged</span>

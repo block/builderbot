@@ -1877,12 +1877,11 @@ pub fn run() {
             // Register the primary ACP bridge tools dir before any command
             // runs so binary resolution (session spawn, provider discovery)
             // prefers the managed bridge shims (or the STAGED_ACP_TOOLS_DIR
-            // dev override) over user-installed copies, falling back to the
-            // pinned bridges Staged still ships as resources. The shim dir
-            // path is stable even before the first reconcile writes shims —
+            // dev override) over user-installed copies. The shim dir path is
+            // stable even before the first reconcile writes shims —
             // find_command probes per call and falls through to PATH until
             // then.
-            if let Some(dir) = acp_tools::resolve_acp_tools_dirs(app.handle()).primary {
+            if let Some(dir) = acp_tools::primary_tools_dir() {
                 acp_client::set_bundled_tools_dir(dir);
             }
 

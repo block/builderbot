@@ -1332,8 +1332,8 @@ export interface AgentVersionInfo {
   updateCommand: string | null;
   /** 'updateMain' or 'updateBridge', matching this readout's slot. */
   updateFixType: 'updateMain' | 'updateBridge' | null;
-  /** True when this binary ships bundled with Staged (resolved from the app's
-   *  bundled ACP tools dir rather than a user install). Stamped by the doctor
+  /** True when this binary is managed by Staged (resolved from the managed
+   *  bridge shim dir rather than a user install). Stamped by the doctor
    *  crate alongside installSource === 'bundled'. */
   bundled: boolean | null;
 }

@@ -79,10 +79,6 @@ jobs:
           STAGED_UPDATER_ENDPOINT: https://github.com/${{ github.repository }}/releases/download/staged-latest/latest.json
         run: pnpm run tauri:release:config
 
-      - name: Stage bundled ACP tools
-        working-directory: apps/staged
-        run: ./scripts/prepare-acp-tools-resource.sh "$TAURI_TARGET"
-
       - name: Build unsigned Tauri app
         working-directory: apps/staged
         env:

@@ -46,8 +46,8 @@ use tokio::io::AsyncBufReadExt;
 
 use crate::managed_node;
 
-/// Dev/bridge-developer override (exported by `just dev`): a directory of
-/// bridge binaries that replaces managed bridge resolution.
+/// Dev/bridge-developer override: a directory of bridge binaries that
+/// replaces managed bridge resolution.
 pub const ACP_TOOLS_DIR_ENV: &str = "STAGED_ACP_TOOLS_DIR";
 
 /// Block's internal Artifactory npm registry. Direct access to
@@ -148,9 +148,8 @@ pub fn state_path(packages_root: &Path) -> PathBuf {
 /// the `STAGED_ACP_TOOLS_DIR` dev override when active (it replaces the
 /// managed shim dir), then the managed bridge shims, the private prefix's
 /// bin shims, and the managed Node runtime's bin dir — the latter is what
-/// makes npm's `#!/usr/bin/env node` shims (and, until the bundle flip, the
-/// bundled bridge wrappers) run without host Node, and what resolves `npm`
-/// itself for install fixes.
+/// makes npm's `#!/usr/bin/env node` shims run without host Node, and what
+/// resolves `npm` itself for install fixes.
 pub fn managed_prepend_dirs() -> Vec<PathBuf> {
     managed_prepend_dirs_from_parts(
         dev_tools_override_dir(),
@@ -222,13 +221,13 @@ pub fn is_npm_backed_command(command: &str) -> bool {
 // =============================================================================
 
 /// A Staged-managed ACP bridge: installed and upgraded from the npm registry
-/// at runtime (see [`install_managed_tool`]) rather than pinned and bundled.
+/// at runtime (see [`install_managed_tool`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ManagedTool {
     /// The install id (`tools/<id>` dir name, `state.json` key).
     pub id: &'static str,
-    /// The bin name the shim is written under — the same command name the
-    /// bundled bridges resolve as, so shims shadow the bundle seamlessly.
+    /// The bin name the shim is written under — the command name bridge
+    /// resolution (`find_command`, provider discovery) looks up.
     pub binary: &'static str,
     /// The npm package installed from the registry.
     pub package: &'static str,
@@ -618,8 +617,8 @@ async fn run_floating_npm_install(
     }
 }
 
-/// Shim body for a managed bridge. Both paths are absolute, so the shim needs
-/// no `node` on PATH and cannot hit the bundled wrapper's exit-127 mode.
+/// Shim body for a managed bridge. Both paths are absolute, so the shim runs
+/// with no `node` on PATH at all.
 fn shim_contents(node: &Path, entrypoint: &Path) -> String {
     format!(
         "#!/bin/sh\n# Written by Staged's managed ACP tools installer; do not edit.\nexec {} {} \"$@\"\n",

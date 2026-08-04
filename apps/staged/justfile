@@ -9,7 +9,6 @@
 install:
     pnpm install
     cd src-tauri && cargo fetch
-    ./scripts/ensure-acp-tools.sh
 
 # ============================================================================
 # Development
@@ -23,11 +22,10 @@ dev repo="":
     # Install JS deps if needed
     [[ -d node_modules ]] || pnpm install
 
-    # Stage the pinned ACP bridge tools and point the app at the staged dir so
-    # dev builds resolve the same bundled bridges as packaged builds.
-    ./scripts/prepare-acp-tools-resource.sh
-    export STAGED_ACP_TOOLS_DIR="$(pwd)/src-tauri/resources/acp/bin"
-    echo "Using ACP tools dir: ${STAGED_ACP_TOOLS_DIR}"
+    # Dev instances share the managed ACP bridges and Node runtime in
+    # ~/.staged/packages with every other Staged instance. Export
+    # STAGED_ACP_TOOLS_DIR manually to point sessions at a local bridge
+    # checkout instead (it disables the managed installs).
 
     # Derive a stable port from the working directory so the same worktree
     # always gets the same port. This avoids changing TAURI_CONFIG between
@@ -62,7 +60,6 @@ dev repo="":
 
 # Build the app for production
 build:
-    ./scripts/prepare-acp-tools-resource.sh
     pnpm run tauri:build
 
 # Generate the release-only Tauri config with updater settings
@@ -71,7 +68,6 @@ release-config:
 
 # Build a signed/notarized release bundle once release config exists
 release-build target="aarch64-apple-darwin" *args:
-    ./scripts/prepare-acp-tools-resource.sh {{target}}
     pnpm exec tauri build --target {{target}} --config src-tauri/tauri.release.conf.json {{args}}
 
 # Create a release branch, bump staged versions, and open a release PR
@@ -136,10 +132,6 @@ release version:
     git push origin "staged/v{{version}}"
 
     echo "Pushed tag staged/v{{version}} — CI will build and publish the release."
-
-# Update acp-tools.lock.json to the newest npm releases of the bundled ACP bridge tools that have aged past the 50h cooling-off window
-bump-acp-tools *ARGS:
-    node scripts/update-acp-tools-lock.mjs {{ ARGS }}
 
 # Fetch official Node.js release checksums and update node-runtime.lock.json (e.g. `just bump-node-runtime v24.12.0`)
 bump-node-runtime *ARGS:

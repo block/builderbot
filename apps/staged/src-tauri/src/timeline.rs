@@ -796,20 +796,11 @@ pub(crate) fn list_parent_branch_commits_impl(
     Ok(parse_parent_commit_lines(&lines))
 }
 
-#[tauri::command(rename_all = "camelCase")]
-pub async fn pull_branch_ff_only(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    branch_id: String,
-) -> Result<(), String> {
-    let store = crate::get_store(&store)?;
-
-    tauri::async_runtime::spawn_blocking(move || pull_branch_ff_only_impl(&store, &branch_id))
-        .await
-        .map_err(|e| format!("Pull task failed: {e}"))?
-}
-
-/// Synchronous body of [`pull_branch_ff_only`], shared verbatim with the
-/// web-mode `dispatch()` arm. Callers run it inside `spawn_blocking`.
+/// Fast-forward the branch to its upstream, right now.
+///
+/// The immediate half of `prs::pull_or_queue_branch`, which owns the decision
+/// between pulling now and queueing behind in-flight branch sessions. Callers run
+/// this inside `spawn_blocking`.
 pub(crate) fn pull_branch_ff_only_impl(store: &Arc<Store>, branch_id: &str) -> Result<(), String> {
     let branch = store
         .get_branch(branch_id)

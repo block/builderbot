@@ -19,12 +19,12 @@
 
 import { projectStateStore } from './projectState.svelte';
 
-export type SessionType = 'commit' | 'pr' | 'push' | 'note' | 'review' | 'other';
+export type SessionType = 'commit' | 'pr' | 'push' | 'pull' | 'note' | 'review' | 'other';
 
 interface SessionMetadata {
   sessionId: string;
   projectId: string;
-  branchId?: string; // Optional: only PR and push sessions are tied to a specific branch
+  branchId?: string; // Optional: only PR, push, and pull sessions are tied to a specific branch
   type: SessionType;
   timestamp: number; // When the session was registered
 }

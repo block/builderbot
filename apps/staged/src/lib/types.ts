@@ -409,7 +409,7 @@ export interface QueuedSessionMessage {
 
 export type StepStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped';
 export type StepType = 'command' | 'ai_handoff';
-export type PipelineKind = 'rebase' | 'squash' | 'push';
+export type PipelineKind = 'rebase' | 'squash' | 'push' | 'pull';
 
 export interface PipelineStepStatus {
   label: string;

@@ -113,6 +113,8 @@ function sessionTypeLabel(type: SessionType): string {
       return 'PR';
     case 'push':
       return 'push';
+    case 'pull':
+      return 'pull';
     case 'other':
       return 'task';
   }
@@ -179,12 +181,16 @@ export function projectActivity(
     counts.set(type, (counts.get(type) ?? 0) + 1);
   }
 
-  // Special-case "push" to read more naturally: "pushing changes" instead of "making a push"
+  // Special-case "push"/"pull" to read more naturally: "pushing changes" instead
+  // of "making a push"
   if (counts.size === 1 && counts.has('push')) {
     return 'pushing changes';
   }
+  if (counts.size === 1 && counts.has('pull')) {
+    return 'pulling changes';
+  }
 
-  const displayOrder: SessionType[] = ['commit', 'note', 'review', 'pr', 'push', 'other'];
+  const displayOrder: SessionType[] = ['commit', 'note', 'review', 'pr', 'push', 'pull', 'other'];
   const parts: string[] = [];
 
   for (const type of displayOrder) {

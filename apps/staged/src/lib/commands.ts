@@ -547,8 +547,11 @@ export function invalidateProjectBranchTimelines(branchIds: string[]): void {
   window.dispatchEvent(new CustomEvent('timeline-invalidated', { detail: { branchIds } }));
 }
 
-export function pullBranchFastForward(branchId: string): Promise<void> {
-  return invokeCommand('pull_branch_ff_only', { branchId });
+/** Fast-forward a branch to origin, or queue the pull behind in-flight branch
+ *  sessions. The backend owns that decision: it resolves to the queued session's
+ *  ID when the pull has to wait, and to `null` when the pull already ran. */
+export function pullOrQueueBranch(branchId: string): Promise<string | null> {
+  return invokeCommand('pull_or_queue_branch', { branchId });
 }
 
 export function resetBranchToRemote(branchId: string): Promise<void> {

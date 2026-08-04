@@ -87,6 +87,8 @@
     pushQueued?: boolean;
     /** Force push is waiting on the branch queue, so its button cancels instead. */
     forcePushQueued?: boolean;
+    /** Pull is waiting on the branch queue, so its button cancels instead. */
+    pullQueued?: boolean;
     onViewDiffClick?: () => void;
     onCommitChangesClick?: () => void;
     commitChangesDisabledReason?: string;
@@ -130,6 +132,7 @@
     pushing = false,
     pushQueued = false,
     forcePushQueued = false,
+    pullQueued = false,
     onViewDiffClick,
     onCommitChangesClick,
     commitChangesDisabledReason,
@@ -181,7 +184,7 @@
   );
   let isClickable = $derived(!!onItemClick && !isPending && !isFailed);
   let hasSession = $derived(!!sessionId && !deleting);
-  let pullTitle = $derived(pullDisabledReason ?? 'Pull');
+  let pullTitle = $derived(pullDisabledReason ?? (pullQueued ? 'Cancel queued pull' : 'Pull'));
   let pushTitle = $derived(
     pushDisabledReason ??
       (pushQueued ? 'Cancel queued push' : pushing ? 'View push session' : 'Push')
@@ -456,7 +459,7 @@
               aria-label={pullTitle}
               class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
             >
-              Pull
+              {pullQueued ? 'Cancel' : 'Pull'}
             </Button>
           </span>
         {/if}

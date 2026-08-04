@@ -1526,14 +1526,15 @@ fn is_false(value: &bool) -> bool {
 /// Durable identity for command pipelines that the branch queue schedules.
 ///
 /// `Rebase` and `Squash` produce a commit and are linked to their branch through
-/// a pending-commit artifact. `Push` produces no artifact and is linked through
-/// `Session::branch_id` instead.
+/// a pending-commit artifact. `Push` and `Pull` produce no artifact and are
+/// linked through `Session::branch_id` instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PipelineKind {
     Rebase,
     Squash,
     Push,
+    Pull,
 }
 
 #[cfg(test)]

@@ -313,6 +313,25 @@ describe('browser-native command wrappers', () => {
     ]);
   });
 
+  it('distinguishes an immediate pull from a queued one', async () => {
+    const invokeCommand = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce('session-1');
+    vi.doMock('./transport', () => ({
+      invokeCommand,
+      isTauri: true,
+    }));
+
+    const { pullOrQueueBranch } = await import('./commands');
+
+    // null: the branch was idle, so the pull already fast-forwarded.
+    await expect(pullOrQueueBranch('branch-1')).resolves.toBeNull();
+    await expect(pullOrQueueBranch('branch-1')).resolves.toBe('session-1');
+
+    expect(invokeCommand.mock.calls).toEqual([
+      ['pull_or_queue_branch', { branchId: 'branch-1' }],
+      ['pull_or_queue_branch', { branchId: 'branch-1' }],
+    ]);
+  });
+
   it('forwards ACP config selection when resuming a session', async () => {
     const invokeCommand = vi.fn().mockResolvedValue(undefined);
     vi.doMock('./transport', () => ({

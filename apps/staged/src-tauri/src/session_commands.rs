@@ -1758,8 +1758,9 @@ enum BranchSessionScheduleKind {
     Review,
     CommitPipeline,
     /// A git command pipeline that mutates the branch without producing a
-    /// commit (push / force push). Exclusive: it rewrites the remote from the
-    /// current worktree, so nothing else may touch the branch while it runs.
+    /// commit (push / force push / pull). Exclusive: it rewrites the remote from
+    /// the current worktree, or moves the worktree's HEAD, so nothing else may
+    /// touch the branch while it runs.
     GitPipeline,
 }
 
@@ -1841,7 +1842,7 @@ fn exclusive_session_schedule(kind: BranchSessionScheduleKind) -> BranchSessionS
 enum PipelineBranchLink {
     /// Rebase/squash: found through the pending-commit artifact they create.
     Commit,
-    /// Push: creates no artifact, so it records `sessions.branch_id` instead.
+    /// Push/pull: create no artifact, so they record `sessions.branch_id` instead.
     Branch,
 }
 
@@ -1850,7 +1851,7 @@ fn pipeline_branch_link(session: &store::Session) -> Option<PipelineBranchLink> 
         store::PipelineKind::Rebase | store::PipelineKind::Squash => {
             Some(PipelineBranchLink::Commit)
         }
-        store::PipelineKind::Push => Some(PipelineBranchLink::Branch),
+        store::PipelineKind::Push | store::PipelineKind::Pull => Some(PipelineBranchLink::Branch),
     }
 }
 
@@ -5222,24 +5223,24 @@ mod tests {
         session
     }
 
-    /// A push pipeline session, linked to the branch without any artifact row.
-    fn create_branch_push_pipeline_session(
+    /// A push or pull pipeline session, linked to the branch without any artifact
+    /// row — which is what makes it resolve as a `GitPipeline` schedule.
+    fn create_branch_git_pipeline_session(
         store: &Arc<Store>,
         branch_id: &str,
         status: store::SessionStatus,
-        force: bool,
+        kind: store::PipelineKind,
     ) -> store::Session {
+        let prompt = format!("{kind:?}").to_lowercase();
         let mut session = match status {
-            store::SessionStatus::Queued => store::Session::new_queued("push"),
-            store::SessionStatus::Running => store::Session::new_running("push", Path::new("/tmp")),
+            store::SessionStatus::Queued => store::Session::new_queued(&prompt),
+            store::SessionStatus::Running => {
+                store::Session::new_running(&prompt, Path::new("/tmp"))
+            }
             other => panic!("unsupported scheduler test status: {}", other.as_str()),
         }
         .with_branch(branch_id);
-        session.pipeline = Some(
-            store::PipelineExecution::from_steps(&[])
-                .with_kind(store::PipelineKind::Push)
-                .with_push_force(force),
-        );
+        session.pipeline = Some(store::PipelineExecution::from_steps(&[]).with_kind(kind));
         store.create_session(&session).unwrap();
         session
     }
@@ -5447,24 +5448,26 @@ mod tests {
     }
 
     #[test]
-    fn running_push_pipeline_blocks_queued_note_review_and_commit() {
-        let (store, branch) = setup_branch_store();
-        create_branch_push_pipeline_session(
-            &store,
-            &branch.id,
-            store::SessionStatus::Running,
-            false,
-        );
+    fn running_git_pipeline_blocks_queued_note_review_and_commit() {
+        for kind in [store::PipelineKind::Push, store::PipelineKind::Pull] {
+            let (store, branch) = setup_branch_store();
+            create_branch_git_pipeline_session(
+                &store,
+                &branch.id,
+                store::SessionStatus::Running,
+                kind,
+            );
 
-        let active = running_branch_session_kinds(&store, &branch.id).unwrap();
+            let active = running_branch_session_kinds(&store, &branch.id).unwrap();
 
-        assert!(active.contains(&BranchSessionScheduleKind::GitPipeline));
-        for kind in [
-            BranchSessionScheduleKind::Note,
-            BranchSessionScheduleKind::Review,
-            BranchSessionScheduleKind::Commit,
-        ] {
-            assert!(!can_start_with_active_branch_sessions(kind, &active));
+            assert!(active.contains(&BranchSessionScheduleKind::GitPipeline));
+            for blocked in [
+                BranchSessionScheduleKind::Note,
+                BranchSessionScheduleKind::Review,
+                BranchSessionScheduleKind::Commit,
+            ] {
+                assert!(!can_start_with_active_branch_sessions(blocked, &active));
+            }
         }
     }
 
@@ -5473,7 +5476,12 @@ mod tests {
         let (store, branch) = setup_branch_store();
         let other = store::Branch::new(&branch.project_id, "other", "main");
         store.create_branch(&other).unwrap();
-        create_branch_push_pipeline_session(&store, &other.id, store::SessionStatus::Running, true);
+        create_branch_git_pipeline_session(
+            &store,
+            &other.id,
+            store::SessionStatus::Running,
+            store::PipelineKind::Push,
+        );
 
         let active = running_branch_session_kinds(&store, &branch.id).unwrap();
 
@@ -5481,16 +5489,25 @@ mod tests {
     }
 
     #[test]
-    fn branch_start_decision_queues_all_user_modes_behind_queued_push() {
-        let (store, branch) = setup_branch_store_with_workdir();
-        create_branch_push_pipeline_session(&store, &branch.id, store::SessionStatus::Queued, true);
+    fn branch_start_decision_queues_all_user_modes_behind_queued_git_pipeline() {
+        for kind in [store::PipelineKind::Push, store::PipelineKind::Pull] {
+            let (store, branch) = setup_branch_store_with_workdir();
+            create_branch_git_pipeline_session(
+                &store,
+                &branch.id,
+                store::SessionStatus::Queued,
+                kind,
+            );
 
-        for session_type in [
-            BranchSessionType::Note,
-            BranchSessionType::Review,
-            BranchSessionType::Commit,
-        ] {
-            assert!(should_queue_branch_session_start(&store, &branch.id, &session_type).unwrap());
+            for session_type in [
+                BranchSessionType::Note,
+                BranchSessionType::Review,
+                BranchSessionType::Commit,
+            ] {
+                assert!(
+                    should_queue_branch_session_start(&store, &branch.id, &session_type).unwrap()
+                );
+            }
         }
     }
 

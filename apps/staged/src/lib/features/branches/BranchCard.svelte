@@ -84,6 +84,7 @@
   import { timelineToHashtagItems, projectNotesToHashtagItems } from '../sessions/hashtagItems';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
+  import { pullStateStore } from '../../stores/pullState.svelte';
   import { pushStateStore } from '../../stores/pushState.svelte';
   import {
     onBranchGitStateUpdated,
@@ -1016,16 +1017,56 @@
     }
   }
 
+  // A queued pull outlives this component (it drains when the branch frees up),
+  // so its state lives in the global pullStateStore alongside pushState. The
+  // immediate pull stays local: it is awaited right here.
+  let storePullState = $derived(pullStateStore.getPullState(branch.id));
+  /** Pull is waiting on the branch session queue rather than running. */
+  let pullQueuedOrigin = $derived(storePullState?.state === 'queued');
+  let pullSessionId = $derived(storePullState?.sessionId ?? null);
+  /** True for both the immediate pull and a drained one still running. */
+  let pullInFlight = $derived(pullingOrigin || storePullState?.state === 'pulling');
+
+  /**
+   * Pull origin's new commits, or queue the pull behind in-flight branch work.
+   *
+   * The backend decides which — an idle branch fast-forwards immediately, with no
+   * session row for what is usually an instant operation — and it dedupes repeat
+   * clicks, so this is deliberately not gated on `branchSessionBusy`.
+   */
   async function handlePullOrigin() {
-    if (pullingOrigin) return;
+    if (pullInFlight || pullQueuedOrigin) return;
     pullingOrigin = true;
     try {
-      await commands.pullBranchFastForward(branch.id);
+      const queuedSessionId = await commands.pullOrQueueBranch(branch.id);
+      if (queuedSessionId) {
+        pullStateStore.setPullQueued(branch.id, queuedSessionId);
+      }
       await loadTimeline();
     } catch (e) {
       notifyError('Pull failed', e);
     } finally {
       pullingOrigin = false;
+    }
+  }
+
+  /**
+   * Drop a pull that is still waiting on the branch queue.
+   *
+   * The store entry is cleared here rather than by the completion listener: a
+   * session that never ran isn't in the session registry, so its cancellation
+   * event carries no pull session type to match on.
+   */
+  async function cancelQueuedPull() {
+    const sessionId = pullSessionId;
+    if (!pullQueuedOrigin || !sessionId) return;
+    pullStateStore.clearPullState(branch.id);
+    try {
+      await commands.cancelSession(sessionId);
+      commands.invalidateBranchTimeline(branch.id);
+      await loadTimeline();
+    } catch (e) {
+      notifyError('Could not cancel queued pull', e);
     }
   }
 
@@ -1877,8 +1918,11 @@
                 ? openForcePushSession
                 : undefined}
               onCancelQueuedPush={cancelQueuedPush}
+              onCancelQueuedPull={cancelQueuedPull}
               {forcePushingOrigin}
               {pushQueuedOrigin}
+              {pullQueuedOrigin}
+              {branchSessionBusy}
               {immediateGitActionDisabledReason}
               queueableGitActionDisabledReason={branchCommandDisabledReason}
               onViewWorktreeDiff={isLocal
@@ -1895,7 +1939,7 @@
               onDiscardWorktreeChanges={handleDiscardWorktreeChanges}
               onNewSessionReferring={(ref) => sessionMgr.openNewSessionReferring(ref)}
               newSessionDisabled={sessionMgr.isNewSessionDisabled || gitUnsafeActionsDisabled}
-              {pullingOrigin}
+              pullingOrigin={pullInFlight}
               {pushingOrigin}
               {resettingToOrigin}
               {discardingWorktreeChanges}

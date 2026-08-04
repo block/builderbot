@@ -237,10 +237,13 @@ fn rebase_ref_for_target(branch: &store::Branch, target: Option<&str>) -> String
 
 const PUSH_PROMPT: &str = "Push the current branch to the remote with a normal push. If the push fails for a recoverable reason, diagnose and fix it, then retry with a normal push. Do not force push.";
 const FORCE_PUSH_PROMPT: &str = "Force push the current branch to the remote";
+/// A pull never hands off to an agent (every step aborts), so this is purely the
+/// session's label.
+const PULL_PROMPT: &str = "Pull from origin";
 
 /// Prompt for a pipeline session, which doubles as its timeline label.
 ///
-/// `push_force` only matters for [`PipelineKind::Push`]; the commit kinds ignore
+/// `push_force` only matters for [`PipelineKind::Push`]; the other kinds ignore
 /// it. Queued and running paths share this so a session's label doesn't change
 /// when it is drained.
 fn pipeline_prompt(kind: &PipelineKind, push_force: bool) -> &'static str {
@@ -249,6 +252,7 @@ fn pipeline_prompt(kind: &PipelineKind, push_force: bool) -> &'static str {
         PipelineKind::Squash => "Squash commits",
         PipelineKind::Push if push_force => FORCE_PUSH_PROMPT,
         PipelineKind::Push => PUSH_PROMPT,
+        PipelineKind::Pull => PULL_PROMPT,
     }
 }
 
@@ -323,10 +327,10 @@ fn git_push_with_fallback(args: &str) -> String {
 /// diverged from `origin/{branch}`). Only the rebase variant consults this
 /// value; squash always operates against the base branch.
 ///
-/// Errors for [`PipelineKind::Push`], which produces no commit and belongs to
-/// the git pipeline path — the only caller that reads the kind from the database
-/// checks it first, so this guards against a misrouted queued session rather
-/// than a reachable input.
+/// Errors for [`PipelineKind::Push`] and [`PipelineKind::Pull`], which produce no
+/// commit and belong to the git pipeline path — the only caller that reads the
+/// kind from the database checks it first, so this guards against a misrouted
+/// queued session rather than a reachable input.
 fn build_commit_pipeline_steps(
     kind: &PipelineKind,
     base_branch: &str,
@@ -419,8 +423,8 @@ Here is the context from the prior steps:
                     .to_string(),
             },
         ],
-        PipelineKind::Push => {
-            return Err("Push is not a commit pipeline".to_string());
+        PipelineKind::Push | PipelineKind::Pull => {
+            return Err(format!("{kind:?} is not a commit pipeline"));
         }
     };
 
@@ -463,6 +467,30 @@ fn build_push_pipeline_steps(branch_name: &str, force: bool) -> Vec<PipelineStep
         command: push_command,
         on_failure,
     }]
+}
+
+/// Build the steps for a queued fast-forward pull.
+///
+/// Both steps abort rather than handing off to an agent: a failed `--ff-only`
+/// merge means the branch diverged while the pull waited, and the fix is a user
+/// decision (rebase onto origin, or reset to origin) rather than something an
+/// agent should pick. `session_runner` turns that abort into a session error the
+/// frontend toasts, since a drained pull has no one watching it.
+///
+/// Rebuilt from the branch's current name on dequeue, like the push steps.
+fn build_pull_pipeline_steps(branch_name: &str) -> Vec<PipelineStep> {
+    vec![
+        PipelineStep::Command {
+            label: format!("Fetch origin/{branch_name}"),
+            command: git_fetch_with_fallback(branch_name),
+            on_failure: FailureStrategy::Abort { marker: None },
+        },
+        PipelineStep::Command {
+            label: format!("Fast-forward to origin/{branch_name}"),
+            command: format!("git merge --ff-only origin/{branch_name}"),
+            on_failure: FailureStrategy::Abort { marker: None },
+        },
+    ]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -813,11 +841,13 @@ fn queue_push_pipeline_if_branch_busy(
     Ok(Some(session.id))
 }
 
-/// Start a queued push pipeline that reached the front of the branch queue.
+/// Start a queued push or pull pipeline that reached the front of the branch
+/// queue.
 ///
-/// Steps are rebuilt from the persisted `push_force` flag rather than replayed
-/// from the queued pipeline, matching [`start_queued_commit_pipeline_for_branch`]
-/// so a branch renamed while the push waited still pushes the right ref.
+/// Steps are rebuilt from the branch's current name and the persisted
+/// `push_force` flag rather than replayed from the queued pipeline, matching
+/// [`start_queued_commit_pipeline_for_branch`] so a branch renamed while the work
+/// waited still acts on the right ref.
 pub(crate) async fn start_queued_git_pipeline_for_branch(
     store: Arc<Store>,
     registry: Arc<session_runner::SessionRegistry>,
@@ -834,16 +864,22 @@ pub(crate) async fn start_queued_git_pipeline_for_branch(
         .kind
         .clone()
         .ok_or_else(|| format!("Queued session {} has no pipeline kind", session.id))?;
-    if kind != PipelineKind::Push {
-        return Err(format!(
-            "Queued git pipeline session {} has non-git kind {kind:?}",
-            session.id
-        ));
-    }
     let force = queued_pipeline.push_force;
 
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
-    let steps = build_push_pipeline_steps(&ctx.branch.branch_name, force);
+    let (steps, session_type) = match kind {
+        PipelineKind::Push => (
+            build_push_pipeline_steps(&ctx.branch.branch_name, force),
+            "push",
+        ),
+        PipelineKind::Pull => (build_pull_pipeline_steps(&ctx.branch.branch_name), "pull"),
+        PipelineKind::Rebase | PipelineKind::Squash => {
+            return Err(format!(
+                "Queued git pipeline session {} has non-git kind {kind:?}",
+                session.id
+            ));
+        }
+    };
     let prompt = pipeline_prompt(&kind, force);
     let pipeline = PipelineExecution::from_steps(&steps)
         .with_kind(kind)
@@ -857,8 +893,9 @@ pub(crate) async fn start_queued_git_pipeline_for_branch(
         return Ok(false);
     }
 
-    // No `mark_session_artifact_started` call: a push has no queued artifact stub
-    // whose timestamp needs restamping when the work actually starts.
+    // No `mark_session_artifact_started` call: a git pipeline has no queued
+    // artifact stub whose timestamp needs restamping when the work actually
+    // starts.
     store
         .prepare_queued_session(&session.id, &ctx.working_dir.to_string_lossy(), prompt)
         .map_err(|e| e.to_string())?;
@@ -869,7 +906,13 @@ pub(crate) async fn start_queued_git_pipeline_for_branch(
     let branch_id = ctx.branch.id.clone();
     let project_id = ctx.branch.project_id.clone();
 
-    session_runner::emit_session_running(&app_handle, &session.id, &branch_id, &project_id, "push");
+    session_runner::emit_session_running(
+        &app_handle,
+        &session.id,
+        &branch_id,
+        &project_id,
+        session_type,
+    );
 
     session_runner::start_pipeline_session(
         session_runner::PipelineConfig {
@@ -891,6 +934,89 @@ pub(crate) async fn start_queued_git_pipeline_for_branch(
     )?;
 
     Ok(true)
+}
+
+/// Queue a fast-forward pull when the branch has work in flight.
+///
+/// Returns the queued session id — either a freshly created one, or the queued
+/// pull that already covers this request — and `None` when the branch is idle so
+/// the caller should pull immediately.
+///
+/// Mirrors [`queue_push_pipeline_if_branch_busy`], including running the busy
+/// check, the dedupe scan, and the insert under the branch launch lock. A pull has
+/// no variants, so the dedupe keys on the kind alone.
+///
+/// No provider is recorded: every pull step aborts on failure, so the pipeline
+/// never hands off to an agent.
+fn queue_pull_pipeline_if_branch_busy(
+    store: &Arc<Store>,
+    branch_id: &str,
+) -> Result<Option<String>, String> {
+    let launch_lock = crate::session_commands::branch_session_launch_lock_for(branch_id);
+    let _guard = launch_lock.lock().unwrap();
+
+    if !branch_has_work_in_flight(store, branch_id)? {
+        return Ok(None);
+    }
+
+    if let Some(existing) = find_queued_pipeline(store, branch_id, |pipeline| {
+        pipeline.kind.as_ref() == Some(&PipelineKind::Pull)
+    })? {
+        return Ok(Some(existing));
+    }
+
+    let branch = store
+        .get_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    let steps = build_pull_pipeline_steps(&branch.branch_name);
+    let pipeline = PipelineExecution::from_steps(&steps).with_kind(PipelineKind::Pull);
+    // Like a queued push, this session carries no artifact — `branch_id` is what
+    // keeps it on the branch queue.
+    let mut session = store::Session::new_queued(PULL_PROMPT).with_branch(branch_id);
+    session.pipeline = Some(pipeline);
+    store.create_session(&session).map_err(|e| e.to_string())?;
+
+    Ok(Some(session.id))
+}
+
+/// Fast-forward the branch to origin now, or queue the pull behind in-flight
+/// branch work.
+///
+/// An idle branch pulls directly (no session row for what is usually an instant
+/// operation), which is why this returns an `Option` rather than the
+/// [`BranchPipelineResponse`] the pipeline-only actions use: `None` means the
+/// pull already happened, `Some(session_id)` means it is waiting its turn on the
+/// branch queue.
+pub(crate) async fn pull_or_queue_branch_for_branch(
+    store: Arc<Store>,
+    branch_id: String,
+) -> Result<Option<String>, String> {
+    if let Some(session_id) = queue_pull_pipeline_if_branch_busy(&store, &branch_id)? {
+        return Ok(Some(session_id));
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::timeline::pull_branch_ff_only_impl(&store, &branch_id)
+    })
+    .await
+    .map_err(|e| format!("Pull task failed: {e}"))??;
+
+    Ok(None)
+}
+
+/// Pull origin's new commits into the branch.
+///
+/// Returns the queued session id when the pull had to join the branch queue, and
+/// `None` when it ran immediately.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn pull_or_queue_branch(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+) -> Result<Option<String>, String> {
+    let store = get_store(&store)?;
+    pull_or_queue_branch_for_branch(store, branch_id).await
 }
 
 fn create_pr_handoff_prompt(
@@ -1982,10 +2108,131 @@ mod tests {
     }
 
     #[test]
-    fn commit_pipeline_steps_reject_the_push_kind() {
-        let err = build_commit_pipeline_steps(&PipelineKind::Push, "main", "main").unwrap_err();
+    fn commit_pipeline_steps_reject_the_git_pipeline_kinds() {
+        let push_err =
+            build_commit_pipeline_steps(&PipelineKind::Push, "main", "main").unwrap_err();
+        let pull_err =
+            build_commit_pipeline_steps(&PipelineKind::Pull, "main", "main").unwrap_err();
 
-        assert_eq!(err, "Push is not a commit pipeline");
+        assert_eq!(push_err, "Push is not a commit pipeline");
+        assert_eq!(pull_err, "Pull is not a commit pipeline");
+    }
+
+    fn queue_pull(store: &Arc<Store>, branch_id: &str) -> Option<String> {
+        queue_pull_pipeline_if_branch_busy(store, branch_id).unwrap()
+    }
+
+    #[test]
+    fn idle_branch_pulls_immediately_instead_of_queueing() {
+        let (store, branch) = setup_branch_store();
+
+        assert_eq!(queue_pull(&store, &branch.id), None);
+        assert!(store
+            .get_queued_sessions_for_branch(&branch.id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn busy_branch_queues_pull_with_branch_link_and_no_artifact() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+
+        let session_id =
+            queue_pull(&store, &branch.id).expect("pull should queue behind the running note");
+
+        let session = store.get_session(&session_id).unwrap().unwrap();
+        assert_eq!(session.status, store::SessionStatus::Queued);
+        assert_eq!(session.prompt, PULL_PROMPT);
+        // Like a queued push, the branch link is what keeps an artifact-less
+        // pull on the queue.
+        assert_eq!(session.branch_id.as_deref(), Some(branch.id.as_str()));
+        assert_eq!(
+            session.pipeline.unwrap().kind,
+            Some(store::PipelineKind::Pull)
+        );
+        assert!(store
+            .list_commits_for_branch(&branch.id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn repeated_pull_click_reuses_the_already_queued_pull() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+
+        let first = queue_pull(&store, &branch.id).unwrap();
+        let second = queue_pull(&store, &branch.id).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(
+            store
+                .get_queued_sessions_for_branch(&branch.id)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn pull_and_push_queue_separately() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+
+        let pull = queue_pull(&store, &branch.id).unwrap();
+        let push = queue_push(&store, &branch.id, false).unwrap();
+
+        assert_ne!(pull, push);
+        assert_eq!(
+            store
+                .get_queued_sessions_for_branch(&branch.id)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn queued_pull_alone_keeps_the_branch_busy() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+        queue_pull(&store, &branch.id).unwrap();
+
+        // The note session finishes, but the still-queued pull must keep a newly
+        // requested push on the queue rather than running it now.
+        for session in store.get_running_sessions().unwrap() {
+            store
+                .update_session_status(&session.id, store::SessionStatus::Completed, None, None)
+                .unwrap();
+        }
+
+        assert!(queue_push(&store, &branch.id, false).is_some());
+    }
+
+    #[test]
+    fn pull_steps_fetch_then_fast_forward_and_never_hand_off() {
+        // The drain path re-derives the ref, so a branch renamed while the pull
+        // waited fast-forwards the new name rather than the queued one.
+        let steps = build_pull_pipeline_steps("feature-renamed");
+
+        let (fetch_label, fetch_command, fetch_on_failure) = command_at(&steps, 0);
+        assert_eq!(fetch_label, "Fetch origin/feature-renamed");
+        assert!(fetch_command.contains("git fetch origin feature-renamed"));
+        assert!(matches!(
+            fetch_on_failure,
+            FailureStrategy::Abort { marker: None }
+        ));
+
+        let (merge_label, merge_command, merge_on_failure) = command_at(&steps, 1);
+        assert_eq!(merge_label, "Fast-forward to origin/feature-renamed");
+        assert_eq!(merge_command, "git merge --ff-only origin/feature-renamed");
+        // A diverged branch is the user's call to make, not an agent's.
+        assert!(matches!(
+            merge_on_failure,
+            FailureStrategy::Abort { marker: None }
+        ));
+        assert_eq!(steps.len(), 2);
     }
 
     #[tokio::test]

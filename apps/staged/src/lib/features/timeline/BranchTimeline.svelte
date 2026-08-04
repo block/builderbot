@@ -97,13 +97,23 @@
     onOpenPushSession?: () => void;
     /** Cancel a push/force-push that is still waiting on the branch queue. */
     onCancelQueuedPush?: () => void;
+    /** Cancel a pull that is still waiting on the branch queue. */
+    onCancelQueuedPull?: () => void;
     /** Push is queued behind in-flight branch work. */
     pushQueuedOrigin?: boolean;
+    /** Pull is queued behind in-flight branch work. */
+    pullQueuedOrigin?: boolean;
+    /**
+     * True when the branch has queued or running sessions, so the backend will
+     * queue a git action rather than run it now. Only loosens the clean-worktree
+     * requirement on Pull — see `pullDisabledReason`.
+     */
+    branchSessionBusy?: boolean;
     /**
      * Why reset-to-origin can't run right now.
      *
      * Reset still executes immediately rather than queueing — it is validated
-     * against a point-in-time preview — so unlike Rebase/Squash/Push it stays
+     * against a point-in-time preview — so unlike Rebase/Squash/Push/Pull it stays
      * disabled while the branch has sessions in flight.
      */
     immediateGitActionDisabledReason?: string | null;
@@ -112,7 +122,7 @@
      *
      * These queue on the branch session queue like Rebase/Squash, so in-flight
      * sessions are not a reason to disable them — only branch identity problems
-     * are.
+     * are. Pull is queueable too, but computes its own reason from the git state.
      */
     queueableGitActionDisabledReason?: string | null;
     onViewWorktreeDiff?: () => void;
@@ -171,7 +181,10 @@
     forcePushingOrigin = false,
     onOpenPushSession,
     onCancelQueuedPush,
+    onCancelQueuedPull,
     pushQueuedOrigin = false,
+    pullQueuedOrigin = false,
+    branchSessionBusy = false,
     immediateGitActionDisabledReason,
     queueableGitActionDisabledReason,
     onViewWorktreeDiff,
@@ -268,6 +281,7 @@
     pushing?: boolean;
     pushQueued?: boolean;
     forcePushQueued?: boolean;
+    pullQueued?: boolean;
     onViewDiff?: () => void;
     onCommitChanges?: () => void;
     commitChangesDisabledReason?: string;
@@ -349,13 +363,25 @@
     return detail ? `${title}: ${detail}` : title;
   }
 
+  /**
+   * Why Pull can't run right now.
+   *
+   * A dirty worktree only blocks the *immediate* pull: `git merge --ff-only`
+   * needs a clean tree. When the branch is busy the pull queues instead, and the
+   * dirt is almost always an agent's work in progress that its commit session
+   * clears before the pull drains — so the requirement is dropped there rather
+   * than disabling an action the backend would happily queue.
+   *
+   * Detached HEAD, the wrong branch, and a diverged upstream stay hard disables:
+   * none of them resolve by waiting.
+   */
   function pullDisabledReason(state: BranchGitState): string | undefined {
     if (pullingOrigin) return 'Pulling...';
     if (state.detachedHead) return 'Detached HEAD';
     if (!state.expectedBranchMatches) {
       return state.currentBranch ? `Checked out ${state.currentBranch}` : 'Wrong branch';
     }
-    if (state.worktree.dirty) return 'Clean worktree required';
+    if (state.worktree.dirty && !branchSessionBusy) return 'Clean worktree required';
     if (state.upstream.relation !== 'originAhead') return 'Not fast-forwardable';
     return undefined;
   }
@@ -436,16 +462,19 @@
         }
         break;
       case 'originAhead': {
-        const disabledReason = pullDisabledReason(state);
+        // A queued pull keeps the button live so it can cancel the queued session.
+        const disabledReason = pullQueuedOrigin ? undefined : pullDisabledReason(state);
         rows.push({
           key: 'git-origin-ahead',
           type: 'git-pull',
           title: `Origin has ${plural(state.upstream.behind, 'new commit')}`,
+          meta: pullQueuedOrigin ? 'Pull queued' : undefined,
           timestamp: bottomTimestamp,
           order: 1,
           placement: 'git-footer',
-          onPull: disabledReason ? undefined : onPullOrigin,
+          onPull: pullQueuedOrigin ? onCancelQueuedPull : disabledReason ? undefined : onPullOrigin,
           pullDisabledReason: disabledReason,
+          pullQueued: pullQueuedOrigin,
         });
         break;
       }
@@ -976,6 +1005,7 @@
             pushing={item.pushing}
             pushQueued={item.pushQueued}
             forcePushQueued={item.forcePushQueued}
+            pullQueued={item.pullQueued}
             onViewDiffClick={item.onViewDiff}
             onCommitChangesClick={item.onCommitChanges}
             commitChangesDisabledReason={item.commitChangesDisabledReason}
@@ -1065,6 +1095,7 @@
             pushing={item.pushing}
             pushQueued={item.pushQueued}
             forcePushQueued={item.forcePushQueued}
+            pullQueued={item.pullQueued}
             onViewDiffClick={item.onViewDiff}
             onCommitChangesClick={item.onCommitChanges}
             commitChangesDisabledReason={item.commitChangesDisabledReason}

@@ -2269,7 +2269,6 @@ pub fn run() {
             timeline::get_branch_timeline,
             timeline::refresh_branch_git_state,
             timeline::list_parent_branch_commits,
-            timeline::pull_branch_ff_only,
             timeline::reset_branch_to_remote,
             // Notes
             note_commands::create_note,
@@ -2311,6 +2310,7 @@ pub fn run() {
             prs::refresh_all_pr_statuses,
             prs::has_unpushed_commits,
             prs::push_branch,
+            prs::pull_or_queue_branch,
             prs::rebase_branch,
             prs::squash_commits,
             prs::clear_branch_pr_status,

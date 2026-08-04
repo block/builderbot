@@ -1,13 +1,15 @@
 /**
  * Listener for the backend's ACP tools reconcile completion.
  *
- * On launch the backend installs/upgrades the Staged-managed ACP bridges
- * (claude, codex) in the background (`acp_tools_reconciler.rs`). On a fresh
- * profile, provider discovery and any doctor report are cached long before
- * that finishes, and nothing re-probes on its own — without this signal the
- * agent picker keeps reporting missing bridges that are already installed
- * until a manual refresh or restart. The event also fires on partial
- * failure: the bridges that did land should become selectable.
+ * The backend installs/upgrades the Staged-managed ACP bridges (claude, codex)
+ * in the background at launch and once a day thereafter
+ * (`acp_tools_reconciler.rs`). On a fresh profile, provider discovery and any
+ * doctor report are cached long before the launch pass finishes, and nothing
+ * re-probes on its own — without this signal the agent picker keeps reporting
+ * missing bridges that are already installed until a manual refresh or restart;
+ * the daily pass likewise surfaces a freshly-published bridge version without a
+ * restart. The event also fires on partial failure: the bridges that did land
+ * should become selectable.
  */
 
 import { listenToEvent, type UnlistenFn } from '../transport';
@@ -16,7 +18,7 @@ import { doctorState, runChecks } from '../features/doctor/doctor.svelte';
 
 /** Mirrors `ACP_TOOLS_RECONCILED_EVENT` in `acp_tools_reconciler.rs`. */
 interface AcpToolsReconciledEvent {
-  /** False when at least one managed bridge install failed this launch. */
+  /** False when at least one managed bridge install failed this pass. */
   ok: boolean;
   /** Managed tool ids the reconciler handled (e.g. `claude-acp`). */
   providerIds: string[];

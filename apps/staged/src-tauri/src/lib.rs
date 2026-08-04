@@ -1885,10 +1885,10 @@ pub fn run() {
                 acp_client::set_bundled_tools_dir(dir);
             }
 
-            // Install/upgrade the managed ACP bridges in the background; the
-            // renderer refreshes doctor + provider discovery on the
-            // completion event.
-            acp_tools_reconciler::spawn_startup_reconcile(app.handle());
+            // Install/upgrade the managed ACP bridges in the background at
+            // launch and once a day thereafter; the renderer refreshes doctor +
+            // provider discovery on each completion event.
+            acp_tools_reconciler::spawn_reconcile_loop(app.handle());
 
             let updater_pubkey_present = app
                 .config()

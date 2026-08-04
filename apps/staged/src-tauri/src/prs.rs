@@ -172,7 +172,11 @@ fn start_pipeline_for_branch(
 ) -> Result<String, String> {
     let pipeline = PipelineExecution::from_steps(&steps);
 
-    let mut session = store::Session::new_running(prompt, &ctx.working_dir);
+    // pr/push pipeline sessions link no artifact row, so the session row
+    // itself carries the branch linkage — busy-state snapshots and terminal
+    // completion side-effects resolve the branch from it.
+    let mut session =
+        store::Session::new_running(prompt, &ctx.working_dir).with_branch(&ctx.branch.id);
     if let Some(ref p) = provider {
         session = session.with_provider(p);
     }
@@ -1395,7 +1399,17 @@ pub async fn refresh_pr_status(
     branch_id: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
+    refresh_pr_status_impl(store, app_handle, branch_id).await
+}
 
+/// Core implementation of the single-branch PR status refresh, shared by the
+/// `refresh_pr_status` command, the web-mode `dispatch()` arm, and the
+/// session-completion side effects that run after a PR session finishes.
+pub(crate) async fn refresh_pr_status_impl(
+    store: Arc<Store>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+) -> Result<(), String> {
     let branch = store
         .get_branch(&branch_id)
         .map_err(|e| e.to_string())?
@@ -1675,12 +1689,22 @@ pub fn clear_branch_pr_status(
     branch_id: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
+    clear_branch_pr_status_impl(&store, &app_handle, &branch_id)
+}
 
+/// Core implementation shared by the `clear_branch_pr_status` command, the
+/// web-mode `dispatch()` arm, and the session-completion side effects that
+/// run after a push session finishes.
+pub(crate) fn clear_branch_pr_status_impl(
+    store: &Store,
+    app_handle: &tauri::AppHandle,
+    branch_id: &str,
+) -> Result<(), String> {
     store
-        .update_branch_pr_status(&branch_id, None, None, None, None, None, None, None, None)
+        .update_branch_pr_status(branch_id, None, None, None, None, None, None, None, None)
         .map_err(|e| e.to_string())?;
 
-    crate::web_server::emit_to_all(&app_handle, "pr-status-cleared", &branch_id);
+    crate::web_server::emit_to_all(app_handle, "pr-status-cleared", branch_id);
 
     Ok(())
 }

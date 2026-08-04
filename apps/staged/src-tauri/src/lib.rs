@@ -31,6 +31,7 @@ pub mod project_mcp;
 pub mod prs;
 pub mod review_commands;
 pub mod session_commands;
+pub mod session_completion;
 pub mod session_runner;
 pub mod shell_env;
 pub mod store;

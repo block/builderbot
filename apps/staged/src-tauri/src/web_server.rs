@@ -3469,74 +3469,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "refresh_pr_status" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
-
-            let branch = store
-                .get_branch(&branch_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-            let pr_number = branch
-                .pr_number
-                .ok_or_else(|| "Branch does not have an associated PR".to_string())?;
-            let project = store
-                .get_project(&branch.project_id)
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
-            let (github_repo, _) =
-                crate::prs::resolve_branch_repo_and_subpath(&store, &project, &branch)?;
-
-            let pr_status = {
-                let github_repo = github_repo.clone();
-                tokio::task::spawn_blocking(move || {
-                    crate::git::fetch_pr_status_for_repo(&github_repo, pr_number)
-                })
-                .await
-                .map_err(|e| format!("refresh_pr_status task failed: {e}"))?
-            };
-            let pr_status = match pr_status {
-                Ok(status) => status,
-                Err(e) => {
-                    log::error!(
-                        "refresh_pr_status failed for branch_id={}, pr_number={}: {}",
-                        branch_id,
-                        pr_number,
-                        e
-                    );
-                    return Err(e.to_string());
-                }
-            };
-            let mergeable = pr_status.mergeable == "MERGEABLE";
-            let pr_fetched_at = store::now_timestamp();
-
-            store
-                .update_branch_pr_status(
-                    &branch_id,
-                    Some(pr_status.state.clone()),
-                    Some(pr_status.checks_summary.state.clone()),
-                    pr_status.review_decision.clone(),
-                    Some(mergeable),
-                    Some(pr_status.is_draft),
-                    None,
-                    None,
-                    pr_status.head_sha.clone(),
-                )
-                .map_err(|e| e.to_string())?;
-
-            emit_to_all(
-                app_handle,
-                "pr-status-changed",
-                crate::prs::PrStatusEvent {
-                    branch_id: branch_id.clone(),
-                    pr_state: pr_status.state,
-                    pr_checks_status: pr_status.checks_summary.state,
-                    pr_review_decision: pr_status.review_decision,
-                    pr_mergeable: mergeable,
-                    pr_draft: pr_status.is_draft,
-                    pr_head_sha: pr_status.head_sha,
-                    pr_fetched_at,
-                    failed_checks: pr_status.failed_checks,
-                },
-            );
-
+            crate::prs::refresh_pr_status_impl(store, app_handle.clone(), branch_id).await?;
             Ok(Value::Null)
         }
         "refresh_all_pr_statuses" => {
@@ -3646,9 +3579,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "clear_branch_pr_status" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
-            store
-                .update_branch_pr_status(&branch_id, None, None, None, None, None, None, None, None)
-                .map_err(|e| e.to_string())?;
+            crate::prs::clear_branch_pr_status_impl(&store, app_handle, &branch_id)?;
             Ok(Value::Null)
         }
 

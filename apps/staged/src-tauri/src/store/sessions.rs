@@ -241,7 +241,7 @@ impl Store {
     pub fn get_active_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id
              FROM sessions WHERE status IN ('running', 'queued')
              ORDER BY created_at ASC",
         )?;
@@ -357,7 +357,8 @@ impl Store {
     }
 
     /// Resolve the branch that owns a session through its linked artifact, or
-    /// through `sessions.branch_id` for artifact-less branch work (pushes).
+    /// through `sessions.branch_id` for artifact-less branch work (pipeline
+    /// pr/push sessions).
     ///
     /// Project-note sessions do not belong to a branch and therefore return `None`.
     /// This assumes all branch-linked artifacts for a session point at the same

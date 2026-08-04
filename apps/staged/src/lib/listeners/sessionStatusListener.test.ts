@@ -48,13 +48,31 @@ function createFakeRegistry(projectStateStore: {
 describe('sessionStatusListener busy-state hydration', () => {
   let getActiveSessions: ReturnType<typeof vi.fn>;
   let invalidateBranchTimeline: ReturnType<typeof vi.fn>;
+  let getFreshSessionMessages: ReturnType<typeof vi.fn>;
+  let updateBranchPr: ReturnType<typeof vi.fn>;
+  let refreshPrStatus: ReturnType<typeof vi.fn>;
+  let clearBranchPrStatus: ReturnType<typeof vi.fn>;
   let listenToEvent: ReturnType<typeof vi.fn>;
   let unlistenEvents: ReturnType<typeof vi.fn>;
-  let eventCallback: ((payload: unknown) => void) | undefined;
+  let eventCallbacks: Map<string, (payload: unknown) => void>;
   let projectStateStore: {
     addRunningSession: ReturnType<typeof vi.fn>;
     removeRunningSession: Mock<(projectId: string, sessionId: string) => void>;
     markAsUnread: ReturnType<typeof vi.fn>;
+  };
+  let prStateStore: {
+    clearSessionTracking: ReturnType<typeof vi.fn>;
+    setPrCreated: ReturnType<typeof vi.fn>;
+    setPrError: ReturnType<typeof vi.fn>;
+    getPrState: ReturnType<typeof vi.fn>;
+  };
+  let pushStateStore: {
+    clearSessionTracking: ReturnType<typeof vi.fn>;
+    markQueuedPushStarted: ReturnType<typeof vi.fn>;
+    setPushDone: ReturnType<typeof vi.fn>;
+    setPushError: ReturnType<typeof vi.fn>;
+    clearPushState: ReturnType<typeof vi.fn>;
+    getPushState: ReturnType<typeof vi.fn>;
   };
   let sessionRegistry: ReturnType<typeof createFakeRegistry>;
 
@@ -64,16 +82,34 @@ describe('sessionStatusListener busy-state hydration', () => {
 
     getActiveSessions = vi.fn().mockResolvedValue([]);
     invalidateBranchTimeline = vi.fn();
+    getFreshSessionMessages = vi.fn().mockResolvedValue([]);
+    updateBranchPr = vi.fn().mockResolvedValue(undefined);
+    refreshPrStatus = vi.fn().mockResolvedValue(undefined);
+    clearBranchPrStatus = vi.fn().mockResolvedValue(undefined);
     unlistenEvents = vi.fn();
-    eventCallback = undefined;
-    listenToEvent = vi.fn((_event: string, callback: (payload: unknown) => void) => {
-      eventCallback = callback;
+    eventCallbacks = new Map();
+    listenToEvent = vi.fn((event: string, callback: (payload: unknown) => void) => {
+      eventCallbacks.set(event, callback);
       return unlistenEvents;
     });
     projectStateStore = {
       addRunningSession: vi.fn(),
       removeRunningSession: vi.fn<(projectId: string, sessionId: string) => void>(),
       markAsUnread: vi.fn(),
+    };
+    prStateStore = {
+      clearSessionTracking: vi.fn(),
+      setPrCreated: vi.fn(),
+      setPrError: vi.fn(),
+      getPrState: vi.fn().mockReturnValue(undefined),
+    };
+    pushStateStore = {
+      clearSessionTracking: vi.fn(),
+      markQueuedPushStarted: vi.fn(),
+      setPushDone: vi.fn(),
+      setPushError: vi.fn(),
+      clearPushState: vi.fn(),
+      getPushState: vi.fn().mockReturnValue(undefined),
     };
     sessionRegistry = createFakeRegistry(projectStateStore);
 
@@ -82,27 +118,17 @@ describe('sessionStatusListener busy-state hydration', () => {
       getActiveSessions,
       invalidateBranchTimeline,
       getSession: vi.fn().mockResolvedValue(null),
-      getFreshSessionMessages: vi.fn().mockResolvedValue([]),
-      updateBranchPr: vi.fn().mockResolvedValue(undefined),
-      refreshPrStatus: vi.fn().mockResolvedValue(undefined),
-      clearBranchPrStatus: vi.fn().mockResolvedValue(undefined),
+      getFreshSessionMessages,
+      updateBranchPr,
+      refreshPrStatus,
+      clearBranchPrStatus,
     }));
     vi.doMock('../features/layout/navigation.svelte', () => ({
       navigation: { selectedProjectId: null },
     }));
     vi.doMock('../stores/projectState.svelte', () => ({ projectStateStore }));
-    vi.doMock('../stores/prState.svelte', () => ({
-      prStateStore: { clearSessionTracking: vi.fn(), setPrCreated: vi.fn(), setPrError: vi.fn() },
-    }));
-    vi.doMock('../stores/pushState.svelte', () => ({
-      pushStateStore: {
-        clearSessionTracking: vi.fn(),
-        markQueuedPushStarted: vi.fn(),
-        setPushDone: vi.fn(),
-        setPushError: vi.fn(),
-        clearPushState: vi.fn(),
-      },
-    }));
+    vi.doMock('../stores/prState.svelte', () => ({ prStateStore }));
+    vi.doMock('../stores/pushState.svelte', () => ({ pushStateStore }));
     vi.doMock('../stores/pullState.svelte', () => ({
       pullStateStore: {
         markQueuedPullStarted: vi.fn(),
@@ -280,13 +306,15 @@ describe('sessionStatusListener busy-state hydration', () => {
 
     const unlisten = listenForSessionStatus();
     expect(listenToEvent).toHaveBeenCalledWith('session-status-changed', expect.any(Function));
+    expect(listenToEvent).toHaveBeenCalledWith('pr-created', expect.any(Function));
+    expect(listenToEvent).toHaveBeenCalledWith('push-completed', expect.any(Function));
     await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
 
     window.dispatchEvent(new CustomEvent('cache-stale'));
     await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(2));
 
     unlisten();
-    expect(unlistenEvents).toHaveBeenCalledTimes(1);
+    expect(unlistenEvents).toHaveBeenCalledTimes(3);
     window.dispatchEvent(new CustomEvent('cache-stale'));
     expect(getActiveSessions).toHaveBeenCalledTimes(2);
   });
@@ -296,7 +324,7 @@ describe('sessionStatusListener busy-state hydration', () => {
     listenForSessionStatus();
     await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
 
-    eventCallback?.({
+    eventCallbacks.get('session-status-changed')?.({
       sessionId: 'delta-1',
       status: 'running',
       projectId: 'project-1',
@@ -311,8 +339,210 @@ describe('sessionStatusListener busy-state hydration', () => {
     );
     expect(projectStateStore.addRunningSession).toHaveBeenCalledWith('project-1', 'delta-1');
 
-    eventCallback?.({ sessionId: 'delta-1', status: 'completed', branchId: 'branch-1' });
+    eventCallbacks.get('session-status-changed')?.({
+      sessionId: 'delta-1',
+      status: 'completed',
+      branchId: 'branch-1',
+    });
     await vi.waitFor(() => expect(sessionRegistry.cleanupSession).toHaveBeenCalledWith('delta-1'));
     expect(invalidateBranchTimeline).toHaveBeenCalledWith('branch-1');
+  });
+
+  // -------------------------------------------------------------------------
+  // Completion rendering: the backend parses/persists outcomes at the terminal
+  // transition and emits `pr-created` / `push-completed` before the terminal
+  // status event; these handlers only render and never write.
+  // -------------------------------------------------------------------------
+
+  describe('completion domain events', () => {
+    async function listen() {
+      const { listenForSessionStatus } = await import('./sessionStatusListener');
+      listenForSessionStatus();
+      await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+    }
+
+    function registerSession(sessionId: string, type: string, branchId = 'branch-1') {
+      sessionRegistry.sessions.set(sessionId, {
+        sessionId,
+        projectId: 'project-1',
+        branchId,
+        type,
+        timestamp: 500,
+      });
+    }
+
+    it('renders pr-created by marking the branch created', async () => {
+      await listen();
+
+      eventCallbacks.get('pr-created')?.({
+        branchId: 'branch-1',
+        sessionId: 'pr-1',
+        prUrl: 'https://github.com/org/repo/pull/42',
+        prNumber: 42,
+      });
+
+      expect(prStateStore.setPrCreated).toHaveBeenCalledWith(
+        'branch-1',
+        'https://github.com/org/repo/pull/42'
+      );
+    });
+
+    it('renders push-completed success and clears it after the done flash', async () => {
+      await listen();
+
+      eventCallbacks.get('push-completed')?.({
+        branchId: 'branch-1',
+        sessionId: 'push-1',
+        outcome: 'succeeded',
+      });
+
+      expect(pushStateStore.setPushDone).toHaveBeenCalledWith('branch-1');
+      expect(pushStateStore.setPushError).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1_500);
+      expect(pushStateStore.clearPushState).toHaveBeenCalledWith('branch-1');
+    });
+
+    it('renders push-completed rejection as a non-fast-forward error', async () => {
+      await listen();
+
+      eventCallbacks.get('push-completed')?.({
+        branchId: 'branch-1',
+        sessionId: 'push-1',
+        outcome: 'rejectedNonFastForward',
+      });
+
+      expect(pushStateStore.setPushError).toHaveBeenCalledWith('branch-1', '', true);
+      expect(pushStateStore.setPushDone).not.toHaveBeenCalled();
+    });
+
+    it('leaves a created branch alone when the pr session completes', async () => {
+      await listen();
+      registerSession('pr-1', 'pr');
+      prStateStore.getPrState.mockReturnValue({ state: 'created' });
+
+      eventCallbacks.get('session-status-changed')?.({
+        sessionId: 'pr-1',
+        status: 'completed',
+        branchId: 'branch-1',
+      });
+
+      expect(prStateStore.setPrError).not.toHaveBeenCalled();
+      expect(prStateStore.clearSessionTracking).toHaveBeenCalledWith('branch-1');
+    });
+
+    it('reports a missing PR URL when completion arrives without pr-created', async () => {
+      await listen();
+      registerSession('pr-1', 'pr');
+
+      eventCallbacks.get('session-status-changed')?.({
+        sessionId: 'pr-1',
+        status: 'completed',
+        branchId: 'branch-1',
+      });
+
+      expect(prStateStore.setPrError).toHaveBeenCalledWith(
+        'branch-1',
+        'PR session completed but no PR URL was found in the output.'
+      );
+    });
+
+    it('renders terminal pr failures and cancellations', async () => {
+      await listen();
+      registerSession('pr-1', 'pr');
+      registerSession('pr-2', 'pr', 'branch-2');
+
+      eventCallbacks.get('session-status-changed')?.({ sessionId: 'pr-1', status: 'error' });
+      eventCallbacks.get('session-status-changed')?.({ sessionId: 'pr-2', status: 'cancelled' });
+
+      expect(prStateStore.setPrError).toHaveBeenCalledWith(
+        'branch-1',
+        'PR creation session failed.'
+      );
+      expect(prStateStore.setPrError).toHaveBeenCalledWith(
+        'branch-2',
+        'PR creation session was cancelled.'
+      );
+    });
+
+    it('falls back to success rendering when the push-completed event was missed', async () => {
+      await listen();
+      registerSession('push-1', 'push');
+      pushStateStore.getPushState.mockReturnValue({ state: 'pushing' });
+
+      eventCallbacks.get('session-status-changed')?.({
+        sessionId: 'push-1',
+        status: 'completed',
+        branchId: 'branch-1',
+      });
+
+      expect(pushStateStore.setPushDone).toHaveBeenCalledWith('branch-1');
+      vi.advanceTimersByTime(1_500);
+      expect(pushStateStore.clearPushState).toHaveBeenCalledWith('branch-1');
+    });
+
+    it('does not re-render a push completion already handled by push-completed', async () => {
+      await listen();
+      registerSession('push-1', 'push');
+      pushStateStore.getPushState.mockReturnValue({ state: 'done' });
+
+      eventCallbacks.get('session-status-changed')?.({
+        sessionId: 'push-1',
+        status: 'completed',
+        branchId: 'branch-1',
+      });
+
+      expect(pushStateStore.setPushDone).not.toHaveBeenCalled();
+      expect(pushStateStore.setPushError).not.toHaveBeenCalled();
+      expect(pushStateStore.clearSessionTracking).toHaveBeenCalledWith('branch-1');
+    });
+
+    it('renders terminal push failures and cancellations', async () => {
+      await listen();
+      registerSession('push-1', 'push');
+      registerSession('push-2', 'push', 'branch-2');
+
+      eventCallbacks.get('session-status-changed')?.({ sessionId: 'push-1', status: 'error' });
+      eventCallbacks.get('session-status-changed')?.({ sessionId: 'push-2', status: 'cancelled' });
+
+      expect(pushStateStore.setPushError).toHaveBeenCalledWith('branch-1', 'Push session failed.');
+      expect(pushStateStore.setPushError).toHaveBeenCalledWith(
+        'branch-2',
+        'Push session was cancelled.'
+      );
+    });
+
+    it('never performs authoritative writes from completion handling', async () => {
+      await listen();
+      registerSession('pr-1', 'pr');
+      registerSession('push-1', 'push', 'branch-2');
+      pushStateStore.getPushState.mockReturnValue({ state: 'pushing' });
+
+      eventCallbacks.get('pr-created')?.({
+        branchId: 'branch-1',
+        sessionId: 'pr-1',
+        prUrl: 'https://github.com/org/repo/pull/42',
+        prNumber: 42,
+      });
+      eventCallbacks.get('push-completed')?.({
+        branchId: 'branch-2',
+        sessionId: 'push-1',
+        outcome: 'succeeded',
+      });
+      eventCallbacks.get('session-status-changed')?.({
+        sessionId: 'pr-1',
+        status: 'completed',
+        branchId: 'branch-1',
+      });
+      eventCallbacks.get('session-status-changed')?.({
+        sessionId: 'push-1',
+        status: 'completed',
+        branchId: 'branch-2',
+      });
+
+      expect(updateBranchPr).not.toHaveBeenCalled();
+      expect(refreshPrStatus).not.toHaveBeenCalled();
+      expect(clearBranchPrStatus).not.toHaveBeenCalled();
+      expect(getFreshSessionMessages).not.toHaveBeenCalled();
+    });
   });
 });

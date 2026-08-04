@@ -14,29 +14,42 @@
  * `get_active_sessions` snapshot (on startup, on WebSocket reconnect via
  * transport.ts, and on the page-lifecycle `cache-stale` resume signal), then
  * applies `session-status-changed` deltas on top.
+ *
+ * Completion outcomes are parsed and persisted by the backend at the terminal
+ * transition (PR number, cleared PR status) and arrive as `pr-created` /
+ * `push-completed` domain events emitted *before* the terminal
+ * `session-status-changed` event. The handlers here are idempotent renderers
+ * — they perform no writes, so any number of connected clients can process
+ * the same events safely.
  */
 
 import { toast } from 'svelte-sonner';
 import { listenToEvent, type UnlistenFn } from '../transport';
 import { invalidateBranchTimeline } from '../commands';
 import * as commands from '../api/commands';
-import {
-  classifyCompletedPushSession,
-  extractPrUrl,
-  extractPrNumber,
-} from '../features/branches/branchCardHelpers';
 import { navigation } from '../features/layout/navigation.svelte';
 import { projectStateStore } from '../stores/projectState.svelte';
 import { prStateStore } from '../stores/prState.svelte';
 import { pullStateStore } from '../stores/pullState.svelte';
 import { pushStateStore } from '../stores/pushState.svelte';
 import { sessionRegistry, type SessionType } from '../stores/sessionRegistry.svelte';
-import type { ActiveSessionInfo, SessionStatus, SessionStatusPayload } from '../types';
+import type {
+  ActiveSessionInfo,
+  PrCreatedPayload,
+  PushCompletedPayload,
+  SessionStatus,
+  SessionStatusPayload,
+} from '../types';
 
 export function listenForSessionStatus(): UnlistenFn {
   const unlistenEvents = listenToEvent<SessionStatusPayload>(
     'session-status-changed',
     handleSessionStatusChanged
+  );
+  const unlistenPrCreated = listenToEvent<PrCreatedPayload>('pr-created', handlePrCreated);
+  const unlistenPushCompleted = listenToEvent<PushCompletedPayload>(
+    'push-completed',
+    handlePushCompleted
   );
 
   // Snapshot-then-deltas: hydrate now (app/page startup) and again after a
@@ -50,6 +63,8 @@ export function listenForSessionStatus(): UnlistenFn {
   return () => {
     window.removeEventListener('cache-stale', onCacheStale);
     unlistenEvents();
+    unlistenPrCreated();
+    unlistenPushCompleted();
   };
 }
 
@@ -150,14 +165,31 @@ export async function hydrateActiveSessions(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// Completion sub-handlers
+// Completion sub-handlers (idempotent renderers — the backend owns the writes)
 // ---------------------------------------------------------------------------
 
-async function handleSessionEnd(
-  sessionId: string,
-  status: SessionStatus,
-  errorMessage?: string | null
-) {
+/**
+ * Render a PR produced by a completed PR session. The backend already
+ * persisted the PR number and kicked off a status refresh; the fresh status
+ * arrives via the existing `pr-status-changed` event.
+ */
+function handlePrCreated(payload: PrCreatedPayload): void {
+  prStateStore.setPrCreated(payload.branchId, payload.prUrl);
+}
+
+/** Render the backend-classified outcome of a completed push session. */
+function handlePushCompleted(payload: PushCompletedPayload): void {
+  if (payload.outcome === 'rejectedNonFastForward') {
+    pushStateStore.setPushError(payload.branchId, '', true);
+  } else {
+    pushStateStore.setPushDone(payload.branchId);
+    setTimeout(() => {
+      pushStateStore.clearPushState(payload.branchId);
+    }, 1_500);
+  }
+}
+
+function handleSessionEnd(sessionId: string, status: SessionStatus, errorMessage?: string | null) {
   const sessionProjectId = sessionRegistry.getProjectId(sessionId);
   const sessionType = sessionRegistry.getType(sessionId);
   const branchId = sessionRegistry.getBranchId(sessionId);
@@ -173,12 +205,12 @@ async function handleSessionEnd(
   }
 
   if (sessionType === 'pr' && branchId) {
-    await handlePrCompletion(sessionId, branchId, status);
+    handlePrCompletion(branchId, status);
     prStateStore.clearSessionTracking(branchId);
   }
 
   if (sessionType === 'push' && branchId) {
-    await handlePushCompletion(sessionId, branchId, status);
+    handlePushCompletion(branchId, status);
     pushStateStore.clearSessionTracking(branchId);
   }
 
@@ -212,55 +244,21 @@ function handlePullCompletion(
   });
 }
 
-async function handlePrCompletion(sessionId: string, branchId: string, status: SessionStatus) {
+/**
+ * Reconcile PR workflow state with the terminal status event.
+ *
+ * The backend emits `pr-created` before the terminal event, so on a
+ * successful completion the branch is already marked created by the time
+ * this runs; a completed session whose branch is still not created means no
+ * PR URL was found in the output.
+ */
+function handlePrCompletion(branchId: string, status: SessionStatus) {
   if (status === 'completed') {
-    try {
-      // Try session messages first (AI session writes PR_URL: marker).
-      const messages = await commands.getFreshSessionMessages(sessionId);
-      let foundUrl = extractPrUrl(messages);
-
-      // Also check pipeline step outputs for older or partially migrated PR sessions.
-      if (!foundUrl) {
-        const session = await commands.getSession(sessionId);
-        if (session?.pipeline) {
-          for (const step of session.pipeline.steps) {
-            if (step.output) {
-              const match = step.output.match(/https:\/\/github\.com\/[^\s/]+\/[^\s/]+\/pull\/\d+/);
-              if (match) {
-                foundUrl = match[0];
-                break;
-              }
-            }
-          }
-        }
-      }
-
-      if (foundUrl) {
-        const prNumber = extractPrNumber(foundUrl);
-        if (prNumber) {
-          try {
-            await commands.updateBranchPr(branchId, prNumber);
-          } catch (storageError) {
-            console.error('Failed to persist PR state after creation:', storageError);
-            prStateStore.setPrError(branchId, 'Failed to save PR details after creation.');
-            return;
-          }
-
-          try {
-            await commands.refreshPrStatus(branchId);
-          } catch (refreshError) {
-            console.error('Failed to refresh PR state after creation:', refreshError);
-          }
-        }
-        prStateStore.setPrCreated(branchId, foundUrl);
-      } else {
-        prStateStore.setPrError(
-          branchId,
-          'PR session completed but no PR URL was found in the output.'
-        );
-      }
-    } catch (e) {
-      prStateStore.setPrError(branchId, e instanceof Error ? e.message : String(e));
+    if (prStateStore.getPrState(branchId)?.state !== 'created') {
+      prStateStore.setPrError(
+        branchId,
+        'PR session completed but no PR URL was found in the output.'
+      );
     }
   } else {
     prStateStore.setPrError(
@@ -270,29 +268,21 @@ async function handlePrCompletion(sessionId: string, branchId: string, status: S
   }
 }
 
-async function handlePushCompletion(sessionId: string, branchId: string, status: SessionStatus) {
+/**
+ * Reconcile push workflow state with the terminal status event.
+ *
+ * `push-completed` arrives before the terminal event and renders the
+ * classified outcome; a branch still marked `pushing` here means that event
+ * was missed, so fall back to the success rendering (the backend's default
+ * classification when no rejection markers are present).
+ */
+function handlePushCompletion(branchId: string, status: SessionStatus) {
   if (status === 'completed') {
-    try {
-      const session = await commands.getSession(sessionId);
-      const pipeline = session?.pipeline;
-      const messages = await commands.getFreshSessionMessages(sessionId);
-      const outcome = classifyCompletedPushSession(pipeline, messages);
-
-      if (outcome === 'rejected_non_fast_forward') {
-        pushStateStore.setPushError(branchId, '', true);
-      } else {
-        try {
-          await commands.clearBranchPrStatus(branchId);
-        } catch (e) {
-          console.warn('[Staged] Failed to clear PR status after push:', e);
-        }
-        pushStateStore.setPushDone(branchId);
-        setTimeout(() => {
-          pushStateStore.clearPushState(branchId);
-        }, 1_500);
-      }
-    } catch (e) {
-      pushStateStore.setPushError(branchId, e instanceof Error ? e.message : String(e));
+    if (pushStateStore.getPushState(branchId)?.state === 'pushing') {
+      pushStateStore.setPushDone(branchId);
+      setTimeout(() => {
+        pushStateStore.clearPushState(branchId);
+      }, 1_500);
     }
   } else {
     pushStateStore.setPushError(

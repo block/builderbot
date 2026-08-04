@@ -8,7 +8,10 @@
 //! 2. Registers the session for cancellation
 //! 3. Spawns a background thread that runs the driver
 //! 4. On completion, atomically transitions the DB status
-//! 5. Emits a single `session-status-changed` event
+//! 5. Runs completion side effects for pr/push sessions (persisting the
+//!    parsed outcome and emitting `pr-created` / `push-completed`, see
+//!    [`crate::session_completion`])
+//! 6. Emits a single `session-status-changed` event
 //!
 //! The frontend never sees streaming events — it polls the DB.
 //!
@@ -849,6 +852,20 @@ pub fn start_session(
             )
             .unwrap_or(false);
 
+        // Parse and persist pr/push outcomes and emit the pr-created /
+        // push-completed domain events. Gated on winning the transition so
+        // exactly one writer runs them, and emitted before the terminal
+        // status event so clients see the outcome first.
+        if transitioned {
+            crate::session_completion::run_completion_side_effects(
+                &store_for_status,
+                &app_handle,
+                &session_id_for_status,
+                config.branch_id.as_deref(),
+                new_status,
+            );
+        }
+
         // Always emit the terminal status event, even if the DB row was already
         // deleted (e.g. user deleted the pending commit). This lets the frontend
         // clean up sidebar "running" state as a safety net.
@@ -1190,6 +1207,15 @@ pub fn start_pipeline_session(
                 let transitioned = store_for_status
                     .transition_from_running(&session_id, status_enum, None, Some(&reason))
                     .unwrap_or(false);
+                if transitioned {
+                    crate::session_completion::run_completion_side_effects(
+                        &store_for_status,
+                        &app_handle,
+                        &session_id,
+                        config.branch_id.as_deref(),
+                        "completed",
+                    );
+                }
                 emit_status(
                     &app_handle,
                     &session_id,
@@ -1335,6 +1361,17 @@ pub fn start_pipeline_session(
                 let transitioned = store_for_status
                     .transition_from_running(&session_id, status, error.as_deref(), Some(&reason))
                     .unwrap_or(false);
+                if transitioned {
+                    // Classifies the abort (e.g. push rejected non-fast-forward)
+                    // and emits the push-completed domain event.
+                    crate::session_completion::run_completion_side_effects(
+                        &store_for_status,
+                        &app_handle,
+                        &session_id,
+                        config.branch_id.as_deref(),
+                        "completed",
+                    );
+                }
                 emit_status(
                     &app_handle,
                     &session_id,

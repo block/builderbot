@@ -921,8 +921,9 @@ pub struct ActiveSessionInfo {
 ///
 /// Keep the derivation aligned with `resume_session_for_store`, which stamps
 /// the same fields onto the `"running"` event for resumed sessions. Pipeline
-/// sessions (pr/push) link no artifact, so their branch and project stay
-/// unresolved and their type falls back to prompt inference.
+/// sessions (pr/push) link no artifact, so their branch comes from the
+/// session row's own `branch_id` and their type falls back to prompt
+/// inference.
 fn project_active_session(store: &Store, session: &store::Session) -> ActiveSessionInfo {
     let project_note = store
         .get_project_note_by_session(&session.id)
@@ -955,7 +956,8 @@ fn project_active_session(store: &Store, session: &store::Session) -> ActiveSess
             linked_review
                 .as_ref()
                 .map(|review| review.branch_id.clone())
-        });
+        })
+        .or_else(|| session.branch_id.clone());
 
     let project_id = if let Some(note) = &project_note {
         Some(note.project_id.clone())
@@ -1224,6 +1226,10 @@ pub(crate) async fn resume_session_for_store(
         store.get_branch(&note.branch_id).ok().flatten()
     } else if let Some(review) = &linked_review {
         store.get_branch(&review.branch_id).ok().flatten()
+    } else if let Some(session_branch_id) = &session.branch_id {
+        // Pipeline (pr/push) sessions link no artifact; the session row
+        // carries their branch.
+        store.get_branch(session_branch_id).ok().flatten()
     } else {
         None
     };
@@ -1529,13 +1535,17 @@ pub(crate) async fn drain_queued_message_for_session(
 }
 
 pub(crate) fn infer_branch_resume_session_type(prompt: &str) -> Option<&'static str> {
-    // Keep these checks aligned with the action prompts built in `prs.rs`.
-    if prompt.contains("Create a draft pull request for the current branch.")
-        || prompt.contains("Create a pull request for the current branch.")
+    // Keep these checks aligned with the session prompts built in `prs.rs`.
+    // The needles are period-free prefixes so they match both the stored
+    // pipeline session prompts ("Create a pull request for the current
+    // branch") and the AI-handoff prompt sentences ("... for the current
+    // branch.").
+    if prompt.contains("Create a draft pull request for the current branch")
+        || prompt.contains("Create a pull request for the current branch")
     {
         Some("pr")
-    } else if prompt.contains("Push the current branch to the remote using force-with-lease.")
-        || prompt.contains("Push the current branch to the remote.")
+    } else if prompt.contains("Push the current branch to the remote")
+        || prompt.contains("Force push the current branch to the remote")
     {
         Some("push")
     } else {
@@ -5488,31 +5498,75 @@ mod tests {
     fn active_sessions_snapshot_infers_pipeline_session_type_from_prompt() {
         let store = Arc::new(Store::in_memory().unwrap());
         // pr/push pipeline sessions link no artifact, so the type falls back
-        // to the same prompt inference the resume path uses.
+        // to the same prompt inference the resume path uses. Use the exact
+        // prompts prs.rs stores on pipeline sessions.
         let pr_session = create_session_with_status(
             &store,
-            "Create a pull request for the current branch.",
+            "Create a pull request for the current branch",
+            store::SessionStatus::Running,
+        );
+        let push_session = create_session_with_status(
+            &store,
+            "Push the current branch to the remote with a normal push. If the push fails for a recoverable reason, diagnose and fix it, then retry with a normal push. Do not force push.",
+            store::SessionStatus::Running,
+        );
+        let force_push_session = create_session_with_status(
+            &store,
+            "Force push the current branch to the remote",
             store::SessionStatus::Running,
         );
         let unknown_session =
             create_session_with_status(&store, "anything else", store::SessionStatus::Running);
 
         let snapshot = get_active_sessions_impl(&store).unwrap();
-        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot.len(), 4);
 
-        let pr_info = snapshot
-            .iter()
-            .find(|info| info.session_id == pr_session.id)
-            .unwrap();
+        let info_for = |session_id: &str| {
+            snapshot
+                .iter()
+                .find(|info| info.session_id == session_id)
+                .unwrap()
+        };
+
+        let pr_info = info_for(&pr_session.id);
         assert_eq!(pr_info.session_type.as_deref(), Some("pr"));
         assert_eq!(pr_info.branch_id, None);
         assert_eq!(pr_info.project_id, None);
 
-        let unknown_info = snapshot
-            .iter()
-            .find(|info| info.session_id == unknown_session.id)
-            .unwrap();
-        assert_eq!(unknown_info.session_type, None);
+        assert_eq!(
+            info_for(&push_session.id).session_type.as_deref(),
+            Some("push")
+        );
+        assert_eq!(
+            info_for(&force_push_session.id).session_type.as_deref(),
+            Some("push")
+        );
+        assert_eq!(info_for(&unknown_session.id).session_type, None);
+    }
+
+    #[test]
+    fn active_sessions_snapshot_resolves_pipeline_sessions_via_session_branch_id() {
+        let (store, branch) = setup_branch_store();
+        // Pipeline (pr/push) sessions carry their branch on the session row
+        // instead of an artifact; the snapshot must resolve branch and
+        // project from it.
+        let mut session = store::Session::new_running(
+            "Create a pull request for the current branch",
+            Path::new("/tmp"),
+        )
+        .with_branch(&branch.id);
+        session.pipeline = Some(store::PipelineExecution::from_steps(&[]));
+        store.create_session(&session).unwrap();
+
+        let snapshot = get_active_sessions_impl(&store).unwrap();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].branch_id.as_deref(), Some(branch.id.as_str()));
+        assert_eq!(
+            snapshot[0].project_id.as_deref(),
+            Some(branch.project_id.as_str())
+        );
+        assert_eq!(snapshot[0].session_type.as_deref(), Some("pr"));
+        assert!(!snapshot[0].is_auto_review);
     }
 
     #[test]
@@ -6682,6 +6736,11 @@ mod tests {
             infer_branch_resume_session_type("Create a draft pull request for the current branch."),
             Some("pr")
         );
+        // The exact prompt prs.rs stores on PR pipeline sessions (no period).
+        assert_eq!(
+            infer_branch_resume_session_type("Create a pull request for the current branch"),
+            Some("pr")
+        );
     }
 
     #[test]
@@ -6694,6 +6753,17 @@ mod tests {
             infer_branch_resume_session_type(
                 "Push the current branch to the remote using force-with-lease."
             ),
+            Some("push")
+        );
+        // The exact prompts prs.rs stores on push pipeline sessions.
+        assert_eq!(
+            infer_branch_resume_session_type(
+                "Push the current branch to the remote with a normal push. If the push fails for a recoverable reason, diagnose and fix it, then retry with a normal push. Do not force push."
+            ),
+            Some("push")
+        );
+        assert_eq!(
+            infer_branch_resume_session_type("Force push the current branch to the remote"),
             Some("push")
         );
     }

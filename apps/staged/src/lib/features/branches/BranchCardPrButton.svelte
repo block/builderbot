@@ -510,6 +510,10 @@
 
   let prCompletionInFlight = false;
 
+  // Renderer-only fallback for completions observed outside the event stream
+  // (e.g. found finished on session-modal close). The backend parses and
+  // persists the PR number at the terminal transition and emits `pr-created`;
+  // this must not write, only mirror the outcome locally.
   export async function handlePrSessionComplete(status: string) {
     if (prCompletionInFlight) return;
     const sid = prSessionId;
@@ -524,7 +528,6 @@
         if (foundUrl) {
           const prNumber = extractPrNumber(foundUrl);
           if (prNumber) {
-            await commands.updateBranchPr(branch.id, prNumber);
             branch.prNumber = prNumber;
             prPollingService.refreshNow(branch.projectId);
           }
@@ -635,6 +638,10 @@
     }
   }
 
+  // Renderer-only fallback, like handlePrSessionComplete above: the backend
+  // classifies the push at the terminal transition, clears the stale PR
+  // status, and emits `push-completed`; this only mirrors the outcome and
+  // refreshes read-side caches.
   export async function handlePushSessionComplete(status: string, completedSession?: Session) {
     if (pushCompletionInFlight) return;
     const sid = pushSessionId;
@@ -648,11 +655,6 @@
         if (outcome === 'rejected_non_fast_forward') {
           pushStateStore.setPushError(branch.id, '', true);
         } else {
-          try {
-            await commands.clearBranchPrStatus(branch.id);
-          } catch (e) {
-            console.warn('[Staged] Failed to clear PR status after push:', e);
-          }
           pushStateStore.setPushDone(branch.id);
           // Refresh local git state so `upstream.relation` settles back to
           // `inSync` (driving hasUnpushed to false) without optimistically

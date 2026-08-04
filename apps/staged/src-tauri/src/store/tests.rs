@@ -1204,6 +1204,56 @@ fn test_running_pipeline_commit_marks_branch_busy_and_resolves_branch() {
 }
 
 #[test]
+fn test_session_branch_id_round_trips_and_resolves_branch_and_project() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    // A pr/push pipeline session: no artifact row, branch carried on the
+    // session row itself.
+    let session = Session::new_running(
+        "Create a pull request for the current branch",
+        Path::new("/tmp"),
+    )
+    .with_branch(&branch.id);
+    store.create_session(&session).unwrap();
+
+    let fetched = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(fetched.branch_id.as_deref(), Some(branch.id.as_str()));
+
+    assert_eq!(
+        store
+            .get_branch_id_for_session(&session.id)
+            .unwrap()
+            .as_deref(),
+        Some(branch.id.as_str())
+    );
+    assert_eq!(
+        store
+            .get_project_id_for_session(&session.id)
+            .unwrap()
+            .as_deref(),
+        Some(project.id.as_str())
+    );
+}
+
+#[test]
+fn test_session_without_branch_or_artifact_resolves_to_none() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("unattributed", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    assert_eq!(
+        store.get_session(&session.id).unwrap().unwrap().branch_id,
+        None
+    );
+    assert_eq!(store.get_branch_id_for_session(&session.id).unwrap(), None);
+    assert_eq!(store.get_project_id_for_session(&session.id).unwrap(), None);
+}
+
+#[test]
 fn test_completion_reason_round_trips() {
     let store = Store::in_memory().unwrap();
 

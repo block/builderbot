@@ -4,9 +4,10 @@
   the projects sidebar.
 
   The card is the full repo path (rendered by the shared RepoLabel, wrapped over
-  as many lines as it needs) above a row of actions: new project, run or clone,
-  pin toggle, and a more menu carrying every repo action plus the local-clone
-  openers. Card tint, border and accent all come from the repo's badge hue.
+  as many lines as it needs) above a row of actions: a labelled "Add project"
+  button on the left, then — right-aligned — run or clone, the pin toggle, and a
+  more menu carrying every repo action plus the local-clone openers. Card tint,
+  border and accent all come from the repo's badge hue.
 
   Pass `reorderable` to make the card a drag-to-reorder handle (the sidebar's
   pinned list); the drag callbacks are only wired up in that mode. Pass
@@ -224,146 +225,148 @@
   <div class="card-actions">
     <Button
       variant="ghost"
-      class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--card-bg-strong)] hover:text-[var(--text-primary)] [&_svg]:!size-3"
-      title="New project"
-      aria-label="New project"
+      class="h-[22px] gap-1 whitespace-nowrap rounded-[4px] px-1.5 text-[length:var(--size-xs)] font-medium text-[var(--text-secondary)] hover:bg-[var(--card-bg-strong)] hover:text-[var(--text-primary)] [&_svg]:!size-3"
+      title="Add project"
       onclick={(e) => {
         e.stopPropagation();
         openNewProjectForRepo();
       }}
     >
       <Plus size={12} />
+      Add project
     </Button>
 
-    {#if repo.hasLocalClone}
-      <Button
-        variant="ghost"
-        class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--card-bg-strong)] hover:text-[var(--ui-success)] [&_svg]:!size-3"
-        title="Run"
-        aria-label="Run"
-        onclick={(e) => {
-          e.stopPropagation();
-          handleRun();
-        }}
-      >
-        <Play size={12} />
-      </Button>
-    {:else}
-      <span class="inline-flex" title="Clone repo locally">
+    <div class="card-actions-secondary">
+      {#if repo.hasLocalClone}
         <Button
           variant="ghost"
-          class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--card-bg-strong)] hover:text-[var(--ui-accent)] [&_svg]:!size-3"
-          aria-label="Clone repo locally"
-          disabled={cloning}
+          class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--card-bg-strong)] hover:text-[var(--ui-success)] [&_svg]:!size-3"
+          title="Run"
+          aria-label="Run"
           onclick={(e) => {
             e.stopPropagation();
-            handleClone();
+            handleRun();
           }}
         >
-          {#if cloning}
+          <Play size={12} />
+        </Button>
+      {:else}
+        <span class="inline-flex" title="Clone repo locally">
+          <Button
+            variant="ghost"
+            class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--card-bg-strong)] hover:text-[var(--ui-accent)] [&_svg]:!size-3"
+            aria-label="Clone repo locally"
+            disabled={cloning}
+            onclick={(e) => {
+              e.stopPropagation();
+              handleClone();
+            }}
+          >
+            {#if cloning}
+              <Spinner size={12} />
+            {:else}
+              <Download size={12} />
+            {/if}
+          </Button>
+        </span>
+      {/if}
+
+      {#if !hidePinButton}
+        <Button
+          variant="ghost"
+          class={[
+            'size-[22px] rounded-[4px] p-0 hover:bg-[var(--card-bg-strong)] [&_svg]:!size-3',
+            repo.pinned
+              ? 'text-[var(--accent)] hover:text-[var(--accent)]'
+              : 'text-[var(--text-faint)] hover:text-[var(--text-primary)]',
+          ]}
+          title={repo.pinned ? 'Unpin repo' : 'Pin repo'}
+          aria-label={repo.pinned ? 'Unpin repo' : 'Pin repo'}
+          disabled={togglingPin}
+          onclick={(e) => {
+            e.stopPropagation();
+            handleTogglePin();
+          }}
+        >
+          {#if togglingPin}
             <Spinner size={12} />
+          {:else if repo.pinned}
+            <Pin size={12} />
           {:else}
-            <Download size={12} />
+            <PinOff size={12} />
           {/if}
         </Button>
-      </span>
-    {/if}
+      {/if}
 
-    {#if !hidePinButton}
-      <Button
-        variant="ghost"
-        class={[
-          'size-[22px] rounded-[4px] p-0 hover:bg-[var(--card-bg-strong)] [&_svg]:!size-3',
-          repo.pinned
-            ? 'text-[var(--accent)] hover:text-[var(--accent)]'
-            : 'text-[var(--text-faint)] hover:text-[var(--text-primary)]',
-        ]}
-        title={repo.pinned ? 'Unpin repo' : 'Pin repo'}
-        aria-label={repo.pinned ? 'Unpin repo' : 'Pin repo'}
-        disabled={togglingPin}
-        onclick={(e) => {
-          e.stopPropagation();
-          handleTogglePin();
+      <DropdownMenu.Root
+        onOpenChange={(open) => {
+          if (open) void loadCloneDetails();
         }}
       >
-        {#if togglingPin}
-          <Spinner size={12} />
-        {:else if repo.pinned}
-          <Pin size={12} />
-        {:else}
-          <PinOff size={12} />
-        {/if}
-      </Button>
-    {/if}
-
-    <DropdownMenu.Root
-      onOpenChange={(open) => {
-        if (open) void loadCloneDetails();
-      }}
-    >
-      <DropdownMenu.Trigger
-        class="inline-flex size-[22px] items-center justify-center rounded-[4px] bg-transparent text-[var(--text-secondary)] transition-colors hover:bg-[var(--card-bg-strong)] hover:text-[var(--text-primary)]"
-        title="More options"
-        aria-label="More options"
-      >
-        <MoreVertical size={12} />
-      </DropdownMenu.Trigger>
-      <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[172px]">
-        <DropdownMenu.Item onSelect={openNewProjectForRepo}>
-          <Plus size={14} /> New Project
-        </DropdownMenu.Item>
-        {#if repo.hasLocalClone}
-          <DropdownMenu.Item onSelect={handleRun}>
-            <Play size={14} /> Run
+        <DropdownMenu.Trigger
+          class="inline-flex size-[22px] items-center justify-center rounded-[4px] bg-transparent text-[var(--text-secondary)] transition-colors hover:bg-[var(--card-bg-strong)] hover:text-[var(--text-primary)]"
+          title="More options"
+          aria-label="More options"
+        >
+          <MoreVertical size={12} />
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[172px]">
+          <DropdownMenu.Item onSelect={openNewProjectForRepo}>
+            <Plus size={14} /> New Project
           </DropdownMenu.Item>
-        {:else}
-          <DropdownMenu.Item disabled={cloning} onSelect={handleClone}>
-            <Download size={14} /> Clone Repo
-          </DropdownMenu.Item>
-        {/if}
-        <DropdownMenu.Item disabled={togglingPin} onSelect={handleTogglePin}>
-          {#if repo.pinned}
-            <PinOff size={14} /> Unpin Repo
-          {:else}
-            <Pin size={14} /> Pin Repo
-          {/if}
-        </DropdownMenu.Item>
-        {#if repo.hasLocalClone}
-          <DropdownMenu.Separator />
-          {#if clonePath}
-            {@const path = clonePath}
-            {#if openerApps.length > 0}
-              <DropdownMenu.Sub>
-                <DropdownMenu.SubTrigger>
-                  <FolderOpen size={14} /> Open in…
-                </DropdownMenu.SubTrigger>
-                <DropdownMenu.SubContent class="min-w-[160px]">
-                  {#each openerApps as app (app.id)}
-                    <DropdownMenu.Item onSelect={() => handleOpenInApp(path, app)}>
-                      {#if app.icon}
-                        <img
-                          src={app.icon}
-                          alt=""
-                          width="14"
-                          height="14"
-                          class="shrink-0 rounded-[3px]"
-                        />
-                      {/if}
-                      {app.name}
-                    </DropdownMenu.Item>
-                  {/each}
-                </DropdownMenu.SubContent>
-              </DropdownMenu.Sub>
-            {/if}
-            <DropdownMenu.Item onSelect={() => copyPathToClipboard(path)}>
-              <Copy size={14} /> Copy Path
+          {#if repo.hasLocalClone}
+            <DropdownMenu.Item onSelect={handleRun}>
+              <Play size={14} /> Run
             </DropdownMenu.Item>
           {:else}
-            <DropdownMenu.Item disabled>Loading…</DropdownMenu.Item>
+            <DropdownMenu.Item disabled={cloning} onSelect={handleClone}>
+              <Download size={14} /> Clone Repo
+            </DropdownMenu.Item>
           {/if}
-        {/if}
-      </DropdownMenu.Content>
-    </DropdownMenu.Root>
+          <DropdownMenu.Item disabled={togglingPin} onSelect={handleTogglePin}>
+            {#if repo.pinned}
+              <PinOff size={14} /> Unpin Repo
+            {:else}
+              <Pin size={14} /> Pin Repo
+            {/if}
+          </DropdownMenu.Item>
+          {#if repo.hasLocalClone}
+            <DropdownMenu.Separator />
+            {#if clonePath}
+              {@const path = clonePath}
+              {#if openerApps.length > 0}
+                <DropdownMenu.Sub>
+                  <DropdownMenu.SubTrigger>
+                    <FolderOpen size={14} /> Open in…
+                  </DropdownMenu.SubTrigger>
+                  <DropdownMenu.SubContent class="min-w-[160px]">
+                    {#each openerApps as app (app.id)}
+                      <DropdownMenu.Item onSelect={() => handleOpenInApp(path, app)}>
+                        {#if app.icon}
+                          <img
+                            src={app.icon}
+                            alt=""
+                            width="14"
+                            height="14"
+                            class="shrink-0 rounded-[3px]"
+                          />
+                        {/if}
+                        {app.name}
+                      </DropdownMenu.Item>
+                    {/each}
+                  </DropdownMenu.SubContent>
+                </DropdownMenu.Sub>
+              {/if}
+              <DropdownMenu.Item onSelect={() => copyPathToClipboard(path)}>
+                <Copy size={14} /> Copy Path
+              </DropdownMenu.Item>
+            {:else}
+              <DropdownMenu.Item disabled>Loading…</DropdownMenu.Item>
+            {/if}
+          {/if}
+        </DropdownMenu.Content>
+      </DropdownMenu.Root>
+    </div>
   </div>
 </div>
 
@@ -420,6 +423,14 @@
 
   .card-actions {
     margin-top: auto;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  /* The labelled "Add project" button leads; the icon buttons hug the far edge. */
+  .card-actions-secondary {
+    margin-left: auto;
     display: flex;
     align-items: center;
     gap: 2px;

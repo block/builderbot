@@ -45,6 +45,8 @@
   import { darkMode } from '../../stores/isDark.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { badgeBg, badgeFg, badgeBgHover } from '../../shared/badgeColors';
+  import { repoSeedFromNewProjectEvent } from './newProjectEvent';
+  import type { RepoSelection } from '../../shared/githubUrl';
   import { viewport } from '../../shared/viewport.svelte';
   import { reposUiEnabled } from '../../featureFlags';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
@@ -67,6 +69,7 @@
   let error = $derived(projectsDataStore.error);
 
   let showNewProjectModal = $state(false);
+  let newProjectInitialRepo = $state<RepoSelection | null>(null);
   let isCommandKeyHeld = $state(false);
   let mainPanelEl = $state<HTMLDivElement | null>(null);
   let activeFilters = $state<Set<string>>(new Set());
@@ -264,7 +267,8 @@
     }
     void projectRunActionsStore.startListening();
 
-    const onNewProject = () => {
+    const onNewProject = (event: Event) => {
+      newProjectInitialRepo = repoSeedFromNewProjectEvent(event);
       showNewProjectModal = true;
     };
     window.addEventListener('staged:new-project', onNewProject);
@@ -407,7 +411,10 @@
       size="icon-xs"
       class="max-md:size-10 [&_svg]:size-3.5"
       aria-label="New project"
-      onclick={() => (showNewProjectModal = true)}
+      onclick={() => {
+        newProjectInitialRepo = null;
+        showNewProjectModal = true;
+      }}
     >
       <Plus size={14} />
     </Button>
@@ -664,6 +671,7 @@
 
 <NewProjectModal
   open={showNewProjectModal && projects.length > 0}
+  initialRepo={newProjectInitialRepo}
   onCreated={handleProjectCreated}
   onClose={() => (showNewProjectModal = false)}
 />

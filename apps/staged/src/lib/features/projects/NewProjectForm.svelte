@@ -29,6 +29,8 @@
     location?: 'local' | 'remote';
     selectedRepo?: string | null;
     subpath?: string;
+    /** Preselect this repo (and subpath) when the form opens. */
+    initialRepo?: RepoSelection | null;
   }
 
   let {
@@ -38,6 +40,7 @@
     location = $bindable('local'),
     selectedRepo = $bindable(null),
     subpath = $bindable(''),
+    initialRepo = null,
   }: Props = $props();
 
   let branchName = $state('');
@@ -61,6 +64,15 @@
   $effect(() => {
     subpath;
     error = null;
+  });
+
+  // Apply the initial repo through the same selectRepo path a pasted GitHub
+  // URL takes, once the RepoConfigForm exposes its API after mount.
+  let initialRepoApplied = false;
+  $effect(() => {
+    if (initialRepoApplied || !initialRepo || !repoConfigApi) return;
+    initialRepoApplied = true;
+    repoConfigApi.selectRepo(initialRepo);
   });
 
   let remoteProjectsAvailable = $derived(sqState.loaded && sqState.available);

@@ -41,6 +41,7 @@
     type OpenerApp,
   } from '../branches/branch';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
+  import type { NewProjectEventDetail } from './newProjectEvent';
   import * as commands from '../../api/commands';
   import { toast } from 'svelte-sonner';
   import { Button } from '$lib/components/ui/button';
@@ -104,11 +105,8 @@
   }
 
   function openNewProjectForRepo() {
-    window.dispatchEvent(
-      new CustomEvent('staged:new-project', {
-        detail: { githubRepo: repo.githubRepo, subpath: repo.subpath },
-      })
-    );
+    const detail: NewProjectEventDetail = { githubRepo: repo.githubRepo, subpath: repo.subpath };
+    window.dispatchEvent(new CustomEvent('staged:new-project', { detail }));
   }
 
   function handleRun() {

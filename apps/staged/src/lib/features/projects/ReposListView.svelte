@@ -9,11 +9,15 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Search from '@lucide/svelte/icons/search';
-  import type { RepoHomeItem } from '../../types';
+  import type { Project, RepoHomeItem } from '../../types';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import RepoCard from './RepoCard.svelte';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
   import { Input } from '$lib/components/ui/input';
+  import NewProjectModal from './NewProjectModal.svelte';
+  import { repoSeedFromNewProjectEvent } from './newProjectEvent';
+  import { selectProject } from '../layout/navigation.svelte';
+  import type { RepoSelection } from '../../shared/githubUrl';
 
   // Served from the shared home-repos cache: revisits paint instantly from
   // memory while the store revalidates in the background.
@@ -21,6 +25,8 @@
   let loading = $derived(!projectsDataStore.homeReposLoaded);
   let searchQuery = $state('');
   let searchInputEl = $state<HTMLInputElement | null>(null);
+  let showNewProjectModal = $state(false);
+  let newProjectInitialRepo = $state<RepoSelection | null>(null);
 
   function repoKey(r: RepoHomeItem): string {
     return `${r.githubRepo}:${r.subpath}`;
@@ -42,7 +48,22 @@
 
   onMount(() => {
     void projectsDataStore.ensureHomeReposLoaded();
+
+    // This view replaces ProjectsList/ProjectHome (the other listeners for
+    // this event), so it must handle new-project requests itself.
+    const onNewProject = (event: Event) => {
+      newProjectInitialRepo = repoSeedFromNewProjectEvent(event);
+      showNewProjectModal = true;
+    };
+    window.addEventListener('staged:new-project', onNewProject);
+    return () => window.removeEventListener('staged:new-project', onNewProject);
   });
+
+  function handleProjectCreated(project: Project) {
+    projectsDataStore.projectCreated(project);
+    showNewProjectModal = false;
+    selectProject(project.id);
+  }
 
   // RepoCard pins, unpins and clones in place; refetching through the store
   // updates every consumer (sidebar pinned list, landing-page strip), so no
@@ -97,6 +118,13 @@
     </div>
   </div>
 </div>
+
+<NewProjectModal
+  open={showNewProjectModal}
+  initialRepo={newProjectInitialRepo}
+  onCreated={handleProjectCreated}
+  onClose={() => (showNewProjectModal = false)}
+/>
 
 <style>
   .repos-list-page {

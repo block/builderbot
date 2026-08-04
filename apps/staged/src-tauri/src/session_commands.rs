@@ -1912,7 +1912,7 @@ fn branch_session_launch_locks() -> &'static Mutex<HashMap<String, Arc<Mutex<()>
     LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn branch_session_launch_lock_for(branch_id: &str) -> Arc<Mutex<()>> {
+pub(crate) fn branch_session_launch_lock_for(branch_id: &str) -> Arc<Mutex<()>> {
     let mut locks = branch_session_launch_locks().lock().unwrap();
     Arc::clone(
         locks

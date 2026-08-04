@@ -490,6 +490,17 @@ export interface BranchSessionResponse {
   sessionStatus: BranchSessionLaunchStatus;
 }
 
+/**
+ * Result of a branch git pipeline command (rebase, squash).
+ *
+ * These can be requested while the branch already has sessions in flight, in
+ * which case the backend queues them and reports `'queued'`.
+ */
+export interface BranchPipelineResponse {
+  sessionId: string;
+  sessionStatus: BranchSessionLaunchStatus;
+}
+
 // =============================================================================
 // Session status event payload
 // =============================================================================

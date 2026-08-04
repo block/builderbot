@@ -95,7 +95,14 @@
     onOpenForcePushSession?: () => void;
     forcePushingOrigin?: boolean;
     onOpenPushSession?: () => void;
-    rebaseBranchDisabledReason?: string | null;
+    /**
+     * Why push, force-push, and reset-to-origin can't run right now.
+     *
+     * These git actions still execute immediately rather than queueing, so
+     * unlike Rebase/Squash they stay disabled while the branch has sessions in
+     * flight.
+     */
+    immediateGitActionDisabledReason?: string | null;
     onViewWorktreeDiff?: () => void;
     onCommitWorktreeChanges?: () => void;
     onDiscardWorktreeChanges?: () => void;
@@ -151,7 +158,7 @@
     onOpenForcePushSession,
     forcePushingOrigin = false,
     onOpenPushSession,
-    rebaseBranchDisabledReason,
+    immediateGitActionDisabledReason,
     onViewWorktreeDiff,
     onCommitWorktreeChanges,
     onDiscardWorktreeChanges,
@@ -388,7 +395,7 @@
           const summary = `is ${plural(state.upstream.ahead, 'commit')} behind`;
           const disabledReason = pushingOrigin
             ? undefined // button is clickable during push (opens session)
-            : (rebaseBranchDisabledReason ?? undefined);
+            : (immediateGitActionDisabledReason ?? undefined);
           rows.push({
             key: 'git-local-ahead',
             type: 'git-push',
@@ -437,7 +444,7 @@
           : forcePushingOrigin
             ? 'Push in progress'
             : onResetToOrigin
-              ? (rebaseBranchDisabledReason ?? undefined)
+              ? (immediateGitActionDisabledReason ?? undefined)
               : undefined;
         rows.push({
           key: 'git-diverged',
@@ -448,13 +455,13 @@
           order: placement.order,
           onForcePush: forcePushingOrigin
             ? onOpenForcePushSession
-            : rebaseBranchDisabledReason
+            : immediateGitActionDisabledReason
               ? undefined
               : onForcePush,
           forcePushDisabledReason: forcePushingOrigin
             ? undefined
             : onForcePush
-              ? (rebaseBranchDisabledReason ?? undefined)
+              ? (immediateGitActionDisabledReason ?? undefined)
               : undefined,
           forcePushing: forcePushingOrigin,
           onResetToOrigin: resetToOriginReason ? undefined : onResetToOrigin,

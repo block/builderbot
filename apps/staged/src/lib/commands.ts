@@ -21,6 +21,7 @@ import type {
   Branch,
   BranchTimeline,
   BranchRef,
+  BranchPipelineResponse,
   BranchSessionLaunchContext,
   BranchSessionType,
   BranchSessionResponse,
@@ -1281,12 +1282,13 @@ export interface GitHubCommentResult {
 /** Rebase a branch via a pipeline.
  *  When target is 'base' (default), rebases onto origin/{base_branch}.
  *  When target is 'origin', rebases onto origin/{branch_name}.
- *  Returns the session ID so the frontend can track progress. */
+ *  Queues behind in-flight branch sessions, so the response reports whether the
+ *  returned session is running or waiting on the branch queue. */
 export function rebaseBranch(
   branchId: string,
   provider?: string,
   target?: 'base' | 'origin'
-): Promise<string> {
+): Promise<BranchPipelineResponse> {
   return invokeCommand('rebase_branch', {
     branchId,
     provider: provider ?? null,
@@ -1296,8 +1298,12 @@ export function rebaseBranch(
 
 /** Squash all commits on a branch into a single commit via a pipeline.
  *  Uses git reset --soft then hands off to AI to write the commit message.
- *  Returns the session ID so the frontend can track progress. */
-export function squashCommits(branchId: string, provider?: string): Promise<string> {
+ *  Queues behind in-flight branch sessions, so the response reports whether the
+ *  returned session is running or waiting on the branch queue. */
+export function squashCommits(
+  branchId: string,
+  provider?: string
+): Promise<BranchPipelineResponse> {
   return invokeCommand('squash_commits', {
     branchId,
     provider: provider ?? null,

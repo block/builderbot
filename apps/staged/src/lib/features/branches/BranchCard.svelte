@@ -74,6 +74,7 @@
     addPendingSession,
     getPendingSessionItems,
     prunePendingSessionItems,
+    queuedSessionMeta,
   } from './branchSessionLaunch.svelte';
   import RemoteWorkspaceStatusBadge from './RemoteWorkspaceStatusBadge.svelte';
   import RemoteWorkspaceStatusView from './RemoteWorkspaceStatusView.svelte';
@@ -329,26 +330,38 @@
   let commandPipelinePending = $state(false);
   let branchSessionBusy = $derived(timeline ? hasActiveSessions(timeline) : false);
 
+  /** Timeline label the backend gives a queued rebase/squash pipeline session. */
+  const branchCommandLabels = { rebase: 'Rebase branch', squash: 'Squash commits' } as const;
+
   async function startBranchCommandPipeline(
     kind: 'rebase' | 'squash',
     rebaseTarget?: 'base' | 'origin'
   ) {
-    if (commandPipelinePending || branchSessionBusy) return;
+    // Deliberately not gated on `branchSessionBusy`: the backend decides
+    // between running now and queueing behind in-flight branch work, and it
+    // dedupes repeat clicks of the same action.
+    if (commandPipelinePending) return;
     commandPipelinePending = true;
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
     const provider = getPreferredAgent(agents) ?? undefined;
     const pendingKey = `pipeline-${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     try {
-      let sessionId: string;
-      if (kind === 'rebase') {
-        sessionId = await commands.rebaseBranch(branch.id, provider, rebaseTarget);
-      } else {
-        sessionId = await commands.squashCommits(branch.id, provider);
-      }
+      const result =
+        kind === 'rebase'
+          ? await commands.rebaseBranch(branch.id, provider, rebaseTarget)
+          : await commands.squashCommits(branch.id, provider);
       // Add a pending session item so the session stub appears instantly
-      // instead of waiting for the full timeline refresh.
-      const title = kind === 'rebase' ? 'Rebasing…' : 'Squashing…';
-      addPendingSession(branch.id, { key: pendingKey, type: 'pending-commit', title, sessionId });
+      // instead of waiting for the full timeline refresh. Queued pipelines get
+      // the same label the persisted row will show, so the stub doesn't flash a
+      // progress title for work that hasn't started.
+      const queued = result.sessionStatus === 'queued';
+      addPendingSession(branch.id, {
+        key: pendingKey,
+        type: queued ? 'queued-commit' : 'pending-commit',
+        title: queued ? branchCommandLabels[kind] : kind === 'rebase' ? 'Rebasing…' : 'Squashing…',
+        secondaryMeta: queued ? queuedSessionMeta(timeline) : undefined,
+        sessionId: result.sessionId,
+      });
       await loadTimeline();
     } catch (e) {
       notifyError(kind === 'rebase' ? 'Rebase failed' : 'Squash failed', e);
@@ -604,13 +617,21 @@
 
   let branchIdentityWarning = $derived(gitIdentityWarning(timeline?.gitState));
   let gitUnsafeActionsDisabled = $derived(!!branchIdentityWarning);
+  /**
+   * Gate for Rebase/Squash. In-flight sessions are not a reason to disable:
+   * both queue on the branch session queue and drain when the branch frees up.
+   * Only identity problems (detached HEAD, wrong branch) make them unsafe.
+   */
   let branchCommandDisabledReason = $derived(
-    branchIdentityWarning ??
-      (commandPipelinePending
-        ? 'Command in progress'
-        : branchSessionBusy
-          ? 'Session in progress'
-          : null)
+    branchIdentityWarning ?? (commandPipelinePending ? 'Command in progress' : null)
+  );
+  /**
+   * Gate for git actions that still execute immediately (push, force-push,
+   * reset to origin). Those have no queue support yet, so a busy branch has to
+   * keep blocking them.
+   */
+  let immediateGitActionDisabledReason = $derived(
+    branchCommandDisabledReason ?? (branchSessionBusy ? 'Session in progress' : null)
   );
 
   // =========================================================================
@@ -1727,10 +1748,7 @@
           onNoteCreated={() => loadTimeline()}
           onRebaseBranch={() => startBranchCommandPipeline('rebase')}
           onSquashCommits={() => startBranchCommandPipeline('squash')}
-          newCommitDisabled={sessionMgr.isNewSessionDisabled ||
-            commandPipelinePending ||
-            branchSessionBusy ||
-            gitUnsafeActionsDisabled}
+          rebaseSquashDisabled={!!branchCommandDisabledReason}
           {commitCount}
         />
       </div>
@@ -1831,7 +1849,7 @@
                 ? openForcePushSession
                 : undefined}
               {forcePushingOrigin}
-              rebaseBranchDisabledReason={branchCommandDisabledReason}
+              {immediateGitActionDisabledReason}
               onViewWorktreeDiff={isLocal
                 ? () =>
                     openDiffDetail({

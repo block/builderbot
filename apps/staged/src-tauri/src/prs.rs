@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::git;
+use crate::session_commands::BranchSessionLaunchStatus;
 use crate::session_runner;
 use crate::store::{self, FailureStrategy, PipelineExecution, PipelineKind, PipelineStep, Store};
 
@@ -48,6 +49,34 @@ pub(crate) struct PrStatusEvent {
 // =============================================================================
 // Pipeline session helper
 // =============================================================================
+
+/// Result of a start-or-queue branch pipeline command.
+///
+/// Rebase and squash can be requested while the branch already has work in
+/// flight, so the caller needs to know whether the returned session started
+/// running or is waiting its turn on the branch queue.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchPipelineResponse {
+    pub session_id: String,
+    pub session_status: BranchSessionLaunchStatus,
+}
+
+impl BranchPipelineResponse {
+    fn running(session_id: String) -> Self {
+        Self {
+            session_id,
+            session_status: BranchSessionLaunchStatus::Running,
+        }
+    }
+
+    fn queued(session_id: String) -> Self {
+        Self {
+            session_id,
+            session_status: BranchSessionLaunchStatus::Queued,
+        }
+    }
+}
 
 /// Resolved context for a branch, ready to start a pipeline session.
 struct BranchPipelineContext {
@@ -211,6 +240,46 @@ fn commit_pipeline_prompt(kind: &PipelineKind) -> &'static str {
         PipelineKind::Rebase => "Rebase branch",
         PipelineKind::Squash => "Squash commits",
     }
+}
+
+/// The rebase target to persist on the pipeline, or `None` when the pipeline
+/// targets the branch's configured base.
+///
+/// Only "rebase onto origin" needs a persisted target; a base rebase re-derives
+/// it from the branch on dequeue. Keeping this in one place means the queued and
+/// running paths agree, which the same-kind dedupe check relies on.
+fn persisted_rebase_target(target: Option<&str>, rebase_ref: &str) -> Option<String> {
+    matches!(target, Some("origin")).then(|| rebase_ref.to_string())
+}
+
+/// Find a queued pipeline session on this branch that already performs exactly
+/// the work being requested, so a second click doesn't stack a duplicate.
+///
+/// `rebase_target` must be the *persisted* target so that "rebase onto base" and
+/// "rebase onto origin" stay distinct — they are different operations even
+/// though they share a [`PipelineKind`].
+fn find_queued_commit_pipeline(
+    store: &Arc<Store>,
+    branch_id: &str,
+    kind: &PipelineKind,
+    rebase_target: Option<&str>,
+) -> Result<Option<String>, String> {
+    let queued = store
+        .get_queued_sessions_for_branch(branch_id)
+        .map_err(|e| e.to_string())?;
+
+    for session in queued {
+        let Some(pipeline) = session.pipeline.as_ref() else {
+            continue;
+        };
+        if pipeline.kind.as_ref() == Some(kind)
+            && pipeline.rebase_target.as_deref() == rebase_target
+        {
+            return Ok(Some(session.id));
+        }
+    }
+
+    Ok(None)
 }
 
 const HTTPS_FALLBACK_CONFIG: &str = "url.https://github.com/.insteadOf=git@github.com:";
@@ -392,6 +461,69 @@ async fn start_running_commit_pipeline_for_branch(
     Ok(session.id)
 }
 
+/// Queue a rebase/squash pipeline when the branch has work in flight.
+///
+/// Returns the queued session id — either a freshly created one, or an existing
+/// queued pipeline that already covers this request — and `None` when the branch
+/// is idle so the caller should start the pipeline immediately.
+///
+/// The busy check, the dedupe scan, and the insert all run under the branch
+/// launch lock, so two rapid clicks (or a click racing a session start) cannot
+/// both observe an idle branch or both miss the same queued pipeline. This stays
+/// synchronous on purpose: the lock must not be held across an await.
+fn queue_commit_pipeline_if_branch_busy(
+    store: &Arc<Store>,
+    branch_id: &str,
+    kind: &PipelineKind,
+    provider: Option<&str>,
+    target: Option<&str>,
+) -> Result<Option<String>, String> {
+    let launch_lock = crate::session_commands::branch_session_launch_lock_for(branch_id);
+    let _guard = launch_lock.lock().unwrap();
+
+    let branch_busy = store
+        .has_running_session_for_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        || !store
+            .get_queued_sessions_for_branch(branch_id)
+            .map_err(|e| e.to_string())?
+            .is_empty();
+    if !branch_busy {
+        return Ok(None);
+    }
+
+    let branch = store
+        .get_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+    let base_branch = base_branch_name(&branch);
+    let rebase_ref = rebase_ref_for_target(&branch, target);
+    let rebase_target = persisted_rebase_target(target, &rebase_ref);
+
+    if let Some(existing) =
+        find_queued_commit_pipeline(store, branch_id, kind, rebase_target.as_deref())?
+    {
+        return Ok(Some(existing));
+    }
+
+    let steps = build_commit_pipeline_steps(kind, base_branch, &rebase_ref);
+    let mut pipeline = PipelineExecution::from_steps(&steps).with_kind(kind.clone());
+    if let Some(target) = rebase_target {
+        pipeline = pipeline.with_rebase_target(target);
+    }
+    let mut session = store::Session::new_queued(commit_pipeline_prompt(kind));
+    if let Some(p) = provider {
+        session = session.with_provider(p);
+    }
+    session.pipeline = Some(pipeline);
+    store.create_session(&session).map_err(|e| e.to_string())?;
+
+    let commit = store::Commit::new_pending(branch_id).with_session(&session.id);
+    store.create_commit(&commit).map_err(|e| e.to_string())?;
+
+    Ok(Some(session.id))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn start_or_queue_commit_pipeline_for_branch(
     store: Arc<Store>,
@@ -401,60 +533,36 @@ pub(crate) async fn start_or_queue_commit_pipeline_for_branch(
     kind: PipelineKind,
     provider: Option<String>,
     target: Option<String>,
-) -> Result<String, String> {
-    let prompt = commit_pipeline_prompt(&kind);
-
-    let branch_has_running_session = store
-        .has_running_session_for_branch(&branch_id)
-        .map_err(|e| e.to_string())?;
-    let branch_has_queued_session = !store
-        .get_queued_sessions_for_branch(&branch_id)
-        .map_err(|e| e.to_string())?
-        .is_empty();
-
-    if branch_has_running_session || branch_has_queued_session {
-        let branch = store
-            .get_branch(&branch_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-        let base_branch = base_branch_name(&branch);
-        let rebase_ref = rebase_ref_for_target(&branch, target.as_deref());
-        let steps = build_commit_pipeline_steps(&kind, base_branch, &rebase_ref);
-        let mut pipeline = PipelineExecution::from_steps(&steps).with_kind(kind);
-        if matches!(target.as_deref(), Some("origin")) {
-            pipeline = pipeline.with_rebase_target(rebase_ref.clone());
-        }
-        let mut session = store::Session::new_queued(prompt);
-        if let Some(ref p) = provider {
-            session = session.with_provider(p);
-        }
-        session.pipeline = Some(pipeline);
-        store.create_session(&session).map_err(|e| e.to_string())?;
-
-        let commit = store::Commit::new_pending(&branch_id).with_session(&session.id);
-        store.create_commit(&commit).map_err(|e| e.to_string())?;
-
-        return Ok(session.id);
+) -> Result<BranchPipelineResponse, String> {
+    if let Some(session_id) = queue_commit_pipeline_if_branch_busy(
+        &store,
+        &branch_id,
+        &kind,
+        provider.as_deref(),
+        target.as_deref(),
+    )? {
+        return Ok(BranchPipelineResponse::queued(session_id));
     }
 
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
     let base_branch = base_branch_name(&ctx.branch).to_string();
     let rebase_ref = rebase_ref_for_target(&ctx.branch, target.as_deref());
     let steps = build_commit_pipeline_steps(&kind, &base_branch, &rebase_ref);
-    let persisted_rebase_target =
-        matches!(target.as_deref(), Some("origin")).then(|| rebase_ref.clone());
+    let rebase_target = persisted_rebase_target(target.as_deref(), &rebase_ref);
 
-    start_running_commit_pipeline_for_branch(
+    let session_id = start_running_commit_pipeline_for_branch(
         ctx,
         kind,
         steps,
-        persisted_rebase_target,
+        rebase_target,
         provider,
         store,
         &app_handle,
         &registry,
     )
-    .await
+    .await?;
+
+    Ok(BranchPipelineResponse::running(session_id))
 }
 
 pub(crate) async fn start_queued_commit_pipeline_for_branch(
@@ -1281,6 +1389,9 @@ pub async fn push_branch(
 /// (the default behaviour used by the base-moved row and the `…` menu).
 /// When `target` is `"origin"`, rebases onto `origin/{branch_name}` so that
 /// the local branch incorporates remote-only commits (used by the diverged row).
+///
+/// Queues behind in-flight branch work instead of failing, so the response
+/// reports whether the rebase started or is waiting on the branch queue.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn rebase_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -1289,7 +1400,7 @@ pub async fn rebase_branch(
     branch_id: String,
     provider: Option<String>,
     target: Option<String>,
-) -> Result<String, String> {
+) -> Result<BranchPipelineResponse, String> {
     let store = get_store(&store)?;
     start_or_queue_commit_pipeline_for_branch(
         store,
@@ -1310,6 +1421,9 @@ pub async fn rebase_branch(
 /// branch's own commits into staged changes.
 /// Hands off to AI to write a single conventional-commit message using the
 /// original commit history as context.
+///
+/// Queues behind in-flight branch work instead of failing, so the response
+/// reports whether the squash started or is waiting on the branch queue.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn squash_commits(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -1317,7 +1431,7 @@ pub async fn squash_commits(
     app_handle: tauri::AppHandle,
     branch_id: String,
     provider: Option<String>,
-) -> Result<String, String> {
+) -> Result<BranchPipelineResponse, String> {
     let store = get_store(&store)?;
     start_or_queue_commit_pipeline_for_branch(
         store,
@@ -1354,6 +1468,162 @@ mod tests {
             } => (label, prompt_template),
             PipelineStep::Command { .. } => panic!("expected AI handoff step at index {index}"),
         }
+    }
+
+    fn setup_branch_store() -> (Arc<Store>, store::Branch) {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let project = store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = store::Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+        (store, branch)
+    }
+
+    /// Make the branch busy by linking a running note session to it, which is
+    /// what `has_running_session_for_branch` looks for.
+    fn start_running_note_session(store: &Arc<Store>, branch_id: &str) {
+        let session = store::Session::new_running("write a note", Path::new("/tmp/staged-test"));
+        store.create_session(&session).unwrap();
+        let note = store::Note::new(branch_id, "note", "").with_session(&session.id);
+        store.create_note(&note).unwrap();
+    }
+
+    fn queue_pipeline(
+        store: &Arc<Store>,
+        branch_id: &str,
+        kind: PipelineKind,
+        target: Option<&str>,
+    ) -> Option<String> {
+        queue_commit_pipeline_if_branch_busy(store, branch_id, &kind, None, target).unwrap()
+    }
+
+    #[test]
+    fn idle_branch_runs_pipeline_immediately_instead_of_queueing() {
+        let (store, branch) = setup_branch_store();
+
+        assert_eq!(
+            queue_pipeline(&store, &branch.id, PipelineKind::Rebase, None),
+            None
+        );
+        assert!(store
+            .list_commits_for_branch(&branch.id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn busy_branch_queues_pipeline_with_label_and_pending_commit() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+
+        let session_id = queue_pipeline(&store, &branch.id, PipelineKind::Rebase, None)
+            .expect("rebase should queue behind the running note session");
+
+        let session = store.get_session(&session_id).unwrap().unwrap();
+        assert_eq!(session.status, store::SessionStatus::Queued);
+        // The timeline renders queued pipeline rows from this prompt, so it has
+        // to read as the git action rather than a bare "Pending commit".
+        assert_eq!(session.prompt, "Rebase branch");
+        let pipeline = session.pipeline.unwrap();
+        assert_eq!(pipeline.kind, Some(PipelineKind::Rebase));
+        assert_eq!(pipeline.rebase_target, None);
+
+        let pending: Vec<_> = store
+            .list_commits_for_branch(&branch.id)
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.sha.is_none())
+            .collect();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].session_id.as_deref(), Some(session_id.as_str()));
+    }
+
+    #[test]
+    fn queued_squash_uses_squash_label() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+
+        let session_id = queue_pipeline(&store, &branch.id, PipelineKind::Squash, None).unwrap();
+
+        let session = store.get_session(&session_id).unwrap().unwrap();
+        assert_eq!(session.prompt, "Squash commits");
+        assert_eq!(session.pipeline.unwrap().kind, Some(PipelineKind::Squash));
+    }
+
+    #[test]
+    fn repeated_click_reuses_the_already_queued_pipeline() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+
+        let first = queue_pipeline(&store, &branch.id, PipelineKind::Rebase, None).unwrap();
+        let second = queue_pipeline(&store, &branch.id, PipelineKind::Rebase, None).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(
+            store
+                .get_queued_sessions_for_branch(&branch.id)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn different_pipeline_kinds_queue_separately() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+
+        let rebase = queue_pipeline(&store, &branch.id, PipelineKind::Rebase, None).unwrap();
+        let squash = queue_pipeline(&store, &branch.id, PipelineKind::Squash, None).unwrap();
+
+        assert_ne!(rebase, squash);
+        assert_eq!(
+            store
+                .get_queued_sessions_for_branch(&branch.id)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn rebase_onto_origin_is_not_deduped_against_rebase_onto_base() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+
+        let onto_base = queue_pipeline(&store, &branch.id, PipelineKind::Rebase, None).unwrap();
+        let onto_origin =
+            queue_pipeline(&store, &branch.id, PipelineKind::Rebase, Some("origin")).unwrap();
+
+        assert_ne!(onto_base, onto_origin);
+        let origin_session = store.get_session(&onto_origin).unwrap().unwrap();
+        assert_eq!(
+            origin_session.pipeline.unwrap().rebase_target.as_deref(),
+            Some("feature")
+        );
+
+        // Clicking the diverged row's rebase again still dedupes.
+        assert_eq!(
+            queue_pipeline(&store, &branch.id, PipelineKind::Rebase, Some("origin")),
+            Some(onto_origin)
+        );
+    }
+
+    #[test]
+    fn queued_pipeline_alone_keeps_the_branch_busy() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+        queue_pipeline(&store, &branch.id, PipelineKind::Rebase, None).unwrap();
+
+        // The note session finishes, but the still-queued rebase must keep a
+        // newly requested squash on the queue rather than running it now.
+        for session in store.get_running_sessions().unwrap() {
+            store
+                .update_session_status(&session.id, store::SessionStatus::Completed, None, None)
+                .unwrap();
+        }
+
+        assert!(queue_pipeline(&store, &branch.id, PipelineKind::Squash, None).is_some());
     }
 
     #[tokio::test]

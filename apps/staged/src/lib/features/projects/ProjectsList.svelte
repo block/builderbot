@@ -15,8 +15,7 @@
   import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
   import Sprout from '@lucide/svelte/icons/sprout';
   import Trash2 from '@lucide/svelte/icons/trash-2';
-  import type { Project, WorkspaceStatus, RepoHomeItem } from '../../types';
-  import * as commands from '../../api/commands';
+  import type { Project, WorkspaceStatus } from '../../types';
   import RepoCard from './RepoCard.svelte';
   import {
     projectDisplayName,
@@ -36,7 +35,6 @@
   import Spinner from '../../shared/Spinner.svelte';
   import SineWave from '../../shared/SineWave.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
-  import { toast } from 'svelte-sonner';
   import { Button } from '$lib/components/ui/button';
 
   import {
@@ -294,17 +292,6 @@
       .catch(console.error);
   });
 
-  async function handleCloneRepo(repo: RepoHomeItem) {
-    try {
-      await commands.cloneRepoLocally(repo.githubRepo);
-      await projectsDataStore.refreshHomeRepos();
-    } catch (e) {
-      console.error('[ProjectsList] Failed to clone repo:', e);
-      const message = e instanceof Error ? e.message : String(e);
-      toast.error('Failed to clone repo', { description: message });
-    }
-  }
-
   function handleProjectCreated(project: Project) {
     projectsDataStore.projectCreated(project);
     showNewProjectModal = false;
@@ -465,7 +452,7 @@
             </div>
             <div class="repos-scroll-row">
               {#each homeRepos as repo (repo.githubRepo + ':' + repo.subpath)}
-                <RepoCard {repo} onclone={() => handleCloneRepo(repo)} />
+                <RepoCard {repo} onChange={() => projectsDataStore.refreshHomeRepos()} />
               {/each}
             </div>
           </div>
@@ -848,6 +835,11 @@
     padding-bottom: 4px;
     scrollbar-width: thin;
     scrollbar-color: var(--border-muted) transparent;
+  }
+
+  .repos-scroll-row > :global(.repo-card) {
+    width: 200px;
+    flex-shrink: 0;
   }
 
   .repos-scroll-row::-webkit-scrollbar {

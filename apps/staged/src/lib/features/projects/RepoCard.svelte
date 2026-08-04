@@ -1,14 +1,25 @@
 <!--
-  RepoCard.svelte — A card for a single repo on the home screen repos row.
+  RepoCard.svelte — the card for a single repo, shared by every repos surface:
+  the home screen repos row, the All Repos grid, and the pinned repos list in
+  the projects sidebar.
 
-  Shows repo short name (colored by badge hue), owner/repo subtitle, a
-  pin/unpin toggle, and either a download button (when the repo has no
-  local clone) or nothing.
+  The card is the full repo path (rendered by the shared RepoLabel, wrapped over
+  as many lines as it needs) above a row of actions: new project, run or clone,
+  pin toggle, and a menu with the local-clone openers. Card tint, border and
+  accent all come from the repo's badge hue.
+
+  Pass `reorderable` to make the card a drag-to-reorder handle (the sidebar's
+  pinned list); the drag callbacks are only wired up in that mode.
 -->
 <script lang="ts">
+  import Plus from '@lucide/svelte/icons/plus';
+  import Play from '@lucide/svelte/icons/play';
+  import MoreVertical from '@lucide/svelte/icons/more-vertical';
   import Download from '@lucide/svelte/icons/download';
   import Pin from '@lucide/svelte/icons/pin';
   import PinOff from '@lucide/svelte/icons/pin-off';
+  import Copy from '@lucide/svelte/icons/copy';
+  import FolderOpen from '@lucide/svelte/icons/folder-open';
   import type { RepoHomeItem } from '../../types';
   import { darkMode } from '../../stores/isDark.svelte';
   import {
@@ -17,48 +28,102 @@
     badgeBgHover,
     badgeBorder,
     badgeBorderHover,
+    badgeShortcutBg,
   } from '../../shared/badgeColors';
+  import RepoLabel from '../../shared/RepoLabel.svelte';
   import Spinner from '../../shared/Spinner.svelte';
+  import {
+    getAvailableOpeners,
+    openInApp,
+    copyPathToClipboard,
+    type OpenerApp,
+  } from '../branches/branch';
+  import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import * as commands from '../../api/commands';
   import { toast } from 'svelte-sonner';
   import { Button } from '$lib/components/ui/button';
 
   interface Props {
     repo: RepoHomeItem;
-    onclone: () => void | Promise<void>;
-    onPinChange?: () => void;
+    /** Called after this card pins, unpins or clones the repo. */
+    onChange?: () => void;
+    /** Turn the card into a drag-to-reorder handle. */
+    reorderable?: boolean;
+    onReorderStart?: (e: DragEvent) => void;
+    onReorderOver?: (e: DragEvent) => void;
+    onReorderDrop?: (e: DragEvent) => void;
+    onReorderEnd?: (e: DragEvent) => void;
   }
 
-  let { repo, onclone, onPinChange }: Props = $props();
+  let {
+    repo,
+    onChange,
+    reorderable = false,
+    onReorderStart,
+    onReorderOver,
+    onReorderDrop,
+    onReorderEnd,
+  }: Props = $props();
 
+  let openerApps = $state<OpenerApp[]>([]);
+  let clonePath = $state<string | null>(null);
+  let cloneDetailsLoaded = $state(false);
   let cloning = $state(false);
   let togglingPin = $state(false);
-
-  let subtitle = $derived.by(() => {
-    const base = repo.githubRepo;
-    if (repo.subpath) return `${base}/${repo.subpath}`;
-    return base;
-  });
+  let dragging = $state(false);
+  let dragOver = $state(false);
 
   let accentColor = $derived(badgeFg(repo.hue, darkMode.value));
   let bgColor = $derived(badgeBg(repo.hue, darkMode.value));
   let bgHoverColor = $derived(badgeBgHover(repo.hue, darkMode.value));
+  /** One tint step past the card's own hover so in-card buttons stay legible. */
+  let bgStrongColor = $derived(badgeShortcutBg(repo.hue, darkMode.value));
   let borderColor = $derived(badgeBorder(repo.hue, darkMode.value));
   let borderHoverColor = $derived(badgeBorderHover(repo.hue, darkMode.value));
 
-  async function handleClone(e: MouseEvent) {
-    e.stopPropagation();
+  /** Resolve the clone path and opener apps the first time the menu opens. */
+  async function loadCloneDetails() {
+    if (cloneDetailsLoaded) return;
+    cloneDetailsLoaded = true;
+    try {
+      const [apps, path] = await Promise.all([
+        getAvailableOpeners(),
+        commands.getRepoClonePath(repo.githubRepo),
+      ]);
+      openerApps = apps;
+      clonePath = path;
+    } catch (e) {
+      console.error('[RepoCard] Failed to resolve clone details:', e);
+      cloneDetailsLoaded = false;
+    }
+  }
+
+  function openNewProjectForRepo() {
+    window.dispatchEvent(
+      new CustomEvent('staged:new-project', {
+        detail: { githubRepo: repo.githubRepo, subpath: repo.subpath },
+      })
+    );
+  }
+
+  async function handleClone() {
     if (cloning) return;
     cloning = true;
     try {
-      await onclone();
+      await commands.cloneRepoLocally(repo.githubRepo);
+      onChange?.();
+    } catch (e) {
+      console.error('[RepoCard] Failed to clone repo:', e);
+      toast.error('Clone failed', {
+        description: e instanceof Error ? e.message : String(e),
+        duration: 5000,
+      });
     } finally {
       cloning = false;
     }
   }
 
-  async function handleTogglePin(e: MouseEvent) {
-    e.stopPropagation();
+  async function handleTogglePin() {
     if (togglingPin) return;
     togglingPin = true;
     try {
@@ -67,114 +132,267 @@
       } else {
         await commands.pinRepo(repo.githubRepo, repo.subpath);
       }
-      onPinChange?.();
+      onChange?.();
       window.dispatchEvent(new CustomEvent('staged:pinned-repos-changed'));
-    } catch (err) {
-      console.error('[RepoCard] Failed to toggle pin:', err);
+    } catch (e) {
+      console.error('[RepoCard] Failed to toggle pin:', e);
       toast.error('Failed to update pin', {
-        description: err instanceof Error ? err.message : String(err),
+        description: e instanceof Error ? e.message : String(e),
       });
     } finally {
       togglingPin = false;
     }
   }
+
+  async function handleOpenInApp(path: string, app: OpenerApp) {
+    try {
+      await openInApp(path, app.id);
+    } catch (e) {
+      toast.error(`Failed to open in ${app.name}`, {
+        description: e instanceof Error ? e.message : String(e),
+        duration: 3000,
+      });
+    }
+  }
+
+  function handleDragStart(e: DragEvent) {
+    dragging = true;
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', `${repo.githubRepo}\t${repo.subpath}`);
+    }
+    onReorderStart?.(e);
+  }
+
+  function handleDragOver(e: DragEvent) {
+    e.preventDefault();
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = 'move';
+    }
+    dragOver = true;
+    onReorderOver?.(e);
+  }
+
+  function handleDragLeave() {
+    dragOver = false;
+  }
+
+  function handleDrop(e: DragEvent) {
+    e.preventDefault();
+    dragOver = false;
+    onReorderDrop?.(e);
+  }
+
+  function handleDragEnd(e: DragEvent) {
+    dragging = false;
+    dragOver = false;
+    onReorderEnd?.(e);
+  }
 </script>
 
 <div
   class="repo-card"
-  style="--accent: {accentColor}; --card-bg: {bgColor}; --card-bg-hover: {bgHoverColor}; --card-border: {borderColor}; --card-border-hover: {borderHoverColor};"
+  class:reorderable
+  class:dragging
+  class:drag-over={dragOver}
+  draggable={reorderable}
+  role={reorderable ? 'listitem' : undefined}
+  style="--accent: {accentColor}; --card-bg: {bgColor}; --card-bg-hover: {bgHoverColor}; --card-bg-strong: {bgStrongColor}; --card-border: {borderColor}; --card-border-hover: {borderHoverColor};"
+  ondragstart={reorderable ? handleDragStart : undefined}
+  ondragover={reorderable ? handleDragOver : undefined}
+  ondragleave={reorderable ? handleDragLeave : undefined}
+  ondrop={reorderable ? handleDrop : undefined}
+  ondragend={reorderable ? handleDragEnd : undefined}
+  data-repo={repo.githubRepo}
+  data-subpath={repo.subpath}
 >
-  <Button
-    variant="ghost"
-    size="icon-sm"
-    class={[
-      'absolute top-1.5 right-1.5 z-[2] size-[26px] hover:bg-[var(--bg-hover)] [&_svg]:!size-3.5',
-      repo.pinned
-        ? 'text-[var(--accent)] hover:text-[var(--accent)]'
-        : 'text-[var(--text-faint)] hover:text-foreground',
-    ]}
-    title={repo.pinned ? 'Unpin repo' : 'Pin repo'}
-    aria-label={repo.pinned ? 'Unpin repo' : 'Pin repo'}
-    onclick={handleTogglePin}
-    disabled={togglingPin}
-  >
-    {#if togglingPin}
-      <Spinner size={14} />
-    {:else if repo.pinned}
-      <Pin size={14} />
-    {:else}
-      <PinOff size={14} />
-    {/if}
-  </Button>
+  <span class="card-title">
+    <RepoLabel githubRepo={repo.githubRepo} subpath={repo.subpath || null} wrap />
+  </span>
 
-  <span class="card-title" title={repo.shortName}>{repo.shortName}</span>
+  <div class="card-actions">
+    <Button
+      variant="ghost"
+      class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--card-bg-strong)] hover:text-[var(--text-primary)] [&_svg]:!size-3"
+      title="New project"
+      aria-label="New project"
+      onclick={(e) => {
+        e.stopPropagation();
+        openNewProjectForRepo();
+      }}
+    >
+      <Plus size={12} />
+    </Button>
 
-  <span class="card-subtitle" title={subtitle}>{subtitle}</span>
-
-  {#if !repo.hasLocalClone}
-    <div class="card-footer">
+    {#if repo.hasLocalClone}
       <Button
-        variant="outline"
-        size="icon-sm"
-        class="size-7 border-[var(--card-border)] bg-transparent text-[var(--accent)] shadow-none hover:bg-[var(--card-bg-hover)] hover:border-[var(--card-border-hover)] hover:text-[var(--accent)] [&_svg]:!size-3.5"
-        title="Clone repo locally"
-        aria-label="Clone repo locally"
-        onclick={handleClone}
-        disabled={cloning}
+        variant="ghost"
+        class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--card-bg-strong)] hover:text-[var(--ui-success)] [&_svg]:!size-3"
+        title="Run"
+        aria-label="Run"
+        onclick={(e) => {
+          e.stopPropagation();
+          // Run primary action — requires backend wiring (run action against main clone)
+          toast.info('Run action', {
+            description: 'Running actions against repos is coming soon.',
+            duration: 2000,
+          });
+        }}
       >
-        {#if cloning}
-          <Spinner size={14} />
-        {:else}
-          <Download size={14} />
-        {/if}
+        <Play size={12} />
       </Button>
-    </div>
-  {/if}
+    {:else}
+      <span class="inline-flex" title="Clone repo locally">
+        <Button
+          variant="ghost"
+          class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--card-bg-strong)] hover:text-[var(--ui-accent)] [&_svg]:!size-3"
+          aria-label="Clone repo locally"
+          disabled={cloning}
+          onclick={(e) => {
+            e.stopPropagation();
+            handleClone();
+          }}
+        >
+          {#if cloning}
+            <Spinner size={12} />
+          {:else}
+            <Download size={12} />
+          {/if}
+        </Button>
+      </span>
+    {/if}
+
+    <Button
+      variant="ghost"
+      class={[
+        'size-[22px] rounded-[4px] p-0 hover:bg-[var(--card-bg-strong)] [&_svg]:!size-3',
+        repo.pinned
+          ? 'text-[var(--accent)] hover:text-[var(--accent)]'
+          : 'text-[var(--text-faint)] hover:text-[var(--text-primary)]',
+      ]}
+      title={repo.pinned ? 'Unpin repo' : 'Pin repo'}
+      aria-label={repo.pinned ? 'Unpin repo' : 'Pin repo'}
+      disabled={togglingPin}
+      onclick={(e) => {
+        e.stopPropagation();
+        handleTogglePin();
+      }}
+    >
+      {#if togglingPin}
+        <Spinner size={12} />
+      {:else if repo.pinned}
+        <Pin size={12} />
+      {:else}
+        <PinOff size={12} />
+      {/if}
+    </Button>
+
+    {#if repo.hasLocalClone}
+      <DropdownMenu.Root
+        onOpenChange={(open) => {
+          if (open) void loadCloneDetails();
+        }}
+      >
+        <DropdownMenu.Trigger
+          class="inline-flex size-[22px] items-center justify-center rounded-[4px] bg-transparent text-[var(--text-secondary)] transition-colors hover:bg-[var(--card-bg-strong)] hover:text-[var(--text-primary)]"
+          title="More options"
+          aria-label="More options"
+        >
+          <MoreVertical size={12} />
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[172px]">
+          {#if clonePath}
+            {@const path = clonePath}
+            {#if openerApps.length > 0}
+              <DropdownMenu.Sub>
+                <DropdownMenu.SubTrigger>
+                  <FolderOpen size={14} /> Open in…
+                </DropdownMenu.SubTrigger>
+                <DropdownMenu.SubContent class="min-w-[160px]">
+                  {#each openerApps as app (app.id)}
+                    <DropdownMenu.Item onSelect={() => handleOpenInApp(path, app)}>
+                      {#if app.icon}
+                        <img
+                          src={app.icon}
+                          alt=""
+                          width="14"
+                          height="14"
+                          class="shrink-0 rounded-[3px]"
+                        />
+                      {/if}
+                      {app.name}
+                    </DropdownMenu.Item>
+                  {/each}
+                </DropdownMenu.SubContent>
+              </DropdownMenu.Sub>
+            {/if}
+            <DropdownMenu.Item onSelect={() => copyPathToClipboard(path)}>
+              <Copy size={14} /> Copy Path
+            </DropdownMenu.Item>
+          {:else}
+            <DropdownMenu.Item disabled>Loading…</DropdownMenu.Item>
+          {/if}
+        </DropdownMenu.Content>
+      </DropdownMenu.Root>
+    {/if}
+  </div>
 </div>
 
 <style>
   .repo-card {
     position: relative;
-    flex-shrink: 0;
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    width: 200px;
-    min-height: 100px;
-    padding: 14px;
+    gap: 8px;
+    padding: 10px 10px 8px;
     border: 1px solid var(--card-border);
-    border-radius: 10px;
+    border-radius: 8px;
     background: var(--card-bg);
     color: inherit;
     text-align: left;
-    transition: all 0.15s ease;
     box-sizing: border-box;
+    transition:
+      background 0.15s ease,
+      border-color 0.15s ease,
+      box-shadow 0.15s ease;
+  }
+
+  .repo-card:hover {
+    background: var(--card-bg-hover);
+    border-color: var(--card-border-hover);
+  }
+
+  .repo-card.reorderable {
+    cursor: grab;
+    user-select: none;
+  }
+
+  .repo-card.dragging {
+    opacity: 0.4;
+    cursor: grabbing;
+  }
+
+  .repo-card.drag-over {
+    box-shadow: 0 -2px 0 0 var(--ui-accent);
   }
 
   .card-title {
-    font-size: var(--size-md);
-    font-weight: 700;
-    color: var(--accent);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    padding-right: 28px;
-  }
-
-  .card-subtitle {
     font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
-    font-size: 11px;
-    font-weight: 500;
-    color: var(--text-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    font-size: var(--size-sm);
+    font-weight: 600;
+    line-height: 1.35;
   }
 
-  .card-footer {
+  /* Emphasize the distinguishing path segment in the repo's badge hue. */
+  .card-title :global(.repo-label-emphasis) {
+    color: var(--accent);
+    font-weight: 700;
+  }
+
+  .card-actions {
     margin-top: auto;
     display: flex;
     align-items: center;
-    min-height: 20px;
+    gap: 2px;
   }
 </style>

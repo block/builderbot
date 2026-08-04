@@ -40,7 +40,7 @@
     SIDEBAR_MIN_WIDTH,
   } from './projectsSidebarState.svelte';
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
-  import SidebarPinnedRepo from './SidebarPinnedRepo.svelte';
+  import RepoCard from './RepoCard.svelte';
   import * as commands from '../../api/commands';
   import { projectActions } from './projectActions.svelte';
   import * as ContextMenu from '$lib/components/ui/context-menu';
@@ -435,12 +435,14 @@
 
             <div class="pinned-repos-list" role="list" aria-label="Pinned repos">
               {#each pinnedRepos as repo, index (repo.githubRepo + '\t' + repo.subpath)}
-                <SidebarPinnedRepo
+                <RepoCard
                   {repo}
+                  reorderable
                   onReorderStart={handleDragStart(index)}
                   onReorderOver={handleDragOver(index)}
                   onReorderDrop={handleDrop(index)}
                   onReorderEnd={handleDragEnd()}
+                  onChange={() => projectsDataStore.refreshHomeRepos()}
                 />
               {/each}
             </div>
@@ -898,7 +900,8 @@
   .pinned-repos-list {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 6px;
+    padding: 2px 0;
   }
 
   .section-divider {

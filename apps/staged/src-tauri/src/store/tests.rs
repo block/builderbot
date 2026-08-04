@@ -1695,6 +1695,75 @@ fn test_complete_pending_commit_sha_updates_pending_row() {
 }
 
 #[test]
+fn test_remap_commit_shas_moves_rows_and_their_reviews() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let first = Commit::new_with_sha(&branch.id, "old111");
+    let second = Commit::new_with_sha(&branch.id, "old222");
+    store.create_commit(&first).unwrap();
+    store.create_commit(&second).unwrap();
+    let review = Review::new(&branch.id, "old222", ReviewScope::Commit);
+    store.create_review(&review).unwrap();
+
+    let remapped = store
+        .remap_commit_shas(
+            &branch.id,
+            &[
+                (first.id.as_str(), "old111", "new111"),
+                (second.id.as_str(), "old222", "new222"),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(remapped, 2);
+    let first = store.get_commit(&first.id).unwrap().unwrap();
+    assert_eq!(first.sha.as_deref(), Some("new111"));
+    let second = store.get_commit(&second.id).unwrap().unwrap();
+    assert_eq!(second.sha.as_deref(), Some("new222"));
+    let review = store.get_review(&review.id).unwrap().unwrap();
+    assert_eq!(review.commit_sha, "new222");
+}
+
+/// The `(branch_id, sha)` unique index is re-checked inside the transaction,
+/// so a target SHA another row already owns is skipped rather than blowing up
+/// the whole remap.
+#[test]
+fn test_remap_commit_shas_skips_target_owned_by_another_row() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let orphan = Commit::new_with_sha(&branch.id, "old111");
+    let owner = Commit::new_with_sha(&branch.id, "new111");
+    let movable = Commit::new_with_sha(&branch.id, "old222");
+    store.create_commit(&orphan).unwrap();
+    store.create_commit(&owner).unwrap();
+    store.create_commit(&movable).unwrap();
+
+    let remapped = store
+        .remap_commit_shas(
+            &branch.id,
+            &[
+                (orphan.id.as_str(), "old111", "new111"),
+                (movable.id.as_str(), "old222", "new222"),
+            ],
+        )
+        .unwrap();
+
+    assert_eq!(remapped, 1);
+    let orphan = store.get_commit(&orphan.id).unwrap().unwrap();
+    assert_eq!(orphan.sha.as_deref(), Some("old111"));
+    let movable = store.get_commit(&movable.id).unwrap().unwrap();
+    assert_eq!(movable.sha.as_deref(), Some("new222"));
+}
+
+#[test]
 fn test_delete_branch_cascades_commits() {
     let store = Store::in_memory().unwrap();
     let project = Project::new("test-owner/test-repo");

@@ -137,6 +137,58 @@ impl Store {
         Ok(rows > 0)
     }
 
+    /// Repoint commit rows at the SHAs a history rewrite (e.g. a rebase) gave
+    /// them, carrying each row's reviews along so they don't drop out of the
+    /// timeline with their old commit.
+    ///
+    /// `remaps` is a list of `(row_id, old_sha, new_sha)`, applied in one
+    /// transaction. Each pair re-checks the `(branch_id, sha)` unique index
+    /// inside the transaction and is skipped on collision, so a row another
+    /// writer already attached to `new_sha` keeps it. Returns how many rows
+    /// were repointed.
+    pub fn remap_commit_shas(
+        &self,
+        branch_id: &str,
+        remaps: &[(&str, &str, &str)],
+    ) -> Result<usize, StoreError> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let now = now_timestamp();
+        let mut remapped = 0;
+
+        for (row_id, old_sha, new_sha) in remaps {
+            let owner = tx
+                .query_row(
+                    "SELECT id FROM commits WHERE branch_id = ?1 AND sha = ?2",
+                    params![branch_id, new_sha],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if owner.is_some_and(|owner| owner != *row_id) {
+                continue;
+            }
+
+            let rows = tx.execute(
+                "UPDATE commits SET sha = ?1, updated_at = ?2
+                 WHERE id = ?3 AND branch_id = ?4 AND sha = ?5",
+                params![new_sha, now, row_id, branch_id, old_sha],
+            )?;
+            if rows == 0 {
+                continue;
+            }
+
+            tx.execute(
+                "UPDATE reviews SET commit_sha = ?1, updated_at = ?2
+                 WHERE branch_id = ?3 AND commit_sha = ?4",
+                params![new_sha, now, branch_id, old_sha],
+            )?;
+            remapped += 1;
+        }
+
+        tx.commit()?;
+        Ok(remapped)
+    }
+
     /// Delete a linked pending commit row if it has not landed.
     pub fn delete_pending_commit_for_session(&self, session_id: &str) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();

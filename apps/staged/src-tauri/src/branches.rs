@@ -347,7 +347,7 @@ pub(crate) fn resolve_branch_clone_dir(
 }
 
 pub(crate) fn resolve_branch_workspace_subpath(
-    store: &Arc<Store>,
+    store: &Store,
     branch: &store::Branch,
 ) -> Result<Option<String>, String> {
     let Some(repo_id) = branch.project_repo_id.as_deref() else {

@@ -35,7 +35,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -1430,6 +1430,44 @@ fn current_pipeline_head(config: &PipelineConfig) -> Result<String, String> {
     }
 }
 
+/// Whether a session's persisted pipeline is a rebase. Read from the session
+/// row rather than an in-memory config so it still answers correctly for an AI
+/// handoff that outlived the pipeline that started it.
+fn session_is_rebase_pipeline(store: &Store, session_id: &str) -> bool {
+    store
+        .get_session(session_id)
+        .ok()
+        .flatten()
+        .and_then(|session| session.pipeline)
+        .and_then(|pipeline| pipeline.kind)
+        .is_some_and(|kind| kind == PipelineKind::Rebase)
+}
+
+/// Reattach a branch's commit metadata (and reviews) to the SHAs a rebase
+/// rewrote them into. Best-effort: a failure here only leaves the rows
+/// orphaned, which is what happened before reassociation existed.
+fn reassociate_rebased_commits(
+    store: &Store,
+    branch_id: &str,
+    working_dir: &Path,
+    workspace_name: Option<&str>,
+) {
+    match crate::commit_reassociation::reassociate_after_rebase(
+        store,
+        branch_id,
+        working_dir,
+        workspace_name,
+    ) {
+        Ok(0) => {}
+        Ok(count) => {
+            log::info!("Reassociated {count} rebased commit(s) on branch {branch_id}")
+        }
+        Err(e) => {
+            log::warn!("Failed to reassociate rebased commits on branch {branch_id}: {e}")
+        }
+    }
+}
+
 fn resolve_pipeline_artifacts_without_ai(config: &PipelineConfig, store: &Store, completed: bool) {
     match config.pipeline.kind.as_ref() {
         Some(PipelineKind::Rebase) if completed => {
@@ -1485,6 +1523,20 @@ fn finalize_rebase_pipeline_without_ai(config: &PipelineConfig, store: &Store) {
         }
         return;
     }
+
+    // The rebase rewrote every SHA on the branch, orphaning the metadata rows
+    // that pointed at the old ones. Reattach them *before* claiming the new
+    // HEAD: once the pre-existing head row owns it, `complete_pending_commit_sha`
+    // takes its "target SHA already owned" branch and drops this pipeline's
+    // pending row — so the top commit keeps its authoring session instead of
+    // the mechanical "Rebase branch" one. A head commit authored outside
+    // Staged has no prior row, so the rebase session keeps it, as before.
+    reassociate_rebased_commits(
+        store,
+        &commit.branch_id,
+        &config.working_dir,
+        config.workspace_name.as_deref(),
+    );
 
     match store.complete_pending_commit_sha(&commit.id, &commit.branch_id, &current_head) {
         Ok(true) => log::info!(
@@ -2324,6 +2376,20 @@ fn run_post_completion_hooks(
                         &pre_sha[..7.min(pre_sha.len())],
                         &current_head[..7.min(current_head.len())]
                     );
+                    // A rebase pipeline that handed off to AI (conflicts, a
+                    // failed fetch) lands here instead of
+                    // `finalize_rebase_pipeline_without_ai`, but rewrote SHAs
+                    // just the same. Reattach the orphaned rows before the
+                    // pending row below claims the new HEAD — see that function
+                    // for why the ordering matters.
+                    if session_is_rebase_pipeline(store, session_id) {
+                        reassociate_rebased_commits(
+                            store,
+                            &commit.branch_id,
+                            working_dir,
+                            workspace_name,
+                        );
+                    }
                     let recorded = if commit.sha.is_none() {
                         match store.complete_pending_commit_sha(
                             &commit.id,
@@ -3653,6 +3719,150 @@ mod tests {
 
         assert!(store.get_commit(&commit.id).unwrap().is_none());
         let _ = std::fs::remove_dir_all(repo);
+    }
+
+    /// A branch whose two commits were authored by Staged sessions (with a
+    /// review on the head one) and have just been rebased onto a moved base by
+    /// a rebase-pipeline session, leaving every row orphaned.
+    struct RebasedBranch {
+        repo: crate::test_utils::TempGitRepo,
+        store: Arc<Store>,
+        /// `(session_id, commit_row_id)` for the authoring sessions, oldest first.
+        authored: Vec<(String, String)>,
+        pending_id: String,
+        review_id: String,
+        rebase_session_id: String,
+        old_head: String,
+        new_head: String,
+        new_first: String,
+    }
+
+    fn rebased_branch() -> RebasedBranch {
+        use crate::store::{Commit, Review, ReviewScope, Session};
+
+        let repo = crate::test_utils::TempGitRepo::new();
+        repo.write_file("base.txt", "base\n");
+        let base_sha = repo.commit("chore: base");
+        repo.run_git(&["update-ref", "refs/remotes/origin/main", &base_sha]);
+
+        repo.run_git(&["checkout", "-b", "feature"]);
+        repo.write_file("parser.txt", "parser\n");
+        let old_first = repo.commit("feat: parser");
+        repo.write_file("lexer.txt", "lexer\n");
+        let old_head = repo.commit("fix: lexer");
+
+        let store = Arc::new(Store::in_memory().unwrap());
+        let project = crate::store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = crate::store::Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+
+        // The two sessions that authored the branch, oldest first.
+        let mut authored = Vec::new();
+        for (index, (prompt, sha)) in [("Add parser", &old_first), ("Fix lexer", &old_head)]
+            .into_iter()
+            .enumerate()
+        {
+            let session = Session::new_running(prompt, repo.path());
+            store.create_session(&session).unwrap();
+            let mut row = Commit::new_with_sha(&branch.id, sha).with_session(&session.id);
+            row.created_at = 1_000 + index as i64;
+            row.updated_at = row.created_at;
+            store.create_commit(&row).unwrap();
+            authored.push((session.id, row.id));
+        }
+        let review = Review::new(&branch.id, &old_head, ReviewScope::Commit);
+        store.create_review(&review).unwrap();
+
+        let mut rebase_session = Session::new_running("Rebase branch", repo.path());
+        rebase_session.pipeline =
+            Some(PipelineExecution::from_steps(&[]).with_kind(PipelineKind::Rebase));
+        store.create_session(&rebase_session).unwrap();
+        let mut pending = Commit::new_pending(&branch.id).with_session(&rebase_session.id);
+        pending.created_at = 2_000;
+        pending.updated_at = pending.created_at;
+        store.create_commit(&pending).unwrap();
+
+        // Move the base out from under the branch, then really rebase onto it.
+        repo.run_git(&["checkout", "main"]);
+        repo.write_file("moved.txt", "moved\n");
+        let moved_base = repo.commit("chore: move base");
+        repo.run_git(&["update-ref", "refs/remotes/origin/main", &moved_base]);
+        repo.run_git(&["checkout", "feature"]);
+        repo.run_git(&["rebase", "--signoff", "origin/main"]);
+        let new_head = repo.run_git(&["rev-parse", "HEAD"]).trim().to_string();
+        let new_first = repo.run_git(&["rev-parse", "HEAD~1"]).trim().to_string();
+        assert_ne!(new_head, old_head, "the rebase must rewrite the SHAs");
+
+        RebasedBranch {
+            repo,
+            store,
+            authored,
+            pending_id: pending.id,
+            review_id: review.id,
+            rebase_session_id: rebase_session.id,
+            old_head,
+            new_head,
+            new_first,
+        }
+    }
+
+    fn assert_reassociated(fixture: &RebasedBranch) {
+        let store = &fixture.store;
+
+        let first = store.get_commit(&fixture.authored[0].1).unwrap().unwrap();
+        assert_eq!(first.sha.as_deref(), Some(fixture.new_first.as_str()));
+        let head = store.get_commit(&fixture.authored[1].1).unwrap().unwrap();
+        assert_eq!(head.sha.as_deref(), Some(fixture.new_head.as_str()));
+        assert_eq!(
+            head.session_id.as_deref(),
+            Some(fixture.authored[1].0.as_str()),
+            "the head commit must keep its authoring session, not the rebase one"
+        );
+
+        // The rebase session's pending row loses the race for the new HEAD and
+        // is dropped, exactly as it is for a no-op rebase today.
+        assert!(store.get_commit(&fixture.pending_id).unwrap().is_none());
+
+        // The review followed its commit, so it stays visible in the timeline.
+        let review = store.get_review(&fixture.review_id).unwrap().unwrap();
+        assert_eq!(review.commit_sha, fixture.new_head);
+    }
+
+    /// A rebase rewrites every SHA on the branch. Finalizing the pipeline must
+    /// move the pre-existing commit rows (and their reviews) onto the new SHAs.
+    #[test]
+    fn rebase_pipeline_completion_reassociates_pre_existing_commits() {
+        let fixture = rebased_branch();
+
+        finalize_rebase_pipeline_without_ai(
+            &rebase_pipeline_config(
+                &fixture.rebase_session_id,
+                fixture.repo.path(),
+                &fixture.old_head,
+            ),
+            &fixture.store,
+        );
+
+        assert_reassociated(&fixture);
+    }
+
+    /// When the pipeline hands off to AI (conflicts, a failed fetch), the agent
+    /// finishes the rebase and the post-completion hooks run instead — they
+    /// have to reassociate too.
+    #[test]
+    fn rebase_handoff_post_completion_reassociates_pre_existing_commits() {
+        let fixture = rebased_branch();
+
+        run_post_completion_hooks(
+            &fixture.rebase_session_id,
+            fixture.repo.path(),
+            Some(&fixture.old_head),
+            None,
+            &fixture.store,
+        );
+
+        assert_reassociated(&fixture);
     }
 
     // ── find_closing_fence ──────────────────────────────────────────────

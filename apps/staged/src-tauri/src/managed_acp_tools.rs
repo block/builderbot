@@ -131,11 +131,20 @@ pub fn tools_root(packages_root: &Path) -> PathBuf {
     packages_root.join("tools")
 }
 
-/// `<packages>/tools/<id>` — the npm `--prefix` a managed bridge installs
-/// into. Floating upgrades reuse the same prefix, so the entrypoint path a
-/// shim points at is version-independent.
+/// `<packages>/tools/<id>` — the live npm `--prefix` a managed bridge resolves
+/// from. Floating upgrades stage a fresh tree beside it and swap it in
+/// atomically (see [`install_managed_tool`]), so this path is stable and
+/// version-independent — a shim can point at it once and never be rewritten.
 pub fn tool_install_dir(packages_root: &Path, id: &str) -> PathBuf {
     tools_root(packages_root).join(id)
+}
+
+/// `<packages>/tools/<id>.staging` — the scratch `--prefix` a floating install
+/// lands in before it is verified and atomically swapped into the live
+/// [`tool_install_dir`]. A sibling of the live prefix so the swap is a single
+/// same-filesystem rename.
+fn staging_install_dir(packages_root: &Path, id: &str) -> PathBuf {
+    tools_root(packages_root).join(format!("{id}.staging"))
 }
 
 /// `<packages>/state.json` — installed bridge versions + the last reconcile
@@ -375,15 +384,18 @@ fn tool_install_lock() -> &'static tokio::sync::Mutex<()> {
 
 /// Install (or upgrade) one managed bridge to the latest published version:
 /// ensure the managed Node runtime, run the floating `npm install
-/// <pkg>@latest --prefix`, write the absolute-path shim, and record the
-/// installed version in `state.json`. Safe to call concurrently — doctor
-/// fixes and the startup reconciler serialize on one process-wide install
-/// mutex, and mutations of the shared packages tree additionally hold the
-/// cross-process flock (other Staged instances reconcile the same
-/// `~/.staged/packages`). A failed install leaves any previously installed
-/// version in place — including the Node runtime its shim execs, since
-/// superseded runtimes are pruned only after a fully-successful reconcile —
-/// so an offline launch never removes a working bridge.
+/// <pkg>@latest` into a scratch prefix, swap the verified tree into the live
+/// prefix, write the absolute-path shim, and record the installed version in
+/// `state.json`. Safe to call concurrently — doctor fixes and the startup
+/// reconciler serialize on one process-wide install mutex, and mutations of
+/// the shared packages tree additionally hold the cross-process flock (other
+/// Staged instances reconcile the same `~/.staged/packages`). A failed
+/// install — including one npm aborts mid-reify, or an upstream `@latest`
+/// that drops the entrypoint — leaves any previously installed version fully
+/// in place, since the live tree is only ever replaced by an atomic swap of a
+/// verified staging tree; the Node runtime its shim execs is likewise kept,
+/// as superseded runtimes are pruned only after a fully-successful reconcile.
+/// So an offline or partial launch never removes a working bridge.
 pub async fn install_managed_tool(
     id: &str,
     on_line: &InstallLineFn<'_>,
@@ -433,35 +445,52 @@ async fn install_npm_tool(
     on_line: &InstallLineFn<'_>,
 ) -> Result<(), ManagedToolError> {
     let install_dir = tool_install_dir(packages_root, tool.id);
-    // Install in place: a failed floating upgrade leaves the previous tree,
-    // shim, and state untouched, so the old bridge keeps working.
-    std::fs::create_dir_all(&install_dir)
-        .map_err(|error| ManagedToolError::Io(format!("create tool install dir: {error}")))?;
+    // Stage the floating install into a scratch prefix and swap it into the
+    // live tree only after the entrypoint floor-check passes. npm reifies in
+    // place, so installing straight into `install_dir` would let a failure
+    // mid-reify — or an upstream `@latest` that drops the entrypoint — replace
+    // the live tree the (version-independent) shim already points at, breaking
+    // the previously working bridge. Staging keeps the old tree untouched
+    // until a verified new one is ready to swap in atomically.
+    let staging_dir = staging_install_dir(packages_root, tool.id);
+    reset_dir(&staging_dir)
+        .map_err(|error| ManagedToolError::Io(format!("prepare staging dir: {error}")))?;
 
     on_line(&format!(
         "Installing {}@latest into ~/.staged/packages",
         tool.package
     ));
-    run_floating_npm_install(
+    if let Err(error) = run_floating_npm_install(
         packages_root,
         node_install_dir,
-        &install_dir,
+        &staging_dir,
         tool,
         registry,
         on_line,
     )
-    .await?;
+    .await
+    {
+        let _ = std::fs::remove_dir_all(&staging_dir);
+        return Err(error);
+    }
 
-    let entrypoint = npm_entrypoint(&install_dir, tool.package);
-    if !entrypoint.is_file() {
+    let staged_entrypoint = npm_entrypoint(&staging_dir, tool.package);
+    if !staged_entrypoint.is_file() {
+        let _ = std::fs::remove_dir_all(&staging_dir);
         return Err(ManagedToolError::Incomplete(format!(
             "{}: bridge entrypoint {} is missing after install",
             tool.package,
-            entrypoint.display()
+            staged_entrypoint.display()
         )));
     }
-    let version = installed_version(&install_dir, tool.package).unwrap_or_default();
+    let version = installed_version(&staging_dir, tool.package).unwrap_or_default();
 
+    // Atomically replace the live tree with the verified staging tree, keeping
+    // the previous tree aside as `.old` to roll back to if the rename fails.
+    swap_into_place(&staging_dir, &install_dir)
+        .map_err(|error| ManagedToolError::Io(format!("install staged bridge: {error}")))?;
+
+    let entrypoint = npm_entrypoint(&install_dir, tool.package);
     write_shim(
         &shim_bin_dir(packages_root),
         tool.binary,
@@ -489,6 +518,43 @@ async fn install_npm_tool(
             version.as_str()
         }
     ));
+    Ok(())
+}
+
+/// Remove `dir` if it exists, then recreate it empty — a clean scratch prefix
+/// for a fresh floating install (a stale staging tree from a crashed run must
+/// not seed the next one).
+fn reset_dir(dir: &Path) -> std::io::Result<()> {
+    if dir.exists() {
+        std::fs::remove_dir_all(dir)?;
+    }
+    std::fs::create_dir_all(dir)
+}
+
+/// Atomically replace `final_dir` with `staging_dir`: stage any previous tree
+/// aside as `<final_dir>.old`, rename the verified staging tree into place,
+/// and roll the previous tree back if that rename fails. Mirrors
+/// `managed_node`'s runtime swap; both dirs are siblings under `tools/`, so
+/// each rename is a single same-filesystem operation.
+fn swap_into_place(staging_dir: &Path, final_dir: &Path) -> std::io::Result<()> {
+    if let Some(parent) = final_dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let old_dir = final_dir.with_extension("old");
+    if old_dir.exists() {
+        std::fs::remove_dir_all(&old_dir)?;
+    }
+    if final_dir.exists() {
+        std::fs::rename(final_dir, &old_dir)?;
+    }
+    if let Err(error) = std::fs::rename(staging_dir, final_dir) {
+        if old_dir.exists() {
+            let _ = std::fs::rename(&old_dir, final_dir);
+        }
+        let _ = std::fs::remove_dir_all(staging_dir);
+        return Err(error);
+    }
+    let _ = std::fs::remove_dir_all(&old_dir);
     Ok(())
 }
 
@@ -1003,6 +1069,25 @@ mod tests {
         }
     }
 
+    /// A fake managed-node `npm` that wipes its `--prefix` node_modules before
+    /// exiting — stands in for a floating upgrade npm aborts mid-reify. Proves
+    /// the swap fix: a live install this touched would be broken, so the test
+    /// installs into a staging prefix and the live tree must survive.
+    fn write_fake_node_with_destructive_npm(node_install_dir: &Path, exit_code: i32) {
+        let bin = node_install_dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("node"), "#!/bin/sh\necho v9.9.9\n").unwrap();
+        let npm = format!(
+            "#!/bin/sh\nprefix=\"\"\nprev=\"\"\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"--prefix\" ]; then prefix=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nrm -rf \"$prefix/node_modules\"\nexit {exit_code}\n"
+        );
+        std::fs::write(bin.join("npm"), npm).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        for name in ["node", "npm"] {
+            std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn install_npm_tool_installs_shims_and_records_version() {
         let dir = tempfile::tempdir().unwrap();
@@ -1106,6 +1191,52 @@ mod tests {
         assert!(matches!(error, ManagedToolError::Incomplete(_)), "{error}");
         assert!(!shim_bin_dir(&packages_root).join(tool.binary).exists());
         assert!(read_state(&packages_root).tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_upgrade_preserves_the_previous_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let packages_root = dir.path().join("packages");
+        let node_install_dir = packages_root.join("node").join("v9.9.9").join("plat");
+        let tool = test_tool();
+
+        // A healthy previously-installed bridge: tree + shim + state at 1.2.3.
+        write_installed_tool(&packages_root, &node_install_dir, &tool);
+        let install_dir = tool_install_dir(&packages_root, tool.id);
+        let entrypoint = npm_entrypoint(&install_dir, tool.package);
+        let shim = shim_bin_dir(&packages_root).join(tool.binary);
+        let shim_before = std::fs::read_to_string(&shim).unwrap();
+
+        // An upgrade whose npm destroys its --prefix tree and then fails. It
+        // only ever touches the staging prefix, so the live install survives.
+        write_fake_node_with_destructive_npm(&node_install_dir, 7);
+        let error = install_npm_tool(
+            &packages_root,
+            &node_install_dir,
+            TEST_NODE_VERSION,
+            &tool,
+            None,
+            &|_| {},
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, ManagedToolError::NpmInstall(_)), "{error}");
+        assert!(
+            entrypoint.is_file(),
+            "live entrypoint clobbered by failed upgrade"
+        );
+        assert_eq!(std::fs::read_to_string(&shim).unwrap(), shim_before);
+        assert_eq!(
+            read_state(&packages_root)
+                .tools
+                .get(tool.id)
+                .map(|pin| pin.version.clone()),
+            Some("1.2.3".to_string())
+        );
+        // No scratch dirs are left behind for the next reconcile to trip over.
+        assert!(!staging_install_dir(&packages_root, tool.id).exists());
+        assert!(!install_dir.with_extension("old").exists());
     }
 
     // -- reconcile epilogue --------------------------------------------------

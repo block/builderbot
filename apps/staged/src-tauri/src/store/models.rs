@@ -527,6 +527,10 @@ pub struct Session {
     /// Selected ACP config values to apply before prompting the agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp_config_selection: Option<AcpConfigSelection>,
+    /// Latest session title pushed by the agent via ACP `session_info_update`.
+    /// Used as an interim display name while the session is running.
+    #[serde(default)]
+    pub acp_title: Option<String>,
 }
 
 /// Persistent follow-up message waiting to be sent to an existing session.
@@ -616,6 +620,7 @@ impl Session {
             owner_pid: Some(std::process::id()),
             pipeline: None,
             acp_config_selection: None,
+            acp_title: None,
         }
     }
 
@@ -638,6 +643,7 @@ impl Session {
             owner_pid: None,
             pipeline: None,
             acp_config_selection: None,
+            acp_title: None,
         }
     }
 

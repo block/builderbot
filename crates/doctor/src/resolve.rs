@@ -285,8 +285,8 @@ fn resolved_binary(
 /// (mirroring the dirs in [`npm_search_dirs`]), and the System dirs. When those
 /// fall through to [`InstallSource::Unknown`] for a binary in a user-local bin
 /// dir, a cheap filesystem fingerprint (see [`fingerprint_curl_pipe`]) is
-/// attempted to recognise curl/native installers (Cursor, Amp), using the
-/// caller snapshot's `HOME` when one is supplied.
+/// attempted to recognise the versioned-symlink layout native installers use
+/// (Cursor, Claude), using the caller snapshot's `HOME` when one is supplied.
 fn detect_install_source_with_env(path: &Path, env: Option<&DoctorEnv>) -> InstallSource {
     let home = env
         .and_then(|env| env.get("HOME").map(PathBuf::from))
@@ -328,7 +328,8 @@ fn shell_lookup_commands(cmd: &str) -> [(&'static str, String); 2] {
     ]
 }
 
-fn shell_quote(value: &str) -> String {
+/// Single-quote `value` for safe interpolation into a `sh -c` command line.
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
@@ -440,114 +441,66 @@ fn npm_global_bin_dir(
     Some(bin)
 }
 
-/// A known curl/native installer footprint for a binary that lands in a
-/// user-local bin dir. Pairs the binary name with marker paths (relative to
-/// `$HOME`) that the installer also creates; if the binary lives in a user-local
-/// bin dir and any marker exists, the install is fingerprinted as a curl-pipe
-/// install.
-struct CurlInstallerFootprint {
-    /// Binary file name as it appears in `~/.local/bin` or `~/bin`.
-    binary: &'static str,
-    /// Marker paths relative to `$HOME`; if any exists the fingerprint matches.
-    markers: &'static [&'static str],
-}
-
-/// Known footprints of curl/native installers whose binaries land in a
-/// user-local bin dir. Conservative on purpose — only well-known data dirs are
-/// listed so a bare `~/.local/bin/<x>` with no installer footprint stays
-/// [`InstallSource::Unknown`].
-const CURL_INSTALLER_FOOTPRINTS: &[CurlInstallerFootprint] = &[
-    // Cursor CLI installer — cursor.com/install.
-    CurlInstallerFootprint {
-        binary: "cursor-agent",
-        markers: &[".local/share/cursor-agent/versions", ".cursor/bin"],
-    },
-    // Amp installer — ampcode.com/install.sh.
-    CurlInstallerFootprint {
-        binary: "amp",
-        markers: &[".local/share/amp", ".cache/amp"],
-    },
-    // Pi installer — pi.dev/install.sh. When the global npm prefix isn't
-    // writable it runs `npm install -g --prefix ~/.local`, leaving the package
-    // tree under `~/.local/lib/node_modules` (always) and a standalone Node
-    // runtime under `~/.local/share/pi-node` (only when no usable node was
-    // found). The package-tree marker must be checked *before* the generic
-    // npm-layout classification — the bin entry canonicalizes into
-    // `node_modules/`, but a plain `npm install -g` can't update this prefix;
-    // `pi update --self` can.
-    CurlInstallerFootprint {
-        binary: "pi",
-        markers: &[
-            ".local/lib/node_modules/@earendil-works/pi-coding-agent",
-            ".local/share/pi-node",
-        ],
-    },
-];
-
-/// Signal 1 of the curl-pipe fingerprint: the binary sits in a user-local bin
-/// dir (`~/.local/bin`, `~/bin`) and a known installer footprint marker for
-/// that binary name exists under `$HOME`. Low-false-positive enough to run
-/// *before* the npm-layout classification (some installers, e.g. Pi's, lay
-/// down npm-shaped trees that `npm install -g` nevertheless can't update).
-fn matches_curl_installer_footprint(path: &Path, home: &Path) -> bool {
-    if !in_user_local_bin(path, home) {
-        return false;
-    }
-    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-        for fp in CURL_INSTALLER_FOOTPRINTS {
-            if fp.binary == name && fp.markers.iter().any(|m| home.join(m).exists()) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 fn in_user_local_bin(path: &Path, home: &Path) -> bool {
     path.starts_with(home.join(".local/bin")) || path.starts_with(home.join("bin"))
 }
 
-/// Cheap filesystem fingerprint for curl/native installs that path-prefix
-/// heuristics can't classify. Only considers binaries inside a user-local bin
-/// dir (`~/.local/bin`, `~/bin`) and uses two low-false-positive signals:
+/// Cheap filesystem fingerprint for native installs that path-prefix heuristics
+/// can't classify. Only considers binaries inside a user-local bin dir
+/// (`~/.local/bin`, `~/bin`), and on a single low-false-positive signal: the bin
+/// entry is a symlink into a *versioned* install dir under `$HOME` — the layout
+/// Cursor's and Claude's native installers use
+/// (`~/.local/bin/<tool>` → `…/versions/<ver>/<tool>`).
 ///
-/// 1. A known installer footprint marker (see [`CURL_INSTALLER_FOOTPRINTS`])
-///    exists under `$HOME` and the binary name matches that installer
-///    ([`matches_curl_installer_footprint`], which also runs earlier in the
-///    detection chain, ahead of the npm-layout check).
-/// 2. The bin entry is a symlink into a *versioned* install dir under `$HOME`
-///    (the layout Cursor's native installer uses:
-///    `~/.local/bin/<tool>` → `…/versions/<ver>/<tool>`).
+/// Every input is local to the resolved binary: what this path *is*, never
+/// whether some marker happens to exist under `$HOME`. An ambient marker
+/// describes the machine rather than the binary PATH resolved to — with a tool
+/// installed both by an installer and by npm, the marker is present either way.
 ///
-/// No subprocess or network access — only `read_link`/`exists`/`canonicalize`.
+/// No subprocess or network access — only `read_link`/`canonicalize`.
 fn fingerprint_curl_pipe(path: &Path, home: &Path) -> bool {
     if !in_user_local_bin(path, home) {
         return false;
     }
 
-    // Signal 1 — a known installer footprint marker exists under $HOME.
-    if matches_curl_installer_footprint(path, home) {
-        return true;
-    }
+    let Ok(target) = std::fs::read_link(path) else {
+        return false;
+    };
+    let resolved = if target.is_absolute() {
+        target
+    } else if let Some(parent) = path.parent() {
+        parent.join(target)
+    } else {
+        target
+    };
+    let resolved = resolved.canonicalize().unwrap_or(resolved);
+    // `resolved` is canonical, so `$HOME` must be too before comparing: a home
+    // reached through a symlinked ancestor (macOS `/tmp` → `/private/tmp`) never
+    // matches as written. Falls back to `home` as-is if canonicalize fails.
+    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    resolved.starts_with(&home) && resolved.components().any(|c| c.as_os_str() == "versions")
+}
 
-    // Signal 2 — the bin entry is a symlink into a versioned install dir under
-    // $HOME.
-    if let Ok(target) = std::fs::read_link(path) {
-        let resolved = if target.is_absolute() {
-            target
-        } else if let Some(parent) = path.parent() {
-            parent.join(target)
-        } else {
-            target
-        };
-        let resolved = resolved.canonicalize().unwrap_or(resolved);
-        if resolved.starts_with(home) && resolved.components().any(|c| c.as_os_str() == "versions")
-        {
-            return true;
-        }
-    }
-
-    false
+/// The npm prefix that owns `path`, derived from where the package tree actually
+/// lives: `<prefix>/lib/node_modules/<pkg>/…` → `<prefix>`.
+///
+/// The global bin entry is a symlink into the package tree, so the path is
+/// canonicalized first (falling back to the path as-is, like
+/// [`looks_like_npm_global`]). Anchors on the *first* adjacent
+/// `lib`/`node_modules` component pair so a nested dependency tree
+/// (`<prefix>/lib/node_modules/a/node_modules/b`) still yields `<prefix>`.
+///
+/// Returns `None` when the path has no such pair — callers then fall back to a
+/// prefix-less `npm install -g`, which targets npm's configured global prefix.
+pub fn npm_prefix_for_binary(path: &Path) -> Option<PathBuf> {
+    let canonical = path.canonicalize();
+    let target = canonical.as_deref().unwrap_or(path);
+    let components: Vec<_> = target.components().collect();
+    let lib = components
+        .windows(2)
+        .position(|pair| pair[0].as_os_str() == "lib" && pair[1].as_os_str() == "node_modules")?;
+    let prefix: PathBuf = components[..lib].iter().collect();
+    (!prefix.as_os_str().is_empty()).then_some(prefix)
 }
 
 /// Whether the active binary path is owned by a Homebrew cask.
@@ -646,17 +599,6 @@ fn detect_install_source_inner(
     // the active Caskroom binary back to Brew.
     if looks_like_homebrew_cask(path) {
         return InstallSource::Brew;
-    }
-
-    // Known curl-installer footprints in user-local bin dirs beat the npm
-    // layout check below: Pi's installer lays down an npm-shaped tree under
-    // `~/.local` (bin symlink into `~/.local/lib/node_modules/…`) that a plain
-    // `npm install -g` can't update — the install is owned by the installer's
-    // own update path, not the user's global npm prefix.
-    if let Some(home) = home {
-        if matches_curl_installer_footprint(path, home) {
-            return InstallSource::CurlPipe;
-        }
     }
 
     // pnpm/bun global installs also canonicalize into `node_modules/` trees,
@@ -766,6 +708,14 @@ mod tests {
 
     fn quoted(value: &str) -> String {
         format!("'{}'", value.replace('\'', "'\\''"))
+    }
+
+    /// A caller snapshot declaring only `HOME`. Classifying through
+    /// [`detect_install_source_with_env`] runs the full chain — unlike the
+    /// [`detect_install_source_with_home`] shorthand, it also reaches the
+    /// [`fingerprint_curl_pipe`] fallback.
+    fn home_env(home: &Path) -> crate::DoctorEnv {
+        crate::DoctorEnv::new(vec![("HOME".to_string(), home.display().to_string())])
     }
 
     fn write_login_path_rewrite_profiles(home: &Path, path: &Path) {
@@ -1300,20 +1250,6 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_curl_pipe_matches_known_installer_marker() {
-        let home = std::env::temp_dir().join(format!("doctor-fp-marker-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&home);
-        // Amp installer: ~/.local/bin/amp + ~/.local/share/amp.
-        fs::create_dir_all(home.join(".local/bin")).unwrap();
-        fs::create_dir_all(home.join(".local/share/amp")).unwrap();
-        let bin = home.join(".local/bin/amp");
-        File::create(&bin).unwrap();
-
-        assert!(fingerprint_curl_pipe(&bin, &home));
-        let _ = fs::remove_dir_all(&home);
-    }
-
-    #[test]
     fn fingerprint_curl_pipe_matches_versioned_symlink() {
         #[cfg(unix)]
         {
@@ -1334,16 +1270,18 @@ mod tests {
         }
     }
 
-    /// Pi's curl installer fallback layout: `~/.local/bin/pi` symlinked into
-    /// `~/.local/lib/node_modules/@earendil-works/pi-coding-agent/…`. The tree
-    /// is npm-shaped (the npm-layout check alone would say `Npm`), but a plain
-    /// `npm install -g` can't update this prefix — the footprint check must win
-    /// and classify it `CurlPipe`.
+    /// Pi's installer fallback layout: `npm install -g --prefix ~/.local` leaves
+    /// `~/.local/bin/pi` symlinked into
+    /// `~/.local/lib/node_modules/@earendil-works/pi-coding-agent/…`. The tree is
+    /// npm-shaped because it *is* an npm install, and it classifies `Npm` —
+    /// updatable with an npm recipe aimed at the prefix that owns it
+    /// ([`npm_prefix_for_binary`]). No `$HOME` marker gets a say: living under
+    /// `~/.local` is not evidence about how a binary was installed.
     #[test]
-    fn pi_curl_installer_user_local_layout_classifies_as_curl_pipe() {
+    fn pi_user_local_npm_layout_classifies_as_npm() {
         #[cfg(unix)]
         {
-            let home = std::env::temp_dir().join(format!("doctor-pi-curl-{}", std::process::id()));
+            let home = std::env::temp_dir().join(format!("doctor-pi-local-{}", std::process::id()));
             let _ = fs::remove_dir_all(&home);
             let pkg = home.join(".local/lib/node_modules/@earendil-works/pi-coding-agent/dist");
             fs::create_dir_all(&pkg).unwrap();
@@ -1352,63 +1290,154 @@ mod tests {
             fs::create_dir_all(home.join(".local/bin")).unwrap();
             let link = home.join(".local/bin/pi");
             std::os::unix::fs::symlink(&real, &link).unwrap();
+            // The standalone-node runtime the installer drops when it finds no
+            // usable node. Present or absent, it changes nothing.
+            fs::create_dir_all(home.join(".local/share/pi-node")).unwrap();
 
-            assert!(
-                looks_like_npm_global(&link),
-                "layout is npm-shaped — the footprint must be what reclassifies it",
-            );
-            assert!(matches_curl_installer_footprint(&link, &home));
             assert_eq!(
-                detect_install_source_with_home(&link, Some(home.as_path())),
+                detect_install_source_with_env(&link, Some(&home_env(&home))),
+                InstallSource::Npm,
+            );
+            assert_eq!(
+                npm_prefix_for_binary(&link),
+                Some(home.join(".local").canonicalize().unwrap()),
+            );
+            let _ = fs::remove_dir_all(&home);
+        }
+    }
+
+    /// An npm-global install under a user-configured `~/.local` prefix stays
+    /// `Npm` even for a tool whose installer also writes runtime dirs there
+    /// (`~/.cache/amp`, `~/.local/share/amp` — both created by `amp` on first
+    /// run, whatever installed it). Classification looks at the resolved binary,
+    /// so an ambient data dir can no longer flip a user-managed npm install to
+    /// `CurlPipe` and silence its update nag.
+    #[test]
+    fn amp_npm_layout_under_user_local_prefix_stays_npm_with_runtime_dirs_present() {
+        #[cfg(unix)]
+        {
+            let home =
+                std::env::temp_dir().join(format!("doctor-amp-local-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&home);
+            let pkg = home.join(".local/lib/node_modules/@ampcode/cli/bin");
+            fs::create_dir_all(&pkg).unwrap();
+            let real = pkg.join("amp.exe");
+            File::create(&real).unwrap();
+            fs::create_dir_all(home.join(".local/bin")).unwrap();
+            let link = home.join(".local/bin/amp");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            fs::create_dir_all(home.join(".cache/amp")).unwrap();
+            fs::create_dir_all(home.join(".local/share/amp")).unwrap();
+
+            assert_eq!(
+                detect_install_source_with_env(&link, Some(&home_env(&home))),
+                InstallSource::Npm,
+            );
+            let _ = fs::remove_dir_all(&home);
+        }
+    }
+
+    /// Regression guard for the one fingerprint signal that survives: Cursor's
+    /// native installer layout (`~/.local/bin/cursor-agent` → a versioned dir)
+    /// classifies `CurlPipe` all the way through `detect_install_source_*`, with
+    /// no installer-marker table involved. The same shape covers the native
+    /// `claude` install (`~/.local/share/claude/versions/<ver>`).
+    #[test]
+    fn cursor_agent_versioned_symlink_classifies_as_curl_pipe() {
+        #[cfg(unix)]
+        {
+            let home =
+                std::env::temp_dir().join(format!("doctor-cursor-vers-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&home);
+            let versioned = home.join(".local/share/cursor-agent/versions/2025.09.18-7ae6800");
+            fs::create_dir_all(&versioned).unwrap();
+            let real = versioned.join("cursor-agent");
+            File::create(&real).unwrap();
+            fs::create_dir_all(home.join(".local/bin")).unwrap();
+            let link = home.join(".local/bin/cursor-agent");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+
+            assert_eq!(
+                detect_install_source_with_env(&link, Some(&home_env(&home))),
                 InstallSource::CurlPipe,
             );
             let _ = fs::remove_dir_all(&home);
         }
     }
 
-    /// The standalone-node marker (`~/.local/share/pi-node`, laid down when the
-    /// installer had no usable Node.js) also fingerprints the curl install.
+    /// The npm global bin entry is a *relative* symlink into the package tree, so
+    /// the prefix has to come out of the canonicalized target.
     #[test]
-    fn pi_standalone_node_marker_classifies_as_curl_pipe() {
-        let home = std::env::temp_dir().join(format!("doctor-pi-node-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&home);
-        fs::create_dir_all(home.join(".local/share/pi-node")).unwrap();
-        fs::create_dir_all(home.join(".local/bin")).unwrap();
-        let bin = home.join(".local/bin/pi");
-        File::create(&bin).unwrap();
-
-        assert_eq!(
-            detect_install_source_with_home(&bin, Some(home.as_path())),
-            InstallSource::CurlPipe,
-        );
-        let _ = fs::remove_dir_all(&home);
-    }
-
-    /// A `pi` on the global npm prefix (installed with plain `npm install -g`,
-    /// or by the curl installer when the prefix was writable) stays `Npm` even
-    /// when a stale `~/.local` footprint marker exists — the footprint only
-    /// claims binaries inside user-local bin dirs.
-    #[test]
-    fn pi_on_npm_prefix_stays_npm_despite_footprint_marker() {
+    fn npm_prefix_for_binary_follows_relative_bin_symlink() {
         #[cfg(unix)]
         {
-            let root = std::env::temp_dir().join(format!("doctor-pi-npm-{}", std::process::id()));
+            let root =
+                std::env::temp_dir().join(format!("doctor-npm-prefix-{}", std::process::id()));
             let _ = fs::remove_dir_all(&root);
-            let home = root.join("home");
-            fs::create_dir_all(home.join(".local/share/pi-node")).unwrap();
-            let pkg = root.join("prefix/lib/node_modules/@earendil-works/pi-coding-agent/dist");
+            let prefix = root.join("prefix");
+            let pkg = prefix.join("lib/node_modules/@earendil-works/pi-coding-agent/dist");
             fs::create_dir_all(&pkg).unwrap();
-            let real = pkg.join("cli.js");
-            File::create(&real).unwrap();
-            fs::create_dir_all(root.join("prefix/bin")).unwrap();
-            let link = root.join("prefix/bin/pi");
-            std::os::unix::fs::symlink(&real, &link).unwrap();
+            File::create(pkg.join("cli.js")).unwrap();
+            fs::create_dir_all(prefix.join("bin")).unwrap();
+            std::os::unix::fs::symlink(
+                "../lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+                prefix.join("bin/pi"),
+            )
+            .unwrap();
 
             assert_eq!(
-                detect_install_source_with_home(&link, Some(home.as_path())),
-                InstallSource::Npm,
+                npm_prefix_for_binary(&prefix.join("bin/pi")),
+                Some(prefix.canonicalize().unwrap()),
             );
             let _ = fs::remove_dir_all(&root);
+        }
+    }
+
+    /// Prefix derivation over the layouts seen in the wild. These paths need not
+    /// exist — with canonicalize unavailable the components are read as given.
+    #[test]
+    fn npm_prefix_for_binary_derives_prefix_from_package_tree() {
+        for (path, expected) in [
+            (
+                "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+                "/opt/homebrew",
+            ),
+            (
+                "/Users/test/.local/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+                "/Users/test/.local",
+            ),
+            (
+                "/Users/test/.nvm/versions/node/v22.14.0/lib/node_modules/pi-acp/dist/index.js",
+                "/Users/test/.nvm/versions/node/v22.14.0",
+            ),
+            // A nested dependency tree resolves to the *outer* prefix, not the
+            // inner `node_modules`.
+            (
+                "/opt/homebrew/lib/node_modules/outer/node_modules/inner/cli.js",
+                "/opt/homebrew",
+            ),
+        ] {
+            assert_eq!(
+                npm_prefix_for_binary(Path::new(path)),
+                Some(PathBuf::from(expected)),
+                "{path}",
+            );
+        }
+    }
+
+    /// No `lib/node_modules` pair — no prefix, and the caller falls back to a
+    /// bare `npm install -g`. Covers non-npm binaries and pnpm's global shims
+    /// (which are generated scripts, not symlinks into a `lib/` tree).
+    #[test]
+    fn npm_prefix_for_binary_none_without_package_tree() {
+        for path in [
+            "/usr/local/bin/goose",
+            "/Users/test/Library/pnpm/pi",
+            // `node_modules` without the `lib` parent: a project-local install,
+            // which is nobody's global prefix.
+            "/Users/test/project/node_modules/.bin/tsc",
+        ] {
+            assert_eq!(npm_prefix_for_binary(Path::new(path)), None, "{path}");
         }
     }
 
@@ -1511,10 +1540,10 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_curl_pipe_no_match_without_footprint() {
+    fn fingerprint_curl_pipe_no_match_for_plain_user_local_binary() {
         let home = std::env::temp_dir().join(format!("doctor-fp-none-{}", std::process::id()));
         let _ = fs::remove_dir_all(&home);
-        // A bare ~/.local/bin binary with no installer footprint stays Unknown.
+        // A real file in ~/.local/bin — not a versioned symlink — stays Unknown.
         fs::create_dir_all(home.join(".local/bin")).unwrap();
         let bin = home.join(".local/bin/mytool");
         File::create(&bin).unwrap();
@@ -1523,16 +1552,28 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
     }
 
+    /// The fingerprint only claims user-local bin dirs: the same versioned-symlink
+    /// layout parked somewhere else on PATH is left to the path-prefix checks.
     #[test]
     fn fingerprint_curl_pipe_ignores_binaries_outside_user_local_bin() {
-        let home = std::env::temp_dir().join(format!("doctor-fp-outside-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&home);
-        // Marker exists, but the binary is elsewhere — must not fingerprint.
-        fs::create_dir_all(home.join(".local/share/amp")).unwrap();
-        let bin = PathBuf::from("/tmp/elsewhere/amp");
+        #[cfg(unix)]
+        {
+            let root =
+                std::env::temp_dir().join(format!("doctor-fp-outside-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            let home = root.join("home");
+            let versioned = home.join(".local/share/cursor-agent/versions/1.0.0");
+            fs::create_dir_all(&versioned).unwrap();
+            let real = versioned.join("cursor-agent");
+            File::create(&real).unwrap();
+            let elsewhere = root.join("elsewhere");
+            fs::create_dir_all(&elsewhere).unwrap();
+            let link = elsewhere.join("cursor-agent");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
 
-        assert!(!fingerprint_curl_pipe(&bin, &home));
-        let _ = fs::remove_dir_all(&home);
+            assert!(!fingerprint_curl_pipe(&link, &home));
+            let _ = fs::remove_dir_all(&root);
+        }
     }
 
     #[test]

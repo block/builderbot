@@ -6,7 +6,7 @@ use crate::command::{
     run_command_with_timeout, CommandError, CommandTimeout, DEFAULT_PROBE_TIMEOUT,
 };
 use crate::environment::{apply_doctor_env, DoctorEnv};
-use crate::resolve::format_command_output;
+use crate::resolve::{format_command_output, shell_quote};
 use crate::timeout_check::{command_timeout_check, TimeoutCheck};
 use crate::types::{
     AgentVersionInfo, AuthStatus, CheckStatus, DoctorCheck, FixType, InstallSource, ResolvedBinary,
@@ -49,15 +49,6 @@ pub struct AgentCheckInfo {
     /// by the embedding app's lock and the version worth surfacing is the
     /// vendored harness CLI's (e.g. Claude Code 2.1.x).
     pub bundled_version_args: Option<&'static [&'static str]>,
-    /// Shell command that runs the agent's own updater for its main CLI (e.g.
-    /// `pi update --self`). Used by the freshness pass as the update command
-    /// for a [`InstallSource::CurlPipe`] main readout, where registry-derived
-    /// recipes would target the wrong prefix (Pi's installer lays down an
-    /// npm-shaped tree under `~/.local` that a plain `npm install -g` can't
-    /// reach) but the tool's own updater re-installs in place. Unlike
-    /// Cursor/Amp-style background auto-updaters, a declared self-update
-    /// command marks the install as user-actioned: the update nag stays.
-    pub self_update_command: Option<&'static str>,
 }
 
 /// All AI agents we check for individually.
@@ -75,7 +66,6 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         auth_status_command: None,
         install_source_override: None,
         bundled_version_args: None,
-        self_update_command: None,
     },
     // The claude-agent-acp bridge vendors the complete Claude Code CLI and
     // forwards `--cli <args>` to it, sharing the user's credential store
@@ -94,7 +84,6 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         auth_status_command: Some("claude-agent-acp --cli auth status"),
         install_source_override: None,
         bundled_version_args: Some(&["--cli", "--version"]),
-        self_update_command: None,
     },
     // The codex-acp bridge vendors the full `codex` binary and forwards
     // `cli <args>` to it, sharing the user's ~/.codex/auth.json — same
@@ -115,7 +104,6 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         // `--version` anywhere in argv and prints its own version, so only
         // codex's clap short flag reaches the vendored binary.
         bundled_version_args: Some(&["cli", "-V"]),
-        self_update_command: None,
     },
     // Pi (pi.dev, github.com/earendil-works/pi) is npm-under-the-hood in every
     // install method: `npm install -g --ignore-scripts` (its docs and its
@@ -136,12 +124,6 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         auth_status_command: None,
         install_source_override: None,
         bundled_version_args: None,
-        // Pi's curl installer (pi.dev/install.sh) falls back to an npm-shaped
-        // tree under `~/.local` when the global npm prefix isn't writable;
-        // `pi update --self` re-installs in place for every layout (it infers
-        // its own prefix/package manager), where `npm install -g …@latest`
-        // would target the wrong prefix.
-        self_update_command: Some("pi update --self"),
     },
     AgentCheckInfo {
         id: "ai-agent-amp",
@@ -157,7 +139,6 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         // Main `amp` curl installer; bridge `amp-acp` is npm (detected positively).
         install_source_override: Some(InstallSource::CurlPipe),
         bundled_version_args: None,
-        self_update_command: None,
     },
     AgentCheckInfo {
         id: "ai-agent-copilot",
@@ -172,7 +153,6 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         auth_status_command: None,
         install_source_override: None,
         bundled_version_args: None,
-        self_update_command: None,
     },
     AgentCheckInfo {
         id: "ai-agent-cursor",
@@ -189,7 +169,6 @@ pub const AI_AGENT_CHECKS: &[AgentCheckInfo] = &[
         // resolved binary is the curl install — the override's primary use case.
         install_source_override: Some(InstallSource::CurlPipe),
         bundled_version_args: None,
-        self_update_command: None,
     },
 ];
 
@@ -218,6 +197,16 @@ pub(crate) fn bundled_version_probe_args(
 /// sources with no canonical update recipe (`Mise`/`Asdf`/`Unknown`/`System`),
 /// or when the package id is unknown.
 ///
+/// `npm_prefix` is the prefix that owns the binary being updated (see
+/// [`crate::resolve::npm_prefix_for_binary`]). npm installs go to whatever
+/// prefix npm is *configured* with, which is not always the one the resolved
+/// binary lives in — a package installed with an explicit `--prefix`, or under a
+/// node version the user has since switched away from, would otherwise be
+/// "updated" by installing a second copy somewhere else while the stale binary
+/// keeps resolving. Passing the derived prefix back through pins the update to
+/// the install it is about; where the two agree — the common case — the flag is
+/// a no-op. `None` falls back to the bare command.
+///
 /// The caller is responsible for gating on `update_available == Some(true)` —
 /// this function only knows how to update, not whether to. `apply_npm_registry`
 /// runs over the final command string downstream, so npm commands automatically
@@ -225,10 +214,19 @@ pub(crate) fn bundled_version_probe_args(
 pub fn derive_update_command(
     install_source: Option<&InstallSource>,
     package_id: Option<&str>,
+    npm_prefix: Option<&Path>,
 ) -> Option<String> {
     let pkg = package_id?;
     match install_source? {
-        InstallSource::Npm => Some(format!("npm install -g {pkg}@latest")),
+        InstallSource::Npm => Some(match npm_prefix {
+            // Quoted: this is executed via `sh -c`, and `/Users/Mary Smith` is a
+            // real home directory.
+            Some(prefix) => format!(
+                "npm install -g --prefix {} {pkg}@latest",
+                shell_quote(&prefix.to_string_lossy()),
+            ),
+            None => format!("npm install -g {pkg}@latest"),
+        }),
         InstallSource::Pnpm => Some(format!("pnpm add -g {pkg}@latest")),
         InstallSource::Bun => Some(format!("bun add -g {pkg}@latest")),
         InstallSource::Brew => Some(format!("brew upgrade {pkg}")),
@@ -240,17 +238,6 @@ pub fn derive_update_command(
         | InstallSource::Unknown
         | InstallSource::System => None,
     }
-}
-
-/// The agent's declared self-update command for its main CLI (e.g. Pi's
-/// `pi update --self`), when one exists. Consulted by the freshness pass for
-/// [`InstallSource::CurlPipe`] main readouts — see
-/// [`AgentCheckInfo::self_update_command`].
-pub(crate) fn agent_self_update_command(check_id: &str) -> Option<&'static str> {
-    AI_AGENT_CHECKS
-        .iter()
-        .find(|info| info.id == check_id)
-        .and_then(|info| info.self_update_command)
 }
 
 /// Append `--registry=<url>` to `command` when a registry override is supplied
@@ -770,10 +757,6 @@ mod tests {
         }
     }
 
-    fn shell_quote(value: &str) -> String {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
-
     fn write_login_path_rewrite_profiles(home: &Path, path: &Path) {
         let profile = format!(
             "export PATH={}\n",
@@ -1092,10 +1075,10 @@ mod tests {
     }
 
     /// Pi's registry entry: npm-shaped install commands for both binaries (so
-    /// the registry override applies), no auth commands (Pi owns its own
-    /// provider/model configuration), and its own updater for curl installs.
+    /// the registry override applies) and no auth commands (Pi owns its own
+    /// provider/model configuration).
     #[test]
-    fn pi_declares_install_bridge_and_self_update_commands() {
+    fn pi_declares_install_and_bridge_commands() {
         let pi = agent("ai-agent-pi");
         assert_eq!(pi.main_command, Some("pi"));
         assert_eq!(pi.commands, &["pi-acp"]);
@@ -1112,7 +1095,6 @@ mod tests {
         assert_eq!(pi.auth_command, None);
         assert_eq!(pi.auth_status_command, None);
         assert_eq!(pi.install_source_override, None);
-        assert_eq!(pi.self_update_command, Some("pi update --self"));
     }
 
     /// Main CLI present, bridge missing → `FixType::Bridge` with the
@@ -1171,29 +1153,18 @@ mod tests {
     }
 
     #[test]
-    fn self_update_command_lookup_only_for_declaring_agents() {
-        assert_eq!(
-            agent_self_update_command("ai-agent-pi"),
-            Some("pi update --self"),
-        );
-        // Cursor/Amp curl installs auto-update in the background — they keep
-        // the self-updating suppression, not a user-actioned updater.
-        assert_eq!(agent_self_update_command("ai-agent-cursor"), None);
-        assert_eq!(agent_self_update_command("ai-agent-amp"), None);
-    }
-
-    #[test]
     fn derive_update_command_pnpm_and_bun_emit_add_g_latest() {
         assert_eq!(
             derive_update_command(
                 Some(&InstallSource::Pnpm),
                 Some("@earendil-works/pi-coding-agent"),
+                None,
             )
             .as_deref(),
             Some("pnpm add -g @earendil-works/pi-coding-agent@latest"),
         );
         assert_eq!(
-            derive_update_command(Some(&InstallSource::Bun), Some("pi-acp")).as_deref(),
+            derive_update_command(Some(&InstallSource::Bun), Some("pi-acp"), None).as_deref(),
             Some("bun add -g pi-acp@latest"),
         );
     }
@@ -1301,22 +1272,82 @@ mod tests {
         );
     }
 
+    /// Without a derived prefix the npm recipe stays bare — today's behaviour,
+    /// and the fail-safe when the package tree can't be located.
     #[test]
-    fn derive_update_command_npm_emits_at_latest() {
+    fn derive_update_command_npm_falls_back_to_bare_without_prefix() {
         assert_eq!(
             derive_update_command(
                 Some(&InstallSource::Npm),
                 Some("@agentclientprotocol/claude-agent-acp"),
+                None,
             )
             .as_deref(),
             Some("npm install -g @agentclientprotocol/claude-agent-acp@latest"),
         );
     }
 
+    /// With a prefix, the recipe pins the install to it — so an agent under
+    /// `~/.local` is upgraded there instead of a second copy appearing in
+    /// whichever prefix npm is configured with.
+    #[test]
+    fn derive_update_command_npm_emits_prefix() {
+        assert_eq!(
+            derive_update_command(
+                Some(&InstallSource::Npm),
+                Some("@earendil-works/pi-coding-agent"),
+                Some(Path::new("/Users/test/.local")),
+            )
+            .as_deref(),
+            Some(
+                "npm install -g --prefix '/Users/test/.local' \
+                 @earendil-works/pi-coding-agent@latest"
+            ),
+        );
+    }
+
+    /// The command is handed to `sh -c`, so a prefix with a space in it (a real
+    /// home directory shape) must survive quoting intact.
+    #[test]
+    fn derive_update_command_npm_quotes_prefix_containing_spaces() {
+        assert_eq!(
+            derive_update_command(
+                Some(&InstallSource::Npm),
+                Some("pi-acp"),
+                Some(Path::new("/Users/Mary Smith/.local")),
+            )
+            .as_deref(),
+            Some("npm install -g --prefix '/Users/Mary Smith/.local' pi-acp@latest"),
+        );
+    }
+
+    /// A prefixed npm recipe is still recognised as npm-backed, so a configured
+    /// registry override lands on it.
+    #[test]
+    fn derive_update_command_npm_with_prefix_still_takes_registry_override() {
+        let command = derive_update_command(
+            Some(&InstallSource::Npm),
+            Some("@earendil-works/pi-coding-agent"),
+            Some(Path::new("/Users/test/.local")),
+        )
+        .expect("npm recipe");
+        assert_eq!(
+            apply_npm_registry(&command, Some("https://artifactory/npm")),
+            "npm install -g --prefix '/Users/test/.local' \
+             @earendil-works/pi-coding-agent@latest --registry=https://artifactory/npm",
+        );
+    }
+
+    /// Non-npm sources ignore the prefix entirely.
     #[test]
     fn derive_update_command_brew_emits_upgrade() {
         assert_eq!(
-            derive_update_command(Some(&InstallSource::Brew), Some("codex")).as_deref(),
+            derive_update_command(
+                Some(&InstallSource::Brew),
+                Some("codex"),
+                Some(Path::new("/Users/test/.local")),
+            )
+            .as_deref(),
             Some("brew upgrade codex"),
         );
     }
@@ -1324,7 +1355,7 @@ mod tests {
     #[test]
     fn derive_update_command_cargo_emits_install_force() {
         assert_eq!(
-            derive_update_command(Some(&InstallSource::Cargo), Some("some-crate")).as_deref(),
+            derive_update_command(Some(&InstallSource::Cargo), Some("some-crate"), None).as_deref(),
             Some("cargo install --force some-crate"),
         );
     }
@@ -1340,7 +1371,7 @@ mod tests {
             InstallSource::System,
         ] {
             assert_eq!(
-                derive_update_command(Some(&src), Some("pkg")),
+                derive_update_command(Some(&src), Some("pkg"), None),
                 None,
                 "expected None for {src:?}",
             );
@@ -1349,7 +1380,10 @@ mod tests {
 
     #[test]
     fn derive_update_command_returns_none_without_package_id() {
-        assert_eq!(derive_update_command(Some(&InstallSource::Npm), None), None,);
+        assert_eq!(
+            derive_update_command(Some(&InstallSource::Npm), None, None),
+            None,
+        );
     }
 
     #[test]

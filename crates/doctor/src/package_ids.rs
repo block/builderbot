@@ -107,11 +107,13 @@ pub(crate) const PACKAGE_IDS: &[(&str, &[PackageEntry])] = &[
     ),
     // ai-agent-pi: every install method is npm-under-the-hood, so `latest`
     // always comes from the npm registry. The main CLI ships as
-    // `@earendil-works/pi-coding-agent` via npm/pnpm/bun, plus the pi.dev curl
-    // installer (classified `CurlPipe` when it lands in its `~/.local`
-    // fallback prefix — updated via `pi update --self`, see the agent's
-    // `self_update_command`). The ACP bridge is the separately-maintained
-    // `pi-acp` npm package.
+    // `@earendil-works/pi-coding-agent` via npm/pnpm/bun; the pi.dev curl
+    // installer is npm too (`npm install -g --ignore-scripts --prefix`), so its
+    // `~/.local` fallback layout classifies `Npm` and updates through the npm
+    // recipe like any other. The `CurlPipe` entry is only a display fallback —
+    // should a Pi ever fingerprint as a native install, the readout still shows
+    // a latest version (report-only, no nag). The ACP bridge is the
+    // separately-maintained `pi-acp` npm package.
     (
         "ai-agent-pi",
         &[
@@ -162,13 +164,33 @@ pub(crate) const PACKAGE_IDS: &[(&str, &[PackageEntry])] = &[
     (
         "ai-agent-amp",
         &[
-            // Bridge: npm. Main: brew. Main curl-pipe install is `CurlPipe`,
-            // not present in the table (self-updating, report-only).
+            // Bridge: npm. Main: npm or brew. Main curl-pipe install is
+            // `CurlPipe`, not present in the table (self-updating, report-only).
             (
                 InstallSource::Npm,
                 "amp-acp",
                 LatestSource::Npm,
                 Role::Bridge,
+            ),
+            // Amp's own npm package. `@ampcode/cli` is canonical (bin `amp`);
+            // `@sourcegraph/amp` is the renamed alias that re-exports it and was
+            // slated for removal on 2026-06-15.
+            //
+            // CAVEAT: correct but inert behind a mirror that filters by version
+            // age. Amp publishes continuously (a new version every few minutes),
+            // so a mirror that withholds young versions serves the package with
+            // no `latest` dist-tag at all — Block's Artifactory currently
+            // reports `{"placeholder": "0.0.0-placeholder"}` for `@ampcode/cli`
+            // and `{"next": …}` for `@sourcegraph/amp`, though upstream npm has
+            // `latest` for both. There, `npm view … version` comes back empty →
+            // `latest_version: None` → no nag, and the update command would fail
+            // `ETARGET`. Pi is unaffected because its releases age past the
+            // filter.
+            (
+                InstallSource::Npm,
+                "@ampcode/cli",
+                LatestSource::Npm,
+                Role::Main,
             ),
             // Sourcegraph Amp ships from the `ampcode/tap` tap as `ampcode`.
             // WARNING: homebrew-core's `amp` formula is an unrelated GPL-3.0

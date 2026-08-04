@@ -1,4 +1,3 @@
-import type { Project } from '../../types';
 import { getStoreValue, setStoreValue } from '../../shared/persistentStore';
 
 const SIDEBAR_WIDTH_KEY = 'projects-sidebar-width';
@@ -11,18 +10,9 @@ function clampWidth(width: number): number {
   return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, width));
 }
 
-/**
- * Shared reactive list of projects.
- *
- * Written by ProjectsList when it loads/reloads projects, read by
- * navigation shortcuts so they don't need a separate IPC round-trip.
- */
-export const projectsList = $state<{ current: Project[] }>({ current: [] });
-
 export const projectsSidebarState = $state({
   width: SIDEBAR_DEFAULT_WIDTH,
   hydrated: false,
-  hasProjects: true,
   scrollTop: 0,
 });
 
@@ -46,11 +36,6 @@ export function setProjectsSidebarWidth(width: number, persist = true): void {
   if (persist) {
     void setStoreValue(SIDEBAR_WIDTH_KEY, clamped);
   }
-}
-
-export function setProjects(projects: Project[]): void {
-  projectsList.current = projects;
-  projectsSidebarState.hasProjects = projects.length > 0;
 }
 
 export function setProjectsSidebarScrollTop(scrollTop: number): void {

@@ -13,7 +13,7 @@
   import FolderGit2 from '@lucide/svelte/icons/folder-git-2';
   import Mail from '@lucide/svelte/icons/mail';
   import Trash2 from '@lucide/svelte/icons/trash-2';
-  import type { Project, ProjectRepo, Branch, WorkspaceStatus, RepoHomeItem } from '../../types';
+  import type { Project, WorkspaceStatus, RepoHomeItem } from '../../types';
   import { goHome, navigation, selectProject, showAllRepos } from '../layout/navigation.svelte';
   import {
     projectDisplayName,
@@ -24,6 +24,7 @@
   } from '../../shared/utils';
   import RepoBadge from '../../shared/RepoBadge.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
+  import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import SineWave from '../../shared/SineWave.svelte';
@@ -48,30 +49,22 @@
   const devBranch = import.meta.env.VITE_DEV_BRANCH as string | undefined;
 
   interface Props {
-    projects: Project[];
-    loading?: boolean;
-    error?: string | null;
-    deletingProjectNames?: Map<string, string>;
-    repoCountsByProject?: Map<string, number>;
-    reposByProject?: Map<string, ProjectRepo[]>;
     showAllProjectsRow?: boolean;
-    projectBranches?: Map<string, Branch[]>;
     onMarkProjectUnread?: (project: Project) => void;
     onRemoveProject?: (project: Project) => void | Promise<void>;
   }
 
-  let {
-    projects,
-    loading = false,
-    error = null,
-    deletingProjectNames = new Map(),
-    repoCountsByProject = new Map(),
-    reposByProject = new Map(),
-    showAllProjectsRow = true,
-    projectBranches = new Map(),
-    onMarkProjectUnread,
-    onRemoveProject,
-  }: Props = $props();
+  let { showAllProjectsRow = true, onMarkProjectUnread, onRemoveProject }: Props = $props();
+
+  // All rendered data comes from the shared projectsData store; only UI
+  // state (width, scroll, drag) lives here or in projectsSidebarState.
+  let projects = $derived(projectsDataStore.projects);
+  let projectBranches = $derived(projectsDataStore.branchesByProject);
+  let reposByProject = $derived(projectsDataStore.reposByProject);
+  let repoCountsByProject = $derived(projectsDataStore.repoCountsByProject);
+  let deletingProjectNames = $derived(projectsDataStore.deletingProjectNames);
+  let loading = $derived(projectsDataStore.loading || !projectsDataStore.loaded);
+  let error = $derived(projectsDataStore.error);
 
   let sidebarBodyEl = $state<HTMLDivElement | null>(null);
   let activeProjectRowEl = $state<HTMLElement | null>(null);
@@ -81,17 +74,14 @@
   let trackedSidebarBodyEl: HTMLDivElement | null = null;
 
   // ── Pinned repos ──
+  // Synced from the shared home-repos cache; kept as local state so a drag
+  // reorder applies optimistically before the persisted order round-trips.
   let pinnedRepos = $state<RepoHomeItem[]>([]);
   let dragSourceIndex = $state<number | null>(null);
 
-  async function loadPinnedRepos() {
-    try {
-      const all = await commands.listReposForHome();
-      pinnedRepos = all.filter((r) => r.pinned);
-    } catch (e) {
-      console.error('[ProjectsSidebar] Failed to load pinned repos:', e);
-    }
-  }
+  $effect(() => {
+    pinnedRepos = projectsDataStore.homeRepos.filter((r) => r.pinned);
+  });
 
   function handleDragStart(index: number) {
     return (e: DragEvent) => {
@@ -132,7 +122,7 @@
       } catch (e) {
         console.error('[ProjectsSidebar] Failed to reorder pinned repos:', e);
         // Reload to get the correct order
-        await loadPinnedRepos();
+        await projectsDataStore.refreshHomeRepos();
       }
     };
   }
@@ -300,26 +290,25 @@
   let resizing = $state(false);
   let resizeStartX = 0;
   let resizeStartWidth = SIDEBAR_DEFAULT_WIDTH;
-  let sidebarVisible = $derived(projectsSidebarState.hasProjects && !viewport.isMobile);
+  // Keep the sidebar up until a completed load proves there are no projects,
+  // so it doesn't flash out during startup.
+  let sidebarVisible = $derived(
+    (projects.length > 0 || !projectsDataStore.loaded) && !viewport.isMobile
+  );
   let sidebarStyle = $derived(`width: ${projectsSidebarState.width}px;`);
 
   onMount(() => {
     const stopWatchingViewport = watchViewport();
     void hydrateProjectsSidebarState();
 
-    const onPinnedChanged = () => {
-      void loadPinnedRepos();
-    };
+    // Pin changes propagate through the store's staged:pinned-repos-changed
+    // listener; this mount only has to make sure the cache is warm.
     if (reposUiEnabled) {
-      void loadPinnedRepos();
-      window.addEventListener('staged:pinned-repos-changed', onPinnedChanged);
+      void projectsDataStore.ensureHomeReposLoaded();
     }
 
     return () => {
       stopWatchingViewport();
-      if (reposUiEnabled) {
-        window.removeEventListener('staged:pinned-repos-changed', onPinnedChanged);
-      }
     };
   });
 
@@ -427,10 +416,10 @@
     </div>
 
     <div class="sidebar-body" use:trackSidebarBody onscroll={handleSidebarScroll}>
-      {#if loading}
-        <div class="state">Loading projects…</div>
-      {:else if error}
+      {#if error}
         <div class="state error">{error}</div>
+      {:else if loading}
+        <div class="state">Loading projects…</div>
       {:else}
         <div class="projects-list">
           {#if reposUiEnabled && pinnedRepos.length > 0}
@@ -453,7 +442,6 @@
                   onReorderOver={handleDragOver(index)}
                   onReorderDrop={handleDrop(index)}
                   onReorderEnd={handleDragEnd()}
-                  onPinnedReposChanged={loadPinnedRepos}
                 />
               {/each}
             </div>

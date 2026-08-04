@@ -13,12 +13,11 @@
  * both modes: the first call does the full fetch; later calls resolve
  * immediately with the in-memory data and kick a background revalidation.
  *
- * Phase 1: no view consumes this store yet — ProjectsList/ProjectHome still
- * own private copies of this state. Phase 2 points them here and deletes
- * those copies; startListeners() gets wired once from App.svelte at that
- * point. View-lifecycle side effects (workspaceLifecycle.enqueueInitialSetup,
+ * ProjectHome, ProjectsList, ProjectsSidebar, and ReposListView all read
+ * this store directly; startListeners() is wired once from App.svelte.
+ * View-lifecycle side effects (workspaceLifecycle.enqueueInitialSetup,
  * queued-session draining, run-action hydration) intentionally stay out of
- * the store — Phase 2 wires them from the consuming views.
+ * the store — consuming views wire them by watching branchesByProject.
  */
 
 import { listenToEvent, type UnlistenFn } from '../transport';
@@ -221,6 +220,59 @@ class ProjectsDataStore {
     await this.hydrateProjectInternal(projectId, generation);
   }
 
+  /**
+   * Refetch the project list plus one project's branches and repos. Used
+   * after mutations that reshape a single project (repo added or removed)
+   * and by the project-setup-progress listener. Invalidates the project's
+   * branch timelines so downstream views refetch them.
+   */
+  async refreshProject(projectId: string): Promise<void> {
+    const generation = this.loadGeneration;
+    try {
+      const [projectsResult, branchesResult, reposResult] = await Promise.all([
+        commands.listProjects(),
+        commands.listBranchesForProject(projectId),
+        commands.listProjectRepos(projectId),
+      ]);
+      if (generation !== this.loadGeneration) return;
+      this._projects = projectsResult.data;
+      const mergedBranches = this.applyProjectBranches(projectId, branchesResult.data, generation);
+      if (mergedBranches) {
+        commands.invalidateProjectBranchTimelines(mergedBranches.map((b) => b.id));
+      }
+      this.applyProjectRepos(projectId, reposResult.data, generation);
+    } catch (e) {
+      console.error(`[projectsData] Failed to refresh project '${projectId}':`, e);
+    }
+  }
+
+  /**
+   * Register a newly created project immediately — closing the creation
+   * modal must not wait for a reload — then hydrate its branches and repos
+   * in the background.
+   */
+  projectCreated(project: Project): void {
+    if (!this._projects.some((p) => p.id === project.id)) {
+      this._projects = [...this._projects, project];
+    }
+    if (!this._branchesByProject.has(project.id)) {
+      this._branchesByProject = new Map(this._branchesByProject).set(project.id, []);
+    }
+    this.hydrateProject(project.id).catch((e) => {
+      console.error(`[projectsData] Failed to hydrate newly created project '${project.id}':`, e);
+    });
+  }
+
+  /**
+   * Replace the branch map wholesale. Entry point for synchronous
+   * view-driven updates (workspaceLifecycle status/worktree writes, branch
+   * rename/delete) so every consumer sees them; fetch-driven applies go
+   * through the generation-guarded paths instead.
+   */
+  setBranchesByProject(next: Map<string, Branch[]>): void {
+    this._branchesByProject = next;
+  }
+
   private async revalidate(): Promise<void> {
     if (this.revalidatePending) return;
     this.revalidatePending = true;
@@ -416,6 +468,11 @@ class ProjectsDataStore {
     await (this.homeReposInFlight ?? this.startHomeReposFetch());
   }
 
+  /** Force a home-repos refetch after a pin/clone mutation changed them. */
+  async refreshHomeRepos(): Promise<void> {
+    await this.startHomeReposFetch();
+  }
+
   private startHomeReposFetch(): Promise<void> {
     // Token instead of generation: a pinned-repos change mid-fetch must win
     // over the response already in flight.
@@ -510,7 +567,7 @@ class ProjectsDataStore {
     // itself is owned by the backend.
     this.unlisteners.push(
       listenToEvent<string>('project-setup-progress', (projectId) => {
-        void this.handleProjectSetupProgress(projectId);
+        void this.refreshProject(projectId);
       })
     );
 
@@ -603,26 +660,6 @@ class ProjectsDataStore {
         `[projectsData] Failed to refresh branches for project ${projectId} after commit:`,
         e
       );
-    }
-  }
-
-  private async handleProjectSetupProgress(projectId: string): Promise<void> {
-    const generation = this.loadGeneration;
-    try {
-      const [projectsResult, branchesResult, reposResult] = await Promise.all([
-        commands.listProjects(),
-        commands.listBranchesForProject(projectId),
-        commands.listProjectRepos(projectId),
-      ]);
-      if (generation !== this.loadGeneration) return;
-      this._projects = projectsResult.data;
-      const mergedBranches = this.applyProjectBranches(projectId, branchesResult.data, generation);
-      if (mergedBranches) {
-        commands.invalidateProjectBranchTimelines(mergedBranches.map((b) => b.id));
-      }
-      this.applyProjectRepos(projectId, reposResult.data, generation);
-    } catch (e) {
-      console.error('[projectsData] Failed to refresh project after setup progress:', e);
     }
   }
 }

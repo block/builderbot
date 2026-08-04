@@ -394,6 +394,65 @@ describe('hydrateProject', () => {
   });
 });
 
+describe('refreshProject', () => {
+  it('refetches the project list and one project, invalidating its branch timelines', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+
+    listProjects.mockResolvedValue(swr([project({ name: 'Renamed' })]));
+    listBranchesForProject.mockResolvedValue(
+      swr([branch(), branch({ id: 'b2', worktreePath: null })])
+    );
+    await store.refreshProject('p1');
+
+    expect(store.projects[0].name).toBe('Renamed');
+    expect(store.branchesByProject.get('p1')).toHaveLength(2);
+    expect(invalidateProjectBranchTimelines).toHaveBeenCalledWith(['b1', 'b2']);
+  });
+});
+
+describe('projectCreated', () => {
+  it('registers the project immediately and hydrates it in the background', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+
+    const created = project({ id: 'p2', name: 'Beta', githubRepo: 'org/beta' });
+    listBranchesForProject.mockResolvedValue(swr([branch({ id: 'b2', projectId: 'p2' })]));
+    listProjectRepos.mockResolvedValue(swr([projectRepo({ id: 'r2', projectId: 'p2' })]));
+    store.projectCreated(created);
+
+    // Synchronous registration so the creation modal can close instantly.
+    expect(store.projects.map((p) => p.id)).toEqual(['p1', 'p2']);
+    expect(store.branchesByProject.get('p2')).toEqual([]);
+
+    await vi.waitFor(() => {
+      expect(store.branchesByProject.get('p2')).toHaveLength(1);
+    });
+    expect(store.reposByProject.get('p2')).toHaveLength(1);
+  });
+
+  it('does not duplicate a project the store already knows', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+
+    store.projectCreated(project());
+
+    expect(store.projects).toHaveLength(1);
+  });
+});
+
+describe('setBranchesByProject', () => {
+  it('replaces the branch map for view-driven updates', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+
+    const renamed = branch({ branchName: 'renamed' });
+    store.setBranchesByProject(new Map(store.branchesByProject).set('p1', [renamed]));
+
+    expect(store.branchesByProject.get('p1')).toEqual([renamed]);
+  });
+});
+
 describe('refresh', () => {
   it('reloads the project list and rehydrates eagerly', async () => {
     const store = await importStore();
@@ -423,6 +482,17 @@ describe('refresh', () => {
 });
 
 describe('home repos cache', () => {
+  it('refreshHomeRepos forces a refetch', async () => {
+    listReposForHome.mockResolvedValue([homeRepo()]);
+    const store = await importStore();
+    await store.ensureHomeReposLoaded();
+
+    listReposForHome.mockResolvedValue([homeRepo({ hasLocalClone: false })]);
+    await store.refreshHomeRepos();
+
+    expect(store.homeRepos[0].hasLocalClone).toBe(false);
+  });
+
   it('fetches once, dedupes concurrent callers, then serves from memory', async () => {
     let resolveRepos!: (value: RepoHomeItem[]) => void;
     listReposForHome.mockReturnValueOnce(

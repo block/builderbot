@@ -44,6 +44,7 @@
   } from './lib/features/keyboard/shortcuts';
   import { runSearchShortcut } from './lib/features/keyboard/searchTargets';
   import { projectStateStore } from './lib/stores/projectState.svelte';
+  import { projectsDataStore } from './lib/stores/projectsData.svelte';
   import { initBloxEnv } from './lib/stores/bloxEnv.svelte';
   import { listenForSessionStatus } from './lib/listeners/sessionStatusListener';
   import { listenForCacheInvalidation } from './lib/listeners/cacheInvalidationListener';
@@ -304,6 +305,9 @@
     // Refresh provider discovery (and any loaded doctor report) once the
     // backend finishes installing/upgrading the managed ACP bridges.
     unlistenAcpToolsReconciled = listenForAcpToolsReconciled();
+    // Keep the shared project-list cache fresh for the app's lifetime — the
+    // store dedupes, so starting before any view consumes it is safe.
+    projectsDataStore.startListeners();
 
     try {
       await initPreferences();
@@ -493,6 +497,7 @@
     unlistenCacheInvalidation?.();
     unlistenPageLifecycle?.();
     unlistenAcpToolsReconciled?.();
+    projectsDataStore.stopListeners();
     stopUpdaterLoop?.();
   });
 

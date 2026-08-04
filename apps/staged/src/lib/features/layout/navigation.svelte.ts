@@ -15,11 +15,10 @@ import {
   clearSnapshot,
   SNAPSHOT_KEYS,
 } from '../../shared/webSnapshot';
-import * as commands from '../../api/commands';
 import type { DiffScope } from '../../commands';
 import type { CommitTimelineItem } from '../../types';
 import { projectStateStore } from '../../stores/projectState.svelte';
-import { projectsList } from '../projects/projectsSidebarState.svelte';
+import { projectsDataStore } from '../../stores/projectsData.svelte';
 import { requestProjectsListRestore } from '../projects/projectsListViewState.svelte';
 import { reposUiEnabled } from '../../featureFlags';
 
@@ -142,6 +141,11 @@ function persistLastProject(projectId: string | null): void {
  * user is sent to the home screen instead.
  */
 export async function initNavigation(): Promise<void> {
+  // Kick the shared projects load immediately so the data is warming while we
+  // read the persisted route — every consumer (sidebar, landing page, this
+  // validation) shares the one fetch.
+  const projectsLoad = projectsDataStore.ensureLoaded();
+
   // `selectedProjectId` may already be set synchronously from the localStorage
   // mirror (web cold boot). Fall back to the async persistent store otherwise —
   // it is the source of truth in Tauri mode. Either way we render immediately
@@ -152,24 +156,23 @@ export async function initNavigation(): Promise<void> {
 
   // Validate the project still exists; this runs in the background relative to
   // the first paint, which already shows the restored project.
-  try {
-    const { data: projects } = await commands.listProjects();
-    projectsList.current = projects;
-    const existingIds = new Set(projects.map((p) => p.id));
-    if (existingIds.has(lastProjectId)) {
-      setDetailStack([rootRoute(), { kind: 'project', projectId: lastProjectId }]);
-    } else {
-      // Project was deleted — back out to home and clear the persisted values.
-      navigation.selectedProjectId = null;
-      await setStoreValue(LAST_PROJECT_STORE_KEY, null);
-      clearSnapshot(SNAPSHOT_KEYS.lastProject);
-    }
-    // Remove unread entries for projects that no longer exist
-    await projectStateStore.pruneDeletedProjects(existingIds);
-  } catch {
+  await projectsLoad;
+  if (!projectsDataStore.loaded) {
     // If we can't list projects (e.g. store error), keep whatever we restored.
     console.warn('[Navigation] Could not verify last project, keeping restored route');
+    return;
   }
+  const existingIds = new Set(projectsDataStore.projects.map((p) => p.id));
+  if (existingIds.has(lastProjectId)) {
+    setDetailStack([rootRoute(), { kind: 'project', projectId: lastProjectId }]);
+  } else {
+    // Project was deleted — back out to home and clear the persisted values.
+    navigation.selectedProjectId = null;
+    await setStoreValue(LAST_PROJECT_STORE_KEY, null);
+    clearSnapshot(SNAPSHOT_KEYS.lastProject);
+  }
+  // Remove unread entries for projects that no longer exist
+  await projectStateStore.pruneDeletedProjects(existingIds);
 }
 
 /** Navigate to the repos list view. */
@@ -224,7 +227,7 @@ function isModalOpen(): boolean {
 /** Navigate to the previous project in the list. */
 export function selectPreviousProject(): void {
   if (currentRoute().kind !== 'project' || !navigation.selectedProjectId || isModalOpen()) return;
-  const projects = projectsList.current;
+  const projects = projectsDataStore.projects;
   const currentIndex = projects.findIndex((p) => p.id === navigation.selectedProjectId);
   if (currentIndex > 0) {
     selectProject(projects[currentIndex - 1].id);
@@ -234,7 +237,7 @@ export function selectPreviousProject(): void {
 /** Navigate to the next project in the list. */
 export function selectNextProject(): void {
   if (currentRoute().kind !== 'project' || !navigation.selectedProjectId || isModalOpen()) return;
-  const projects = projectsList.current;
+  const projects = projectsDataStore.projects;
   const currentIndex = projects.findIndex((p) => p.id === navigation.selectedProjectId);
   if (currentIndex >= 0 && currentIndex < projects.length - 1) {
     selectProject(projects[currentIndex + 1].id);

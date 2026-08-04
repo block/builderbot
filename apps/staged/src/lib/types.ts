@@ -523,6 +523,21 @@ export interface SessionStatusPayload {
   isAutoReview?: boolean;
 }
 
+/**
+ * One entry of the `get_active_sessions` busy-state snapshot: a running or
+ * queued session projected to its branch/project context. Carries the same
+ * discriminators as `SessionStatusPayload` so the snapshot and the
+ * `session-status-changed` delta stream describe sessions identically.
+ */
+export interface ActiveSessionInfo {
+  sessionId: string;
+  projectId: string | null;
+  branchId: string | null;
+  sessionType: string | null;
+  status: SessionStatus;
+  isAutoReview: boolean;
+}
+
 // =============================================================================
 // Store status
 // =============================================================================

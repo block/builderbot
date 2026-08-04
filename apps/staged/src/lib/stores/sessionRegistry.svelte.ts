@@ -15,6 +15,14 @@
  * - prState: Branch-specific PR workflow state (creating/created/error, PR URL)
  *
  * But they delegate session metadata tracking to this central registry.
+ *
+ * The registry is a pure projection of backend busy state: entries are added
+ * by `session-status-changed` running events, launch-site registrations, and
+ * the `get_active_sessions` snapshot hydration, and removed only on terminal
+ * events or a hydration sweep. There is deliberately no client-side TTL or
+ * size eviction — the backend guarantees terminal events via its session
+ * state machine plus dead-session recovery, and local eviction is precisely
+ * what would turn a missed event into a permanent lie.
  */
 
 import { projectStateStore } from './projectState.svelte';
@@ -29,10 +37,6 @@ interface SessionMetadata {
   timestamp: number; // When the session was registered
 }
 
-const MAX_REGISTRY_SIZE = 200; // Maximum number of sessions to track
-const SESSION_TTL_MS = 48 * 60 * 60 * 1000; // 48 hours - keep longer than prState TTL
-const CLEANUP_THRESHOLD = 0.8; // Run cleanup when registry is 80% full
-
 class SessionRegistry {
   // Map from session ID to session metadata
   private sessions = $state<Map<string, SessionMetadata>>(new Map());
@@ -44,11 +48,6 @@ class SessionRegistry {
    * Register a new session with its metadata
    */
   register(sessionId: string, projectId: string, type: SessionType, branchId?: string): void {
-    // Only cleanup when we're approaching the size limit to avoid O(n) cost on every registration
-    if (this.sessions.size >= MAX_REGISTRY_SIZE * CLEANUP_THRESHOLD) {
-      this.cleanup();
-    }
-
     this.sessions.set(sessionId, {
       sessionId,
       projectId,
@@ -151,28 +150,11 @@ class SessionRegistry {
   }
 
   /**
-   * Clean up stale sessions to prevent memory leaks
-   * Removes sessions older than SESSION_TTL_MS or beyond MAX_REGISTRY_SIZE
+   * Get all tracked session IDs. Used by snapshot hydration to sweep entries
+   * the backend no longer reports as active.
    */
-  private cleanup(): void {
-    const now = Date.now();
-
-    // Remove stale entries (older than TTL)
-    for (const [sessionId, metadata] of this.sessions.entries()) {
-      if (now - metadata.timestamp > SESSION_TTL_MS) {
-        this.sessions.delete(sessionId);
-      }
-    }
-
-    // If still over limit, remove oldest entries
-    if (this.sessions.size > MAX_REGISTRY_SIZE) {
-      const entries = Array.from(this.sessions.entries());
-      entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
-      const toRemove = entries.slice(0, entries.length - MAX_REGISTRY_SIZE);
-      for (const [sessionId] of toRemove) {
-        this.sessions.delete(sessionId);
-      }
-    }
+  getAllSessionIds(): string[] {
+    return Array.from(this.sessions.keys());
   }
 
   /**

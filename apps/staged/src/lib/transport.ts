@@ -146,6 +146,19 @@ function replayCurrentPrPollInterestHints(): void {
     });
 }
 
+/**
+ * Re-hydrate busy state from the backend snapshot after a (re)connect: any
+ * `session-status-changed` event emitted while the socket was down is gone
+ * for good, so the accumulated client state may be stale in either direction.
+ */
+function rehydrateBusyState(): void {
+  void import('./listeners/sessionStatusListener')
+    .then(({ hydrateActiveSessions }) => hydrateActiveSessions())
+    .catch((e) => {
+      console.error('[transport] Failed to hydrate busy-state snapshot:', e);
+    });
+}
+
 async function ensureWebSocket(): Promise<void> {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
     return;
@@ -166,6 +179,7 @@ async function ensureWebSocket(): Promise<void> {
     wsConnecting = false;
     startHeartbeat();
     replayCurrentPrPollInterestHints();
+    rehydrateBusyState();
     if (wsReconnectTimer) {
       clearTimeout(wsReconnectTimer);
       wsReconnectTimer = null;

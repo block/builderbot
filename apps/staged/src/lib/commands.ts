@@ -26,6 +26,7 @@ import type {
   BranchSessionType,
   BranchSessionResponse,
   StoreIncompatibility,
+  ActiveSessionInfo,
   Session,
   SessionMessage,
   QueuedSessionMessage,
@@ -758,6 +759,15 @@ export async function discoverAcpConfig(
 
 export function getSession(sessionId: string): Promise<Session | null> {
   return invokeCommand('get_session', { sessionId });
+}
+
+/**
+ * Busy-state snapshot: all running and queued sessions projected to their
+ * branch/project context. Clients hydrate from this on load or reconnect,
+ * then apply `session-status-changed` deltas on top.
+ */
+export function getActiveSessions(): Promise<ActiveSessionInfo[]> {
+  return invokeCommand('get_active_sessions');
 }
 
 export function getSessionMessages(sessionId: string): Promise<SwrResult<SessionMessage[]>> {

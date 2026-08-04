@@ -48,14 +48,21 @@ class MockWebSocket {
 let sockets: MockWebSocket[];
 
 describe('web transport', () => {
+  let hydrateActiveSessions: ReturnType<typeof vi.fn>;
+
   beforeEach(() => {
     vi.resetModules();
     vi.stubGlobal('crypto', { randomUUID: vi.fn(() => 'web-client-1') });
     sockets = [];
+    // The busy-state hydrator pulls in rune-based stores that plain vitest
+    // can't compile, so it is mocked for every socket-opening test.
+    hydrateActiveSessions = vi.fn().mockResolvedValue(undefined);
+    vi.doMock('./listeners/sessionStatusListener', () => ({ hydrateActiveSessions }));
   });
 
   afterEach(() => {
     vi.doUnmock('./services/prPollingService');
+    vi.doUnmock('./listeners/sessionStatusListener');
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
@@ -115,7 +122,7 @@ describe('web transport', () => {
     expect(socket.closed).toBe(true);
   });
 
-  it('replays PR polling interest when the browser event socket opens and reconnects', async () => {
+  it('replays PR polling interest and re-hydrates busy state when the browser event socket opens and reconnects', async () => {
     vi.useFakeTimers();
     vi.stubGlobal('WebSocket', MockWebSocket);
     const replayPrPollInterestHints = vi.fn().mockResolvedValue(undefined);
@@ -130,6 +137,7 @@ describe('web transport', () => {
 
     sockets[0].open();
     await vi.waitFor(() => expect(replayPrPollInterestHints).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(hydrateActiveSessions).toHaveBeenCalledTimes(1));
 
     sockets[0].close();
     await vi.advanceTimersByTimeAsync(2000);
@@ -137,6 +145,7 @@ describe('web transport', () => {
 
     sockets[1].open();
     await vi.waitFor(() => expect(replayPrPollInterestHints).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(hydrateActiveSessions).toHaveBeenCalledTimes(2));
 
     unlisten();
   });

@@ -8,6 +8,12 @@
  * 4. pullState     — branch-specific queued-pull state (pull footer row)
  *
  * Session lookups are delegated to the unified sessionRegistry for consistency.
+ *
+ * Busy state follows a snapshot-then-deltas model: the backend is the source
+ * of truth, and this module hydrates the registry from the
+ * `get_active_sessions` snapshot (on startup, on WebSocket reconnect via
+ * transport.ts, and on the page-lifecycle `cache-stale` resume signal), then
+ * applies `session-status-changed` deltas on top.
  */
 
 import { toast } from 'svelte-sonner';
@@ -25,50 +31,122 @@ import { prStateStore } from '../stores/prState.svelte';
 import { pullStateStore } from '../stores/pullState.svelte';
 import { pushStateStore } from '../stores/pushState.svelte';
 import { sessionRegistry, type SessionType } from '../stores/sessionRegistry.svelte';
-import type { SessionStatus, SessionStatusPayload } from '../types';
+import type { ActiveSessionInfo, SessionStatus, SessionStatusPayload } from '../types';
 
 export function listenForSessionStatus(): UnlistenFn {
-  return listenToEvent<SessionStatusPayload>('session-status-changed', async (payload) => {
-    const {
+  const unlistenEvents = listenToEvent<SessionStatusPayload>(
+    'session-status-changed',
+    handleSessionStatusChanged
+  );
+
+  // Snapshot-then-deltas: hydrate now (app/page startup) and again after a
+  // long hide (the page-lifecycle `cache-stale` resume signal). WebSocket
+  // reconnects re-hydrate from transport.ts, next to the PR-poll interest
+  // replay.
+  void hydrateActiveSessions();
+  const onCacheStale = () => void hydrateActiveSessions();
+  window.addEventListener('cache-stale', onCacheStale);
+
+  return () => {
+    window.removeEventListener('cache-stale', onCacheStale);
+    unlistenEvents();
+  };
+}
+
+async function handleSessionStatusChanged(payload: SessionStatusPayload): Promise<void> {
+  const {
+    sessionId,
+    status,
+    errorMessage,
+    branchId: eventBranchId,
+    projectId: eventProjectId,
+    sessionType,
+    isAutoReview,
+  } = payload;
+
+  // Auto review sessions are handled by BranchCard — don't register them
+  // here so they don't cause the project list spinner. When the user
+  // adopts an auto review, BranchCard registers the session at that point.
+  if (status === 'running' && eventProjectId && !isAutoReview) {
+    sessionRegistry.register(
       sessionId,
-      status,
-      errorMessage,
-      branchId: eventBranchId,
-      projectId: eventProjectId,
-      sessionType,
-      isAutoReview,
-    } = payload;
-
-    // Auto review sessions are handled by BranchCard — don't register them
-    // here so they don't cause the project list spinner. When the user
-    // adopts an auto review, BranchCard registers the session at that point.
-    if (status === 'running' && eventProjectId && !isAutoReview) {
-      sessionRegistry.register(
-        sessionId,
-        eventProjectId,
-        (sessionType as SessionType) ?? 'other',
-        eventBranchId
-      );
-      projectStateStore.addRunningSession(eventProjectId, sessionId);
-      // A push or pull that was queued behind other branch work starts running
-      // when the branch queue drains it; this event is the only signal of that.
-      if (sessionType === 'push' && eventBranchId) {
-        pushStateStore.markQueuedPushStarted(eventBranchId, sessionId);
-      }
-      if (sessionType === 'pull' && eventBranchId) {
-        pullStateStore.markQueuedPullStarted(eventBranchId, sessionId);
-      }
-      return;
+      eventProjectId,
+      (sessionType as SessionType) ?? 'other',
+      eventBranchId
+    );
+    projectStateStore.addRunningSession(eventProjectId, sessionId);
+    // A push or pull that was queued behind other branch work starts running
+    // when the branch queue drains it; this event is the only signal of that.
+    if (sessionType === 'push' && eventBranchId) {
+      pushStateStore.markQueuedPushStarted(eventBranchId, sessionId);
     }
-
-    if (status === 'completed' || status === 'error' || status === 'cancelled') {
-      // Invalidate cached timeline for the branch affected by this session
-      if (eventBranchId) {
-        invalidateBranchTimeline(eventBranchId);
-      }
-      handleSessionEnd(sessionId, status, errorMessage);
+    if (sessionType === 'pull' && eventBranchId) {
+      pullStateStore.markQueuedPullStarted(eventBranchId, sessionId);
     }
-  });
+    return;
+  }
+
+  if (status === 'completed' || status === 'error' || status === 'cancelled') {
+    // Invalidate cached timeline for the branch affected by this session
+    if (eventBranchId) {
+      invalidateBranchTimeline(eventBranchId);
+    }
+    handleSessionEnd(sessionId, status, errorMessage);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Snapshot hydration
+// ---------------------------------------------------------------------------
+
+/**
+ * Hydrate the busy-state stores from the backend's `get_active_sessions`
+ * snapshot.
+ *
+ * The snapshot is authoritative for *which* sessions are active: local
+ * entries the backend no longer reports are swept, which is what heals a
+ * stuck spinner after a missed terminal event. Per-session metadata prefers
+ * what the client already knows: launch sites register pipeline (pr/push)
+ * sessions with their real branch/project, which the snapshot cannot resolve
+ * (they link no artifact), and BranchCard registers adopted auto reviews.
+ * Snapshot entries the client has never seen are applied with the same
+ * gating as the live `running` event: running, resolved project, not an
+ * auto review. Queued sessions register when their own running event
+ * arrives. Unread state is per-device UX state and is left untouched.
+ */
+export async function hydrateActiveSessions(): Promise<void> {
+  // Entries registered while the fetch is in flight (an optimistic launch-site
+  // registration) are newer than the snapshot — the sweep below must not
+  // treat them as stale.
+  const fetchStartedAt = Date.now();
+  let active: ActiveSessionInfo[];
+  try {
+    active = await commands.getActiveSessions();
+  } catch (e) {
+    console.error('Failed to fetch active-sessions snapshot:', e);
+    return;
+  }
+
+  const activeIds = new Set(active.map((session) => session.sessionId));
+  for (const sessionId of sessionRegistry.getAllSessionIds()) {
+    const registeredAt = sessionRegistry.getMetadata(sessionId)?.timestamp ?? 0;
+    if (!activeIds.has(sessionId) && registeredAt < fetchStartedAt) {
+      sessionRegistry.cleanupSession(sessionId);
+    }
+  }
+
+  for (const session of active) {
+    if (session.status !== 'running') continue;
+    if (!session.projectId || session.isAutoReview) continue;
+    if (sessionRegistry.getMetadata(session.sessionId)) continue;
+    sessionRegistry.register(
+      session.sessionId,
+      session.projectId,
+      (session.sessionType as SessionType) ?? 'other',
+      session.branchId ?? undefined
+    );
+    projectStateStore.addRunningSession(session.projectId, session.sessionId);
+  }
 }
 
 // ---------------------------------------------------------------------------

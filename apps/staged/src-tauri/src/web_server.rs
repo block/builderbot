@@ -3376,7 +3376,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let branch_id: String = arg(&args, "branchId")?;
             let provider: Option<String> = opt_arg(&args, "provider")?;
             let force: Option<bool> = opt_arg(&args, "force")?;
-            let session_id = crate::prs::start_push_branch_pipeline_for_branch(
+            let response = crate::prs::start_or_queue_push_pipeline_for_branch(
                 store,
                 Arc::clone(session_registry),
                 app_handle.clone(),
@@ -3385,7 +3385,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 force,
             )
             .await?;
-            Ok(serde_json::to_value(session_id).unwrap())
+            Ok(serde_json::to_value(response).unwrap())
         }
         "rebase_branch" => {
             let store = get_store(store_mutex)?;

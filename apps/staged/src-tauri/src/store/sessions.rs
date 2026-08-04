@@ -19,8 +19,8 @@ impl Store {
         let acp_config_selection_json =
             serialize_acp_config_selection(session.acp_config_selection.as_ref())?;
         conn.execute(
-            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 session.id,
                 session.prompt,
@@ -36,6 +36,7 @@ impl Store {
                 pipeline_json,
                 acp_config_selection_json,
                 session.acp_title,
+                session.branch_id,
             ],
         )?;
         Ok(())
@@ -44,7 +45,7 @@ impl Store {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id
              FROM sessions WHERE id = ?1",
             params![id],
             Self::row_to_session,
@@ -223,7 +224,7 @@ impl Store {
     pub fn get_running_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id
              FROM sessions WHERE status = 'running'",
         )?;
         let sessions = stmt
@@ -287,20 +288,22 @@ impl Store {
 
     /// Get all queued sessions for a branch, ordered by creation time (oldest first).
     ///
-    /// Sessions are linked to branches through artifacts (commits, notes, reviews).
-    /// This query joins across all three artifact tables to find every queued session
-    /// belonging to the given branch.
+    /// Sessions are linked to branches through artifacts (commits, notes, reviews),
+    /// or directly via `sessions.branch_id` for artifact-less work such as queued
+    /// push pipelines. This query covers both so a queued push takes its place in
+    /// the branch queue alongside artifact-backed sessions.
     pub fn get_queued_sessions_for_branch(
         &self,
         branch_id: &str,
     ) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT s.id, s.prompt, s.status, s.working_dir, s.provider, s.agent_id, s.error_message, s.completion_reason, s.created_at, s.updated_at, s.owner_pid, s.pipeline, s.acp_config_selection, s.acp_title
+            "SELECT s.id, s.prompt, s.status, s.working_dir, s.provider, s.agent_id, s.error_message, s.completion_reason, s.created_at, s.updated_at, s.owner_pid, s.pipeline, s.acp_config_selection, s.acp_title, s.branch_id
              FROM sessions s
              WHERE s.status = 'queued'
                AND (
-                   EXISTS (SELECT 1 FROM commits c WHERE c.session_id = s.id AND c.branch_id = ?1)
+                   s.branch_id = ?1
+                   OR EXISTS (SELECT 1 FROM commits c WHERE c.session_id = s.id AND c.branch_id = ?1)
                    OR EXISTS (SELECT 1 FROM notes n WHERE n.session_id = s.id AND n.branch_id = ?1)
                    OR EXISTS (SELECT 1 FROM reviews r WHERE r.session_id = s.id AND r.branch_id = ?1)
                )
@@ -315,14 +318,17 @@ impl Store {
     /// Check whether a branch already has a running session.
     ///
     /// Auto-reviews (`is_auto = 1`) are excluded because they run in the
-    /// background and should never block user-initiated sessions.
+    /// background and should never block user-initiated sessions. Sessions
+    /// linked through `sessions.branch_id` (running push pipelines) count, so a
+    /// push in flight blocks new branch work the same way a commit does.
     pub fn has_running_session_for_branch(&self, branch_id: &str) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM sessions s
              WHERE s.status = 'running'
                AND (
-                   EXISTS (SELECT 1 FROM commits c WHERE c.session_id = s.id AND c.branch_id = ?1)
+                   s.branch_id = ?1
+                   OR EXISTS (SELECT 1 FROM commits c WHERE c.session_id = s.id AND c.branch_id = ?1)
                    OR EXISTS (SELECT 1 FROM notes n WHERE n.session_id = s.id AND n.branch_id = ?1)
                    OR EXISTS (SELECT 1 FROM reviews r WHERE r.session_id = s.id AND r.branch_id = ?1 AND r.is_auto = 0)
                )",
@@ -332,7 +338,8 @@ impl Store {
         Ok(count > 0)
     }
 
-    /// Resolve the branch that owns a session through its linked artifact.
+    /// Resolve the branch that owns a session through its linked artifact, or
+    /// through `sessions.branch_id` for artifact-less branch work (pushes).
     ///
     /// Project-note sessions do not belong to a branch and therefore return `None`.
     /// This assumes all branch-linked artifacts for a session point at the same
@@ -345,6 +352,8 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
             "SELECT branch_id FROM (
+                 SELECT branch_id FROM sessions WHERE id = ?1 AND branch_id IS NOT NULL
+                 UNION ALL
                  SELECT branch_id FROM commits WHERE session_id = ?1
                  UNION ALL
                  SELECT branch_id FROM notes WHERE session_id = ?1
@@ -382,6 +391,8 @@ impl Store {
         conn.query_row(
             "SELECT b.project_id FROM branches b
              INNER JOIN (
+                 SELECT branch_id FROM sessions WHERE id = ?1 AND branch_id IS NOT NULL
+                 UNION ALL
                  SELECT branch_id FROM commits WHERE session_id = ?1
                  UNION ALL
                  SELECT branch_id FROM notes WHERE session_id = ?1
@@ -479,6 +490,7 @@ impl Store {
             pipeline,
             acp_config_selection,
             acp_title: row.get(13)?,
+            branch_id: row.get(14)?,
         })
     }
 }

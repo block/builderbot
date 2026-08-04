@@ -409,7 +409,7 @@ export interface QueuedSessionMessage {
 
 export type StepStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped';
 export type StepType = 'command' | 'ai_handoff';
-export type PipelineKind = 'rebase' | 'squash';
+export type PipelineKind = 'rebase' | 'squash' | 'push';
 
 export interface PipelineStepStatus {
   label: string;
@@ -423,6 +423,8 @@ export interface PipelineStepStatus {
 
 export interface PipelineExecution {
   kind?: PipelineKind | null;
+  /** Whether a `push` pipeline force-pushes. Absent for the other kinds. */
+  pushForce?: boolean;
   steps: PipelineStepStatus[];
   currentStep: number;
   completedWithoutAi: boolean;

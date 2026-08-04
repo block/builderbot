@@ -1416,7 +1416,9 @@ fn pre_head_for_pipeline_handoff(config: &PipelineConfig) -> Option<String> {
                 None
             }
         },
-        None => None,
+        // A push never rewrites local history, so an AI handoff has no
+        // pre-pipeline HEAD to compare against.
+        Some(PipelineKind::Push) | None => None,
     }
 }
 
@@ -1443,7 +1445,8 @@ fn resolve_pipeline_artifacts_without_ai(config: &PipelineConfig, store: &Store,
                 );
             }
         }
-        None => {}
+        // Push pipelines create no artifact, so there is nothing to resolve.
+        Some(PipelineKind::Push) | None => {}
     }
 }
 

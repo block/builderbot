@@ -95,14 +95,26 @@
     onOpenForcePushSession?: () => void;
     forcePushingOrigin?: boolean;
     onOpenPushSession?: () => void;
+    /** Cancel a push/force-push that is still waiting on the branch queue. */
+    onCancelQueuedPush?: () => void;
+    /** Push is queued behind in-flight branch work. */
+    pushQueuedOrigin?: boolean;
     /**
-     * Why push, force-push, and reset-to-origin can't run right now.
+     * Why reset-to-origin can't run right now.
      *
-     * These git actions still execute immediately rather than queueing, so
-     * unlike Rebase/Squash they stay disabled while the branch has sessions in
-     * flight.
+     * Reset still executes immediately rather than queueing — it is validated
+     * against a point-in-time preview — so unlike Rebase/Squash/Push it stays
+     * disabled while the branch has sessions in flight.
      */
     immediateGitActionDisabledReason?: string | null;
+    /**
+     * Why push and force-push can't run right now.
+     *
+     * These queue on the branch session queue like Rebase/Squash, so in-flight
+     * sessions are not a reason to disable them — only branch identity problems
+     * are.
+     */
+    queueableGitActionDisabledReason?: string | null;
     onViewWorktreeDiff?: () => void;
     onCommitWorktreeChanges?: () => void;
     onDiscardWorktreeChanges?: () => void;
@@ -158,7 +170,10 @@
     onOpenForcePushSession,
     forcePushingOrigin = false,
     onOpenPushSession,
+    onCancelQueuedPush,
+    pushQueuedOrigin = false,
     immediateGitActionDisabledReason,
+    queueableGitActionDisabledReason,
     onViewWorktreeDiff,
     onCommitWorktreeChanges,
     onDiscardWorktreeChanges,
@@ -251,6 +266,8 @@
     resetToOriginDisabledReason?: string;
     resettingToOrigin?: boolean;
     pushing?: boolean;
+    pushQueued?: boolean;
+    forcePushQueued?: boolean;
     onViewDiff?: () => void;
     onCommitChanges?: () => void;
     commitChangesDisabledReason?: string;
@@ -393,19 +410,28 @@
             2
           );
           const summary = `is ${plural(state.upstream.ahead, 'commit')} behind`;
-          const disabledReason = pushingOrigin
-            ? undefined // button is clickable during push (opens session)
-            : (immediateGitActionDisabledReason ?? undefined);
+          const disabledReason =
+            pushingOrigin || pushQueuedOrigin
+              ? undefined // button stays clickable: it opens the session, or cancels the queued push
+              : (queueableGitActionDisabledReason ?? undefined);
           rows.push({
             key: 'git-local-ahead',
             type: 'git-push',
             title: `origin ${summary}`,
             titleHtml: `<span class="git-ref-badge">origin</span> ${escapeHtml(summary)}`,
+            meta: pushQueuedOrigin ? 'Push queued' : undefined,
             timestamp: placement.timestamp,
             order: placement.order,
-            onPush: pushingOrigin ? onOpenPushSession : disabledReason ? undefined : onPushOrigin,
+            onPush: pushQueuedOrigin
+              ? onCancelQueuedPush
+              : pushingOrigin
+                ? onOpenPushSession
+                : disabledReason
+                  ? undefined
+                  : onPushOrigin,
             pushDisabledReason: disabledReason,
             pushing: pushingOrigin,
+            pushQueued: pushQueuedOrigin,
           });
         }
         break;
@@ -441,29 +467,36 @@
         const divergedTitleHtml = `<span class="git-ref-badge">origin</span> diverges here and has ${escapeHtml(plural(behindCount, 'more commit'))}${escapeHtml(baseSummary)}`;
         const resetToOriginReason = resettingToOrigin
           ? 'Resetting...'
-          : forcePushingOrigin
-            ? 'Push in progress'
-            : onResetToOrigin
-              ? (immediateGitActionDisabledReason ?? undefined)
-              : undefined;
+          : pushQueuedOrigin
+            ? 'Push queued'
+            : forcePushingOrigin
+              ? 'Push in progress'
+              : onResetToOrigin
+                ? (immediateGitActionDisabledReason ?? undefined)
+                : undefined;
         rows.push({
           key: 'git-diverged',
           type: 'git-merge-warning',
           title: divergedTitle,
           titleHtml: divergedTitleHtml,
+          meta: pushQueuedOrigin ? 'Push queued' : undefined,
           timestamp: placement.timestamp,
           order: placement.order,
-          onForcePush: forcePushingOrigin
-            ? onOpenForcePushSession
-            : immediateGitActionDisabledReason
+          onForcePush: pushQueuedOrigin
+            ? onCancelQueuedPush
+            : forcePushingOrigin
+              ? onOpenForcePushSession
+              : queueableGitActionDisabledReason
+                ? undefined
+                : onForcePush,
+          forcePushDisabledReason:
+            forcePushingOrigin || pushQueuedOrigin
               ? undefined
-              : onForcePush,
-          forcePushDisabledReason: forcePushingOrigin
-            ? undefined
-            : onForcePush
-              ? (immediateGitActionDisabledReason ?? undefined)
-              : undefined,
+              : onForcePush
+                ? (queueableGitActionDisabledReason ?? undefined)
+                : undefined,
           forcePushing: forcePushingOrigin,
+          forcePushQueued: pushQueuedOrigin,
           onResetToOrigin: resetToOriginReason ? undefined : onResetToOrigin,
           resetToOriginDisabledReason: resetToOriginReason,
           resettingToOrigin,
@@ -941,6 +974,8 @@
             resetToOriginDisabledReason={item.resetToOriginDisabledReason}
             resettingToOrigin={item.resettingToOrigin}
             pushing={item.pushing}
+            pushQueued={item.pushQueued}
+            forcePushQueued={item.forcePushQueued}
             onViewDiffClick={item.onViewDiff}
             onCommitChangesClick={item.onCommitChanges}
             commitChangesDisabledReason={item.commitChangesDisabledReason}
@@ -1028,6 +1063,8 @@
             resetToOriginDisabledReason={item.resetToOriginDisabledReason}
             resettingToOrigin={item.resettingToOrigin}
             pushing={item.pushing}
+            pushQueued={item.pushQueued}
+            forcePushQueued={item.forcePushQueued}
             onViewDiffClick={item.onViewDiff}
             onCommitChangesClick={item.onCommitChanges}
             commitChangesDisabledReason={item.commitChangesDisabledReason}

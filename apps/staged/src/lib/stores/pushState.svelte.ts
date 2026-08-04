@@ -14,9 +14,14 @@
  * Session lookups are delegated to the unified sessionRegistry
  */
 
+import type { BranchPipelineResponse } from '../types';
 import { sessionRegistry } from './sessionRegistry.svelte';
 
-export type PushState = 'idle' | 'pushing' | 'error' | 'done';
+/**
+ * `queued` means the backend put the push on the branch session queue because
+ * the branch was busy; it becomes `pushing` when the queue drains it.
+ */
+export type PushState = 'idle' | 'queued' | 'pushing' | 'error' | 'done';
 
 interface BranchPushState {
   state: PushState;
@@ -66,6 +71,47 @@ class PushStateStore {
       timestamp: Date.now(),
     });
     this.version++;
+  }
+
+  setPushQueued(branchId: string, sessionId: string): void {
+    this.maybeCleanup();
+    this.states.set(branchId, {
+      state: 'queued',
+      sessionId,
+      error: null,
+      rejectedNonFastForward: false,
+      timestamp: Date.now(),
+    });
+    this.version++;
+  }
+
+  /**
+   * Record the backend's queued-vs-running verdict for a push request.
+   *
+   * The backend owns that decision (it holds the branch launch lock), so both
+   * push entry points route their response through here rather than predicting
+   * it from the timeline.
+   */
+  setPushLaunch(branchId: string, response: BranchPipelineResponse): void {
+    if (response.sessionStatus === 'queued') {
+      this.setPushQueued(branchId, response.sessionId);
+    } else {
+      this.setPushing(branchId, response.sessionId);
+    }
+  }
+
+  /**
+   * Flip a queued push to `pushing` once the branch queue drains it.
+   *
+   * Guarded on the session ID so an unrelated push event can't revive a stale
+   * queued entry (e.g. one the user cancelled and re-requested).
+   */
+  markQueuedPushStarted(branchId: string, sessionId: string): void {
+    const existing = this.states.get(branchId);
+    if (existing?.state !== 'queued' || existing.sessionId !== sessionId) {
+      return;
+    }
+    this.setPushing(branchId, sessionId);
   }
 
   setPushDone(branchId: string): void {

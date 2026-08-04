@@ -11,6 +11,7 @@
   import GitPullRequestDraft from '@lucide/svelte/icons/git-pull-request-draft';
   import GitMerge from '@lucide/svelte/icons/git-merge';
   import AlertCircle from '@lucide/svelte/icons/alert-circle';
+  import Clock from '@lucide/svelte/icons/clock';
   import Spinner from '../../shared/Spinner.svelte';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
@@ -229,15 +230,22 @@
     return () => clearInterval(interval);
   });
 
-  // Fallback polling for push session
+  // Fallback polling for push session. Queued pushes are polled too: if the
+  // branch queue drains one while the "running" event is missed, this is what
+  // moves the button off "Queued".
   $effect(() => {
-    if (pushState !== 'pushing' || !pushSessionId) return;
+    if ((pushState !== 'pushing' && pushState !== 'queued') || !pushSessionId) return;
 
     const sid = pushSessionId;
     const interval = setInterval(async () => {
       try {
         const session = await commands.getSession(sid);
-        if (session && session.status !== 'running') {
+        if (session?.status === 'queued') return;
+        if (session?.status === 'running') {
+          pushStateStore.markQueuedPushStarted(branch.id, sid);
+          return;
+        }
+        if (session) {
           handlePushSessionComplete(session.status, session);
         }
       } catch (err) {
@@ -337,7 +345,7 @@
 
   function getPrStatusIndicator(): 'success' | 'warning' | 'error' | 'neutral' | 'pending' | null {
     if (prState === 'creating') return null;
-    if (pushState === 'pushing') return null;
+    if (pushState === 'pushing' || pushState === 'queued') return null;
     if (pushState === 'error' || prState === 'error') return 'error';
 
     if (!branch.prNumber) return null;
@@ -363,6 +371,7 @@
   let prStatusIndicator = $derived(getPrStatusIndicator());
 
   function getPrButtonActionTitle(): string {
+    if (pushState === 'queued') return 'Push queued behind branch work — click to cancel';
     if (pushState === 'pushing') return 'Pushing… (click to view)';
     if (pushState === 'error') return 'Push failed — click for details';
     if (prState === 'created' && hasUnpushed) {
@@ -478,7 +487,7 @@
   // =========================================================================
 
   function handlePush(force = false) {
-    if (pushState === 'pushing') return;
+    if (pushState === 'pushing' || pushState === 'queued') return;
 
     pushStateStore.setPushing(branch.id, '__pending__');
 
@@ -487,15 +496,33 @@
 
     commands
       .pushBranch(branch.id, provider, force)
-      .then((sessionId) => {
-        // Session is already registered by the global listener via the
-        // backend's "running" event — just update the local store with the
-        // real session ID so the fallback poller can track it.
-        pushStateStore.setPushing(branch.id, sessionId);
+      .then((response) => {
+        // A running session is already registered by the global listener via
+        // the backend's "running" event — this just records the real session ID
+        // (and whether the push is waiting on the branch queue) so the fallback
+        // poller can track it.
+        pushStateStore.setPushLaunch(branch.id, response);
       })
       .catch((e) => {
         pushStateStore.setPushError(branch.id, e instanceof Error ? e.message : String(e));
       });
+  }
+
+  /**
+   * Drop a push that is still waiting on the branch queue.
+   *
+   * The store entry is cleared here rather than in the completion handler: a
+   * session that never ran isn't in the session registry, so the cancellation
+   * event carries no push session type for `sessionStatusListener` to match.
+   */
+  function cancelQueuedPush() {
+    const sid = pushSessionId;
+    if (pushState !== 'queued' || !sid || sid === '__pending__') return;
+
+    pushStateStore.clearPushState(branch.id);
+    commands.cancelSession(sid).catch((e) => {
+      pushStateStore.setPushError(branch.id, e instanceof Error ? e.message : String(e));
+    });
   }
 
   let pushCompletionInFlight = false;
@@ -602,6 +629,10 @@
       }
       return;
     }
+    if (pushState === 'queued') {
+      cancelQueuedPush();
+      return;
+    }
     if (pushState === 'pushing' && pushSessionId) {
       onOpenSession?.(pushSessionId);
       return;
@@ -676,12 +707,15 @@
         (prState === 'error' || pushState === 'error') &&
           'border-destructive text-destructive hover:bg-[var(--ui-danger-bg)] hover:text-destructive',
         pushState === 'pushing' && 'cursor-default border-[var(--border-muted)]',
+        pushState === 'queued' && 'border-[var(--border-muted)]',
         prState === 'created' && prStatusState === 'MERGED' && '[&_svg]:text-[var(--status-added)]',
       ]}
       onclick={handlePrButtonClick}
       disabled={showPushErrorDialog || showForcePushDialog || showPrErrorDialog}
     >
-      {#if pushState === 'pushing'}
+      {#if pushState === 'queued'}
+        <Clock size={13} />
+      {:else if pushState === 'pushing'}
         <Spinner size={13} />
       {:else if pushState === 'error'}
         <AlertCircle size={13} />
@@ -699,7 +733,9 @@
         <GitPullRequestCreateArrow size={13} />
       {/if}
       <span class="min-w-0 truncate">
-        {#if pushState === 'pushing'}
+        {#if pushState === 'queued'}
+          Push queued
+        {:else if pushState === 'pushing'}
           Pushing…
         {:else if pushState === 'error'}
           Push failed

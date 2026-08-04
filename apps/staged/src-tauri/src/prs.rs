@@ -235,10 +235,20 @@ fn rebase_ref_for_target(branch: &store::Branch, target: Option<&str>) -> String
     }
 }
 
-fn commit_pipeline_prompt(kind: &PipelineKind) -> &'static str {
+const PUSH_PROMPT: &str = "Push the current branch to the remote with a normal push. If the push fails for a recoverable reason, diagnose and fix it, then retry with a normal push. Do not force push.";
+const FORCE_PUSH_PROMPT: &str = "Force push the current branch to the remote";
+
+/// Prompt for a pipeline session, which doubles as its timeline label.
+///
+/// `push_force` only matters for [`PipelineKind::Push`]; the commit kinds ignore
+/// it. Queued and running paths share this so a session's label doesn't change
+/// when it is drained.
+fn pipeline_prompt(kind: &PipelineKind, push_force: bool) -> &'static str {
     match kind {
         PipelineKind::Rebase => "Rebase branch",
         PipelineKind::Squash => "Squash commits",
+        PipelineKind::Push if push_force => FORCE_PUSH_PROMPT,
+        PipelineKind::Push => PUSH_PROMPT,
     }
 }
 
@@ -255,31 +265,37 @@ fn persisted_rebase_target(target: Option<&str>, rebase_ref: &str) -> Option<Str
 /// Find a queued pipeline session on this branch that already performs exactly
 /// the work being requested, so a second click doesn't stack a duplicate.
 ///
-/// `rebase_target` must be the *persisted* target so that "rebase onto base" and
-/// "rebase onto origin" stay distinct — they are different operations even
-/// though they share a [`PipelineKind`].
-fn find_queued_commit_pipeline(
+/// `matches` has to compare every persisted field that changes what the pipeline
+/// does, not just the kind: "rebase onto base" vs "rebase onto origin" and
+/// "push" vs "force push" are different operations that share a [`PipelineKind`].
+fn find_queued_pipeline(
     store: &Arc<Store>,
     branch_id: &str,
-    kind: &PipelineKind,
-    rebase_target: Option<&str>,
+    matches: impl Fn(&PipelineExecution) -> bool,
 ) -> Result<Option<String>, String> {
     let queued = store
         .get_queued_sessions_for_branch(branch_id)
         .map_err(|e| e.to_string())?;
 
-    for session in queued {
-        let Some(pipeline) = session.pipeline.as_ref() else {
-            continue;
-        };
-        if pipeline.kind.as_ref() == Some(kind)
-            && pipeline.rebase_target.as_deref() == rebase_target
-        {
-            return Ok(Some(session.id));
-        }
-    }
+    Ok(queued
+        .into_iter()
+        .find(|session| session.pipeline.as_ref().is_some_and(&matches))
+        .map(|session| session.id))
+}
 
-    Ok(None)
+/// Whether the branch already has work in flight, and a new request therefore
+/// has to join the queue instead of starting now.
+///
+/// Callers must hold the branch launch lock: the answer is only meaningful for
+/// as long as no session can start or be enqueued underneath them.
+fn branch_has_work_in_flight(store: &Arc<Store>, branch_id: &str) -> Result<bool, String> {
+    Ok(store
+        .has_running_session_for_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        || !store
+            .get_queued_sessions_for_branch(branch_id)
+            .map_err(|e| e.to_string())?
+            .is_empty())
 }
 
 const HTTPS_FALLBACK_CONFIG: &str = "url.https://github.com/.insteadOf=git@github.com:";
@@ -306,12 +322,17 @@ fn git_push_with_fallback(args: &str) -> String {
 /// the branch's own name for "rebase onto origin" (used when local has
 /// diverged from `origin/{branch}`). Only the rebase variant consults this
 /// value; squash always operates against the base branch.
+///
+/// Errors for [`PipelineKind::Push`], which produces no commit and belongs to
+/// the git pipeline path — the only caller that reads the kind from the database
+/// checks it first, so this guards against a misrouted queued session rather
+/// than a reachable input.
 fn build_commit_pipeline_steps(
     kind: &PipelineKind,
     base_branch: &str,
     rebase_target: &str,
-) -> Vec<PipelineStep> {
-    match kind {
+) -> Result<Vec<PipelineStep>, String> {
+    let steps = match kind {
         PipelineKind::Rebase => {
             let target_note = if base_branch == rebase_target {
                 String::new()
@@ -398,7 +419,50 @@ Here is the context from the prior steps:
                     .to_string(),
             },
         ],
-    }
+        PipelineKind::Push => {
+            return Err("Push is not a commit pipeline".to_string());
+        }
+    };
+
+    Ok(steps)
+}
+
+/// Build the single step that pushes the branch to its remote.
+///
+/// Rebuilt from the persisted `push_force` flag on dequeue rather than replayed
+/// from the queued pipeline, so a queued push always pushes the branch's current
+/// name with the command the user asked for.
+fn build_push_pipeline_steps(branch_name: &str, force: bool) -> Vec<PipelineStep> {
+    let push_command = if force {
+        git_push_with_fallback(&format!("-u origin {branch_name} --force-with-lease"))
+    } else {
+        git_push_with_fallback(&format!("-u origin {branch_name}"))
+    };
+
+    let on_failure = if force {
+        FailureStrategy::HandoffToAi {
+            prompt_template:
+                "The force push failed. Diagnose and fix the issue, then retry the force push.\n\n{step_outputs}"
+                    .to_string(),
+        }
+    } else {
+        // For normal push, abort on non-fast-forward so the frontend can show
+        // the force-push dialog. The marker matches git's actual stderr output
+        // (e.g. "! [rejected] main -> main (non-fast-forward)").
+        //
+        // If the push fails for a *different* reason (e.g. auth error, network
+        // timeout), the marker won't match and the pipeline falls through to an
+        // AI handoff for generic diagnosis — this is intentional.
+        FailureStrategy::Abort {
+            marker: Some("non-fast-forward".to_string()),
+        }
+    };
+
+    vec![PipelineStep::Command {
+        label: "Push to remote".to_string(),
+        command: push_command,
+        on_failure,
+    }]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -412,7 +476,7 @@ async fn start_running_commit_pipeline_for_branch(
     app_handle: &tauri::AppHandle,
     registry: &Arc<session_runner::SessionRegistry>,
 ) -> Result<String, String> {
-    let prompt = commit_pipeline_prompt(&kind);
+    let prompt = pipeline_prompt(&kind, false);
     let mut pipeline = PipelineExecution::from_steps(&steps).with_kind(kind);
     if let Some(target) = rebase_target {
         pipeline = pipeline.with_rebase_target(target);
@@ -481,14 +545,7 @@ fn queue_commit_pipeline_if_branch_busy(
     let launch_lock = crate::session_commands::branch_session_launch_lock_for(branch_id);
     let _guard = launch_lock.lock().unwrap();
 
-    let branch_busy = store
-        .has_running_session_for_branch(branch_id)
-        .map_err(|e| e.to_string())?
-        || !store
-            .get_queued_sessions_for_branch(branch_id)
-            .map_err(|e| e.to_string())?
-            .is_empty();
-    if !branch_busy {
+    if !branch_has_work_in_flight(store, branch_id)? {
         return Ok(None);
     }
 
@@ -500,18 +557,19 @@ fn queue_commit_pipeline_if_branch_busy(
     let rebase_ref = rebase_ref_for_target(&branch, target);
     let rebase_target = persisted_rebase_target(target, &rebase_ref);
 
-    if let Some(existing) =
-        find_queued_commit_pipeline(store, branch_id, kind, rebase_target.as_deref())?
-    {
+    if let Some(existing) = find_queued_pipeline(store, branch_id, |pipeline| {
+        pipeline.kind.as_ref() == Some(kind)
+            && pipeline.rebase_target.as_deref() == rebase_target.as_deref()
+    })? {
         return Ok(Some(existing));
     }
 
-    let steps = build_commit_pipeline_steps(kind, base_branch, &rebase_ref);
+    let steps = build_commit_pipeline_steps(kind, base_branch, &rebase_ref)?;
     let mut pipeline = PipelineExecution::from_steps(&steps).with_kind(kind.clone());
     if let Some(target) = rebase_target {
         pipeline = pipeline.with_rebase_target(target);
     }
-    let mut session = store::Session::new_queued(commit_pipeline_prompt(kind));
+    let mut session = store::Session::new_queued(pipeline_prompt(kind, false));
     if let Some(p) = provider {
         session = session.with_provider(p);
     }
@@ -547,7 +605,7 @@ pub(crate) async fn start_or_queue_commit_pipeline_for_branch(
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
     let base_branch = base_branch_name(&ctx.branch).to_string();
     let rebase_ref = rebase_ref_for_target(&ctx.branch, target.as_deref());
-    let steps = build_commit_pipeline_steps(&kind, &base_branch, &rebase_ref);
+    let steps = build_commit_pipeline_steps(&kind, &base_branch, &rebase_ref)?;
     let rebase_target = persisted_rebase_target(target.as_deref(), &rebase_ref);
 
     let session_id = start_running_commit_pipeline_for_branch(
@@ -588,8 +646,8 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
     let rebase_ref = queued_rebase_target
         .clone()
         .unwrap_or_else(|| base_branch.clone());
-    let steps = build_commit_pipeline_steps(&kind, &base_branch, &rebase_ref);
-    let prompt = commit_pipeline_prompt(&kind);
+    let steps = build_commit_pipeline_steps(&kind, &base_branch, &rebase_ref)?;
+    let prompt = pipeline_prompt(&kind, false);
     let mut pipeline = PipelineExecution::from_steps(&steps).with_kind(kind);
     if let Some(target) = queued_rebase_target {
         pipeline = pipeline.with_rebase_target(target);
@@ -624,6 +682,194 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
         &project_id,
         "commit",
     );
+
+    session_runner::start_pipeline_session(
+        session_runner::PipelineConfig {
+            session_id: session.id.clone(),
+            prompt: prompt.to_string(),
+            steps,
+            pipeline,
+            working_dir: ctx.working_dir,
+            pre_head_sha: None,
+            provider: effective_provider,
+            workspace_name: ctx.workspace_name,
+            remote_working_dir: ctx.remote_working_dir,
+            branch_id: Some(branch_id),
+            project_id: Some(project_id),
+        },
+        store,
+        app_handle,
+        Arc::clone(&registry),
+    )?;
+
+    Ok(true)
+}
+
+/// Start a push pipeline that runs right now.
+///
+/// Unlike [`start_pipeline_for_branch`], the session records its pipeline kind
+/// and `branch_id`. A push creates no artifact, so without that link the branch
+/// queue could not see it and a commit session could start mid-push.
+fn start_running_push_pipeline_for_branch(
+    ctx: BranchPipelineContext,
+    force: bool,
+    steps: Vec<PipelineStep>,
+    provider: Option<String>,
+    store: Arc<Store>,
+    app_handle: &tauri::AppHandle,
+    registry: &Arc<session_runner::SessionRegistry>,
+) -> Result<String, String> {
+    let prompt = pipeline_prompt(&PipelineKind::Push, force);
+    let pipeline = PipelineExecution::from_steps(&steps)
+        .with_kind(PipelineKind::Push)
+        .with_push_force(force);
+
+    let branch_id = ctx.branch.id.clone();
+    let project_id = ctx.branch.project_id.clone();
+
+    let mut session = store::Session::new_running(prompt, &ctx.working_dir).with_branch(&branch_id);
+    if let Some(ref p) = provider {
+        session = session.with_provider(p);
+    }
+    session.pipeline = Some(pipeline.clone());
+    store.create_session(&session).map_err(|e| e.to_string())?;
+
+    // Emit "running" before returning so the global session listener registers
+    // this session atomically, as `start_pipeline_for_branch` does.
+    session_runner::emit_session_running(app_handle, &session.id, &branch_id, &project_id, "push");
+
+    session_runner::start_pipeline_session(
+        session_runner::PipelineConfig {
+            session_id: session.id.clone(),
+            prompt: prompt.to_string(),
+            steps,
+            pipeline,
+            working_dir: ctx.working_dir,
+            pre_head_sha: None,
+            provider,
+            workspace_name: ctx.workspace_name,
+            remote_working_dir: ctx.remote_working_dir,
+            branch_id: Some(branch_id),
+            project_id: Some(project_id),
+        },
+        store,
+        app_handle.clone(),
+        Arc::clone(registry),
+    )?;
+
+    Ok(session.id)
+}
+
+/// Queue a push pipeline when the branch has work in flight.
+///
+/// Returns the queued session id — either a freshly created one, or an existing
+/// queued push that already covers this request — and `None` when the branch is
+/// idle so the caller should push immediately.
+///
+/// Mirrors [`queue_commit_pipeline_if_branch_busy`]: the busy check, the dedupe
+/// scan, and the insert all run under the branch launch lock, and stay
+/// synchronous because the lock must not be held across an await. A push and a
+/// force push dedupe separately — they are different operations, so a queued
+/// normal push must not swallow a force push request.
+fn queue_push_pipeline_if_branch_busy(
+    store: &Arc<Store>,
+    branch_id: &str,
+    provider: Option<&str>,
+    force: bool,
+) -> Result<Option<String>, String> {
+    let launch_lock = crate::session_commands::branch_session_launch_lock_for(branch_id);
+    let _guard = launch_lock.lock().unwrap();
+
+    if !branch_has_work_in_flight(store, branch_id)? {
+        return Ok(None);
+    }
+
+    if let Some(existing) = find_queued_pipeline(store, branch_id, |pipeline| {
+        pipeline.kind.as_ref() == Some(&PipelineKind::Push) && pipeline.push_force == force
+    })? {
+        return Ok(Some(existing));
+    }
+
+    let branch = store
+        .get_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    let steps = build_push_pipeline_steps(&branch.branch_name, force);
+    let pipeline = PipelineExecution::from_steps(&steps)
+        .with_kind(PipelineKind::Push)
+        .with_push_force(force);
+    // No artifact row: a push produces no commit, and a pending-commit stub
+    // would render as a failed commit once the push finishes without a new sha.
+    // `branch_id` is what keeps this session on the branch queue instead.
+    let mut session = store::Session::new_queued(pipeline_prompt(&PipelineKind::Push, force))
+        .with_branch(branch_id);
+    if let Some(p) = provider {
+        session = session.with_provider(p);
+    }
+    session.pipeline = Some(pipeline);
+    store.create_session(&session).map_err(|e| e.to_string())?;
+
+    Ok(Some(session.id))
+}
+
+/// Start a queued push pipeline that reached the front of the branch queue.
+///
+/// Steps are rebuilt from the persisted `push_force` flag rather than replayed
+/// from the queued pipeline, matching [`start_queued_commit_pipeline_for_branch`]
+/// so a branch renamed while the push waited still pushes the right ref.
+pub(crate) async fn start_queued_git_pipeline_for_branch(
+    store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    app_handle: tauri::AppHandle,
+    branch_id: String,
+    session: store::Session,
+    provider: Option<String>,
+) -> Result<bool, String> {
+    let queued_pipeline = session
+        .pipeline
+        .as_ref()
+        .ok_or_else(|| format!("Queued session {} has no pipeline", session.id))?;
+    let kind = queued_pipeline
+        .kind
+        .clone()
+        .ok_or_else(|| format!("Queued session {} has no pipeline kind", session.id))?;
+    if kind != PipelineKind::Push {
+        return Err(format!(
+            "Queued git pipeline session {} has non-git kind {kind:?}",
+            session.id
+        ));
+    }
+    let force = queued_pipeline.push_force;
+
+    let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
+    let steps = build_push_pipeline_steps(&ctx.branch.branch_name, force);
+    let prompt = pipeline_prompt(&kind, force);
+    let pipeline = PipelineExecution::from_steps(&steps)
+        .with_kind(kind)
+        .with_push_force(force);
+    let effective_provider = session.provider.clone().or(provider);
+
+    let transitioned = store
+        .transition_queued_to_running(&session.id)
+        .map_err(|e| e.to_string())?;
+    if !transitioned {
+        return Ok(false);
+    }
+
+    // No `mark_session_artifact_started` call: a push has no queued artifact stub
+    // whose timestamp needs restamping when the work actually starts.
+    store
+        .prepare_queued_session(&session.id, &ctx.working_dir.to_string_lossy(), prompt)
+        .map_err(|e| e.to_string())?;
+    store
+        .update_session_pipeline(&session.id, &pipeline)
+        .map_err(|e| e.to_string())?;
+
+    let branch_id = ctx.branch.id.clone();
+    let project_id = ctx.branch.project_id.clone();
+
+    session_runner::emit_session_running(&app_handle, &session.id, &branch_id, &project_id, "push");
 
     session_runner::start_pipeline_session(
         session_runner::PipelineConfig {
@@ -1297,71 +1543,44 @@ pub(crate) async fn has_unpushed_commits_impl(
     .map_err(|e| format!("has_unpushed_commits task failed: {e}"))?
 }
 
-/// Push a branch to its remote by kicking off an agent session.
-pub(crate) async fn start_push_branch_pipeline_for_branch(
+/// Push a branch to its remote by kicking off an agent session, or queue the
+/// push behind whatever the branch is already doing.
+pub(crate) async fn start_or_queue_push_pipeline_for_branch(
     store: Arc<Store>,
     registry: Arc<session_runner::SessionRegistry>,
     app_handle: tauri::AppHandle,
     branch_id: String,
     provider: Option<String>,
     force: Option<bool>,
-) -> Result<String, String> {
-    let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
-
+) -> Result<BranchPipelineResponse, String> {
     let force = force.unwrap_or(false);
 
-    let push_command = if force {
-        git_push_with_fallback(&format!(
-            "-u origin {} --force-with-lease",
-            ctx.branch.branch_name
-        ))
-    } else {
-        git_push_with_fallback(&format!("-u origin {}", ctx.branch.branch_name))
-    };
+    if let Some(session_id) =
+        queue_push_pipeline_if_branch_busy(&store, &branch_id, provider.as_deref(), force)?
+    {
+        return Ok(BranchPipelineResponse::queued(session_id));
+    }
 
-    let on_failure = if force {
-        FailureStrategy::HandoffToAi {
-            prompt_template:
-                "The force push failed. Diagnose and fix the issue, then retry the force push.\n\n{step_outputs}"
-                    .to_string(),
-        }
-    } else {
-        // For normal push, abort on non-fast-forward so the frontend can show
-        // the force-push dialog. The marker matches git's actual stderr output
-        // (e.g. "! [rejected] main -> main (non-fast-forward)").
-        //
-        // If the push fails for a *different* reason (e.g. auth error, network
-        // timeout), the marker won't match and the pipeline falls through to an
-        // AI handoff for generic diagnosis — this is intentional.
-        FailureStrategy::Abort {
-            marker: Some("non-fast-forward".to_string()),
-        }
-    };
+    let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
+    let steps = build_push_pipeline_steps(&ctx.branch.branch_name, force);
 
-    let steps = vec![PipelineStep::Command {
-        label: "Push to remote".to_string(),
-        command: push_command,
-        on_failure,
-    }];
-
-    let prompt = if force {
-        "Force push the current branch to the remote".to_string()
-    } else {
-        "Push the current branch to the remote with a normal push. If the push fails for a recoverable reason, diagnose and fix it, then retry with a normal push. Do not force push.".to_string()
-    };
-
-    start_pipeline_for_branch(
+    let session_id = start_running_push_pipeline_for_branch(
         ctx,
+        force,
         steps,
-        &prompt,
-        "push",
         provider,
         store,
         &app_handle,
         &registry,
-    )
+    )?;
+
+    Ok(BranchPipelineResponse::running(session_id))
 }
 
+/// Push a branch to its remote.
+///
+/// Queues behind in-flight branch work instead of failing, so the response
+/// reports whether the push started or is waiting on the branch queue.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn push_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -1370,9 +1589,9 @@ pub async fn push_branch(
     branch_id: String,
     provider: Option<String>,
     force: Option<bool>,
-) -> Result<String, String> {
+) -> Result<BranchPipelineResponse, String> {
     let store = get_store(&store)?;
-    start_push_branch_pipeline_for_branch(
+    start_or_queue_push_pipeline_for_branch(
         store,
         Arc::clone(&registry),
         app_handle,
@@ -1626,6 +1845,149 @@ mod tests {
         assert!(queue_pipeline(&store, &branch.id, PipelineKind::Squash, None).is_some());
     }
 
+    fn queue_push(store: &Arc<Store>, branch_id: &str, force: bool) -> Option<String> {
+        queue_push_pipeline_if_branch_busy(store, branch_id, None, force).unwrap()
+    }
+
+    #[test]
+    fn idle_branch_pushes_immediately_instead_of_queueing() {
+        let (store, branch) = setup_branch_store();
+
+        assert_eq!(queue_push(&store, &branch.id, false), None);
+        assert!(store
+            .get_queued_sessions_for_branch(&branch.id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn busy_branch_queues_push_with_branch_link_and_no_artifact() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+
+        let session_id = queue_push(&store, &branch.id, false)
+            .expect("push should queue behind the running note session");
+
+        let session = store.get_session(&session_id).unwrap().unwrap();
+        assert_eq!(session.status, store::SessionStatus::Queued);
+        assert_eq!(session.prompt, PUSH_PROMPT);
+        // The branch link is what keeps an artifact-less push on the queue.
+        assert_eq!(session.branch_id.as_deref(), Some(branch.id.as_str()));
+        let pipeline = session.pipeline.unwrap();
+        assert_eq!(pipeline.kind, Some(PipelineKind::Push));
+        assert!(!pipeline.push_force);
+
+        // A pending commit would render as a failed commit once the push ends.
+        assert!(store
+            .list_commits_for_branch(&branch.id)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn repeated_push_click_reuses_the_already_queued_push() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+
+        let first = queue_push(&store, &branch.id, false).unwrap();
+        let second = queue_push(&store, &branch.id, false).unwrap();
+
+        assert_eq!(first, second);
+        assert_eq!(
+            store
+                .get_queued_sessions_for_branch(&branch.id)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn force_push_is_not_deduped_against_a_queued_normal_push() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+
+        let push = queue_push(&store, &branch.id, false).unwrap();
+        let force_push = queue_push(&store, &branch.id, true).unwrap();
+
+        assert_ne!(push, force_push);
+        let forced = store.get_session(&force_push).unwrap().unwrap();
+        assert_eq!(forced.prompt, FORCE_PUSH_PROMPT);
+        assert!(forced.pipeline.unwrap().push_force);
+        assert_eq!(
+            store
+                .get_queued_sessions_for_branch(&branch.id)
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // Clicking force push again still dedupes.
+        assert_eq!(queue_push(&store, &branch.id, true), Some(force_push));
+    }
+
+    #[test]
+    fn queued_push_alone_keeps_the_branch_busy() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+        queue_push(&store, &branch.id, false).unwrap();
+
+        // The note session finishes, but the still-queued push must keep a newly
+        // requested squash on the queue rather than running it now.
+        for session in store.get_running_sessions().unwrap() {
+            store
+                .update_session_status(&session.id, store::SessionStatus::Completed, None, None)
+                .unwrap();
+        }
+
+        assert!(queue_pipeline(&store, &branch.id, PipelineKind::Squash, None).is_some());
+    }
+
+    #[test]
+    fn queued_rebase_keeps_a_later_push_on_the_queue() {
+        let (store, branch) = setup_branch_store();
+        start_running_note_session(&store, &branch.id);
+        queue_pipeline(&store, &branch.id, PipelineKind::Rebase, None).unwrap();
+
+        for session in store.get_running_sessions().unwrap() {
+            store
+                .update_session_status(&session.id, store::SessionStatus::Completed, None, None)
+                .unwrap();
+        }
+
+        assert!(queue_push(&store, &branch.id, false).is_some());
+    }
+
+    #[test]
+    fn push_steps_are_rebuilt_from_the_current_branch_name_and_force_flag() {
+        let normal = build_push_pipeline_steps("feature", false);
+        let (label, command, on_failure) = command_at(&normal, 0);
+        assert_eq!(label, "Push to remote");
+        assert!(command.contains("-u origin feature"));
+        assert!(!command.contains("--force-with-lease"));
+        assert!(matches!(
+            on_failure,
+            FailureStrategy::Abort { marker } if marker.as_deref() == Some("non-fast-forward")
+        ));
+
+        // The drain path re-derives the ref, so a branch renamed while the push
+        // waited pushes the new name rather than the queued one.
+        let forced = build_push_pipeline_steps("feature-renamed", true);
+        let (_, forced_command, forced_on_failure) = command_at(&forced, 0);
+        assert!(forced_command.contains("-u origin feature-renamed --force-with-lease"));
+        assert!(matches!(
+            forced_on_failure,
+            FailureStrategy::HandoffToAi { .. }
+        ));
+    }
+
+    #[test]
+    fn commit_pipeline_steps_reject_the_push_kind() {
+        let err = build_commit_pipeline_steps(&PipelineKind::Push, "main", "main").unwrap_err();
+
+        assert_eq!(err, "Push is not a commit pipeline");
+    }
+
     #[tokio::test]
     async fn collect_branch_refresh_results_tolerates_partial_task_failure() {
         let tasks = vec![
@@ -1717,7 +2079,7 @@ mod tests {
 
     #[test]
     fn rebase_pipeline_uses_signoff() {
-        let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "main");
+        let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "main").unwrap();
 
         let (label, command, _) = command_at(&steps, 0);
         assert_eq!(label, "Fetch latest base");
@@ -1733,7 +2095,8 @@ mod tests {
 
     #[test]
     fn rebase_pipeline_targets_origin_branch_when_target_differs() {
-        let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "feature-branch");
+        let steps =
+            build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "feature-branch").unwrap();
 
         let (label, command, _) = command_at(&steps, 0);
         assert_eq!(label, "Fetch origin/feature-branch");
@@ -1749,7 +2112,8 @@ mod tests {
 
     #[test]
     fn rebase_pipeline_prompt_mentions_base_when_target_differs() {
-        let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "feature-branch");
+        let steps =
+            build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "feature-branch").unwrap();
 
         let fetch_failure = match &steps[0] {
             PipelineStep::Command {
@@ -1776,7 +2140,7 @@ mod tests {
 
     #[test]
     fn rebase_pipeline_prompt_omits_target_note_when_target_matches_base() {
-        let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "main");
+        let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "main").unwrap();
 
         for step in &steps {
             if let PipelineStep::Command {
@@ -1792,7 +2156,7 @@ mod tests {
 
     #[test]
     fn squash_pipeline_prompt_requires_signoff() {
-        let steps = build_commit_pipeline_steps(&PipelineKind::Squash, "main", "main");
+        let steps = build_commit_pipeline_steps(&PipelineKind::Squash, "main", "main").unwrap();
 
         let (_, prompt) = ai_prompt_at(&steps, 3);
         assert!(prompt.contains("Use the user's global git identity"));

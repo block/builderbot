@@ -948,6 +948,81 @@ fn test_queued_pipeline_commit_owns_branch_queue_position() {
 }
 
 #[test]
+fn test_queued_push_pipeline_is_found_through_session_branch_link() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    let other_branch = Branch::new(&project.id, "other", "main");
+    store.create_branch(&other_branch).unwrap();
+
+    // No commit/note/review artifact: the branch link is the only way in.
+    let mut session = Session::new_queued("Push the current branch").with_branch(&branch.id);
+    session.pipeline = Some(
+        PipelineExecution::from_steps(&[])
+            .with_kind(PipelineKind::Push)
+            .with_push_force(true),
+    );
+    store.create_session(&session).unwrap();
+
+    let queued = store.get_queued_sessions_for_branch(&branch.id).unwrap();
+    assert_eq!(queued.len(), 1);
+    assert_eq!(queued[0].id, session.id);
+    assert_eq!(queued[0].branch_id.as_deref(), Some(branch.id.as_str()));
+    assert_eq!(
+        queued[0].pipeline.as_ref().and_then(|p| p.kind.as_ref()),
+        Some(&PipelineKind::Push)
+    );
+    assert!(queued[0].pipeline.as_ref().unwrap().push_force);
+
+    assert!(store
+        .get_queued_sessions_for_branch(&other_branch.id)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn test_running_push_pipeline_marks_branch_busy_and_resolves_branch() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let mut session =
+        Session::new_running("Push the current branch", Path::new("/tmp")).with_branch(&branch.id);
+    session.pipeline = Some(PipelineExecution::from_steps(&[]).with_kind(PipelineKind::Push));
+    store.create_session(&session).unwrap();
+
+    assert!(store.has_running_session_for_branch(&branch.id).unwrap());
+    assert_eq!(
+        store
+            .get_branch_id_for_session(&session.id)
+            .unwrap()
+            .as_deref(),
+        Some(branch.id.as_str())
+    );
+    assert_eq!(
+        store
+            .get_project_id_for_session(&session.id)
+            .unwrap()
+            .as_deref(),
+        Some(project.id.as_str())
+    );
+    // The drain scan resolves schedules from `get_running_sessions`, so that
+    // query has to carry the branch link too.
+    let running = store.get_running_sessions().unwrap();
+    assert_eq!(
+        running
+            .iter()
+            .find(|running| running.id == session.id)
+            .and_then(|running| running.branch_id.as_deref()),
+        Some(branch.id.as_str())
+    );
+}
+
+#[test]
 fn test_mark_session_artifact_started_restamps_empty_note_and_preserves_session_created_at() {
     let store = Store::in_memory().unwrap();
     let project = Project::new("test-owner/test-repo");

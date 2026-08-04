@@ -46,6 +46,11 @@ export function listenForSessionStatus(): UnlistenFn {
         eventBranchId
       );
       projectStateStore.addRunningSession(eventProjectId, sessionId);
+      // A push that was queued behind other branch work starts running when the
+      // branch queue drains it; this event is the only signal of that.
+      if (sessionType === 'push' && eventBranchId) {
+        pushStateStore.markQueuedPushStarted(eventBranchId, sessionId);
+      }
       return;
     }
 

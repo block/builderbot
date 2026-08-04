@@ -618,17 +618,18 @@
   let branchIdentityWarning = $derived(gitIdentityWarning(timeline?.gitState));
   let gitUnsafeActionsDisabled = $derived(!!branchIdentityWarning);
   /**
-   * Gate for Rebase/Squash. In-flight sessions are not a reason to disable:
-   * both queue on the branch session queue and drain when the branch frees up.
-   * Only identity problems (detached HEAD, wrong branch) make them unsafe.
+   * Gate for the queueable git actions (Rebase/Squash, push, force-push).
+   * In-flight sessions are not a reason to disable: they all queue on the branch
+   * session queue and drain when the branch frees up. Only identity problems
+   * (detached HEAD, wrong branch) make them unsafe.
    */
   let branchCommandDisabledReason = $derived(
     branchIdentityWarning ?? (commandPipelinePending ? 'Command in progress' : null)
   );
   /**
-   * Gate for git actions that still execute immediately (push, force-push,
-   * reset to origin). Those have no queue support yet, so a busy branch has to
-   * keep blocking them.
+   * Gate for reset to origin, which still executes immediately: it is validated
+   * against a point-in-time preview of what would be discarded, so a busy branch
+   * has to keep blocking it.
    */
   let immediateGitActionDisabledReason = $derived(
     branchCommandDisabledReason ?? (branchSessionBusy ? 'Session in progress' : null)
@@ -1077,21 +1078,46 @@
   // a 5s polling fallback in BranchCardPrButton.
   let storePushState = $derived(pushStateStore.getPushState(branch.id));
   let pushingOrigin = $derived(storePushState?.state === 'pushing');
+  /** Push is waiting on the branch session queue rather than running. */
+  let pushQueuedOrigin = $derived(storePushState?.state === 'queued');
   let pushSessionId = $derived(storePushState?.sessionId ?? null);
   let forcePushingOrigin = $derived(pushingOrigin);
   let forcePushSessionId = $derived(pushSessionId);
 
   async function handlePushOrigin() {
-    if (pushingOrigin || commandPipelinePending || branchSessionBusy) return;
+    // Deliberately not gated on `branchSessionBusy`: the backend decides
+    // between pushing now and queueing behind in-flight branch work, and it
+    // dedupes repeat clicks of the same action.
+    if (pushingOrigin || pushQueuedOrigin || commandPipelinePending) return;
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
     const provider = getPreferredAgent(agents) ?? undefined;
     pushStateStore.setPushing(branch.id, '__pending__');
     try {
-      const sessionId = await commands.pushBranch(branch.id, provider, false);
-      pushStateStore.setPushing(branch.id, sessionId);
+      const response = await commands.pushBranch(branch.id, provider, false);
+      pushStateStore.setPushLaunch(branch.id, response);
     } catch (e) {
       pushStateStore.setPushError(branch.id, e instanceof Error ? e.message : String(e));
       notifyError('Push failed', e);
+    }
+  }
+
+  /**
+   * Drop a push that is still waiting on the branch queue.
+   *
+   * The store entry is cleared here rather than by the completion listener: a
+   * session that never ran isn't in the session registry, so its cancellation
+   * event carries no push session type to match on.
+   */
+  async function cancelQueuedPush() {
+    const sessionId = pushSessionId;
+    if (!pushQueuedOrigin || !sessionId || sessionId === '__pending__') return;
+    pushStateStore.clearPushState(branch.id);
+    try {
+      await commands.cancelSession(sessionId);
+      commands.invalidateBranchTimeline(branch.id);
+      await loadTimeline();
+    } catch (e) {
+      notifyError('Could not cancel queued push', e);
     }
   }
 
@@ -1108,7 +1134,9 @@
   }
 
   async function confirmForcePush() {
-    if (forcePushingOrigin || commandPipelinePending || branchSessionBusy) {
+    // Like `handlePushOrigin`, not gated on `branchSessionBusy` — the backend
+    // queues the force push behind in-flight branch work.
+    if (forcePushingOrigin || pushQueuedOrigin || commandPipelinePending) {
       // Another operation is in progress — keep the dialog open so the user
       // understands why the action didn't proceed.
       return;
@@ -1118,8 +1146,8 @@
     const provider = getPreferredAgent(agents) ?? undefined;
     pushStateStore.setPushing(branch.id, '__pending__');
     try {
-      const sessionId = await commands.pushBranch(branch.id, provider, true);
-      pushStateStore.setPushing(branch.id, sessionId);
+      const response = await commands.pushBranch(branch.id, provider, true);
+      pushStateStore.setPushLaunch(branch.id, response);
     } catch (e) {
       pushStateStore.setPushError(branch.id, e instanceof Error ? e.message : String(e));
       notifyError('Force push failed', e);
@@ -1848,8 +1876,11 @@
               onOpenForcePushSession={forcePushSessionId && forcePushSessionId !== '__pending__'
                 ? openForcePushSession
                 : undefined}
+              onCancelQueuedPush={cancelQueuedPush}
               {forcePushingOrigin}
+              {pushQueuedOrigin}
               {immediateGitActionDisabledReason}
+              queueableGitActionDisabledReason={branchCommandDisabledReason}
               onViewWorktreeDiff={isLocal
                 ? () =>
                     openDiffDetail({

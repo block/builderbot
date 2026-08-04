@@ -83,6 +83,10 @@
     resetToOriginDisabledReason?: string;
     resettingToOrigin?: boolean;
     pushing?: boolean;
+    /** Push is waiting on the branch queue, so its button cancels instead. */
+    pushQueued?: boolean;
+    /** Force push is waiting on the branch queue, so its button cancels instead. */
+    forcePushQueued?: boolean;
     onViewDiffClick?: () => void;
     onCommitChangesClick?: () => void;
     commitChangesDisabledReason?: string;
@@ -124,6 +128,8 @@
     resetToOriginDisabledReason,
     resettingToOrigin = false,
     pushing = false,
+    pushQueued = false,
+    forcePushQueued = false,
     onViewDiffClick,
     onCommitChangesClick,
     commitChangesDisabledReason,
@@ -176,10 +182,17 @@
   let isClickable = $derived(!!onItemClick && !isPending && !isFailed);
   let hasSession = $derived(!!sessionId && !deleting);
   let pullTitle = $derived(pullDisabledReason ?? 'Pull');
-  let pushTitle = $derived(pushDisabledReason ?? (pushing ? 'View push session' : 'Push'));
+  let pushTitle = $derived(
+    pushDisabledReason ??
+      (pushQueued ? 'Cancel queued push' : pushing ? 'View push session' : 'Push')
+  );
   let forcePushTitle = $derived(
     forcePushDisabledReason ??
-      (forcePushing ? 'View push session' : 'Force push local branch to origin')
+      (forcePushQueued
+        ? 'Cancel queued push'
+        : forcePushing
+          ? 'View push session'
+          : 'Force push local branch to origin')
   );
   let resetToOriginTitle = $derived(
     resetToOriginDisabledReason ??
@@ -458,7 +471,7 @@
               aria-label={pushTitle}
               class="h-[22px] rounded-md border-[var(--border-subtle)] bg-transparent text-[var(--text-muted)] shadow-none hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground"
             >
-              {pushing ? 'Pushing\u2026' : 'Push'}
+              {pushQueued ? 'Cancel' : pushing ? 'Pushing\u2026' : 'Push'}
             </Button>
           </span>
         {/if}
@@ -493,12 +506,12 @@
               aria-label={forcePushTitle}
               class={[
                 'h-[22px] rounded-md bg-transparent shadow-none',
-                forcePushing
+                forcePushing || forcePushQueued
                   ? 'border-[var(--border-subtle)] text-[var(--text-muted)] hover:border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:text-foreground'
                   : 'border-[var(--ui-danger-bg)] font-medium text-[var(--ui-danger)] hover:border-[var(--ui-danger)] hover:bg-[var(--ui-danger-bg)] hover:text-[var(--ui-danger)]',
               ]}
             >
-              {forcePushing ? 'Pushing\u2026' : 'Force Push'}
+              {forcePushQueued ? 'Cancel' : forcePushing ? 'Pushing\u2026' : 'Force Push'}
             </Button>
           </span>
         {/if}

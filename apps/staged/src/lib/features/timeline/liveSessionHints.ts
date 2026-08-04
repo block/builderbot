@@ -26,6 +26,12 @@ export type PendingHintItem = {
   sessionId?: string;
 };
 
+function normalizeTitleText(title: string | null | undefined): string | undefined {
+  if (!title) return undefined;
+  const cleaned = stripXmlTags(title).replace(/\s+/g, ' ').trim();
+  return cleaned || undefined;
+}
+
 function normalizeHintText(text: string): string | undefined {
   const cleaned = stripXmlTags(text)
     .replace(/```[\s\S]*?```/g, ' ')
@@ -182,10 +188,12 @@ export function collectRunningSessionIds(
 
 export function createLiveSessionHints(
   onHintsChange: (hints: Record<string, string>) => void,
-  getDisplayRootCandidates?: () => DisplayRootInput
+  getDisplayRootCandidates?: () => DisplayRootInput,
+  onTitlesChange?: (titles: Record<string, string>) => void
 ) {
   const hintTrackers = new Map<string, HintTracker>();
   let hints: Record<string, string> = {};
+  let titles: Record<string, string> = {};
   let hintPollTimer: ReturnType<typeof setInterval> | null = null;
   let hintPollInFlight = false;
   let destroyed = false;
@@ -206,6 +214,22 @@ export function createLiveSessionHints(
     onHintsChange(hints);
   }
 
+  function setTitle(sessionId: string, title: string) {
+    if (destroyed || !onTitlesChange) return;
+    if (titles[sessionId] === title) return;
+    titles = { ...titles, [sessionId]: title };
+    onTitlesChange(titles);
+  }
+
+  function clearTitle(sessionId: string) {
+    if (destroyed || !onTitlesChange) return;
+    if (!(sessionId in titles)) return;
+    const next = { ...titles };
+    delete next[sessionId];
+    titles = next;
+    onTitlesChange(titles);
+  }
+
   async function refreshHint(sessionId: string, tracker: HintTracker) {
     if (destroyed) return;
     try {
@@ -214,7 +238,15 @@ export function createLiveSessionHints(
       if (!session || session.status !== 'running') {
         hintTrackers.delete(sessionId);
         clearHint(sessionId);
+        clearTitle(sessionId);
         return;
+      }
+
+      const acpTitle = normalizeTitleText(session.acpTitle);
+      if (acpTitle) {
+        setTitle(sessionId, acpTitle);
+      } else {
+        clearTitle(sessionId);
       }
 
       const rootCandidates: DisplayRootInput = [getDisplayRootCandidates?.(), session.workingDir];
@@ -310,6 +342,7 @@ export function createLiveSessionHints(
         if (!activeIds.has(sessionId)) {
           hintTrackers.delete(sessionId);
           clearHint(sessionId);
+          clearTitle(sessionId);
         }
       }
 
@@ -328,6 +361,10 @@ export function createLiveSessionHints(
       if (Object.keys(hints).length > 0) {
         hints = {};
         onHintsChange(hints);
+      }
+      if (Object.keys(titles).length > 0) {
+        titles = {};
+        onTitlesChange?.(titles);
       }
     },
   };

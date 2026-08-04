@@ -195,11 +195,15 @@
   }
 
   let liveSessionHints = $state<Record<string, string>>({});
+  let liveSessionTitles = $state<Record<string, string>>({});
   const liveSessionHintPoller = createLiveSessionHints(
     (nextHints) => {
       liveSessionHints = nextHints;
     },
-    () => repoDir
+    () => repoDir,
+    (nextTitles) => {
+      liveSessionTitles = nextTitles;
+    }
   );
 
   // Unified timeline item for display
@@ -535,11 +539,15 @@
       }
 
       const showAuthor = type === 'commit' && !isDeleting && !!commit.author && !commit.isOwnCommit;
+      const liveTitle =
+        type === 'pending-commit' && commit.sessionId
+          ? liveSessionTitles[commit.sessionId]
+          : undefined;
 
       all.push({
         key: commit.sha || `pending-${commit.sessionId || commit.timestamp}`,
         type,
-        title: stripXmlTags(commit.subject),
+        title: stripXmlTags(liveTitle ?? commit.subject),
         meta: isDeleting ? 'Deleting...' : secondaryMeta,
         secondaryMeta: isDeleting || isRunning ? undefined : commit.shortSha || undefined,
         tertiaryMeta: showAuthor ? commit.author : undefined,
@@ -591,10 +599,15 @@
         secondaryMeta = formatRelativeTime(note.completedAt ?? note.createdAt, nowMs);
       }
 
+      const liveTitle =
+        type === 'generating-note' && note.sessionId
+          ? liveSessionTitles[note.sessionId]
+          : undefined;
+
       all.push({
         key: `note-${note.id}`,
         type,
-        title: stripXmlTags(note.title),
+        title: stripXmlTags(liveTitle ?? note.title),
         secondaryMeta: isDeleting ? 'Deleting...' : secondaryMeta,
         deleting: isDeleting,
         // Use completedAt so completed notes sort by completion time, not queue time
@@ -657,10 +670,15 @@
         meta = formatRelativeTime(review.completedAt ?? review.createdAt, nowMs);
       }
 
+      const liveTitle =
+        type === 'generating-review' && review.sessionId
+          ? liveSessionTitles[review.sessionId]
+          : undefined;
+
       all.push({
         key: `review-${review.id}`,
         type,
-        title: review.title || 'Code Review',
+        title: liveTitle ?? (review.title || 'Code Review'),
         meta: isDeleting ? 'Deleting...' : meta,
         badges: badges.length > 0 ? badges : undefined,
         deleting: isDeleting,

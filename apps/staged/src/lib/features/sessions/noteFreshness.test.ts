@@ -25,6 +25,7 @@ function session(
     completionReason,
     createdAt: 1000,
     updatedAt: 2000,
+    acpTitle: null,
   };
 }
 

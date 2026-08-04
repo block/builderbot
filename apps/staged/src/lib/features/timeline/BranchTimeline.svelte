@@ -372,6 +372,14 @@
    * clears before the pull drains — so the requirement is dropped there rather
    * than disabling an action the backend would happily queue.
    *
+   * `branchSessionBusy` is the frontend's read of that, and it can disagree with
+   * the lock-held decision the backend makes on the click: on a timeline that
+   * still shows a session which has just finished, the pull runs immediately
+   * against the dirty worktree and fails with "Cannot pull with uncommitted
+   * changes" rather than being disabled up front. That is the failure mode this
+   * trade accepts; the reverse skew is covered by BranchCard folding in-flight
+   * push/pull sessions (which have no timeline artifact) into the signal.
+   *
    * Detached HEAD, the wrong branch, and a diverged upstream stay hard disables:
    * none of them resolve by waiting.
    */

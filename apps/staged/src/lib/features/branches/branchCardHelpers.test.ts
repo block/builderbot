@@ -4,6 +4,7 @@ import {
   classifyPipelinePushCompletion,
   extractPrNumber,
   extractPrUrl,
+  isGitActionInFlight,
   isImageFile,
   isMaybeTextFile,
   isPushRejectedNonFastForward,
@@ -210,5 +211,26 @@ describe('classifyPipelinePushCompletion', () => {
         ]
       )
     ).toBe('succeeded');
+  });
+});
+
+describe('isGitActionInFlight', () => {
+  it('reports a push or pull that is running or waiting on the branch queue', () => {
+    expect(isGitActionInFlight({ push: { state: 'pushing' } })).toBe(true);
+    expect(isGitActionInFlight({ push: { state: 'queued' } })).toBe(true);
+    expect(isGitActionInFlight({ pull: { state: 'pulling' } })).toBe(true);
+    expect(isGitActionInFlight({ pull: { state: 'queued' } })).toBe(true);
+    expect(isGitActionInFlight({ immediatePull: true })).toBe(true);
+  });
+
+  it('ignores finished push state, which no longer blocks anything', () => {
+    expect(isGitActionInFlight({ push: { state: 'done' } })).toBe(false);
+    expect(isGitActionInFlight({ push: { state: 'error' } })).toBe(false);
+    expect(isGitActionInFlight({ push: { state: 'idle' } })).toBe(false);
+  });
+
+  it('reports an idle branch when neither store has an entry', () => {
+    expect(isGitActionInFlight({})).toBe(false);
+    expect(isGitActionInFlight({ push: null, pull: null, immediatePull: false })).toBe(false);
   });
 });

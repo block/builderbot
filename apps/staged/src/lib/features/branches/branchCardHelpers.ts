@@ -1,7 +1,31 @@
 import type { ProjectAction } from '../../api/commands';
+import type { PullState } from '../../stores/pullState.svelte';
+import type { PushState } from '../../stores/pushState.svelte';
 import type { PipelineExecution } from '../../types';
 
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
+
+/**
+ * Whether a push or pull of the branch's own is running or waiting on the branch
+ * session queue.
+ *
+ * Neither creates a timeline artifact, so a timeline-derived "has active sessions"
+ * check reads the branch as idle for their whole duration. That skew matters for
+ * the gates that ask whether the backend would queue a new action: mid-push, an
+ * action they only disable for an *immediate* run (Pull on a dirty worktree) would
+ * otherwise stay disabled even though the click would just queue.
+ */
+export function isGitActionInFlight(args: {
+  push?: { state: PushState } | null;
+  pull?: { state: PullState } | null;
+  /** An immediate pull the card is awaiting inline; it has no store entry. */
+  immediatePull?: boolean;
+}): boolean {
+  if (args.immediatePull) return true;
+  const push = args.push?.state;
+  const pull = args.pull?.state;
+  return push === 'pushing' || push === 'queued' || pull === 'pulling' || pull === 'queued';
+}
 
 export function groupActionsByType(actions: ProjectAction[]): Record<string, ProjectAction[]> {
   const groups: Record<string, ProjectAction[]> = {

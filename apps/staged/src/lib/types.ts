@@ -493,10 +493,14 @@ export interface BranchSessionResponse {
 }
 
 /**
- * Result of a branch git pipeline command (rebase, squash).
+ * Result of a branch git pipeline command (rebase, squash, push, force push).
  *
  * These can be requested while the branch already has sessions in flight, in
  * which case the backend queues them and reports `'queued'`.
+ *
+ * Pull is the odd one out: an idle branch fast-forwards without going through the
+ * pipeline runner, so `pullOrQueueBranch` returns `string | null` — the queued
+ * session id, or `null` for a pull that already happened.
  */
 export interface BranchPipelineResponse {
   sessionId: string;

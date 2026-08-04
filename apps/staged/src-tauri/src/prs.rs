@@ -493,50 +493,85 @@ fn build_pull_pipeline_steps(branch_name: &str) -> Vec<PipelineStep> {
     ]
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn start_running_commit_pipeline_for_branch(
-    ctx: BranchPipelineContext,
+/// The rows a run-now pipeline needs before the session runner can pick it up.
+///
+/// Inserted under the branch launch lock and consumed by
+/// [`launch_running_pipeline_session`] once the lock is released.
+struct RunningPipelineSession {
+    session_id: String,
+    pipeline: PipelineExecution,
+    prompt: &'static str,
+}
+
+/// Insert the session and pending-commit rows for a rebase/squash that runs now.
+///
+/// Callers must hold the branch launch lock: these rows are what make the branch
+/// look busy to a concurrent launch, so the busy check and this insert have to be
+/// atomic. Synchronous for the same reason — the lock must not be held across an
+/// await.
+fn insert_running_commit_pipeline_session(
+    store: &Arc<Store>,
+    ctx: &BranchPipelineContext,
     kind: PipelineKind,
-    steps: Vec<PipelineStep>,
+    steps: &[PipelineStep],
     rebase_target: Option<String>,
-    provider: Option<String>,
-    store: Arc<Store>,
-    app_handle: &tauri::AppHandle,
-    registry: &Arc<session_runner::SessionRegistry>,
-) -> Result<String, String> {
+    provider: Option<&str>,
+) -> Result<RunningPipelineSession, String> {
     let prompt = pipeline_prompt(&kind, false);
-    let mut pipeline = PipelineExecution::from_steps(&steps).with_kind(kind);
+    let mut pipeline = PipelineExecution::from_steps(steps).with_kind(kind);
     if let Some(target) = rebase_target {
         pipeline = pipeline.with_rebase_target(target);
     }
 
     let mut session = store::Session::new_running(prompt, &ctx.working_dir);
-    if let Some(ref p) = provider {
+    if let Some(p) = provider {
         session = session.with_provider(p);
     }
     session.pipeline = Some(pipeline.clone());
     store.create_session(&session).map_err(|e| e.to_string())?;
 
+    let commit = store::Commit::new_pending(&ctx.branch.id).with_session(&session.id);
+    store.create_commit(&commit).map_err(|e| e.to_string())?;
+
+    Ok(RunningPipelineSession {
+        session_id: session.id,
+        pipeline,
+        prompt,
+    })
+}
+
+/// Announce a run-now pipeline session and hand it to the session runner.
+///
+/// Runs after the branch launch lock is released: the session row already exists,
+/// so anything racing this already sees the branch as busy.
+#[allow(clippy::too_many_arguments)]
+fn launch_running_pipeline_session(
+    ctx: BranchPipelineContext,
+    running: RunningPipelineSession,
+    steps: Vec<PipelineStep>,
+    session_type: &str,
+    provider: Option<String>,
+    store: Arc<Store>,
+    app_handle: &tauri::AppHandle,
+    registry: &Arc<session_runner::SessionRegistry>,
+) -> Result<String, String> {
     let branch_id = ctx.branch.id.clone();
     let project_id = ctx.branch.project_id.clone();
 
-    let commit = store::Commit::new_pending(&branch_id).with_session(&session.id);
-    store.create_commit(&commit).map_err(|e| e.to_string())?;
-
     session_runner::emit_session_running(
         app_handle,
-        &session.id,
+        &running.session_id,
         &branch_id,
         &project_id,
-        "commit",
+        session_type,
     );
 
     session_runner::start_pipeline_session(
         session_runner::PipelineConfig {
-            session_id: session.id.clone(),
-            prompt: prompt.to_string(),
+            session_id: running.session_id.clone(),
+            prompt: running.prompt.to_string(),
             steps,
-            pipeline,
+            pipeline: running.pipeline,
             working_dir: ctx.working_dir,
             pre_head_sha: None,
             provider,
@@ -550,7 +585,7 @@ async fn start_running_commit_pipeline_for_branch(
         Arc::clone(registry),
     )?;
 
-    Ok(session.id)
+    Ok(running.session_id)
 }
 
 /// Queue a rebase/squash pipeline when the branch has work in flight.
@@ -572,7 +607,18 @@ fn queue_commit_pipeline_if_branch_busy(
 ) -> Result<Option<String>, String> {
     let launch_lock = crate::session_commands::branch_session_launch_lock_for(branch_id);
     let _guard = launch_lock.lock().unwrap();
+    queue_commit_pipeline_locked(store, branch_id, kind, provider, target)
+}
 
+/// The body of [`queue_commit_pipeline_if_branch_busy`], for the run-now path,
+/// which re-checks while already holding the branch launch lock.
+fn queue_commit_pipeline_locked(
+    store: &Arc<Store>,
+    branch_id: &str,
+    kind: &PipelineKind,
+    provider: Option<&str>,
+    target: Option<&str>,
+) -> Result<Option<String>, String> {
     if !branch_has_work_in_flight(store, branch_id)? {
         return Ok(None);
     }
@@ -620,6 +666,9 @@ pub(crate) async fn start_or_queue_commit_pipeline_for_branch(
     provider: Option<String>,
     target: Option<String>,
 ) -> Result<BranchPipelineResponse, String> {
+    // Pre-flight check: a branch that is already busy queues without resolving a
+    // pipeline context, which for a remote branch can depend on a running
+    // workspace the queued work will only need later.
     if let Some(session_id) = queue_commit_pipeline_if_branch_busy(
         &store,
         &branch_id,
@@ -636,17 +685,45 @@ pub(crate) async fn start_or_queue_commit_pipeline_for_branch(
     let steps = build_commit_pipeline_steps(&kind, &base_branch, &rebase_ref)?;
     let rebase_target = persisted_rebase_target(target.as_deref(), &rebase_ref);
 
-    let session_id = start_running_commit_pipeline_for_branch(
+    // Re-check and insert under the lock, mirroring
+    // `session_commands::start_or_queue_branch_session_for_store`: the pre-flight
+    // check released the lock to resolve the context above, so without a second
+    // look two near-simultaneous actions could both have seen an idle branch and
+    // both start running — exactly what git-pipeline exclusivity exists to stop.
+    let running = {
+        let launch_lock = crate::session_commands::branch_session_launch_lock_for(&branch_id);
+        let _guard = launch_lock.lock().unwrap();
+
+        if let Some(session_id) = queue_commit_pipeline_locked(
+            &store,
+            &branch_id,
+            &kind,
+            provider.as_deref(),
+            target.as_deref(),
+        )? {
+            return Ok(BranchPipelineResponse::queued(session_id));
+        }
+
+        insert_running_commit_pipeline_session(
+            &store,
+            &ctx,
+            kind,
+            &steps,
+            rebase_target,
+            provider.as_deref(),
+        )?
+    };
+
+    let session_id = launch_running_pipeline_session(
         ctx,
-        kind,
+        running,
         steps,
-        rebase_target,
+        "commit",
         provider,
         store,
         &app_handle,
         &registry,
-    )
-    .await?;
+    )?;
 
     Ok(BranchPipelineResponse::running(session_id))
 }
@@ -733,59 +810,39 @@ pub(crate) async fn start_queued_commit_pipeline_for_branch(
     Ok(true)
 }
 
-/// Start a push pipeline that runs right now.
+/// Insert the session row for a push that runs right now.
 ///
 /// Unlike [`start_pipeline_for_branch`], the session records its pipeline kind
 /// and `branch_id`. A push creates no artifact, so without that link the branch
 /// queue could not see it and a commit session could start mid-push.
-fn start_running_push_pipeline_for_branch(
-    ctx: BranchPipelineContext,
+///
+/// Like [`insert_running_commit_pipeline_session`], callers must hold the branch
+/// launch lock: this row is what makes the branch look busy.
+fn insert_running_push_pipeline_session(
+    store: &Arc<Store>,
+    ctx: &BranchPipelineContext,
     force: bool,
-    steps: Vec<PipelineStep>,
-    provider: Option<String>,
-    store: Arc<Store>,
-    app_handle: &tauri::AppHandle,
-    registry: &Arc<session_runner::SessionRegistry>,
-) -> Result<String, String> {
+    steps: &[PipelineStep],
+    provider: Option<&str>,
+) -> Result<RunningPipelineSession, String> {
     let prompt = pipeline_prompt(&PipelineKind::Push, force);
-    let pipeline = PipelineExecution::from_steps(&steps)
+    let pipeline = PipelineExecution::from_steps(steps)
         .with_kind(PipelineKind::Push)
         .with_push_force(force);
 
-    let branch_id = ctx.branch.id.clone();
-    let project_id = ctx.branch.project_id.clone();
-
-    let mut session = store::Session::new_running(prompt, &ctx.working_dir).with_branch(&branch_id);
-    if let Some(ref p) = provider {
+    let mut session =
+        store::Session::new_running(prompt, &ctx.working_dir).with_branch(&ctx.branch.id);
+    if let Some(p) = provider {
         session = session.with_provider(p);
     }
     session.pipeline = Some(pipeline.clone());
     store.create_session(&session).map_err(|e| e.to_string())?;
 
-    // Emit "running" before returning so the global session listener registers
-    // this session atomically, as `start_pipeline_for_branch` does.
-    session_runner::emit_session_running(app_handle, &session.id, &branch_id, &project_id, "push");
-
-    session_runner::start_pipeline_session(
-        session_runner::PipelineConfig {
-            session_id: session.id.clone(),
-            prompt: prompt.to_string(),
-            steps,
-            pipeline,
-            working_dir: ctx.working_dir,
-            pre_head_sha: None,
-            provider,
-            workspace_name: ctx.workspace_name,
-            remote_working_dir: ctx.remote_working_dir,
-            branch_id: Some(branch_id),
-            project_id: Some(project_id),
-        },
-        store,
-        app_handle.clone(),
-        Arc::clone(registry),
-    )?;
-
-    Ok(session.id)
+    Ok(RunningPipelineSession {
+        session_id: session.id,
+        pipeline,
+        prompt,
+    })
 }
 
 /// Queue a push pipeline when the branch has work in flight.
@@ -807,7 +864,17 @@ fn queue_push_pipeline_if_branch_busy(
 ) -> Result<Option<String>, String> {
     let launch_lock = crate::session_commands::branch_session_launch_lock_for(branch_id);
     let _guard = launch_lock.lock().unwrap();
+    queue_push_pipeline_locked(store, branch_id, provider, force)
+}
 
+/// The body of [`queue_push_pipeline_if_branch_busy`], for the run-now path,
+/// which re-checks while already holding the branch launch lock.
+fn queue_push_pipeline_locked(
+    store: &Arc<Store>,
+    branch_id: &str,
+    provider: Option<&str>,
+    force: bool,
+) -> Result<Option<String>, String> {
     if !branch_has_work_in_flight(store, branch_id)? {
         return Ok(None);
     }
@@ -936,33 +1003,50 @@ pub(crate) async fn start_queued_git_pipeline_for_branch(
     Ok(true)
 }
 
-/// Queue a fast-forward pull when the branch has work in flight.
+/// What the branch queue decided to do with a pull request.
+enum PullDisposition {
+    /// Waiting its turn: either a freshly queued session, or the queued pull that
+    /// already covers this request.
+    Queued(String),
+    /// The branch was idle, so the pull runs now. The id is the session that marks
+    /// the branch busy for its duration.
+    RunningNow(String),
+}
+
+/// Decide between pulling now and queueing behind in-flight branch work, and
+/// record that decision.
 ///
-/// Returns the queued session id — either a freshly created one, or the queued
-/// pull that already covers this request — and `None` when the branch is idle so
-/// the caller should pull immediately.
+/// Mirrors [`queue_push_pipeline_if_branch_busy`]: the busy check, the dedupe
+/// scan, and the insert all run under the branch launch lock, and stay
+/// synchronous because the lock must not be held across an await. A pull has no
+/// variants, so the dedupe keys on the kind alone.
 ///
-/// Mirrors [`queue_push_pipeline_if_branch_busy`], including running the busy
-/// check, the dedupe scan, and the insert under the branch launch lock. A pull has
-/// no variants, so the dedupe keys on the kind alone.
+/// The run-now case still gets a session row — a running `PipelineKind::Pull`
+/// linked to the branch with no artifact, exactly like a running push. It is what
+/// makes the fetch-and-merge visible to `has_running_session_for_branch` and the
+/// drain scan; without it the one mutating git operation that skips the pipeline
+/// runner would look idle for its whole duration, and a commit session or another
+/// git action could start against the same worktree mid-merge. No
+/// `session-status-changed` event is emitted for it: the caller awaits the pull and
+/// reports the outcome itself, so an event would double-report a failure and spin
+/// the project tile for what is usually an instant operation.
 ///
-/// No provider is recorded: every pull step aborts on failure, so the pipeline
-/// never hands off to an agent.
-fn queue_pull_pipeline_if_branch_busy(
+/// No provider is recorded either: every pull step aborts on failure, so the
+/// pipeline never hands off to an agent.
+fn claim_or_queue_pull_for_branch(
     store: &Arc<Store>,
     branch_id: &str,
-) -> Result<Option<String>, String> {
+) -> Result<PullDisposition, String> {
     let launch_lock = crate::session_commands::branch_session_launch_lock_for(branch_id);
     let _guard = launch_lock.lock().unwrap();
 
-    if !branch_has_work_in_flight(store, branch_id)? {
-        return Ok(None);
-    }
-
-    if let Some(existing) = find_queued_pipeline(store, branch_id, |pipeline| {
-        pipeline.kind.as_ref() == Some(&PipelineKind::Pull)
-    })? {
-        return Ok(Some(existing));
+    let busy = branch_has_work_in_flight(store, branch_id)?;
+    if busy {
+        if let Some(existing) = find_queued_pipeline(store, branch_id, |pipeline| {
+            pipeline.kind.as_ref() == Some(&PipelineKind::Pull)
+        })? {
+            return Ok(PullDisposition::Queued(existing));
+        }
     }
 
     let branch = store
@@ -972,38 +1056,112 @@ fn queue_pull_pipeline_if_branch_busy(
 
     let steps = build_pull_pipeline_steps(&branch.branch_name);
     let pipeline = PipelineExecution::from_steps(&steps).with_kind(PipelineKind::Pull);
-    // Like a queued push, this session carries no artifact — `branch_id` is what
+    // Like a push session, this one carries no artifact — `branch_id` is what
     // keeps it on the branch queue.
-    let mut session = store::Session::new_queued(PULL_PROMPT).with_branch(branch_id);
+    let mut session = if busy {
+        store::Session::new_queued(PULL_PROMPT)
+    } else {
+        store::Session::new_running(PULL_PROMPT, &immediate_pull_working_dir(store, branch_id))
+    }
+    .with_branch(branch_id);
     session.pipeline = Some(pipeline);
     store.create_session(&session).map_err(|e| e.to_string())?;
 
-    Ok(Some(session.id))
+    Ok(if busy {
+        PullDisposition::Queued(session.id)
+    } else {
+        PullDisposition::RunningNow(session.id)
+    })
+}
+
+/// Best-effort working directory for the session row of an immediate pull.
+///
+/// The pull resolves its own path (a remote branch fast-forwards through its
+/// workspace shell), so this only decides what the session row displays — not
+/// where anything runs, and not whether the pull can proceed.
+fn immediate_pull_working_dir(store: &Arc<Store>, branch_id: &str) -> PathBuf {
+    store
+        .get_workdir_for_branch(branch_id)
+        .ok()
+        .flatten()
+        .map(|workdir| PathBuf::from(workdir.path))
+        .unwrap_or_default()
+}
+
+/// Release the session that marked the branch busy for an immediate pull.
+///
+/// The marker never went through the session runner, so nothing else will end it.
+/// The completion reason matches the pipeline path: the work ran to its conclusion
+/// either way, only the outcome differs.
+fn finish_immediate_pull_session(store: &Arc<Store>, session_id: &str, error: Option<&str>) {
+    let status = if error.is_some() {
+        store::SessionStatus::Error
+    } else {
+        store::SessionStatus::Completed
+    };
+
+    if let Err(e) = store.transition_from_running(
+        session_id,
+        status,
+        error,
+        Some(&store::CompletionReason::TurnComplete),
+    ) {
+        log::warn!("[prs] Failed to finish immediate pull session {session_id}: {e}");
+    }
 }
 
 /// Fast-forward the branch to origin now, or queue the pull behind in-flight
 /// branch work.
 ///
-/// An idle branch pulls directly (no session row for what is usually an instant
-/// operation), which is why this returns an `Option` rather than the
-/// [`BranchPipelineResponse`] the pipeline-only actions use: `None` means the
-/// pull already happened, `Some(session_id)` means it is waiting its turn on the
-/// branch queue.
+/// An idle branch pulls directly rather than through the pipeline runner, which is
+/// why this returns an `Option` rather than the [`BranchPipelineResponse`] the
+/// pipeline-only actions use: `None` means the pull already happened (and its
+/// failure, if any, is this call's error), `Some(session_id)` means it is waiting
+/// its turn on the branch queue.
 pub(crate) async fn pull_or_queue_branch_for_branch(
     store: Arc<Store>,
+    registry: Arc<session_runner::SessionRegistry>,
+    app_handle: tauri::AppHandle,
     branch_id: String,
 ) -> Result<Option<String>, String> {
-    if let Some(session_id) = queue_pull_pipeline_if_branch_busy(&store, &branch_id)? {
-        return Ok(Some(session_id));
-    }
+    let session_id = match claim_or_queue_pull_for_branch(&store, &branch_id)? {
+        PullDisposition::Queued(session_id) => return Ok(Some(session_id)),
+        PullDisposition::RunningNow(session_id) => session_id,
+    };
 
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::timeline::pull_branch_ff_only_impl(&store, &branch_id)
+    let pull_store = Arc::clone(&store);
+    let pull_branch_id = branch_id.clone();
+    let pulled = tauri::async_runtime::spawn_blocking(move || {
+        crate::timeline::pull_branch_ff_only_impl(&pull_store, &pull_branch_id)
     })
     .await
-    .map_err(|e| format!("Pull task failed: {e}"))??;
+    .map_err(|e| format!("Pull task failed: {e}"))?;
 
-    Ok(None)
+    finish_immediate_pull_session(
+        &store,
+        &session_id,
+        pulled.as_ref().err().map(String::as_str),
+    );
+
+    // Anything the user requested while the pull held the branch is queued behind
+    // the marker session, and the marker bypassed the session runner that would
+    // normally drain it. Spawned rather than awaited so the pull's own result
+    // isn't held up by starting someone else's work.
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = crate::session_commands::drain_queued_sessions_for_branch(
+            store,
+            registry,
+            app_handle,
+            branch_id.clone(),
+            None,
+        )
+        .await
+        {
+            log::warn!("[prs] Failed to drain queued sessions after pulling {branch_id}: {e}");
+        }
+    });
+
+    pulled.map(|()| None)
 }
 
 /// Pull origin's new commits into the branch.
@@ -1013,10 +1171,12 @@ pub(crate) async fn pull_or_queue_branch_for_branch(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn pull_or_queue_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
+    app_handle: tauri::AppHandle,
     branch_id: String,
 ) -> Result<Option<String>, String> {
     let store = get_store(&store)?;
-    pull_or_queue_branch_for_branch(store, branch_id).await
+    pull_or_queue_branch_for_branch(store, Arc::clone(&registry), app_handle, branch_id).await
 }
 
 fn create_pr_handoff_prompt(
@@ -1681,6 +1841,8 @@ pub(crate) async fn start_or_queue_push_pipeline_for_branch(
 ) -> Result<BranchPipelineResponse, String> {
     let force = force.unwrap_or(false);
 
+    // Pre-flight check, then a re-check at insert time — see
+    // `start_or_queue_commit_pipeline_for_branch` for why both are needed.
     if let Some(session_id) =
         queue_push_pipeline_if_branch_busy(&store, &branch_id, provider.as_deref(), force)?
     {
@@ -1690,10 +1852,24 @@ pub(crate) async fn start_or_queue_push_pipeline_for_branch(
     let ctx = resolve_branch_pipeline_context(&store, &branch_id)?;
     let steps = build_push_pipeline_steps(&ctx.branch.branch_name, force);
 
-    let session_id = start_running_push_pipeline_for_branch(
+    let running = {
+        let launch_lock = crate::session_commands::branch_session_launch_lock_for(&branch_id);
+        let _guard = launch_lock.lock().unwrap();
+
+        if let Some(session_id) =
+            queue_push_pipeline_locked(&store, &branch_id, provider.as_deref(), force)?
+        {
+            return Ok(BranchPipelineResponse::queued(session_id));
+        }
+
+        insert_running_push_pipeline_session(&store, &ctx, force, &steps, provider.as_deref())?
+    };
+
+    let session_id = launch_running_pipeline_session(
         ctx,
-        force,
+        running,
         steps,
+        "push",
         provider,
         store,
         &app_handle,
@@ -2084,6 +2260,78 @@ mod tests {
         assert!(queue_push(&store, &branch.id, false).is_some());
     }
 
+    fn pipeline_context(branch: &store::Branch) -> BranchPipelineContext {
+        BranchPipelineContext {
+            branch: branch.clone(),
+            working_dir: PathBuf::from("/tmp/staged-test"),
+            workspace_name: None,
+            remote_working_dir: None,
+        }
+    }
+
+    #[test]
+    fn inserting_a_running_pipeline_is_what_makes_the_branch_busy() {
+        let (store, branch) = setup_branch_store();
+        let steps = build_commit_pipeline_steps(&PipelineKind::Rebase, "main", "main").unwrap();
+
+        // The pre-flight check sees an idle branch and lets the rebase run now.
+        assert_eq!(
+            queue_pipeline(&store, &branch.id, PipelineKind::Rebase, None),
+            None
+        );
+        insert_running_commit_pipeline_session(
+            &store,
+            &pipeline_context(&branch),
+            PipelineKind::Rebase,
+            &steps,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // The rows that insert wrote are what the re-check at insert time reads, so
+        // an action that raced it queues instead of also starting.
+        assert!(queue_commit_pipeline_locked(
+            &store,
+            &branch.id,
+            &PipelineKind::Squash,
+            None,
+            None
+        )
+        .unwrap()
+        .is_some());
+        assert!(queue_push(&store, &branch.id, false).is_some());
+    }
+
+    #[test]
+    fn inserting_a_running_push_is_what_makes_the_branch_busy() {
+        let (store, branch) = setup_branch_store();
+        let steps = build_push_pipeline_steps(&branch.branch_name, false);
+
+        insert_running_push_pipeline_session(
+            &store,
+            &pipeline_context(&branch),
+            false,
+            &steps,
+            None,
+        )
+        .unwrap();
+
+        // A push has no artifact, so `branch_id` is what the re-check keys on.
+        assert!(queue_push_pipeline_locked(&store, &branch.id, None, true)
+            .unwrap()
+            .is_some());
+        assert!(queue_commit_pipeline_locked(
+            &store,
+            &branch.id,
+            &PipelineKind::Rebase,
+            None,
+            None
+        )
+        .unwrap()
+        .is_some());
+    }
+
     #[test]
     fn push_steps_are_rebuilt_from_the_current_branch_name_and_force_flag() {
         let normal = build_push_pipeline_steps("feature", false);
@@ -2118,8 +2366,22 @@ mod tests {
         assert_eq!(pull_err, "Pull is not a commit pipeline");
     }
 
+    /// The queued session id, or `None` when the branch was idle and the pull
+    /// claimed it to run now.
     fn queue_pull(store: &Arc<Store>, branch_id: &str) -> Option<String> {
-        queue_pull_pipeline_if_branch_busy(store, branch_id).unwrap()
+        match claim_or_queue_pull_for_branch(store, branch_id).unwrap() {
+            PullDisposition::Queued(session_id) => Some(session_id),
+            PullDisposition::RunningNow(_) => None,
+        }
+    }
+
+    fn claim_pull(store: &Arc<Store>, branch_id: &str) -> String {
+        match claim_or_queue_pull_for_branch(store, branch_id).unwrap() {
+            PullDisposition::RunningNow(session_id) => session_id,
+            PullDisposition::Queued(session_id) => {
+                panic!("expected an immediate pull, got queued session {session_id}")
+            }
+        }
     }
 
     #[test]
@@ -2131,6 +2393,65 @@ mod tests {
             .get_queued_sessions_for_branch(&branch.id)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn immediate_pull_claims_the_branch_with_a_running_marker_session() {
+        let (store, branch) = setup_branch_store();
+
+        let session_id = claim_pull(&store, &branch.id);
+
+        let session = store.get_session(&session_id).unwrap().unwrap();
+        assert_eq!(session.status, store::SessionStatus::Running);
+        // The branch link and pipeline kind are what make the pull visible to the
+        // queue; it creates no artifact, exactly like a push.
+        assert_eq!(session.branch_id.as_deref(), Some(branch.id.as_str()));
+        assert_eq!(
+            session.pipeline.unwrap().kind,
+            Some(store::PipelineKind::Pull)
+        );
+        assert!(store
+            .list_commits_for_branch(&branch.id)
+            .unwrap()
+            .is_empty());
+        assert!(store.has_running_session_for_branch(&branch.id).unwrap());
+    }
+
+    #[test]
+    fn a_pull_in_flight_keeps_other_branch_work_off_the_worktree() {
+        let (store, branch) = setup_branch_store();
+        claim_pull(&store, &branch.id);
+
+        // A commit pipeline or a second git action requested mid-pull has to wait
+        // rather than race the fast-forward in the same worktree.
+        assert!(queue_pipeline(&store, &branch.id, PipelineKind::Rebase, None).is_some());
+        assert!(queue_push(&store, &branch.id, false).is_some());
+        assert!(queue_pull(&store, &branch.id).is_some());
+    }
+
+    #[test]
+    fn finishing_an_immediate_pull_frees_the_branch_and_records_the_failure() {
+        let (store, branch) = setup_branch_store();
+
+        let ok = claim_pull(&store, &branch.id);
+        finish_immediate_pull_session(&store, &ok, None);
+        let completed = store.get_session(&ok).unwrap().unwrap();
+        assert_eq!(completed.status, store::SessionStatus::Completed);
+        assert!(!store.has_running_session_for_branch(&branch.id).unwrap());
+
+        let failed_id = claim_pull(&store, &branch.id);
+        finish_immediate_pull_session(
+            &store,
+            &failed_id,
+            Some("Cannot pull with uncommitted changes"),
+        );
+        let failed = store.get_session(&failed_id).unwrap().unwrap();
+        assert_eq!(failed.status, store::SessionStatus::Error);
+        assert_eq!(
+            failed.error_message.as_deref(),
+            Some("Cannot pull with uncommitted changes")
+        );
+        assert!(!store.has_running_session_for_branch(&branch.id).unwrap());
     }
 
     #[test]

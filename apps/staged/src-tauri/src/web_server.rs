@@ -2326,8 +2326,13 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
             // Returns the queued session id, or null when the pull ran now.
-            let queued_session_id =
-                crate::prs::pull_or_queue_branch_for_branch(store, branch_id).await?;
+            let queued_session_id = crate::prs::pull_or_queue_branch_for_branch(
+                store,
+                Arc::clone(session_registry),
+                app_handle.clone(),
+                branch_id,
+            )
+            .await?;
             Ok(serde_json::to_value(queued_session_id).unwrap())
         }
         "reset_branch_to_remote" => {

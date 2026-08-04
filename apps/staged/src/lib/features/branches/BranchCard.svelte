@@ -63,6 +63,7 @@
   import {
     fileNameFromPath,
     formatBaseBranch,
+    isGitActionInFlight,
     isMaybeTextFile,
     isImageFile,
   } from './branchCardHelpers';
@@ -329,7 +330,35 @@
     );
   }
   let commandPipelinePending = $state(false);
-  let branchSessionBusy = $derived(timeline ? hasActiveSessions(timeline) : false);
+
+  // Push and pull state is sourced from the global stores so it survives the
+  // BranchCard remount that happens when the user switches projects and back.
+  // Both are read up here, above the handlers that use them, because a push or
+  // pull is branch work `hasActiveSessions` cannot see: neither creates a
+  // timeline artifact.
+  let storePushState = $derived(pushStateStore.getPushState(branch.id));
+  let storePullState = $derived(pullStateStore.getPullState(branch.id));
+  /** A git action of our own is running or waiting on the branch queue. */
+  let gitPipelineInFlight = $derived(
+    isGitActionInFlight({
+      push: storePushState,
+      pull: storePullState,
+      immediatePull: pullingOrigin,
+    })
+  );
+  /**
+   * True when the branch has work in flight that a new action queues behind.
+   *
+   * Folding the git actions in matters for the gates that read this: without them
+   * the frontend reads a mid-push branch as idle and keeps disabling actions the
+   * backend would happily queue. The opposite skew — a timeline that still shows a
+   * session which has just finished — is unavoidable from here; it costs an
+   * immediate pull that fails with "Cannot pull with uncommitted changes" instead
+   * of a disabled button.
+   */
+  let branchSessionBusy = $derived(
+    (timeline ? hasActiveSessions(timeline) : false) || gitPipelineInFlight
+  );
 
   /** Timeline label the backend gives a queued rebase/squash pipeline session. */
   const branchCommandLabels = { rebase: 'Rebase branch', squash: 'Squash commits' } as const;
@@ -1018,9 +1047,9 @@
   }
 
   // A queued pull outlives this component (it drains when the branch frees up),
-  // so its state lives in the global pullStateStore alongside pushState. The
-  // immediate pull stays local: it is awaited right here.
-  let storePullState = $derived(pullStateStore.getPullState(branch.id));
+  // so its state lives in the global pullStateStore (read as `storePullState`
+  // above, alongside pushState). The immediate pull stays local: it is awaited
+  // right here.
   /** Pull is waiting on the branch session queue rather than running. */
   let pullQueuedOrigin = $derived(storePullState?.state === 'queued');
   let pullSessionId = $derived(storePullState?.sessionId ?? null);
@@ -1070,6 +1099,49 @@
     }
   }
 
+  /**
+   * Fallback polling for a pull on the branch queue, mirroring the push poller in
+   * BranchCardPrButton.
+   *
+   * A queued pull is drained headless, so `session-status-changed` is the only
+   * thing that moves it off "Pull queued" and reports a failure. If that event is
+   * missed the badge sticks until the user clicks Cancel and a failed pull loses
+   * its toast, so poll the session too. The effect tracks `storePullState`, so
+   * whichever of the two gets there first tears the other down.
+   */
+  $effect(() => {
+    const sessionId = storePullState?.sessionId;
+    if (!sessionId) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const session = await commands.getSession(sessionId);
+        if (session?.status === 'queued') return;
+        if (session?.status === 'running') {
+          pullStateStore.markQueuedPullStarted(branch.id, sessionId);
+          return;
+        }
+        pullStateStore.clearPullState(branch.id);
+        if (session?.status === 'error') {
+          notifyError(
+            'Pull failed',
+            session.errorMessage ?? 'The queued pull could not fast-forward this branch.'
+          );
+        }
+        commands.invalidateBranchTimeline(branch.id);
+        await loadTimeline();
+      } catch (e) {
+        console.error(
+          `[BranchCard] Lost track of pull session ${sessionId} for branch ${branch.id}:`,
+          e
+        );
+        pullStateStore.clearPullState(branch.id);
+      }
+    }, 5_000);
+
+    return () => clearInterval(interval);
+  });
+
   function formatCommitCount(count: number, noun = 'commit'): string {
     return `${count} ${noun}${count === 1 ? '' : 's'}`;
   }
@@ -1112,12 +1184,9 @@
     }
   }
 
-  // Push state is sourced from the global pushStateStore so it survives the
-  // BranchCard remount that happens when the user switches projects and back.
-  // The store is shared with BranchCardPrButton (single entry per branch.id),
-  // updated by the global sessionStatusListener on completion, and covered by
-  // a 5s polling fallback in BranchCardPrButton.
-  let storePushState = $derived(pushStateStore.getPushState(branch.id));
+  // `storePushState` (read above) is shared with BranchCardPrButton (single entry
+  // per branch.id), updated by the global sessionStatusListener on completion, and
+  // covered by a 5s polling fallback in BranchCardPrButton.
   let pushingOrigin = $derived(storePushState?.state === 'pushing');
   /** Push is waiting on the branch session queue rather than running. */
   let pushQueuedOrigin = $derived(storePushState?.state === 'queued');

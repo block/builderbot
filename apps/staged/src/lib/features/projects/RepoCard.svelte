@@ -5,11 +5,13 @@
 
   The card is the full repo path (rendered by the shared RepoLabel, wrapped over
   as many lines as it needs) above a row of actions: new project, run or clone,
-  pin toggle, and a menu with the local-clone openers. Card tint, border and
-  accent all come from the repo's badge hue.
+  pin toggle, and a more menu carrying every repo action plus the local-clone
+  openers. Card tint, border and accent all come from the repo's badge hue.
 
   Pass `reorderable` to make the card a drag-to-reorder handle (the sidebar's
-  pinned list); the drag callbacks are only wired up in that mode.
+  pinned list); the drag callbacks are only wired up in that mode. Pass
+  `hidePinButton` to drop the pin toggle from the action row (the sidebar keeps
+  unpin in the more menu only).
 -->
 <script lang="ts">
   import Plus from '@lucide/svelte/icons/plus';
@@ -47,6 +49,8 @@
     repo: RepoHomeItem;
     /** Called after this card pins, unpins or clones the repo. */
     onChange?: () => void;
+    /** Drop the pin toggle from the action row; pin/unpin stays in the more menu. */
+    hidePinButton?: boolean;
     /** Turn the card into a drag-to-reorder handle. */
     reorderable?: boolean;
     onReorderStart?: (e: DragEvent) => void;
@@ -58,6 +62,7 @@
   let {
     repo,
     onChange,
+    hidePinButton = false,
     reorderable = false,
     onReorderStart,
     onReorderOver,
@@ -83,7 +88,7 @@
 
   /** Resolve the clone path and opener apps the first time the menu opens. */
   async function loadCloneDetails() {
-    if (cloneDetailsLoaded) return;
+    if (!repo.hasLocalClone || cloneDetailsLoaded) return;
     cloneDetailsLoaded = true;
     try {
       const [apps, path] = await Promise.all([
@@ -104,6 +109,14 @@
         detail: { githubRepo: repo.githubRepo, subpath: repo.subpath },
       })
     );
+  }
+
+  function handleRun() {
+    // Run primary action — requires backend wiring (run action against main clone)
+    toast.info('Run action', {
+      description: 'Running actions against repos is coming soon.',
+      duration: 2000,
+    });
   }
 
   async function handleClone() {
@@ -232,11 +245,7 @@
         aria-label="Run"
         onclick={(e) => {
           e.stopPropagation();
-          // Run primary action — requires backend wiring (run action against main clone)
-          toast.info('Run action', {
-            description: 'Running actions against repos is coming soon.',
-            duration: 2000,
-          });
+          handleRun();
         }}
       >
         <Play size={12} />
@@ -262,45 +271,67 @@
       </span>
     {/if}
 
-    <Button
-      variant="ghost"
-      class={[
-        'size-[22px] rounded-[4px] p-0 hover:bg-[var(--card-bg-strong)] [&_svg]:!size-3',
-        repo.pinned
-          ? 'text-[var(--accent)] hover:text-[var(--accent)]'
-          : 'text-[var(--text-faint)] hover:text-[var(--text-primary)]',
-      ]}
-      title={repo.pinned ? 'Unpin repo' : 'Pin repo'}
-      aria-label={repo.pinned ? 'Unpin repo' : 'Pin repo'}
-      disabled={togglingPin}
-      onclick={(e) => {
-        e.stopPropagation();
-        handleTogglePin();
-      }}
-    >
-      {#if togglingPin}
-        <Spinner size={12} />
-      {:else if repo.pinned}
-        <Pin size={12} />
-      {:else}
-        <PinOff size={12} />
-      {/if}
-    </Button>
-
-    {#if repo.hasLocalClone}
-      <DropdownMenu.Root
-        onOpenChange={(open) => {
-          if (open) void loadCloneDetails();
+    {#if !hidePinButton}
+      <Button
+        variant="ghost"
+        class={[
+          'size-[22px] rounded-[4px] p-0 hover:bg-[var(--card-bg-strong)] [&_svg]:!size-3',
+          repo.pinned
+            ? 'text-[var(--accent)] hover:text-[var(--accent)]'
+            : 'text-[var(--text-faint)] hover:text-[var(--text-primary)]',
+        ]}
+        title={repo.pinned ? 'Unpin repo' : 'Pin repo'}
+        aria-label={repo.pinned ? 'Unpin repo' : 'Pin repo'}
+        disabled={togglingPin}
+        onclick={(e) => {
+          e.stopPropagation();
+          handleTogglePin();
         }}
       >
-        <DropdownMenu.Trigger
-          class="inline-flex size-[22px] items-center justify-center rounded-[4px] bg-transparent text-[var(--text-secondary)] transition-colors hover:bg-[var(--card-bg-strong)] hover:text-[var(--text-primary)]"
-          title="More options"
-          aria-label="More options"
-        >
-          <MoreVertical size={12} />
-        </DropdownMenu.Trigger>
-        <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[172px]">
+        {#if togglingPin}
+          <Spinner size={12} />
+        {:else if repo.pinned}
+          <Pin size={12} />
+        {:else}
+          <PinOff size={12} />
+        {/if}
+      </Button>
+    {/if}
+
+    <DropdownMenu.Root
+      onOpenChange={(open) => {
+        if (open) void loadCloneDetails();
+      }}
+    >
+      <DropdownMenu.Trigger
+        class="inline-flex size-[22px] items-center justify-center rounded-[4px] bg-transparent text-[var(--text-secondary)] transition-colors hover:bg-[var(--card-bg-strong)] hover:text-[var(--text-primary)]"
+        title="More options"
+        aria-label="More options"
+      >
+        <MoreVertical size={12} />
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Content align="end" sideOffset={4} class="min-w-[172px]">
+        <DropdownMenu.Item onSelect={openNewProjectForRepo}>
+          <Plus size={14} /> New Project
+        </DropdownMenu.Item>
+        {#if repo.hasLocalClone}
+          <DropdownMenu.Item onSelect={handleRun}>
+            <Play size={14} /> Run
+          </DropdownMenu.Item>
+        {:else}
+          <DropdownMenu.Item disabled={cloning} onSelect={handleClone}>
+            <Download size={14} /> Clone Repo
+          </DropdownMenu.Item>
+        {/if}
+        <DropdownMenu.Item disabled={togglingPin} onSelect={handleTogglePin}>
+          {#if repo.pinned}
+            <PinOff size={14} /> Unpin Repo
+          {:else}
+            <Pin size={14} /> Pin Repo
+          {/if}
+        </DropdownMenu.Item>
+        {#if repo.hasLocalClone}
+          <DropdownMenu.Separator />
           {#if clonePath}
             {@const path = clonePath}
             {#if openerApps.length > 0}
@@ -332,9 +363,9 @@
           {:else}
             <DropdownMenu.Item disabled>Loading…</DropdownMenu.Item>
           {/if}
-        </DropdownMenu.Content>
-      </DropdownMenu.Root>
-    {/if}
+        {/if}
+      </DropdownMenu.Content>
+    </DropdownMenu.Root>
   </div>
 </div>
 

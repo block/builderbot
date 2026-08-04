@@ -1,9 +1,10 @@
 <!--
   ReposListView.svelte - Full grid view of all repos with search and pin management.
 
-  Shows pinned repos first (by sort order), then unpinned (by project count).
-  Each card is the shared RepoCard, so the grid carries the same repo path label
-  and action row as the pinned repos in the projects sidebar.
+  Splits the repos into a "Pinned repos" section (by sort order) and an
+  "All repos" section for the unpinned rest (by project count). Each card is the
+  shared RepoCard, so the grid carries the same repo path label and action row
+  as the pinned repos in the projects sidebar.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -35,6 +36,9 @@
         (r.subpath && r.subpath.toLowerCase().includes(q))
     );
   });
+
+  let pinnedRepos = $derived(filteredRepos.filter((r) => r.pinned));
+  let unpinnedRepos = $derived(filteredRepos.filter((r) => !r.pinned));
 
   onMount(() => {
     void projectsDataStore.ensureHomeReposLoaded();
@@ -73,16 +77,22 @@
       {:else if filteredRepos.length === 0}
         <div class="state">No repos yet.</div>
       {:else}
-        <div class="repos-grid">
-          {#each filteredRepos as repo (repoKey(repo))}
-            <div class="repo-card-wrapper">
+        {#if pinnedRepos.length > 0}
+          <h2 class="section-title">Pinned repos</h2>
+          <div class="repos-grid">
+            {#each pinnedRepos as repo (repoKey(repo))}
               <RepoCard {repo} onChange={handleRepoChange} />
-              {#if repo.pinned}
-                <div class="card-label">Pinned</div>
-              {/if}
-            </div>
-          {/each}
-        </div>
+            {/each}
+          </div>
+        {/if}
+        {#if unpinnedRepos.length > 0}
+          <h2 class="section-title">All repos</h2>
+          <div class="repos-grid">
+            {#each unpinnedRepos as repo (repoKey(repo))}
+              <RepoCard {repo} onChange={handleRepoChange} />
+            {/each}
+          </div>
+        {/if}
       {/if}
     </div>
   </div>
@@ -142,27 +152,22 @@
     padding: 16px 2px;
   }
 
+  .section-title {
+    margin: 0 0 10px;
+    font-size: var(--size-md);
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+
+  .repos-grid + .section-title {
+    margin-top: 24px;
+  }
+
   .repos-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     grid-auto-rows: 1fr;
     gap: 12px;
-  }
-
-  .repo-card-wrapper {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .repo-card-wrapper > :global(.repo-card) {
-    flex: 1;
-  }
-
-  .card-label {
-    color: var(--text-faint);
-    font-size: var(--size-xs);
-    padding: 0 4px;
   }
 
   @media (max-width: 900px) {

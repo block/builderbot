@@ -437,6 +437,7 @@
               {#each pinnedRepos as repo, index (repo.githubRepo + '\t' + repo.subpath)}
                 <RepoCard
                   {repo}
+                  hidePinButton
                   reorderable
                   onReorderStart={handleDragStart(index)}
                   onReorderOver={handleDragOver(index)}

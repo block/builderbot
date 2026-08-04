@@ -64,15 +64,19 @@ If you installed manually (not via the install script), copy `scripts/staged` to
 
 ### AI Agent Setup (ACP)
 
-Staged discovers ACP providers by CLI command name. For Claude Code ACP:
+Staged manages the Claude Code and Codex ACP bridges itself: on every launch
+it installs (or upgrades) them into `~/.staged/packages` on a Staged-managed
+Node.js runtime, so no host Node or manual `npm install` is needed. The first
+launch downloads them, which requires network access; after that they work
+offline. Other agents (Goose, Pi, copilot, amp) are discovered by CLI command
+name on your PATH, and **Settings -> Doctor** can install the npm-based ones
+into the same Staged-private prefix.
 
-```bash
-npm install -g @zed-industries/claude-agent-acp
-```
+Open **Settings -> Doctor** to verify agent checks are detected as installed.
 
-This package installs the `claude-agent-acp` executable.
-
-After installing, open Staged and run **Settings -> Doctor** to verify the Claude check is detected as installed.
+To develop against a local bridge checkout, export `STAGED_ACP_TOOLS_DIR`
+pointing at a directory with the bridge binaries — this disables the managed
+installs and resolves bridges from that directory instead.
 
 ## Development
 

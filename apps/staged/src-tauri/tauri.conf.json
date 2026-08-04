@@ -44,8 +44,7 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "resources/pikchr/grammar.md",
-      "resources/acp"
+      "resources/pikchr/grammar.md"
     ],
     "macOS": {
       "infoPlist": "Info.plist"

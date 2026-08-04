@@ -167,9 +167,11 @@
       {check.label}
     </span>
     <span class="check-message">{check.message}</span>
+    <!-- "Managed by Staged": resolved from the managed bridge shim dir,
+         whose installs and updates Staged owns — no manual update nag. -->
     {#if check.path}
       {#if check.main?.bundled}
-        <span class="check-path">Bundled with Staged</span>
+        <span class="check-path">Managed by Staged</span>
       {:else}
         <span class="check-path">{check.path}</span>
       {/if}
@@ -177,7 +179,7 @@
     {/if}
     {#if check.bridgePath}
       {#if check.bridge?.bundled}
-        <span class="check-path">Bundled with Staged</span>
+        <span class="check-path">Managed by Staged</span>
       {:else}
         <span class="check-path">{check.bridgePath}</span>
       {/if}

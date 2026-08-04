@@ -5,6 +5,7 @@
 
 pub(crate) mod acp_config;
 pub mod acp_tools;
+pub mod acp_tools_reconciler;
 pub mod actions;
 pub mod agent;
 pub mod background_sync;
@@ -16,6 +17,8 @@ pub mod doctor;
 pub mod git;
 pub mod github_commands;
 pub mod image_commands;
+pub mod managed_acp_tools;
+pub mod managed_node;
 pub mod migrations;
 pub mod note_commands;
 pub mod paths;
@@ -1871,12 +1874,21 @@ pub fn run() {
         )
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
-            // Register the bundled ACP bridge tools dir before any command
+            // Register the primary ACP bridge tools dir before any command
             // runs so binary resolution (session spawn, provider discovery)
-            // prefers the pinned bridges Staged ships as resources.
-            if let Some(dir) = acp_tools::resolve_bundled_acp_tools_dir(app.handle()) {
+            // prefers the managed bridge shims (or the STAGED_ACP_TOOLS_DIR
+            // dev override) over user-installed copies. The shim dir path is
+            // stable even before the first reconcile writes shims —
+            // find_command probes per call and falls through to PATH until
+            // then.
+            if let Some(dir) = acp_tools::primary_tools_dir() {
                 acp_client::set_bundled_tools_dir(dir);
             }
+
+            // Install/upgrade the managed ACP bridges in the background at
+            // launch and once a day thereafter; the renderer refreshes doctor +
+            // provider discovery on each completion event.
+            acp_tools_reconciler::spawn_reconcile_loop(app.handle());
 
             let updater_pubkey_present = app
                 .config()

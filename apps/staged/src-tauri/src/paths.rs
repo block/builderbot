@@ -21,6 +21,15 @@ pub fn clone_path_for(github_repo: &str) -> Option<PathBuf> {
     repos_dir().map(|d| d.join(github_repo))
 }
 
+/// Root for app-managed runtime packages (the managed Node.js runtime and,
+/// eventually, npm-installed ACP bridges): `~/.staged/packages/`
+///
+/// Shared by every running Staged instance; mutations must hold the
+/// cross-process lock (see `managed_node`).
+pub fn packages_dir() -> Option<PathBuf> {
+    data_dir().map(|d| d.join("packages"))
+}
+
 /// Root directory for workspace-scoped local data: `~/.staged/workspaces/`
 pub fn workspaces_dir() -> Option<PathBuf> {
     data_dir().map(|d| d.join("workspaces"))

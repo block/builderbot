@@ -486,10 +486,6 @@ pub fn start_session(
 
     let cancel_token = registry.register(&config.session_id);
 
-    // Resolve the bundled ACP tools dir before the AppHandle moves into the
-    // session thread; the snapshots built there prepend it to the agent PATH.
-    let bundled_acp_tools_dir = crate::acp_tools::resolve_bundled_acp_tools_dir(&app_handle);
-
     // The agent protocol may use !Send futures, so we spin up a dedicated
     // thread with its own single-threaded Tokio runtime + LocalSet.
     let session_id_for_status = config.session_id.clone();
@@ -520,24 +516,20 @@ pub fn start_session(
             // cwd capture failure is non-fatal: log it and let the driver fall
             // back to spawning `$SHELL -ils` and exec'ing the agent.
             //
-            // Both snapshots are shaped through `apply_bundled_tools_env`
-            // after capture, so the bundled ACP bridges win over
+            // Both snapshots are shaped through `apply_managed_tools_env`
+            // after capture, so the managed ACP bridges win over
             // user-installed copies (and over `GOOSE_SEARCH_PATHS` values
             // from the user's shell) for the agent and everything it spawns.
             let driver = if config.workspace_name.is_none() {
                 let cache = shell_env_cache();
                 let mut home_snapshot =
                     crate::shell_env::home_env_vars_with_extended_path(cache.as_ref()).await;
-                if let Some(dir) = bundled_acp_tools_dir.as_deref() {
-                    crate::acp_tools::apply_bundled_tools_env(&mut home_snapshot, dir);
-                }
+                crate::acp_tools::apply_managed_tools_env(&mut home_snapshot);
                 let driver = driver.with_interpreter_env_snapshot(home_snapshot);
                 match cache.get(&config.working_dir).await {
                     Ok(snapshot) => {
                         let mut vars = snapshot.vars().to_vec();
-                        if let Some(dir) = bundled_acp_tools_dir.as_deref() {
-                            crate::acp_tools::apply_bundled_tools_env(&mut vars, dir);
-                        }
+                        crate::acp_tools::apply_managed_tools_env(&mut vars);
                         driver.with_env_snapshot(vars)
                     }
                     Err(e) => {

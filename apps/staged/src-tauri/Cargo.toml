@@ -81,6 +81,24 @@ resvg = "0.47"
 usvg = "0.47"
 tiny-skia = "0.12"
 
+# Managed Node.js runtime: tarball extraction for runtime installs
+tar = "0.4"
+flate2 = "1"
+
+[features]
+# no-block-npm-registry: downloads the managed Node.js runtime from upstream
+# nodejs.org instead of Block's Artifactory mirror, and lets npm-backed
+# doctor checks and fixes use npm's default public registry instead of
+# Artifactory's square-npm proxy.
+no-block-npm-registry = []
+
+# no-managed-acp-tools: compiles the managed ACP bridge set empty for
+# restricted builds — the startup reconciler installs nothing, doctor fixes
+# fall back to the doctor crate's regular commands, and the managed shim dir
+# is hidden from PATH prepends so shims another build left in the shared
+# ~/.staged/packages tree cannot resolve.
+no-managed-acp-tools = []
+
 # Debug binaries archived — uncomment when needed
 # [[bin]]
 # name = "debug_diff"

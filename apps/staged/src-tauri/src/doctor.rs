@@ -1,8 +1,6 @@
 //! Tauri command wrappers for the doctor health-check system.
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::Duration;
 
 pub use doctor::types::{AuthStatus, InstallSource};
 pub use doctor::{
@@ -11,18 +9,22 @@ pub use doctor::{
 };
 
 /// Environment snapshot for doctor checks and fixes. Shaped through
-/// `apply_bundled_tools_env` so checks resolve binaries from the same PATH
-/// the agent spawn path uses — a bridge Staged bundles must never be
+/// `apply_managed_tools_env` so checks resolve binaries from the same PATH
+/// the agent spawn path uses — a bridge Staged manages must never be
 /// reported missing (or prompt an install) just because the user has no
-/// global copy.
-async fn doctor_env_vars(bundled_dir: Option<&Path>) -> Vec<(String, String)> {
+/// global copy. The managed npm env is overlaid on top, so checks probe npm
+/// state (`npm prefix -g`, version lookups) with the same private-prefix view
+/// the fixes install into — a check never contradicts the fix that just ran.
+async fn doctor_env_vars() -> Vec<(String, String)> {
     let mut env_vars = crate::shell_env::home_env_vars_with_extended_path(
         crate::session_runner::shell_env_cache().as_ref(),
     )
     .await;
-    if let Some(dir) = bundled_dir {
-        crate::acp_tools::apply_bundled_tools_env(&mut env_vars, dir);
-    }
+    crate::acp_tools::apply_managed_tools_env(&mut env_vars);
+    crate::managed_acp_tools::apply_managed_npm_env(
+        &mut env_vars,
+        &crate::managed_acp_tools::managed_npm_env(),
+    );
     env_vars
 }
 
@@ -34,14 +36,16 @@ fn run_checks_options(
     RunChecksOptions {
         check_freshness,
         offline: false,
-        // Use the default public registries — Staged installs these agents
-        // from public npm/brew/crates.io, not an internal mirror.
-        npm_registry: None,
+        // npm-backed checks and fixes route through Block's Artifactory
+        // square-npm proxy (registry.npmjs.org is blocked on managed
+        // devices); `no-block-npm-registry` builds fall back to npm's
+        // default public registry.
+        npm_registry: crate::managed_acp_tools::npm_registry().map(str::to_string),
         env: None,
         // Doctor labels binaries resolved from this dir as bundled (install
         // source + readout flag) and suppresses registry update fixes for
-        // them — versions are pinned by acp-tools.lock.json and ship with
-        // Staged updates.
+        // them — the startup reconciler floats the managed shims to @latest,
+        // so Staged owns their updates.
         bundled_tools_dir: bundled_dir,
     }
     .with_env_snapshot(env_vars)
@@ -53,7 +57,7 @@ fn execute_fix_options(
 ) -> ExecuteFixOptions {
     ExecuteFixOptions {
         command_override,
-        npm_registry: None,
+        npm_registry: crate::managed_acp_tools::npm_registry().map(str::to_string),
         env: None,
     }
     .with_env_snapshot(env_vars)
@@ -66,8 +70,8 @@ fn execute_fix_options(
 /// The frontend calls this first for an instant paint, then follows up with
 /// [`run_doctor_freshness`] to fill in version/update information.
 #[tauri::command]
-pub async fn run_doctor(app_handle: tauri::AppHandle) -> DoctorReport {
-    run_doctor_report(&app_handle, false).await
+pub async fn run_doctor() -> DoctorReport {
+    run_doctor_report(false).await
 }
 
 /// Run all health checks with version freshness enabled.
@@ -78,24 +82,23 @@ pub async fn run_doctor(app_handle: tauri::AppHandle) -> DoctorReport {
 /// `updateAvailable`, and the source-aware `updateCommand`/`updateFixType` on
 /// each readout. Hits the network, so it must never block first paint.
 #[tauri::command]
-pub async fn run_doctor_freshness(app_handle: tauri::AppHandle) -> DoctorReport {
-    run_doctor_report(&app_handle, true).await
+pub async fn run_doctor_freshness() -> DoctorReport {
+    run_doctor_report(true).await
 }
 
 /// Run the doctor crate's checks plus Staged-local ones (currently the
-/// bundled ACP Node.js runtime check) over one shared env snapshot. Bundled
+/// managed Node.js runtime check) over one shared env snapshot. Bundled
 /// readouts are labeled by the doctor crate itself via
 /// `RunChecksOptions::bundled_tools_dir`.
-async fn run_doctor_report(app_handle: &tauri::AppHandle, check_freshness: bool) -> DoctorReport {
-    let bundled_dir = crate::acp_tools::resolve_bundled_acp_tools_dir(app_handle);
-    let env_vars = doctor_env_vars(bundled_dir.as_deref()).await;
+async fn run_doctor_report(check_freshness: bool) -> DoctorReport {
+    let env_vars = doctor_env_vars().await;
     let (mut report, node_runtime) = tokio::join!(
         doctor::run_checks_with_options(run_checks_options(
             check_freshness,
             env_vars.clone(),
-            bundled_dir.clone(),
+            crate::acp_tools::primary_tools_dir(),
         )),
-        run_node_runtime_check(&env_vars, bundled_dir.as_deref()),
+        run_node_runtime_check(),
     );
     if let Some(check) = node_runtime {
         report.checks.push(check);
@@ -106,17 +109,67 @@ async fn run_doctor_report(app_handle: &tauri::AppHandle, check_freshness: bool)
 /// Run a fix for a doctor check, identified by check ID and fix type.
 ///
 /// The actual shell command is looked up from the static check definitions —
-/// the caller never sends a raw command string.
+/// the caller never sends a raw command string. Two families of fixes are
+/// native rather than shell commands: the node-runtime fix (re)installs the
+/// pinned managed runtime, and install fixes for the managed ACP bridges run
+/// the floating managed installer so the bridge lands in
+/// `~/.staged/packages/tools` with an absolute-path shim instead of the
+/// crate's `npm install -g`. Remaining npm-backed fixes install the managed
+/// runtime first, since they run npm from it into the private prefix (the
+/// existing "Running…" spinner covers the one-time download).
 #[tauri::command]
-pub async fn run_doctor_fix(
-    app_handle: tauri::AppHandle,
-    check_id: String,
-    fix_type: FixType,
-) -> Result<(), String> {
-    let bundled_dir = crate::acp_tools::resolve_bundled_acp_tools_dir(&app_handle);
-    let env_vars = doctor_env_vars(bundled_dir.as_deref()).await;
+pub async fn run_doctor_fix(check_id: String, fix_type: FixType) -> Result<(), String> {
+    if check_id == NODE_RUNTIME_CHECK_ID {
+        return ensure_managed_node_runtime_for_fix().await;
+    }
+    if matches!(fix_type, FixType::Command | FixType::Bridge) {
+        if let Some(tool_id) = managed_tool_for_check(&check_id) {
+            return install_managed_tool_logged(tool_id, &check_id).await;
+        }
+    }
+    let env_vars = doctor_env_vars().await;
+    if doctor::agents::lookup_fix_command(&check_id, &fix_type)
+        .as_deref()
+        .is_some_and(crate::managed_acp_tools::is_npm_backed_command)
+    {
+        ensure_managed_node_runtime_for_fix().await?;
+    }
     doctor::execute_fix_with_env_options(check_id, fix_type, execute_fix_options(None, env_vars))
         .await
+}
+
+/// The managed ACP bridge behind a doctor check id, when this build manages
+/// it. `None` routes the check to the doctor crate's regular fix commands —
+/// which is also the correct fallback whenever bridge management is off (dev
+/// override, `no-managed-acp-tools`, unsupported target).
+fn managed_tool_for_check(check_id: &str) -> Option<&'static str> {
+    let tool_id = match check_id {
+        "ai-agent-claude" => "claude-acp",
+        "ai-agent-codex" => "codex-acp",
+        _ => return None,
+    };
+    crate::managed_acp_tools::managed_tool(tool_id).map(|tool| tool.id)
+}
+
+/// Install (or float-upgrade) a managed bridge for a doctor fix/update.
+/// Progress goes to the log — doctor fixes have no streamed-output channel,
+/// only a button spinner.
+async fn install_managed_tool_logged(tool_id: &str, check_id: &str) -> Result<(), String> {
+    let log_prefix = format!("[doctor fix {check_id}]");
+    crate::managed_acp_tools::install_managed_tool(tool_id, &|line| {
+        log::info!("{log_prefix} {line}");
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
+/// Install (or repair) the managed Node.js runtime ahead of a fix that needs
+/// it. Progress goes to the log — doctor fixes have no streamed-output
+/// channel, only a button spinner.
+async fn ensure_managed_node_runtime_for_fix() -> Result<(), String> {
+    crate::managed_node::ensure_managed_node_runtime()
+        .await
+        .map_err(|error| error.to_string())
 }
 
 /// Run a source-aware update for a single readout (main CLI or ACP bridge).
@@ -133,20 +186,39 @@ pub async fn run_doctor_fix(
 /// validated against the authoritative backend derivation.
 #[tauri::command]
 pub async fn run_doctor_update(
-    app_handle: tauri::AppHandle,
     check_id: String,
     fix_type: FixType,
     command: String,
 ) -> Result<(), String> {
-    let bundled_dir = crate::acp_tools::resolve_bundled_acp_tools_dir(&app_handle);
-    let env_vars = doctor_env_vars(bundled_dir.as_deref()).await;
-    let expected =
-        expected_update_command(&check_id, &fix_type, env_vars.clone(), bundled_dir).await?;
+    // Updates for the managed ACP bridges are the floating installer itself
+    // (`<pkg>@latest` onto the managed runtime) — no shell command runs, so
+    // the frontend-supplied command needs no validation here. Readouts
+    // resolved from the managed shim dir derive no update command at all
+    // (they are labeled bundled), so this arm only fires for a bridge copy
+    // that resolved elsewhere (e.g. a user install found on PATH before the
+    // first reconcile lands) — and the managed install is the correct
+    // upgrade for that state too.
+    if let Some(tool_id) = managed_tool_for_check(&check_id) {
+        return install_managed_tool_logged(tool_id, &check_id).await;
+    }
+    let env_vars = doctor_env_vars().await;
+    let expected = expected_update_command(
+        &check_id,
+        &fix_type,
+        env_vars.clone(),
+        crate::acp_tools::primary_tools_dir(),
+    )
+    .await?;
     if expected != command {
         return Err(format!(
             "Update command mismatch for {check_id}: refusing to run a command \
              that does not match the backend-derived update command."
         ));
+    }
+    // npm-backed updates run the managed npm into the private prefix, so the
+    // managed runtime must exist before the command does.
+    if crate::managed_acp_tools::is_npm_backed_command(&expected) {
+        ensure_managed_node_runtime_for_fix().await?;
     }
     // Run the backend-derived `expected`, not the frontend-supplied `command`.
     // They are equal past the guard above, but executing `expected` makes the
@@ -192,242 +264,130 @@ async fn expected_update_command(
 }
 
 // =============================================================================
-// Bundled ACP Node.js runtime check
+// Managed Node.js runtime check
 // =============================================================================
 
 const NODE_RUNTIME_CHECK_ID: &str = "node-runtime";
 const NODE_RUNTIME_CHECK_LABEL: &str = "Node.js Runtime";
-const NODE_RUNTIME_FIX_URL: &str = "https://nodejs.org/en/download";
-const NODE_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// On-disk shape of `resources/acp/node-runtime.json`, written by
-/// `scripts/prepare-acp-tools-resource.sh` while staging npm-sourced ACP
-/// bridges. Each tool carries its own required Node major so bridges with
-/// different engine ranges are checked independently.
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct NodeRuntimeManifest {
-    #[serde(default)]
-    tools: Vec<NodeRuntimeTool>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct NodeRuntimeTool {
-    binary: String,
-    #[serde(default)]
-    node_engine: Option<String>,
-    required_node_major: u32,
-}
-
-impl NodeRuntimeTool {
-    fn requirement_label(&self) -> String {
-        self.node_engine
-            .clone()
-            .unwrap_or_else(|| format!(">={}", self.required_node_major))
-    }
-}
-
-enum NodeRuntimeManifestState {
-    /// No manifest next to the bundled tools dir: no npm-sourced bridges are
-    /// bundled, so the check stays silent.
+/// Disk states of the Staged-managed Node.js runtime the check reports on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ManagedNodeRuntimeState {
+    /// The pinned version is installed and answers the readiness probe.
+    Ready,
+    /// The pinned install dir exists but the probe fails — a crashed install
+    /// or damaged tree that a reinstall repairs.
+    Broken,
+    /// The pinned version is not on disk (fresh profile, or a pin bump left
+    /// only a superseded version behind).
     Missing,
-    Invalid {
-        path: PathBuf,
-        error: String,
-    },
-    Loaded {
-        path: PathBuf,
-        manifest: NodeRuntimeManifest,
-    },
 }
 
-fn load_node_runtime_manifest(bundled_bin_dir: Option<&Path>) -> NodeRuntimeManifestState {
-    let Some(path) = bundled_bin_dir.and_then(crate::acp_tools::node_runtime_manifest_path) else {
-        return NodeRuntimeManifestState::Missing;
+/// Report the state of the Staged-managed Node.js runtime that npm-installed
+/// agent tools run on, with a native fix that (re)installs the pinned
+/// version (`run_doctor_fix` routes this check id to
+/// `ensure_managed_node_runtime`). Silent when there is nothing to report:
+/// an unsupported target, or a runtime that was never installed and no
+/// Staged-installed npm tools that would need it.
+async fn run_node_runtime_check() -> Option<DoctorCheck> {
+    let node_root = crate::managed_node::managed_node_root()?;
+    let install_dir = crate::managed_node::pinned_install_dir(&node_root)?;
+    let state = if crate::managed_node::pinned_runtime_ready(&node_root).await {
+        ManagedNodeRuntimeState::Ready
+    } else if install_dir.exists() {
+        ManagedNodeRuntimeState::Broken
+    } else {
+        ManagedNodeRuntimeState::Missing
     };
-    let contents = match std::fs::read(&path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return NodeRuntimeManifestState::Missing;
-        }
-        Err(error) => {
-            return NodeRuntimeManifestState::Invalid {
-                path,
-                error: format!("failed to read manifest: {error}"),
-            };
-        }
+    // Both install families depend on the runtime: the private-prefix npm
+    // tools (copilot, amp-acp) and the managed bridge shims, whose embedded
+    // node paths break silently without it.
+    let mut npm_tools: Vec<String> = [
+        crate::managed_acp_tools::npm_prefix_bin_dir(),
+        crate::managed_acp_tools::managed_shim_bin_dir(),
+    ]
+    .into_iter()
+    .flatten()
+    .flat_map(|dir| installed_npm_tool_names(&dir))
+    .collect();
+    npm_tools.sort();
+    npm_tools.dedup();
+    build_node_runtime_check(state, &install_dir, &npm_tools)
+}
+
+/// Names of the bin shims npm wrote into the Staged-private prefix — the
+/// tools that need the managed runtime to run at all.
+fn installed_npm_tool_names(bin_dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(bin_dir) else {
+        return Vec::new();
     };
-    match serde_json::from_slice::<NodeRuntimeManifest>(&contents) {
-        Ok(manifest) => NodeRuntimeManifestState::Loaded { path, manifest },
-        Err(error) => NodeRuntimeManifestState::Invalid {
-            path,
-            error: format!("failed to parse manifest JSON: {error}"),
-        },
-    }
-}
-
-/// Surface the bundled ACP bridges' Node.js runtime requirement at setup
-/// time instead of letting the first session spawn die with a bare exit 127
-/// (the bundled bridges are bash shims that exec node). Returns `None` when
-/// no npm-sourced bridges are bundled; an unreadable manifest warns instead
-/// of silently hiding a packaging break.
-async fn run_node_runtime_check(
-    env_vars: &[(String, String)],
-    bundled_bin_dir: Option<&Path>,
-) -> Option<DoctorCheck> {
-    let (manifest_path, manifest) = match load_node_runtime_manifest(bundled_bin_dir) {
-        NodeRuntimeManifestState::Missing => return None,
-        NodeRuntimeManifestState::Invalid { path, error } => {
-            return Some(node_runtime_doctor_check(
-                CheckStatus::Warn,
-                "Bundled ACP bridge Node.js manifest is unreadable; bridge runtime requirements cannot be verified".to_string(),
-                Some(path.display().to_string()),
-                Some(format!("error: {error}")),
-            ));
-        }
-        NodeRuntimeManifestState::Loaded { path, manifest } => (path, manifest),
-    };
-    if manifest.tools.is_empty() {
-        return None;
-    }
-
-    // Resolve node from the same PATH shape every other doctor check and the
-    // agent spawn path use, so this check cannot disagree with what the
-    // bundled wrapper shims will find at spawn time.
-    let path_value = env_vars
-        .iter()
-        .find(|(key, _)| key == "PATH")
-        .map(|(_, value)| value.as_str())
-        .unwrap_or_default();
-    let node_path = doctor::resolve::resolve_executable_from_path("node", path_value)
-        .map(|path| path.to_string_lossy().to_string());
-    let node_version = match node_path.as_deref() {
-        Some(path) => query_node_version(path).await,
-        None => None,
-    };
-
-    Some(build_node_runtime_check(
-        &manifest_path,
-        &manifest.tools,
-        node_path,
-        node_version,
-    ))
-}
-
-async fn query_node_version(node_path: &str) -> Option<String> {
-    let mut command = tokio::process::Command::new(node_path);
-    command
-        .args(["-p", "process.versions.node"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let output = tokio::time::timeout(NODE_PROBE_TIMEOUT, command.output())
-        .await
-        .ok()?
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(String::from)
-}
-
-fn parse_node_major(version: &str) -> Option<u32> {
-    version
-        .trim()
-        .trim_start_matches('v')
-        .split('.')
-        .next()?
-        .parse()
-        .ok()
-}
-
-fn node_requirement_summary<'a>(tools: impl IntoIterator<Item = &'a NodeRuntimeTool>) -> String {
-    tools
-        .into_iter()
-        .map(|tool| format!("{} needs Node.js {}", tool.binary, tool.requirement_label()))
-        .collect::<Vec<_>>()
-        .join(", ")
+    entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| !name.starts_with('.'))
+        .collect()
 }
 
 fn build_node_runtime_check(
-    manifest_path: &Path,
-    tools: &[NodeRuntimeTool],
-    node_path: Option<String>,
-    node_version: Option<String>,
-) -> DoctorCheck {
-    let node_major = node_version.as_deref().and_then(parse_node_major);
-    let unmet: Vec<&NodeRuntimeTool> = match node_major {
-        Some(major) => tools
-            .iter()
-            .filter(|tool| major < tool.required_node_major)
-            .collect(),
-        None => Vec::new(),
-    };
-
-    let (status, message) = if node_path.is_none() {
-        (
-            CheckStatus::Warn,
-            format!(
-                "Node.js was not found on PATH; bundled ACP bridges require it ({})",
-                node_requirement_summary(tools)
-            ),
-        )
-    } else if node_major.is_none() {
-        (
-            CheckStatus::Warn,
-            format!(
-                "Could not determine the Node.js version; bundled ACP bridges require it ({})",
-                node_requirement_summary(tools)
-            ),
-        )
-    } else if unmet.is_empty() {
-        (
+    state: ManagedNodeRuntimeState,
+    install_dir: &Path,
+    npm_tools: &[String],
+) -> Option<DoctorCheck> {
+    let version = &crate::managed_node::node_runtime_lock().version;
+    let (status, message) = match state {
+        ManagedNodeRuntimeState::Ready => (
             CheckStatus::Pass,
-            format!(
-                "Node.js {} satisfies the bundled ACP bridge requirements",
-                node_version.as_deref().unwrap_or("unknown")
-            ),
-        )
-    } else {
-        (
+            format!("Staged-managed Node.js {version} is installed"),
+        ),
+        ManagedNodeRuntimeState::Broken => (
+            CheckStatus::Warn,
+            format!("Staged-managed Node.js {version} is damaged; run the fix to reinstall it"),
+        ),
+        ManagedNodeRuntimeState::Missing if npm_tools.is_empty() => return None,
+        ManagedNodeRuntimeState::Missing => (
             CheckStatus::Warn,
             format!(
-                "Node.js {} is too old for bundled ACP bridges: {}",
-                node_version.as_deref().unwrap_or("unknown"),
-                node_requirement_summary(unmet.iter().copied())
+                "Staged-managed Node.js {version} is not installed; Staged-installed agent tools require it"
             ),
-        )
+        ),
     };
 
+    let state_label = match state {
+        ManagedNodeRuntimeState::Ready => "ready",
+        ManagedNodeRuntimeState::Broken => "broken",
+        ManagedNodeRuntimeState::Missing => "missing",
+    };
     let mut detail = vec![
-        "checked: bundled ACP bridge Node.js runtime requirement".to_string(),
-        format!("manifest: {}", manifest_path.display()),
-        format!(
-            "node: {}",
-            node_path.as_deref().unwrap_or("not found on PATH")
-        ),
-        format!("version: {}", node_version.as_deref().unwrap_or("unknown")),
-        "requirements:".to_string(),
+        "checked: Staged-managed Node.js runtime".to_string(),
+        format!("pinned version: {version}"),
+        format!("install dir: {}", install_dir.display()),
+        format!("state: {state_label}"),
     ];
-    for tool in tools {
-        let verdict = match node_major {
-            Some(major) if major >= tool.required_node_major => "satisfied",
-            Some(_) => "unmet",
-            None => "unknown",
-        };
-        detail.push(format!(
-            "- {}: requires Node.js {} [{verdict}]",
-            tool.binary,
-            tool.requirement_label()
-        ));
+    if npm_tools.is_empty() {
+        detail.push("Staged-installed npm tools: none".to_string());
+    } else {
+        detail.push("Staged-installed npm tools:".to_string());
+        detail.extend(npm_tools.iter().map(|name| format!("- {name}")));
     }
 
-    node_runtime_doctor_check(status, message, node_path, Some(detail.join("\n")))
+    let node_path = (state == ManagedNodeRuntimeState::Ready)
+        .then(|| install_dir.join("bin").join("node").display().to_string());
+    // Native fix: `run_doctor_fix` routes this check id to
+    // `ensure_managed_node_runtime`. The command string is what the fix
+    // confirmation dialog displays, not a shell command.
+    let fix = (status != CheckStatus::Pass).then(|| {
+        (
+            FixType::Command,
+            format!("download and install Node.js {version} into ~/.staged/packages"),
+        )
+    });
+    Some(node_runtime_doctor_check(
+        status,
+        message,
+        node_path,
+        Some(detail.join("\n")),
+        fix,
+    ))
 }
 
 fn node_runtime_doctor_check(
@@ -435,16 +395,17 @@ fn node_runtime_doctor_check(
     message: String,
     path: Option<String>,
     raw_output: Option<String>,
+    fix: Option<(FixType, String)>,
 ) -> DoctorCheck {
+    let (fix_type, fix_command) = fix.map(|(t, c)| (Some(t), Some(c))).unwrap_or((None, None));
     DoctorCheck {
         id: NODE_RUNTIME_CHECK_ID.to_string(),
         label: NODE_RUNTIME_CHECK_LABEL.to_string(),
         status,
         message,
-        // Only rendered by the frontend for non-pass statuses.
-        fix_url: Some(NODE_RUNTIME_FIX_URL.to_string()),
-        fix_command: None,
-        fix_type: None,
+        fix_url: None,
+        fix_command,
+        fix_type,
         path,
         bridge_path: None,
         raw_output,
@@ -463,205 +424,139 @@ fn node_runtime_doctor_check(
 mod tests {
     use super::*;
 
-    fn node_tool(binary: &str, engine: &str, major: u32) -> NodeRuntimeTool {
-        NodeRuntimeTool {
-            binary: binary.to_string(),
-            node_engine: Some(engine.to_string()),
-            required_node_major: major,
-        }
+    fn pinned_version() -> String {
+        crate::managed_node::node_runtime_lock().version.clone()
     }
 
     #[test]
-    fn node_runtime_check_passes_when_all_bridges_are_satisfied() {
-        let tools = [
-            node_tool("claude-agent-acp", ">=22", 22),
-            node_tool("codex-acp", ">=20", 20),
-        ];
-
+    fn ready_runtime_passes_without_a_fix() {
         let check = build_node_runtime_check(
-            Path::new("/resources/acp/node-runtime.json"),
-            &tools,
-            Some("/usr/local/bin/node".to_string()),
-            Some("22.17.0".to_string()),
-        );
+            ManagedNodeRuntimeState::Ready,
+            Path::new("/data/packages/node/v9.9.9/plat"),
+            &["copilot".to_string()],
+        )
+        .expect("ready runtime is reported");
 
         assert_eq!(check.status, CheckStatus::Pass);
         assert_eq!(
             check.message,
-            "Node.js 22.17.0 satisfies the bundled ACP bridge requirements"
+            format!("Staged-managed Node.js {} is installed", pinned_version())
         );
-        assert_eq!(check.path.as_deref(), Some("/usr/local/bin/node"));
+        assert_eq!(
+            check.path.as_deref(),
+            Some("/data/packages/node/v9.9.9/plat/bin/node")
+        );
+        assert!(check.fix_type.is_none());
+        assert!(check.fix_command.is_none());
+        assert!(check.fix_url.is_none());
         let output = check.raw_output.as_deref().expect("raw output");
-        assert!(output.contains("manifest: /resources/acp/node-runtime.json"));
-        assert!(output.contains("- claude-agent-acp: requires Node.js >=22 [satisfied]"));
-        assert!(output.contains("- codex-acp: requires Node.js >=20 [satisfied]"));
+        assert!(output.contains("state: ready"));
+        assert!(output.contains("- copilot"));
     }
 
     #[test]
-    fn node_runtime_check_warns_only_for_bridges_with_unmet_majors() {
-        // Bridges may require different Node majors; a Node 21 runtime
-        // satisfies codex (>=20) but not claude (>=22).
-        let tools = [
-            node_tool("claude-agent-acp", ">=22", 22),
-            node_tool("codex-acp", ">=20", 20),
-        ];
-
+    fn damaged_runtime_warns_with_a_native_reinstall_fix() {
         let check = build_node_runtime_check(
-            Path::new("/resources/acp/node-runtime.json"),
-            &tools,
-            Some("/usr/local/bin/node".to_string()),
-            Some("21.7.3".to_string()),
-        );
+            ManagedNodeRuntimeState::Broken,
+            Path::new("/data/packages/node/v9.9.9/plat"),
+            &[],
+        )
+        .expect("damaged runtime is reported");
 
         assert_eq!(check.status, CheckStatus::Warn);
-        assert_eq!(
-            check.message,
-            "Node.js 21.7.3 is too old for bundled ACP bridges: claude-agent-acp needs Node.js >=22"
-        );
-        assert!(!check.message.contains("codex-acp"));
-        let output = check.raw_output.as_deref().expect("raw output");
-        assert!(output.contains("- claude-agent-acp: requires Node.js >=22 [unmet]"));
-        assert!(output.contains("- codex-acp: requires Node.js >=20 [satisfied]"));
-    }
-
-    #[test]
-    fn node_runtime_check_warns_when_node_is_missing() {
-        let tools = [
-            node_tool("claude-agent-acp", ">=22", 22),
-            node_tool("codex-acp", ">=20", 20),
-        ];
-
-        let check = build_node_runtime_check(
-            Path::new("/resources/acp/node-runtime.json"),
-            &tools,
-            None,
-            None,
-        );
-
-        assert_eq!(check.status, CheckStatus::Warn);
-        assert_eq!(
-            check.message,
-            "Node.js was not found on PATH; bundled ACP bridges require it (claude-agent-acp needs Node.js >=22, codex-acp needs Node.js >=20)"
-        );
+        assert!(check.message.contains("is damaged"));
         assert!(check.path.is_none());
-        assert_eq!(
-            check.fix_url.as_deref(),
-            Some("https://nodejs.org/en/download")
-        );
+        assert_eq!(check.fix_type, Some(FixType::Command));
+        let fix_command = check.fix_command.as_deref().expect("fix command");
+        assert!(fix_command.contains(&pinned_version()));
+        assert!(fix_command.contains("~/.staged/packages"));
+        let output = check.raw_output.as_deref().expect("raw output");
+        assert!(output.contains("state: broken"));
+        assert!(output.contains("Staged-installed npm tools: none"));
     }
 
     #[test]
-    fn node_runtime_check_warns_when_version_is_unknown() {
-        let tools = [node_tool("claude-agent-acp", ">=22", 22)];
-
+    fn missing_runtime_warns_only_when_installed_tools_need_it() {
+        // Tools installed into the private prefix need the runtime: warn with
+        // the reinstall fix.
         let check = build_node_runtime_check(
-            Path::new("/resources/acp/node-runtime.json"),
-            &tools,
-            Some("/usr/local/bin/node".to_string()),
-            None,
-        );
-
+            ManagedNodeRuntimeState::Missing,
+            Path::new("/data/packages/node/v9.9.9/plat"),
+            &["amp-acp".to_string(), "copilot".to_string()],
+        )
+        .expect("needed-but-missing runtime is reported");
         assert_eq!(check.status, CheckStatus::Warn);
-        assert!(check
-            .message
-            .starts_with("Could not determine the Node.js version"));
-        assert!(check
-            .message
-            .contains("claude-agent-acp needs Node.js >=22"));
-    }
+        assert!(check.message.contains("is not installed"));
+        assert_eq!(check.fix_type, Some(FixType::Command));
+        let output = check.raw_output.as_deref().expect("raw output");
+        assert!(output.contains("- amp-acp"));
+        assert!(output.contains("- copilot"));
 
-    #[test]
-    fn node_runtime_manifest_loads_from_bundled_dir_parent() {
-        let dir = tempfile::tempdir().unwrap();
-        let bin_dir = dir.path().join("bin");
-        std::fs::create_dir(&bin_dir).unwrap();
-        std::fs::write(
-            dir.path().join("node-runtime.json"),
-            r#"{"tools":[{"id":"claude-acp","binary":"claude-agent-acp","nodeEngine":">=22","requiredNodeMajor":22},{"id":"codex-acp","binary":"codex-acp","nodeEngine":">=20","requiredNodeMajor":20}]}"#,
+        // Nothing installed that needs it: stay silent.
+        assert!(build_node_runtime_check(
+            ManagedNodeRuntimeState::Missing,
+            Path::new("/data/packages/node/v9.9.9/plat"),
+            &[],
         )
-        .unwrap();
-
-        let NodeRuntimeManifestState::Loaded { path, manifest } =
-            load_node_runtime_manifest(Some(&bin_dir))
-        else {
-            panic!("expected manifest to load");
-        };
-
-        assert_eq!(path, dir.path().join("node-runtime.json"));
-        assert_eq!(manifest.tools.len(), 2);
-        assert_eq!(manifest.tools[0].binary, "claude-agent-acp");
-        assert_eq!(manifest.tools[0].required_node_major, 22);
-        assert_eq!(manifest.tools[1].required_node_major, 20);
+        .is_none());
     }
 
     #[test]
-    fn node_runtime_manifest_missing_or_invalid() {
-        assert!(matches!(
-            load_node_runtime_manifest(None),
-            NodeRuntimeManifestState::Missing
-        ));
-
+    fn installed_npm_tool_names_lists_visible_entries_only() {
         let dir = tempfile::tempdir().unwrap();
-        let bin_dir = dir.path().join("bin");
-        std::fs::create_dir(&bin_dir).unwrap();
-        assert!(matches!(
-            load_node_runtime_manifest(Some(&bin_dir)),
-            NodeRuntimeManifestState::Missing
-        ));
+        std::fs::write(dir.path().join("copilot"), "").unwrap();
+        std::fs::write(dir.path().join(".copilot.tmp"), "").unwrap();
 
-        std::fs::write(dir.path().join("node-runtime.json"), "not json").unwrap();
-        assert!(matches!(
-            load_node_runtime_manifest(Some(&bin_dir)),
-            NodeRuntimeManifestState::Invalid { .. }
-        ));
+        let names = installed_npm_tool_names(dir.path());
+        assert_eq!(names, vec!["copilot".to_string()]);
+
+        // An absent dir reads as no tools, not an error.
+        assert!(installed_npm_tool_names(&dir.path().join("absent")).is_empty());
     }
 
-    #[tokio::test]
-    async fn node_runtime_check_runs_end_to_end_from_manifest() {
-        let dir = tempfile::tempdir().unwrap();
-        let bin_dir = dir.path().join("bin");
-        std::fs::create_dir(&bin_dir).unwrap();
-        std::fs::write(
-            dir.path().join("node-runtime.json"),
-            r#"{"tools":[{"id":"claude-acp","binary":"claude-agent-acp","nodeEngine":">=0","requiredNodeMajor":0}]}"#,
-        )
-        .unwrap();
-        let env_vars = vec![("PATH".to_string(), std::env::var("PATH").unwrap())];
-
-        let check = run_node_runtime_check(&env_vars, Some(&bin_dir))
-            .await
-            .expect("check emitted for npm-bundled bridges");
-
-        assert_eq!(check.id, "node-runtime");
-        // With a zero required major any resolvable Node passes; on a host
-        // without Node the check still surfaces as a warning instead of
-        // vanishing.
-        if check.path.is_some() {
-            assert_eq!(check.status, CheckStatus::Pass);
-        } else {
-            assert_eq!(check.status, CheckStatus::Warn);
-        }
-
-        assert!(run_node_runtime_check(&env_vars, None).await.is_none());
-    }
-
-    #[test]
-    fn parse_node_major_handles_plain_and_prefixed_versions() {
-        assert_eq!(parse_node_major("22.17.0"), Some(22));
-        assert_eq!(parse_node_major("v20.11.1\n"), Some(20));
-        assert_eq!(parse_node_major("not-a-version"), None);
-        assert_eq!(parse_node_major(""), None);
-    }
-
-    /// Bundled-readout labeling lives in the doctor crate now; Staged's job is
-    /// only to hand the resolved bundled dir into the run options.
+    /// Bundled-readout labeling lives in the doctor crate; Staged's job is
+    /// only to hand the managed shim dir into the run options.
     #[test]
     fn run_checks_options_carries_bundled_tools_dir() {
-        let dir = PathBuf::from("/bundle/resources/acp/bin");
+        let dir = PathBuf::from("/data/packages/bin");
         let opts = run_checks_options(false, Vec::new(), Some(dir.clone()));
         assert_eq!(opts.bundled_tools_dir, Some(dir));
 
         let opts = run_checks_options(false, Vec::new(), None);
         assert!(opts.bundled_tools_dir.is_none());
+    }
+
+    /// Fixes and updates for the two bridge checks route to the managed
+    /// installer exactly when this build manages bridges; every other check
+    /// keeps the doctor crate's regular fix commands.
+    #[test]
+    fn managed_bridge_checks_route_to_the_managed_installer() {
+        let managed = crate::managed_acp_tools::managed_tools_enabled();
+        assert_eq!(
+            managed_tool_for_check("ai-agent-claude"),
+            managed.then_some("claude-acp")
+        );
+        assert_eq!(
+            managed_tool_for_check("ai-agent-codex"),
+            managed.then_some("codex-acp")
+        );
+        assert_eq!(managed_tool_for_check("ai-agent-copilot"), None);
+        assert_eq!(managed_tool_for_check("ai-agent-amp"), None);
+        assert_eq!(managed_tool_for_check(NODE_RUNTIME_CHECK_ID), None);
+    }
+
+    /// Checks and fixes must agree on the registry: both option builders take
+    /// it from the same `managed_acp_tools::npm_registry()` gate.
+    #[test]
+    fn doctor_options_route_npm_through_the_managed_registry() {
+        let expected = crate::managed_acp_tools::npm_registry().map(str::to_string);
+        assert_eq!(
+            run_checks_options(false, Vec::new(), None).npm_registry,
+            expected
+        );
+        assert_eq!(execute_fix_options(None, Vec::new()).npm_registry, expected);
+        if !cfg!(feature = "no-block-npm-registry") {
+            assert!(expected.is_some());
+        }
     }
 }

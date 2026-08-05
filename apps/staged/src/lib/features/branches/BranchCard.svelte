@@ -62,6 +62,7 @@
   import { Button } from '$lib/components/ui/button';
   import {
     createPollFailureTracker,
+    createQueuedSessionCanceller,
     fileNameFromPath,
     formatBaseBranch,
     isGitActionInFlight,
@@ -1085,18 +1086,21 @@
    *
    * The store entry is cleared here rather than by the completion listener: a
    * session that never ran isn't in the session registry, so its cancellation
-   * event carries no pull session type to match on.
+   * event carries no pull session type to match on. It waits for the backend to
+   * confirm the cancellation — see `createQueuedSessionCanceller`.
    */
+  const runCancelQueuedPull = createQueuedSessionCanceller({
+    cancel: (sessionId) => commands.cancelSession(sessionId),
+    clearState: () => pullStateStore.clearPullState(branch.id),
+    onError: (e) => notifyError('Could not cancel queued pull', e),
+  });
+
   async function cancelQueuedPull() {
     const sessionId = pullSessionId;
     if (!pullQueuedOrigin || !sessionId) return;
-    pullStateStore.clearPullState(branch.id);
-    try {
-      await commands.cancelSession(sessionId);
+    if (await runCancelQueuedPull(sessionId)) {
       commands.invalidateBranchTimeline(branch.id);
       await loadTimeline();
-    } catch (e) {
-      notifyError('Could not cancel queued pull', e);
     }
   }
 
@@ -1231,18 +1235,21 @@
    *
    * The store entry is cleared here rather than by the completion listener: a
    * session that never ran isn't in the session registry, so its cancellation
-   * event carries no push session type to match on.
+   * event carries no push session type to match on. It waits for the backend to
+   * confirm the cancellation — see `createQueuedSessionCanceller`.
    */
+  const runCancelQueuedPush = createQueuedSessionCanceller({
+    cancel: (sessionId) => commands.cancelSession(sessionId),
+    clearState: () => pushStateStore.clearPushState(branch.id),
+    onError: (e) => notifyError('Could not cancel queued push', e),
+  });
+
   async function cancelQueuedPush() {
     const sessionId = pushSessionId;
     if (!pushQueuedOrigin || !sessionId || sessionId === '__pending__') return;
-    pushStateStore.clearPushState(branch.id);
-    try {
-      await commands.cancelSession(sessionId);
+    if (await runCancelQueuedPush(sessionId)) {
       commands.invalidateBranchTimeline(branch.id);
       await loadTimeline();
-    } catch (e) {
-      notifyError('Could not cancel queued push', e);
     }
   }
 

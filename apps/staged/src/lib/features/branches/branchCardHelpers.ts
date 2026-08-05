@@ -58,6 +58,44 @@ export function createPollFailureTracker(
   };
 }
 
+/**
+ * Cancel a queued git action, clearing its store entry only once the backend
+ * confirms.
+ *
+ * `cancel_session` answers `Ok` for a session it cannot find, one that already
+ * finished, and one already cancelled — so a rejection only ever means the request
+ * never arrived (a web-mode network blip, the backend restarting, a laptop waking).
+ * That is precisely when the queued session still exists, so the badge and its
+ * Cancel button have to survive: clearing first would hide a session that goes on
+ * to drain, with no affordance left to call it off.
+ *
+ * The returned function is re-entrant-safe. Leaving the state set while the cancel
+ * is in flight means the call sites' own "still queued?" guards no longer stop a
+ * second click, so the in-flight flag does. It resets on failure, so retrying by
+ * clicking Cancel again works.
+ */
+export function createQueuedSessionCanceller(deps: {
+  cancel: (sessionId: string) => Promise<unknown>;
+  clearState: () => void;
+  onError: (error: unknown) => void;
+}): (sessionId: string) => Promise<boolean> {
+  let inFlight = false;
+  return async (sessionId: string): Promise<boolean> => {
+    if (inFlight) return false;
+    inFlight = true;
+    try {
+      await deps.cancel(sessionId);
+      deps.clearState();
+      return true;
+    } catch (e) {
+      deps.onError(e);
+      return false;
+    } finally {
+      inFlight = false;
+    }
+  };
+}
+
 export function groupActionsByType(actions: ProjectAction[]): Record<string, ProjectAction[]> {
   const groups: Record<string, ProjectAction[]> = {
     prerun: [],

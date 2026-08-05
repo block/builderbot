@@ -1,8 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   classifyCompletedPushSession,
   classifyPipelinePushCompletion,
   createPollFailureTracker,
+  createQueuedSessionCanceller,
   extractPrNumber,
   extractPrUrl,
   isGitActionInFlight,
@@ -268,5 +269,77 @@ describe('createPollFailureTracker', () => {
       expect(tracker.recordFailure()).toBe(false);
     }
     expect(tracker.recordFailure()).toBe(true);
+  });
+});
+
+describe('createQueuedSessionCanceller', () => {
+  it('clears the state only after the backend confirms the cancellation', async () => {
+    let confirmCancel: () => void = () => {};
+    const cancel = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          confirmCancel = resolve;
+        })
+    );
+    const clearState = vi.fn();
+    const onError = vi.fn();
+    const run = createQueuedSessionCanceller({ cancel, clearState, onError });
+
+    const pending = run('session-1');
+    await Promise.resolve();
+    expect(cancel).toHaveBeenCalledWith('session-1');
+    expect(clearState).not.toHaveBeenCalled();
+
+    confirmCancel();
+    expect(await pending).toBe(true);
+    expect(clearState).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('keeps the state when the cancel request never reaches the backend', async () => {
+    const failure = new Error('network unreachable');
+    const clearState = vi.fn();
+    const onError = vi.fn();
+    const run = createQueuedSessionCanceller({
+      cancel: () => Promise.reject(failure),
+      clearState,
+      onError,
+    });
+
+    expect(await run('session-1')).toBe(false);
+    expect(clearState).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(failure);
+  });
+
+  it('ignores a second click while the first cancel is still in flight', async () => {
+    let confirmCancel: () => void = () => {};
+    const cancel = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          confirmCancel = resolve;
+        })
+    );
+    const run = createQueuedSessionCanceller({ cancel, clearState: () => {}, onError: () => {} });
+
+    const first = run('session-1');
+    expect(await run('session-1')).toBe(false);
+    expect(cancel).toHaveBeenCalledTimes(1);
+
+    confirmCancel();
+    expect(await first).toBe(true);
+  });
+
+  it('lets the user retry by clicking again after a failure', async () => {
+    const cancel = vi
+      .fn<(sessionId: string) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('network unreachable'))
+      .mockResolvedValueOnce(undefined);
+    const clearState = vi.fn();
+    const run = createQueuedSessionCanceller({ cancel, clearState, onError: () => {} });
+
+    expect(await run('session-1')).toBe(false);
+    expect(await run('session-1')).toBe(true);
+    expect(cancel).toHaveBeenCalledTimes(2);
+    expect(clearState).toHaveBeenCalledTimes(1);
   });
 });

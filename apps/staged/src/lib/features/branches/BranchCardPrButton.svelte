@@ -6,6 +6,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { toast } from 'svelte-sonner';
   import GitPullRequestCreateArrow from '@lucide/svelte/icons/git-pull-request-create-arrow';
   import GitPullRequestArrow from '@lucide/svelte/icons/git-pull-request-arrow';
   import GitPullRequestDraft from '@lucide/svelte/icons/git-pull-request-draft';
@@ -27,6 +28,7 @@
     classifyCompletedPushSession,
     classifyPipelinePushCompletion,
     createPollFailureTracker,
+    createQueuedSessionCanceller,
     extractPrNumber,
     extractPrUrl,
     type CompletedPushOutcome,
@@ -536,16 +538,29 @@
    *
    * The store entry is cleared here rather than in the completion handler: a
    * session that never ran isn't in the session registry, so the cancellation
-   * event carries no push session type for `sessionStatusListener` to match.
+   * event carries no push session type for `sessionStatusListener` to match. It
+   * waits for the backend to confirm the cancellation — see
+   * `createQueuedSessionCanceller`.
+   *
+   * A failure is toasted rather than pushed into `setPushError`: the push is still
+   * queued, so flipping this button to "Push failed" would both misreport its state
+   * and swap the Cancel affordance for a retry dialog.
    */
+  const runCancelQueuedPush = createQueuedSessionCanceller({
+    cancel: (sessionId) => commands.cancelSession(sessionId),
+    clearState: () => pushStateStore.clearPushState(branch.id),
+    onError: (e) =>
+      toast.error('Could not cancel queued push', {
+        description: e instanceof Error ? e.message : String(e),
+        duration: Infinity,
+      }),
+  });
+
   function cancelQueuedPush() {
     const sid = pushSessionId;
     if (pushState !== 'queued' || !sid || sid === '__pending__') return;
 
-    pushStateStore.clearPushState(branch.id);
-    commands.cancelSession(sid).catch((e) => {
-      pushStateStore.setPushError(branch.id, e instanceof Error ? e.message : String(e));
-    });
+    void runCancelQueuedPush(sid);
   }
 
   let pushCompletionInFlight = false;

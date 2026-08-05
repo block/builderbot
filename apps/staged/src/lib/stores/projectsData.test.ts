@@ -846,6 +846,106 @@ describe('project-delete lifecycle', () => {
     expect(store.projects).toHaveLength(1);
     expect(store.branchesByProject.has('p1')).toBe(true);
   });
+
+  it('discards an SWR revalidation that resolves after the delete', async () => {
+    const beta = project({ id: 'p2', name: 'Beta' });
+    let resolveFresh!: (value: Project[]) => void;
+    listProjects.mockResolvedValueOnce(
+      swr(
+        [project(), beta],
+        new Promise<Project[]>((resolve) => {
+          resolveFresh = resolve;
+        })
+      )
+    );
+    const store = await importStore();
+    await store.ensureLoaded();
+
+    store.projectDeleteStarted('p2', 'Beta');
+    store.projectDeleteFinished('p2', { removed: true });
+
+    // Fetched before the backend delete — applying it would resurrect p2.
+    resolveFresh([project(), beta]);
+    await tick();
+
+    expect(store.projects.map((p) => p.id)).toEqual(['p1']);
+    expect(store.branchesByProject.has('p2')).toBe(false);
+  });
+
+  it('discards a concurrent ensureLoaded revalidation that resolves after the delete', async () => {
+    const beta = project({ id: 'p2', name: 'Beta' });
+    listProjects.mockResolvedValue(swr([project(), beta]));
+    const store = await importStore();
+    await store.ensureLoaded();
+
+    let resolveReload!: (value: SwrResult<Project[]>) => void;
+    listProjects.mockReturnValueOnce(
+      new Promise<SwrResult<Project[]>>((resolve) => {
+        resolveReload = resolve;
+      })
+    );
+    await store.ensureLoaded(); // kicks the background revalidation
+
+    store.projectDeleteStarted('p2', 'Beta');
+    store.projectDeleteFinished('p2', { removed: true });
+
+    resolveReload(swr([project(), beta]));
+    await tick();
+
+    expect(store.projects.map((p) => p.id)).toEqual(['p1']);
+  });
+
+  it("discards refreshProject's list replacement racing the delete", async () => {
+    const beta = project({ id: 'p2', name: 'Beta' });
+    listProjects.mockResolvedValue(swr([project(), beta]));
+    const store = await importStore();
+    await store.ensureLoaded();
+
+    let resolveList!: (value: SwrResult<Project[]>) => void;
+    listProjects.mockReturnValueOnce(
+      new Promise<SwrResult<Project[]>>((resolve) => {
+        resolveList = resolve;
+      })
+    );
+    const refreshing = store.refreshProject('p1');
+
+    store.projectDeleteStarted('p2', 'Beta');
+    store.projectDeleteFinished('p2', { removed: true });
+
+    resolveList(swr([project(), beta]));
+    await refreshing;
+
+    expect(store.projects.map((p) => p.id)).toEqual(['p1']);
+  });
+
+  it('restarts the idle drip so un-hydrated projects still fill in after a delete', async () => {
+    listProjects.mockResolvedValue(swr([project(), project({ id: 'p2', name: 'Beta' })]));
+    const store = await importStore();
+    await store.ensureLoaded();
+    expect(store.isProjectHydrated('p1')).toBe(false);
+
+    store.projectDeleteStarted('p2', 'Beta');
+    store.projectDeleteFinished('p2', { removed: true });
+
+    await vi.waitFor(() => {
+      expect(store.isProjectHydrated('p1')).toBe(true);
+    });
+    expect(listBranchesForProject).not.toHaveBeenCalledWith('p2');
+  });
+
+  it('does not refetch already-hydrated projects after a delete', async () => {
+    listProjects.mockResolvedValue(swr([project(), project({ id: 'p2', name: 'Beta' })]));
+    const store = await importStore();
+    await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
+    listBranchesForProject.mockClear();
+
+    store.projectDeleteStarted('p2', 'Beta');
+    store.projectDeleteFinished('p2', { removed: true });
+    await tick();
+
+    expect(listBranchesForProject).not.toHaveBeenCalled();
+  });
 });
 
 describe('repoCountsByProject', () => {

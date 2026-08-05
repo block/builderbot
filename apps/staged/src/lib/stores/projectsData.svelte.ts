@@ -633,6 +633,14 @@ class ProjectsDataStore {
   }
 
   private removeProject(projectId: string): void {
+    // Bump the generation so any list or branch apply already in flight — an
+    // SWR `revalidating` promise, a concurrent ensureLoaded() revalidation,
+    // refreshProject's un-deduped list replacement — is discarded instead of
+    // resurrecting the project it fetched before the backend delete.
+    const generation = ++this.loadGeneration;
+    // In-flight hydrations are no-ops under the new generation; drop them so
+    // callers after the bump start fresh fetches.
+    this.hydrationInFlight.clear();
     this._projects = this._projects.filter((p) => p.id !== projectId);
     const branches = new Map(this._branchesByProject);
     branches.delete(projectId);
@@ -643,6 +651,14 @@ class ProjectsDataStore {
     const hydrated = new Map(this._hydratedProjects);
     hydrated.delete(projectId);
     this._hydratedProjects = hydrated;
+    // The bump halted the running idle drip too. Restart it for whatever is
+    // still un-hydrated — including a first hydration the bump just discarded
+    // — but not for hydrated projects: a delete doesn't stale their data, so
+    // this isn't the refetch-everything drip a fresh list apply schedules.
+    this.scheduleBackgroundHydration(
+      this._projects.filter((p) => !this._hydratedProjects.has(p.id)).map((p) => p.id),
+      generation
+    );
   }
 
   // ── Event listeners ──

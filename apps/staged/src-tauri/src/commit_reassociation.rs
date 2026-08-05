@@ -109,24 +109,7 @@ pub fn reassociate_after_rebase(
     working_dir: &Path,
     workspace_name: Option<&str>,
 ) -> Result<usize, String> {
-    let branch = store
-        .get_branch(branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-
-    let repo_subpath = match workspace_name {
-        Some(_) => crate::branches::resolve_branch_workspace_subpath(store, &branch)?,
-        None => None,
-    };
-    let git = |args: &[&str]| -> Result<String, String> {
-        match workspace_name {
-            Some(ws_name) => {
-                crate::branches::run_workspace_git(ws_name, repo_subpath.as_deref(), args)
-                    .map_err(|e| e.to_string())
-            }
-            None => crate::git::cli_run_smart(working_dir, args).map_err(|e| e.to_string()),
-        }
-    };
+    let (branch, git) = branch_git_runner(store, branch_id, working_dir, workspace_name)?;
 
     let branch_name = crate::git::branch_name_without_origin(&branch.branch_name);
     if !head_is_on_branch(&git, branch_name) {
@@ -193,6 +176,63 @@ pub fn reassociate_after_rebase(
     store
         .remap_commit_shas(branch_id, &pairs)
         .map_err(|e| e.to_string())
+}
+
+/// The git runner [`branch_git_runner`] hands back. Boxed rather than an `impl
+/// Fn`, since a named type keeps the return signature readable and every
+/// consumer here is generic over `Fn` anyway.
+type GitRunner<'a> = Box<dyn Fn(&[&str]) -> Result<String, String> + 'a>;
+
+/// Resolve the branch row and build the git runner the entry points share:
+/// local commands run in `working_dir`, remote ones through the branch's
+/// workspace (and its repo subpath).
+fn branch_git_runner<'a>(
+    store: &Store,
+    branch_id: &str,
+    working_dir: &'a Path,
+    workspace_name: Option<&'a str>,
+) -> Result<(crate::store::Branch, GitRunner<'a>), String> {
+    let branch = store
+        .get_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+
+    let repo_subpath = match workspace_name {
+        Some(_) => crate::branches::resolve_branch_workspace_subpath(store, &branch)?,
+        None => None,
+    };
+    let git = move |args: &[&str]| -> Result<String, String> {
+        match workspace_name {
+            Some(ws_name) => {
+                crate::branches::run_workspace_git(ws_name, repo_subpath.as_deref(), args)
+                    .map_err(|e| e.to_string())
+            }
+            None => crate::git::cli_run_smart(working_dir, args).map_err(|e| e.to_string()),
+        }
+    };
+    Ok((branch, Box::new(git)))
+}
+
+/// Whether HEAD is attached to this branch — i.e. no rebase is in flight
+/// (see [`head_is_on_branch`] for why that's the same question). For callers
+/// that need the answer *before* touching any rows, like the post-completion
+/// commit detection. Errors read as "not attached", the safe direction.
+pub fn head_is_attached_to_branch(
+    store: &Store,
+    branch_id: &str,
+    working_dir: &Path,
+    workspace_name: Option<&str>,
+) -> bool {
+    match branch_git_runner(store, branch_id, working_dir, workspace_name) {
+        Ok((branch, git)) => head_is_on_branch(
+            &git,
+            crate::git::branch_name_without_origin(&branch.branch_name),
+        ),
+        Err(e) => {
+            log::warn!("Failed to check whether HEAD is attached to branch {branch_id}: {e}");
+            false
+        }
+    }
 }
 
 /// Whether HEAD is the branch we're about to reassociate, rather than a

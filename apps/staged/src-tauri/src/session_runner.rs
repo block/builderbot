@@ -2371,79 +2371,110 @@ fn run_post_completion_hooks(
 
             match current_head_result {
                 Ok(current_head) if current_head != pre_sha => {
-                    log::info!(
-                        "Session {session_id}: new commit detected ({} → {})",
-                        &pre_sha[..7.min(pre_sha.len())],
-                        &current_head[..7.min(current_head.len())]
-                    );
                     // A rebase pipeline that handed off to AI (conflicts, a
                     // failed fetch) lands here instead of
-                    // `finalize_rebase_pipeline_without_ai`, but rewrote SHAs
-                    // just the same. Reattach the orphaned rows before the
-                    // pending row below claims the new HEAD — see that function
-                    // for why the ordering matters.
-                    if session_is_rebase_pipeline(store, session_id) {
-                        reassociate_rebased_commits(
+                    // `finalize_rebase_pipeline_without_ai`. If its turn ended
+                    // with the rebase still stopped on a conflict, HEAD is
+                    // detached on a partially applied commit — a SHA `git
+                    // rebase --abort` erases — so nothing may claim it: not
+                    // the pending row, not an amend, and no auto-review via
+                    // `committed_branch_id`. Skip the whole arm; the rows
+                    // self-resolve on a later turn, because resumed sessions
+                    // re-capture `pre_head_sha` and land back here once HEAD
+                    // is attached again (after `--continue` finishes or
+                    // `--abort` restores, reassociation plus the duplicate-SHA
+                    // branch of `complete_pending_commit_sha` settle every
+                    // row), while a turn that never comes leaves the pending
+                    // row `sha IS NULL` — an ordinary failed commit attempt.
+                    let rebase_pipeline = session_is_rebase_pipeline(store, session_id);
+                    if rebase_pipeline
+                        && !crate::commit_reassociation::head_is_attached_to_branch(
                             store,
                             &commit.branch_id,
                             working_dir,
                             workspace_name,
+                        )
+                    {
+                        log::info!(
+                            "Session {session_id}: rebase still in flight (HEAD detached), \
+                             leaving commit detection for a later turn"
                         );
-                    }
-                    let recorded = if commit.sha.is_none() {
-                        match store.complete_pending_commit_sha(
-                            &commit.id,
-                            &commit.branch_id,
-                            &current_head,
-                        ) {
-                            Ok(recorded) => recorded,
-                            Err(e) => {
-                                log::error!("Failed to update pending commit SHA: {e}");
-                                false
-                            }
-                        }
                     } else {
-                        match store.get_commit_by_sha(&commit.branch_id, &current_head) {
-                            Ok(Some(existing)) if existing.id != commit.id => {
-                                log::warn!(
-                                    "Session {session_id}: target commit SHA already has metadata row {}, skipping update",
-                                    existing.id
-                                );
-                                false
-                            }
-                            Ok(_) => {
-                                if let Err(e) = store.update_commit_sha(&commit.id, &current_head) {
-                                    log::error!("Failed to update commit SHA: {e}");
+                        log::info!(
+                            "Session {session_id}: new commit detected ({} → {})",
+                            &pre_sha[..7.min(pre_sha.len())],
+                            &current_head[..7.min(current_head.len())]
+                        );
+                        // The rebase rewrote SHAs just the same as the no-AI
+                        // path. Reattach the orphaned rows before the pending
+                        // row below claims the new HEAD — see
+                        // `finalize_rebase_pipeline_without_ai` for why the
+                        // ordering matters.
+                        if rebase_pipeline {
+                            reassociate_rebased_commits(
+                                store,
+                                &commit.branch_id,
+                                working_dir,
+                                workspace_name,
+                            );
+                        }
+                        let recorded = if commit.sha.is_none() {
+                            match store.complete_pending_commit_sha(
+                                &commit.id,
+                                &commit.branch_id,
+                                &current_head,
+                            ) {
+                                Ok(recorded) => recorded,
+                                Err(e) => {
+                                    log::error!("Failed to update pending commit SHA: {e}");
                                     false
-                                } else {
-                                    true
                                 }
                             }
-                            Err(e) => {
-                                log::error!("Failed to check existing commit SHA: {e}");
-                                false
+                        } else {
+                            match store.get_commit_by_sha(&commit.branch_id, &current_head) {
+                                Ok(Some(existing)) if existing.id != commit.id => {
+                                    log::warn!(
+                                        "Session {session_id}: target commit SHA already has metadata row {}, skipping update",
+                                        existing.id
+                                    );
+                                    false
+                                }
+                                Ok(_) => {
+                                    if let Err(e) =
+                                        store.update_commit_sha(&commit.id, &current_head)
+                                    {
+                                        log::error!("Failed to update commit SHA: {e}");
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                }
+                                Err(e) => {
+                                    log::error!("Failed to check existing commit SHA: {e}");
+                                    false
+                                }
                             }
-                        }
-                    };
+                        };
 
-                    if recorded {
-                        committed_branch_id = Some(commit.branch_id.clone());
+                        if recorded {
+                            committed_branch_id = Some(commit.branch_id.clone());
 
-                        // Spawn background diff caching for remote branches.
-                        if let Some(ws_name) = workspace_name {
-                            let commit_shas: Vec<String> = store
-                                .list_commits_for_branch(&commit.branch_id)
-                                .unwrap_or_default()
-                                .into_iter()
-                                .filter_map(|c| c.sha)
-                                .collect();
-                            crate::diff_cache::spawn_cache_branch_diff(
-                                Arc::clone(store),
-                                commit.branch_id.clone(),
-                                ws_name.to_string(),
-                                current_head.clone(),
-                                commit_shas,
-                            );
+                            // Spawn background diff caching for remote branches.
+                            if let Some(ws_name) = workspace_name {
+                                let commit_shas: Vec<String> = store
+                                    .list_commits_for_branch(&commit.branch_id)
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .filter_map(|c| c.sha)
+                                    .collect();
+                                crate::diff_cache::spawn_cache_branch_diff(
+                                    Arc::clone(store),
+                                    commit.branch_id.clone(),
+                                    ws_name.to_string(),
+                                    current_head.clone(),
+                                    commit_shas,
+                                );
+                            }
                         }
                     }
                 }
@@ -3865,14 +3896,22 @@ mod tests {
         assert_reassociated(&fixture);
     }
 
-    /// The handoff also runs when the agent's turn ends with the rebase still
-    /// stopped on a conflict. HEAD is detached on a partially applied rewrite
-    /// there, and those SHAs only survive until someone runs `git rebase
-    /// --abort` — which restores the originals — so reassociating onto them
-    /// would leave every row, and its reviews, naming commits on no branch at
-    /// all. The rows have to stay put until the rebase finishes.
-    #[test]
-    fn rebase_stopped_on_a_conflict_leaves_the_rows_alone() {
+    /// A branch like [`RebasedBranch`], except the rebase is still in flight:
+    /// the first commit rebased cleanly, the second stopped on a conflict,
+    /// leaving HEAD detached on the partially applied rewrite.
+    struct ConflictedRebase {
+        repo: crate::test_utils::TempGitRepo,
+        store: Arc<Store>,
+        /// `(session_id, commit_row_id)` for the authoring sessions, oldest first.
+        authored: Vec<(String, String)>,
+        pending_id: String,
+        review_id: String,
+        rebase_session_id: String,
+        old_first: String,
+        old_head: String,
+    }
+
+    fn conflicted_rebase() -> ConflictedRebase {
         use crate::store::{Commit, Review, ReviewScope, Session};
 
         let repo = crate::test_utils::TempGitRepo::new();
@@ -3894,7 +3933,7 @@ mod tests {
         let branch = crate::store::Branch::new(&project.id, "feature", "main");
         store.create_branch(&branch).unwrap();
 
-        let mut rows = Vec::new();
+        let mut authored = Vec::new();
         for (index, sha) in [&old_first, &old_head].into_iter().enumerate() {
             let session = Session::new_running("Author a commit", repo.path());
             store.create_session(&session).unwrap();
@@ -3902,7 +3941,7 @@ mod tests {
             row.created_at = 1_000 + index as i64;
             row.updated_at = row.created_at;
             store.create_commit(&row).unwrap();
-            rows.push(row.id);
+            authored.push((session.id, row.id));
         }
         let review = Review::new(&branch.id, &old_head, ReviewScope::Commit);
         store.create_review(&review).unwrap();
@@ -3930,26 +3969,165 @@ mod tests {
             "the stopped rebase must have moved HEAD off the branch"
         );
 
-        run_post_completion_hooks(
-            &rebase_session.id,
-            repo.path(),
-            Some(&old_head),
-            None,
-            &store,
-        );
+        ConflictedRebase {
+            repo,
+            store,
+            authored,
+            pending_id: pending.id,
+            review_id: review.id,
+            rebase_session_id: rebase_session.id,
+            old_first,
+            old_head,
+        }
+    }
 
+    /// End the handoff turn with the rebase still stopped on the conflict.
+    /// Returns the hooks' `committed_branch_id`, which must be `None` — a
+    /// mid-rebase state must not trigger the auto-review follow-up.
+    fn end_turn_mid_rebase(fixture: &ConflictedRebase) -> Option<String> {
+        run_post_completion_hooks(
+            &fixture.rebase_session_id,
+            fixture.repo.path(),
+            Some(&fixture.old_head),
+            None,
+            &fixture.store,
+        )
+    }
+
+    fn assert_untouched(fixture: &ConflictedRebase) {
+        let store = &fixture.store;
         assert_eq!(
-            store.get_commit(&rows[0]).unwrap().unwrap().sha.as_deref(),
-            Some(old_first.as_str()),
+            store
+                .get_commit(&fixture.authored[0].1)
+                .unwrap()
+                .unwrap()
+                .sha
+                .as_deref(),
+            Some(fixture.old_first.as_str()),
             "the first commit's row must keep the SHA an abort would restore"
         );
         assert_eq!(
-            store.get_commit(&rows[1]).unwrap().unwrap().sha.as_deref(),
-            Some(old_head.as_str())
+            store
+                .get_commit(&fixture.authored[1].1)
+                .unwrap()
+                .unwrap()
+                .sha
+                .as_deref(),
+            Some(fixture.old_head.as_str())
         );
         assert_eq!(
-            store.get_review(&review.id).unwrap().unwrap().commit_sha,
-            old_head
+            store
+                .get_review(&fixture.review_id)
+                .unwrap()
+                .unwrap()
+                .commit_sha,
+            fixture.old_head
+        );
+    }
+
+    /// The handoff also runs when the agent's turn ends with the rebase still
+    /// stopped on a conflict. HEAD is detached on a partially applied rewrite
+    /// there, and those SHAs only survive until someone runs `git rebase
+    /// --abort` — which restores the originals — so neither the authored rows
+    /// nor the rebase session's pending row may take one. The rows have to
+    /// stay put until the rebase finishes.
+    #[test]
+    fn rebase_stopped_on_a_conflict_leaves_the_rows_alone() {
+        let fixture = conflicted_rebase();
+
+        assert!(end_turn_mid_rebase(&fixture).is_none());
+
+        assert_untouched(&fixture);
+        let pending = fixture
+            .store
+            .get_commit(&fixture.pending_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            pending.sha.is_none(),
+            "the pending row must not claim the detached mid-rebase SHA"
+        );
+    }
+
+    /// The deferred pending row resolves on the next turn: the resumed session
+    /// re-captures HEAD (now the detached mid-rebase commit), the conflict is
+    /// resolved, and `--continue` finishes the rebase. The authored rows claim
+    /// the rewritten SHAs first, so the pending row drops as a duplicate —
+    /// the same end state as a rebase that never conflicted.
+    #[test]
+    fn rebase_resumed_and_finished_resolves_the_deferred_pending_row() {
+        let fixture = conflicted_rebase();
+        assert!(end_turn_mid_rebase(&fixture).is_none());
+
+        let repo = &fixture.repo;
+        let detached_head = repo.run_git(&["rev-parse", "HEAD"]).trim().to_string();
+        repo.write_file("shared.txt", "resolved\n");
+        repo.run_git(&["add", "shared.txt"]);
+        repo.run_git(&["-c", "core.editor=true", "rebase", "--continue"]);
+        let new_head = repo.run_git(&["rev-parse", "HEAD"]).trim().to_string();
+        let new_first = repo.run_git(&["rev-parse", "HEAD~1"]).trim().to_string();
+
+        run_post_completion_hooks(
+            &fixture.rebase_session_id,
+            repo.path(),
+            Some(&detached_head),
+            None,
+            &fixture.store,
+        );
+
+        let store = &fixture.store;
+        let first = store.get_commit(&fixture.authored[0].1).unwrap().unwrap();
+        assert_eq!(first.sha.as_deref(), Some(new_first.as_str()));
+        let head = store.get_commit(&fixture.authored[1].1).unwrap().unwrap();
+        assert_eq!(head.sha.as_deref(), Some(new_head.as_str()));
+        assert_eq!(
+            head.session_id.as_deref(),
+            Some(fixture.authored[1].0.as_str()),
+            "the head commit must keep its authoring session, not the rebase one"
+        );
+        assert_eq!(
+            store
+                .get_review(&fixture.review_id)
+                .unwrap()
+                .unwrap()
+                .commit_sha,
+            new_head
+        );
+        assert!(
+            store.get_commit(&fixture.pending_id).unwrap().is_none(),
+            "the deferred pending row must drop as a duplicate of the reclaimed head"
+        );
+    }
+
+    /// The other way out of the conflict: `--abort` restores the original
+    /// SHAs. The next turn sees HEAD attached again, reassociation finds no
+    /// orphans, and the pending row's claim on the old head hits the same
+    /// duplicate-resolution branch — dropped cleanly, rows untouched.
+    #[test]
+    fn rebase_resumed_and_aborted_drops_the_deferred_pending_row() {
+        let fixture = conflicted_rebase();
+        assert!(end_turn_mid_rebase(&fixture).is_none());
+
+        let repo = &fixture.repo;
+        let detached_head = repo.run_git(&["rev-parse", "HEAD"]).trim().to_string();
+        repo.run_git(&["rebase", "--abort"]);
+
+        run_post_completion_hooks(
+            &fixture.rebase_session_id,
+            repo.path(),
+            Some(&detached_head),
+            None,
+            &fixture.store,
+        );
+
+        assert_untouched(&fixture);
+        assert!(
+            fixture
+                .store
+                .get_commit(&fixture.pending_id)
+                .unwrap()
+                .is_none(),
+            "the deferred pending row must drop as a duplicate of the restored head"
         );
     }
 

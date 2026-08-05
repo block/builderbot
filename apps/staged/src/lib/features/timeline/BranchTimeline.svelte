@@ -19,6 +19,7 @@
     BranchGitState,
     BranchTimeline as BranchTimelineData,
     HashtagItem,
+    UpstreamRelation,
   } from '../../types';
   import type { NoteClickInfo } from '../sessions/noteFreshness';
   import TimelineRow from './TimelineRow.svelte';
@@ -40,6 +41,7 @@
     type PendingHintItemType,
   } from './liveSessionHints';
   import { isEmptyFailedReview } from './reviewState';
+  import { standaloneQueuedPullRowCopy } from './queuedPullRow';
   import { failedArtifactSubtitle } from './sessionFailureCopy';
   import { stripXmlTags } from '../sessions/sessionModalHelpers';
 
@@ -345,6 +347,9 @@
     liveSessionHintPoller.destroy();
   });
 
+  /** Timestamp that sorts the git status rows below every timeline artifact. */
+  const gitFooterTimestamp = Number.MAX_SAFE_INTEGER - 1000;
+
   function plural(count: number, noun: string): string {
     return `${count} ${noun}${count === 1 ? '' : 's'}`;
   }
@@ -418,7 +423,7 @@
   ): DisplayItem[] {
     const rows: DisplayItem[] = [];
     const topTimestamp = 0;
-    const bottomTimestamp = Number.MAX_SAFE_INTEGER - 1000;
+    const bottomTimestamp = gitFooterTimestamp;
     const commitChangesDisabledReason = gitActionDisabledReason
       ? gitActionDisabledReason
       : newSessionDisabled
@@ -470,7 +475,9 @@
         }
         break;
       case 'originAhead': {
-        // A queued pull keeps the button live so it can cancel the queued session.
+        // A queued pull keeps the button live so it can cancel the queued
+        // session. If the relation moves off `originAhead` while the pull is
+        // still queued, the standalone row below takes over.
         const disabledReason = pullQueuedOrigin ? undefined : pullDisabledReason(state);
         rows.push({
           key: 'git-origin-ahead',
@@ -568,6 +575,32 @@
     }
 
     return rows;
+  }
+
+  /**
+   * Footer row for a queued pull the upstream rows above can no longer host.
+   *
+   * A pull is only startable while origin is ahead, so that row owns the badge
+   * and the Cancel button — but the queued session outlives the relation it was
+   * created in: whatever sits ahead of it in the branch queue can land a local
+   * commit before the pull drains. This row takes over in the slot the
+   * origin-ahead row occupied, so the queued pull stays visible and cancellable
+   * instead of draining into a surprise `merge --ff-only` failure.
+   */
+  function queuedPullFooterRow(relation: UpstreamRelation | null): DisplayItem | null {
+    const copy = standaloneQueuedPullRowCopy({ pullQueued: pullQueuedOrigin, relation });
+    if (!copy) return null;
+    return {
+      key: 'git-queued-pull',
+      type: 'git-pull',
+      title: copy.title,
+      meta: copy.meta,
+      timestamp: gitFooterTimestamp,
+      order: 1,
+      placement: 'git-footer',
+      onPull: onCancelQueuedPull,
+      pullQueued: true,
+    };
   }
 
   // Merge commits, notes, and reviews into a single sorted list
@@ -791,6 +824,11 @@
     if (timeline.gitState) {
       all.push(...gitStateRows(timeline.gitState, commitAnchors));
     }
+
+    // Outside the git-state block: a queued pull has to stay cancellable even
+    // when the timeline came back without a git state to hang it on.
+    const queuedPull = queuedPullFooterRow(timeline.gitState?.upstream.relation ?? null);
+    if (queuedPull) all.push(queuedPull);
 
     // Provisioning row appears at the very start of the timeline
     if (provisioningLabel) {

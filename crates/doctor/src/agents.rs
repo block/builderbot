@@ -2,7 +2,6 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::checks::CLONEFILE_FIX_COMMAND;
 use crate::command::{
     run_command_with_timeout, CommandError, CommandTimeout, DEFAULT_PROBE_TIMEOUT,
 };
@@ -216,8 +215,7 @@ pub fn derive_update_command(
 
 /// Append `--registry=<url>` to `command` when a registry override is supplied
 /// and the command is npm-backed. Non-npm commands (curl-pipe installers, auth
-/// commands, the git-clonefile fix, …) and the `None` registry case return the
-/// command unchanged.
+/// commands, …) and the `None` registry case return the command unchanged.
 ///
 /// The registry URL is always caller-supplied — the crate never bakes in a
 /// Block-specific (or any other) registry.
@@ -666,11 +664,6 @@ pub fn check_single_ai_agent(
 ///
 /// Returns `None` if the check ID is unknown or has no fix of the requested type.
 pub fn lookup_fix_command(check_id: &str, fix_type: &FixType) -> Option<String> {
-    // Tool checks with hardcoded fix commands
-    if check_id == "git-clonefile" && *fix_type == FixType::Command {
-        return Some(CLONEFILE_FIX_COMMAND.to_string());
-    }
-
     // AI agent checks
     for info in AI_AGENT_CHECKS {
         if info.id == check_id {

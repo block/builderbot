@@ -25,7 +25,7 @@ use agents::{
     bundled_version_probe_args, check_single_ai_agent, derive_update_command, lookup_fix_command,
     AI_AGENT_CHECKS,
 };
-use checks::{check_clonefile, check_gh, check_gh_auth, check_git, check_git_lfs};
+use checks::{check_gh, check_gh_auth, check_git, check_git_lfs};
 use command::{
     format_duration, run_command_with_timeout, CommandError, CommandTimeout, DEFAULT_PROBE_TIMEOUT,
 };
@@ -199,9 +199,8 @@ async fn collect_base_report(
     let git_r = r_git.clone();
     let gh_r = r_gh.clone();
     let gh_r2 = r_gh.clone();
-    let git_r2 = r_git.clone();
+    let git_r2 = r_git;
     let git_lfs_r = r_git_lfs;
-    let git_r3 = r_git;
 
     let c_git_env = env.clone();
     let c_git = tokio::task::spawn_blocking(move || check_git(&git_r, c_git_env.as_deref()));
@@ -214,9 +213,6 @@ async fn collect_base_report(
     let c_git_lfs = tokio::task::spawn_blocking(move || {
         check_git_lfs(&git_r2, &git_lfs_r, c_git_lfs_env.as_deref())
     });
-    let c_clonefile_env = env.clone();
-    let c_clonefile =
-        tokio::task::spawn_blocking(move || check_clonefile(&git_r3, c_clonefile_env.as_deref()));
 
     let npm_registry_owned = npm_registry.map(|s| s.to_string());
     let agent_handles: Vec<_> = AI_AGENT_CHECKS
@@ -249,15 +245,13 @@ async fn collect_base_report(
         })
         .collect();
 
-    let (c_git, c_gh, c_gh_auth, c_git_lfs, c_clonefile) =
-        tokio::join!(c_git, c_gh, c_gh_auth, c_git_lfs, c_clonefile);
+    let (c_git, c_gh, c_gh_auth, c_git_lfs) = tokio::join!(c_git, c_gh, c_gh_auth, c_git_lfs);
 
     let mut checks = vec![
         c_git.unwrap_or_else(|_| empty_check("git", "Git")),
         c_gh.unwrap_or_else(|_| empty_check("gh", "GitHub CLI")),
         c_gh_auth.unwrap_or_else(|_| empty_check("gh-auth", "GitHub Auth")),
         c_git_lfs.unwrap_or_else(|_| empty_check("git-lfs", "Git LFS")),
-        c_clonefile.unwrap_or_else(|_| empty_check("git-clonefile", "Copy on Write Git Clones")),
     ];
 
     for (i, handle) in agent_handles.into_iter().enumerate() {

@@ -1240,6 +1240,24 @@ fn test_session_branch_id_round_trips_and_resolves_branch_and_project() {
 }
 
 #[test]
+fn test_session_completion_effects_marker_round_trips() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("Push the current branch to the remote", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    let fetched = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(fetched.completion_effects_at, None);
+
+    store.mark_completion_effects_ran(&session.id).unwrap();
+    let marked = store.get_session(&session.id).unwrap().unwrap();
+    let marked_at = marked
+        .completion_effects_at
+        .expect("marker should be set after delivering outcomes");
+    assert!(marked_at >= session.created_at);
+    assert_eq!(marked.updated_at, marked_at);
+}
+
+#[test]
 fn test_session_without_branch_or_artifact_resolves_to_none() {
     let store = Store::in_memory().unwrap();
     let session = Session::new_running("unattributed", Path::new("/tmp"));

@@ -18,7 +18,9 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::AppHandle;
 
-use crate::store::{MessageRole, PipelineExecution, Session, SessionMessage, StepStatus, Store};
+use crate::store::{
+    MessageRole, PipelineExecution, Session, SessionMessage, SessionStatus, StepStatus, Store,
+};
 
 // =============================================================================
 // Domain events
@@ -76,6 +78,13 @@ enum CompletionEffect {
 /// exactly like the resume path and busy-state snapshot do. Non-completed
 /// terminal states have no outcome to parse — clients render those directly
 /// from the terminal status event.
+///
+/// Outcomes are delivered at most once per session, recorded by the
+/// `completion_effects_at` marker: a resumed pr/push session completes again,
+/// but its pipeline and transcript still describe the *original* run, so
+/// re-evaluating them would re-emit `pr-created` or — destructively — re-clear
+/// the branch's PR status. See [`pending_completion_effect`] for what the
+/// marker does and doesn't claim.
 pub fn run_completion_side_effects(
     store: &Arc<Store>,
     app_handle: &AppHandle,
@@ -83,6 +92,9 @@ pub fn run_completion_side_effects(
     branch_id: Option<&str>,
     status: &str,
 ) {
+    // Cheap pre-check so ordinary terminal transitions don't read the session
+    // row; `pending_completion_effect` re-applies the gate as part of the
+    // decision it owns.
     if status != "completed" {
         return;
     }
@@ -95,11 +107,9 @@ pub fn run_completion_side_effects(
             return;
         }
     };
-    if session.pipeline.is_none() {
-        return;
-    }
-    let Some(kind) = crate::session_commands::infer_branch_resume_session_type(&session.prompt)
-    else {
+    let Some((kind, effect)) = pending_completion_effect(&session, status, || {
+        store.get_session_messages(session_id).unwrap_or_default()
+    }) else {
         return;
     };
 
@@ -113,10 +123,21 @@ pub fn run_completion_side_effects(
         return;
     };
 
-    let messages = store.get_session_messages(session_id).unwrap_or_default();
-    let Some(effect) = evaluate_completed_session(kind, &session, &messages) else {
-        return;
-    };
+    if should_record_effects(&effect) {
+        // Mark *before* emitting/persisting. Dying in between loses one
+        // emission, which existing recovery already covers (`recover_branch_pr`
+        // re-derives PR numbers, the PR refresh loop repopulates status,
+        // clients keep a read-only fallback classification). Dying the other
+        // way round would let a later resume replay the destructive push
+        // re-clear — the bug this marker exists to prevent. A failed marker
+        // write is logged but doesn't suppress the events: that leaves today's
+        // status quo rather than dropping a real outcome.
+        if let Err(e) = store.mark_completion_effects_ran(session_id) {
+            log::error!(
+                "Failed to mark completion effects for {kind} session {session_id} as delivered: {e}"
+            );
+        }
+    }
 
     match effect {
         CompletionEffect::PrCreated { pr_url, pr_number } => {
@@ -179,6 +200,47 @@ pub fn run_completion_side_effects(
             );
         }
     }
+}
+
+/// Decide what outcome, if any, a session that just reached a terminal state
+/// still owes its clients.
+///
+/// Folds every gate — terminal status, the one-shot marker, pipeline
+/// provenance, pr/push kind inference — and the outcome evaluation into one
+/// pure decision, so the whole thing is testable without an `AppHandle`.
+///
+/// The marker means "outcome events for this session were delivered once", not
+/// "the session finished once": error and cancelled terminal states never reach
+/// evaluation (status gate) and never mark, so resuming a pipeline session that
+/// failed or was cancelled before it finished its work still fires its outcome
+/// on the first real completion.
+///
+/// `load_messages` is lazy because most completions are ordinary AI sessions
+/// that fail the pipeline gate, and there is no reason to read their transcript.
+fn pending_completion_effect(
+    session: &Session,
+    status: &str,
+    load_messages: impl FnOnce() -> Vec<SessionMessage>,
+) -> Option<(&'static str, CompletionEffect)> {
+    if status != SessionStatus::Completed.as_str() || session.completion_effects_at.is_some() {
+        return None;
+    }
+    if session.pipeline.is_none() {
+        return None;
+    }
+    let kind = crate::session_commands::infer_branch_resume_session_type(&session.prompt)?;
+    let effect = evaluate_completed_session(kind, session, &load_messages())?;
+    Some((kind, effect))
+}
+
+/// Whether an effect counts as "outcomes delivered" for the one-shot marker.
+///
+/// `PrUrlMissing` emits and persists nothing, and leaving it unmarked preserves
+/// the recovery turn: a PR session that completed without producing a URL can
+/// be resumed ("you didn't create the PR — do it now"), and the next completion
+/// scans the new transcript and fires `pr-created` for real.
+fn should_record_effects(effect: &CompletionEffect) -> bool {
+    !matches!(effect, CompletionEffect::PrUrlMissing)
 }
 
 fn evaluate_completed_session(
@@ -401,6 +463,20 @@ mod tests {
         session
     }
 
+    fn push_session(pipeline: PipelineExecution) -> Session {
+        let mut session = Session::new_running(
+            "Push the current branch to the remote",
+            std::path::Path::new("/tmp"),
+        )
+        .with_branch("branch-1");
+        session.pipeline = Some(pipeline);
+        session
+    }
+
+    fn succeeded_push_pipeline() -> PipelineExecution {
+        pipeline(vec![step(StepStatus::Succeeded, Some("pushed"))])
+    }
+
     #[test]
     fn extracts_pr_url_from_marker() {
         let messages = vec![
@@ -573,6 +649,104 @@ mod tests {
         assert_eq!(
             classify_completed_push_session(None, &[message(MessageRole::Assistant, "pushed")]),
             PushOutcome::Succeeded
+        );
+    }
+
+    #[test]
+    fn unmarked_completed_push_session_has_a_pending_effect() {
+        let session = push_session(succeeded_push_pipeline());
+        assert_eq!(
+            pending_completion_effect(&session, "completed", Vec::new),
+            Some((
+                "push",
+                CompletionEffect::PushCompleted {
+                    outcome: PushOutcome::Succeeded
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn marked_session_has_no_pending_effect() {
+        // A resumed push session: the old all-succeeded pipeline still
+        // classifies as a fresh success, so only the marker stops the
+        // destructive re-clear of the branch's PR status.
+        let mut session = push_session(succeeded_push_pipeline());
+        session.completion_effects_at = Some(1_700_000_000_000);
+        assert_eq!(
+            pending_completion_effect(&session, "completed", Vec::new),
+            None
+        );
+    }
+
+    #[test]
+    fn non_completed_terminal_states_have_no_pending_effect() {
+        let session = push_session(succeeded_push_pipeline());
+        for status in ["error", "cancelled", "running"] {
+            assert_eq!(
+                pending_completion_effect(&session, status, Vec::new),
+                None,
+                "status {status} should not evaluate an outcome"
+            );
+        }
+    }
+
+    #[test]
+    fn non_pipeline_and_non_pipeline_kind_sessions_have_no_pending_effect() {
+        let plain = Session::new_running("Fix the login flow", std::path::Path::new("/tmp"));
+        assert_eq!(
+            pending_completion_effect(&plain, "completed", Vec::new),
+            None
+        );
+
+        let mut ai_with_pipeline = plain.clone();
+        ai_with_pipeline.pipeline = Some(succeeded_push_pipeline());
+        assert_eq!(
+            pending_completion_effect(&ai_with_pipeline, "completed", Vec::new),
+            None
+        );
+    }
+
+    #[test]
+    fn only_pr_url_missing_skips_the_marker() {
+        assert!(should_record_effects(&CompletionEffect::PrCreated {
+            pr_url: "https://github.com/org/repo/pull/8".to_string(),
+            pr_number: 8,
+        }));
+        assert!(should_record_effects(&CompletionEffect::PushCompleted {
+            outcome: PushOutcome::Succeeded
+        }));
+        assert!(should_record_effects(&CompletionEffect::PushCompleted {
+            outcome: PushOutcome::RejectedNonFastForward
+        }));
+        assert!(!should_record_effects(&CompletionEffect::PrUrlMissing));
+    }
+
+    #[test]
+    fn unmarked_pr_url_missing_session_fires_on_a_later_completion() {
+        let session = pr_session(pipeline(vec![step(StepStatus::Succeeded, Some("ok"))]));
+
+        // First completion produced no URL, so nothing was delivered and the
+        // session stays eligible.
+        let first = pending_completion_effect(&session, "completed", Vec::new);
+        assert_eq!(first, Some(("pr", CompletionEffect::PrUrlMissing)));
+        assert!(!should_record_effects(&first.unwrap().1));
+
+        // Resumed with "you didn't create the PR — do it now": the next
+        // completion scans the new transcript and fires for real.
+        let messages = vec![message(
+            MessageRole::Assistant,
+            "PR_URL: https://github.com/org/repo/pull/9",
+        )];
+        assert_eq!(
+            pending_completion_effect(&session, "completed", || messages),
+            Some((
+                "pr",
+                CompletionEffect::PrCreated {
+                    pr_url: "https://github.com/org/repo/pull/9".to_string(),
+                    pr_number: 9,
+                }
+            ))
         );
     }
 }

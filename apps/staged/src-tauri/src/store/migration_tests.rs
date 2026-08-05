@@ -145,7 +145,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
         )
         .unwrap();
 
-    assert_eq!(version, 22);
+    assert_eq!(version, 23);
     assert_eq!(app_version, super::APP_VERSION);
     assert!(table_exists(&conn, "projects"));
     assert!(table_exists(&conn, "project_notes"));
@@ -161,6 +161,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
     assert!(column_exists(&conn, "sessions", "acp_config_selection"));
     assert!(column_exists(&conn, "sessions", "acp_title"));
     assert!(column_exists(&conn, "sessions", "branch_id"));
+    assert!(column_exists(&conn, "sessions", "completion_effects_at"));
 
     let trigger_count: i64 = conn
         .query_row(
@@ -189,7 +190,13 @@ fn test_store_repairs_github_comment_tracking_user_version() {
             app_version TEXT NOT NULL
         );
         INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
-        CREATE TABLE sessions (id TEXT PRIMARY KEY);
+        -- `status` and `updated_at` predate every migration below; they are
+        -- spelled out because the 0023 backfill reads them.
+        CREATE TABLE sessions (
+            id         TEXT PRIMARY KEY,
+            status     TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
         CREATE TABLE session_messages (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id  TEXT NOT NULL,
@@ -224,11 +231,12 @@ fn test_store_repairs_github_comment_tracking_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 22);
+    assert_eq!(version, 23);
     assert!(column_exists(&conn, "sessions", "pipeline"));
     assert!(column_exists(&conn, "sessions", "acp_config_selection"));
     assert!(column_exists(&conn, "sessions", "acp_title"));
     assert!(column_exists(&conn, "sessions", "branch_id"));
+    assert!(column_exists(&conn, "sessions", "completion_effects_at"));
     assert!(column_exists(
         &conn,
         "session_messages",
@@ -252,8 +260,10 @@ fn test_store_repairs_pipeline_user_version() {
         );
         INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
         CREATE TABLE sessions (
-            id       TEXT PRIMARY KEY,
-            pipeline TEXT
+            id         TEXT PRIMARY KEY,
+            status     TEXT NOT NULL,
+            pipeline   TEXT,
+            updated_at INTEGER NOT NULL
         );
         CREATE TABLE session_messages (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -284,7 +294,7 @@ fn test_store_repairs_pipeline_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 22);
+    assert_eq!(version, 23);
     assert!(column_exists(&conn, "comments", "github_comment_id"));
     assert!(column_exists(&conn, "comments", "github_comment_type"));
     assert!(column_exists(&conn, "comments", "github_comment_stale"));
@@ -297,6 +307,65 @@ fn test_store_repairs_pipeline_user_version() {
     assert!(column_exists(&conn, "sessions", "acp_config_selection"));
     assert!(column_exists(&conn, "sessions", "acp_title"));
     assert!(column_exists(&conn, "sessions", "branch_id"));
+    assert!(column_exists(&conn, "sessions", "completion_effects_at"));
+
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_completion_effects_migration_backfills_finished_pipeline_sessions() {
+    let path = temp_db_path("completion-effects-backfill");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "
+        PRAGMA user_version = 22;
+        CREATE TABLE app_metadata (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            app_version TEXT NOT NULL
+        );
+        INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
+        CREATE TABLE sessions (
+            id         TEXT PRIMARY KEY,
+            status     TEXT NOT NULL,
+            pipeline   TEXT,
+            updated_at INTEGER NOT NULL
+        );
+        INSERT INTO sessions (id, status, pipeline, updated_at) VALUES
+            ('completed-pipeline', 'completed', '{}', 100),
+            ('running-pipeline',   'running',   '{}', 200),
+            ('error-pipeline',     'error',     '{}', 300),
+            ('completed-ai',       'completed', NULL, 400);
+        ",
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = Store::new(&path).unwrap();
+    drop(store);
+
+    let conn = Connection::open(&path).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 23);
+    assert!(column_exists(&conn, "sessions", "completion_effects_at"));
+
+    let marker = |id: &str| -> Option<i64> {
+        conn.query_row(
+            "SELECT completion_effects_at FROM sessions WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    // Already-finished pipeline sessions are exactly the rows whose next resume
+    // would replay their outcome effects, so they start out marked.
+    assert_eq!(marker("completed-pipeline"), Some(100));
+    // Still-running and failed pipeline sessions have outcomes yet to deliver.
+    assert_eq!(marker("running-pipeline"), None);
+    assert_eq!(marker("error-pipeline"), None);
+    // Plain AI sessions never had completion side effects to begin with.
+    assert_eq!(marker("completed-ai"), None);
 
     cleanup_db(&path);
 }

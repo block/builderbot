@@ -540,6 +540,13 @@ pub struct Session {
     /// `None` for artifact-backed sessions and for project-level sessions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_id: Option<String>,
+    /// When this session's pipeline (pr/push) completion outcome events were
+    /// delivered. A one-shot marker: it means "outcome events for this session
+    /// were delivered once", *not* "the session finished once". Resuming a
+    /// finished pr/push session completes it again, and the stale pipeline plus
+    /// transcript would otherwise re-fire those effects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_effects_at: Option<i64>,
 }
 
 /// Persistent follow-up message waiting to be sent to an existing session.
@@ -631,6 +638,7 @@ impl Session {
             acp_config_selection: None,
             acp_title: None,
             branch_id: None,
+            completion_effects_at: None,
         }
     }
 
@@ -655,6 +663,7 @@ impl Session {
             acp_config_selection: None,
             acp_title: None,
             branch_id: None,
+            completion_effects_at: None,
         }
     }
 

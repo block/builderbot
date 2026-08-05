@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Branch, Project } from '../../types';
+import type { Branch, Project, ProjectRepo } from '../../types';
 
 // ── Fixtures ──
 
@@ -50,6 +50,22 @@ function mergedBranch(overrides: Partial<Branch> = {}): Branch {
   return branch({ prState: 'MERGED', ...overrides });
 }
 
+function projectRepo(overrides: Partial<ProjectRepo> = {}): ProjectRepo {
+  return {
+    id: 'r1',
+    projectId: 'p1',
+    githubRepo: 'org/alpha',
+    branchName: 'feature',
+    subpath: null,
+    isPrimary: true,
+    reason: null,
+    headRepo: null,
+    createdAt: 0,
+    updatedAt: 0,
+    ...overrides,
+  };
+}
+
 // ── Mock plumbing ──
 
 let deleteProject: ReturnType<typeof vi.fn>;
@@ -64,12 +80,13 @@ let goHome: ReturnType<typeof vi.fn>;
 let navigationState: { selectedProjectId: string | null };
 let projectDeleteStarted: ReturnType<typeof vi.fn>;
 let projectDeleteFinished: ReturnType<typeof vi.fn>;
+let ensureProjectHydrated: ReturnType<typeof vi.fn>;
 
 /** Mutable backing state for the mocked projectsDataStore. */
 let storeState: {
   projects: Project[];
   branchesByProject: Map<string, Branch[]>;
-  repoCountsByProject: Map<string, number>;
+  reposByProject: Map<string, ProjectRepo[]>;
   deletingProjectNames: Map<string, string>;
 };
 
@@ -96,11 +113,13 @@ beforeEach(() => {
   navigationState = { selectedProjectId: null };
   projectDeleteStarted = vi.fn();
   projectDeleteFinished = vi.fn();
+  // Default: the project is already hydrated, so ensuring it is a no-op.
+  ensureProjectHydrated = vi.fn().mockResolvedValue(undefined);
 
   storeState = {
     projects: [project()],
     branchesByProject: new Map([['p1', [mergedBranch()]]]),
-    repoCountsByProject: new Map([['p1', 1]]),
+    reposByProject: new Map([['p1', [projectRepo()]]]),
     deletingProjectNames: new Map(),
   };
 
@@ -122,10 +141,21 @@ beforeEach(() => {
       get branchesByProject() {
         return storeState.branchesByProject;
       },
+      get reposByProject() {
+        return storeState.reposByProject;
+      },
+      // Derived exactly like the real store's, fallbacks included, so the
+      // un-hydrated cases here see what the app sees.
       get repoCountsByProject() {
-        return storeState.repoCountsByProject;
+        return new Map(
+          storeState.projects.map((p) => {
+            const repos = storeState.reposByProject.get(p.id);
+            return [p.id, repos ? repos.length : p.githubRepo ? 1 : 0] as const;
+          })
+        );
       },
       isProjectDeleting: (projectId: string) => storeState.deletingProjectNames.has(projectId),
+      ensureProjectHydrated,
       projectDeleteStarted,
       projectDeleteFinished,
     },
@@ -220,6 +250,94 @@ describe('requestRemoveProject', () => {
     expect(projectDeleteFinished).toHaveBeenCalledWith('p1');
     expect(markAsRead).not.toHaveBeenCalled();
     expect(clearBranchState).not.toHaveBeenCalled();
+  });
+});
+
+describe('hydration before the safety check', () => {
+  /** An un-hydrated project: repos never fetched, branches seeded empty. With
+   *  githubRepo null the repoCount fallback is 0, which reads as safe. */
+  function unhydratedMultiRepoProject(): Project {
+    const p = project({ githubRepo: null });
+    storeState.projects = [p];
+    storeState.branchesByProject = new Map([['p1', []]]);
+    storeState.reposByProject = new Map();
+    return p;
+  }
+
+  /** Make ensureProjectHydrated land real branches and repos. */
+  function hydrationReveals(branches: Branch[], repos: ProjectRepo[]): void {
+    ensureProjectHydrated.mockImplementation(async (projectId: string) => {
+      storeState.branchesByProject.set(projectId, branches);
+      storeState.reposByProject.set(projectId, repos);
+    });
+  }
+
+  it('confirms instead of deleting when hydration reveals unpushed work', async () => {
+    const p = unhydratedMultiRepoProject();
+    hydrationReveals([mergedBranch()], [projectRepo()]);
+    hasUnpushedCommits.mockResolvedValue(true);
+    const actions = await importActions();
+
+    await actions.requestRemoveProject(p);
+
+    expect(ensureProjectHydrated).toHaveBeenCalledWith('p1');
+    expect(actions.pendingDelete).toEqual(p);
+    expect(deleteProject).not.toHaveBeenCalled();
+    expect(projectDeleteStarted).not.toHaveBeenCalled();
+  });
+
+  it('confirms when hydration settled without fetching repos (failed load)', async () => {
+    // hydrateOnce marks a project settled even when its fetch rejects, so
+    // "hydrated" alone proves nothing — an unwritten repos entry does.
+    const p = unhydratedMultiRepoProject();
+    const actions = await importActions();
+
+    await actions.requestRemoveProject(p);
+
+    expect(actions.pendingDelete).toEqual(p);
+    expect(deleteProject).not.toHaveBeenCalled();
+    expect(hasUnpushedCommits).not.toHaveBeenCalled();
+  });
+
+  it('still deletes a fetched, repo-less project immediately', async () => {
+    const p = unhydratedMultiRepoProject();
+    hydrationReveals([], []);
+    const actions = await importActions();
+
+    await actions.requestRemoveProject(p);
+
+    expect(actions.pendingDelete).toBeNull();
+    expect(deleteProject).toHaveBeenCalledWith('p1');
+  });
+
+  it('clears the branches hydration revealed, not the seeded empty list', async () => {
+    const p = unhydratedMultiRepoProject();
+    hydrationReveals([mergedBranch(), mergedBranch({ id: 'b2' })], [projectRepo()]);
+    const actions = await importActions();
+
+    await actions.requestRemoveProject(p);
+
+    expect(deleteProject).toHaveBeenCalledWith('p1');
+    expect(invalidateProjectBranchTimelines).toHaveBeenCalledWith(['b1', 'b2']);
+    expect(clearBranchState).toHaveBeenCalledWith('b1');
+    expect(clearBranchState).toHaveBeenCalledWith('b2');
+  });
+
+  it('bails when a delete for the project started while it hydrated', async () => {
+    const p = unhydratedMultiRepoProject();
+    ensureProjectHydrated.mockImplementation(async (projectId: string) => {
+      storeState.branchesByProject.set(projectId, [mergedBranch()]);
+      storeState.reposByProject.set(projectId, [projectRepo()]);
+      storeState.deletingProjectNames.set(projectId, 'Alpha');
+    });
+    hasUnpushedCommits.mockResolvedValue(true);
+    const actions = await importActions();
+
+    await actions.requestRemoveProject(p);
+
+    expect(actions.pendingDelete).toBeNull();
+    expect(deleteProject).not.toHaveBeenCalled();
+    expect(projectDeleteStarted).not.toHaveBeenCalled();
   });
 });
 

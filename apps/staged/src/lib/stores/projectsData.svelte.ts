@@ -37,8 +37,14 @@ import type {
   SessionStatusPayload,
 } from '../types';
 
-/** Idle delay between background hydration steps (one project per step). */
-const BACKGROUND_HYDRATION_DELAY_MS = 3000;
+/**
+ * requestIdleCallback timeout for each background hydration step (one project
+ * per step). Not a fixed delay: a step runs at the next idle period, and this
+ * is only the ceiling if the main thread stays busy that long. Where
+ * requestIdleCallback is missing (older WKWebView, tests) steps run on a
+ * macrotask with no delay at all.
+ */
+const BACKGROUND_HYDRATION_IDLE_TIMEOUT_MS = 3000;
 
 /**
  * Merge incoming branches with existing ones, preserving worktreePath when
@@ -211,7 +217,8 @@ class ProjectsDataStore {
    *
    * Either way per-project hydration drips through the idle queue behind
    * this; callers that need it sooner use hydrateProject() (one project,
-   * foreground) or ensureProjectsHydrated() (all of them).
+   * always refetched), ensureProjectHydrated() (one project, only if not
+   * fetched yet) or ensureProjectsHydrated() (all of them).
    *
    * Load failures don't reject; they surface through `error` so callers can
    * render them, mirroring the views' loadData() pattern.
@@ -256,10 +263,25 @@ class ProjectsDataStore {
     if (options.priority === 'background') {
       scheduleDeferredTask(() => {
         void this.hydrateOnce(projectId, generation);
-      }, BACKGROUND_HYDRATION_DELAY_MS);
+      }, BACKGROUND_HYDRATION_IDLE_TIMEOUT_MS);
       return;
     }
     await this.hydrateOnce(projectId, generation);
+  }
+
+  /**
+   * Hydrate one project only if it hasn't been fetched under the current load —
+   * the single-project counterpart of ensureProjectsHydrated().
+   *
+   * Unlike hydrateProject(), which always refetches (hydrateOnce dedupes
+   * against in-flight requests, not settled ones), this no-ops once the project
+   * is hydrated and otherwise joins whatever drip/sweep/foreground fetch is
+   * already running. Entry point for consumers that must not act on the seeded
+   * fallbacks — notably the project-delete safety check.
+   */
+  async ensureProjectHydrated(projectId: string): Promise<void> {
+    if (this._hydratedProjects.has(projectId)) return;
+    await this.hydrateOnce(projectId, this.loadGeneration);
   }
 
   /** Hydrate every project that hasn't been fetched yet, in parallel. Entry
@@ -513,7 +535,7 @@ class ProjectsDataStore {
 
     const scheduleNext = () => {
       if (cancelled || generation !== this.loadGeneration || queue.length === 0) return;
-      cancelScheduledTask = scheduleDeferredTask(hydrateNext, BACKGROUND_HYDRATION_DELAY_MS);
+      cancelScheduledTask = scheduleDeferredTask(hydrateNext, BACKGROUND_HYDRATION_IDLE_TIMEOUT_MS);
     };
 
     const hydrateNext = () => {
@@ -535,7 +557,7 @@ class ProjectsDataStore {
       void this.hydrateOnce(projectId, generation).finally(scheduleNext);
     };
 
-    cancelScheduledTask = scheduleDeferredTask(hydrateNext, BACKGROUND_HYDRATION_DELAY_MS);
+    cancelScheduledTask = scheduleDeferredTask(hydrateNext, BACKGROUND_HYDRATION_IDLE_TIMEOUT_MS);
     this.backgroundHydrationCancel = () => {
       cancelled = true;
       cancelScheduledTask?.();

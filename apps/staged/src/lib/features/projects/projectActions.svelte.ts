@@ -42,12 +42,30 @@ class ProjectActionsController {
   async requestRemoveProject(project: Project): Promise<void> {
     if (projectsDataStore.isProjectDeleting(project.id)) return;
 
-    const safeToDelete = await canDeleteProjectWithoutConfirmation({
-      branches: projectsDataStore.branchesByProject.get(project.id) || [],
-      repoCount: projectsDataStore.repoCountsByProject.get(project.id) ?? 0,
-      hasUnpushedCommits: commands.hasUnpushedCommits,
-      onCheckError: (e) => console.error('Failed to check unpushed commits:', e),
-    });
+    // Rows render as soon as the project *list* lands, so branches and repos
+    // may still be the seeded fallbacks (empty branch list; repoCount 1 for a
+    // githubRepo project, 0 otherwise) when the user picks Remove. Deciding
+    // against those would skip the confirmation dialog for an un-hydrated
+    // multi-repo project — repoCount 0 reads as "nothing to lose" — and leave
+    // branchesToClear empty, so demand the data instead of reading whatever
+    // the cache happens to hold. Deduped: no refetch when already hydrated,
+    // and joins the idle drip's request when one is in flight.
+    await projectsDataStore.ensureProjectHydrated(project.id);
+    if (projectsDataStore.isProjectDeleting(project.id)) return;
+
+    // Hydration settles even when the fetch fails, so views gated on it don't
+    // hang — but then branches and repoCount are still the fallbacks. Only the
+    // success path writes reposByProject, so it is the truthful "actually
+    // fetched" signal: without it, fall through to the dialog.
+    const reposFetched = projectsDataStore.reposByProject.has(project.id);
+    const safeToDelete =
+      reposFetched &&
+      (await canDeleteProjectWithoutConfirmation({
+        branches: projectsDataStore.branchesByProject.get(project.id) || [],
+        repoCount: projectsDataStore.repoCountsByProject.get(project.id) ?? 0,
+        hasUnpushedCommits: commands.hasUnpushedCommits,
+        onCheckError: (e) => console.error('Failed to check unpushed commits:', e),
+      }));
 
     if (safeToDelete) {
       await this.deleteProject(project);

@@ -395,6 +395,57 @@ describe('hydration readiness', () => {
     expect(listProjectRepos).toHaveBeenCalledTimes(1);
   });
 
+  it('ensureProjectHydrated fetches a project nobody has hydrated yet', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    expect(store.isProjectHydrated('p1')).toBe(false);
+
+    await store.ensureProjectHydrated('p1');
+
+    expect(store.isProjectHydrated('p1')).toBe(true);
+    expect(store.branchesByProject.get('p1')).toEqual([branch()]);
+    expect(store.reposByProject.get('p1')).toEqual([projectRepo()]);
+    // The drip skips what the ensure call already fetched under this load.
+    await tick();
+    expect(listBranchesForProject).toHaveBeenCalledTimes(1);
+  });
+
+  it('ensureProjectHydrated no-ops for an already hydrated project', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
+    listBranchesForProject.mockClear();
+    listProjectRepos.mockClear();
+
+    await store.ensureProjectHydrated('p1');
+    await tick();
+
+    expect(listBranchesForProject).not.toHaveBeenCalled();
+    expect(listProjectRepos).not.toHaveBeenCalled();
+  });
+
+  it('ensureProjectHydrated joins an in-flight drip instead of refetching', async () => {
+    let resolveBranches!: (value: SwrResult<Branch[]>) => void;
+    listBranchesForProject.mockReturnValue(
+      new Promise<SwrResult<Branch[]>>((resolve) => {
+        resolveBranches = resolve;
+      })
+    );
+    const store = await importStore();
+    await store.ensureLoaded();
+    // Let the idle drip pick p1 up first.
+    await vi.waitFor(() => {
+      expect(listBranchesForProject).toHaveBeenCalledWith('p1');
+    });
+
+    const ensuring = store.ensureProjectHydrated('p1');
+    resolveBranches(swr([branch()]));
+    await ensuring;
+
+    expect(listBranchesForProject).toHaveBeenCalledTimes(1);
+    expect(store.isProjectHydrated('p1')).toBe(true);
+  });
+
   it('ensureProjectsHydrated awaits in-flight work instead of refetching', async () => {
     let resolveBranches!: (value: SwrResult<Branch[]>) => void;
     listBranchesForProject.mockReturnValueOnce(

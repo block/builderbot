@@ -237,8 +237,10 @@ fn normalize_pr_url(candidate: &str) -> Option<(String, u64)> {
 /// Find the PR URL in a session transcript.
 ///
 /// First pass looks for the explicit `PR_URL: <url>` marker the PR session
-/// prompt asks the agent to output (assistant / tool-result messages only);
-/// the second pass falls back to any GitHub PR URL anywhere in the transcript.
+/// prompt asks the agent to output; the second pass falls back to any GitHub
+/// PR URL in the transcript. Both passes only consider assistant /
+/// tool-result messages: a URL in a user message (e.g. pasted into a queued
+/// follow-up) is not evidence the session created that PR.
 fn extract_pr_url(messages: &[SessionMessage]) -> Option<(String, u64)> {
     static MARKER_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     static URL_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
@@ -257,6 +259,9 @@ fn extract_pr_url(messages: &[SessionMessage]) -> Option<(String, u64)> {
     }
 
     for msg in messages {
+        if !matches!(msg.role, MessageRole::Assistant | MessageRole::ToolResult) {
+            continue;
+        }
         for candidate in url_re.find_iter(&msg.content) {
             if let Some(normalized) = normalize_pr_url(candidate.as_str()) {
                 return Some(normalized);
@@ -443,6 +448,18 @@ mod tests {
             extract_pr_url(&messages),
             Some(("https://github.com/org/repo/pull/123".to_string(), 123))
         );
+    }
+
+    #[test]
+    fn fallback_pass_ignores_user_messages() {
+        let messages = vec![
+            message(
+                MessageRole::User,
+                "see https://github.com/org/repo/pull/3 for prior art",
+            ),
+            message(MessageRole::Assistant, "Working on it."),
+        ];
+        assert_eq!(extract_pr_url(&messages), None);
     }
 
     #[test]

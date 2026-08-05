@@ -273,6 +273,13 @@ export function getTokensForLine(tokens: Token[][], index: number): Token[] {
   return tokens[index] || [{ content: '', color: 'inherit' }];
 }
 
+/**
+ * Comment text stays readable on very wide panes (e.g. a fullscreen viewer on
+ * a wide monitor) by capping the editor at a comfortable prose measure instead
+ * of stretching edge to edge with the pane.
+ */
+export const MAX_COMMENT_EDITOR_WIDTH = 640;
+
 export function decideCommentPositionBySpace(
   spaceBelow: number,
   spaceAbove: number,
@@ -303,7 +310,7 @@ export function buildRangeCommentEditorLayout(
   return {
     top,
     left: paneRect.left - viewerRect.left + paneHorizontalPadding,
-    width: paneRect.width - paneHorizontalPadding * 2,
+    width: Math.min(paneRect.width - paneHorizontalPadding * 2, MAX_COMMENT_EDITOR_WIDTH),
     position,
     visible,
   };
@@ -329,7 +336,7 @@ export function buildLineCommentEditorLayout(
   return {
     top,
     left: paneRect.left - viewerRect.left + paneHorizontalPadding,
-    width: paneRect.width - paneHorizontalPadding * 2,
+    width: Math.min(paneRect.width - paneHorizontalPadding * 2, MAX_COMMENT_EDITOR_WIDTH),
     visible,
     position,
   };

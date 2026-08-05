@@ -567,9 +567,14 @@
 
     // Kick off a background git-state refresh (TTL-gated fetch).
     refreshingGitState = true;
-    commands.refreshBranchGitState(branch.id).catch(() => {
-      refreshingGitState = false;
-    });
+    commands
+      .refreshBranchGitState(branch.id)
+      .catch(() => {})
+      .finally(() => {
+        // Clear on settle, not just on the `git-state-updated` event: branches
+        // with no workdir (or a deleted worktree) resolve Ok without emitting.
+        refreshingGitState = false;
+      });
   }
 
   // Synchronously hydrate timeline from cache so isSettingUp is never true
@@ -802,9 +807,14 @@
     // Kick off a background git-state refresh (TTL-gated fetch).
     // The result arrives via the `git-state-updated` event listener above.
     refreshingGitState = true;
-    commands.refreshBranchGitState(branch.id).catch(() => {
-      refreshingGitState = false;
-    });
+    commands
+      .refreshBranchGitState(branch.id)
+      .catch(() => {})
+      .finally(() => {
+        // Clear on settle, not just on the `git-state-updated` event: branches
+        // with no workdir (or a deleted worktree) resolve Ok without emitting.
+        refreshingGitState = false;
+      });
   }
 
   function getTimelineReviewDetails(fullReview: TimelineFullReview): TimelineReviewDetails {

@@ -2527,16 +2527,25 @@ fn run_post_completion_hooks(
             if review.title.is_none() {
                 // Fall back to the ACP-provided session title when no
                 // review-title block is found.
-                let title = extract_review_title(&full_text).or_else(|| {
-                    store
-                        .get_session(session_id)
-                        .ok()
-                        .flatten()
-                        .as_ref()
-                        .and_then(non_empty_acp_title)
-                });
+                let title = match extract_review_title(&full_text) {
+                    Some(title) => {
+                        log::info!("Session {session_id}: extracted review title: {title}");
+                        Some(title)
+                    }
+                    None => {
+                        let acp_title = store
+                            .get_session(session_id)
+                            .ok()
+                            .flatten()
+                            .as_ref()
+                            .and_then(non_empty_acp_title);
+                        if let Some(title) = &acp_title {
+                            log::info!("Session {session_id}: no review-title block found; using ACP session title as review title: {title}");
+                        }
+                        acp_title
+                    }
+                };
                 if let Some(title) = title {
-                    log::info!("Session {session_id}: extracted review title: {title}");
                     if let Err(e) = store.update_review_title(&review.id, &title) {
                         log::error!("Failed to update review title: {e}");
                     }

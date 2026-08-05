@@ -546,6 +546,33 @@ fn test_transition_queued_to_running_does_not_overwrite_cancelled_session() {
 }
 
 #[test]
+fn test_get_active_sessions_returns_running_and_queued_only() {
+    let store = Store::in_memory().unwrap();
+
+    let running = Session::new_running("running", Path::new("/tmp"));
+    store.create_session(&running).unwrap();
+    let queued = Session::new_queued("queued");
+    store.create_session(&queued).unwrap();
+
+    for status in [
+        SessionStatus::Completed,
+        SessionStatus::Error,
+        SessionStatus::Cancelled,
+    ] {
+        let terminal = Session::new_running("terminal", Path::new("/tmp"));
+        store.create_session(&terminal).unwrap();
+        store
+            .update_session_status(&terminal.id, status, None, None)
+            .unwrap();
+    }
+
+    let active = store.get_active_sessions().unwrap();
+    assert_eq!(active.len(), 2);
+    assert!(active.iter().any(|s| s.id == running.id));
+    assert!(active.iter().any(|s| s.id == queued.id));
+}
+
+#[test]
 fn test_queued_session_messages_order_and_image_ids() {
     let store = Store::in_memory().unwrap();
     let session = Session::new_running("work", Path::new("/tmp"));
@@ -1174,6 +1201,74 @@ fn test_running_pipeline_commit_marks_branch_busy_and_resolves_branch() {
             .as_deref(),
         Some(branch.id.as_str())
     );
+}
+
+#[test]
+fn test_session_branch_id_round_trips_and_resolves_branch_and_project() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    // A pr/push pipeline session: no artifact row, branch carried on the
+    // session row itself.
+    let session = Session::new_running(
+        "Create a pull request for the current branch",
+        Path::new("/tmp"),
+    )
+    .with_branch(&branch.id);
+    store.create_session(&session).unwrap();
+
+    let fetched = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(fetched.branch_id.as_deref(), Some(branch.id.as_str()));
+
+    assert_eq!(
+        store
+            .get_branch_id_for_session(&session.id)
+            .unwrap()
+            .as_deref(),
+        Some(branch.id.as_str())
+    );
+    assert_eq!(
+        store
+            .get_project_id_for_session(&session.id)
+            .unwrap()
+            .as_deref(),
+        Some(project.id.as_str())
+    );
+}
+
+#[test]
+fn test_session_completion_effects_marker_round_trips() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("Push the current branch to the remote", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    let fetched = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(fetched.completion_effects_at, None);
+
+    store.mark_completion_effects_ran(&session.id).unwrap();
+    let marked = store.get_session(&session.id).unwrap().unwrap();
+    let marked_at = marked
+        .completion_effects_at
+        .expect("marker should be set after delivering outcomes");
+    assert!(marked_at >= session.created_at);
+    assert_eq!(marked.updated_at, marked_at);
+}
+
+#[test]
+fn test_session_without_branch_or_artifact_resolves_to_none() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("unattributed", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    assert_eq!(
+        store.get_session(&session.id).unwrap().unwrap().branch_id,
+        None
+    );
+    assert_eq!(store.get_branch_id_for_session(&session.id).unwrap(), None);
+    assert_eq!(store.get_project_id_for_session(&session.id).unwrap(), None);
 }
 
 #[test]

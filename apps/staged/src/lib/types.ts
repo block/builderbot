@@ -384,6 +384,12 @@ export interface Session {
   acpConfigSelection?: AcpConfigSelection | null;
   /** Latest session title pushed by the agent via ACP `session_info_update`. */
   acpTitle: string | null;
+  /**
+   * Branch this session runs for. Present on pipeline-launched (pr/push)
+   * sessions, which link no artifact row; artifact-linked sessions resolve
+   * their branch through the artifact instead.
+   */
+  branchId?: string | null;
 }
 
 export type QueuedSessionMessageStatus = 'queued' | 'sending' | 'sent';
@@ -521,6 +527,46 @@ export interface SessionStatusPayload {
   projectId?: string;
   sessionType?: string;
   isAutoReview?: boolean;
+}
+
+/**
+ * One entry of the `get_active_sessions` busy-state snapshot: a running or
+ * queued session projected to its branch/project context. Carries the same
+ * discriminators as `SessionStatusPayload` so the snapshot and the
+ * `session-status-changed` delta stream describe sessions identically.
+ */
+export interface ActiveSessionInfo {
+  sessionId: string;
+  projectId: string | null;
+  branchId: string | null;
+  sessionType: string | null;
+  status: SessionStatus;
+  isAutoReview: boolean;
+}
+
+/**
+ * Payload emitted by the `pr-created` domain event when a completed PR
+ * session produced a pull request. The backend has already persisted the PR
+ * number and kicked off a status refresh; clients only render.
+ */
+export interface PrCreatedPayload {
+  branchId: string;
+  sessionId: string;
+  prUrl: string;
+  prNumber: number;
+}
+
+export type PushCompletedOutcome = 'succeeded' | 'rejectedNonFastForward';
+
+/**
+ * Payload emitted by the `push-completed` domain event when a push session
+ * completes. On success the backend has already cleared the stale PR status
+ * (and emitted `pr-status-cleared`); clients only render.
+ */
+export interface PushCompletedPayload {
+  branchId: string;
+  sessionId: string;
+  outcome: PushCompletedOutcome;
 }
 
 // =============================================================================

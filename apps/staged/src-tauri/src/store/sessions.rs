@@ -19,8 +19,8 @@ impl Store {
         let acp_config_selection_json =
             serialize_acp_config_selection(session.acp_config_selection.as_ref())?;
         conn.execute(
-            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 session.id,
                 session.prompt,
@@ -37,6 +37,7 @@ impl Store {
                 acp_config_selection_json,
                 session.acp_title,
                 session.branch_id,
+                session.completion_effects_at,
             ],
         )?;
         Ok(())
@@ -45,7 +46,7 @@ impl Store {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at
              FROM sessions WHERE id = ?1",
             params![id],
             Self::row_to_session,
@@ -224,8 +225,26 @@ impl Store {
     pub fn get_running_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at
              FROM sessions WHERE status = 'running'",
+        )?;
+        let sessions = stmt
+            .query_map([], Self::row_to_session)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(sessions)
+    }
+
+    /// Get all running and queued sessions, oldest first.
+    ///
+    /// Backs the `get_active_sessions` busy-state snapshot command, which
+    /// clients hydrate from on load or reconnect instead of relying solely on
+    /// accumulated `session-status-changed` events.
+    pub fn get_active_sessions(&self) -> Result<Vec<Session>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title, branch_id, completion_effects_at
+             FROM sessions WHERE status IN ('running', 'queued')
+             ORDER BY created_at ASC",
         )?;
         let sessions = stmt
             .query_map([], Self::row_to_session)?
@@ -298,7 +317,7 @@ impl Store {
     ) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT s.id, s.prompt, s.status, s.working_dir, s.provider, s.agent_id, s.error_message, s.completion_reason, s.created_at, s.updated_at, s.owner_pid, s.pipeline, s.acp_config_selection, s.acp_title, s.branch_id
+            "SELECT s.id, s.prompt, s.status, s.working_dir, s.provider, s.agent_id, s.error_message, s.completion_reason, s.created_at, s.updated_at, s.owner_pid, s.pipeline, s.acp_config_selection, s.acp_title, s.branch_id, s.completion_effects_at
              FROM sessions s
              WHERE s.status = 'queued'
                AND (
@@ -339,7 +358,8 @@ impl Store {
     }
 
     /// Resolve the branch that owns a session through its linked artifact, or
-    /// through `sessions.branch_id` for artifact-less branch work (pushes).
+    /// through `sessions.branch_id` for artifact-less branch work (pipeline
+    /// pr/push sessions).
     ///
     /// Project-note sessions do not belong to a branch and therefore return `None`.
     /// This assumes all branch-linked artifacts for a session point at the same
@@ -444,6 +464,21 @@ impl Store {
         Ok(())
     }
 
+    /// Record that this session's pipeline (pr/push) completion outcome events
+    /// have been delivered, so a later resume of the same session doesn't
+    /// re-fire them against its stale pipeline and transcript.
+    ///
+    /// One-shot: the completion hook refuses to run once this is set.
+    pub fn mark_completion_effects_ran(&self, id: &str) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let now = now_timestamp();
+        conn.execute(
+            "UPDATE sessions SET completion_effects_at = ?1, updated_at = ?1 WHERE id = ?2",
+            params![now, id],
+        )?;
+        Ok(())
+    }
+
     /// Update the pipeline execution state for a session.
     pub fn update_session_pipeline(
         &self,
@@ -491,6 +526,7 @@ impl Store {
             acp_config_selection,
             acp_title: row.get(13)?,
             branch_id: row.get(14)?,
+            completion_effects_at: row.get(15)?,
         })
     }
 }

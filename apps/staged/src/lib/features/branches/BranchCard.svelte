@@ -1702,7 +1702,7 @@
         baseBranch={isRemote
           ? (branch.workspaceName ?? formatBaseBranch(branch.baseBranch))
           : formatBaseBranch(branch.baseBranch)}
-        parentAheadCount={refreshingGitState ? 0 : (timeline?.gitState?.base.commitsSinceFork ?? 0)}
+        parentAheadCount={timeline?.gitState?.base.commitsSinceFork ?? 0}
         onRebase={branchCommandDisabledReason
           ? undefined
           : () => startBranchCommandPipeline('rebase')}

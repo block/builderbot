@@ -382,6 +382,8 @@ export interface Session {
   pipeline?: PipelineExecution | null;
   /** Selected ACP config values to apply before prompting the agent. */
   acpConfigSelection?: AcpConfigSelection | null;
+  /** Latest session title pushed by the agent via ACP `session_info_update`. */
+  acpTitle: string | null;
 }
 
 export type QueuedSessionMessageStatus = 'queued' | 'sending' | 'sent';

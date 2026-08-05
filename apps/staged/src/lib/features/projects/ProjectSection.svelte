@@ -106,13 +106,17 @@
   /** Session IDs for running project sessions (all produce notes). */
   let activeSessionIds = $state<Set<string>>(new Set());
 
-  // ── Live session hints (show latest agent message for running notes) ──
+  // ── Live session hints/titles (latest agent message + ACP title for running notes) ──
   let liveSessionHints = $state<Record<string, string>>({});
+  let liveSessionTitles = $state<Record<string, string>>({});
   const liveSessionHintPoller = createLiveSessionHints(
     (nextHints) => {
       liveSessionHints = nextHints;
     },
-    () => projectDisplayRootCandidates
+    () => projectDisplayRootCandidates,
+    (nextTitles) => {
+      liveSessionTitles = nextTitles;
+    }
   );
 
   /** Collect session IDs from running project notes + activeSessionIds. */
@@ -466,10 +470,12 @@
             {@const noteType = isRunning ? 'generating-note' : isFailed ? 'failed-note' : 'note'}
             {@const liveHint =
               isRunning && note.sessionId ? liveSessionHints[note.sessionId] : undefined}
+            {@const liveTitle =
+              isRunning && note.sessionId ? liveSessionTitles[note.sessionId] : undefined}
             <TimelineRow
               type={noteType}
               title={isRunning
-                ? 'Generating note…'
+                ? (liveTitle ?? 'Generating note…')
                 : isFailed
                   ? 'Session finished — no note created'
                   : note.title || 'Untitled note'}

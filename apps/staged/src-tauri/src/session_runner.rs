@@ -2525,8 +2525,27 @@ fn run_post_completion_hooks(
 
             // Extract and save review title (always attempt, even if comments exist)
             if review.title.is_none() {
-                if let Some(title) = extract_review_title(&full_text) {
-                    log::info!("Session {session_id}: extracted review title: {title}");
+                // Fall back to the ACP-provided session title when no
+                // review-title block is found.
+                let title = match extract_review_title(&full_text) {
+                    Some(title) => {
+                        log::info!("Session {session_id}: extracted review title: {title}");
+                        Some(title)
+                    }
+                    None => {
+                        let acp_title = store
+                            .get_session(session_id)
+                            .ok()
+                            .flatten()
+                            .as_ref()
+                            .and_then(non_empty_acp_title);
+                        if let Some(title) = &acp_title {
+                            log::info!("Session {session_id}: no review-title block found; using ACP session title as review title: {title}");
+                        }
+                        acp_title
+                    }
+                };
+                if let Some(title) = title {
                     if let Err(e) = store.update_review_title(&review.id, &title) {
                         log::error!("Failed to update review title: {e}");
                     }
@@ -2797,8 +2816,22 @@ fn extract_note_title(content: &str) -> (String, String) {
     }
 }
 
-/// Parse note content into a final `(title, body)` pair, using the session
-/// prompt as a fallback title when the note has no H1 heading.
+/// The session's ACP-provided title, trimmed, when set and non-empty.
+///
+/// Used as an end-of-session fallback name when the session produced no
+/// better title (note without an H1, review without a review-title block).
+fn non_empty_acp_title(session: &crate::store::Session) -> Option<String> {
+    session
+        .acp_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+}
+
+/// Parse note content into a final `(title, body)` pair. When the note has
+/// no H1 heading, fall back to the ACP-provided session title, then the
+/// session prompt.
 ///
 /// Shared by both repo-note and project-note extraction paths.
 fn resolve_note_title_and_body(
@@ -2807,12 +2840,15 @@ fn resolve_note_title_and_body(
     session_id: &str,
 ) -> (String, String) {
     let (title, body) = extract_note_title(note_content);
-    let final_title = if title.is_empty() {
-        store
-            .get_session(session_id)
-            .ok()
-            .flatten()
-            .map(|s| {
+    if !title.is_empty() {
+        return (title, body);
+    }
+    let session = store.get_session(session_id).ok().flatten();
+    let final_title = session
+        .as_ref()
+        .and_then(non_empty_acp_title)
+        .or_else(|| {
+            session.as_ref().map(|s| {
                 let prompt = strip_action_wrapper(&s.prompt);
                 let t: String = prompt.chars().take(80).collect();
                 if prompt.len() > 80 {
@@ -2821,10 +2857,8 @@ fn resolve_note_title_and_body(
                     t
                 }
             })
-            .unwrap_or_else(|| "Untitled Note".to_string())
-    } else {
-        title
-    };
+        })
+        .unwrap_or_else(|| "Untitled Note".to_string());
     (final_title, body)
 }
 
@@ -3764,6 +3798,135 @@ Solid changes with minor nit
             extract_review_title(text),
             Some("Solid changes with minor nit".to_string())
         );
+    }
+
+    // ── end-of-session ACP title fallbacks ──────────────────────────────
+
+    fn store_with_session(prompt: &str, acp_title: Option<&str>) -> (Arc<Store>, String) {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let mut session = crate::store::Session::new_running(prompt, std::path::Path::new("/tmp"));
+        session.acp_title = acp_title.map(str::to_string);
+        store.create_session(&session).unwrap();
+        (store, session.id)
+    }
+
+    #[test]
+    fn note_title_prefers_h1_over_acp_title() {
+        let (store, session_id) = store_with_session("Write a note", Some("ACP session title"));
+        let (title, body) =
+            resolve_note_title_and_body("# Heading From Note\n\nBody text", &store, &session_id);
+        assert_eq!(title, "Heading From Note");
+        assert_eq!(body, "Body text");
+    }
+
+    #[test]
+    fn note_title_falls_back_to_acp_title_when_no_h1() {
+        let (store, session_id) =
+            store_with_session("Write a note", Some("Investigate flaky login test"));
+        let (title, body) =
+            resolve_note_title_and_body("Body without a heading", &store, &session_id);
+        assert_eq!(title, "Investigate flaky login test");
+        assert_eq!(body, "Body without a heading");
+    }
+
+    #[test]
+    fn note_title_falls_back_to_prompt_without_h1_or_acp_title() {
+        let (store, session_id) = store_with_session("Write a note", None);
+        let (title, _) = resolve_note_title_and_body("Body without a heading", &store, &session_id);
+        assert_eq!(title, "Write a note");
+    }
+
+    #[test]
+    fn note_title_skips_blank_acp_title() {
+        let (store, session_id) = store_with_session("Write a note", Some("   "));
+        let (title, _) = resolve_note_title_and_body("Body without a heading", &store, &session_id);
+        assert_eq!(title, "Write a note");
+    }
+
+    fn create_review_for_session(store: &Store, session_id: &str) -> String {
+        let project = crate::store::Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = crate::store::Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+        let review =
+            crate::store::Review::new(&branch.id, "abc123", crate::store::ReviewScope::Branch)
+                .with_session(session_id);
+        store.create_review(&review).unwrap();
+        review.id
+    }
+
+    #[test]
+    fn review_title_falls_back_to_acp_title_when_no_title_block() {
+        let (store, session_id) =
+            store_with_session("Review this", Some("Solid refactor of the parser"));
+        let review_id = create_review_for_session(&store, &session_id);
+        store
+            .add_session_message(
+                &session_id,
+                MessageRole::Assistant,
+                "Looked at everything; no fenced blocks here.",
+            )
+            .unwrap();
+
+        run_post_completion_hooks(
+            &session_id,
+            std::path::Path::new("/tmp"),
+            None,
+            None,
+            &store,
+        );
+
+        let review = store.get_review(&review_id).unwrap().unwrap();
+        assert_eq!(
+            review.title.as_deref(),
+            Some("Solid refactor of the parser")
+        );
+        assert!(review.completed_at.is_some());
+    }
+
+    #[test]
+    fn review_title_block_wins_over_acp_title() {
+        let (store, session_id) = store_with_session("Review this", Some("ACP session title"));
+        let review_id = create_review_for_session(&store, &session_id);
+        store
+            .add_session_message(
+                &session_id,
+                MessageRole::Assistant,
+                "```review-title\nExtracted block title\n```\n",
+            )
+            .unwrap();
+
+        run_post_completion_hooks(
+            &session_id,
+            std::path::Path::new("/tmp"),
+            None,
+            None,
+            &store,
+        );
+
+        let review = store.get_review(&review_id).unwrap().unwrap();
+        assert_eq!(review.title.as_deref(), Some("Extracted block title"));
+    }
+
+    #[test]
+    fn review_without_title_block_or_acp_title_stays_untitled_but_completes() {
+        let (store, session_id) = store_with_session("Review this", None);
+        let review_id = create_review_for_session(&store, &session_id);
+        store
+            .add_session_message(&session_id, MessageRole::Assistant, "No blocks at all.")
+            .unwrap();
+
+        run_post_completion_hooks(
+            &session_id,
+            std::path::Path::new("/tmp"),
+            None,
+            None,
+            &store,
+        );
+
+        let review = store.get_review(&review_id).unwrap().unwrap();
+        assert_eq!(review.title, None);
+        assert!(review.completed_at.is_some());
     }
 
     // ── extract_review_comments ─────────────────────────────────────────

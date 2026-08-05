@@ -19,8 +19,8 @@ impl Store {
         let acp_config_selection_json =
             serialize_acp_config_selection(session.acp_config_selection.as_ref())?;
         conn.execute(
-            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO sessions (id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 session.id,
                 session.prompt,
@@ -35,6 +35,7 @@ impl Store {
                 session.owner_pid,
                 pipeline_json,
                 acp_config_selection_json,
+                session.acp_title,
             ],
         )?;
         Ok(())
@@ -43,7 +44,7 @@ impl Store {
     pub fn get_session(&self, id: &str) -> Result<Option<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title
              FROM sessions WHERE id = ?1",
             params![id],
             Self::row_to_session,
@@ -222,7 +223,7 @@ impl Store {
     pub fn get_running_sessions(&self) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection
+            "SELECT id, prompt, status, working_dir, provider, agent_id, error_message, completion_reason, created_at, updated_at, owner_pid, pipeline, acp_config_selection, acp_title
              FROM sessions WHERE status = 'running'",
         )?;
         let sessions = stmt
@@ -295,7 +296,7 @@ impl Store {
     ) -> Result<Vec<Session>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT s.id, s.prompt, s.status, s.working_dir, s.provider, s.agent_id, s.error_message, s.completion_reason, s.created_at, s.updated_at, s.owner_pid, s.pipeline, s.acp_config_selection
+            "SELECT s.id, s.prompt, s.status, s.working_dir, s.provider, s.agent_id, s.error_message, s.completion_reason, s.created_at, s.updated_at, s.owner_pid, s.pipeline, s.acp_config_selection, s.acp_title
              FROM sessions s
              WHERE s.status = 'queued'
                AND (
@@ -416,6 +417,22 @@ impl Store {
         Ok(())
     }
 
+    /// Update the ACP-provided session title.
+    ///
+    /// `None` clears the column (the agent explicitly retracted the title).
+    pub fn update_session_acp_title(
+        &self,
+        id: &str,
+        title: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE sessions SET acp_title = ?1, updated_at = ?2 WHERE id = ?3",
+            params![title, now_timestamp(), id],
+        )?;
+        Ok(())
+    }
+
     /// Update the pipeline execution state for a session.
     pub fn update_session_pipeline(
         &self,
@@ -461,6 +478,7 @@ impl Store {
             owner_pid: row.get(10)?,
             pipeline,
             acp_config_selection,
+            acp_title: row.get(13)?,
         })
     }
 }

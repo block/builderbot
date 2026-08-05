@@ -10,7 +10,7 @@
 
 use crate::git;
 use crate::session_runner;
-use crate::store::{CommentAuthor, Review, Store};
+use crate::store::{CommentAuthor, ResolvedSession, Review, Store};
 use crate::{
     blox, branches, BranchTimeline, CommitTimelineItem, ImageTimelineItem, NoteTimelineItem,
     ReviewTimelineItem,
@@ -271,6 +271,20 @@ fn map_local_commits(
         .collect()
 }
 
+/// The agent-pushed ACP session title, when set and non-empty.
+///
+/// Applied at read time only, as an interim display name for in-progress
+/// timeline rows — stored artifact names (commit subject, note H1, review
+/// title) always win once the session ends.
+fn non_empty_acp_title(resolved: &ResolvedSession) -> Option<String> {
+    resolved
+        .acp_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+}
+
 /// Public wrapper for `build_branch_timeline` for use by the web server.
 pub fn build_branch_timeline_public(
     store: &Arc<Store>,
@@ -419,15 +433,15 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 id: Some(dc.id.clone()),
                 sha: String::new(),
                 short_sha: String::new(),
-                subject: resolved
-                    .session_id
-                    .as_deref()
-                    .and_then(|sid| {
-                        store
-                            .get_session(sid)
-                            .ok()
-                            .flatten()
-                            .map(|s| s.prompt.clone())
+                subject: non_empty_acp_title(&resolved)
+                    .or_else(|| {
+                        resolved.session_id.as_deref().and_then(|sid| {
+                            store
+                                .get_session(sid)
+                                .ok()
+                                .flatten()
+                                .map(|s| s.prompt.clone())
+                        })
                     })
                     .unwrap_or_else(|| "Pending commit".to_string()),
                 author: String::new(),
@@ -456,9 +470,18 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         .into_iter()
         .map(|n| {
             let resolved = store.resolve_session_status(n.session_id.as_deref());
+            // While the session runs, the stored title is just the prompt
+            // stub — an agent-pushed ACP title is a better interim name.
+            // Once the session ends the stored title is final (note H1 or
+            // prompt fallback) and always wins.
+            let title = if resolved.status.as_deref() == Some("running") {
+                non_empty_acp_title(&resolved).unwrap_or(n.title)
+            } else {
+                n.title
+            };
             NoteTimelineItem {
                 id: n.id,
-                title: n.title,
+                title,
                 content: n.content,
                 session_id: resolved.session_id,
                 session_status: resolved.status,
@@ -481,6 +504,15 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
         .map(|r| {
             let resolved = store.resolve_session_status(r.session_id.as_deref());
             let comment_count = r.comments.len();
+            // Untitled running reviews would otherwise render a static
+            // placeholder; surface the agent-pushed ACP title instead. A
+            // stored title always wins.
+            let title = match r.title {
+                None if resolved.status.as_deref() == Some("running") => {
+                    non_empty_acp_title(&resolved)
+                }
+                title => title,
+            };
             ReviewTimelineItem {
                 id: r.id,
                 commit_sha: r.commit_sha,
@@ -489,7 +521,7 @@ fn build_branch_timeline(store: &Arc<Store>, branch_id: &str) -> Result<BranchTi
                 session_status: resolved.status,
                 session_provider: resolved.provider,
                 completion_reason: resolved.completion_reason,
-                title: r.title,
+                title,
                 comment_count,
                 is_auto: r.is_auto,
                 created_at: r.created_at,
@@ -1377,7 +1409,9 @@ pub(crate) async fn delete_commit_impl(
 mod tests {
     use super::*;
     use crate::git::Span;
-    use crate::store::models::{Branch, Comment, Project, ReviewScope, Workdir};
+    use crate::store::models::{
+        Branch, Comment, Commit, Note, Project, ReviewScope, Session, SessionStatus, Workdir,
+    };
     use crate::test_utils::TempGitRepo;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1648,5 +1682,138 @@ mod tests {
 
         assert_eq!(timeline.commits.len(), 1);
         assert!(timeline.reviews.is_empty());
+    }
+
+    fn running_session(store: &Arc<Store>, prompt: &str, acp_title: Option<&str>) -> Session {
+        let session = Session::new_running(prompt, Path::new("/tmp"));
+        store.create_session(&session).unwrap();
+        if let Some(title) = acp_title {
+            store
+                .update_session_acp_title(&session.id, Some(title))
+                .unwrap();
+        }
+        session
+    }
+
+    #[test]
+    fn build_branch_timeline_pending_commit_prefers_acp_title_over_prompt() {
+        let (repo, _visible_sha, _stale_sha) = repo_with_visible_and_stale_commit();
+        let (store, branch) = store_with_branch(&repo);
+
+        let titled = running_session(&store, "fix the login bug", Some("Fix login token refresh"));
+        let untitled = running_session(&store, "add more tests", None);
+        let titled_commit = Commit::new_pending(&branch.id).with_session(&titled.id);
+        let untitled_commit = Commit::new_pending(&branch.id).with_session(&untitled.id);
+        store.create_commit(&titled_commit).unwrap();
+        store.create_commit(&untitled_commit).unwrap();
+
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+
+        let subject_of = |commit_id: &str| {
+            timeline
+                .commits
+                .iter()
+                .find(|c| c.id.as_deref() == Some(commit_id))
+                .unwrap()
+                .subject
+                .clone()
+        };
+        assert_eq!(subject_of(&titled_commit.id), "Fix login token refresh");
+        assert_eq!(subject_of(&untitled_commit.id), "add more tests");
+    }
+
+    #[test]
+    fn build_branch_timeline_running_note_shows_acp_title() {
+        let (repo, _visible_sha, _stale_sha) = repo_with_visible_and_stale_commit();
+        let (store, branch) = store_with_branch(&repo);
+
+        let titled = running_session(&store, "write up the plan", Some("Plan: staged rollout"));
+        let untitled = running_session(&store, "summarize findings", None);
+        let titled_note = Note::new(&branch.id, "write up the plan", "").with_session(&titled.id);
+        let untitled_note =
+            Note::new(&branch.id, "summarize findings", "").with_session(&untitled.id);
+        store.create_note(&titled_note).unwrap();
+        store.create_note(&untitled_note).unwrap();
+
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+
+        let title_of = |note_id: &str| {
+            timeline
+                .notes
+                .iter()
+                .find(|n| n.id == note_id)
+                .unwrap()
+                .title
+                .clone()
+        };
+        assert_eq!(title_of(&titled_note.id), "Plan: staged rollout");
+        assert_eq!(title_of(&untitled_note.id), "summarize findings");
+    }
+
+    #[test]
+    fn build_branch_timeline_running_review_shows_acp_title() {
+        let (repo, visible_sha, _stale_sha) = repo_with_visible_and_stale_commit();
+        let (store, branch) = store_with_branch(&repo);
+
+        let session = running_session(&store, "review the change", Some("Review: token refresh"));
+        let untitled_review =
+            Review::new(&branch.id, &visible_sha, ReviewScope::Commit).with_session(&session.id);
+        store.create_review(&untitled_review).unwrap();
+
+        let stored_session = running_session(&store, "another review", Some("Should not display"));
+        let mut stored_review = Review::new(&branch.id, &visible_sha, ReviewScope::Commit)
+            .with_session(&stored_session.id);
+        stored_review.title = Some("Stored review title".to_string());
+        store.create_review(&stored_review).unwrap();
+
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+
+        let title_of = |review_id: &str| {
+            timeline
+                .reviews
+                .iter()
+                .find(|r| r.id == review_id)
+                .unwrap()
+                .title
+                .clone()
+        };
+        assert_eq!(
+            title_of(&untitled_review.id),
+            Some("Review: token refresh".to_string())
+        );
+        assert_eq!(
+            title_of(&stored_review.id),
+            Some("Stored review title".to_string())
+        );
+    }
+
+    #[test]
+    fn build_branch_timeline_completed_artifacts_ignore_acp_title() {
+        let (repo, visible_sha, _stale_sha) = repo_with_visible_and_stale_commit();
+        let (store, branch) = store_with_branch(&repo);
+
+        let session = running_session(&store, "the prompt", Some("Interim ACP title"));
+        store
+            .update_session_status(&session.id, SessionStatus::Completed, None, None)
+            .unwrap();
+
+        let commit = Commit::new_with_sha(&branch.id, &visible_sha).with_session(&session.id);
+        store.create_commit(&commit).unwrap();
+        let note = Note::new(&branch.id, "Final note title", "note body").with_session(&session.id);
+        store.create_note(&note).unwrap();
+        let review =
+            Review::new(&branch.id, &visible_sha, ReviewScope::Commit).with_session(&session.id);
+        store.create_review(&review).unwrap();
+
+        let timeline = build_branch_timeline(&store, &branch.id).unwrap();
+
+        let landed = timeline
+            .commits
+            .iter()
+            .find(|c| c.sha == visible_sha)
+            .unwrap();
+        assert_eq!(landed.subject, "visible change");
+        assert_eq!(timeline.notes[0].title, "Final note title");
+        assert_eq!(timeline.reviews[0].title, None);
     }
 }

@@ -22,6 +22,7 @@ use acp_client::{
     autoapprove_permission_decision, strip_code_fences, AcpEventMetadata, AcpInitializeMetadata,
     AcpPermissionDecision, AcpPermissionRequest, AcpToolCallMetadata,
 };
+use agent_client_protocol::schema::MaybeUndefined;
 
 /// Minimum interval between DB flushes for streaming text. Chunks accumulate
 /// in memory and are written at most this often, reducing mutex contention
@@ -317,6 +318,31 @@ impl acp_client::MessageWriter for MessageWriter {
         {
             log::error!("Failed to persist ACP session info update: {e}");
         }
+
+        // Mirror the agent-provided title onto the session row so it can be
+        // shown as an interim session name while the session runs.
+        match &info.title {
+            MaybeUndefined::Value(title) => {
+                let title = sanitize_title(title);
+                let title = title.trim();
+                if !title.is_empty() {
+                    if let Err(e) = self
+                        .store
+                        .update_session_acp_title(&self.session_id, Some(title))
+                    {
+                        log::error!("Failed to persist ACP session title: {e}");
+                    }
+                }
+            }
+            // The agent explicitly retracted the title.
+            MaybeUndefined::Null => {
+                if let Err(e) = self.store.update_session_acp_title(&self.session_id, None) {
+                    log::error!("Failed to clear ACP session title: {e}");
+                }
+            }
+            // Update was about `updated_at`/meta only — leave the title alone.
+            MaybeUndefined::Undefined => {}
+        }
     }
 
     async fn on_model_state_update(&self, state: &acp_client::SessionModelState) {
@@ -425,6 +451,7 @@ mod tests {
     use acp_client::{
         AcpPermissionDecision, AcpPermissionOption, AcpPermissionOptionKind, AcpPermissionRequest,
     };
+    use agent_client_protocol::schema::MaybeUndefined;
     use tokio_util::sync::CancellationToken;
 
     fn setup_writer() -> (Arc<Store>, String, MessageWriter) {
@@ -754,5 +781,68 @@ mod tests {
             metadata_rows[0].acp.acp_usage.as_ref().unwrap()["outputTokens"],
             7
         );
+    }
+
+    #[tokio::test]
+    async fn session_info_update_title_value_sets_session_acp_title() {
+        let (store, session_id, writer) = setup_writer();
+
+        let info = acp_client::SessionInfoUpdate::new().title("  `Fix the login flow`  ");
+        <MessageWriter as acp_client::MessageWriter>::on_session_info_update(&writer, &info).await;
+
+        let session = store.get_session(&session_id).unwrap().unwrap();
+        assert_eq!(session.acp_title.as_deref(), Some("Fix the login flow"));
+
+        // The metadata-row archive of the raw update is unchanged behavior.
+        let metadata_rows = store
+            .get_session_acp_metadata_messages(&session_id)
+            .unwrap();
+        assert_eq!(metadata_rows.len(), 1);
+        assert_eq!(
+            metadata_rows[0].acp.acp_event_kind.as_deref(),
+            Some("session_info_update")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_info_update_null_title_clears_session_acp_title() {
+        let (store, session_id, writer) = setup_writer();
+        store
+            .update_session_acp_title(&session_id, Some("Earlier title"))
+            .unwrap();
+
+        let info = acp_client::SessionInfoUpdate::new().title(MaybeUndefined::Null);
+        <MessageWriter as acp_client::MessageWriter>::on_session_info_update(&writer, &info).await;
+
+        let session = store.get_session(&session_id).unwrap().unwrap();
+        assert_eq!(session.acp_title, None);
+    }
+
+    #[tokio::test]
+    async fn session_info_update_undefined_title_preserves_session_acp_title() {
+        let (store, session_id, writer) = setup_writer();
+        store
+            .update_session_acp_title(&session_id, Some("Earlier title"))
+            .unwrap();
+
+        let info = acp_client::SessionInfoUpdate::new().updated_at("2026-08-04T00:00:00Z");
+        <MessageWriter as acp_client::MessageWriter>::on_session_info_update(&writer, &info).await;
+
+        let session = store.get_session(&session_id).unwrap().unwrap();
+        assert_eq!(session.acp_title.as_deref(), Some("Earlier title"));
+    }
+
+    #[tokio::test]
+    async fn session_info_update_blank_title_value_preserves_session_acp_title() {
+        let (store, session_id, writer) = setup_writer();
+        store
+            .update_session_acp_title(&session_id, Some("Earlier title"))
+            .unwrap();
+
+        let info = acp_client::SessionInfoUpdate::new().title("  ``  ");
+        <MessageWriter as acp_client::MessageWriter>::on_session_info_update(&writer, &info).await;
+
+        let session = store.get_session(&session_id).unwrap().unwrap();
+        assert_eq!(session.acp_title.as_deref(), Some("Earlier title"));
     }
 }

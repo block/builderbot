@@ -640,6 +640,59 @@ fn test_session_acp_config_selection_round_trips() {
 }
 
 #[test]
+fn test_session_acp_title_round_trips() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("work", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    let fetched = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(fetched.acp_title, None);
+
+    store
+        .update_session_acp_title(&session.id, Some("Refactor the widget pipeline"))
+        .unwrap();
+    let updated = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(
+        updated.acp_title.as_deref(),
+        Some("Refactor the widget pipeline")
+    );
+
+    store
+        .update_session_acp_title(&session.id, Some("Refactor and test the widget pipeline"))
+        .unwrap();
+    let replaced = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(
+        replaced.acp_title.as_deref(),
+        Some("Refactor and test the widget pipeline")
+    );
+
+    store.update_session_acp_title(&session.id, None).unwrap();
+    let cleared = store.get_session(&session.id).unwrap().unwrap();
+    assert_eq!(cleared.acp_title, None);
+}
+
+#[test]
+fn test_resolve_session_status_exposes_acp_title() {
+    let store = Store::in_memory().unwrap();
+    let session = Session::new_running("work", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+
+    let resolved = store.resolve_session_status(Some(&session.id));
+    assert_eq!(resolved.acp_title, None);
+
+    store
+        .update_session_acp_title(&session.id, Some("Fix the login flow"))
+        .unwrap();
+    let resolved = store.resolve_session_status(Some(&session.id));
+    assert_eq!(resolved.session_id.as_deref(), Some(session.id.as_str()));
+    assert_eq!(resolved.status.as_deref(), Some("running"));
+    assert_eq!(resolved.acp_title.as_deref(), Some("Fix the login flow"));
+
+    let unresolved = store.resolve_session_status(None);
+    assert_eq!(unresolved.acp_title, None);
+}
+
+#[test]
 fn test_queued_session_acp_config_selection_round_trips() {
     let store = Store::in_memory().unwrap();
     let project = Project::new("test-owner/test-repo");

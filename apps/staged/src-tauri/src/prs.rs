@@ -1131,11 +1131,14 @@ pub(crate) async fn pull_or_queue_branch_for_branch(
 
     let pull_store = Arc::clone(&store);
     let pull_branch_id = branch_id.clone();
+    // A join failure (the pull task panicking, or runtime shutdown) folds into the
+    // pull's own error path rather than returning early: the marker session below
+    // is what marks the branch busy, and nothing else ever finishes it.
     let pulled = tauri::async_runtime::spawn_blocking(move || {
         crate::timeline::pull_branch_ff_only_impl(&pull_store, &pull_branch_id)
     })
     .await
-    .map_err(|e| format!("Pull task failed: {e}"))?;
+    .unwrap_or_else(|e| Err(format!("Pull task failed: {e}")));
 
     finish_immediate_pull_session(
         &store,

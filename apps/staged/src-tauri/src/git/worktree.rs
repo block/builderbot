@@ -299,6 +299,59 @@ pub fn get_head_sha(worktree: &Path) -> Result<String, GitError> {
     Ok(output.trim().to_string())
 }
 
+/// `git log` format for every commit producer that feeds a
+/// [`CommitTimelineItem`](crate::CommitTimelineItem).
+///
+/// Carries both clocks: `%ct` (committer time) is what a rebase rewrites, so
+/// it answers "did the branch change since?"; `%at` (author time) is what a
+/// rebase preserves, so it answers "when was this commit written" and is what
+/// the branch timeline sorts on.
+///
+/// Fields are separated by `%x1f` (the unit separator) because no printable
+/// delimiter is safe: git permits `|` in author names — and technically in
+/// emails — and a delimiter inside a field shifts every field after it. The
+/// subject still goes last so [`parse_branch_commit_line`] can take it as the
+/// remainder — the same shape as `commit_reassociation`'s format.
+pub const BRANCH_COMMIT_LOG_FORMAT: &str = "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%ct%x1f%at%x1f%s";
+
+/// One [`BRANCH_COMMIT_LOG_FORMAT`] line, borrowed from the log output.
+#[derive(Debug, Clone)]
+pub struct BranchCommitFields<'a> {
+    pub sha: &'a str,
+    pub short_sha: &'a str,
+    pub author: &'a str,
+    pub author_email: &'a str,
+    /// Committer time (`%ct`), in unix seconds. Rewritten by a rebase.
+    pub committer_timestamp: i64,
+    /// Author time (`%at`), in unix seconds. Preserved by a rebase.
+    pub author_timestamp: i64,
+    pub subject: &'a str,
+}
+
+/// Parse one [`BRANCH_COMMIT_LOG_FORMAT`] line. The subject is the remainder,
+/// so even a subject containing the separator byte survives intact. Returns
+/// `None` for a line that doesn't carry every field — a blank line, or output
+/// from some other format.
+pub fn parse_branch_commit_line(line: &str) -> Option<BranchCommitFields<'_>> {
+    let mut parts = line.splitn(7, '\x1f');
+    let sha = parts.next().filter(|sha| !sha.is_empty())?;
+    let short_sha = parts.next()?;
+    let author = parts.next()?;
+    let author_email = parts.next()?;
+    let committer_timestamp = parts.next()?;
+    let author_timestamp = parts.next()?;
+    let subject = parts.next()?;
+    Some(BranchCommitFields {
+        sha,
+        short_sha,
+        author,
+        author_email,
+        committer_timestamp: committer_timestamp.parse().unwrap_or(0),
+        author_timestamp: author_timestamp.parse().unwrap_or(0),
+        subject,
+    })
+}
+
 /// Get commits on a branch since it diverged from base.
 /// Returns commits in reverse chronological order (newest first).
 #[derive(Debug, Clone)]
@@ -308,7 +361,10 @@ pub struct CommitInfo {
     pub subject: String,
     pub author: String,
     pub author_email: String,
+    /// Committer time (`%ct`), in unix seconds. Rewritten by a rebase.
     pub timestamp: i64,
+    /// Author time (`%at`), in unix seconds. Preserved by a rebase.
+    pub author_timestamp: i64,
     /// Position in git's topological order (0 = oldest on the branch).
     /// Used as a tiebreaker when multiple commits share the same second-level timestamp.
     pub order: i64,
@@ -329,29 +385,30 @@ pub fn get_commits_since_base(worktree: &Path, base: &str) -> Result<Vec<CommitI
     let mb_output = cli::run_smart(worktree, &["merge-base", base, "HEAD"])?;
     let merge_base = mb_output.trim().to_string();
 
-    let format = "--format=%H|%h|%s|%an|%ae|%ct";
     let range = format!("{merge_base}..HEAD");
 
-    let output = cli::run_smart(worktree, &["log", format, &range])?;
+    let output = cli::run_smart(worktree, &["log", BRANCH_COMMIT_LOG_FORMAT, &range])?;
 
-    let mut commits = Vec::new();
-    for line in output.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        let parts: Vec<&str> = line.splitn(6, '|').collect();
-        if parts.len() >= 6 {
-            commits.push(CommitInfo {
-                sha: parts[0].to_string(),
-                short_sha: parts[1].to_string(),
-                subject: parts[2].to_string(),
-                author: parts[3].to_string(),
-                author_email: parts[4].to_string(),
-                timestamp: parts[5].parse().unwrap_or(0),
-                order: 0, // placeholder, assigned below
-            });
-        }
-    }
+    Ok(parse_commit_info_lines(&output))
+}
+
+/// Parse [`BRANCH_COMMIT_LOG_FORMAT`] lines, newest first as `git log` emits
+/// them, assigning `order` so that 0 is the oldest commit on the branch.
+fn parse_commit_info_lines(output: &str) -> Vec<CommitInfo> {
+    let mut commits: Vec<CommitInfo> = output
+        .lines()
+        .filter_map(parse_branch_commit_line)
+        .map(|fields| CommitInfo {
+            sha: fields.sha.to_string(),
+            short_sha: fields.short_sha.to_string(),
+            subject: fields.subject.to_string(),
+            author: fields.author.to_string(),
+            author_email: fields.author_email.to_string(),
+            timestamp: fields.committer_timestamp,
+            author_timestamp: fields.author_timestamp,
+            order: 0, // placeholder, assigned below
+        })
+        .collect();
 
     // git log returns newest-first; assign order so that 0 = oldest.
     let len = commits.len() as i64;
@@ -359,7 +416,7 @@ pub fn get_commits_since_base(worktree: &Path, base: &str) -> Result<Vec<CommitI
         commit.order = len - 1 - i as i64;
     }
 
-    Ok(commits)
+    commits
 }
 
 /// Get the full commit log (with bodies) between base and HEAD.
@@ -383,14 +440,17 @@ pub fn get_full_commit_log(worktree: &Path, base: &str) -> Result<String, GitErr
     let range = format!("{merge_base}..HEAD");
 
     // --reverse gives oldest-first ordering
-    // %x00 = record separator, %x01 = field separator, %ct = unix timestamp
+    // %x00 = record separator, %x01 = field separator
+    // %at = author time — the prefix is purely an ordering key, and author
+    // time is the one a rebase preserves, so rewritten commits keep their
+    // place among the session messages they're interleaved with
     // %B is the full commit message (subject + body)
     let output = cli::run(
         worktree,
         &[
             "log",
             "--reverse",
-            "--format=%x00%ct%x01commit %H%nAuthor: %an%nDate: %ci%n%n%B",
+            "--format=%x00%at%x01commit %H%nAuthor: %an%nDate: %ci%n%n%B",
             &range,
         ],
     )?;
@@ -767,6 +827,70 @@ pub fn has_unpushed_commits(worktree: &Path, branch: &str) -> Result<bool, GitEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_both_clocks_and_orders_from_the_oldest_commit() {
+        let commits = parse_commit_info_lines(concat!(
+            "def456\x1fdef456a\x1fTest\x1ftest@example.com\x1f9200\x1f1200\x1ffix: lexer\n",
+            "abc123\x1fabc123a\x1fTest\x1ftest@example.com\x1f9100\x1f1100\x1ffeat: parser\n",
+        ));
+
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].subject, "fix: lexer");
+        assert_eq!(commits[0].timestamp, 9200);
+        assert_eq!(commits[0].author_timestamp, 1200);
+        assert_eq!(commits[1].subject, "feat: parser");
+        assert_eq!(commits[1].timestamp, 9100);
+        assert_eq!(commits[1].author_timestamp, 1100);
+        // git log is newest-first, so the last line is the oldest commit.
+        assert_eq!(commits[0].order, 1);
+        assert_eq!(commits[1].order, 0);
+    }
+
+    /// git permits `|` in `user.name` (and technically in emails) and it's
+    /// common in subjects, which is why the separator is `%x1f` — none of
+    /// these shift the fields after them.
+    #[test]
+    fn keeps_pipes_in_names_emails_and_subjects_intact() {
+        let commits = parse_commit_info_lines(
+            "abc123\x1fabc123a\x1fFoo | Bar\x1fa|b@example.com\x1f9100\x1f1100\x1ffeat: parse a|b unions\n",
+        );
+
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].author, "Foo | Bar");
+        assert_eq!(commits[0].author_email, "a|b@example.com");
+        assert_eq!(commits[0].subject, "feat: parse a|b unions");
+        assert_eq!(commits[0].timestamp, 9100);
+        assert_eq!(commits[0].author_timestamp, 1100);
+    }
+
+    /// The subject is the trailing field so even a separator byte in it can't
+    /// shift the timestamps out from under the parse.
+    #[test]
+    fn keeps_a_subject_containing_the_separator_intact() {
+        let commits = parse_commit_info_lines(
+            "abc123\x1fabc123a\x1fTest\x1ftest@example.com\x1f9100\x1f1100\x1ffeat: a\x1fb\n",
+        );
+
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "feat: a\x1fb");
+        assert_eq!(commits[0].timestamp, 9100);
+        assert_eq!(commits[0].author_timestamp, 1100);
+    }
+
+    #[test]
+    fn skips_lines_that_are_missing_fields() {
+        assert!(parse_branch_commit_line("").is_none());
+        assert!(
+            parse_branch_commit_line("abc123\x1fabc123a\x1fTest\x1ftest@example.com\x1f9100")
+                .is_none()
+        );
+        // A record with no SHA isn't a commit.
+        assert!(parse_branch_commit_line(
+            "\x1fabc123a\x1fTest\x1ftest@example.com\x1f9100\x1f1100\x1fs"
+        )
+        .is_none());
+    }
 
     #[test]
     fn test_worktree_path_sanitization() {

@@ -456,7 +456,7 @@
     const all: AnyCandidate[] = [...candidates];
     for (const commit of timeline.commits) {
       if (!commit.sha) continue; // skip pending
-      all.push({ kind: 'commit', timestamp: commit.timestamp });
+      all.push({ kind: 'commit', timestamp: commit.sortTimestamp });
     }
 
     if (all.length === 0) return empty;

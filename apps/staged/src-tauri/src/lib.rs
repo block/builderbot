@@ -11,6 +11,7 @@ pub mod agent;
 pub mod background_sync;
 pub mod blox;
 pub mod branches;
+pub(crate) mod commit_reassociation;
 pub mod diff_cache;
 pub mod diff_commands;
 pub mod doctor;
@@ -142,7 +143,17 @@ pub struct CommitTimelineItem {
     pub subject: String,
     pub author: String,
     pub author_email: String,
+    /// Unix seconds the UI renders. Branch commits carry author time (`%at`),
+    /// which a rebase preserves, so a rewritten commit still shows when it was
+    /// written; pending rows carry their DB `created_at`, and repo-browse
+    /// listings carry committer time.
     pub timestamp: i64,
+    /// Unix seconds the timeline *sorts* on — never rendered. Same as
+    /// `timestamp`, except that branch commits clamp it so it can't decrease in
+    /// branch order (see `timeline::clamp_commit_sort_timestamps`): a
+    /// cherry-picked commit keeps a week-old author date that would otherwise
+    /// sort it above the commit it follows.
+    pub sort_timestamp: i64,
     /// Position in git's topological order (0 = oldest on the branch).
     /// Used as a tiebreaker when multiple commits share the same second-level timestamp.
     pub order: i64,
@@ -1245,35 +1256,39 @@ async fn get_repo_default_branch_timeline(
         let max_count = limit.unwrap_or(50);
         let origin_ref = format!("origin/{default_branch}");
         let limit_arg = format!("-{max_count}");
-        let format_arg = "--format=%H|%h|%s|%an|%ae|%ct";
-
-        let output = git::cli_run(&clone_path, &["log", &limit_arg, format_arg, &origin_ref])
-            .map_err(|e| format!("Failed to get commits for {github_repo}: {e}"))?;
+        let output = git::cli_run(
+            &clone_path,
+            &[
+                "log",
+                &limit_arg,
+                git::BRANCH_COMMIT_LOG_FORMAT,
+                &origin_ref,
+            ],
+        )
+        .map_err(|e| format!("Failed to get commits for {github_repo}: {e}"))?;
 
         let mut commits: Vec<CommitTimelineItem> = output
             .lines()
-            .filter(|l| !l.is_empty())
             .enumerate()
             .filter_map(|(i, line)| {
-                let parts: Vec<&str> = line.splitn(6, '|').collect();
-                if parts.len() >= 6 {
-                    Some(CommitTimelineItem {
-                        id: None,
-                        sha: parts[0].to_string(),
-                        short_sha: parts[1].to_string(),
-                        subject: parts[2].to_string(),
-                        author: parts[3].to_string(),
-                        author_email: parts[4].to_string(),
-                        timestamp: parts[5].parse().unwrap_or(0),
-                        order: (max_count - 1 - i) as i64,
-                        session_id: None,
-                        session_status: None,
-                        completion_reason: None,
-                        is_own_commit: false,
-                    })
-                } else {
-                    None
-                }
+                let fields = git::parse_branch_commit_line(line)?;
+                Some(CommitTimelineItem {
+                    id: None,
+                    sha: fields.sha.to_string(),
+                    short_sha: fields.short_sha.to_string(),
+                    subject: fields.subject.to_string(),
+                    author: fields.author.to_string(),
+                    author_email: fields.author_email.to_string(),
+                    // Committer time: this listing never interleaves with notes,
+                    // so it has no reason to prefer the rebase-stable clock.
+                    timestamp: fields.committer_timestamp,
+                    sort_timestamp: fields.committer_timestamp,
+                    order: (max_count - 1 - i) as i64,
+                    session_id: None,
+                    session_status: None,
+                    completion_reason: None,
+                    is_own_commit: false,
+                })
             })
             .collect();
 

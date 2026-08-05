@@ -1,4 +1,3 @@
-import type { ProjectAction } from '../../api/commands';
 import type { PullState } from '../../stores/pullState.svelte';
 import type { PushState } from '../../stores/pushState.svelte';
 import type { PipelineExecution } from '../../types';
@@ -118,54 +117,6 @@ export function createQueuedSessionCanceller(deps: {
       inFlight = false;
     }
   };
-}
-
-export function groupActionsByType(actions: ProjectAction[]): Record<string, ProjectAction[]> {
-  const groups: Record<string, ProjectAction[]> = {
-    prerun: [],
-    run: [],
-    build: [],
-    format: [],
-    check: [],
-    test: [],
-    cleanUp: [],
-  };
-
-  for (const action of actions) {
-    if (groups[action.actionType]) {
-      groups[action.actionType].push(action);
-    }
-  }
-
-  return groups;
-}
-
-export function getPrimaryRunAction(
-  groupedActions: Record<string, ProjectAction[]>
-): ProjectAction | null {
-  return groupedActions.run?.[0] ?? null;
-}
-
-export function getRemainingRunActions(
-  groupedActions: Record<string, ProjectAction[]>
-): ProjectAction[] {
-  return groupedActions.run?.slice(1) ?? [];
-}
-
-export function getPrimaryActionExecution<T extends { actionId: string }>(
-  runningActions: T[],
-  primaryRunActionId: string | null
-): T | null {
-  if (!primaryRunActionId) return null;
-  return runningActions.find((a) => a.actionId === primaryRunActionId) ?? null;
-}
-
-export function getSecondaryRunningActions<T extends { actionId: string }>(
-  runningActions: T[],
-  primaryRunActionId: string | null
-): T[] {
-  if (!primaryRunActionId) return runningActions;
-  return runningActions.filter((a) => a.actionId !== primaryRunActionId);
 }
 
 export function getActionTypeLabel(actionType: string): string {

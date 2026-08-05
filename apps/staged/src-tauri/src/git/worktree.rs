@@ -299,11 +299,6 @@ pub fn get_head_sha(worktree: &Path) -> Result<String, GitError> {
     Ok(output.trim().to_string())
 }
 
-/// The `git log` field list behind [`BRANCH_COMMIT_LOG_FORMAT`], for the one
-/// producer that inlines it into a shell script (`state::BATCH_FAST_SCRIPT`)
-/// instead of passing it as an argument.
-pub const BRANCH_COMMIT_LOG_FIELDS: &str = "%H%x1f%h%x1f%an%x1f%ae%x1f%ct%x1f%at%x1f%s";
-
 /// `git log` format for every commit producer that feeds a
 /// [`CommitTimelineItem`](crate::CommitTimelineItem).
 ///
@@ -832,14 +827,6 @@ pub fn has_unpushed_commits(worktree: &Path, branch: &str) -> Result<bool, GitEr
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn format_arg_wraps_the_shared_field_list() {
-        assert_eq!(
-            BRANCH_COMMIT_LOG_FORMAT,
-            format!("--format={BRANCH_COMMIT_LOG_FIELDS}")
-        );
-    }
 
     #[test]
     fn parses_both_clocks_and_orders_from_the_oldest_commit() {

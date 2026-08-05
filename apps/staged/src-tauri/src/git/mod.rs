@@ -40,11 +40,10 @@ pub use refs::{
     origin_ref_for_branch, prune_remote, resolve_ref, BranchRef,
 };
 pub use state::{
-    complete_local_git_state, compute_branch_git_state, compute_branch_git_state_batched,
-    compute_fast_git_state_batched, compute_fast_local_git_state, compute_local_branch_git_state,
-    ensure_fast_forward_pullable, fast_forward_to_ref, local_git_state_cache_key, needs_fetch,
-    update_repo_fetch_cache, BaseGitState, BranchGitState, FastGitState, FetchGitState, FetchMode,
-    FetchStatus, UpstreamGitState, UpstreamRelation, WorktreeGitState, WorktreeStatusScope,
+    compute_branch_git_state, compute_branch_git_state_batched, compute_local_branch_git_state,
+    ensure_fast_forward_pullable, fast_forward_to_ref, update_repo_fetch_cache, BaseGitState,
+    BranchGitState, FetchGitState, FetchMode, FetchStatus, UpstreamGitState, UpstreamRelation,
+    WorktreeGitState, WorktreeStatusScope,
 };
 pub use types::*;
 pub use worktree::{
@@ -56,5 +55,5 @@ pub use worktree::{
     parse_worktree_status_paths, project_worktree_path_for, project_worktree_root_for,
     remote_branch_exists, remove_worktree, reset_to_commit, set_upstream_to_origin, switch_branch,
     update_branch_from_pr, worktree_path_for, BranchCommitFields, CommitInfo, UpdateFromPrResult,
-    WorktreeChangePaths, BRANCH_COMMIT_LOG_FIELDS, BRANCH_COMMIT_LOG_FORMAT,
+    WorktreeChangePaths, BRANCH_COMMIT_LOG_FORMAT,
 };

@@ -2322,15 +2322,18 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             .map_err(|e| format!("List parent branch commits task failed: {e}"))??;
             Ok(serde_json::to_value(commits).unwrap())
         }
-        "pull_branch_ff_only" => {
+        "pull_or_queue_branch" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
-            tauri::async_runtime::spawn_blocking(move || {
-                crate::timeline::pull_branch_ff_only_impl(&store, &branch_id)
-            })
-            .await
-            .map_err(|e| format!("Pull task failed: {e}"))??;
-            Ok(Value::Null)
+            // Returns the queued session id, or null when the pull ran now.
+            let queued_session_id = crate::prs::pull_or_queue_branch_for_branch(
+                store,
+                Arc::clone(session_registry),
+                app_handle.clone(),
+                branch_id,
+            )
+            .await?;
+            Ok(serde_json::to_value(queued_session_id).unwrap())
         }
         "reset_branch_to_remote" => {
             let store = get_store(store_mutex)?;
@@ -3376,7 +3379,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let branch_id: String = arg(&args, "branchId")?;
             let provider: Option<String> = opt_arg(&args, "provider")?;
             let force: Option<bool> = opt_arg(&args, "force")?;
-            let session_id = crate::prs::start_push_branch_pipeline_for_branch(
+            let response = crate::prs::start_or_queue_push_pipeline_for_branch(
                 store,
                 Arc::clone(session_registry),
                 app_handle.clone(),
@@ -3385,29 +3388,32 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 force,
             )
             .await?;
-            Ok(serde_json::to_value(session_id).unwrap())
+            Ok(serde_json::to_value(response).unwrap())
         }
         "rebase_branch" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
             let provider: Option<String> = opt_arg(&args, "provider")?;
-            let session_id = crate::prs::start_or_queue_commit_pipeline_for_branch(
+            // Forwarded so web mode honours "Rebase onto Origin" instead of
+            // silently downgrading it to a base rebase.
+            let target: Option<String> = opt_arg(&args, "target")?;
+            let response = crate::prs::start_or_queue_commit_pipeline_for_branch(
                 store,
                 Arc::clone(session_registry),
                 app_handle.clone(),
                 branch_id,
                 store::PipelineKind::Rebase,
                 provider,
-                None,
+                target,
             )
             .await?;
-            Ok(serde_json::to_value(session_id).unwrap())
+            Ok(serde_json::to_value(response).unwrap())
         }
         "squash_commits" => {
             let store = get_store(store_mutex)?;
             let branch_id: String = arg(&args, "branchId")?;
             let provider: Option<String> = opt_arg(&args, "provider")?;
-            let session_id = crate::prs::start_or_queue_commit_pipeline_for_branch(
+            let response = crate::prs::start_or_queue_commit_pipeline_for_branch(
                 store,
                 Arc::clone(session_registry),
                 app_handle.clone(),
@@ -3417,7 +3423,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 None,
             )
             .await?;
-            Ok(serde_json::to_value(session_id).unwrap())
+            Ok(serde_json::to_value(response).unwrap())
         }
         "get_pr_url" => {
             let store = get_store(store_mutex)?;

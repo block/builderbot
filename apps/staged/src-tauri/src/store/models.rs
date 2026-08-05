@@ -531,6 +531,14 @@ pub struct Session {
     /// Used as an interim display name while the session is running.
     #[serde(default)]
     pub acp_title: Option<String>,
+    /// Branch this session belongs to, for sessions that create no artifact.
+    ///
+    /// Branch-scoped sessions are normally found through their commit, note, or
+    /// review row. Push pipelines have none of those, so they record the branch
+    /// here to stay visible to the branch queue. `None` for artifact-backed
+    /// sessions and for project-level sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_id: Option<String>,
 }
 
 /// Persistent follow-up message waiting to be sent to an existing session.
@@ -621,6 +629,7 @@ impl Session {
             pipeline: None,
             acp_config_selection: None,
             acp_title: None,
+            branch_id: None,
         }
     }
 
@@ -644,11 +653,18 @@ impl Session {
             pipeline: None,
             acp_config_selection: None,
             acp_title: None,
+            branch_id: None,
         }
     }
 
     pub fn with_provider(mut self, provider: &str) -> Self {
         self.provider = Some(provider.to_string());
+        self
+    }
+
+    /// Link an artifact-less session to its branch so the branch queue sees it.
+    pub fn with_branch(mut self, branch_id: &str) -> Self {
+        self.branch_id = Some(branch_id.to_string());
         self
     }
 
@@ -1436,6 +1452,13 @@ pub struct PipelineExecution {
     /// rather than silently downgrading to a base rebase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rebase_target: Option<String>,
+    /// Whether the push variant force-pushes (`--force-with-lease`).
+    ///
+    /// Recorded so a queued push re-derives the same command on dequeue, and so
+    /// the queue can tell a pending push from a pending force push. Always
+    /// `false` for non-push pipelines.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub push_force: bool,
     pub steps: Vec<PipelineStepStatus>,
     pub current_step: usize,
     /// Set when pipeline completes without needing AI.
@@ -1472,6 +1495,7 @@ impl PipelineExecution {
         Self {
             kind: None,
             rebase_target: None,
+            push_force: false,
             steps: step_statuses,
             current_step: 0,
             completed_without_ai: false,
@@ -1487,14 +1511,30 @@ impl PipelineExecution {
         self.rebase_target = Some(target);
         self
     }
+
+    pub fn with_push_force(mut self, force: bool) -> Self {
+        self.push_force = force;
+        self
+    }
 }
 
-/// Durable identity for commit-producing command pipelines.
+/// `skip_serializing_if` predicate so non-push pipelines persist no push flag.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Durable identity for command pipelines that the branch queue schedules.
+///
+/// `Rebase` and `Squash` produce a commit and are linked to their branch through
+/// a pending-commit artifact. `Push` and `Pull` produce no artifact and are
+/// linked through `Session::branch_id` instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PipelineKind {
     Rebase,
     Squash,
+    Push,
+    Pull,
 }
 
 #[cfg(test)]
@@ -1532,6 +1572,36 @@ mod pipeline_tests {
         .unwrap();
 
         assert_eq!(execution.rebase_target, None);
+    }
+
+    #[test]
+    fn pipeline_push_force_is_optional_for_legacy_pipeline_json() {
+        let execution: PipelineExecution =
+            serde_json::from_str(r#"{"steps":[],"currentStep":0,"completedWithoutAi":false}"#)
+                .unwrap();
+
+        assert!(!execution.push_force);
+    }
+
+    #[test]
+    fn pipeline_push_force_round_trips_and_stays_out_of_non_push_json() {
+        let execution = PipelineExecution::from_steps(&[])
+            .with_kind(PipelineKind::Push)
+            .with_push_force(true);
+        let json = serde_json::to_string(&execution).unwrap();
+
+        assert!(json.contains("\"kind\":\"push\""));
+        assert!(json.contains("\"pushForce\":true"));
+        assert!(
+            serde_json::from_str::<PipelineExecution>(&json)
+                .unwrap()
+                .push_force
+        );
+
+        let rebase = PipelineExecution::from_steps(&[]).with_kind(PipelineKind::Rebase);
+        assert!(!serde_json::to_string(&rebase)
+            .unwrap()
+            .contains("pushForce"));
     }
 
     #[test]

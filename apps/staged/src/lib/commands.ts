@@ -21,6 +21,7 @@ import type {
   Branch,
   BranchTimeline,
   BranchRef,
+  BranchPipelineResponse,
   BranchSessionLaunchContext,
   BranchSessionType,
   BranchSessionResponse,
@@ -546,8 +547,11 @@ export function invalidateProjectBranchTimelines(branchIds: string[]): void {
   window.dispatchEvent(new CustomEvent('timeline-invalidated', { detail: { branchIds } }));
 }
 
-export function pullBranchFastForward(branchId: string): Promise<void> {
-  return invokeCommand('pull_branch_ff_only', { branchId });
+/** Fast-forward a branch to origin, or queue the pull behind in-flight branch
+ *  sessions. The backend owns that decision: it resolves to the queued session's
+ *  ID when the pull has to wait, and to `null` when the pull already ran. */
+export function pullOrQueueBranch(branchId: string): Promise<string | null> {
+  return invokeCommand('pull_or_queue_branch', { branchId });
 }
 
 export function resetBranchToRemote(branchId: string): Promise<void> {
@@ -1254,8 +1258,13 @@ export function hasUnpushedCommits(branchId: string): Promise<boolean> {
 
 /** Push a branch to its remote via an agent session.
  *  The agent runs git push and can fix pre-push hook failures.
- *  Returns the session ID so the frontend can track progress. */
-export function pushBranch(branchId: string, provider?: string, force?: boolean): Promise<string> {
+ *  Queues behind in-flight branch sessions, so the response reports whether the
+ *  returned session is pushing now or waiting on the branch queue. */
+export function pushBranch(
+  branchId: string,
+  provider?: string,
+  force?: boolean
+): Promise<BranchPipelineResponse> {
   return invokeCommand('push_branch', {
     branchId,
     provider: provider ?? null,
@@ -1281,12 +1290,13 @@ export interface GitHubCommentResult {
 /** Rebase a branch via a pipeline.
  *  When target is 'base' (default), rebases onto origin/{base_branch}.
  *  When target is 'origin', rebases onto origin/{branch_name}.
- *  Returns the session ID so the frontend can track progress. */
+ *  Queues behind in-flight branch sessions, so the response reports whether the
+ *  returned session is running or waiting on the branch queue. */
 export function rebaseBranch(
   branchId: string,
   provider?: string,
   target?: 'base' | 'origin'
-): Promise<string> {
+): Promise<BranchPipelineResponse> {
   return invokeCommand('rebase_branch', {
     branchId,
     provider: provider ?? null,
@@ -1296,8 +1306,12 @@ export function rebaseBranch(
 
 /** Squash all commits on a branch into a single commit via a pipeline.
  *  Uses git reset --soft then hands off to AI to write the commit message.
- *  Returns the session ID so the frontend can track progress. */
-export function squashCommits(branchId: string, provider?: string): Promise<string> {
+ *  Queues behind in-flight branch sessions, so the response reports whether the
+ *  returned session is running or waiting on the branch queue. */
+export function squashCommits(
+  branchId: string,
+  provider?: string
+): Promise<BranchPipelineResponse> {
   return invokeCommand('squash_commits', {
     branchId,
     provider: provider ?? null,

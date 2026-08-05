@@ -259,6 +259,79 @@ describe('browser-native command wrappers', () => {
     });
   });
 
+  it('surfaces the queued-vs-running status returned by rebase and squash', async () => {
+    const invokeCommand = vi
+      .fn()
+      .mockResolvedValueOnce({ sessionId: 'session-1', sessionStatus: 'queued' })
+      .mockResolvedValueOnce({ sessionId: 'session-2', sessionStatus: 'running' });
+    vi.doMock('./transport', () => ({
+      invokeCommand,
+      isTauri: true,
+    }));
+
+    const { rebaseBranch, squashCommits } = await import('./commands');
+
+    await expect(rebaseBranch('branch-1', 'codex', 'origin')).resolves.toEqual({
+      sessionId: 'session-1',
+      sessionStatus: 'queued',
+    });
+    await expect(squashCommits('branch-1', 'codex')).resolves.toEqual({
+      sessionId: 'session-2',
+      sessionStatus: 'running',
+    });
+
+    expect(invokeCommand.mock.calls).toEqual([
+      ['rebase_branch', { branchId: 'branch-1', provider: 'codex', target: 'origin' }],
+      ['squash_commits', { branchId: 'branch-1', provider: 'codex' }],
+    ]);
+  });
+
+  it('surfaces the queued-vs-running status returned by push and force push', async () => {
+    const invokeCommand = vi
+      .fn()
+      .mockResolvedValueOnce({ sessionId: 'session-1', sessionStatus: 'running' })
+      .mockResolvedValueOnce({ sessionId: 'session-2', sessionStatus: 'queued' });
+    vi.doMock('./transport', () => ({
+      invokeCommand,
+      isTauri: true,
+    }));
+
+    const { pushBranch } = await import('./commands');
+
+    await expect(pushBranch('branch-1', 'codex', false)).resolves.toEqual({
+      sessionId: 'session-1',
+      sessionStatus: 'running',
+    });
+    await expect(pushBranch('branch-1', 'codex', true)).resolves.toEqual({
+      sessionId: 'session-2',
+      sessionStatus: 'queued',
+    });
+
+    expect(invokeCommand.mock.calls).toEqual([
+      ['push_branch', { branchId: 'branch-1', provider: 'codex', force: false }],
+      ['push_branch', { branchId: 'branch-1', provider: 'codex', force: true }],
+    ]);
+  });
+
+  it('distinguishes an immediate pull from a queued one', async () => {
+    const invokeCommand = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce('session-1');
+    vi.doMock('./transport', () => ({
+      invokeCommand,
+      isTauri: true,
+    }));
+
+    const { pullOrQueueBranch } = await import('./commands');
+
+    // null: the branch was idle, so the pull already fast-forwarded.
+    await expect(pullOrQueueBranch('branch-1')).resolves.toBeNull();
+    await expect(pullOrQueueBranch('branch-1')).resolves.toBe('session-1');
+
+    expect(invokeCommand.mock.calls).toEqual([
+      ['pull_or_queue_branch', { branchId: 'branch-1' }],
+      ['pull_or_queue_branch', { branchId: 'branch-1' }],
+    ]);
+  });
+
   it('forwards ACP config selection when resuming a session', async () => {
     const invokeCommand = vi.fn().mockResolvedValue(undefined);
     vi.doMock('./transport', () => ({

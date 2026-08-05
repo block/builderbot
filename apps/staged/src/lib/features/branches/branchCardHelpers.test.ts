@@ -1,12 +1,17 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   classifyCompletedPushSession,
   classifyPipelinePushCompletion,
+  classifyPolledSession,
+  createPollFailureTracker,
+  createQueuedSessionCanceller,
   extractPrNumber,
   extractPrUrl,
+  isGitActionInFlight,
   isImageFile,
   isMaybeTextFile,
   isPushRejectedNonFastForward,
+  MAX_CONSECUTIVE_POLL_FAILURES,
 } from './branchCardHelpers';
 import type { PipelineExecution } from '../../types';
 
@@ -210,5 +215,153 @@ describe('classifyPipelinePushCompletion', () => {
         ]
       )
     ).toBe('succeeded');
+  });
+});
+
+describe('isGitActionInFlight', () => {
+  it('reports a push or pull that is running or waiting on the branch queue', () => {
+    expect(isGitActionInFlight({ push: { state: 'pushing' } })).toBe(true);
+    expect(isGitActionInFlight({ push: { state: 'queued' } })).toBe(true);
+    expect(isGitActionInFlight({ pull: { state: 'pulling' } })).toBe(true);
+    expect(isGitActionInFlight({ pull: { state: 'queued' } })).toBe(true);
+    expect(isGitActionInFlight({ immediatePull: true })).toBe(true);
+  });
+
+  it('ignores finished push state, which no longer blocks anything', () => {
+    expect(isGitActionInFlight({ push: { state: 'done' } })).toBe(false);
+    expect(isGitActionInFlight({ push: { state: 'error' } })).toBe(false);
+    expect(isGitActionInFlight({ push: { state: 'idle' } })).toBe(false);
+  });
+
+  it('reports an idle branch when neither store has an entry', () => {
+    expect(isGitActionInFlight({})).toBe(false);
+    expect(isGitActionInFlight({ push: null, pull: null, immediatePull: false })).toBe(false);
+  });
+});
+
+describe('createPollFailureTracker', () => {
+  it('tolerates failures until the budget is exhausted', () => {
+    const tracker = createPollFailureTracker(3);
+    expect(tracker.recordFailure()).toBe(false);
+    expect(tracker.recordFailure()).toBe(false);
+    expect(tracker.recordFailure()).toBe(true);
+  });
+
+  it('resets the count on a success, so intermittent failures never give up', () => {
+    const tracker = createPollFailureTracker(3);
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      expect(tracker.recordFailure()).toBe(false);
+      expect(tracker.recordFailure()).toBe(false);
+      tracker.recordSuccess();
+    }
+  });
+
+  it('honors a custom failure budget', () => {
+    expect(createPollFailureTracker(1).recordFailure()).toBe(true);
+
+    const patient = createPollFailureTracker(5);
+    expect([1, 2, 3, 4].map(() => patient.recordFailure())).toEqual([false, false, false, false]);
+    expect(patient.recordFailure()).toBe(true);
+  });
+
+  it('defaults to the shared consecutive-failure budget', () => {
+    const tracker = createPollFailureTracker();
+    for (let attempt = 1; attempt < MAX_CONSECUTIVE_POLL_FAILURES; attempt += 1) {
+      expect(tracker.recordFailure()).toBe(false);
+    }
+    expect(tracker.recordFailure()).toBe(true);
+  });
+});
+
+describe('classifyPolledSession', () => {
+  it('treats a missing session as gone, so the poller drops its store entry', () => {
+    expect(classifyPolledSession(null)).toBe('gone');
+    expect(classifyPolledSession(undefined)).toBe('gone');
+  });
+
+  it('keeps waiting while the session sits on the branch queue', () => {
+    expect(classifyPolledSession({ status: 'queued' })).toBe('waiting');
+  });
+
+  it('reports a drained session as active', () => {
+    expect(classifyPolledSession({ status: 'running' })).toBe('active');
+  });
+
+  it('reports every terminal status as finished', () => {
+    expect(classifyPolledSession({ status: 'completed' })).toBe('finished');
+    expect(classifyPolledSession({ status: 'error' })).toBe('finished');
+    expect(classifyPolledSession({ status: 'cancelled' })).toBe('finished');
+  });
+});
+
+describe('createQueuedSessionCanceller', () => {
+  it('clears the state only after the backend confirms the cancellation', async () => {
+    let confirmCancel: () => void = () => {};
+    const cancel = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          confirmCancel = resolve;
+        })
+    );
+    const clearState = vi.fn();
+    const onError = vi.fn();
+    const run = createQueuedSessionCanceller({ cancel, clearState, onError });
+
+    const pending = run('session-1');
+    await Promise.resolve();
+    expect(cancel).toHaveBeenCalledWith('session-1');
+    expect(clearState).not.toHaveBeenCalled();
+
+    confirmCancel();
+    expect(await pending).toBe(true);
+    expect(clearState).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('keeps the state when the cancel request never reaches the backend', async () => {
+    const failure = new Error('network unreachable');
+    const clearState = vi.fn();
+    const onError = vi.fn();
+    const run = createQueuedSessionCanceller({
+      cancel: () => Promise.reject(failure),
+      clearState,
+      onError,
+    });
+
+    expect(await run('session-1')).toBe(false);
+    expect(clearState).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(failure);
+  });
+
+  it('ignores a second click while the first cancel is still in flight', async () => {
+    let confirmCancel: () => void = () => {};
+    const cancel = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          confirmCancel = resolve;
+        })
+    );
+    const run = createQueuedSessionCanceller({ cancel, clearState: () => {}, onError: () => {} });
+
+    const first = run('session-1');
+    expect(await run('session-1')).toBe(false);
+    expect(cancel).toHaveBeenCalledTimes(1);
+
+    confirmCancel();
+    expect(await first).toBe(true);
+  });
+
+  it('lets the user retry by clicking again after a failure', async () => {
+    const cancel = vi
+      .fn<(sessionId: string) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('network unreachable'))
+      .mockResolvedValueOnce(undefined);
+    const clearState = vi.fn();
+    const run = createQueuedSessionCanceller({ cancel, clearState, onError: () => {} });
+
+    expect(await run('session-1')).toBe(false);
+    expect(await run('session-1')).toBe(true);
+    expect(cancel).toHaveBeenCalledTimes(2);
+    expect(clearState).toHaveBeenCalledTimes(1);
   });
 });

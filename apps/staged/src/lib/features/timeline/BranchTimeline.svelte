@@ -19,6 +19,7 @@
     BranchGitState,
     BranchTimeline as BranchTimelineData,
     HashtagItem,
+    UpstreamRelation,
   } from '../../types';
   import type { NoteClickInfo } from '../sessions/noteFreshness';
   import TimelineRow from './TimelineRow.svelte';
@@ -40,6 +41,7 @@
     type PendingHintItemType,
   } from './liveSessionHints';
   import { isEmptyFailedReview } from './reviewState';
+  import { standaloneQueuedPullRowCopy } from './queuedPullRow';
   import { failedArtifactSubtitle } from './sessionFailureCopy';
   import { stripXmlTags } from '../sessions/sessionModalHelpers';
 
@@ -95,7 +97,36 @@
     onOpenForcePushSession?: () => void;
     forcePushingOrigin?: boolean;
     onOpenPushSession?: () => void;
-    rebaseBranchDisabledReason?: string | null;
+    /** Cancel a push/force-push that is still waiting on the branch queue. */
+    onCancelQueuedPush?: () => void;
+    /** Cancel a pull that is still waiting on the branch queue. */
+    onCancelQueuedPull?: () => void;
+    /** Push is queued behind in-flight branch work. */
+    pushQueuedOrigin?: boolean;
+    /** Pull is queued behind in-flight branch work. */
+    pullQueuedOrigin?: boolean;
+    /**
+     * True when the branch has queued or running sessions, so the backend will
+     * queue a git action rather than run it now. Only loosens the clean-worktree
+     * requirement on Pull — see `pullDisabledReason`.
+     */
+    branchSessionBusy?: boolean;
+    /**
+     * Why reset-to-origin can't run right now.
+     *
+     * Reset still executes immediately rather than queueing — it is validated
+     * against a point-in-time preview — so unlike Rebase/Squash/Push/Pull it stays
+     * disabled while the branch has sessions in flight.
+     */
+    immediateGitActionDisabledReason?: string | null;
+    /**
+     * Why push and force-push can't run right now.
+     *
+     * These queue on the branch session queue like Rebase/Squash, so in-flight
+     * sessions are not a reason to disable them — only branch identity problems
+     * are. Pull is queueable too, but computes its own reason from the git state.
+     */
+    queueableGitActionDisabledReason?: string | null;
     onViewWorktreeDiff?: () => void;
     onCommitWorktreeChanges?: () => void;
     onDiscardWorktreeChanges?: () => void;
@@ -151,7 +182,13 @@
     onOpenForcePushSession,
     forcePushingOrigin = false,
     onOpenPushSession,
-    rebaseBranchDisabledReason,
+    onCancelQueuedPush,
+    onCancelQueuedPull,
+    pushQueuedOrigin = false,
+    pullQueuedOrigin = false,
+    branchSessionBusy = false,
+    immediateGitActionDisabledReason,
+    queueableGitActionDisabledReason,
     onViewWorktreeDiff,
     onCommitWorktreeChanges,
     onDiscardWorktreeChanges,
@@ -244,6 +281,9 @@
     resetToOriginDisabledReason?: string;
     resettingToOrigin?: boolean;
     pushing?: boolean;
+    pushQueued?: boolean;
+    forcePushQueued?: boolean;
+    pullQueued?: boolean;
     onViewDiff?: () => void;
     onCommitChanges?: () => void;
     commitChangesDisabledReason?: string;
@@ -307,6 +347,9 @@
     liveSessionHintPoller.destroy();
   });
 
+  /** Timestamp that sorts the git status rows below every timeline artifact. */
+  const gitFooterTimestamp = Number.MAX_SAFE_INTEGER - 1000;
+
   function plural(count: number, noun: string): string {
     return `${count} ${noun}${count === 1 ? '' : 's'}`;
   }
@@ -325,13 +368,33 @@
     return detail ? `${title}: ${detail}` : title;
   }
 
+  /**
+   * Why Pull can't run right now.
+   *
+   * A dirty worktree only blocks the *immediate* pull: `git merge --ff-only`
+   * needs a clean tree. When the branch is busy the pull queues instead, and the
+   * dirt is almost always an agent's work in progress that its commit session
+   * clears before the pull drains — so the requirement is dropped there rather
+   * than disabling an action the backend would happily queue.
+   *
+   * `branchSessionBusy` is the frontend's read of that, and it can disagree with
+   * the lock-held decision the backend makes on the click: on a timeline that
+   * still shows a session which has just finished, the pull runs immediately
+   * against the dirty worktree and fails with "Cannot pull with uncommitted
+   * changes" rather than being disabled up front. That is the failure mode this
+   * trade accepts; the reverse skew is covered by BranchCard folding in-flight
+   * push/pull sessions (which have no timeline artifact) into the signal.
+   *
+   * Detached HEAD, the wrong branch, and a diverged upstream stay hard disables:
+   * none of them resolve by waiting.
+   */
   function pullDisabledReason(state: BranchGitState): string | undefined {
     if (pullingOrigin) return 'Pulling...';
     if (state.detachedHead) return 'Detached HEAD';
     if (!state.expectedBranchMatches) {
       return state.currentBranch ? `Checked out ${state.currentBranch}` : 'Wrong branch';
     }
-    if (state.worktree.dirty) return 'Clean worktree required';
+    if (state.worktree.dirty && !branchSessionBusy) return 'Clean worktree required';
     if (state.upstream.relation !== 'originAhead') return 'Not fast-forwardable';
     return undefined;
   }
@@ -360,7 +423,7 @@
   ): DisplayItem[] {
     const rows: DisplayItem[] = [];
     const topTimestamp = 0;
-    const bottomTimestamp = Number.MAX_SAFE_INTEGER - 1000;
+    const bottomTimestamp = gitFooterTimestamp;
     const commitChangesDisabledReason = gitActionDisabledReason
       ? gitActionDisabledReason
       : newSessionDisabled
@@ -386,33 +449,47 @@
             2
           );
           const summary = `is ${plural(state.upstream.ahead, 'commit')} behind`;
-          const disabledReason = pushingOrigin
-            ? undefined // button is clickable during push (opens session)
-            : (rebaseBranchDisabledReason ?? undefined);
+          const disabledReason =
+            pushingOrigin || pushQueuedOrigin
+              ? undefined // button stays clickable: it opens the session, or cancels the queued push
+              : (queueableGitActionDisabledReason ?? undefined);
           rows.push({
             key: 'git-local-ahead',
             type: 'git-push',
             title: `origin ${summary}`,
             titleHtml: `<span class="git-ref-badge">origin</span> ${escapeHtml(summary)}`,
+            meta: pushQueuedOrigin ? 'Push queued' : undefined,
             timestamp: placement.timestamp,
             order: placement.order,
-            onPush: pushingOrigin ? onOpenPushSession : disabledReason ? undefined : onPushOrigin,
+            onPush: pushQueuedOrigin
+              ? onCancelQueuedPush
+              : pushingOrigin
+                ? onOpenPushSession
+                : disabledReason
+                  ? undefined
+                  : onPushOrigin,
             pushDisabledReason: disabledReason,
             pushing: pushingOrigin,
+            pushQueued: pushQueuedOrigin,
           });
         }
         break;
       case 'originAhead': {
-        const disabledReason = pullDisabledReason(state);
+        // A queued pull keeps the button live so it can cancel the queued
+        // session. If the relation moves off `originAhead` while the pull is
+        // still queued, the standalone row below takes over.
+        const disabledReason = pullQueuedOrigin ? undefined : pullDisabledReason(state);
         rows.push({
           key: 'git-origin-ahead',
           type: 'git-pull',
           title: `Origin has ${plural(state.upstream.behind, 'new commit')}`,
+          meta: pullQueuedOrigin ? 'Pull queued' : undefined,
           timestamp: bottomTimestamp,
           order: 1,
           placement: 'git-footer',
-          onPull: disabledReason ? undefined : onPullOrigin,
+          onPull: pullQueuedOrigin ? onCancelQueuedPull : disabledReason ? undefined : onPullOrigin,
           pullDisabledReason: disabledReason,
+          pullQueued: pullQueuedOrigin,
         });
         break;
       }
@@ -434,29 +511,36 @@
         const divergedTitleHtml = `<span class="git-ref-badge">origin</span> diverges here and has ${escapeHtml(plural(behindCount, 'more commit'))}${escapeHtml(baseSummary)}`;
         const resetToOriginReason = resettingToOrigin
           ? 'Resetting...'
-          : forcePushingOrigin
-            ? 'Push in progress'
-            : onResetToOrigin
-              ? (rebaseBranchDisabledReason ?? undefined)
-              : undefined;
+          : pushQueuedOrigin
+            ? 'Push queued'
+            : forcePushingOrigin
+              ? 'Push in progress'
+              : onResetToOrigin
+                ? (immediateGitActionDisabledReason ?? undefined)
+                : undefined;
         rows.push({
           key: 'git-diverged',
           type: 'git-merge-warning',
           title: divergedTitle,
           titleHtml: divergedTitleHtml,
+          meta: pushQueuedOrigin ? 'Push queued' : undefined,
           timestamp: placement.timestamp,
           order: placement.order,
-          onForcePush: forcePushingOrigin
-            ? onOpenForcePushSession
-            : rebaseBranchDisabledReason
+          onForcePush: pushQueuedOrigin
+            ? onCancelQueuedPush
+            : forcePushingOrigin
+              ? onOpenForcePushSession
+              : queueableGitActionDisabledReason
+                ? undefined
+                : onForcePush,
+          forcePushDisabledReason:
+            forcePushingOrigin || pushQueuedOrigin
               ? undefined
-              : onForcePush,
-          forcePushDisabledReason: forcePushingOrigin
-            ? undefined
-            : onForcePush
-              ? (rebaseBranchDisabledReason ?? undefined)
-              : undefined,
+              : onForcePush
+                ? (queueableGitActionDisabledReason ?? undefined)
+                : undefined,
           forcePushing: forcePushingOrigin,
+          forcePushQueued: pushQueuedOrigin,
           onResetToOrigin: resetToOriginReason ? undefined : onResetToOrigin,
           resetToOriginDisabledReason: resetToOriginReason,
           resettingToOrigin,
@@ -491,6 +575,32 @@
     }
 
     return rows;
+  }
+
+  /**
+   * Footer row for a queued pull the upstream rows above can no longer host.
+   *
+   * A pull is only startable while origin is ahead, so that row owns the badge
+   * and the Cancel button — but the queued session outlives the relation it was
+   * created in: whatever sits ahead of it in the branch queue can land a local
+   * commit before the pull drains. This row takes over in the slot the
+   * origin-ahead row occupied, so the queued pull stays visible and cancellable
+   * instead of draining into a surprise `merge --ff-only` failure.
+   */
+  function queuedPullFooterRow(relation: UpstreamRelation | null): DisplayItem | null {
+    const copy = standaloneQueuedPullRowCopy({ pullQueued: pullQueuedOrigin, relation });
+    if (!copy) return null;
+    return {
+      key: 'git-queued-pull',
+      type: 'git-pull',
+      title: copy.title,
+      meta: copy.meta,
+      timestamp: gitFooterTimestamp,
+      order: 1,
+      placement: 'git-footer',
+      onPull: onCancelQueuedPull,
+      pullQueued: true,
+    };
   }
 
   // Merge commits, notes, and reviews into a single sorted list
@@ -715,6 +825,11 @@
       all.push(...gitStateRows(timeline.gitState, commitAnchors));
     }
 
+    // Outside the git-state block: a queued pull has to stay cancellable even
+    // when the timeline came back without a git state to hang it on.
+    const queuedPull = queuedPullFooterRow(timeline.gitState?.upstream.relation ?? null);
+    if (queuedPull) all.push(queuedPull);
+
     // Provisioning row appears at the very start of the timeline
     if (provisioningLabel) {
       all.unshift({
@@ -934,6 +1049,9 @@
             resetToOriginDisabledReason={item.resetToOriginDisabledReason}
             resettingToOrigin={item.resettingToOrigin}
             pushing={item.pushing}
+            pushQueued={item.pushQueued}
+            forcePushQueued={item.forcePushQueued}
+            pullQueued={item.pullQueued}
             onViewDiffClick={item.onViewDiff}
             onCommitChangesClick={item.onCommitChanges}
             commitChangesDisabledReason={item.commitChangesDisabledReason}
@@ -1021,6 +1139,9 @@
             resetToOriginDisabledReason={item.resetToOriginDisabledReason}
             resettingToOrigin={item.resettingToOrigin}
             pushing={item.pushing}
+            pushQueued={item.pushQueued}
+            forcePushQueued={item.forcePushQueued}
+            pullQueued={item.pullQueued}
             onViewDiffClick={item.onViewDiff}
             onCommitChangesClick={item.onCommitChanges}
             commitChangesDisabledReason={item.commitChangesDisabledReason}

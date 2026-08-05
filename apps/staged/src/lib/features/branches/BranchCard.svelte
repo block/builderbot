@@ -61,8 +61,12 @@
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
   import {
+    classifyPolledSession,
+    createPollFailureTracker,
+    createQueuedSessionCanceller,
     fileNameFromPath,
     formatBaseBranch,
+    isGitActionInFlight,
     isMaybeTextFile,
     isImageFile,
   } from './branchCardHelpers';
@@ -74,6 +78,7 @@
     addPendingSession,
     getPendingSessionItems,
     prunePendingSessionItems,
+    queuedSessionMeta,
   } from './branchSessionLaunch.svelte';
   import RemoteWorkspaceStatusBadge from './RemoteWorkspaceStatusBadge.svelte';
   import RemoteWorkspaceStatusView from './RemoteWorkspaceStatusView.svelte';
@@ -83,6 +88,7 @@
   import { timelineToHashtagItems, projectNotesToHashtagItems } from '../sessions/hashtagItems';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState, REMOTE_AGENTS } from '../agents/agent.svelte';
+  import { pullStateStore } from '../../stores/pullState.svelte';
   import { pushStateStore } from '../../stores/pushState.svelte';
   import {
     onBranchGitStateUpdated,
@@ -327,28 +333,68 @@
     );
   }
   let commandPipelinePending = $state(false);
-  let branchSessionBusy = $derived(timeline ? hasActiveSessions(timeline) : false);
+
+  // Push and pull state is sourced from the global stores so it survives the
+  // BranchCard remount that happens when the user switches projects and back.
+  // Both are read up here, above the handlers that use them, because a push or
+  // pull is branch work `hasActiveSessions` cannot see: neither creates a
+  // timeline artifact.
+  let storePushState = $derived(pushStateStore.getPushState(branch.id));
+  let storePullState = $derived(pullStateStore.getPullState(branch.id));
+  /** A git action of our own is running or waiting on the branch queue. */
+  let gitPipelineInFlight = $derived(
+    isGitActionInFlight({
+      push: storePushState,
+      pull: storePullState,
+      immediatePull: pullingOrigin,
+    })
+  );
+  /**
+   * True when the branch has work in flight that a new action queues behind.
+   *
+   * Folding the git actions in matters for the gates that read this: without them
+   * the frontend reads a mid-push branch as idle and keeps disabling actions the
+   * backend would happily queue. The opposite skew — a timeline that still shows a
+   * session which has just finished — is unavoidable from here; it costs an
+   * immediate pull that fails with "Cannot pull with uncommitted changes" instead
+   * of a disabled button.
+   */
+  let branchSessionBusy = $derived(
+    (timeline ? hasActiveSessions(timeline) : false) || gitPipelineInFlight
+  );
+
+  /** Timeline label the backend gives a queued rebase/squash pipeline session. */
+  const branchCommandLabels = { rebase: 'Rebase branch', squash: 'Squash commits' } as const;
 
   async function startBranchCommandPipeline(
     kind: 'rebase' | 'squash',
     rebaseTarget?: 'base' | 'origin'
   ) {
-    if (commandPipelinePending || branchSessionBusy) return;
+    // Deliberately not gated on `branchSessionBusy`: the backend decides
+    // between running now and queueing behind in-flight branch work, and it
+    // dedupes repeat clicks of the same action.
+    if (commandPipelinePending) return;
     commandPipelinePending = true;
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
     const provider = getPreferredAgent(agents) ?? undefined;
     const pendingKey = `pipeline-${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     try {
-      let sessionId: string;
-      if (kind === 'rebase') {
-        sessionId = await commands.rebaseBranch(branch.id, provider, rebaseTarget);
-      } else {
-        sessionId = await commands.squashCommits(branch.id, provider);
-      }
+      const result =
+        kind === 'rebase'
+          ? await commands.rebaseBranch(branch.id, provider, rebaseTarget)
+          : await commands.squashCommits(branch.id, provider);
       // Add a pending session item so the session stub appears instantly
-      // instead of waiting for the full timeline refresh.
-      const title = kind === 'rebase' ? 'Rebasing…' : 'Squashing…';
-      addPendingSession(branch.id, { key: pendingKey, type: 'pending-commit', title, sessionId });
+      // instead of waiting for the full timeline refresh. Queued pipelines get
+      // the same label the persisted row will show, so the stub doesn't flash a
+      // progress title for work that hasn't started.
+      const queued = result.sessionStatus === 'queued';
+      addPendingSession(branch.id, {
+        key: pendingKey,
+        type: queued ? 'queued-commit' : 'pending-commit',
+        title: queued ? branchCommandLabels[kind] : kind === 'rebase' ? 'Rebasing…' : 'Squashing…',
+        secondaryMeta: queued ? queuedSessionMeta(timeline) : undefined,
+        sessionId: result.sessionId,
+      });
       await loadTimeline();
     } catch (e) {
       notifyError(kind === 'rebase' ? 'Rebase failed' : 'Squash failed', e);
@@ -624,13 +670,22 @@
 
   let branchIdentityWarning = $derived(gitIdentityWarning(timeline?.gitState));
   let gitUnsafeActionsDisabled = $derived(!!branchIdentityWarning);
+  /**
+   * Gate for the queueable git actions (Rebase/Squash, push, force-push).
+   * In-flight sessions are not a reason to disable: they all queue on the branch
+   * session queue and drain when the branch frees up. Only identity problems
+   * (detached HEAD, wrong branch) make them unsafe.
+   */
   let branchCommandDisabledReason = $derived(
-    branchIdentityWarning ??
-      (commandPipelinePending
-        ? 'Command in progress'
-        : branchSessionBusy
-          ? 'Session in progress'
-          : null)
+    branchIdentityWarning ?? (commandPipelinePending ? 'Command in progress' : null)
+  );
+  /**
+   * Gate for reset to origin, which still executes immediately: it is validated
+   * against a point-in-time preview of what would be discarded, so a busy branch
+   * has to keep blocking it.
+   */
+  let immediateGitActionDisabledReason = $derived(
+    branchCommandDisabledReason ?? (branchSessionBusy ? 'Session in progress' : null)
   );
 
   // =========================================================================
@@ -1012,11 +1067,31 @@
     }
   }
 
+  // A queued pull outlives this component (it drains when the branch frees up),
+  // so its state lives in the global pullStateStore (read as `storePullState`
+  // above, alongside pushState). The immediate pull stays local: it is awaited
+  // right here.
+  /** Pull is waiting on the branch session queue rather than running. */
+  let pullQueuedOrigin = $derived(storePullState?.state === 'queued');
+  let pullSessionId = $derived(storePullState?.sessionId ?? null);
+  /** True for both the immediate pull and a drained one still running. */
+  let pullInFlight = $derived(pullingOrigin || storePullState?.state === 'pulling');
+
+  /**
+   * Pull origin's new commits, or queue the pull behind in-flight branch work.
+   *
+   * The backend decides which — an idle branch fast-forwards immediately, with no
+   * session row for what is usually an instant operation — and it dedupes repeat
+   * clicks, so this is deliberately not gated on `branchSessionBusy`.
+   */
   async function handlePullOrigin() {
-    if (pullingOrigin) return;
+    if (pullInFlight || pullQueuedOrigin) return;
     pullingOrigin = true;
     try {
-      await commands.pullBranchFastForward(branch.id);
+      const queuedSessionId = await commands.pullOrQueueBranch(branch.id);
+      if (queuedSessionId) {
+        pullStateStore.setPullQueued(branch.id, queuedSessionId);
+      }
       await loadTimeline();
     } catch (e) {
       notifyError('Pull failed', e);
@@ -1024,6 +1099,89 @@
       pullingOrigin = false;
     }
   }
+
+  /**
+   * Drop a pull that is still waiting on the branch queue.
+   *
+   * The store entry is cleared here rather than by the completion listener: a
+   * session that never ran isn't in the session registry, so its cancellation
+   * event carries no pull session type to match on. It waits for the backend to
+   * confirm the cancellation — see `createQueuedSessionCanceller`.
+   */
+  const runCancelQueuedPull = createQueuedSessionCanceller({
+    cancel: (sessionId) => commands.cancelSession(sessionId),
+    clearState: () => pullStateStore.clearPullState(branch.id),
+    onError: (e) => notifyError('Could not cancel queued pull', e),
+  });
+
+  async function cancelQueuedPull() {
+    const sessionId = pullSessionId;
+    if (!pullQueuedOrigin || !sessionId) return;
+    if (await runCancelQueuedPull(sessionId)) {
+      commands.invalidateBranchTimeline(branch.id);
+      await loadTimeline();
+    }
+  }
+
+  /**
+   * Fallback polling for a pull on the branch queue, mirroring the push poller in
+   * BranchCardPrButton.
+   *
+   * A queued pull is drained headless, so `session-status-changed` is the only
+   * thing that moves it off "Pull queued" and reports a failure. If that event is
+   * missed the badge sticks until the user clicks Cancel and a failed pull loses
+   * its toast, so poll the session too. The effect tracks `storePullState`, so
+   * whichever of the two gets there first tears the other down.
+   *
+   * A deleted session comes back as `null` from `getSession`, so a rejection only
+   * ever means the backend was unreachable. Those are tolerated for a few
+   * consecutive attempts — dropping the badge on the first blip would strand a
+   * still-queued pull with no Cancel button and no signal to re-click.
+   */
+  $effect(() => {
+    const sessionId = storePullState?.sessionId;
+    if (!sessionId) return;
+
+    const failures = createPollFailureTracker();
+    const interval = setInterval(async () => {
+      try {
+        const session = await commands.getSession(sessionId);
+        failures.recordSuccess();
+        const disposition = classifyPolledSession(session);
+        if (disposition === 'waiting') return;
+        if (disposition === 'active') {
+          pullStateStore.markQueuedPullStarted(branch.id, sessionId);
+          return;
+        }
+        // 'gone' or 'finished': either way the badge has to go, and a drained pull
+        // that failed is the only outcome still worth telling the user about.
+        pullStateStore.clearPullState(branch.id);
+        if (session?.status === 'error') {
+          notifyError(
+            'Pull failed',
+            session.errorMessage ?? 'The queued pull could not fast-forward this branch.'
+          );
+        }
+        commands.invalidateBranchTimeline(branch.id);
+        await loadTimeline();
+      } catch (e) {
+        if (!failures.recordFailure()) {
+          console.warn(
+            `[BranchCard] Could not poll pull session ${sessionId} for branch ${branch.id}, retrying:`,
+            e
+          );
+          return;
+        }
+        console.error(
+          `[BranchCard] Lost track of pull session ${sessionId} for branch ${branch.id}:`,
+          e
+        );
+        pullStateStore.clearPullState(branch.id);
+      }
+    }, 5_000);
+
+    return () => clearInterval(interval);
+  });
 
   function formatCommitCount(count: number, noun = 'commit'): string {
     return `${count} ${noun}${count === 1 ? '' : 's'}`;
@@ -1067,28 +1225,53 @@
     }
   }
 
-  // Push state is sourced from the global pushStateStore so it survives the
-  // BranchCard remount that happens when the user switches projects and back.
-  // The store is shared with BranchCardPrButton (single entry per branch.id),
-  // updated by the global sessionStatusListener on completion, and covered by
-  // a 5s polling fallback in BranchCardPrButton.
-  let storePushState = $derived(pushStateStore.getPushState(branch.id));
+  // `storePushState` (read above) is shared with BranchCardPrButton (single entry
+  // per branch.id), updated by the global sessionStatusListener on completion, and
+  // covered by a 5s polling fallback in BranchCardPrButton.
   let pushingOrigin = $derived(storePushState?.state === 'pushing');
+  /** Push is waiting on the branch session queue rather than running. */
+  let pushQueuedOrigin = $derived(storePushState?.state === 'queued');
   let pushSessionId = $derived(storePushState?.sessionId ?? null);
   let forcePushingOrigin = $derived(pushingOrigin);
   let forcePushSessionId = $derived(pushSessionId);
 
   async function handlePushOrigin() {
-    if (pushingOrigin || commandPipelinePending || branchSessionBusy) return;
+    // Deliberately not gated on `branchSessionBusy`: the backend decides
+    // between pushing now and queueing behind in-flight branch work, and it
+    // dedupes repeat clicks of the same action.
+    if (pushingOrigin || pushQueuedOrigin || commandPipelinePending) return;
     const agents = isRemote ? REMOTE_AGENTS : agentState.providers;
     const provider = getPreferredAgent(agents) ?? undefined;
     pushStateStore.setPushing(branch.id, '__pending__');
     try {
-      const sessionId = await commands.pushBranch(branch.id, provider, false);
-      pushStateStore.setPushing(branch.id, sessionId);
+      const response = await commands.pushBranch(branch.id, provider, false);
+      pushStateStore.setPushLaunch(branch.id, response);
     } catch (e) {
       pushStateStore.setPushError(branch.id, e instanceof Error ? e.message : String(e));
       notifyError('Push failed', e);
+    }
+  }
+
+  /**
+   * Drop a push that is still waiting on the branch queue.
+   *
+   * The store entry is cleared here rather than by the completion listener: a
+   * session that never ran isn't in the session registry, so its cancellation
+   * event carries no push session type to match on. It waits for the backend to
+   * confirm the cancellation — see `createQueuedSessionCanceller`.
+   */
+  const runCancelQueuedPush = createQueuedSessionCanceller({
+    cancel: (sessionId) => commands.cancelSession(sessionId),
+    clearState: () => pushStateStore.clearPushState(branch.id),
+    onError: (e) => notifyError('Could not cancel queued push', e),
+  });
+
+  async function cancelQueuedPush() {
+    const sessionId = pushSessionId;
+    if (!pushQueuedOrigin || !sessionId || sessionId === '__pending__') return;
+    if (await runCancelQueuedPush(sessionId)) {
+      commands.invalidateBranchTimeline(branch.id);
+      await loadTimeline();
     }
   }
 
@@ -1105,7 +1288,9 @@
   }
 
   async function confirmForcePush() {
-    if (forcePushingOrigin || commandPipelinePending || branchSessionBusy) {
+    // Like `handlePushOrigin`, not gated on `branchSessionBusy` — the backend
+    // queues the force push behind in-flight branch work.
+    if (forcePushingOrigin || pushQueuedOrigin || commandPipelinePending) {
       // Another operation is in progress — keep the dialog open so the user
       // understands why the action didn't proceed.
       return;
@@ -1115,8 +1300,8 @@
     const provider = getPreferredAgent(agents) ?? undefined;
     pushStateStore.setPushing(branch.id, '__pending__');
     try {
-      const sessionId = await commands.pushBranch(branch.id, provider, true);
-      pushStateStore.setPushing(branch.id, sessionId);
+      const response = await commands.pushBranch(branch.id, provider, true);
+      pushStateStore.setPushLaunch(branch.id, response);
     } catch (e) {
       pushStateStore.setPushError(branch.id, e instanceof Error ? e.message : String(e));
       notifyError('Force push failed', e);
@@ -1745,10 +1930,7 @@
           onNoteCreated={() => loadTimeline()}
           onRebaseBranch={() => startBranchCommandPipeline('rebase')}
           onSquashCommits={() => startBranchCommandPipeline('squash')}
-          newCommitDisabled={sessionMgr.isNewSessionDisabled ||
-            commandPipelinePending ||
-            branchSessionBusy ||
-            gitUnsafeActionsDisabled}
+          rebaseSquashDisabled={!!branchCommandDisabledReason}
           {commitCount}
         />
       </div>
@@ -1848,8 +2030,14 @@
               onOpenForcePushSession={forcePushSessionId && forcePushSessionId !== '__pending__'
                 ? openForcePushSession
                 : undefined}
+              onCancelQueuedPush={cancelQueuedPush}
+              onCancelQueuedPull={cancelQueuedPull}
               {forcePushingOrigin}
-              rebaseBranchDisabledReason={branchCommandDisabledReason}
+              {pushQueuedOrigin}
+              {pullQueuedOrigin}
+              {branchSessionBusy}
+              {immediateGitActionDisabledReason}
+              queueableGitActionDisabledReason={branchCommandDisabledReason}
               onViewWorktreeDiff={isLocal
                 ? () =>
                     openDiffDetail({
@@ -1864,7 +2052,7 @@
               onDiscardWorktreeChanges={handleDiscardWorktreeChanges}
               onNewSessionReferring={(ref) => sessionMgr.openNewSessionReferring(ref)}
               newSessionDisabled={sessionMgr.isNewSessionDisabled || gitUnsafeActionsDisabled}
-              {pullingOrigin}
+              pullingOrigin={pullInFlight}
               {pushingOrigin}
               {resettingToOrigin}
               {discardingWorktreeChanges}

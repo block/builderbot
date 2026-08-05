@@ -1,7 +1,124 @@
 import type { ProjectAction } from '../../api/commands';
+import type { PullState } from '../../stores/pullState.svelte';
+import type { PushState } from '../../stores/pushState.svelte';
 import type { PipelineExecution } from '../../types';
 
 const IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
+
+/**
+ * Whether a push or pull of the branch's own is running or waiting on the branch
+ * session queue.
+ *
+ * Neither creates a timeline artifact, so a timeline-derived "has active sessions"
+ * check reads the branch as idle for their whole duration. That skew matters for
+ * the gates that ask whether the backend would queue a new action: mid-push, an
+ * action they only disable for an *immediate* run (Pull on a dirty worktree) would
+ * otherwise stay disabled even though the click would just queue.
+ */
+export function isGitActionInFlight(args: {
+  push?: { state: PushState } | null;
+  pull?: { state: PullState } | null;
+  /** An immediate pull the card is awaiting inline; it has no store entry. */
+  immediatePull?: boolean;
+}): boolean {
+  if (args.immediatePull) return true;
+  const push = args.push?.state;
+  const pull = args.pull?.state;
+  return push === 'pushing' || push === 'queued' || pull === 'pulling' || pull === 'queued';
+}
+
+export const MAX_CONSECUTIVE_POLL_FAILURES = 3;
+
+export type PollFailureTracker = {
+  recordSuccess(): void;
+  /** Records one failure; true when the budget is exhausted and the poller should give up. */
+  recordFailure(): boolean;
+};
+
+/**
+ * Failure budget for a session poller.
+ *
+ * `getSession` resolves `null` for a session that no longer exists, so a rejection
+ * is always a transport or dispatch failure — the kind that a retry fixes. Tolerate
+ * those until several happen in a row; a success resets the budget, so only sustained
+ * unreachability, not an isolated blip, makes a poller give up its store entry.
+ */
+export function createPollFailureTracker(
+  maxFailures = MAX_CONSECUTIVE_POLL_FAILURES
+): PollFailureTracker {
+  let consecutive = 0;
+  return {
+    recordSuccess(): void {
+      consecutive = 0;
+    },
+    recordFailure(): boolean {
+      consecutive += 1;
+      return consecutive >= maxFailures;
+    },
+  };
+}
+
+export type PolledSessionDisposition = 'gone' | 'waiting' | 'active' | 'finished';
+
+/**
+ * What a session poller should do with the session it just fetched.
+ *
+ * `getSession` resolves `null` only for a session that is no longer in the table —
+ * `delete_session` or the branch-delete cascade on `sessions.branch_id`, since
+ * `cancel_session` transitions to `cancelled` instead. So `gone` means the work will
+ * never run and there is nothing left to cancel: drop the store entry quietly rather
+ * than reporting a failure the user cannot act on. Without this the tick is a no-op
+ * and the poller runs forever behind a badge for a session that does not exist.
+ *
+ * Callers must skip the `'__pending__'` sentinel before polling: it is not a real id,
+ * so it classifies as `gone` while the launch command is still in flight.
+ */
+export function classifyPolledSession(
+  session: { status: string } | null | undefined
+): PolledSessionDisposition {
+  if (!session) return 'gone';
+  if (session.status === 'queued') return 'waiting';
+  if (session.status === 'running') return 'active';
+  return 'finished';
+}
+
+/**
+ * Cancel a queued git action, clearing its store entry only once the backend
+ * confirms.
+ *
+ * `cancel_session` answers `Ok` for a session it cannot find, one that already
+ * finished, and one already cancelled — so a rejection only ever means the request
+ * never arrived (a web-mode network blip, the backend restarting, a laptop waking).
+ * That is precisely when the queued session still exists, so the badge and its
+ * Cancel button have to survive: clearing first would hide a session that goes on
+ * to drain, with no affordance left to call it off.
+ *
+ * The returned function is re-entrant-safe. Leaving the state set while the cancel
+ * is in flight means the call sites' own "still queued?" guards no longer stop a
+ * second click, so the in-flight flag does. It resets on failure, so retrying by
+ * clicking Cancel again works.
+ */
+export function createQueuedSessionCanceller(deps: {
+  cancel: (sessionId: string) => Promise<unknown>;
+  clearState: () => void;
+  onError: (error: unknown) => void;
+}): (sessionId: string) => Promise<boolean> {
+  let inFlight = false;
+  return async (sessionId: string): Promise<boolean> => {
+    if (inFlight) return false;
+    inFlight = true;
+    try {
+      await deps.cancel(sessionId);
+      deps.clearState();
+      return true;
+    } catch (e) {
+      deps.onError(e);
+      return false;
+    } finally {
+      inFlight = false;
+    }
+  };
+}
 
 export function groupActionsByType(actions: ProjectAction[]): Record<string, ProjectAction[]> {
   const groups: Record<string, ProjectAction[]> = {

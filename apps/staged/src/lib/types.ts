@@ -409,7 +409,7 @@ export interface QueuedSessionMessage {
 
 export type StepStatus = 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped';
 export type StepType = 'command' | 'ai_handoff';
-export type PipelineKind = 'rebase' | 'squash';
+export type PipelineKind = 'rebase' | 'squash' | 'push' | 'pull';
 
 export interface PipelineStepStatus {
   label: string;
@@ -423,6 +423,8 @@ export interface PipelineStepStatus {
 
 export interface PipelineExecution {
   kind?: PipelineKind | null;
+  /** Whether a `push` pipeline force-pushes. Absent for the other kinds. */
+  pushForce?: boolean;
   steps: PipelineStepStatus[];
   currentStep: number;
   completedWithoutAi: boolean;
@@ -487,6 +489,21 @@ export interface BranchSessionLaunchContext {
 export interface BranchSessionResponse {
   sessionId: string;
   artifactId: string;
+  sessionStatus: BranchSessionLaunchStatus;
+}
+
+/**
+ * Result of a branch git pipeline command (rebase, squash, push, force push).
+ *
+ * These can be requested while the branch already has sessions in flight, in
+ * which case the backend queues them and reports `'queued'`.
+ *
+ * Pull is the odd one out: an idle branch fast-forwards without going through the
+ * pipeline runner, so `pullOrQueueBranch` returns `string | null` — the queued
+ * session id, or `null` for a pull that already happened.
+ */
+export interface BranchPipelineResponse {
+  sessionId: string;
   sessionStatus: BranchSessionLaunchStatus;
 }
 

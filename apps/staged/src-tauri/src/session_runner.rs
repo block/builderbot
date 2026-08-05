@@ -1315,25 +1315,35 @@ pub fn start_pipeline_session(
                     }
                 }
             }
-            PipelineOutcome::Aborted { .. } => {
+            PipelineOutcome::Aborted { step_index } => {
                 // Pipeline aborted (e.g. non-fast-forward). Mark as completed so
-                // the frontend can inspect the pipeline steps for the failure.
+                // the frontend can inspect the pipeline steps for the failure —
+                // except for a pull, which has no such affordance and, when it
+                // was drained off the branch queue, no one watching it. See
+                // `aborted_pipeline_error`.
                 resolve_pipeline_artifacts_without_ai(&config, &store_for_status, false);
+                let error = aborted_pipeline_error(&config, &store_for_status, step_index);
+                // The pipeline ran to its conclusion either way; only the
+                // outcome differs, so the completion reason stays the same.
                 let reason = CompletionReason::TurnComplete;
+                let status = if error.is_some() {
+                    SessionStatus::Error
+                } else {
+                    SessionStatus::Completed
+                };
                 registry.deregister(&session_id);
                 let transitioned = store_for_status
-                    .transition_from_running(
-                        &session_id,
-                        SessionStatus::Completed,
-                        None,
-                        Some(&reason),
-                    )
+                    .transition_from_running(&session_id, status, error.as_deref(), Some(&reason))
                     .unwrap_or(false);
                 emit_status(
                     &app_handle,
                     &session_id,
-                    "completed",
-                    None,
+                    if error.is_some() {
+                        "error"
+                    } else {
+                        "completed"
+                    },
+                    error,
                     Some(&reason),
                     config.branch_id.clone(),
                     config.project_id.clone(),
@@ -1406,6 +1416,47 @@ fn finish_failed_pipeline_handoff_start(
         .unwrap_or(false)
 }
 
+/// Error message for an aborted pipeline, or `None` when the abort is an expected
+/// outcome the session should still complete with.
+///
+/// Only a pull produces an error. A push rejected as non-fast-forward completes so
+/// the frontend can read the steps and offer a force push, but a pull that can't
+/// fast-forward is a dead end whose fix is a user decision (rebase onto origin, or
+/// reset to origin) — and a pull drained off the branch queue runs headless, so
+/// the error status is the only way the user hears about it.
+///
+/// The failing step's output is read back from the persisted pipeline, which
+/// `run_pipeline` writes before it returns `Aborted`.
+fn aborted_pipeline_error(
+    config: &PipelineConfig,
+    store: &Store,
+    step_index: usize,
+) -> Option<String> {
+    if config.pipeline.kind.as_ref() != Some(&PipelineKind::Pull) {
+        return None;
+    }
+
+    let step = store
+        .get_session(&config.session_id)
+        .ok()
+        .flatten()
+        .and_then(|session| session.pipeline)
+        .and_then(|pipeline| pipeline.steps.into_iter().nth(step_index));
+    let Some(step) = step else {
+        return Some("Pull failed".to_string());
+    };
+
+    let detail = step
+        .output
+        .as_deref()
+        .map(str::trim)
+        .filter(|output| !output.is_empty());
+    Some(match detail {
+        Some(detail) => format!("{} failed:\n\n{detail}", step.label),
+        None => format!("{} failed", step.label),
+    })
+}
+
 fn pre_head_for_pipeline_handoff(config: &PipelineConfig) -> Option<String> {
     match config.pipeline.kind.as_ref() {
         Some(PipelineKind::Rebase) => config.pre_head_sha.clone(),
@@ -1416,7 +1467,9 @@ fn pre_head_for_pipeline_handoff(config: &PipelineConfig) -> Option<String> {
                 None
             }
         },
-        None => None,
+        // A push never rewrites local history and a pull never hands off, so
+        // neither has a pre-pipeline HEAD to compare against.
+        Some(PipelineKind::Push | PipelineKind::Pull) | None => None,
     }
 }
 
@@ -1443,7 +1496,9 @@ fn resolve_pipeline_artifacts_without_ai(config: &PipelineConfig, store: &Store,
                 );
             }
         }
-        None => {}
+        // Push and pull pipelines create no artifact, so there is nothing to
+        // resolve.
+        Some(PipelineKind::Push | PipelineKind::Pull) | None => {}
     }
 }
 
@@ -3629,6 +3684,94 @@ mod tests {
         let updated = store.get_commit(&commit.id).unwrap().unwrap();
         assert_eq!(updated.sha.as_deref(), Some(new_head.as_str()));
         let _ = std::fs::remove_dir_all(repo);
+    }
+
+    /// A session whose pipeline recorded `step_index` as failed, mirroring what
+    /// `run_pipeline` persists before it returns `Aborted`.
+    fn store_with_aborted_pipeline(
+        kind: PipelineKind,
+        steps: &[PipelineStep],
+        step_index: usize,
+        output: Option<&str>,
+    ) -> (Store, PipelineConfig) {
+        let store = Store::in_memory().unwrap();
+        let mut pipeline = PipelineExecution::from_steps(steps).with_kind(kind.clone());
+        pipeline.steps[step_index].status = StepStatus::Failed;
+        pipeline.steps[step_index].output = output.map(str::to_string);
+        let mut session =
+            crate::store::Session::new_running("git pipeline", std::path::Path::new("/tmp"));
+        session.pipeline = Some(pipeline.clone());
+        store.create_session(&session).unwrap();
+
+        let config = PipelineConfig {
+            session_id: session.id,
+            prompt: "git pipeline".to_string(),
+            steps: steps.to_vec(),
+            pipeline,
+            working_dir: PathBuf::from("/tmp"),
+            pre_head_sha: None,
+            provider: None,
+            workspace_name: None,
+            remote_working_dir: None,
+            branch_id: None,
+            project_id: None,
+        };
+        (store, config)
+    }
+
+    fn abort_step(label: &str) -> PipelineStep {
+        PipelineStep::Command {
+            label: label.to_string(),
+            command: "true".to_string(),
+            on_failure: FailureStrategy::Abort { marker: None },
+        }
+    }
+
+    #[test]
+    fn aborted_pull_reports_the_failing_step_and_its_output() {
+        let steps = vec![
+            abort_step("Fetch origin/feature"),
+            abort_step("Fast-forward"),
+        ];
+        let (store, config) = store_with_aborted_pipeline(
+            PipelineKind::Pull,
+            &steps,
+            1,
+            Some("  fatal: Not possible to fast-forward, aborting.\n"),
+        );
+
+        let error = aborted_pipeline_error(&config, &store, 1).unwrap();
+
+        assert_eq!(
+            error,
+            "Fast-forward failed:\n\nfatal: Not possible to fast-forward, aborting."
+        );
+    }
+
+    #[test]
+    fn aborted_pull_without_step_output_still_names_the_step() {
+        let steps = vec![abort_step("Fetch origin/feature")];
+        let (store, config) = store_with_aborted_pipeline(PipelineKind::Pull, &steps, 0, None);
+
+        assert_eq!(
+            aborted_pipeline_error(&config, &store, 0).unwrap(),
+            "Fetch origin/feature failed"
+        );
+    }
+
+    #[test]
+    fn aborted_push_completes_without_an_error_message() {
+        // A push rejected as non-fast-forward is an expected outcome: the session
+        // completes so the frontend can offer a force push.
+        let steps = vec![abort_step("Push to remote")];
+        let (store, config) = store_with_aborted_pipeline(
+            PipelineKind::Push,
+            &steps,
+            0,
+            Some("! [rejected] feature -> feature (non-fast-forward)"),
+        );
+
+        assert_eq!(aborted_pipeline_error(&config, &store, 0), None);
     }
 
     #[test]

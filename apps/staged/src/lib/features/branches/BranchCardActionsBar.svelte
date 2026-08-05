@@ -90,7 +90,9 @@
     onNoteCreated?: () => void;
     onRebaseBranch?: () => void;
     onSquashCommits?: () => void;
-    newCommitDisabled?: boolean;
+    /** Rebase/Squash queue behind running sessions, so this covers only the
+     *  cases where they can't run at all (detached HEAD, wrong branch). */
+    rebaseSquashDisabled?: boolean;
     commitCount?: number;
   }
 
@@ -106,7 +108,7 @@
     onNoteCreated,
     onRebaseBranch,
     onSquashCommits,
-    newCommitDisabled = false,
+    rebaseSquashDisabled = false,
     commitCount = 0,
   }: Props = $props();
 
@@ -923,11 +925,11 @@
       <DropdownMenu.Item onSelect={handleRenameFromMenu}>
         <GitBranch size={14} /> Rename Branch
       </DropdownMenu.Item>
-      <DropdownMenu.Item disabled={newCommitDisabled} onSelect={() => onRebaseBranch?.()}>
+      <DropdownMenu.Item disabled={rebaseSquashDisabled} onSelect={() => onRebaseBranch?.()}>
         <GitBranch size={14} /> Rebase Branch
       </DropdownMenu.Item>
       {#if commitCount >= 2}
-        <DropdownMenu.Item disabled={newCommitDisabled} onSelect={() => onSquashCommits?.()}>
+        <DropdownMenu.Item disabled={rebaseSquashDisabled} onSelect={() => onSquashCommits?.()}>
           <GitBranch size={14} /> Squash Commits
         </DropdownMenu.Item>
       {/if}

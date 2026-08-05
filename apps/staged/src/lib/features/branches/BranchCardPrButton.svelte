@@ -6,11 +6,13 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
+  import { toast } from 'svelte-sonner';
   import GitPullRequestCreateArrow from '@lucide/svelte/icons/git-pull-request-create-arrow';
   import GitPullRequestArrow from '@lucide/svelte/icons/git-pull-request-arrow';
   import GitPullRequestDraft from '@lucide/svelte/icons/git-pull-request-draft';
   import GitMerge from '@lucide/svelte/icons/git-merge';
   import AlertCircle from '@lucide/svelte/icons/alert-circle';
+  import Clock from '@lucide/svelte/icons/clock';
   import Spinner from '../../shared/Spinner.svelte';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
@@ -25,6 +27,9 @@
   import {
     classifyCompletedPushSession,
     classifyPipelinePushCompletion,
+    classifyPolledSession,
+    createPollFailureTracker,
+    createQueuedSessionCanceller,
     extractPrNumber,
     extractPrUrl,
     type CompletedPushOutcome,
@@ -209,18 +214,49 @@
     };
   });
 
-  // Fallback polling for PR session
+  // Fallback polling for PR session. A rejection means the backend was
+  // unreachable (a missing session resolves to `null`), so give it a few
+  // consecutive attempts before declaring the session lost.
+  //
+  // The `'__pending__'` sentinel is skipped: handleCreatePr seeds it before
+  // `createPr` resolves, and polling it would classify a PR that is about to start
+  // as gone. `prSessionId` is derived from the store, so the effect re-runs with the
+  // real id the moment setPrCreating swaps it in.
   $effect(() => {
-    if (prState !== 'creating' || !prSessionId) return;
+    if (prState !== 'creating' || !prSessionId || prSessionId === '__pending__') return;
 
     const sid = prSessionId;
+    const failures = createPollFailureTracker();
     const interval = setInterval(async () => {
       try {
         const session = await commands.getSession(sid);
-        if (session && session.status !== 'running') {
-          handlePrSessionComplete(session.status);
+        failures.recordSuccess();
+        switch (classifyPolledSession(session)) {
+          case 'gone':
+            // Deleted out from under us; revert the button to "Create PR" rather
+            // than leaving it on "Creating PR…" forever.
+            console.warn(
+              `[BranchCardPrButton] PR session ${sid} for branch ${branch.id} no longer exists; clearing its state.`
+            );
+            prStateStore.clearPrState(branch.id);
+            break;
+          case 'waiting':
+          case 'active':
+            // PR sessions launch running today, but tolerating a queued one keeps
+            // the poller from misreporting it as a completion.
+            break;
+          case 'finished':
+            if (session) handlePrSessionComplete(session.status);
+            break;
         }
-      } catch {
+      } catch (err) {
+        if (!failures.recordFailure()) {
+          console.warn(
+            `[BranchCardPrButton] Could not poll PR session ${sid} for branch ${branch.id}, retrying:`,
+            err
+          );
+          return;
+        }
         prStateStore.setPrError(branch.id, 'Lost track of PR creation session.');
         prStateStore.clearSessionTracking(branch.id);
       }
@@ -229,18 +265,56 @@
     return () => clearInterval(interval);
   });
 
-  // Fallback polling for push session
+  // Fallback polling for push session. Queued pushes are polled too: if the
+  // branch queue drains one while the "running" event is missed, this is what
+  // moves the button off "Queued". Transient poll failures are tolerated for a
+  // few attempts, so a single blip can't flip a still-queued push to "Push
+  // failed".
+  //
+  // The `'__pending__'` sentinel is skipped for the same reason as in the PR
+  // poller above: handlePush (and BranchCard's push rows) seed it before
+  // `pushBranch` resolves, and it is not an id the backend can find.
   $effect(() => {
-    if (pushState !== 'pushing' || !pushSessionId) return;
+    if (
+      (pushState !== 'pushing' && pushState !== 'queued') ||
+      !pushSessionId ||
+      pushSessionId === '__pending__'
+    )
+      return;
 
     const sid = pushSessionId;
+    const failures = createPollFailureTracker();
     const interval = setInterval(async () => {
       try {
         const session = await commands.getSession(sid);
-        if (session && session.status !== 'running') {
-          handlePushSessionComplete(session.status, session);
+        failures.recordSuccess();
+        switch (classifyPolledSession(session)) {
+          case 'gone':
+            // Not setPushError: flipping to "Push failed" for a session someone
+            // deliberately deleted misreports it, and clearSessionTracking would
+            // keep the "Queued" badge with a Cancel button that can't work.
+            console.warn(
+              `[BranchCardPrButton] Push session ${sid} for branch ${branch.id} no longer exists; clearing its state.`
+            );
+            pushStateStore.clearPushState(branch.id);
+            break;
+          case 'waiting':
+            break;
+          case 'active':
+            pushStateStore.markQueuedPushStarted(branch.id, sid);
+            break;
+          case 'finished':
+            if (session) handlePushSessionComplete(session.status, session);
+            break;
         }
       } catch (err) {
+        if (!failures.recordFailure()) {
+          console.warn(
+            `[BranchCardPrButton] Could not poll push session ${sid} for branch ${branch.id}, retrying:`,
+            err
+          );
+          return;
+        }
         console.error(
           `[BranchCardPrButton] Lost track of push session ${sid} for branch ${branch.id}:`,
           err
@@ -337,7 +411,7 @@
 
   function getPrStatusIndicator(): 'success' | 'warning' | 'error' | 'neutral' | 'pending' | null {
     if (prState === 'creating') return null;
-    if (pushState === 'pushing') return null;
+    if (pushState === 'pushing' || pushState === 'queued') return null;
     if (pushState === 'error' || prState === 'error') return 'error';
 
     if (!branch.prNumber) return null;
@@ -363,6 +437,7 @@
   let prStatusIndicator = $derived(getPrStatusIndicator());
 
   function getPrButtonActionTitle(): string {
+    if (pushState === 'queued') return 'Push queued behind branch work — click to cancel';
     if (pushState === 'pushing') return 'Pushing… (click to view)';
     if (pushState === 'error') return 'Push failed — click for details';
     if (prState === 'created' && hasUnpushed) {
@@ -478,7 +553,7 @@
   // =========================================================================
 
   function handlePush(force = false) {
-    if (pushState === 'pushing') return;
+    if (pushState === 'pushing' || pushState === 'queued') return;
 
     pushStateStore.setPushing(branch.id, '__pending__');
 
@@ -487,15 +562,46 @@
 
     commands
       .pushBranch(branch.id, provider, force)
-      .then((sessionId) => {
-        // Session is already registered by the global listener via the
-        // backend's "running" event — just update the local store with the
-        // real session ID so the fallback poller can track it.
-        pushStateStore.setPushing(branch.id, sessionId);
+      .then((response) => {
+        // A running session is already registered by the global listener via
+        // the backend's "running" event — this just records the real session ID
+        // (and whether the push is waiting on the branch queue) so the fallback
+        // poller can track it.
+        pushStateStore.setPushLaunch(branch.id, response);
       })
       .catch((e) => {
         pushStateStore.setPushError(branch.id, e instanceof Error ? e.message : String(e));
       });
+  }
+
+  /**
+   * Drop a push that is still waiting on the branch queue.
+   *
+   * The store entry is cleared here rather than in the completion handler: a
+   * session that never ran isn't in the session registry, so the cancellation
+   * event carries no push session type for `sessionStatusListener` to match. It
+   * waits for the backend to confirm the cancellation — see
+   * `createQueuedSessionCanceller`.
+   *
+   * A failure is toasted rather than pushed into `setPushError`: the push is still
+   * queued, so flipping this button to "Push failed" would both misreport its state
+   * and swap the Cancel affordance for a retry dialog.
+   */
+  const runCancelQueuedPush = createQueuedSessionCanceller({
+    cancel: (sessionId) => commands.cancelSession(sessionId),
+    clearState: () => pushStateStore.clearPushState(branch.id),
+    onError: (e) =>
+      toast.error('Could not cancel queued push', {
+        description: e instanceof Error ? e.message : String(e),
+        duration: Infinity,
+      }),
+  });
+
+  function cancelQueuedPush() {
+    const sid = pushSessionId;
+    if (pushState !== 'queued' || !sid || sid === '__pending__') return;
+
+    void runCancelQueuedPush(sid);
   }
 
   let pushCompletionInFlight = false;
@@ -602,6 +708,10 @@
       }
       return;
     }
+    if (pushState === 'queued') {
+      cancelQueuedPush();
+      return;
+    }
     if (pushState === 'pushing' && pushSessionId) {
       onOpenSession?.(pushSessionId);
       return;
@@ -676,12 +786,15 @@
         (prState === 'error' || pushState === 'error') &&
           'border-destructive text-destructive hover:bg-[var(--ui-danger-bg)] hover:text-destructive',
         pushState === 'pushing' && 'cursor-default border-[var(--border-muted)]',
+        pushState === 'queued' && 'border-[var(--border-muted)]',
         prState === 'created' && prStatusState === 'MERGED' && '[&_svg]:text-[var(--status-added)]',
       ]}
       onclick={handlePrButtonClick}
       disabled={showPushErrorDialog || showForcePushDialog || showPrErrorDialog}
     >
-      {#if pushState === 'pushing'}
+      {#if pushState === 'queued'}
+        <Clock size={13} />
+      {:else if pushState === 'pushing'}
         <Spinner size={13} />
       {:else if pushState === 'error'}
         <AlertCircle size={13} />
@@ -699,7 +812,9 @@
         <GitPullRequestCreateArrow size={13} />
       {/if}
       <span class="min-w-0 truncate">
-        {#if pushState === 'pushing'}
+        {#if pushState === 'queued'}
+          Push queued
+        {:else if pushState === 'pushing'}
           Pushing…
         {:else if pushState === 'error'}
           Push failed

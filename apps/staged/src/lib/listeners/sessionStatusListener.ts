@@ -1,14 +1,16 @@
 /**
  * Global listener for `session-status-changed` Tauri events.
  *
- * Updates three independent state stores on session completion:
+ * Updates four independent state stores on session completion:
  * 1. projectState  — aggregate view of all sessions in a project (project tiles)
  * 2. prState       — branch-specific PR creation workflow state (PR buttons)
  * 3. pushState     — branch-specific push workflow state (push operations)
+ * 4. pullState     — branch-specific queued-pull state (pull footer row)
  *
  * Session lookups are delegated to the unified sessionRegistry for consistency.
  */
 
+import { toast } from 'svelte-sonner';
 import { listenToEvent, type UnlistenFn } from '../transport';
 import { invalidateBranchTimeline } from '../commands';
 import * as commands from '../api/commands';
@@ -20,6 +22,7 @@ import {
 import { navigation } from '../features/layout/navigation.svelte';
 import { projectStateStore } from '../stores/projectState.svelte';
 import { prStateStore } from '../stores/prState.svelte';
+import { pullStateStore } from '../stores/pullState.svelte';
 import { pushStateStore } from '../stores/pushState.svelte';
 import { sessionRegistry, type SessionType } from '../stores/sessionRegistry.svelte';
 import type { SessionStatus, SessionStatusPayload } from '../types';
@@ -29,6 +32,7 @@ export function listenForSessionStatus(): UnlistenFn {
     const {
       sessionId,
       status,
+      errorMessage,
       branchId: eventBranchId,
       projectId: eventProjectId,
       sessionType,
@@ -46,6 +50,14 @@ export function listenForSessionStatus(): UnlistenFn {
         eventBranchId
       );
       projectStateStore.addRunningSession(eventProjectId, sessionId);
+      // A push or pull that was queued behind other branch work starts running
+      // when the branch queue drains it; this event is the only signal of that.
+      if (sessionType === 'push' && eventBranchId) {
+        pushStateStore.markQueuedPushStarted(eventBranchId, sessionId);
+      }
+      if (sessionType === 'pull' && eventBranchId) {
+        pullStateStore.markQueuedPullStarted(eventBranchId, sessionId);
+      }
       return;
     }
 
@@ -54,7 +66,7 @@ export function listenForSessionStatus(): UnlistenFn {
       if (eventBranchId) {
         invalidateBranchTimeline(eventBranchId);
       }
-      handleSessionEnd(sessionId, status);
+      handleSessionEnd(sessionId, status, errorMessage);
     }
   });
 }
@@ -63,7 +75,11 @@ export function listenForSessionStatus(): UnlistenFn {
 // Completion sub-handlers
 // ---------------------------------------------------------------------------
 
-async function handleSessionEnd(sessionId: string, status: SessionStatus) {
+async function handleSessionEnd(
+  sessionId: string,
+  status: SessionStatus,
+  errorMessage?: string | null
+) {
   const sessionProjectId = sessionRegistry.getProjectId(sessionId);
   const sessionType = sessionRegistry.getType(sessionId);
   const branchId = sessionRegistry.getBranchId(sessionId);
@@ -88,8 +104,34 @@ async function handleSessionEnd(sessionId: string, status: SessionStatus) {
     pushStateStore.clearSessionTracking(branchId);
   }
 
+  if (sessionType === 'pull' && branchId) {
+    handlePullCompletion(branchId, status, errorMessage);
+  }
+
   // Remove running state from projectStateStore and unregister from the registry.
   sessionRegistry.cleanupSession(sessionId);
+}
+
+/**
+ * Release the pull row and report a failed pull.
+ *
+ * A queued pull is drained headless, so the status event is the only place its
+ * failure surfaces: the backend ends an unpullable session in `error` with the
+ * failing step's output (see `session_runner::aborted_pipeline_error`), and the
+ * usual fix — rebase onto origin, or reset to origin — is the user's call. On
+ * success the row simply disappears, since the branch is no longer behind.
+ */
+function handlePullCompletion(
+  branchId: string,
+  status: SessionStatus,
+  errorMessage?: string | null
+) {
+  pullStateStore.clearPullState(branchId);
+  if (status !== 'error') return;
+  toast.error('Pull failed', {
+    description: errorMessage ?? 'The queued pull could not fast-forward this branch.',
+    duration: Infinity,
+  });
 }
 
 async function handlePrCompletion(sessionId: string, branchId: string, status: SessionStatus) {

@@ -283,6 +283,95 @@ describe('sessionStatusListener busy-state hydration', () => {
     expect(sessionRegistry.getMetadata('launched-mid-fetch')).not.toBeNull();
   });
 
+  it('does not re-register sessions whose terminal delta arrived while the fetch was in flight', async () => {
+    const { listenForSessionStatus, hydrateActiveSessions } =
+      await import('./sessionStatusListener');
+    listenForSessionStatus();
+    await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+
+    // A session running and registered via the delta path...
+    eventCallbacks.get('session-status-changed')?.({
+      sessionId: 'racy-1',
+      status: 'running',
+      projectId: 'project-1',
+      branchId: 'branch-1',
+      sessionType: 'commit',
+    });
+    expect(sessionRegistry.getMetadata('racy-1')).not.toBeNull();
+
+    vi.setSystemTime(2_000);
+    getActiveSessions.mockImplementation(async () => {
+      // ...whose terminal delta lands while a snapshot that still reports it
+      // running is in flight. The register loop must not resurrect it from
+      // the stale snapshot — that would recreate the stuck spinner.
+      eventCallbacks.get('session-status-changed')?.({
+        sessionId: 'racy-1',
+        status: 'completed',
+        branchId: 'branch-1',
+      });
+      return [
+        {
+          sessionId: 'racy-1',
+          projectId: 'project-1',
+          branchId: 'branch-1',
+          sessionType: 'commit',
+          status: 'running',
+          isAutoReview: false,
+        },
+      ];
+    });
+
+    sessionRegistry.register.mockClear();
+    projectStateStore.addRunningSession.mockClear();
+    await hydrateActiveSessions();
+
+    expect(sessionRegistry.register).not.toHaveBeenCalled();
+    expect(projectStateStore.addRunningSession).not.toHaveBeenCalled();
+    expect(sessionRegistry.getMetadata('racy-1')).toBeNull();
+  });
+
+  it('lets a later hydration register a session terminated during an earlier fetch', async () => {
+    const { listenForSessionStatus, hydrateActiveSessions } =
+      await import('./sessionStatusListener');
+    listenForSessionStatus();
+    await vi.waitFor(() => expect(getActiveSessions).toHaveBeenCalledTimes(1));
+
+    vi.setSystemTime(2_000);
+    getActiveSessions.mockImplementation(async () => {
+      eventCallbacks.get('session-status-changed')?.({
+        sessionId: 'racy-1',
+        status: 'completed',
+        branchId: 'branch-1',
+      });
+      return [];
+    });
+    await hydrateActiveSessions();
+
+    // The session was resumed backend-side after the terminal event: a fresh
+    // snapshot legitimately reports it running again, and the guard from the
+    // settled hydration must not suppress it.
+    vi.setSystemTime(3_000);
+    getActiveSessions.mockResolvedValue([
+      {
+        sessionId: 'racy-1',
+        projectId: 'project-1',
+        branchId: 'branch-1',
+        sessionType: 'commit',
+        status: 'running',
+        isAutoReview: false,
+      },
+    ]);
+    await hydrateActiveSessions();
+
+    expect(sessionRegistry.register).toHaveBeenCalledWith(
+      'racy-1',
+      'project-1',
+      'commit',
+      'branch-1'
+    );
+    expect(sessionRegistry.getMetadata('racy-1')).not.toBeNull();
+  });
+
   it('leaves state untouched when the snapshot fetch fails', async () => {
     sessionRegistry.sessions.set('running-1', {
       sessionId: 'running-1',

@@ -41,6 +41,14 @@ import type {
   SessionStatusPayload,
 } from '../types';
 
+// Terminal deltas processed while a snapshot fetch is in flight are newer
+// than that snapshot, which may still report the session as running — the
+// register loop in hydrateActiveSessions must not resurrect them. Entries are
+// keyed by arrival time so overlapping hydrations each compare against their
+// own fetch start; the map is cleared once no fetch is in flight.
+let hydrationFetchesInFlight = 0;
+const terminalWhileFetching = new Map<string, number>();
+
 export function listenForSessionStatus(): UnlistenFn {
   const unlistenEvents = listenToEvent<SessionStatusPayload>(
     'session-status-changed',
@@ -102,6 +110,9 @@ async function handleSessionStatusChanged(payload: SessionStatusPayload): Promis
   }
 
   if (status === 'completed' || status === 'error' || status === 'cancelled') {
+    if (hydrationFetchesInFlight > 0) {
+      terminalWhileFetching.set(sessionId, Date.now());
+    }
     // Invalidate cached timeline for the branch affected by this session
     if (eventBranchId) {
       invalidateBranchTimeline(eventBranchId);
@@ -130,37 +141,48 @@ async function handleSessionStatusChanged(payload: SessionStatusPayload): Promis
  * arrives. Unread state is per-device UX state and is left untouched.
  */
 export async function hydrateActiveSessions(): Promise<void> {
-  // Entries registered while the fetch is in flight (an optimistic launch-site
-  // registration) are newer than the snapshot — the sweep below must not
-  // treat them as stale.
+  // Anything that happens while the fetch is in flight is newer than the
+  // snapshot, in both directions: entries registered mid-fetch (optimistic
+  // launch-site registrations) must not be swept, and sessions whose terminal
+  // delta was processed mid-fetch must not be re-registered from the
+  // snapshot's stale "running" claim.
   const fetchStartedAt = Date.now();
-  let active: ActiveSessionInfo[];
+  hydrationFetchesInFlight++;
   try {
-    active = await commands.getActiveSessions();
-  } catch (e) {
-    console.error('Failed to fetch active-sessions snapshot:', e);
-    return;
-  }
-
-  const activeIds = new Set(active.map((session) => session.sessionId));
-  for (const sessionId of sessionRegistry.getAllSessionIds()) {
-    const registeredAt = sessionRegistry.getMetadata(sessionId)?.timestamp ?? 0;
-    if (!activeIds.has(sessionId) && registeredAt < fetchStartedAt) {
-      sessionRegistry.cleanupSession(sessionId);
+    let active: ActiveSessionInfo[];
+    try {
+      active = await commands.getActiveSessions();
+    } catch (e) {
+      console.error('Failed to fetch active-sessions snapshot:', e);
+      return;
     }
-  }
 
-  for (const session of active) {
-    if (session.status !== 'running') continue;
-    if (!session.projectId || session.isAutoReview) continue;
-    if (sessionRegistry.getMetadata(session.sessionId)) continue;
-    sessionRegistry.register(
-      session.sessionId,
-      session.projectId,
-      (session.sessionType as SessionType) ?? 'other',
-      session.branchId ?? undefined
-    );
-    projectStateStore.addRunningSession(session.projectId, session.sessionId);
+    const activeIds = new Set(active.map((session) => session.sessionId));
+    for (const sessionId of sessionRegistry.getAllSessionIds()) {
+      const registeredAt = sessionRegistry.getMetadata(sessionId)?.timestamp ?? 0;
+      if (!activeIds.has(sessionId) && registeredAt < fetchStartedAt) {
+        sessionRegistry.cleanupSession(sessionId);
+      }
+    }
+
+    for (const session of active) {
+      if (session.status !== 'running') continue;
+      if (!session.projectId || session.isAutoReview) continue;
+      if (sessionRegistry.getMetadata(session.sessionId)) continue;
+      if ((terminalWhileFetching.get(session.sessionId) ?? 0) >= fetchStartedAt) continue;
+      sessionRegistry.register(
+        session.sessionId,
+        session.projectId,
+        (session.sessionType as SessionType) ?? 'other',
+        session.branchId ?? undefined
+      );
+      projectStateStore.addRunningSession(session.projectId, session.sessionId);
+    }
+  } finally {
+    hydrationFetchesInFlight--;
+    if (hydrationFetchesInFlight === 0) {
+      terminalWhileFetching.clear();
+    }
   }
 }
 

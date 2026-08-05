@@ -234,7 +234,9 @@ interface SweptWorkflowSession {
  * the real one at the terminal transition, so the branch row drives the chip
  * (PR number → created, none → idle) and the push chip returns to its
  * git-state-derived affordance. `error` / `cancelled` are unambiguous and
- * render the same copy as the delta path.
+ * render the same copy as the delta path. Only a null row — the session is
+ * genuinely gone — errors out as "Lost track of …"; a *thrown* lookup is a
+ * transport failure and skips reconciliation entirely (see the catch below).
  *
  * Race safety comes from re-checking the tracked session id after the await:
  * a terminal delta clears it, and a relaunch replaces it — either way this
@@ -247,11 +249,19 @@ async function reconcileSweptWorkflowSession({
   kind,
   branchId,
 }: SweptWorkflowSession): Promise<void> {
-  let status: SessionStatus | null = null;
+  let status: SessionStatus | null;
   try {
     status = (await commands.getSession(sessionId))?.status ?? null;
   } catch (e) {
+    // A thrown lookup is a transport failure, not evidence about the session
+    // — and this runs right after a WebSocket reconnect, when a hiccup is
+    // most likely. The registry entry is already swept, so no later hydration
+    // retries this branch; painting the sticky "Lost track of…" error here
+    // would turn one failed round-trip into a permanent false failure. Leave
+    // the chip in progress for the mounted card poller to heal instead, and
+    // reserve the hard error for a lookup that proves the row is gone.
     console.error('Failed to look up swept workflow session:', sessionId, e);
+    return;
   }
 
   const store = kind === 'pr' ? prStateStore : pushStateStore;

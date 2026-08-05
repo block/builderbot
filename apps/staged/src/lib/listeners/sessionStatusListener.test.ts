@@ -544,10 +544,9 @@ describe('sessionStatusListener busy-state hydration', () => {
       expect(pushStateStore.clearPushState).not.toHaveBeenCalled();
     });
 
-    it('errors out a swept pr chip when the session lookup fails', async () => {
+    it('errors out a swept pr chip when the session has vanished', async () => {
       trackWorkflowSession('pr', 'pr-1');
-      getSession.mockRejectedValue(new Error('store not ready'));
-      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      getSession.mockResolvedValue(null);
 
       await hydrate();
 
@@ -556,6 +555,22 @@ describe('sessionStatusListener busy-state hydration', () => {
         'Lost track of PR creation session.'
       );
       expect(prStateStore.clearSessionTracking).toHaveBeenCalledWith('branch-1');
+    });
+
+    it('leaves a swept chip in progress when the session lookup throws', async () => {
+      trackWorkflowSession('pr', 'pr-1');
+      getSession.mockRejectedValue(new Error('socket not ready'));
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await hydrate();
+
+      // A throw is a transport failure, not proof the session is gone — most
+      // likely right after the WebSocket reconnect that triggered hydration.
+      // The sticky "Lost track of…" error would outlive a PR that actually
+      // succeeded, so keep the chip tracking for the card poller to heal.
+      expect(prStateStore.setPrError).not.toHaveBeenCalled();
+      expect(prStateStore.clearPrState).not.toHaveBeenCalled();
+      expect(prStateStore.clearSessionTracking).not.toHaveBeenCalled();
       expect(consoleError).toHaveBeenCalled();
     });
 

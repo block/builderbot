@@ -215,23 +215,41 @@ describe('mergeBranchesPreservingWorktree', () => {
 });
 
 describe('ensureLoaded', () => {
-  it('performs the full fetch on first call: projects, branches, and repos', async () => {
+  it('fetches the project list on first call, then hydrates on demand', async () => {
     const store = await importStore();
     expect(store.loaded).toBe(false);
 
     await store.ensureLoaded();
 
     expect(listProjects).toHaveBeenCalledTimes(1);
-    expect(listBranchesForProject).toHaveBeenCalledWith('p1');
-    expect(listProjectRepos).toHaveBeenCalledWith('p1');
     expect(store.projects).toEqual([project()]);
-    expect(store.branchesByProject.get('p1')).toEqual([branch()]);
-    expect(store.reposByProject.get('p1')).toEqual([projectRepo()]);
-    expect(store.repoCountsByProject.get('p1')).toBe(1);
+    expect(store.branchesByProject.get('p1')).toEqual([]);
     expect(store.loaded).toBe(true);
     expect(store.loading).toBe(false);
     expect(store.error).toBeNull();
+
+    await store.ensureProjectsHydrated();
+
+    expect(listBranchesForProject).toHaveBeenCalledWith('p1');
+    expect(listProjectRepos).toHaveBeenCalledWith('p1');
+    expect(store.branchesByProject.get('p1')).toEqual([branch()]);
+    expect(store.reposByProject.get('p1')).toEqual([projectRepo()]);
+    expect(store.repoCountsByProject.get('p1')).toBe(1);
     expect(ensureForRepos).toHaveBeenCalled();
+  });
+
+  it('resolves while per-project hydration is still pending', async () => {
+    // The regression this two-level readiness exists for: a cold start must
+    // not sit behind every project's branches.
+    listBranchesForProject.mockReturnValue(new Promise(() => {}));
+    const store = await importStore();
+
+    await store.ensureLoaded();
+
+    expect(store.loaded).toBe(true);
+    expect(store.loading).toBe(false);
+    expect(store.projects).toEqual([project()]);
+    expect(store.isProjectHydrated('p1')).toBe(false);
   });
 
   it('dedupes concurrent first loads into a single fetch', async () => {
@@ -266,12 +284,14 @@ describe('ensureLoaded', () => {
     expect(store.branchesByProject.has('p2')).toBe(true);
   });
 
-  it('prunes branches and repos of projects removed by a revalidation', async () => {
+  it('prunes branches, repos, and hydration state of projects removed by a revalidation', async () => {
     listProjects.mockResolvedValue(swr([project(), project({ id: 'p2', name: 'Beta' })]));
     const store = await importStore();
     await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
     expect(store.branchesByProject.has('p2')).toBe(true);
     expect(store.reposByProject.has('p2')).toBe(true);
+    expect(store.isProjectHydrated('p2')).toBe(true);
 
     listProjects.mockResolvedValue(swr([project()]));
     await store.ensureLoaded();
@@ -281,6 +301,7 @@ describe('ensureLoaded', () => {
     });
     expect(store.branchesByProject.has('p2')).toBe(false);
     expect(store.reposByProject.has('p2')).toBe(false);
+    expect(store.isProjectHydrated('p2')).toBe(false);
   });
 
   it('applies the SwrResult revalidating promise when it resolves', async () => {
@@ -320,10 +341,85 @@ describe('ensureLoaded', () => {
   });
 });
 
+describe('hydration readiness', () => {
+  it('flips isProjectHydrated per project and allProjectsHydrated on the last one', async () => {
+    const branchesByProject = new Map<string, (value: SwrResult<Branch[]>) => void>();
+    listProjects.mockResolvedValue(swr([project(), project({ id: 'p2', name: 'Beta' })]));
+    listBranchesForProject.mockImplementation(
+      (projectId: string) =>
+        new Promise<SwrResult<Branch[]>>((resolve) => {
+          branchesByProject.set(projectId, resolve);
+        })
+    );
+    const store = await importStore();
+
+    await store.ensureLoaded();
+    const hydrating = store.ensureProjectsHydrated();
+    await vi.waitFor(() => {
+      expect(branchesByProject.size).toBe(2);
+    });
+    expect(store.isProjectHydrated('p1')).toBe(false);
+    expect(store.allProjectsHydrated).toBe(false);
+
+    branchesByProject.get('p1')!(swr([branch()]));
+    await vi.waitFor(() => {
+      expect(store.isProjectHydrated('p1')).toBe(true);
+    });
+    expect(store.allProjectsHydrated).toBe(false);
+
+    branchesByProject.get('p2')!(swr([]));
+    await hydrating;
+    expect(store.allProjectsHydrated).toBe(true);
+  });
+
+  it('marks a project settled even when its branches fail to load', async () => {
+    listBranchesForProject.mockRejectedValue(new Error('boom'));
+    const store = await importStore();
+
+    await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
+
+    // Settled, not successful — a view gated on hydration must never hang.
+    expect(store.isProjectHydrated('p1')).toBe(true);
+    expect(store.allProjectsHydrated).toBe(true);
+  });
+
+  it('dedupes the idle drip and a foreground hydrate into one fetch', async () => {
+    const store = await importStore();
+
+    await store.ensureLoaded();
+    await store.hydrateProject('p1');
+    await tick();
+
+    expect(listBranchesForProject).toHaveBeenCalledTimes(1);
+    expect(listProjectRepos).toHaveBeenCalledTimes(1);
+  });
+
+  it('ensureProjectsHydrated awaits in-flight work instead of refetching', async () => {
+    let resolveBranches!: (value: SwrResult<Branch[]>) => void;
+    listBranchesForProject.mockReturnValueOnce(
+      new Promise<SwrResult<Branch[]>>((resolve) => {
+        resolveBranches = resolve;
+      })
+    );
+    const store = await importStore();
+    await store.ensureLoaded();
+
+    const foreground = store.hydrateProject('p1');
+    const sweep = store.ensureProjectsHydrated();
+    resolveBranches(swr([branch()]));
+    await Promise.all([foreground, sweep]);
+
+    expect(listBranchesForProject).toHaveBeenCalledTimes(1);
+    expect(store.isProjectHydrated('p1')).toBe(true);
+  });
+});
+
 describe('hydrateProject', () => {
   it('merges refetched branches, preserving worktreePath over a stale null', async () => {
     const store = await importStore();
     await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
     expect(store.branchesByProject.get('p1')![0].worktreePath).toBe('/wt/b1');
 
     listBranchesForProject.mockResolvedValue(
@@ -360,6 +456,7 @@ describe('hydrateProject', () => {
   it('discards a stale hydration superseded by a refresh (generation guard)', async () => {
     const store = await importStore();
     await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
 
     let resolveStale!: (value: SwrResult<Branch[]>) => void;
     listBranchesForProject.mockReturnValueOnce(
@@ -383,6 +480,7 @@ describe('hydrateProject', () => {
   it('defers background-priority hydration off the critical path', async () => {
     const store = await importStore();
     await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
     listBranchesForProject.mockClear();
 
     await store.hydrateProject('p1', { priority: 'background' });
@@ -421,9 +519,11 @@ describe('projectCreated', () => {
     listProjectRepos.mockResolvedValue(swr([projectRepo({ id: 'r2', projectId: 'p2' })]));
     store.projectCreated(created);
 
-    // Synchronous registration so the creation modal can close instantly.
+    // Synchronous registration so the creation modal can close instantly, and
+    // hydrated right away so selecting it doesn't blank the project view.
     expect(store.projects.map((p) => p.id)).toEqual(['p1', 'p2']);
     expect(store.branchesByProject.get('p2')).toEqual([]);
+    expect(store.isProjectHydrated('p2')).toBe(true);
 
     await vi.waitFor(() => {
       expect(store.branchesByProject.get('p2')).toHaveLength(1);
@@ -454,9 +554,10 @@ describe('setBranchesByProject', () => {
 });
 
 describe('refresh', () => {
-  it('reloads the project list and rehydrates eagerly', async () => {
+  it('reloads the project list and rehydrates what was already hydrated', async () => {
     const store = await importStore();
     await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
 
     listProjects.mockResolvedValue(swr([project({ name: 'Renamed' })]));
     listBranchesForProject.mockResolvedValue(swr([branch({ prState: 'MERGED' })]));
@@ -536,6 +637,7 @@ describe('event listeners', () => {
   it('coalesces a pr-status-changed burst into one flush, last event winning', async () => {
     const store = await importStore();
     await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
     store.startListeners();
 
     emit('pr-status-changed', prEvent({ prState: 'OPEN', prChecksStatus: 'PENDING' }));
@@ -555,6 +657,7 @@ describe('event listeners', () => {
   it('refetches a project’s branches when a commit session completes', async () => {
     const store = await importStore();
     await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
     store.startListeners();
     listBranchesForProject.mockClear();
     listBranchesForProject.mockResolvedValue(swr([branch({ prState: 'OPEN' })]));
@@ -575,6 +678,7 @@ describe('event listeners', () => {
   it('ignores non-commit sessions and unknown projects', async () => {
     const store = await importStore();
     await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
     store.startListeners();
     listBranchesForProject.mockClear();
 
@@ -598,6 +702,7 @@ describe('event listeners', () => {
   it('refreshes the project list and one project on setup progress', async () => {
     const store = await importStore();
     await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
     store.startListeners();
 
     listProjects.mockResolvedValue(swr([project({ name: 'Renamed' })]));
@@ -704,18 +809,17 @@ describe('repoCountsByProject', () => {
       })
     );
     const store = await importStore();
-    const load = store.ensureLoaded();
+    await store.ensureLoaded();
+    const hydrating = store.ensureProjectsHydrated();
 
-    await vi.waitFor(() => {
-      expect(store.projects).toHaveLength(2);
-    });
+    expect(store.projects).toHaveLength(2);
     expect(store.repoCountsByProject.get('p1')).toBe(1);
     expect(store.repoCountsByProject.get('p2')).toBe(0);
 
     resolveRepos(
       swr([projectRepo(), projectRepo({ id: 'r2', githubRepo: 'org/other', subpath: 'pkg' })])
     );
-    await load;
+    await hydrating;
     expect(store.repoCountsByProject.get('p1')).toBe(2);
   });
 });

@@ -61,7 +61,11 @@
   let reposByProject = $derived(projectsDataStore.reposByProject);
   let deletingProjectNames = $derived(projectsDataStore.deletingProjectNames);
   let homeRepos = $derived(projectsDataStore.homeRepos);
-  let loading = $derived(projectsDataStore.loading || !projectsDataStore.loaded);
+  // The grid paints every card complete or not at all, so it waits for each
+  // project's branches and repos — not just the project list `loaded` covers.
+  let loading = $derived(
+    projectsDataStore.loading || !projectsDataStore.loaded || !projectsDataStore.allProjectsHydrated
+  );
   let error = $derived(projectsDataStore.error);
 
   let showNewProjectModal = $state(false);
@@ -271,6 +275,15 @@
       projectRunActionsStore.stopListening();
       window.removeEventListener('staged:new-project', onNewProject);
     };
+  });
+
+  // Pull every project's branches and repos forward off the store's idle drip
+  // — the grid renders all of them. An effect rather than onMount so a list
+  // change or a cache-stale reload re-kicks the sweep and the loading gate
+  // heals itself; the store dedupes projects it has already fetched.
+  $effect(() => {
+    if (!projectsDataStore.loaded) return;
+    void projectsDataStore.ensureProjectsHydrated();
   });
 
   // Keep run-action state hydrated for the status badges; the store call

@@ -10,8 +10,13 @@
  * instantly instead of replaying the full IPC fetch cascade.
  *
  * ensureLoaded() applies the SwrResult render-stale-then-refresh contract in
- * both modes: the first call does the full fetch; later calls resolve
+ * both modes: the first call fetches the project list; later calls resolve
  * immediately with the in-memory data and kick a background revalidation.
+ * Readiness is two-level so no view waits for data it doesn't paint —
+ * `loaded` means "the project list landed", while per-project branches and
+ * repos are hydrated on demand (hydrateProject / ensureProjectsHydrated) and
+ * dripped through the idle queue for everything nobody asked for. Views gate
+ * on isProjectHydrated()/allProjectsHydrated rather than on `loaded`.
  *
  * ProjectHome, ProjectsList, ProjectsSidebar, and ReposListView all read
  * this store directly; startListeners() is wired once from App.svelte.
@@ -85,6 +90,20 @@ class ProjectsDataStore {
   private _loaded = $state(false);
   private _deletingProjectNames = $state<Map<string, string>>(new Map());
 
+  /**
+   * Projects whose branches + repos have been fetched at least once, mapped to
+   * the load generation that fetched them. Membership is what view gates read
+   * (isProjectHydrated); the generation lets the idle drip skip a project some
+   * foreground caller already fetched under the current load while still
+   * refreshing it after the next one.
+   *
+   * Entries are written once a fetch *settles* — success or failure, or a
+   * failed fetch would gate a view forever — and survive a generation bump:
+   * they mean "we have data to paint", so a refresh never re-blanks a painted
+   * view.
+   */
+  private _hydratedProjects = $state<Map<string, number>>(new Map());
+
   // null = never loaded; distinguishes "no repos" from "not fetched yet".
   private _homeRepos = $state<RepoHomeItem[] | null>(null);
   private _homeReposLoading = $state(false);
@@ -98,6 +117,9 @@ class ProjectsDataStore {
   private initialLoad: Promise<void> | null = null;
   private revalidatePending = false;
   private backgroundHydrationCancel: (() => void) | null = null;
+  /** In-flight per-project hydrations, so the foreground fetch, the idle drip
+   *  and the grid's sweep share one request instead of racing three. */
+  private hydrationInFlight = new Map<string, Promise<void>>();
 
   private homeReposInFlight: Promise<void> | null = null;
   private homeReposFetchToken = 0;
@@ -142,8 +164,20 @@ class ProjectsDataStore {
     return this._error;
   }
 
+  /** True once the project list has landed. Branches and repos may still be
+   *  hydrating — gate on isProjectHydrated()/allProjectsHydrated for those. */
   get loaded(): boolean {
     return this._loaded;
+  }
+
+  /** Whether this project's branches and repos have been fetched. */
+  isProjectHydrated(projectId: string): boolean {
+    return this._hydratedProjects.has(projectId);
+  }
+
+  /** True when every known project has been hydrated at least once. */
+  get allProjectsHydrated(): boolean {
+    return this._projects.every((p) => this._hydratedProjects.has(p.id));
   }
 
   get deletingProjectNames(): Map<string, string> {
@@ -169,11 +203,15 @@ class ProjectsDataStore {
   // ── Loading ──
 
   /**
-   * Make sure the store holds data. The first call performs the full fetch
-   * (project list, then branches + repos for every project) and resolves when
-   * it completes. Later calls resolve immediately — the in-memory data is
-   * already renderable — and kick a background revalidation that drips
-   * per-project hydration through the idle queue.
+   * Make sure the store holds the project list. The first call fetches it and
+   * resolves as soon as it lands — per-project branches and repos are *not*
+   * on this critical path, so a cold start costs one round trip rather than
+   * one per project. Later calls resolve immediately — the in-memory data is
+   * already renderable — and kick a background revalidation.
+   *
+   * Either way per-project hydration drips through the idle queue behind
+   * this; callers that need it sooner use hydrateProject() (one project,
+   * foreground) or ensureProjectsHydrated() (all of them).
    *
    * Load failures don't reject; they surface through `error` so callers can
    * render them, mirroring the views' loadData() pattern.
@@ -183,16 +221,22 @@ class ProjectsDataStore {
       void this.revalidate();
       return;
     }
-    this.initialLoad ??= this.loadProjectsAndHydrate({ hydration: 'eager' }).finally(() => {
+    this.initialLoad ??= this.loadProjectsAndHydrate().finally(() => {
       this.initialLoad = null;
     });
     return this.initialLoad;
   }
 
   /** Full reload (used by cache-stale and the project-delete flow). Always
-   *  starts a new load — the generation bump discards in-flight applies. */
+   *  starts a new load — the generation bump discards in-flight applies —
+   *  and refetches whatever was already hydrated so no painted view goes
+   *  stale. */
   async refresh(): Promise<void> {
-    await this.loadProjectsAndHydrate({ hydration: 'eager' });
+    await this.loadProjectsAndHydrate();
+    const generation = this.loadGeneration;
+    await Promise.all(
+      [...this._hydratedProjects.keys()].map((projectId) => this.hydrateOnce(projectId, generation))
+    );
     if (this._homeRepos !== null) {
       void this.startHomeReposFetch();
     }
@@ -201,7 +245,8 @@ class ProjectsDataStore {
   /**
    * Hydrate branches + repos for one project. Foreground (default) fetches
    * immediately — use for the selected project. Background defers to the
-   * idle queue so it doesn't compete with a view transition.
+   * idle queue so it doesn't compete with a view transition. Deduped against
+   * any hydration already in flight for the project.
    */
   async hydrateProject(
     projectId: string,
@@ -210,14 +255,20 @@ class ProjectsDataStore {
     const generation = this.loadGeneration;
     if (options.priority === 'background') {
       scheduleDeferredTask(() => {
-        if (generation !== this.loadGeneration) return;
-        this.hydrateProjectInternal(projectId, generation).catch((e) => {
-          console.error(`[projectsData] Failed to background hydrate project '${projectId}':`, e);
-        });
+        void this.hydrateOnce(projectId, generation);
       }, BACKGROUND_HYDRATION_DELAY_MS);
       return;
     }
-    await this.hydrateProjectInternal(projectId, generation);
+    await this.hydrateOnce(projectId, generation);
+  }
+
+  /** Hydrate every project that hasn't been fetched yet, in parallel. Entry
+   *  point for the projects grid, which paints complete or not at all. */
+  async ensureProjectsHydrated(): Promise<void> {
+    const generation = this.loadGeneration;
+    const pending = this._projects.filter((p) => !this._hydratedProjects.has(p.id));
+    if (pending.length === 0) return;
+    await Promise.all(pending.map((project) => this.hydrateOnce(project.id, generation)));
   }
 
   /**
@@ -225,6 +276,9 @@ class ProjectsDataStore {
    * after mutations that reshape a single project (repo added or removed)
    * and by the project-setup-progress listener. Invalidates the project's
    * branch timelines so downstream views refetch them.
+   *
+   * Deliberately un-deduped: it is the post-mutation refetch, so it must not
+   * be absorbed into a hydration that started before the mutation.
    */
   async refreshProject(projectId: string): Promise<void> {
     const generation = this.loadGeneration;
@@ -241,6 +295,7 @@ class ProjectsDataStore {
         commands.invalidateProjectBranchTimelines(mergedBranches.map((b) => b.id));
       }
       this.applyProjectRepos(projectId, reposResult.data, generation);
+      this.markProjectHydrated(projectId, generation);
     } catch (e) {
       console.error(`[projectsData] Failed to refresh project '${projectId}':`, e);
     }
@@ -258,9 +313,11 @@ class ProjectsDataStore {
     if (!this._branchesByProject.has(project.id)) {
       this._branchesByProject = new Map(this._branchesByProject).set(project.id, []);
     }
-    this.hydrateProject(project.id).catch((e) => {
-      console.error(`[projectsData] Failed to hydrate newly created project '${project.id}':`, e);
-    });
+    // Count it hydrated right away — the seeded empty branch list is accurate
+    // at creation time, and selecting the project as the modal closes must not
+    // land on a view that treats it as un-hydrated and blanks for a beat.
+    this.markProjectHydrated(project.id, this.loadGeneration);
+    void this.hydrateProject(project.id);
   }
 
   /**
@@ -277,17 +334,18 @@ class ProjectsDataStore {
     if (this.revalidatePending) return;
     this.revalidatePending = true;
     try {
-      await this.loadProjectsAndHydrate({ hydration: 'background' });
+      await this.loadProjectsAndHydrate();
     } finally {
       this.revalidatePending = false;
     }
   }
 
-  private async loadProjectsAndHydrate(options: {
-    hydration: 'eager' | 'background';
-  }): Promise<void> {
+  private async loadProjectsAndHydrate(): Promise<void> {
     const generation = ++this.loadGeneration;
     this.cancelBackgroundHydration();
+    // Those promises are already no-ops under the new generation; drop them so
+    // callers after the bump start fresh fetches.
+    this.hydrationInFlight.clear();
     if (this._projects.length === 0) {
       this._loading = true;
     }
@@ -296,15 +354,14 @@ class ProjectsDataStore {
     try {
       const { data, revalidating } = await commands.listProjects();
       if (generation !== this.loadGeneration) return;
-      await this.applyProjectList(data, generation, options);
-      if (generation !== this.loadGeneration) return;
+      this.applyProjectList(data, generation);
       this._loaded = true;
 
       if (revalidating) {
         // Applied outside the awaited chain so callers aren't blocked on the
         // SWR refresh — they already have renderable data.
         revalidating
-          .then((fresh) => this.applyProjectList(fresh, generation, options))
+          .then((fresh) => this.applyProjectList(fresh, generation))
           .catch((e) => {
             console.error('[projectsData] Failed to revalidate project list:', e);
           });
@@ -321,15 +378,12 @@ class ProjectsDataStore {
 
   /**
    * Apply a fetched project list: seed branch entries so per-project
-   * consumers can render immediately, prune state for removed projects, and
-   * hydrate branches + repos — in parallel for eager loads, via the idle
-   * drip for background revalidations.
+   * consumers can render immediately and prune state for removed projects.
+   * Synchronous by design — this is what `loaded` waits for. Per-project
+   * branches and repos are left to the idle drip kicked here, or to whichever
+   * view asks for them sooner.
    */
-  private async applyProjectList(
-    projectList: Project[],
-    generation: number,
-    options: { hydration: 'eager' | 'background' }
-  ): Promise<void> {
+  private applyProjectList(projectList: Project[], generation: number): void {
     if (generation !== this.loadGeneration) return;
     this._projects = projectList;
 
@@ -346,51 +400,76 @@ class ProjectsDataStore {
     }
     this._reposByProject = prunedRepos;
 
-    if (options.hydration === 'eager') {
-      await Promise.all(
-        projectList.map(async (project) => {
-          try {
-            await this.hydrateProjectInternal(project.id, generation);
-          } catch (e) {
-            console.error(`[projectsData] Failed to hydrate project '${project.id}':`, e);
-          }
-        })
-      );
-    } else {
-      this.scheduleBackgroundHydration(
-        projectList.map((p) => p.id),
-        generation
-      );
+    const prunedHydrated = new Map<string, number>();
+    for (const [projectId, hydratedAt] of this._hydratedProjects) {
+      if (projectIds.has(projectId)) prunedHydrated.set(projectId, hydratedAt);
     }
+    this._hydratedProjects = prunedHydrated;
+
+    this.scheduleBackgroundHydration(
+      projectList.map((p) => p.id),
+      generation
+    );
+  }
+
+  /** Hydrate a project unless the same hydration is already in flight, so the
+   *  foreground fetch, the idle drip and the grid's sweep share one request.
+   *  Never rejects: failures are logged and still mark the project settled, or
+   *  a view gated on isProjectHydrated() would hang forever. */
+  private hydrateOnce(projectId: string, generation: number): Promise<void> {
+    if (generation !== this.loadGeneration) return Promise.resolve();
+    const inFlight = this.hydrationInFlight.get(projectId);
+    if (inFlight) return inFlight;
+
+    const hydration = this.hydrateProjectInternal(projectId, generation).catch((e) => {
+      console.error(`[projectsData] Failed to hydrate project '${projectId}':`, e);
+    });
+    this.hydrationInFlight.set(projectId, hydration);
+    void hydration.finally(() => {
+      // Identity check: a newer load may have cleared or replaced the entry.
+      if (this.hydrationInFlight.get(projectId) === hydration) {
+        this.hydrationInFlight.delete(projectId);
+      }
+    });
+    return hydration;
   }
 
   private async hydrateProjectInternal(projectId: string, generation: number): Promise<void> {
-    const [branchesResult, reposResult] = await Promise.all([
-      commands.listBranchesForProject(projectId),
-      commands.listProjectRepos(projectId),
-    ]);
+    try {
+      const [branchesResult, reposResult] = await Promise.all([
+        commands.listBranchesForProject(projectId),
+        commands.listProjectRepos(projectId),
+      ]);
+      if (generation !== this.loadGeneration) return;
+
+      this.applyProjectBranches(projectId, branchesResult.data, generation);
+      this.applyProjectRepos(projectId, reposResult.data, generation);
+
+      if (branchesResult.revalidating) {
+        branchesResult.revalidating
+          .then((fresh) => {
+            this.applyProjectBranches(projectId, fresh, generation);
+          })
+          .catch((e) => {
+            console.error(`[projectsData] Failed to revalidate branches for '${projectId}':`, e);
+          });
+      }
+
+      if (reposResult.revalidating) {
+        reposResult.revalidating
+          .then((fresh) => this.applyProjectRepos(projectId, fresh, generation))
+          .catch((e) => {
+            console.error(`[projectsData] Failed to revalidate repos for '${projectId}':`, e);
+          });
+      }
+    } finally {
+      this.markProjectHydrated(projectId, generation);
+    }
+  }
+
+  private markProjectHydrated(projectId: string, generation: number): void {
     if (generation !== this.loadGeneration) return;
-
-    this.applyProjectBranches(projectId, branchesResult.data, generation);
-    this.applyProjectRepos(projectId, reposResult.data, generation);
-
-    if (branchesResult.revalidating) {
-      branchesResult.revalidating
-        .then((fresh) => {
-          this.applyProjectBranches(projectId, fresh, generation);
-        })
-        .catch((e) => {
-          console.error(`[projectsData] Failed to revalidate branches for '${projectId}':`, e);
-        });
-    }
-
-    if (reposResult.revalidating) {
-      reposResult.revalidating
-        .then((fresh) => this.applyProjectRepos(projectId, fresh, generation))
-        .catch((e) => {
-          console.error(`[projectsData] Failed to revalidate repos for '${projectId}':`, e);
-        });
-    }
+    this._hydratedProjects = new Map(this._hydratedProjects).set(projectId, generation);
   }
 
   private applyProjectBranches(
@@ -421,8 +500,8 @@ class ProjectsDataStore {
     this.backgroundHydrationCancel = null;
   }
 
-  /** Hydrate projects one at a time through the idle queue so background
-   *  refreshes never contend with foreground work. */
+  /** Hydrate projects one at a time through the idle queue so neither the
+   *  first fill nor a background refresh contends with foreground work. */
   private scheduleBackgroundHydration(projectIds: string[], generation: number): void {
     this.cancelBackgroundHydration();
 
@@ -432,6 +511,11 @@ class ProjectsDataStore {
     let cancelled = false;
     let cancelScheduledTask: (() => void) | null = null;
 
+    const scheduleNext = () => {
+      if (cancelled || generation !== this.loadGeneration || queue.length === 0) return;
+      cancelScheduledTask = scheduleDeferredTask(hydrateNext, BACKGROUND_HYDRATION_DELAY_MS);
+    };
+
     const hydrateNext = () => {
       cancelScheduledTask = null;
       if (cancelled || generation !== this.loadGeneration) return;
@@ -439,14 +523,16 @@ class ProjectsDataStore {
       const projectId = queue.shift();
       if (!projectId) return;
 
-      this.hydrateProjectInternal(projectId, generation)
-        .catch((e) => {
-          console.error(`[projectsData] Failed to background hydrate project '${projectId}':`, e);
-        })
-        .finally(() => {
-          if (cancelled || generation !== this.loadGeneration || queue.length === 0) return;
-          cancelScheduledTask = scheduleDeferredTask(hydrateNext, BACKGROUND_HYDRATION_DELAY_MS);
-        });
+      // Someone already fetched this project under the current load (the
+      // selected project, or the grid's sweep) — the drip exists to fill in
+      // what nobody asked for, not to refetch what just landed. The next load
+      // bumps the generation, so a revalidation still refreshes everything.
+      if (this._hydratedProjects.get(projectId) === generation) {
+        scheduleNext();
+        return;
+      }
+
+      void this.hydrateOnce(projectId, generation).finally(scheduleNext);
     };
 
     cancelScheduledTask = scheduleDeferredTask(hydrateNext, BACKGROUND_HYDRATION_DELAY_MS);
@@ -532,6 +618,9 @@ class ProjectsDataStore {
     const repos = new Map(this._reposByProject);
     repos.delete(projectId);
     this._reposByProject = repos;
+    const hydrated = new Map(this._hydratedProjects);
+    hydrated.delete(projectId);
+    this._hydratedProjects = hydrated;
   }
 
   // ── Event listeners ──

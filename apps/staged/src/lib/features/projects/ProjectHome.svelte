@@ -69,7 +69,17 @@
   // The store-status check runs before the first ensureLoaded call; hold the
   // loading state until it settles so the splash screen doesn't flash.
   let storeCheckPending = $state(true);
-  let loading = $derived(storeCheckPending || projectsDataStore.loading);
+  // The store's `loaded` only covers the project list, so wait for the
+  // selected project's own branches too. Gated on the project still being in
+  // the list: a stale or deleted id must not pin the view in loading forever,
+  // and the "selected project vanished → goHome()" effect below needs
+  // `loading` to clear so it can fire.
+  let selectedProjectPending = $derived(
+    !!selectedProjectId &&
+      projects.some((project) => project.id === selectedProjectId) &&
+      !projectsDataStore.isProjectHydrated(selectedProjectId)
+  );
+  let loading = $derived(storeCheckPending || projectsDataStore.loading || selectedProjectPending);
   // Store-status/reset failures are view-local; load failures come from the store.
   let viewError = $state<string | null>(null);
   let error = $derived(viewError ?? projectsDataStore.error);
@@ -164,16 +174,15 @@
         storeIncompat = status;
         return;
       }
-      // On a revisit the store resolves instantly from memory and revalidates
-      // in the background; foreground-refresh the selected project only when
-      // this call didn't just perform the full eager load.
-      const wasLoaded = projectsDataStore.loaded;
+      // ensureLoaded resolves on the project list alone, so the selected
+      // project's branches are always ours to fetch — on a cold start the
+      // store's idle drip dedupes into this one request.
       const load = projectsDataStore.ensureLoaded();
       storeCheckPending = false;
       await load;
       lastSelectedProjectId = selectedProjectId;
       initialLoadComplete = true;
-      if (selectedProjectId && wasLoaded) {
+      if (selectedProjectId) {
         void projectsDataStore.hydrateProject(selectedProjectId);
       }
       void hydrateActionDetection();

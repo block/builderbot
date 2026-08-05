@@ -96,28 +96,54 @@ pub fn match_rewritten_commits(
     remaps
 }
 
+/// Which way [`reassociate_after_rebase`] went — it answers "is the rebase
+/// over?" on its way in, so callers that must not touch rows mid-rebase can
+/// read the answer off the same call instead of asking again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reassociation {
+    /// HEAD isn't attached to the branch — or that couldn't be verified
+    /// (errors read as "not attached", the safe direction). No row was
+    /// touched; commit detection must defer to a later turn.
+    MidRebase,
+    /// HEAD is attached to the branch; `remapped` rows (possibly 0) were
+    /// repointed.
+    Done { remapped: usize },
+}
+
 /// Repoint a branch's orphaned commit rows (and their reviews) at the SHAs a
-/// rebase rewrote them into. Returns how many rows were remapped.
+/// rebase rewrote them into.
 ///
 /// Safe to call when nothing was rewritten: with no orphaned rows it stops
-/// after listing the branch and returns 0. Also safe to call while a rebase is
-/// still in flight — it returns 0 without touching a row (see
-/// [`head_is_on_branch`]).
+/// after listing the branch and reports `Done { remapped: 0 }`. Also safe to
+/// call while a rebase is still in flight — it reports
+/// [`MidRebase`](Reassociation::MidRebase) without touching a row (see
+/// [`head_is_on_branch`] for why an unattached HEAD is the same question as "is
+/// the rebase still going?"). That check happens before anything else here, so a
+/// `MidRebase` answer is a promise that no row moved, and `Err` is reserved for
+/// failures *after* it passed.
 pub fn reassociate_after_rebase(
     store: &Store,
     branch_id: &str,
     working_dir: &Path,
     workspace_name: Option<&str>,
-) -> Result<usize, String> {
-    let (branch, git) = branch_git_runner(store, branch_id, working_dir, workspace_name)?;
+) -> Result<Reassociation, String> {
+    let (branch, git) = match branch_git_runner(store, branch_id, working_dir, workspace_name) {
+        Ok(pair) => pair,
+        Err(e) => {
+            log::warn!("Failed to resolve branch {branch_id} for commit reassociation: {e}");
+            return Ok(Reassociation::MidRebase);
+        }
+    };
 
     let branch_name = crate::git::branch_name_without_origin(&branch.branch_name);
     if !head_is_on_branch(&git, branch_name) {
-        log::warn!(
+        // Routine on a rebase-handoff turn that ended with conflicts
+        // unresolved, so an expected state rather than an anomaly.
+        log::info!(
             "Skipping commit reassociation on branch {branch_id}: HEAD isn't on {branch_name} \
              (rebase still in progress?)"
         );
-        return Ok(0);
+        return Ok(Reassociation::MidRebase);
     }
 
     let base_ref = crate::git::origin_ref_for_branch(&branch.base_branch);
@@ -146,7 +172,7 @@ pub fn reassociate_after_rebase(
         .map(|sha| (*sha).to_string())
         .collect();
     if orphan_shas.is_empty() {
-        return Ok(0);
+        return Ok(Reassociation::Done { remapped: 0 });
     }
 
     let mut old_identities = lookup_commit_identities(&git, &orphan_shas)?;
@@ -166,16 +192,17 @@ pub fn reassociate_after_rebase(
 
     let remaps = match_rewritten_commits(&orphans, &rewritten);
     if remaps.is_empty() {
-        return Ok(0);
+        return Ok(Reassociation::Done { remapped: 0 });
     }
 
     let pairs: Vec<(&str, &str, &str)> = remaps
         .iter()
         .map(|r| (r.row_id.as_str(), r.old_sha.as_str(), r.new_sha.as_str()))
         .collect();
-    store
+    let remapped = store
         .remap_commit_shas(branch_id, &pairs)
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    Ok(Reassociation::Done { remapped })
 }
 
 /// The git runner [`branch_git_runner`] hands back. Boxed rather than an `impl
@@ -183,9 +210,9 @@ pub fn reassociate_after_rebase(
 /// consumer here is generic over `Fn` anyway.
 type GitRunner<'a> = Box<dyn Fn(&[&str]) -> Result<String, String> + 'a>;
 
-/// Resolve the branch row and build the git runner the entry points share:
-/// local commands run in `working_dir`, remote ones through the branch's
-/// workspace (and its repo subpath).
+/// Resolve the branch row and build the git runner [`reassociate_after_rebase`]
+/// works through: local commands run in `working_dir`, remote ones through the
+/// branch's workspace (and its repo subpath).
 fn branch_git_runner<'a>(
     store: &Store,
     branch_id: &str,
@@ -211,28 +238,6 @@ fn branch_git_runner<'a>(
         }
     };
     Ok((branch, Box::new(git)))
-}
-
-/// Whether HEAD is attached to this branch — i.e. no rebase is in flight
-/// (see [`head_is_on_branch`] for why that's the same question). For callers
-/// that need the answer *before* touching any rows, like the post-completion
-/// commit detection. Errors read as "not attached", the safe direction.
-pub fn head_is_attached_to_branch(
-    store: &Store,
-    branch_id: &str,
-    working_dir: &Path,
-    workspace_name: Option<&str>,
-) -> bool {
-    match branch_git_runner(store, branch_id, working_dir, workspace_name) {
-        Ok((branch, git)) => head_is_on_branch(
-            &git,
-            crate::git::branch_name_without_origin(&branch.branch_name),
-        ),
-        Err(e) => {
-            log::warn!("Failed to check whether HEAD is attached to branch {branch_id}: {e}");
-            false
-        }
-    }
 }
 
 /// Whether HEAD is the branch we're about to reassociate, rather than a

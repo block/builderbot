@@ -49,6 +49,7 @@ use acp_client::{AgentRunOutcome, McpServer, McpServerHttp};
 
 use crate::actions::{ActionExecutor, ActionRegistry};
 use crate::agent::{AcpDriver, AgentDriver, MessageWriter};
+use crate::commit_reassociation::Reassociation;
 use crate::git::Span;
 use crate::shell_env::ShellEnvCache;
 use crate::store::{
@@ -1444,26 +1445,36 @@ fn session_is_rebase_pipeline(store: &Store, session_id: &str) -> bool {
 }
 
 /// Reattach a branch's commit metadata (and reviews) to the SHAs a rebase
-/// rewrote them into. Best-effort: a failure here only leaves the rows
-/// orphaned, which is what happened before reassociation existed.
+/// rewrote them into, and report whether the rebase had finished — callers that
+/// must not touch a row mid-rebase gate on the returned
+/// [`Reassociation::MidRebase`].
+///
+/// Best-effort: a failure here only leaves the rows orphaned, which is what
+/// happened before reassociation existed, so an `Err` folds into `Done`. It can
+/// only be raised once HEAD was seen attached, so the caller's detection should
+/// carry on regardless — `MidRebase` is the only answer that means "defer".
 fn reassociate_rebased_commits(
     store: &Store,
     branch_id: &str,
     working_dir: &Path,
     workspace_name: Option<&str>,
-) {
+) -> Reassociation {
     match crate::commit_reassociation::reassociate_after_rebase(
         store,
         branch_id,
         working_dir,
         workspace_name,
     ) {
-        Ok(0) => {}
-        Ok(count) => {
-            log::info!("Reassociated {count} rebased commit(s) on branch {branch_id}")
+        Ok(Reassociation::Done { remapped: 0 }) => Reassociation::Done { remapped: 0 },
+        Ok(Reassociation::Done { remapped }) => {
+            log::info!("Reassociated {remapped} rebased commit(s) on branch {branch_id}");
+            Reassociation::Done { remapped }
         }
+        // Already logged inside the module, with the branch name it wanted.
+        Ok(Reassociation::MidRebase) => Reassociation::MidRebase,
         Err(e) => {
-            log::warn!("Failed to reassociate rebased commits on branch {branch_id}: {e}")
+            log::warn!("Failed to reassociate rebased commits on branch {branch_id}: {e}");
+            Reassociation::Done { remapped: 0 }
         }
     }
 }
@@ -1531,7 +1542,13 @@ fn finalize_rebase_pipeline_without_ai(config: &PipelineConfig, store: &Store) {
     // pending row — so the top commit keeps its authoring session instead of
     // the mechanical "Rebase branch" one. A head commit authored outside
     // Staged has no prior row, so the rebase session keeps it, as before.
-    reassociate_rebased_commits(
+    //
+    // This path runs when the pipeline drove the rebase to completion itself,
+    // and its own HEAD-moved check above already established there's something
+    // to claim, so the returned outcome isn't a gate here: a `MidRebase` answer
+    // (an unattached HEAD, or a branch that wouldn't resolve) just means the
+    // rows stay orphaned while the claim below proceeds as it always has.
+    let _ = reassociate_rebased_commits(
         store,
         &commit.branch_id,
         &config.working_dir,
@@ -2386,15 +2403,24 @@ fn run_post_completion_hooks(
                     // branch of `complete_pending_commit_sha` settle every
                     // row), while a turn that never comes leaves the pending
                     // row `sha IS NULL` — an ordinary failed commit attempt.
+                    //
+                    // Asking is the same call that does the work: the rebase
+                    // rewrote SHAs just the same as the no-AI path, and
+                    // reassociation has to check the attached HEAD anyway
+                    // before it repoints anything, so it reports which way it
+                    // went. That also keeps the load-bearing ordering — reattach
+                    // the orphaned rows before the pending row below claims the
+                    // new HEAD, see `finalize_rebase_pipeline_without_ai` for
+                    // why — true by construction.
                     let rebase_pipeline = session_is_rebase_pipeline(store, session_id);
-                    if rebase_pipeline
-                        && !crate::commit_reassociation::head_is_attached_to_branch(
+                    let mid_rebase = rebase_pipeline
+                        && reassociate_rebased_commits(
                             store,
                             &commit.branch_id,
                             working_dir,
                             workspace_name,
-                        )
-                    {
+                        ) == Reassociation::MidRebase;
+                    if mid_rebase {
                         log::info!(
                             "Session {session_id}: rebase still in flight (HEAD detached), \
                              leaving commit detection for a later turn"
@@ -2405,19 +2431,6 @@ fn run_post_completion_hooks(
                             &pre_sha[..7.min(pre_sha.len())],
                             &current_head[..7.min(current_head.len())]
                         );
-                        // The rebase rewrote SHAs just the same as the no-AI
-                        // path. Reattach the orphaned rows before the pending
-                        // row below claims the new HEAD — see
-                        // `finalize_rebase_pipeline_without_ai` for why the
-                        // ordering matters.
-                        if rebase_pipeline {
-                            reassociate_rebased_commits(
-                                store,
-                                &commit.branch_id,
-                                working_dir,
-                                workspace_name,
-                            );
-                        }
                         let recorded = if commit.sha.is_none() {
                             match store.complete_pending_commit_sha(
                                 &commit.id,

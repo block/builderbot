@@ -35,7 +35,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -834,6 +834,10 @@ pub fn start_session(
                 &config.working_dir,
                 config.pre_head_sha.as_deref(),
                 config.workspace_name.as_deref(),
+                config
+                    .remote_working_dir
+                    .as_deref()
+                    .and_then(|dir| dir.to_str()),
                 &store_for_status,
             )
         } else {
@@ -1421,14 +1425,24 @@ fn pre_head_for_pipeline_handoff(config: &PipelineConfig) -> Option<String> {
     }
 }
 
+/// A git runner for the checkout this pipeline runs in. `remote_working_dir`
+/// is the literal directory `run_remote_pipeline_command` `cd`s into, so every
+/// read through this runner is about the same repo the pipeline's own commands
+/// were — not whatever sibling clone a bare `ws exec` happens to land in.
+fn pipeline_git_runner(config: &PipelineConfig) -> crate::branches::GitRunner<'_> {
+    crate::branches::git_runner(
+        &config.working_dir,
+        config.workspace_name.as_deref(),
+        config
+            .remote_working_dir
+            .as_deref()
+            .and_then(|dir| dir.to_str())
+            .map(str::to_string),
+    )
+}
+
 fn current_pipeline_head(config: &PipelineConfig) -> Result<String, String> {
-    if let Some(ws_name) = config.workspace_name.as_deref() {
-        crate::blox::ws_exec(ws_name, &["git", "rev-parse", "HEAD"])
-            .map(|s| s.trim().to_string())
-            .map_err(|e| e.to_string())
-    } else {
-        crate::git::get_head_sha(&config.working_dir).map_err(|e| e.to_string())
-    }
+    crate::branches::head_sha(&pipeline_git_runner(config))
 }
 
 /// Whether a session's persisted pipeline is a rebase. Read from the session
@@ -1449,22 +1463,33 @@ fn session_is_rebase_pipeline(store: &Store, session_id: &str) -> bool {
 /// must not touch a row mid-rebase gate on the returned
 /// [`Reassociation::MidRebase`].
 ///
+/// `git` is the caller's own runner, so the reassociation reads the checkout
+/// the caller just read HEAD from rather than resolving a second one.
+///
 /// Best-effort: a failure here only leaves the rows orphaned, which is what
 /// happened before reassociation existed, so an `Err` folds into `Done`. It can
 /// only be raised once HEAD was seen attached, so the caller's detection should
 /// carry on regardless — `MidRebase` is the only answer that means "defer".
+/// A branch row that won't load is the exception: nothing was checked, so it
+/// reads as `MidRebase`, the same "don't touch anything" direction.
 fn reassociate_rebased_commits(
     store: &Store,
     branch_id: &str,
-    working_dir: &Path,
-    workspace_name: Option<&str>,
+    git: &crate::branches::GitRunner<'_>,
 ) -> Reassociation {
-    match crate::commit_reassociation::reassociate_after_rebase(
-        store,
-        branch_id,
-        working_dir,
-        workspace_name,
-    ) {
+    let branch = match store.get_branch(branch_id) {
+        Ok(Some(branch)) => branch,
+        Ok(None) => {
+            log::warn!("Branch {branch_id} not found for commit reassociation");
+            return Reassociation::MidRebase;
+        }
+        Err(e) => {
+            log::warn!("Failed to load branch {branch_id} for commit reassociation: {e}");
+            return Reassociation::MidRebase;
+        }
+    };
+
+    match crate::commit_reassociation::reassociate_after_rebase(store, &branch, git) {
         Ok(Reassociation::Done { remapped: 0 }) => Reassociation::Done { remapped: 0 },
         Ok(Reassociation::Done { remapped }) => {
             log::info!("Reassociated {remapped} rebased commit(s) on branch {branch_id}");
@@ -1514,7 +1539,10 @@ fn finalize_rebase_pipeline_without_ai(config: &PipelineConfig, store: &Store) {
         }
     };
 
-    let current_head = match current_pipeline_head(config) {
+    // One runner for both reads below, so the HEAD this claims and the commits
+    // reassociation lists can't come from different checkouts.
+    let git = pipeline_git_runner(config);
+    let current_head = match crate::branches::head_sha(&git) {
         Ok(head) => head,
         Err(e) => {
             log::error!(
@@ -1548,12 +1576,7 @@ fn finalize_rebase_pipeline_without_ai(config: &PipelineConfig, store: &Store) {
     // to claim, so the returned outcome isn't a gate here: a `MidRebase` answer
     // (an unattached HEAD, or a branch that wouldn't resolve) just means the
     // rows stay orphaned while the claim below proceeds as it always has.
-    let _ = reassociate_rebased_commits(
-        store,
-        &commit.branch_id,
-        &config.working_dir,
-        config.workspace_name.as_deref(),
-    );
+    let _ = reassociate_rebased_commits(store, &commit.branch_id, &git);
 
     match store.complete_pending_commit_sha(&commit.id, &commit.branch_id, &current_head) {
         Ok(true) => log::info!(
@@ -2368,6 +2391,7 @@ fn run_post_completion_hooks(
     working_dir: &std::path::Path,
     pre_head_sha: Option<&str>,
     workspace_name: Option<&str>,
+    remote_working_dir: Option<&str>,
     store: &Arc<Store>,
 ) -> Option<String> {
     let mut committed_branch_id: Option<String> = None;
@@ -2377,16 +2401,18 @@ fn run_post_completion_hooks(
         // Look for any commit linked to this session — not just pending (sha IS NULL)
         // ones — so we also detect amended commits on resumed sessions.
         if let Ok(Some(commit)) = store.get_commit_by_session(session_id) {
-            // Get current HEAD — either from local worktree or remote workspace.
-            let current_head_result = if let Some(ws_name) = workspace_name {
-                crate::blox::ws_exec(ws_name, &["git", "rev-parse", "HEAD"])
-                    .map(|s| s.trim().to_string())
-                    .map_err(|e| format!("{e}"))
-            } else {
-                crate::git::get_head_sha(working_dir).map_err(|e| format!("{e}"))
-            };
+            // Get current HEAD from the checkout the session ran in — the
+            // branch's clone directory on a remote workspace, which is not
+            // where a bare `ws exec` lands when the workspace holds more than
+            // one repo. The same runner is handed to reassociation below, so
+            // the two can't end up describing different repos.
+            let git = crate::branches::git_runner(
+                working_dir,
+                workspace_name,
+                remote_working_dir.map(str::to_string),
+            );
 
-            match current_head_result {
+            match crate::branches::head_sha(&git) {
                 Ok(current_head) if current_head != pre_sha => {
                     // A rebase pipeline that handed off to AI (conflicts, a
                     // failed fetch) lands here instead of
@@ -2414,12 +2440,8 @@ fn run_post_completion_hooks(
                     // why — true by construction.
                     let rebase_pipeline = session_is_rebase_pipeline(store, session_id);
                     let mid_rebase = rebase_pipeline
-                        && reassociate_rebased_commits(
-                            store,
-                            &commit.branch_id,
-                            working_dir,
-                            workspace_name,
-                        ) == Reassociation::MidRebase;
+                        && reassociate_rebased_commits(store, &commit.branch_id, &git)
+                            == Reassociation::MidRebase;
                     if mid_rebase {
                         log::info!(
                             "Session {session_id}: rebase still in flight (HEAD detached), \
@@ -3903,6 +3925,7 @@ mod tests {
             fixture.repo.path(),
             Some(&fixture.old_head),
             None,
+            None,
             &fixture.store,
         );
 
@@ -4003,6 +4026,7 @@ mod tests {
             fixture.repo.path(),
             Some(&fixture.old_head),
             None,
+            None,
             &fixture.store,
         )
     }
@@ -4085,6 +4109,7 @@ mod tests {
             repo.path(),
             Some(&detached_head),
             None,
+            None,
             &fixture.store,
         );
 
@@ -4129,6 +4154,7 @@ mod tests {
             &fixture.rebase_session_id,
             repo.path(),
             Some(&detached_head),
+            None,
             None,
             &fixture.store,
         );
@@ -4362,6 +4388,7 @@ Solid changes with minor nit
             std::path::Path::new("/tmp"),
             None,
             None,
+            None,
             &store,
         );
 
@@ -4390,6 +4417,7 @@ Solid changes with minor nit
             std::path::Path::new("/tmp"),
             None,
             None,
+            None,
             &store,
         );
 
@@ -4408,6 +4436,7 @@ Solid changes with minor nit
         run_post_completion_hooks(
             &session_id,
             std::path::Path::new("/tmp"),
+            None,
             None,
             None,
             &store,

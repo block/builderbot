@@ -205,12 +205,19 @@ pub(crate) fn repo_name_from_github_repo(github_repo: &str) -> String {
     }
 }
 
-pub(crate) fn run_workspace_git(
+/// Build the argv every workspace git call hands to `ws_exec`.
+///
+/// A repo subpath becomes `git -C <resolved> …`, pinning the command to that
+/// clone; without one the command runs bare, at whatever directory the
+/// workspace hands a bare exec. That one rule is what every remote read of a
+/// branch's HEAD rests on, so it lives in a pure function that can be tested
+/// without a workstation.
+fn workspace_git_args(
     workspace_name: &str,
     repo_subpath: Option<&str>,
     git_args: &[&str],
-) -> Result<String, blox::BloxError> {
-    let mut owned = Vec::<String>::new();
+) -> Result<Vec<String>, blox::BloxError> {
+    let mut owned = Vec::<String>::with_capacity(3 + git_args.len());
     owned.push("git".to_string());
     if let Some(subpath) = repo_subpath.map(str::trim).filter(|s| !s.is_empty()) {
         let resolved = resolve_workspace_repo_path(workspace_name, subpath)?;
@@ -218,6 +225,15 @@ pub(crate) fn run_workspace_git(
         owned.push(resolved);
     }
     owned.extend(git_args.iter().map(|arg| (*arg).to_string()));
+    Ok(owned)
+}
+
+pub(crate) fn run_workspace_git(
+    workspace_name: &str,
+    repo_subpath: Option<&str>,
+    git_args: &[&str],
+) -> Result<String, blox::BloxError> {
+    let owned = workspace_git_args(workspace_name, repo_subpath, git_args)?;
     let borrowed = owned.iter().map(String::as_str).collect::<Vec<_>>();
     blox::ws_exec(workspace_name, &borrowed)
 }
@@ -247,14 +263,7 @@ pub(crate) fn run_workspace_git_bytes(
     repo_subpath: Option<&str>,
     git_args: &[&str],
 ) -> Result<Vec<u8>, blox::BloxError> {
-    let mut owned = Vec::<String>::new();
-    owned.push("git".to_string());
-    if let Some(subpath) = repo_subpath.map(str::trim).filter(|s| !s.is_empty()) {
-        let resolved = resolve_workspace_repo_path(workspace_name, subpath)?;
-        owned.push("-C".to_string());
-        owned.push(resolved);
-    }
-    owned.extend(git_args.iter().map(|arg| (*arg).to_string()));
+    let owned = workspace_git_args(workspace_name, repo_subpath, git_args)?;
     let borrowed = owned.iter().map(String::as_str).collect::<Vec<_>>();
     blox::ws_exec_bytes(workspace_name, &borrowed)
 }
@@ -366,6 +375,94 @@ pub(crate) fn resolve_branch_workspace_subpath(
         None => format!("home:{clone_dir}"),
     };
     Ok(Some(workspace_path))
+}
+
+// ── Per-branch git runners ──────────────────────────────────────────────────
+//
+// Any read *about* a branch has to happen *in* the branch's own checkout. On a
+// Blox workspace that is not the same thing as a bare exec: one project gets
+// one workspace (`resolve_project_workspace_name`) and every additional repo
+// is cloned into it as a sibling (`clone_repo_into_workspace`), so at most one
+// clone can be whatever directory a bare `sq blox ws exec … git rev-parse
+// HEAD` lands in. These runners resolve the same directory the rebase
+// (`run_remote_pipeline_command`), the remote agent, and the diff collector
+// already run in.
+
+/// A git command runner bound to one checkout: local commands run in
+/// `working_dir`, remote ones in `remote_dir` on `workspace_name`.
+///
+/// Boxed rather than an `impl Fn`, since a named type keeps the return
+/// signatures readable and every consumer is generic over `Fn` anyway.
+pub(crate) type GitRunner<'a> = Box<dyn Fn(&[&str]) -> Result<String, String> + 'a>;
+
+/// Build a runner for an already-resolved remote directory.
+///
+/// `remote_dir` takes either form the codebase produces — the `home:<clone>`
+/// string from [`resolve_branch_workspace_subpath`] or the absolute path a
+/// session config carries as `remote_working_dir` — because
+/// [`resolve_workspace_repo_path`] maps both to the same `-C` argument. `None`
+/// runs bare git, which is correct for a branch with no project repo (and is
+/// what every remote read did before). It is owned rather than borrowed
+/// because callers that resolve it from a branch row produce it on the fly.
+pub(crate) fn git_runner<'a>(
+    working_dir: &'a Path,
+    workspace_name: Option<&'a str>,
+    remote_dir: Option<String>,
+) -> GitRunner<'a> {
+    Box::new(move |args: &[&str]| match workspace_name {
+        Some(ws_name) => {
+            run_workspace_git(ws_name, remote_dir.as_deref(), args).map_err(|e| e.to_string())
+        }
+        None => git::cli_run_smart(working_dir, args).map_err(|e| e.to_string()),
+    })
+}
+
+/// The same runner, resolving the remote directory from the branch row.
+///
+/// For callers that hold a `Branch` but no session config. The resolution is
+/// the one such a config's `remote_working_dir` was built from, so the two
+/// agree byte for byte.
+pub(crate) fn branch_git_runner<'a>(
+    store: &Store,
+    branch: &store::Branch,
+    working_dir: &'a Path,
+    workspace_name: Option<&'a str>,
+) -> Result<GitRunner<'a>, String> {
+    let remote_dir = match workspace_name {
+        Some(_) => resolve_branch_workspace_subpath(store, branch)?,
+        None => None,
+    };
+    Ok(git_runner(working_dir, workspace_name, remote_dir))
+}
+
+/// Read HEAD through a runner, trimmed.
+pub(crate) fn head_sha(git: &GitRunner<'_>) -> Result<String, String> {
+    git(&["rev-parse", "HEAD"]).map(|sha| sha.trim().to_string())
+}
+
+/// A branch's HEAD, read off the checkout that branch lives in.
+///
+/// Goes to a blocking thread because on a remote branch it is a `ws exec`
+/// round trip to a cloud workstation.
+pub(crate) async fn branch_head_sha(
+    store: &Arc<Store>,
+    branch: &store::Branch,
+    working_dir: &Path,
+) -> Result<String, String> {
+    let store = Arc::clone(store);
+    let branch = branch.clone();
+    let working_dir = working_dir.to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || {
+        let git = branch_git_runner(
+            &store,
+            &branch,
+            &working_dir,
+            branch.workspace_name.as_deref(),
+        )?;
+        head_sha(&git)
+    })
+    .await
+    .map_err(|e| format!("HEAD lookup task failed: {e}"))?
 }
 
 pub(crate) fn normalize_branch_ref(branch: &str) -> String {
@@ -2643,6 +2740,77 @@ pub(crate) async fn run_prerun_actions_for_branch(
 mod tests {
     use super::*;
     use crate::test_utils::TempGitRepo;
+
+    /// The rule every remote read of a branch's HEAD rests on: a branch with
+    /// a project repo is pinned to that repo's clone directory, so it can't
+    /// answer about a sibling clone that happens to be the bare exec cwd.
+    #[test]
+    fn workspace_git_pins_a_branch_with_a_repo_to_its_clone_dir() {
+        let store = Store::in_memory().unwrap();
+        let project = store::Project::new("squareup/g2");
+        store.create_project(&project).unwrap();
+        let repo = store::ProjectRepo::new(
+            &project.id,
+            "block/builderbot",
+            "feature",
+            Some("apps/staged".to_string()),
+        );
+        store.create_project_repo(&repo).unwrap();
+        let branch = store::Branch::new_remote(&project.id, "feature", "main", "ws-1")
+            .with_project_repo(&repo.id);
+
+        let subpath = resolve_branch_workspace_subpath(&store, &branch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            workspace_git_args("ws-1", Some(&subpath), &["rev-parse", "HEAD"]).unwrap(),
+            vec![
+                "git",
+                "-C",
+                "/home/bloxer/builderbot/apps/staged",
+                "rev-parse",
+                "HEAD"
+            ]
+        );
+    }
+
+    /// A branch with no project repo (a pre-Staged-repo branch) has no clone
+    /// dir to resolve, so it runs bare — byte-identical to a plain `ws_exec`.
+    #[test]
+    fn workspace_git_runs_bare_without_a_repo() {
+        let store = Store::in_memory().unwrap();
+        let project = store::Project::new("squareup/g2");
+        store.create_project(&project).unwrap();
+        let branch = store::Branch::new_remote(&project.id, "feature", "main", "ws-1");
+
+        assert!(resolve_branch_workspace_subpath(&store, &branch)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            workspace_git_args("ws-1", None, &["rev-parse", "HEAD"]).unwrap(),
+            vec!["git", "rev-parse", "HEAD"]
+        );
+    }
+
+    /// A session config's already-absolute `remote_working_dir` resolves to the
+    /// same `-C` as the `home:` form, so the two runners can't disagree.
+    #[test]
+    fn workspace_git_accepts_an_already_resolved_remote_dir() {
+        assert_eq!(
+            workspace_git_args(
+                "ws-1",
+                Some("/home/bloxer/builderbot/apps/staged"),
+                &["rev-parse", "HEAD"]
+            )
+            .unwrap(),
+            workspace_git_args(
+                "ws-1",
+                Some("home:builderbot/apps/staged"),
+                &["rev-parse", "HEAD"]
+            )
+            .unwrap()
+        );
+    }
 
     #[test]
     fn apply_branch_prefix_joins_with_slash() {

@@ -85,17 +85,6 @@ pub(crate) fn resolve_branch_repo_slug(
     project.primary_repo().map(|s| s.to_string())
 }
 
-pub(crate) async fn run_blox_blocking<T, F>(op: F) -> Result<T, String>
-where
-    T: Send + 'static,
-    F: FnOnce() -> Result<T, blox::BloxError> + Send + 'static,
-{
-    tauri::async_runtime::spawn_blocking(op)
-        .await
-        .map_err(|e| format!("blox task failed: {e}"))?
-        .map_err(|e| e.to_string())
-}
-
 fn bundled_pikchr_grammar_path(app_handle: &tauri::AppHandle) -> Option<PathBuf> {
     if let Ok(path) = app_handle
         .path()
@@ -1165,17 +1154,9 @@ pub(crate) async fn resume_session_for_store(
         if let Some(ref branch) = linked_branch {
             let ws_name = branch.workspace_name.clone();
             let head = if linked_commit.is_some() {
-                if let Some(ref ws) = ws_name {
-                    let ws = ws.clone();
-                    run_blox_blocking(move || {
-                        crate::blox::ws_exec(&ws, &["git", "rev-parse", "HEAD"])
-                    })
+                crate::branches::branch_head_sha(&store, branch, &working_dir)
                     .await
-                    .map(|s| s.trim().to_string())
                     .ok()
-                } else {
-                    crate::git::get_head_sha(&working_dir).ok()
-                }
             } else {
                 None
             };
@@ -2267,6 +2248,44 @@ fn resolve_branch_session_provider(
     }
 }
 
+/// A commit session's `pre_head_sha`, read off the branch's own checkout.
+///
+/// A remote lookup failure only costs commit detection for this session, so it
+/// degrades to `None`; a local one means the worktree is unusable, so it fails
+/// the command — the split each capture site hand-rolled before.
+async fn commit_pre_head_sha(
+    store: &Arc<Store>,
+    branch: &store::Branch,
+    working_dir: &Path,
+) -> Result<Option<String>, String> {
+    match crate::branches::branch_head_sha(store, branch, working_dir).await {
+        Ok(sha) => Ok(Some(sha)),
+        Err(e) if branch.workspace_name.is_some() => {
+            log::warn!(
+                "Failed to get remote HEAD SHA for branch {}: {e}",
+                branch.id
+            );
+            Ok(None)
+        }
+        Err(e) => Err(format!("Failed to get HEAD SHA: {e}")),
+    }
+}
+
+/// The tip SHA a review anchors to, read off the branch's own checkout.
+///
+/// `reviews.commit_sha` is matched against the branch's commits by
+/// `review_is_visible_in_timeline`, so a SHA from a sibling clone would hide
+/// the review. Failure degrades the same way as [`commit_pre_head_sha`].
+async fn review_tip_sha(
+    store: &Arc<Store>,
+    branch: &store::Branch,
+    working_dir: &Path,
+) -> Result<String, String> {
+    Ok(commit_pre_head_sha(store, branch, working_dir)
+        .await?
+        .unwrap_or_else(|| "unknown".to_string()))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn prepare_branch_session_start(
     store: &Arc<Store>,
@@ -2356,40 +2375,13 @@ async fn prepare_branch_session_start(
     };
 
     let pre_head_sha = if matches!(session_type, BranchSessionType::Commit) {
-        if is_remote {
-            let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
-            match run_blox_blocking(move || {
-                blox::ws_exec(&workspace_name, &["git", "rev-parse", "HEAD"])
-            })
-            .await
-            {
-                Ok(sha) => Some(sha.trim().to_string()),
-                Err(e) => {
-                    log::warn!("Failed to get remote HEAD SHA via ws_exec: {e}");
-                    None
-                }
-            }
-        } else {
-            Some(
-                git::get_head_sha(&working_dir)
-                    .map_err(|e| format!("Failed to get HEAD SHA: {e}"))?,
-            )
-        }
+        commit_pre_head_sha(store, &branch, &working_dir).await?
     } else {
         None
     };
 
     let review_tip_sha = if matches!(session_type, BranchSessionType::Review) {
-        let tip_sha = if is_remote {
-            let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
-            run_blox_blocking(move || blox::ws_exec(&workspace_name, &["git", "rev-parse", "HEAD"]))
-                .await
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|_| "unknown".to_string())
-        } else {
-            git::get_head_sha(&working_dir).map_err(|e| format!("Failed to get HEAD SHA: {e}"))?
-        };
-        Some(tip_sha)
+        Some(review_tip_sha(store, &branch, &working_dir).await?)
     } else {
         None
     };
@@ -3042,15 +3034,7 @@ async fn start_queued_session_for_branch(
     // At queue time, reviews are created with an empty commit_sha since the
     // workspace may not exist yet.
     if let Some(ref review_id) = schedule.review_id {
-        let tip_sha = if is_remote {
-            let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
-            run_blox_blocking(move || blox::ws_exec(&workspace_name, &["git", "rev-parse", "HEAD"]))
-                .await
-                .map(|s| s.trim().to_string())
-                .unwrap_or_else(|_| "unknown".to_string())
-        } else {
-            git::get_head_sha(&working_dir).map_err(|e| format!("Failed to get HEAD SHA: {e}"))?
-        };
+        let tip_sha = review_tip_sha(&store, &branch, &working_dir).await?;
         store
             .update_review_commit_sha(review_id, &tip_sha)
             .map_err(|e| e.to_string())?;
@@ -3058,27 +3042,7 @@ async fn start_queued_session_for_branch(
 
     // Compute pre-head SHA for commit sessions.
     let pre_head_sha = match session_type {
-        BranchSessionType::Commit => {
-            if is_remote {
-                let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
-                match run_blox_blocking(move || {
-                    blox::ws_exec(&workspace_name, &["git", "rev-parse", "HEAD"])
-                })
-                .await
-                {
-                    Ok(sha) => Some(sha.trim().to_string()),
-                    Err(e) => {
-                        log::warn!("Failed to get remote HEAD SHA via ws_exec: {e}");
-                        None
-                    }
-                }
-            } else {
-                Some(
-                    git::get_head_sha(&working_dir)
-                        .map_err(|e| format!("Failed to get HEAD SHA: {e}"))?,
-                )
-            }
-        }
+        BranchSessionType::Commit => commit_pre_head_sha(&store, &branch, &working_dir).await?,
         _ => None,
     };
 
@@ -3414,15 +3378,7 @@ pub async fn trigger_auto_review(
     };
 
     // Get the current tip SHA for the review anchor
-    let tip_sha = if is_remote {
-        let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
-        run_blox_blocking(move || blox::ws_exec(&workspace_name, &["git", "rev-parse", "HEAD"]))
-            .await
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| "unknown".to_string())
-    } else {
-        git::get_head_sha(&working_dir).map_err(|e| format!("Failed to get HEAD SHA: {e}"))?
-    };
+    let tip_sha = review_tip_sha(&store, &branch, &working_dir).await?;
 
     // Build the full prompt (reuse Review prompt)
     let prompt = "Review the latest changes on this branch.".to_string();

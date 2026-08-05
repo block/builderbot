@@ -14,9 +14,9 @@
 //! can read the old metadata back and match it against the rewritten commits.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::Path;
 
-use crate::store::Store;
+use crate::branches::GitRunner;
+use crate::store::{Branch, Store};
 
 /// The commit metadata `git rebase` carries across a rewrite. Two commits with
 /// the same identity are the same commit before and after a rebase.
@@ -113,6 +113,11 @@ pub enum Reassociation {
 /// Repoint a branch's orphaned commit rows (and their reviews) at the SHAs a
 /// rebase rewrote them into.
 ///
+/// `git` must be bound to the branch's own checkout — see
+/// [`crate::branches::branch_git_runner`]. Every read here is relative to
+/// wherever it points, so a runner aimed at a sibling clone on a shared
+/// workspace would compare one repo's rows against another repo's commits.
+///
 /// Safe to call when nothing was rewritten: with no orphaned rows it stops
 /// after listing the branch and reports `Done { remapped: 0 }`. Also safe to
 /// call while a rebase is still in flight — it reports
@@ -123,20 +128,12 @@ pub enum Reassociation {
 /// failures *after* it passed.
 pub fn reassociate_after_rebase(
     store: &Store,
-    branch_id: &str,
-    working_dir: &Path,
-    workspace_name: Option<&str>,
+    branch: &Branch,
+    git: &GitRunner<'_>,
 ) -> Result<Reassociation, String> {
-    let (branch, git) = match branch_git_runner(store, branch_id, working_dir, workspace_name) {
-        Ok(pair) => pair,
-        Err(e) => {
-            log::warn!("Failed to resolve branch {branch_id} for commit reassociation: {e}");
-            return Ok(Reassociation::MidRebase);
-        }
-    };
-
+    let branch_id = branch.id.as_str();
     let branch_name = crate::git::branch_name_without_origin(&branch.branch_name);
-    if !head_is_on_branch(&git, branch_name) {
+    if !head_is_on_branch(git, branch_name) {
         // Routine on a rebase-handoff turn that ended with conflicts
         // unresolved, so an expected state rather than an anomaly.
         log::info!(
@@ -147,7 +144,7 @@ pub fn reassociate_after_rebase(
     }
 
     let base_ref = crate::git::origin_ref_for_branch(&branch.base_branch);
-    let on_branch = list_branch_commits(&git, &base_ref)?;
+    let on_branch = list_branch_commits(git, &base_ref)?;
 
     // `list_commits_for_branch` orders by `created_at`, which is the order the
     // sessions authored them — i.e. branch order, as the matcher requires.
@@ -175,7 +172,7 @@ pub fn reassociate_after_rebase(
         return Ok(Reassociation::Done { remapped: 0 });
     }
 
-    let mut old_identities = lookup_commit_identities(&git, &orphan_shas)?;
+    let mut old_identities = lookup_commit_identities(git, &orphan_shas)?;
     let orphans: Vec<OrphanedRow> = rows
         .iter()
         .filter_map(|row| {
@@ -203,41 +200,6 @@ pub fn reassociate_after_rebase(
         .remap_commit_shas(branch_id, &pairs)
         .map_err(|e| e.to_string())?;
     Ok(Reassociation::Done { remapped })
-}
-
-/// The git runner [`branch_git_runner`] hands back. Boxed rather than an `impl
-/// Fn`, since a named type keeps the return signature readable and every
-/// consumer here is generic over `Fn` anyway.
-type GitRunner<'a> = Box<dyn Fn(&[&str]) -> Result<String, String> + 'a>;
-
-/// Resolve the branch row and build the git runner [`reassociate_after_rebase`]
-/// works through: local commands run in `working_dir`, remote ones through the
-/// branch's workspace (and its repo subpath).
-fn branch_git_runner<'a>(
-    store: &Store,
-    branch_id: &str,
-    working_dir: &'a Path,
-    workspace_name: Option<&'a str>,
-) -> Result<(crate::store::Branch, GitRunner<'a>), String> {
-    let branch = store
-        .get_branch(branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-
-    let repo_subpath = match workspace_name {
-        Some(_) => crate::branches::resolve_branch_workspace_subpath(store, &branch)?,
-        None => None,
-    };
-    let git = move |args: &[&str]| -> Result<String, String> {
-        match workspace_name {
-            Some(ws_name) => {
-                crate::branches::run_workspace_git(ws_name, repo_subpath.as_deref(), args)
-                    .map_err(|e| e.to_string())
-            }
-            None => crate::git::cli_run_smart(working_dir, args).map_err(|e| e.to_string()),
-        }
-    };
-    Ok((branch, Box::new(git)))
 }
 
 /// Whether HEAD is the branch we're about to reassociate, rather than a

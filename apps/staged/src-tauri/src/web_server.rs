@@ -2971,17 +2971,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 if let Some(ref branch) = linked_branch {
                     let ws_name = branch.workspace_name.clone();
                     let head = if linked_commit.is_some() {
-                        if let Some(ref ws) = ws_name {
-                            let ws = ws.clone();
-                            session_commands::run_blox_blocking(move || {
-                                crate::blox::ws_exec(&ws, &["git", "rev-parse", "HEAD"])
-                            })
+                        crate::branches::branch_head_sha(&store, branch, &working_dir)
                             .await
-                            .map(|s| s.trim().to_string())
                             .ok()
-                        } else {
-                            crate::git::get_head_sha(&working_dir).ok()
-                        }
                     } else {
                         None
                     };

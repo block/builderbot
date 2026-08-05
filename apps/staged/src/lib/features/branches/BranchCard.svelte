@@ -61,6 +61,7 @@
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
   import {
+    classifyPolledSession,
     createPollFailureTracker,
     createQueuedSessionCanceller,
     fileNameFromPath,
@@ -1114,10 +1115,10 @@
    * its toast, so poll the session too. The effect tracks `storePullState`, so
    * whichever of the two gets there first tears the other down.
    *
-   * A cancelled or deleted session comes back as `null` from `getSession`, so a
-   * rejection only ever means the backend was unreachable. Those are tolerated for
-   * a few consecutive attempts — dropping the badge on the first blip would strand
-   * a still-queued pull with no Cancel button and no signal to re-click.
+   * A deleted session comes back as `null` from `getSession`, so a rejection only
+   * ever means the backend was unreachable. Those are tolerated for a few
+   * consecutive attempts — dropping the badge on the first blip would strand a
+   * still-queued pull with no Cancel button and no signal to re-click.
    */
   $effect(() => {
     const sessionId = storePullState?.sessionId;
@@ -1128,11 +1129,14 @@
       try {
         const session = await commands.getSession(sessionId);
         failures.recordSuccess();
-        if (session?.status === 'queued') return;
-        if (session?.status === 'running') {
+        const disposition = classifyPolledSession(session);
+        if (disposition === 'waiting') return;
+        if (disposition === 'active') {
           pullStateStore.markQueuedPullStarted(branch.id, sessionId);
           return;
         }
+        // 'gone' or 'finished': either way the badge has to go, and a drained pull
+        // that failed is the only outcome still worth telling the user about.
         pullStateStore.clearPullState(branch.id);
         if (session?.status === 'error') {
           notifyError(

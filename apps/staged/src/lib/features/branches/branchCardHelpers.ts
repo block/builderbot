@@ -58,6 +58,30 @@ export function createPollFailureTracker(
   };
 }
 
+export type PolledSessionDisposition = 'gone' | 'waiting' | 'active' | 'finished';
+
+/**
+ * What a session poller should do with the session it just fetched.
+ *
+ * `getSession` resolves `null` only for a session that is no longer in the table —
+ * `delete_session` or the branch-delete cascade on `sessions.branch_id`, since
+ * `cancel_session` transitions to `cancelled` instead. So `gone` means the work will
+ * never run and there is nothing left to cancel: drop the store entry quietly rather
+ * than reporting a failure the user cannot act on. Without this the tick is a no-op
+ * and the poller runs forever behind a badge for a session that does not exist.
+ *
+ * Callers must skip the `'__pending__'` sentinel before polling: it is not a real id,
+ * so it classifies as `gone` while the launch command is still in flight.
+ */
+export function classifyPolledSession(
+  session: { status: string } | null | undefined
+): PolledSessionDisposition {
+  if (!session) return 'gone';
+  if (session.status === 'queued') return 'waiting';
+  if (session.status === 'running') return 'active';
+  return 'finished';
+}
+
 /**
  * Cancel a queued git action, clearing its store entry only once the backend
  * confirms.

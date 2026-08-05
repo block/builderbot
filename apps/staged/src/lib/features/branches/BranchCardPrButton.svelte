@@ -27,6 +27,7 @@
   import {
     classifyCompletedPushSession,
     classifyPipelinePushCompletion,
+    classifyPolledSession,
     createPollFailureTracker,
     createQueuedSessionCanceller,
     extractPrNumber,
@@ -216,8 +217,13 @@
   // Fallback polling for PR session. A rejection means the backend was
   // unreachable (a missing session resolves to `null`), so give it a few
   // consecutive attempts before declaring the session lost.
+  //
+  // The `'__pending__'` sentinel is skipped: handleCreatePr seeds it before
+  // `createPr` resolves, and polling it would classify a PR that is about to start
+  // as gone. `prSessionId` is derived from the store, so the effect re-runs with the
+  // real id the moment setPrCreating swaps it in.
   $effect(() => {
-    if (prState !== 'creating' || !prSessionId) return;
+    if (prState !== 'creating' || !prSessionId || prSessionId === '__pending__') return;
 
     const sid = prSessionId;
     const failures = createPollFailureTracker();
@@ -225,8 +231,23 @@
       try {
         const session = await commands.getSession(sid);
         failures.recordSuccess();
-        if (session && session.status !== 'running') {
-          handlePrSessionComplete(session.status);
+        switch (classifyPolledSession(session)) {
+          case 'gone':
+            // Deleted out from under us; revert the button to "Create PR" rather
+            // than leaving it on "Creating PR…" forever.
+            console.warn(
+              `[BranchCardPrButton] PR session ${sid} for branch ${branch.id} no longer exists; clearing its state.`
+            );
+            prStateStore.clearPrState(branch.id);
+            break;
+          case 'waiting':
+          case 'active':
+            // PR sessions launch running today, but tolerating a queued one keeps
+            // the poller from misreporting it as a completion.
+            break;
+          case 'finished':
+            if (session) handlePrSessionComplete(session.status);
+            break;
         }
       } catch (err) {
         if (!failures.recordFailure()) {
@@ -249,8 +270,17 @@
   // moves the button off "Queued". Transient poll failures are tolerated for a
   // few attempts, so a single blip can't flip a still-queued push to "Push
   // failed".
+  //
+  // The `'__pending__'` sentinel is skipped for the same reason as in the PR
+  // poller above: handlePush (and BranchCard's push rows) seed it before
+  // `pushBranch` resolves, and it is not an id the backend can find.
   $effect(() => {
-    if ((pushState !== 'pushing' && pushState !== 'queued') || !pushSessionId) return;
+    if (
+      (pushState !== 'pushing' && pushState !== 'queued') ||
+      !pushSessionId ||
+      pushSessionId === '__pending__'
+    )
+      return;
 
     const sid = pushSessionId;
     const failures = createPollFailureTracker();
@@ -258,13 +288,24 @@
       try {
         const session = await commands.getSession(sid);
         failures.recordSuccess();
-        if (session?.status === 'queued') return;
-        if (session?.status === 'running') {
-          pushStateStore.markQueuedPushStarted(branch.id, sid);
-          return;
-        }
-        if (session) {
-          handlePushSessionComplete(session.status, session);
+        switch (classifyPolledSession(session)) {
+          case 'gone':
+            // Not setPushError: flipping to "Push failed" for a session someone
+            // deliberately deleted misreports it, and clearSessionTracking would
+            // keep the "Queued" badge with a Cancel button that can't work.
+            console.warn(
+              `[BranchCardPrButton] Push session ${sid} for branch ${branch.id} no longer exists; clearing its state.`
+            );
+            pushStateStore.clearPushState(branch.id);
+            break;
+          case 'waiting':
+            break;
+          case 'active':
+            pushStateStore.markQueuedPushStarted(branch.id, sid);
+            break;
+          case 'finished':
+            if (session) handlePushSessionComplete(session.status, session);
+            break;
         }
       } catch (err) {
         if (!failures.recordFailure()) {

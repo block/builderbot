@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   classifyCompletedPushSession,
   classifyPipelinePushCompletion,
+  classifyPolledSession,
   createPollFailureTracker,
   createQueuedSessionCanceller,
   extractPrNumber,
@@ -269,6 +270,27 @@ describe('createPollFailureTracker', () => {
       expect(tracker.recordFailure()).toBe(false);
     }
     expect(tracker.recordFailure()).toBe(true);
+  });
+});
+
+describe('classifyPolledSession', () => {
+  it('treats a missing session as gone, so the poller drops its store entry', () => {
+    expect(classifyPolledSession(null)).toBe('gone');
+    expect(classifyPolledSession(undefined)).toBe('gone');
+  });
+
+  it('keeps waiting while the session sits on the branch queue', () => {
+    expect(classifyPolledSession({ status: 'queued' })).toBe('waiting');
+  });
+
+  it('reports a drained session as active', () => {
+    expect(classifyPolledSession({ status: 'running' })).toBe('active');
+  });
+
+  it('reports every terminal status as finished', () => {
+    expect(classifyPolledSession({ status: 'completed' })).toBe('finished');
+    expect(classifyPolledSession({ status: 'error' })).toBe('finished');
+    expect(classifyPolledSession({ status: 'cancelled' })).toBe('finished');
   });
 });
 

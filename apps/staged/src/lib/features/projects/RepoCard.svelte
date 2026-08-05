@@ -352,8 +352,11 @@
 
     <div class="card-actions-secondary">
       {#if repo.hasLocalClone}
-        <RunningActionPills {runner} />
-        <PrimaryRunActionButton {runner} />
+        <!-- The outline variant reads the --accent / --card-border-hover /
+             --card-bg-strong vars set on the card root, so the runner
+             surfaces pick up the repo's badge hue. -->
+        <RunningActionPills {runner} variant="outline" />
+        <PrimaryRunActionButton {runner} variant="outline" />
         {#if actionsLoaded && runner.actions.length === 0}
           <span class="inline-flex" title="Detect actions">
             <Button

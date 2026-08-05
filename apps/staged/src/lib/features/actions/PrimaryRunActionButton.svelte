@@ -18,6 +18,12 @@
     getEndpointCopyUrl — maps a detected endpoint to the URL the copy button
                          puts on the clipboard (e.g. remote workstation URL
                          rewriting). Defaults to the endpoint itself.
+    variant            — surface theme: 'default' is the branch card's
+                         elevated neutral button; 'outline' is a clear
+                         background outlined with the host card's theme,
+                         reading the --card-border-hover / --card-bg-strong
+                         custom properties the repo card sets from its badge
+                         hue.
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
@@ -39,6 +45,7 @@
     show?: boolean;
     canResolveEndpoint?: boolean;
     getEndpointCopyUrl?: (endpoint: string) => string;
+    variant?: 'default' | 'outline';
   }
 
   let {
@@ -46,7 +53,10 @@
     show = true,
     canResolveEndpoint = true,
     getEndpointCopyUrl = (endpoint) => endpoint,
+    variant = 'default',
   }: Props = $props();
+
+  let outline = $derived(variant === 'outline');
 
   let primaryRunAction = $derived(runner.primaryRunAction);
 
@@ -79,7 +89,7 @@
   >
     {#if isRunning && hasEndpoint && phase?.type === 'running' && phase.endpoint}
       <!-- Pill-shaped button when running with endpoint -->
-      <div class="primary-action-pill">
+      <div class="primary-action-pill" class:outline>
         <Button
           variant="ghost"
           class={[
@@ -115,7 +125,12 @@
         </Button>
         <Button
           variant="ghost"
-          class="relative size-7 rounded-none border-0 border-l border-l-[var(--border-muted)] bg-transparent text-muted-foreground hover:bg-[var(--bg-elevated)] hover:text-foreground [&_svg]:!size-3"
+          class={[
+            'relative size-7 rounded-none border-0 border-l bg-transparent text-muted-foreground hover:text-foreground [&_svg]:!size-3',
+            outline
+              ? 'border-l-[var(--card-border-hover)] hover:bg-[var(--card-bg-strong)]'
+              : 'border-l-[var(--border-muted)] hover:bg-[var(--bg-elevated)]',
+          ]}
           title={`Copy endpoint: ${copyUrl}`}
           aria-label="Copy endpoint"
           onclick={(e) => {
@@ -156,14 +171,27 @@
       <Button
         variant="ghost"
         class={[
-          'size-7 rounded-full border-0 bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)] [&_svg]:!size-3.5',
-          isRunning && 'bg-[var(--bg-hover)] text-muted-foreground hover:bg-[var(--bg-elevated)]',
+          'size-7 rounded-full [&_svg]:!size-3.5',
+          outline
+            ? 'border border-[var(--card-border-hover)] bg-transparent hover:bg-[var(--card-bg-strong)]'
+            : 'border-0 bg-[var(--bg-elevated)] hover:bg-[var(--bg-hover)]',
+          isRunning &&
+            (outline
+              ? 'text-muted-foreground'
+              : 'bg-[var(--bg-hover)] text-muted-foreground hover:bg-[var(--bg-elevated)]'),
           execution?.status === 'completed' &&
-            'bg-[var(--bg-hover)] text-[var(--status-added)] hover:bg-[var(--bg-hover)]',
+            (outline
+              ? 'border-[var(--status-added)] text-[var(--status-added)]'
+              : 'bg-[var(--bg-hover)] text-[var(--status-added)] hover:bg-[var(--bg-hover)]'),
           execution?.status === 'failed' &&
-            'bg-[var(--bg-hover)] text-destructive hover:bg-[var(--bg-hover)]',
-          isStopping && 'opacity-60 hover:bg-[var(--bg-elevated)]',
-          showStopIcon && 'text-destructive',
+            (outline
+              ? 'border-destructive text-destructive'
+              : 'bg-[var(--bg-hover)] text-destructive hover:bg-[var(--bg-hover)]'),
+          isStopping &&
+            (outline
+              ? 'opacity-60 hover:bg-transparent'
+              : 'opacity-60 hover:bg-[var(--bg-elevated)]'),
+          showStopIcon && (outline ? 'border-destructive text-destructive' : 'text-destructive'),
         ]}
         title={isStopping
           ? 'Stopping…'
@@ -235,6 +263,12 @@
     background: var(--bg-hover);
     border-radius: 999px;
     overflow: hidden;
+  }
+
+  .primary-action-pill.outline {
+    background: transparent;
+    border: 1px solid var(--card-border-hover);
+    box-sizing: border-box;
   }
 
   .copy-icon-wrapper {

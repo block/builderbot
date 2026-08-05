@@ -5,6 +5,11 @@
   Each pill shows the action's live status (spinner, sine wave for a serving
   run action, check/alert on completion), opens the output modal on click, and
   stops the action on alt-click. Driven entirely by an ActionRunner.
+
+  variant selects the surface theme: 'default' is the branch card's elevated
+  neutral pill; 'outline' is a clear background outlined with the host card's
+  theme, reading the --accent / --card-border-hover / --card-bg-strong custom
+  properties the repo card sets from its badge hue.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -20,9 +25,12 @@
 
   interface Props {
     runner: ActionRunner;
+    variant?: 'default' | 'outline';
   }
 
-  let { runner }: Props = $props();
+  let { runner, variant = 'default' }: Props = $props();
+
+  let outline = $derived(variant === 'outline');
 
   onMount(() => trackAltKey());
 
@@ -71,11 +79,17 @@
     <Button
       variant="ghost"
       class={[
-        'h-auto whitespace-nowrap rounded-full border bg-[var(--bg-elevated)] border-[var(--border-muted)] px-3 py-1.5 gap-1.5 text-xs text-foreground hover:bg-[var(--bg-hover)] hover:border-[var(--border-focus)] [&_svg]:!size-3',
+        'h-auto whitespace-nowrap rounded-full border px-3 py-1.5 gap-1.5 text-xs text-foreground [&_svg]:!size-3',
+        outline
+          ? 'bg-transparent border-[var(--card-border-hover)] hover:bg-[var(--card-bg-strong)] hover:border-[var(--accent)]'
+          : 'bg-[var(--bg-elevated)] border-[var(--border-muted)] hover:bg-[var(--bg-hover)] hover:border-[var(--border-focus)]',
         execution.status === 'completed' &&
           'border-[var(--status-added)] text-[var(--status-added)]',
         execution.status === 'failed' && 'border-destructive text-destructive',
-        isStopping && 'opacity-60 hover:bg-[var(--bg-elevated)] hover:border-[var(--border-muted)]',
+        isStopping &&
+          (outline
+            ? 'opacity-60 hover:bg-transparent hover:border-[var(--card-border-hover)]'
+            : 'opacity-60 hover:bg-[var(--bg-elevated)] hover:border-[var(--border-muted)]'),
         showStopIcon && 'border-destructive text-destructive',
       ]}
       title={isStopping

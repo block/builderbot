@@ -27,6 +27,37 @@ export function isGitActionInFlight(args: {
   return push === 'pushing' || push === 'queued' || pull === 'pulling' || pull === 'queued';
 }
 
+export const MAX_CONSECUTIVE_POLL_FAILURES = 3;
+
+export type PollFailureTracker = {
+  recordSuccess(): void;
+  /** Records one failure; true when the budget is exhausted and the poller should give up. */
+  recordFailure(): boolean;
+};
+
+/**
+ * Failure budget for a session poller.
+ *
+ * `getSession` resolves `null` for a session that no longer exists, so a rejection
+ * is always a transport or dispatch failure — the kind that a retry fixes. Tolerate
+ * those until several happen in a row; a success resets the budget, so only sustained
+ * unreachability, not an isolated blip, makes a poller give up its store entry.
+ */
+export function createPollFailureTracker(
+  maxFailures = MAX_CONSECUTIVE_POLL_FAILURES
+): PollFailureTracker {
+  let consecutive = 0;
+  return {
+    recordSuccess(): void {
+      consecutive = 0;
+    },
+    recordFailure(): boolean {
+      consecutive += 1;
+      return consecutive >= maxFailures;
+    },
+  };
+}
+
 export function groupActionsByType(actions: ProjectAction[]): Record<string, ProjectAction[]> {
   const groups: Record<string, ProjectAction[]> = {
     prerun: [],

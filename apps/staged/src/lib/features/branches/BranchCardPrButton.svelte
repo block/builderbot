@@ -26,6 +26,7 @@
   import {
     classifyCompletedPushSession,
     classifyPipelinePushCompletion,
+    createPollFailureTracker,
     extractPrNumber,
     extractPrUrl,
     type CompletedPushOutcome,
@@ -210,18 +211,29 @@
     };
   });
 
-  // Fallback polling for PR session
+  // Fallback polling for PR session. A rejection means the backend was
+  // unreachable (a missing session resolves to `null`), so give it a few
+  // consecutive attempts before declaring the session lost.
   $effect(() => {
     if (prState !== 'creating' || !prSessionId) return;
 
     const sid = prSessionId;
+    const failures = createPollFailureTracker();
     const interval = setInterval(async () => {
       try {
         const session = await commands.getSession(sid);
+        failures.recordSuccess();
         if (session && session.status !== 'running') {
           handlePrSessionComplete(session.status);
         }
-      } catch {
+      } catch (err) {
+        if (!failures.recordFailure()) {
+          console.warn(
+            `[BranchCardPrButton] Could not poll PR session ${sid} for branch ${branch.id}, retrying:`,
+            err
+          );
+          return;
+        }
         prStateStore.setPrError(branch.id, 'Lost track of PR creation session.');
         prStateStore.clearSessionTracking(branch.id);
       }
@@ -232,14 +244,18 @@
 
   // Fallback polling for push session. Queued pushes are polled too: if the
   // branch queue drains one while the "running" event is missed, this is what
-  // moves the button off "Queued".
+  // moves the button off "Queued". Transient poll failures are tolerated for a
+  // few attempts, so a single blip can't flip a still-queued push to "Push
+  // failed".
   $effect(() => {
     if ((pushState !== 'pushing' && pushState !== 'queued') || !pushSessionId) return;
 
     const sid = pushSessionId;
+    const failures = createPollFailureTracker();
     const interval = setInterval(async () => {
       try {
         const session = await commands.getSession(sid);
+        failures.recordSuccess();
         if (session?.status === 'queued') return;
         if (session?.status === 'running') {
           pushStateStore.markQueuedPushStarted(branch.id, sid);
@@ -249,6 +265,13 @@
           handlePushSessionComplete(session.status, session);
         }
       } catch (err) {
+        if (!failures.recordFailure()) {
+          console.warn(
+            `[BranchCardPrButton] Could not poll push session ${sid} for branch ${branch.id}, retrying:`,
+            err
+          );
+          return;
+        }
         console.error(
           `[BranchCardPrButton] Lost track of push session ${sid} for branch ${branch.id}:`,
           err

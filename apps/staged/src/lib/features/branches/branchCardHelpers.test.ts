@@ -2,12 +2,14 @@ import { describe, expect, it } from 'vitest';
 import {
   classifyCompletedPushSession,
   classifyPipelinePushCompletion,
+  createPollFailureTracker,
   extractPrNumber,
   extractPrUrl,
   isGitActionInFlight,
   isImageFile,
   isMaybeTextFile,
   isPushRejectedNonFastForward,
+  MAX_CONSECUTIVE_POLL_FAILURES,
 } from './branchCardHelpers';
 import type { PipelineExecution } from '../../types';
 
@@ -232,5 +234,39 @@ describe('isGitActionInFlight', () => {
   it('reports an idle branch when neither store has an entry', () => {
     expect(isGitActionInFlight({})).toBe(false);
     expect(isGitActionInFlight({ push: null, pull: null, immediatePull: false })).toBe(false);
+  });
+});
+
+describe('createPollFailureTracker', () => {
+  it('tolerates failures until the budget is exhausted', () => {
+    const tracker = createPollFailureTracker(3);
+    expect(tracker.recordFailure()).toBe(false);
+    expect(tracker.recordFailure()).toBe(false);
+    expect(tracker.recordFailure()).toBe(true);
+  });
+
+  it('resets the count on a success, so intermittent failures never give up', () => {
+    const tracker = createPollFailureTracker(3);
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      expect(tracker.recordFailure()).toBe(false);
+      expect(tracker.recordFailure()).toBe(false);
+      tracker.recordSuccess();
+    }
+  });
+
+  it('honors a custom failure budget', () => {
+    expect(createPollFailureTracker(1).recordFailure()).toBe(true);
+
+    const patient = createPollFailureTracker(5);
+    expect([1, 2, 3, 4].map(() => patient.recordFailure())).toEqual([false, false, false, false]);
+    expect(patient.recordFailure()).toBe(true);
+  });
+
+  it('defaults to the shared consecutive-failure budget', () => {
+    const tracker = createPollFailureTracker();
+    for (let attempt = 1; attempt < MAX_CONSECUTIVE_POLL_FAILURES; attempt += 1) {
+      expect(tracker.recordFailure()).toBe(false);
+    }
+    expect(tracker.recordFailure()).toBe(true);
   });
 });

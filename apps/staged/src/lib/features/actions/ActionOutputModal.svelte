@@ -15,6 +15,8 @@
 
   Props:
     executionId — the execution to display output for
+    branchId    — the branch saved notes attach to; omit for repo-scoped
+                  executions, which hides the save-as-note affordance
     actionName  — name of the action being run
     onClose     — callback to close this modal
 -->
@@ -48,7 +50,7 @@
   interface Props {
     open: boolean;
     executionId: string;
-    branchId: string;
+    branchId?: string;
     actionName: string;
     isStopping?: boolean;
     onClose: () => void;
@@ -140,7 +142,7 @@
   }
 
   async function handleSaveAsNote() {
-    if (saveState === 'saved') return;
+    if (!branchId || saveState === 'saved') return;
     const content = capturedSelection || selectedText || getFullOutputText();
     capturedSelection = '';
     if (!content) return;
@@ -427,40 +429,42 @@
         {/if}
       </div>
       <div class="header-actions">
-        <span
-          class="inline-flex"
-          title={saveState === 'error'
-            ? (saveError ?? 'Failed to save note')
-            : selectedText
-              ? 'Save selected text as a note'
-              : 'Save full log as a note'}
-        >
-          <Button
-            variant="outline"
-            size="sm"
-            class={[
-              'gap-1.5 border-[var(--border-muted)] bg-[var(--bg-secondary)] px-3 text-[13px] font-medium text-foreground shadow-none hover:border-[var(--border-focus)] hover:bg-[var(--bg-hover)] max-[640px]:h-10 max-[640px]:px-2.5',
-              saveState === 'saved' &&
-                'cursor-default border-[var(--commit-bg-emphasis)] bg-[var(--commit-bg)] text-[var(--status-added)] hover:border-[var(--commit-bg-emphasis)] hover:bg-[var(--commit-bg)] hover:text-[var(--status-added)]',
-              saveState === 'error' &&
-                'cursor-default border-[var(--ui-danger-bg)] bg-[var(--ui-danger-bg)] text-[var(--ui-danger)] hover:border-[var(--ui-danger-bg)] hover:bg-[var(--ui-danger-bg)] hover:text-[var(--ui-danger)]',
-            ]}
-            onmousedown={handleSaveMouseDown}
-            onclick={handleSaveAsNote}
-            disabled={saveState === 'saved' || saveState === 'error'}
+        {#if branchId}
+          <span
+            class="inline-flex"
+            title={saveState === 'error'
+              ? (saveError ?? 'Failed to save note')
+              : selectedText
+                ? 'Save selected text as a note'
+                : 'Save full log as a note'}
           >
-            {#if saveState === 'saved'}
-              <Check size={14} />
-              <span>Saved</span>
-            {:else if saveState === 'error'}
-              <AlertCircle size={14} />
-              <span>Failed</span>
-            {:else}
-              <StickyNote size={14} />
-              <span>{selectedText ? 'Save selection' : 'Save log'}</span>
-            {/if}
-          </Button>
-        </span>
+            <Button
+              variant="outline"
+              size="sm"
+              class={[
+                'gap-1.5 border-[var(--border-muted)] bg-[var(--bg-secondary)] px-3 text-[13px] font-medium text-foreground shadow-none hover:border-[var(--border-focus)] hover:bg-[var(--bg-hover)] max-[640px]:h-10 max-[640px]:px-2.5',
+                saveState === 'saved' &&
+                  'cursor-default border-[var(--commit-bg-emphasis)] bg-[var(--commit-bg)] text-[var(--status-added)] hover:border-[var(--commit-bg-emphasis)] hover:bg-[var(--commit-bg)] hover:text-[var(--status-added)]',
+                saveState === 'error' &&
+                  'cursor-default border-[var(--ui-danger-bg)] bg-[var(--ui-danger-bg)] text-[var(--ui-danger)] hover:border-[var(--ui-danger-bg)] hover:bg-[var(--ui-danger-bg)] hover:text-[var(--ui-danger)]',
+              ]}
+              onmousedown={handleSaveMouseDown}
+              onclick={handleSaveAsNote}
+              disabled={saveState === 'saved' || saveState === 'error'}
+            >
+              {#if saveState === 'saved'}
+                <Check size={14} />
+                <span>Saved</span>
+              {:else if saveState === 'error'}
+                <AlertCircle size={14} />
+                <span>Failed</span>
+              {:else}
+                <StickyNote size={14} />
+                <span>{selectedText ? 'Save selection' : 'Save log'}</span>
+              {/if}
+            </Button>
+          </span>
+        {/if}
         {#if isRunning}
           {@const isCurrentlyStopping = isStopping || isStoppingDerived}
           <span class="inline-flex">

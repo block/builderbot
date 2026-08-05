@@ -5,9 +5,17 @@
 
   The card is the full repo path (rendered by the shared RepoLabel, wrapped over
   as many lines as it needs) above a row of actions: a labelled "Add project"
-  button on the left, then — right-aligned — run or clone, the pin toggle, and a
-  more menu carrying every repo action plus the local-clone openers. Card tint,
-  border and accent all come from the repo's badge hue.
+  button on the left, then — right-aligned — the action-runner surfaces (running
+  pills and the primary run button) or a clone button, the pin toggle, and a
+  more menu carrying every repo action, an Actions submenu, and the local-clone
+  openers. Card tint, border and accent all come from the repo's badge hue.
+
+  Action runs go through the shared ActionRunner, scoped to the synthetic
+  repoActionScopeId and executed by run_repo_action against the repo's main
+  local clone — so they require the clone (cards without one show Clone
+  instead). A cloned repo whose action context is empty (detection normally
+  runs during project setup) gets a Detect Actions affordance in the run slot
+  and the more menu.
 
   Pass `reorderable` to make the card a drag-to-reorder handle (the sidebar's
   pinned list); the drag callbacks are only wired up in that mode. Pass
@@ -15,15 +23,17 @@
   unpin in the more menu only).
 -->
 <script lang="ts">
+  import { onMount, onDestroy } from 'svelte';
   import Plus from '@lucide/svelte/icons/plus';
-  import Play from '@lucide/svelte/icons/play';
   import MoreVertical from '@lucide/svelte/icons/more-vertical';
   import Download from '@lucide/svelte/icons/download';
   import Pin from '@lucide/svelte/icons/pin';
   import PinOff from '@lucide/svelte/icons/pin-off';
   import Copy from '@lucide/svelte/icons/copy';
   import FolderOpen from '@lucide/svelte/icons/folder-open';
+  import Zap from '@lucide/svelte/icons/zap';
   import type { RepoHomeItem } from '../../types';
+  import type { UnlistenFn } from '../../transport';
   import { darkMode } from '../../stores/isDark.svelte';
   import {
     badgeFg,
@@ -46,6 +56,14 @@
   import * as commands from '../../api/commands';
   import { toast } from 'svelte-sonner';
   import { Button } from '$lib/components/ui/button';
+  import ActionOutputModal from '../actions/ActionOutputModal.svelte';
+  import ActionsSubmenu from '../actions/ActionsSubmenu.svelte';
+  import PrimaryRunActionButton from '../actions/PrimaryRunActionButton.svelte';
+  import RunningActionPills from '../actions/RunningActionPills.svelte';
+  import { ActionRunner } from '../actions/actionRunner.svelte';
+  import { detectRepoActions, listenToRepoActionsDetection } from '../actions/actions';
+  import { getPreferredAgent } from '../settings/preferences.svelte';
+  import { agentState } from '../agents/agent.svelte';
 
   interface Props {
     repo: RepoHomeItem;
@@ -80,6 +98,65 @@
   let dragging = $state(false);
   let dragOver = $state(false);
 
+  // Actions state — the shared runner, scoped to this repo's synthetic scope
+  // id. Runs execute against the main local clone via run_repo_action.
+  const runner = new ActionRunner({
+    getScopeId: () => commands.repoActionScopeId(repo.githubRepo, repo.subpath || undefined),
+    loadActions: () => commands.listRepoActions(repo.githubRepo, repo.subpath || undefined),
+    run: (actionId) =>
+      commands.runRepoAction(
+        repo.githubRepo,
+        repo.subpath || undefined,
+        actionId,
+        getPreferredAgent(agentState.providers) ?? undefined
+      ),
+  });
+
+  /** Distinguishes an empty action context from one that hasn't loaded yet. */
+  let actionsLoaded = $state(false);
+  let detecting = $state(false);
+  let unlistenRepoActionsDetection: UnlistenFn | null = null;
+
+  $effect(() => runner.subscribe());
+
+  // Repo runs require the local clone, so cards without one skip the action
+  // lookups entirely; cloning flips hasLocalClone and this picks them up.
+  $effect(() => {
+    if (!repo.hasLocalClone) return;
+    void hydrateActions();
+  });
+
+  async function hydrateActions() {
+    await runner.loadActions();
+    actionsLoaded = true;
+    await runner.loadRunningActions();
+  }
+
+  function handleActionsChanged() {
+    if (repo.hasLocalClone) runner.loadActions();
+  }
+
+  onMount(() => {
+    window.addEventListener('project-actions-changed', handleActionsChanged);
+
+    // Track detection for this repo's context wherever it was started (this
+    // card, the same repo's card on another surface, the settings panel).
+    unlistenRepoActionsDetection = listenToRepoActionsDetection((event) => {
+      if (event.githubRepo !== repo.githubRepo || (event.subpath ?? '') !== (repo.subpath || '')) {
+        return;
+      }
+      detecting = event.detecting;
+      if (!event.detecting && repo.hasLocalClone) {
+        runner.loadActions();
+      }
+    });
+  });
+
+  onDestroy(() => {
+    window.removeEventListener('project-actions-changed', handleActionsChanged);
+    unlistenRepoActionsDetection?.();
+  });
+
   let accentColor = $derived(badgeFg(repo.hue, darkMode.value));
   let bgColor = $derived(badgeBg(repo.hue, darkMode.value));
   let bgHoverColor = $derived(badgeBgHover(repo.hue, darkMode.value));
@@ -110,12 +187,49 @@
     window.dispatchEvent(new CustomEvent('staged:new-project', { detail }));
   }
 
-  function handleRun() {
-    // Run primary action — requires backend wiring (run action against main clone)
-    toast.info('Run action', {
-      description: 'Running actions against repos is coming soon.',
-      duration: 2000,
-    });
+  /**
+   * Detect actions for this repo's context and persist the new suggestions.
+   * Detection normally runs during project setup, so a repo that was never
+   * attached to a project has an empty context; this is its way in. Mirrors
+   * the settings panel's detect flow (detect, then create the suggestions
+   * that don't already exist).
+   */
+  async function handleDetectActions() {
+    if (detecting) return;
+    detecting = true;
+    try {
+      const provider = getPreferredAgent(agentState.providers) ?? undefined;
+      const suggested = await detectRepoActions(
+        repo.githubRepo,
+        repo.subpath || undefined,
+        provider
+      );
+
+      const existingCommands = new Set(runner.actions.map((a) => a.command));
+      let nextSortOrder = Math.max(...runner.actions.map((a) => a.sortOrder), 0) + 1;
+      for (const suggestion of suggested) {
+        if (existingCommands.has(suggestion.command)) continue;
+        await commands.createRepoAction(
+          repo.githubRepo,
+          repo.subpath || undefined,
+          suggestion.name,
+          suggestion.command,
+          suggestion.actionType,
+          nextSortOrder++,
+          suggestion.autoCommit
+        );
+      }
+
+      await runner.loadActions();
+      window.dispatchEvent(new CustomEvent('project-actions-changed'));
+    } catch (e) {
+      console.error('[RepoCard] Failed to detect actions:', e);
+      toast.error('Failed to detect actions', {
+        description: e instanceof Error ? e.message : String(e),
+      });
+    } finally {
+      detecting = false;
+    }
   }
 
   async function handleClone() {
@@ -238,18 +352,28 @@
 
     <div class="card-actions-secondary">
       {#if repo.hasLocalClone}
-        <Button
-          variant="ghost"
-          class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--card-bg-strong)] hover:text-[var(--ui-success)] [&_svg]:!size-3"
-          title="Run"
-          aria-label="Run"
-          onclick={(e) => {
-            e.stopPropagation();
-            handleRun();
-          }}
-        >
-          <Play size={12} />
-        </Button>
+        <RunningActionPills {runner} />
+        <PrimaryRunActionButton {runner} />
+        {#if actionsLoaded && runner.actions.length === 0}
+          <span class="inline-flex" title="Detect actions">
+            <Button
+              variant="ghost"
+              class="size-[22px] rounded-[4px] p-0 text-[var(--text-secondary)] hover:bg-[var(--card-bg-strong)] hover:text-[var(--ui-accent)] [&_svg]:!size-3"
+              aria-label="Detect actions"
+              disabled={detecting}
+              onclick={(e) => {
+                e.stopPropagation();
+                handleDetectActions();
+              }}
+            >
+              {#if detecting}
+                <Spinner size={12} />
+              {:else}
+                <Zap size={12} />
+              {/if}
+            </Button>
+          </span>
+        {/if}
       {:else}
         <span class="inline-flex" title="Clone repo locally">
           <Button
@@ -315,9 +439,12 @@
             <Plus size={14} /> New Project
           </DropdownMenu.Item>
           {#if repo.hasLocalClone}
-            <DropdownMenu.Item onSelect={handleRun}>
-              <Play size={14} /> Run
-            </DropdownMenu.Item>
+            <ActionsSubmenu {runner} />
+            {#if actionsLoaded && runner.actions.length === 0}
+              <DropdownMenu.Item disabled={detecting} onSelect={handleDetectActions}>
+                <Zap size={14} /> Detect Actions
+              </DropdownMenu.Item>
+            {/if}
           {:else}
             <DropdownMenu.Item disabled={cloning} onSelect={handleClone}>
               <Download size={14} /> Clone Repo
@@ -369,6 +496,17 @@
     </div>
   </div>
 </div>
+
+<!-- No branchId: repo-scoped executions have no branch to attach notes to,
+     so the modal hides its save-selection-as-note affordance. -->
+<ActionOutputModal
+  open={runner.outputModal !== null}
+  executionId={runner.outputModal?.executionId ?? ''}
+  actionName={runner.outputModal?.actionName ?? ''}
+  isStopping={runner.outputModal?.isStopping}
+  onClose={() => runner.closeOutputModal()}
+  onRunAgain={() => runner.runAgain()}
+/>
 
 <style>
   .repo-card {
@@ -424,15 +562,20 @@
   .card-actions {
     margin-top: auto;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 2px;
   }
 
-  /* The labelled "Add project" button leads; the icon buttons hug the far edge. */
+  /* The labelled "Add project" button leads; the icon buttons hug the far
+     edge. Running-action pills can outgrow a narrow card, so overflow wraps
+     while staying right-aligned. */
   .card-actions-secondary {
     margin-left: auto;
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
+    justify-content: flex-end;
     gap: 2px;
   }
 </style>

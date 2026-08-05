@@ -1202,6 +1202,7 @@ pub fn start_pipeline_session(
                 // Pipeline completed successfully — transition session to completed.
                 resolve_pipeline_artifacts_without_ai(&config, &store_for_status, true);
                 let status_enum = SessionStatus::Completed;
+                let status_str = status_enum.as_str();
                 let reason = CompletionReason::TurnComplete;
                 registry.deregister(&session_id);
                 let transitioned = store_for_status
@@ -1213,13 +1214,13 @@ pub fn start_pipeline_session(
                         &app_handle,
                         &session_id,
                         config.branch_id.as_deref(),
-                        "completed",
+                        status_str,
                     );
                 }
                 emit_status(
                     &app_handle,
                     &session_id,
-                    "completed",
+                    status_str,
                     None,
                     Some(&reason),
                     config.branch_id.clone(),
@@ -1352,14 +1353,20 @@ pub fn start_pipeline_session(
                 // The pipeline ran to its conclusion either way; only the
                 // outcome differs, so the completion reason stays the same.
                 let reason = CompletionReason::TurnComplete;
-                let status = if error.is_some() {
+                let status_enum = if error.is_some() {
                     SessionStatus::Error
                 } else {
                     SessionStatus::Completed
                 };
+                let status_str = status_enum.as_str();
                 registry.deregister(&session_id);
                 let transitioned = store_for_status
-                    .transition_from_running(&session_id, status, error.as_deref(), Some(&reason))
+                    .transition_from_running(
+                        &session_id,
+                        status_enum,
+                        error.as_deref(),
+                        Some(&reason),
+                    )
                     .unwrap_or(false);
                 if transitioned {
                     // Classifies the abort (e.g. push rejected non-fast-forward)
@@ -1369,17 +1376,13 @@ pub fn start_pipeline_session(
                         &app_handle,
                         &session_id,
                         config.branch_id.as_deref(),
-                        "completed",
+                        status_str,
                     );
                 }
                 emit_status(
                     &app_handle,
                     &session_id,
-                    if error.is_some() {
-                        "error"
-                    } else {
-                        "completed"
-                    },
+                    status_str,
                     error,
                     Some(&reason),
                     config.branch_id.clone(),

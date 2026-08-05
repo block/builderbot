@@ -2376,6 +2376,7 @@ pub fn run() {
             // Actions
             actions::commands::detect_repo_actions,
             actions::commands::run_branch_action,
+            actions::commands::run_repo_action,
             actions::commands::stop_branch_action,
             actions::commands::get_running_branch_actions,
             actions::commands::get_action_output_buffer,

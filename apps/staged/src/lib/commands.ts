@@ -622,6 +622,36 @@ export function listRepoActions(githubRepo: string, subpath?: string): Promise<P
   return invokeCommand('list_repo_actions', { githubRepo, subpath: subpath ?? null });
 }
 
+/**
+ * Build the synthetic scope id under which repo-scoped action executions are
+ * routed: `repo:{githubRepo}` or `repo:{githubRepo}:{subpath}`. Running-action
+ * queries and action events carry it where branch runs carry a branch id.
+ * Mirrors `repo_action_scope_id` in src-tauri/src/actions/commands.rs.
+ */
+export function repoActionScopeId(githubRepo: string, subpath?: string): string {
+  return subpath ? `repo:${githubRepo}:${subpath}` : `repo:${githubRepo}`;
+}
+
+/**
+ * Run a repo-scoped action against the repo's local clone.
+ * Requires the local clone to exist on disk, and always disables auto-commit
+ * (the working dir is the user's default-branch checkout, not a worktree).
+ * Returns an execution ID routed under `repoActionScopeId(githubRepo, subpath)`.
+ */
+export function runRepoAction(
+  githubRepo: string,
+  subpath: string | undefined,
+  actionId: string,
+  provider?: string
+): Promise<string> {
+  return invokeCommand('run_repo_action', {
+    githubRepo,
+    subpath: subpath ?? null,
+    actionId,
+    provider: provider ?? null,
+  });
+}
+
 export function createRepoAction(
   githubRepo: string,
   subpath: string | undefined,

@@ -199,6 +199,100 @@ pub async fn detect_repo_actions(
     detect_repo_actions_impl(github_repo, subpath, provider, app, store).await
 }
 
+/// Wire up run detection for a just-started Run-type action execution.
+///
+/// `scope_id` is the routing id echoed into run-phase events — a branch id
+/// for branch runs, or the synthetic id from [`repo_action_scope_id`] for
+/// repo runs; the registry and event stream treat it as an opaque string.
+/// `working_dir` is the local directory the autodetect poller inspects
+/// (empty for remote executions, where detection gracefully degrades).
+#[allow(clippy::too_many_arguments)]
+fn wire_run_detection(
+    app: AppHandle,
+    store: Arc<Store>,
+    registry: Arc<ActionRegistry>,
+    execution_id: String,
+    scope_id: String,
+    action: &crate::store::RepoAction,
+    working_dir: String,
+    provider_id: Option<String>,
+) {
+    // Ensure the output buffer for this execution_id exists so the
+    // regex matcher can obtain a reference to it.
+    registry.register_output_buffer(&execution_id);
+
+    match action.run_detection_mode.clone() {
+        Some(RunDetectionMode::EndpointRegex { pattern }) => {
+            let (cancel_tx, cancel_rx) = watch::channel(false);
+            registry.store_cancel_sender(&execution_id, cancel_tx);
+            run_detector::spawn_regex_matcher(
+                app,
+                registry,
+                execution_id,
+                scope_id,
+                action.name.clone(),
+                pattern,
+                true,
+                cancel_rx,
+            );
+        }
+        Some(RunDetectionMode::RunningRegex { pattern }) => {
+            let (cancel_tx, cancel_rx) = watch::channel(false);
+            registry.store_cancel_sender(&execution_id, cancel_tx);
+            run_detector::spawn_regex_matcher(
+                app,
+                registry,
+                execution_id,
+                scope_id,
+                action.name.clone(),
+                pattern,
+                false,
+                cancel_rx,
+            );
+        }
+        Some(RunDetectionMode::NoDetection) => {
+            registry.set_run_phase(&execution_id, RunPhase::NoDetection);
+            emit_run_phase_changed(
+                &app,
+                RunPhaseChangedEvent {
+                    execution_id,
+                    branch_id: scope_id,
+                    action_name: action.name.clone(),
+                    phase: RunPhase::NoDetection,
+                },
+            );
+        }
+        Some(RunDetectionMode::Autodetect) | None => {
+            registry.set_run_phase(&execution_id, RunPhase::AutodetectPending);
+            emit_run_phase_changed(
+                &app,
+                RunPhaseChangedEvent {
+                    execution_id: execution_id.clone(),
+                    branch_id: scope_id.clone(),
+                    action_name: action.name.clone(),
+                    phase: RunPhase::AutodetectPending,
+                },
+            );
+
+            let (cancel_tx, cancel_rx) = watch::channel(false);
+            registry.store_cancel_sender(&execution_id, cancel_tx);
+            run_detector::spawn_autodetect_poller(
+                app,
+                store,
+                registry,
+                execution_id,
+                scope_id,
+                action.id.clone(),
+                action.name.clone(),
+                action.command.clone(),
+                std::path::PathBuf::from(&working_dir),
+                provider_id,
+                cancel_rx,
+            );
+        }
+    }
+}
+
 pub(crate) async fn run_branch_action_impl(
     branch_id: String,
     action_id: String,
@@ -235,8 +329,6 @@ pub(crate) async fn run_branch_action_impl(
 
     let is_remote = branch.branch_type == crate::store::BranchType::Remote;
 
-    let reg = Arc::clone(&registry);
-
     // Create event listener
     let listener = Arc::new(TauriExecutionListener::new(
         app.clone(),
@@ -244,7 +336,7 @@ pub(crate) async fn run_branch_action_impl(
         action_id.clone(),
         action.name.clone(),
         action.action_type.as_str().to_string(),
-        reg.clone(),
+        Arc::clone(&registry),
     ));
 
     // Create metadata
@@ -253,9 +345,6 @@ pub(crate) async fn run_branch_action_impl(
         action_name: action.name.clone(),
         auto_commit: action.auto_commit,
     };
-
-    // Clone values needed after execute() moves them.
-    let command_for_detection = action.command.clone();
 
     // Execute the action — local vs remote paths
     let (execution_id, working_dir_for_detection) = if is_remote {
@@ -371,7 +460,7 @@ pub(crate) async fn run_branch_action_impl(
 
         let wd = working_dir.clone();
         let eid = executor
-            .execute(action.command, working_dir, metadata, listener)
+            .execute(action.command.clone(), working_dir, metadata, listener)
             .await
             .map_err(|e| format!("Failed to execute action: {e}"))?;
 
@@ -380,82 +469,16 @@ pub(crate) async fn run_branch_action_impl(
 
     // --- Run detection wiring (only for Run actions) ---
     if matches!(action.action_type, ActionType::Run) {
-        // Ensure the output buffer for this execution_id exists so the
-        // regex matcher can obtain a reference to it.
-        reg.register_output_buffer(&execution_id);
-
-        let detection_mode = action.run_detection_mode.clone();
-
-        match detection_mode {
-            Some(RunDetectionMode::EndpointRegex { pattern }) => {
-                let (cancel_tx, cancel_rx) = watch::channel(false);
-                reg.store_cancel_sender(&execution_id, cancel_tx);
-                run_detector::spawn_regex_matcher(
-                    app,
-                    reg,
-                    execution_id.clone(),
-                    branch_id,
-                    action.name.clone(),
-                    pattern,
-                    true,
-                    cancel_rx,
-                );
-            }
-            Some(RunDetectionMode::RunningRegex { pattern }) => {
-                let (cancel_tx, cancel_rx) = watch::channel(false);
-                reg.store_cancel_sender(&execution_id, cancel_tx);
-                run_detector::spawn_regex_matcher(
-                    app,
-                    reg,
-                    execution_id.clone(),
-                    branch_id,
-                    action.name.clone(),
-                    pattern,
-                    false,
-                    cancel_rx,
-                );
-            }
-            Some(RunDetectionMode::NoDetection) => {
-                reg.set_run_phase(&execution_id, RunPhase::NoDetection);
-                emit_run_phase_changed(
-                    &app,
-                    RunPhaseChangedEvent {
-                        execution_id: execution_id.clone(),
-                        branch_id,
-                        action_name: action.name.clone(),
-                        phase: RunPhase::NoDetection,
-                    },
-                );
-            }
-            Some(RunDetectionMode::Autodetect) | None => {
-                reg.set_run_phase(&execution_id, RunPhase::AutodetectPending);
-                emit_run_phase_changed(
-                    &app,
-                    RunPhaseChangedEvent {
-                        execution_id: execution_id.clone(),
-                        branch_id: branch_id.clone(),
-                        action_name: action.name.clone(),
-                        phase: RunPhase::AutodetectPending,
-                    },
-                );
-
-                let (cancel_tx, cancel_rx) = watch::channel(false);
-                reg.store_cancel_sender(&execution_id, cancel_tx);
-                run_detector::spawn_autodetect_poller(
-                    app,
-                    store,
-                    reg,
-                    execution_id.clone(),
-                    branch_id,
-                    action_id,
-                    action.name.clone(),
-                    command_for_detection,
-                    std::path::PathBuf::from(&working_dir_for_detection),
-                    provider_id,
-                    cancel_rx,
-                );
-            }
-        }
+        wire_run_detection(
+            app,
+            store,
+            registry,
+            execution_id.clone(),
+            branch_id,
+            &action,
+            working_dir_for_detection,
+            provider_id,
+        );
     }
 
     Ok(execution_id)
@@ -475,6 +498,144 @@ pub async fn run_branch_action(
     let store = get_store(&store)?;
     run_branch_action_impl(
         branch_id,
+        action_id,
+        provider,
+        app,
+        store,
+        executor.inner().clone(),
+        registry.inner().clone(),
+    )
+    .await
+}
+
+/// Build the synthetic scope id under which repo-scoped executions are
+/// routed: `repo:{github_repo}` or `repo:{github_repo}:{subpath}`.
+///
+/// The registry, execution events, and running-actions queries all treat
+/// the branch id as an opaque routing string, so repo runs reuse them
+/// untouched by passing this id where branch runs pass a branch id. The
+/// frontend mirrors this format in `repoActionScopeId` (src/lib/commands.ts).
+pub(crate) fn repo_action_scope_id(github_repo: &str, subpath: Option<&str>) -> String {
+    match subpath.filter(|s| !s.is_empty()) {
+        Some(subpath) => format!("repo:{github_repo}:{subpath}"),
+        None => format!("repo:{github_repo}"),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_repo_action_impl(
+    github_repo: String,
+    subpath: Option<String>,
+    action_id: String,
+    provider_id: Option<String>,
+    app: AppHandle,
+    store: Arc<Store>,
+    executor: Arc<ActionExecutor>,
+    registry: Arc<ActionRegistry>,
+) -> Result<String, String> {
+    // Normalize empty subpaths so the context lookup and scope id agree.
+    let subpath = subpath.filter(|s| !s.is_empty());
+
+    // Get the action and validate it belongs to this repo+subpath context
+    let action = store
+        .get_repo_action(&action_id)
+        .map_err(|e| format!("Failed to get action: {e}"))?
+        .ok_or_else(|| "Action not found".to_string())?;
+
+    let context = store
+        .get_or_create_action_context(&github_repo, subpath.as_deref())
+        .map_err(|e| format!("Failed to get action context: {e}"))?;
+    if action.context_id != context.id {
+        return Err("Action does not belong to this repo/subpath context".to_string());
+    }
+
+    // Repo runs execute against the repo's main local clone; unlike branch
+    // runs there is no worktree or remote-workspace fallback, so the clone
+    // must already exist on disk.
+    let clone_path = crate::paths::clone_path_for(&github_repo)
+        .ok_or_else(|| "Cannot determine clone path (no home directory)".to_string())?;
+    if !clone_path.exists() {
+        return Err(format!(
+            "Repository {github_repo} has not been cloned locally. Clone it before running actions."
+        ));
+    }
+
+    let working_dir_path = match subpath.as_deref() {
+        Some(subpath) => clone_path.join(subpath),
+        None => clone_path,
+    };
+    if !working_dir_path.exists() {
+        return Err(format!(
+            "Path {} does not exist in the local clone",
+            working_dir_path.to_string_lossy()
+        ));
+    }
+    let working_dir = working_dir_path.to_string_lossy().to_string();
+
+    let scope_id = repo_action_scope_id(&github_repo, subpath.as_deref());
+
+    let listener = Arc::new(TauriExecutionListener::new(
+        app.clone(),
+        scope_id.clone(),
+        action.id.clone(),
+        action.name.clone(),
+        action.action_type.as_str().to_string(),
+        Arc::clone(&registry),
+    ));
+
+    // Auto-commit is always stripped for repo runs: the executor would
+    // commit into the working dir, which here is the user's default-branch
+    // checkout rather than a disposable worktree.
+    let metadata = ActionMetadata {
+        action_id: action.id.clone(),
+        action_name: action.name.clone(),
+        auto_commit: false,
+    };
+
+    let execution_id = executor
+        .execute(
+            action.command.clone(),
+            working_dir.clone(),
+            metadata,
+            listener,
+        )
+        .await
+        .map_err(|e| format!("Failed to execute action: {e}"))?;
+
+    // --- Run detection wiring (only for Run actions) ---
+    if matches!(action.action_type, ActionType::Run) {
+        wire_run_detection(
+            app,
+            store,
+            registry,
+            execution_id.clone(),
+            scope_id,
+            &action,
+            working_dir,
+            provider_id,
+        );
+    }
+
+    Ok(execution_id)
+}
+
+/// Run a repo-scoped action against the repo's local clone.
+#[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
+pub async fn run_repo_action(
+    github_repo: String,
+    subpath: Option<String>,
+    action_id: String,
+    provider: Option<String>,
+    app: AppHandle,
+    store: State<'_, Mutex<Option<Arc<Store>>>>,
+    executor: State<'_, Arc<ActionExecutor>>,
+    registry: State<'_, Arc<ActionRegistry>>,
+) -> Result<String, String> {
+    let store = get_store(&store)?;
+    run_repo_action_impl(
+        github_repo,
+        subpath,
         action_id,
         provider,
         app,
@@ -826,4 +987,26 @@ pub async fn update_run_detection_mode(
 ) -> Result<(), String> {
     let store = get_store(&store)?;
     update_run_detection_mode_impl(store, action_id, mode)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repo_action_scope_id_includes_subpath_when_present() {
+        assert_eq!(
+            repo_action_scope_id("block/builderbot", Some("apps/staged")),
+            "repo:block/builderbot:apps/staged"
+        );
+        assert_eq!(
+            repo_action_scope_id("block/goose", None),
+            "repo:block/goose"
+        );
+        // Empty subpaths normalize to the no-subpath form.
+        assert_eq!(
+            repo_action_scope_id("block/goose", Some("")),
+            "repo:block/goose"
+        );
+    }
 }

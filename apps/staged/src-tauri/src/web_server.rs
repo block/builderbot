@@ -2231,6 +2231,25 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             .await?;
             Ok(serde_json::to_value(execution_id).unwrap())
         }
+        "run_repo_action" => {
+            let store = get_store(store_mutex)?;
+            let github_repo: String = arg(&args, "githubRepo")?;
+            let subpath: Option<String> = opt_arg(&args, "subpath")?;
+            let action_id: String = arg(&args, "actionId")?;
+            let provider: Option<String> = opt_arg(&args, "provider")?;
+            let execution_id = crate::actions::commands::run_repo_action_impl(
+                github_repo,
+                subpath,
+                action_id,
+                provider,
+                app_handle.clone(),
+                store,
+                Arc::clone(action_executor),
+                Arc::clone(action_registry),
+            )
+            .await?;
+            Ok(serde_json::to_value(execution_id).unwrap())
+        }
         "stop_branch_action" => {
             let execution_id: String = arg(&args, "executionId")?;
             crate::actions::commands::stop_branch_action_impl(execution_id, action_executor)?;

@@ -23,12 +23,21 @@ function rect(partial: Partial<DOMRect>): DOMRect {
 
 const viewerRect = rect({ top: 0, left: 0, width: 2400 });
 const anchorLineRect = rect({ top: 300, bottom: 320 });
+const EDITOR_HEIGHT = 120;
+const PANE_HORIZONTAL_PADDING = 12;
 
 describe('buildRangeCommentEditorLayout', () => {
   it('spans the pane minus padding when the pane is narrow', () => {
     const paneRect = rect({ top: 0, bottom: 800, left: 0, width: 500 });
-    const layout = buildRangeCommentEditorLayout(viewerRect, paneRect, anchorLineRect, 'below');
-    expect(layout.width).toBe(500 - 24);
+    const layout = buildRangeCommentEditorLayout(
+      viewerRect,
+      paneRect,
+      anchorLineRect,
+      'below',
+      EDITOR_HEIGHT,
+      PANE_HORIZONTAL_PADDING
+    );
+    expect(layout.width).toBe(500 - 2 * PANE_HORIZONTAL_PADDING);
   });
 
   it('clamps to MAX_COMMENT_EDITOR_WIDTH on a wide pane', () => {
@@ -41,8 +50,15 @@ describe('buildRangeCommentEditorLayout', () => {
 describe('buildLineCommentEditorLayout', () => {
   it('spans the pane minus padding when the pane is narrow', () => {
     const paneRect = rect({ top: 0, bottom: 800, left: 0, width: 500 });
-    const layout = buildLineCommentEditorLayout(viewerRect, paneRect, anchorLineRect, 'below');
-    expect(layout.width).toBe(500 - 24);
+    const layout = buildLineCommentEditorLayout(
+      viewerRect,
+      paneRect,
+      anchorLineRect,
+      'below',
+      EDITOR_HEIGHT,
+      PANE_HORIZONTAL_PADDING
+    );
+    expect(layout.width).toBe(500 - 2 * PANE_HORIZONTAL_PADDING);
   });
 
   it('clamps to MAX_COMMENT_EDITOR_WIDTH on a wide pane', () => {

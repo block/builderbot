@@ -222,10 +222,10 @@ fn pending_completion_effect(
     status: &str,
     load_messages: impl FnOnce() -> Vec<SessionMessage>,
 ) -> Option<(&'static str, CompletionEffect)> {
-    if status != SessionStatus::Completed.as_str() || session.completion_effects_at.is_some() {
-        return None;
-    }
-    if session.pipeline.is_none() {
+    if status != SessionStatus::Completed.as_str()
+        || session.completion_effects_at.is_some()
+        || session.pipeline.is_none()
+    {
         return None;
     }
     let kind = crate::session_commands::infer_branch_resume_session_type(&session.prompt)?;

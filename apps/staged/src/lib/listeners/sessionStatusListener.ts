@@ -13,7 +13,13 @@
  * of truth, and this module hydrates the registry from the
  * `get_active_sessions` snapshot (on startup, on WebSocket reconnect via
  * transport.ts, and on the page-lifecycle `cache-stale` resume signal), then
- * applies `session-status-changed` deltas on top.
+ * applies `session-status-changed` deltas on top. Sessions the snapshot
+ * proves dead are swept, and a swept session still rendering a pr/push
+ * workflow chip is reconciled against its persisted terminal status — a
+ * client that was offline through the whole completion missed both the
+ * domain event and the terminal event, so the chip would otherwise stay
+ * stuck in "Creating PR…" / "Pushing…". Unread state is the only client-local
+ * busy-state signal left untouched.
  *
  * Completion outcomes are parsed and persisted by the backend at the terminal
  * transition (PR number, cleared PR status) and arrive as `pr-created` /
@@ -139,6 +145,10 @@ async function handleSessionStatusChanged(payload: SessionStatusPayload): Promis
  * gating as the live `running` event: running, resolved project, not an
  * auto review. Queued sessions register when their own running event
  * arrives. Unread state is per-device UX state and is left untouched.
+ *
+ * Swept sessions that a workflow store is still rendering as in-progress are
+ * reconciled against their persisted status once the snapshot window closes
+ * (see `reconcileSweptWorkflowSession`).
  */
 export async function hydrateActiveSessions(): Promise<void> {
   // Anything that happens while the fetch is in flight is newer than the
@@ -147,6 +157,7 @@ export async function hydrateActiveSessions(): Promise<void> {
   // delta was processed mid-fetch must not be re-registered from the
   // snapshot's stale "running" claim.
   const fetchStartedAt = Date.now();
+  const sweptWorkflows: SweptWorkflowSession[] = [];
   hydrationFetchesInFlight++;
   try {
     let active: ActiveSessionInfo[];
@@ -161,6 +172,14 @@ export async function hydrateActiveSessions(): Promise<void> {
     for (const sessionId of sessionRegistry.getAllSessionIds()) {
       const registeredAt = sessionRegistry.getMetadata(sessionId)?.timestamp ?? 0;
       if (!activeIds.has(sessionId) && registeredAt < fetchStartedAt) {
+        // Collect before cleanupSession, which destroys the registry metadata
+        // the store lookups resolve the branch through. Both lookups only
+        // answer for their own session id in its in-progress state, so
+        // settled chips are never collected.
+        const prBranchId = prStateStore.getBranchIdForSession(sessionId);
+        if (prBranchId) sweptWorkflows.push({ sessionId, kind: 'pr', branchId: prBranchId });
+        const pushBranchId = pushStateStore.getBranchIdForSession(sessionId);
+        if (pushBranchId) sweptWorkflows.push({ sessionId, kind: 'push', branchId: pushBranchId });
         sessionRegistry.cleanupSession(sessionId);
       }
     }
@@ -182,6 +201,90 @@ export async function hydrateActiveSessions(): Promise<void> {
     hydrationFetchesInFlight--;
     if (hydrationFetchesInFlight === 0) {
       terminalWhileFetching.clear();
+    }
+  }
+
+  // Deliberately outside the in-flight window: the counter and the
+  // `terminalWhileFetching` guard cover the snapshot fetch/apply only, and
+  // these lookups must not extend it. Awaited so callers (and tests) can
+  // observe the reconciliation.
+  await Promise.all(sweptWorkflows.map(reconcileSweptWorkflowSession));
+}
+
+interface SweptWorkflowSession {
+  sessionId: string;
+  kind: 'pr' | 'push';
+  branchId: string;
+}
+
+/**
+ * Heal a pr/push workflow chip whose session the sweep just proved dead.
+ *
+ * A client offline through a pipeline session's entire completion misses both
+ * the `pr-created` / `push-completed` domain event and the terminal
+ * `session-status-changed` event, so its chip is still rendering
+ * "Creating PR…" / "Pushing…" for a session that finished long ago. The
+ * delta-path reconcilers can't be reused here: they read the ordered event
+ * stream, so `handlePrCompletion` would render "no PR URL was found" for a PR
+ * that actually succeeded.
+ *
+ * Instead, look up the session's persisted status (one `getSession` per
+ * genuinely stuck chip — normally zero) and, on `completed`, drop the stale
+ * workflow state rather than re-deriving an outcome: the backend persisted
+ * the real one at the terminal transition, so the branch row drives the chip
+ * (PR number → created, none → idle) and the push chip returns to its
+ * git-state-derived affordance. `error` / `cancelled` are unambiguous and
+ * render the same copy as the delta path.
+ *
+ * Race safety comes from re-checking the tracked session id after the await:
+ * a terminal delta clears it, and a relaunch replaces it — either way this
+ * reconciliation is stale and skips. Overlapping hydrations can't
+ * double-reconcile, since the first sweep removes the registry entry the
+ * second's collection step resolves the branch through.
+ */
+async function reconcileSweptWorkflowSession({
+  sessionId,
+  kind,
+  branchId,
+}: SweptWorkflowSession): Promise<void> {
+  let status: SessionStatus | null = null;
+  try {
+    status = (await commands.getSession(sessionId))?.status ?? null;
+  } catch (e) {
+    console.error('Failed to look up swept workflow session:', sessionId, e);
+  }
+
+  const store = kind === 'pr' ? prStateStore : pushStateStore;
+  if (store.getSessionId(branchId) !== sessionId) return;
+
+  // The backend resumed it between the snapshot and this lookup — leave the
+  // chip alone; its running event re-registers the session.
+  if (status === 'running' || status === 'queued') return;
+
+  if (kind === 'pr') {
+    if (status === 'completed') {
+      prStateStore.clearPrState(branchId);
+    } else if (status) {
+      handlePrCompletion(branchId, status);
+      prStateStore.clearSessionTracking(branchId);
+    } else {
+      prStateStore.setPrError(branchId, 'Lost track of PR creation session.');
+      prStateStore.clearSessionTracking(branchId);
+    }
+  } else {
+    if (status === 'completed') {
+      // No `done` flash: this completion may be arbitrarily old, and the
+      // outcome was already classified and persisted server-side.
+      pushStateStore.clearPushState(branchId);
+    } else if (status) {
+      pushStateStore.setPushError(
+        branchId,
+        `Push session ${status === 'error' ? 'failed' : 'was cancelled'}.`
+      );
+      pushStateStore.clearSessionTracking(branchId);
+    } else {
+      pushStateStore.setPushError(branchId, 'Lost track of push session.');
+      pushStateStore.clearSessionTracking(branchId);
     }
   }
 }

@@ -45,8 +45,32 @@ function createFakeRegistry(projectStateStore: {
   };
 }
 
+/**
+ * Workflow-store fake. The setters stay plain spies (tests assert on the
+ * calls), but the two lookups the sweep depends on are backed by a real state
+ * map so their validating semantics are exercised faithfully: a branch
+ * resolves only for its own session id while still in the in-progress state.
+ */
+function createFakeWorkflowStore(
+  registry: ReturnType<typeof createFakeRegistry>,
+  inProgressState: 'creating' | 'pushing'
+) {
+  const states = new Map<string, { state: string; sessionId: string | null }>();
+  return {
+    states,
+    getBranchIdForSession: vi.fn((sessionId: string) => {
+      const branchId = registry.getBranchId(sessionId);
+      if (!branchId) return null;
+      const entry = states.get(branchId);
+      return entry?.sessionId === sessionId && entry.state === inProgressState ? branchId : null;
+    }),
+    getSessionId: vi.fn((branchId: string) => states.get(branchId)?.sessionId ?? null),
+  };
+}
+
 describe('sessionStatusListener busy-state hydration', () => {
   let getActiveSessions: ReturnType<typeof vi.fn>;
+  let getSession: ReturnType<typeof vi.fn>;
   let invalidateBranchTimeline: ReturnType<typeof vi.fn>;
   let getFreshSessionMessages: ReturnType<typeof vi.fn>;
   let updateBranchPr: ReturnType<typeof vi.fn>;
@@ -60,13 +84,14 @@ describe('sessionStatusListener busy-state hydration', () => {
     removeRunningSession: Mock<(projectId: string, sessionId: string) => void>;
     markAsUnread: ReturnType<typeof vi.fn>;
   };
-  let prStateStore: {
+  let prStateStore: ReturnType<typeof createFakeWorkflowStore> & {
     clearSessionTracking: ReturnType<typeof vi.fn>;
     setPrCreated: ReturnType<typeof vi.fn>;
     setPrError: ReturnType<typeof vi.fn>;
+    clearPrState: ReturnType<typeof vi.fn>;
     getPrState: ReturnType<typeof vi.fn>;
   };
-  let pushStateStore: {
+  let pushStateStore: ReturnType<typeof createFakeWorkflowStore> & {
     clearSessionTracking: ReturnType<typeof vi.fn>;
     markQueuedPushStarted: ReturnType<typeof vi.fn>;
     setPushDone: ReturnType<typeof vi.fn>;
@@ -81,6 +106,7 @@ describe('sessionStatusListener busy-state hydration', () => {
     vi.useFakeTimers({ now: 1_000 });
 
     getActiveSessions = vi.fn().mockResolvedValue([]);
+    getSession = vi.fn().mockResolvedValue(null);
     invalidateBranchTimeline = vi.fn();
     getFreshSessionMessages = vi.fn().mockResolvedValue([]);
     updateBranchPr = vi.fn().mockResolvedValue(undefined);
@@ -97,13 +123,17 @@ describe('sessionStatusListener busy-state hydration', () => {
       removeRunningSession: vi.fn<(projectId: string, sessionId: string) => void>(),
       markAsUnread: vi.fn(),
     };
+    sessionRegistry = createFakeRegistry(projectStateStore);
     prStateStore = {
+      ...createFakeWorkflowStore(sessionRegistry, 'creating'),
       clearSessionTracking: vi.fn(),
       setPrCreated: vi.fn(),
       setPrError: vi.fn(),
+      clearPrState: vi.fn(),
       getPrState: vi.fn().mockReturnValue(undefined),
     };
     pushStateStore = {
+      ...createFakeWorkflowStore(sessionRegistry, 'pushing'),
       clearSessionTracking: vi.fn(),
       markQueuedPushStarted: vi.fn(),
       setPushDone: vi.fn(),
@@ -111,13 +141,12 @@ describe('sessionStatusListener busy-state hydration', () => {
       clearPushState: vi.fn(),
       getPushState: vi.fn().mockReturnValue(undefined),
     };
-    sessionRegistry = createFakeRegistry(projectStateStore);
 
     vi.doMock('../transport', () => ({ isTauri: true, listenToEvent }));
     vi.doMock('../commands', () => ({
       getActiveSessions,
       invalidateBranchTimeline,
-      getSession: vi.fn().mockResolvedValue(null),
+      getSession,
       getFreshSessionMessages,
       updateBranchPr,
       refreshPrStatus,
@@ -435,6 +464,166 @@ describe('sessionStatusListener busy-state hydration', () => {
     });
     await vi.waitFor(() => expect(sessionRegistry.cleanupSession).toHaveBeenCalledWith('delta-1'));
     expect(invalidateBranchTimeline).toHaveBeenCalledWith('branch-1');
+  });
+
+  // -------------------------------------------------------------------------
+  // Swept workflow chips: a client offline through a pipeline session's whole
+  // completion missed both the domain event and the terminal event, so the
+  // sweep reconciles its chip against the session's persisted status.
+  // -------------------------------------------------------------------------
+
+  describe('swept workflow reconciliation', () => {
+    /** A pipeline session the snapshot will no longer report, chip still in progress. */
+    function trackWorkflowSession(kind: 'pr' | 'push', sessionId: string, branchId = 'branch-1') {
+      sessionRegistry.sessions.set(sessionId, {
+        sessionId,
+        projectId: 'project-1',
+        branchId,
+        type: kind,
+        timestamp: 500,
+      });
+      const store = kind === 'pr' ? prStateStore : pushStateStore;
+      store.states.set(branchId, { state: kind === 'pr' ? 'creating' : 'pushing', sessionId });
+    }
+
+    async function hydrate() {
+      const { hydrateActiveSessions } = await import('./sessionStatusListener');
+      await hydrateActiveSessions();
+    }
+
+    it('clears a swept pr chip whose session completed, letting the branch row drive it', async () => {
+      trackWorkflowSession('pr', 'pr-1');
+      getSession.mockResolvedValue({ id: 'pr-1', status: 'completed' });
+
+      await hydrate();
+
+      expect(getSession).toHaveBeenCalledWith('pr-1');
+      // Not `setPrError`: the client missed `pr-created`, but the backend
+      // persisted the PR number — a false "no PR URL found" would stick.
+      expect(prStateStore.clearPrState).toHaveBeenCalledWith('branch-1');
+      expect(prStateStore.setPrError).not.toHaveBeenCalled();
+      expect(sessionRegistry.cleanupSession).toHaveBeenCalledWith('pr-1');
+    });
+
+    it('renders the delta-path error copy for a swept pr session that failed', async () => {
+      trackWorkflowSession('pr', 'pr-1');
+      getSession.mockResolvedValue({ id: 'pr-1', status: 'error' });
+
+      await hydrate();
+
+      expect(prStateStore.setPrError).toHaveBeenCalledWith(
+        'branch-1',
+        'PR creation session failed.'
+      );
+      expect(prStateStore.clearSessionTracking).toHaveBeenCalledWith('branch-1');
+      expect(prStateStore.clearPrState).not.toHaveBeenCalled();
+    });
+
+    it('clears a swept push chip whose session completed without a done flash', async () => {
+      trackWorkflowSession('push', 'push-1');
+      getSession.mockResolvedValue({ id: 'push-1', status: 'completed' });
+
+      await hydrate();
+
+      expect(pushStateStore.clearPushState).toHaveBeenCalledWith('branch-1');
+      expect(pushStateStore.setPushDone).not.toHaveBeenCalled();
+      expect(pushStateStore.setPushError).not.toHaveBeenCalled();
+    });
+
+    it('renders the cancellation for a swept push session', async () => {
+      trackWorkflowSession('push', 'push-1');
+      getSession.mockResolvedValue({ id: 'push-1', status: 'cancelled' });
+
+      await hydrate();
+
+      expect(pushStateStore.setPushError).toHaveBeenCalledWith(
+        'branch-1',
+        'Push session was cancelled.'
+      );
+      expect(pushStateStore.clearSessionTracking).toHaveBeenCalledWith('branch-1');
+      expect(pushStateStore.clearPushState).not.toHaveBeenCalled();
+    });
+
+    it('errors out a swept pr chip when the session lookup fails', async () => {
+      trackWorkflowSession('pr', 'pr-1');
+      getSession.mockRejectedValue(new Error('store not ready'));
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      await hydrate();
+
+      expect(prStateStore.setPrError).toHaveBeenCalledWith(
+        'branch-1',
+        'Lost track of PR creation session.'
+      );
+      expect(prStateStore.clearSessionTracking).toHaveBeenCalledWith('branch-1');
+      expect(consoleError).toHaveBeenCalled();
+    });
+
+    it('errors out a swept push chip when the session has vanished', async () => {
+      trackWorkflowSession('push', 'push-1');
+      getSession.mockResolvedValue(null);
+
+      await hydrate();
+
+      expect(pushStateStore.setPushError).toHaveBeenCalledWith(
+        'branch-1',
+        'Lost track of push session.'
+      );
+      expect(pushStateStore.clearSessionTracking).toHaveBeenCalledWith('branch-1');
+    });
+
+    it('leaves the chip alone when the backend resumed the session', async () => {
+      trackWorkflowSession('pr', 'pr-1');
+      getSession.mockResolvedValue({ id: 'pr-1', status: 'running' });
+
+      await hydrate();
+
+      expect(prStateStore.clearPrState).not.toHaveBeenCalled();
+      expect(prStateStore.setPrError).not.toHaveBeenCalled();
+      expect(prStateStore.clearSessionTracking).not.toHaveBeenCalled();
+    });
+
+    it('skips a chip already tracking a different session', async () => {
+      trackWorkflowSession('pr', 'pr-1');
+      // The user relaunched before hydration ran: the chip belongs to pr-2 now.
+      prStateStore.states.set('branch-1', { state: 'creating', sessionId: 'pr-2' });
+
+      await hydrate();
+
+      expect(getSession).not.toHaveBeenCalled();
+      expect(prStateStore.clearPrState).not.toHaveBeenCalled();
+      expect(prStateStore.setPrError).not.toHaveBeenCalled();
+    });
+
+    it('skips a chip relaunched while the session lookup was in flight', async () => {
+      trackWorkflowSession('pr', 'pr-1');
+      getSession.mockImplementation(async () => {
+        prStateStore.states.set('branch-1', { state: 'creating', sessionId: 'pr-2' });
+        return { id: 'pr-1', status: 'completed' };
+      });
+
+      await hydrate();
+
+      expect(prStateStore.clearPrState).not.toHaveBeenCalled();
+      expect(prStateStore.setPrError).not.toHaveBeenCalled();
+    });
+
+    it('ignores swept sessions no workflow chip is tracking', async () => {
+      sessionRegistry.sessions.set('commit-1', {
+        sessionId: 'commit-1',
+        projectId: 'project-1',
+        branchId: 'branch-1',
+        type: 'other',
+        timestamp: 500,
+      });
+
+      await hydrate();
+
+      expect(getSession).not.toHaveBeenCalled();
+      expect(prStateStore.setPrError).not.toHaveBeenCalled();
+      expect(pushStateStore.setPushError).not.toHaveBeenCalled();
+      expect(sessionRegistry.cleanupSession).toHaveBeenCalledWith('commit-1');
+    });
   });
 
   // -------------------------------------------------------------------------

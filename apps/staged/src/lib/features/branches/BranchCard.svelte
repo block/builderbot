@@ -520,6 +520,30 @@
   let requestedTimelineKey: string | null = null;
   let timelineLoadVersion = 0;
   let revalidationVersion = 0;
+  let gitRefreshVersion = 0;
+
+  /**
+   * Kick off a background git-state refresh (TTL-gated fetch). Fresh state
+   * arrives via the `git-state-updated` event listener below.
+   *
+   * Clear the flag on settle, not just on the event: branches with no workdir
+   * (or a deleted worktree) resolve Ok without emitting. Version-gated so an
+   * older refresh settling can't end the spinner while a newer one — e.g. a
+   * `loadTimeline` re-run overlapping the mount-time hydration refresh — is
+   * still in flight.
+   */
+  function startGitStateRefresh() {
+    const version = ++gitRefreshVersion;
+    refreshingGitState = true;
+    commands
+      .refreshBranchGitState(branch.id)
+      .catch(() => {})
+      .finally(() => {
+        if (version === gitRefreshVersion) {
+          refreshingGitState = false;
+        }
+      });
+  }
 
   function isCurrentTimelineLoad(loadVersion: number, timelineKey: string): boolean {
     return loadVersion === timelineLoadVersion && branchTimelineReadyKey(branch) === timelineKey;
@@ -565,11 +589,7 @@
       void loadTimelineReviewDetails(cached.reviews);
     }
 
-    // Kick off a background git-state refresh (TTL-gated fetch).
-    refreshingGitState = true;
-    commands.refreshBranchGitState(branch.id).catch(() => {
-      refreshingGitState = false;
-    });
+    startGitStateRefresh();
   }
 
   // Synchronously hydrate timeline from cache so isSettingUp is never true
@@ -697,7 +717,10 @@
       if (timeline) {
         timeline = { ...timeline, gitState: payload.gitState };
       }
-      refreshingGitState = false;
+      // `refreshingGitState` is cleared by startGitStateRefresh's settle
+      // handler, not here: an event from an external refresh (e.g. the bulk
+      // refresh on project open) must not end the spinner while this card's
+      // own refresh is still in flight.
     });
 
     return () => {
@@ -799,12 +822,7 @@
       }
     }
 
-    // Kick off a background git-state refresh (TTL-gated fetch).
-    // The result arrives via the `git-state-updated` event listener above.
-    refreshingGitState = true;
-    commands.refreshBranchGitState(branch.id).catch(() => {
-      refreshingGitState = false;
-    });
+    startGitStateRefresh();
   }
 
   function getTimelineReviewDetails(fullReview: TimelineFullReview): TimelineReviewDetails {
@@ -1702,7 +1720,7 @@
         baseBranch={isRemote
           ? (branch.workspaceName ?? formatBaseBranch(branch.baseBranch))
           : formatBaseBranch(branch.baseBranch)}
-        parentAheadCount={refreshingGitState ? 0 : (timeline?.gitState?.base.commitsSinceFork ?? 0)}
+        parentAheadCount={timeline?.gitState?.base.commitsSinceFork ?? 0}
         onRebase={branchCommandDisabledReason
           ? undefined
           : () => startBranchCommandPipeline('rebase')}

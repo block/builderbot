@@ -33,12 +33,21 @@
     refreshingGitState = false,
     fetchError = null,
   }: Props = $props();
+
+  const capsuleTitle = $derived.by(() => {
+    if (!baseBranch || parentAheadCount <= 0) return baseBranch ?? undefined;
+    const behind = `${parentAheadCount} commit${parentAheadCount === 1 ? '' : 's'} behind`;
+    return refreshingGitState
+      ? `${baseBranch} · ${behind} (checking for updates…)`
+      : `${baseBranch} · ${behind}`;
+  });
 </script>
 
 {#snippet capsule()}
-  <span class="branch-capsule" title={baseBranch ?? undefined}>
+  <span class="branch-capsule" title={capsuleTitle}>
     {baseBranch}{#if parentAheadCount > 0}<span
         class="ahead-count"
+        class:provisional={refreshingGitState}
         transition:fade={{ duration: 150 }}
       >
         +{parentAheadCount}</span
@@ -173,6 +182,10 @@
   .ahead-count {
     font-weight: 600;
     color: var(--ui-accent);
+  }
+
+  .ahead-count.provisional {
+    opacity: 0.6;
   }
 
   .branch-warning {

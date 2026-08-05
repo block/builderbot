@@ -12,14 +12,12 @@
   import Pause from '@lucide/svelte/icons/pause';
   import Plus from '@lucide/svelte/icons/plus';
   import Trash2 from '@lucide/svelte/icons/trash-2';
-  import { getWindowSync, listenToEvent } from '../../transport';
+  import { getWindowSync } from '../../transport';
   import type {
     Project,
     ProjectRepo,
     Branch,
     WorkspaceStatus,
-    PrStatusChangedEvent,
-    SessionStatusPayload,
     StoreIncompatibility,
   } from '../../types';
   import * as commands from '../../api/commands';
@@ -31,35 +29,19 @@
   import type { RepoSelection as RepoPickerSelection } from '../../shared/githubUrl';
   import AddRepoModal from './AddRepoModal.svelte';
   import NewProjectModal from './NewProjectModal.svelte';
-  import ProjectsSidebar from './ProjectsSidebar.svelte';
   import SplashScreen from './SplashScreen.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
   import { toast } from 'svelte-sonner';
-  import { setProjects } from './projectsSidebarState.svelte';
   import { workspaceLifecycle } from './workspaceLifecycle.svelte';
+  import { projectActions } from './projectActions.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
-  import { repoBadgeStore } from '../../stores/repoBadges.svelte';
-  import { projectStateStore } from '../../stores/projectState.svelte';
+  import { projectsDataStore } from '../../stores/projectsData.svelte';
   import {
     canDeleteProjectWithoutConfirmation,
     computeSafeToDeleteSignature,
   } from './projectDeleteSafety';
-
-  /**
-   * Merge incoming branches with existing ones, preserving worktreePath when
-   * a stale async response would overwrite an already-populated value with null.
-   */
-  function mergeBranchesPreservingWorktree(existing: Branch[], incoming: Branch[]): Branch[] {
-    return incoming.map((newBranch) => {
-      const prev = existing.find((b) => b.id === newBranch.id);
-      if (prev?.worktreePath && !newBranch.worktreePath) {
-        return { ...newBranch, worktreePath: prev.worktreePath };
-      }
-      return newBranch;
-    });
-  }
 
   interface Props {
     selectedProjectId?: string | null;
@@ -67,28 +49,50 @@
 
   let { selectedProjectId = null }: Props = $props();
 
-  // Data
-  let projects = $state<Project[]>([]);
-  let branchesByProject = $state<Map<string, Branch[]>>(new Map());
-  let reposById = $state<Map<string, ProjectRepo>>(new Map());
+  // Data comes from the shared projectsData store (module-scoped, survives
+  // route changes); this view only owns UI state and view-lifecycle policy.
+  let projects = $derived(projectsDataStore.projects);
+  let branchesByProject = $derived(projectsDataStore.branchesByProject);
+  let reposByProject = $derived(projectsDataStore.reposByProject);
+  let repoCountsByProject = $derived(projectsDataStore.repoCountsByProject);
+  let deletingProjectNames = $derived(projectsDataStore.deletingProjectNames);
 
-  /** Replace all cached repos for a single project with a fresh list. */
-  function replaceProjectRepos(projectId: string, repos: ProjectRepo[]) {
-    const next = new Map(reposById);
-    for (const [id, repo] of next) {
-      if (repo.projectId === projectId) next.delete(id);
+  /** Repos keyed by repo id for ProjectSection's branch.projectRepoId lookups. */
+  let reposById = $derived.by(() => {
+    const map = new Map<string, ProjectRepo>();
+    for (const repos of reposByProject.values()) {
+      for (const repo of repos) map.set(repo.id, repo);
     }
-    for (const repo of repos) next.set(repo.id, repo);
-    reposById = next;
-  }
-  let loading = $state(true);
-  let error = $state<string | null>(null);
-  let loadGeneration = 0;
-  let initialLoadComplete = $state(false);
+    return map;
+  });
+
+  // The store-status check runs before the first ensureLoaded call; hold the
+  // loading state until it settles so the splash screen doesn't flash.
+  let storeCheckPending = $state(true);
+  // The store's `loaded` only covers the project list, so wait for the
+  // selected project's own branches too. Gated on the project still being in
+  // the list: a stale or deleted id must not pin the view in loading forever,
+  // and the "selected project vanished → goHome()" effect below needs
+  // `loading` to clear so it can fire.
+  let selectedProjectPending = $derived(
+    !!selectedProjectId &&
+      projects.some((project) => project.id === selectedProjectId) &&
+      !projectsDataStore.isProjectHydrated(selectedProjectId)
+  );
+  let loading = $derived(storeCheckPending || projectsDataStore.loading || selectedProjectPending);
+  // Store-status/reset failures are view-local; load failures come from the store.
+  let viewError = $state<string | null>(null);
+  let error = $derived(viewError ?? projectsDataStore.error);
+
+  let initialLoadComplete = false;
   let lastSelectedProjectId: string | null = null;
-  let backgroundHydrationCancel: (() => void) | null = null;
+
+  // Startup queued-session drain: once per branch per mount, batched through
+  // the idle queue. Branches that become ready later (worktree setup or
+  // workspace start completing) are drained by workspaceLifecycle itself.
   let queuedSessionDrainCancel: (() => void) | null = null;
-  const queuedSessionDrainBranchIds = new Set<string>();
+  const drainedSessionBranchIds = new Set<string>();
+  const pendingDrainBranchIds = new Set<string>();
 
   // Store health — if non-null the DB needs a reset before we can proceed
   let storeIncompat = $state<StoreIncompatibility | null>(null);
@@ -103,13 +107,13 @@
   let projectTitleElement = $state<HTMLHeadingElement | null>(null);
   let showTopBarProjectName = $state(false);
 
-  // Delete confirmation state
-  let projectToDelete = $state<Project | null>(null);
+  // Delete confirmation state (remove-project confirmation lives in the
+  // shared projectActions module + App-level ProjectDeleteDialog)
   let branchToDelete = $state<{ branch: Branch; project: Project } | null>(null);
   let deletingBranches = $state<Set<string>>(new Set());
-  let deletingProjectNames = $state<Map<string, string>>(new Map());
   // Guards the delete shortcut while the async safe-to-delete check is in flight,
-  // before projectToDelete/deletingProjectNames are set, so a held key only deletes once.
+  // before projectActions.pendingDelete/deletingProjectNames are set, so a held
+  // key only deletes once.
   let deleteShortcutPending = $state(false);
 
   // Setup errors come from the shared workspace lifecycle orchestrator.
@@ -120,25 +124,24 @@
   let detectingProjectIds = $state<Set<string>>(new Set());
 
   onMount(() => {
+    // Backend/window listeners for the shared data (pr-status-changed,
+    // session-status-changed, project-setup-progress, cache-stale) live in
+    // the projectsData store, started once from App.svelte.
     workspaceLifecycle.start({
-      getBranchesByProject: () => branchesByProject,
-      setBranchesByProject: (next) => {
-        branchesByProject = next;
-      },
-      isProjectDeleting: (projectId) => deletingProjectNames.has(projectId),
+      getBranchesByProject: () => projectsDataStore.branchesByProject,
+      setBranchesByProject: (next) => projectsDataStore.setBranchesByProject(next),
+      isProjectDeleting: (projectId) => projectsDataStore.isProjectDeleting(projectId),
     });
     checkStoreAndLoad();
     void projectRunActionsStore.startListening();
 
     const onNewProject = () => handleNewProject();
-    const onCacheStale = () => loadData();
     window.addEventListener('staged:new-project', onNewProject);
-    window.addEventListener('cache-stale', onCacheStale);
     const onDeleteCurrentProject = (event: Event) => handleDeleteCurrentProjectShortcut(event);
     window.addEventListener('staged:delete-current-project', onDeleteCurrentProject);
 
     const unlistenDetection = listenToRepoActionsDetection((event) => {
-      const matchingProjectIds = projects
+      const matchingProjectIds = projectsDataStore.projects
         .filter((p) => p.githubRepo === event.githubRepo && p.subpath === event.subpath)
         .map((p) => p.id);
       if (matchingProjectIds.length === 0) return;
@@ -154,142 +157,10 @@
       detectingProjectIds = next;
     });
 
-    // Listen for backend-driven setup progress events. The backend emits this
-    // after repo creation, after worktree setup, and after prerun actions.
-    // We only refresh display state here — setup itself is owned by the backend.
-    const unlistenProjectRepoAdded = listenToEvent<string>(
-      'project-setup-progress',
-      async (projectId) => {
-        console.log('[ProjectHome] project-setup-progress event for project', projectId);
-        try {
-          const [projectsList, branches, repos] = await Promise.all([
-            commands.listProjects(),
-            commands.listBranchesForProject(projectId),
-            commands.listProjectRepos(projectId),
-          ]);
-          setProjects(projectsList.data);
-          projects = projectsList.data;
-          const mergedBranches = mergeBranchesPreservingWorktree(
-            branchesByProject.get(projectId) || [],
-            branches.data
-          );
-          branchesByProject = new Map(branchesByProject).set(projectId, mergedBranches);
-          commands.invalidateProjectBranchTimelines(mergedBranches.map((b) => b.id));
-          workspaceLifecycle.enqueueInitialSetup(projectId, mergedBranches);
-          replaceProjectRepos(projectId, repos.data);
-          void repoBadgeStore.ensureForRepos(
-            repos.data.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
-          );
-        } catch (e) {
-          console.error('[ProjectHome] Failed to refresh project after setup progress:', e);
-        }
-      }
-    );
-
-    // Listen for PR status changes to update branch state.
-    //
-    // A PR-polling cycle emits one `pr-status-changed` per branch, so a storm
-    // of N branches arrives as N separate events. Rebuilding `branchesByProject`
-    // with a fresh `new Map(...)` per event means N allocations + N derivation
-    // re-runs, which can pile up on the main thread during a project switch.
-    // Buffer the events and apply a single rebuild per frame so a burst
-    // coalesces into one reactive flush without dropping any update.
-    let pendingPrStatusEvents: PrStatusChangedEvent[] = [];
-    let prStatusFlushHandle: number | null = null;
-
-    const flushPrStatusEvents = () => {
-      prStatusFlushHandle = null;
-      if (pendingPrStatusEvents.length === 0) return;
-      const events = pendingPrStatusEvents;
-      pendingPrStatusEvents = [];
-
-      // Apply every buffered event onto one fresh Map. Each event re-scans the
-      // in-progress map, so multiple updates to the same project compound
-      // correctly instead of clobbering one another.
-      const next = new Map(branchesByProject);
-      for (const payload of events) {
-        for (const [projectId, branches] of next) {
-          const branchIndex = branches.findIndex((b) => b.id === payload.branchId);
-          if (branchIndex !== -1) {
-            const existing = branches[branchIndex];
-            // A live `prState` flip (e.g. OPEN → MERGED) is a genuine, user-
-            // visible transition rather than a poller re-confirming the same
-            // value. Flag it so the safe-to-delete effect recomputes promptly
-            // instead of waiting out its idle window (see prStateTransitionPending).
-            if (existing.prState !== payload.prState) {
-              prStateTransitionPending = true;
-            }
-            const updatedBranches = [...branches];
-            updatedBranches[branchIndex] = {
-              ...existing,
-              prState: payload.prState,
-              prChecksStatus: payload.prChecksStatus,
-              prReviewDecision: payload.prReviewDecision,
-              prMergeable: payload.prMergeable,
-              prDraft: payload.prDraft,
-              prHeadSha: payload.prHeadSha,
-              prFetchedAt: payload.prFetchedAt,
-            };
-            next.set(projectId, updatedBranches);
-            break;
-          }
-        }
-      }
-      branchesByProject = next;
-    };
-
-    const unlistenPrStatus = listenToEvent<PrStatusChangedEvent>('pr-status-changed', (payload) => {
-      pendingPrStatusEvents.push(payload);
-      if (prStatusFlushHandle === null) {
-        prStatusFlushHandle = requestAnimationFrame(flushPrStatusEvents);
-      }
-    });
-
-    // Refresh a project's branches when a commit session completes so the
-    // sprout/draft-PR icon flips as soon as the first commit lands.
-    const unlistenSessionStatus = listenToEvent<SessionStatusPayload>(
-      'session-status-changed',
-      async (payload) => {
-        if (payload.status !== 'completed') return;
-        if (payload.sessionType !== 'commit') return;
-        const projectId = payload.projectId;
-        if (!projectId || !branchesByProject.has(projectId)) return;
-        try {
-          const { data: branches, revalidating } = await commands.listBranchesForProject(projectId);
-          branchesByProject = new Map(branchesByProject).set(projectId, branches);
-          if (revalidating) {
-            revalidating
-              .then((fresh) => {
-                branchesByProject = new Map(branchesByProject).set(projectId, fresh);
-              })
-              .catch((e) => {
-                console.error(
-                  `Failed to revalidate branches for project ${projectId} after commit:`,
-                  e
-                );
-              });
-          }
-        } catch (e) {
-          console.error(`Failed to refresh branches for project ${projectId} after commit:`, e);
-        }
-      }
-    );
-
     return () => {
-      loadGeneration++;
       window.removeEventListener('staged:new-project', onNewProject);
-      window.removeEventListener('cache-stale', onCacheStale);
       window.removeEventListener('staged:delete-current-project', onDeleteCurrentProject);
       unlistenDetection();
-      unlistenProjectRepoAdded();
-      unlistenPrStatus();
-      if (prStatusFlushHandle !== null) {
-        cancelAnimationFrame(prStatusFlushHandle);
-        prStatusFlushHandle = null;
-      }
-      pendingPrStatusEvents = [];
-      unlistenSessionStatus();
-      cancelBackgroundHydration();
       cancelQueuedSessionDrain();
       workspaceLifecycle.stop();
       projectRunActionsStore.stopListening();
@@ -297,18 +168,28 @@
   });
 
   async function checkStoreAndLoad() {
-    loading = true;
     try {
       const status = await commands.getStoreStatus();
       if (status) {
         storeIncompat = status;
-        loading = false;
         return;
       }
-      await loadData();
+      // ensureLoaded resolves on the project list alone, so the selected
+      // project's branches are always ours to fetch — on a cold start the
+      // store's idle drip dedupes into this one request.
+      const load = projectsDataStore.ensureLoaded();
+      storeCheckPending = false;
+      await load;
+      lastSelectedProjectId = selectedProjectId;
+      initialLoadComplete = true;
+      if (selectedProjectId) {
+        void projectsDataStore.hydrateProject(selectedProjectId);
+      }
+      void hydrateActionDetection();
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-      loading = false;
+      viewError = e instanceof Error ? e.message : String(e);
+    } finally {
+      storeCheckPending = false;
     }
   }
 
@@ -317,9 +198,10 @@
     try {
       await commands.confirmResetStore();
       storeIncompat = null;
-      await loadData();
+      viewError = null;
+      await projectsDataStore.refresh();
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      viewError = e instanceof Error ? e.message : String(e);
     } finally {
       resetting = false;
     }
@@ -343,32 +225,31 @@
     return () => cancel(handle);
   }
 
-  function cancelBackgroundHydration() {
-    backgroundHydrationCancel?.();
-    backgroundHydrationCancel = null;
-  }
-
   function cancelQueuedSessionDrain() {
     queuedSessionDrainCancel?.();
     queuedSessionDrainCancel = null;
-    queuedSessionDrainBranchIds.clear();
+    pendingDrainBranchIds.clear();
   }
 
-  function scheduleQueuedSessionDrain(branches: Branch[]) {
-    for (const branch of branches) {
-      const isLocalReady = branch.branchType === 'local' && branch.worktreePath;
-      const isRemoteReady = branch.branchType === 'remote' && branch.workspaceStatus === 'running';
-      if (isLocalReady || isRemoteReady) {
-        queuedSessionDrainBranchIds.add(branch.id);
+  function scheduleQueuedSessionDrain(branchMap: Map<string, Branch[]>) {
+    for (const branches of branchMap.values()) {
+      for (const branch of branches) {
+        const isLocalReady = branch.branchType === 'local' && branch.worktreePath;
+        const isRemoteReady =
+          branch.branchType === 'remote' && branch.workspaceStatus === 'running';
+        if ((isLocalReady || isRemoteReady) && !drainedSessionBranchIds.has(branch.id)) {
+          drainedSessionBranchIds.add(branch.id);
+          pendingDrainBranchIds.add(branch.id);
+        }
       }
     }
 
-    if (queuedSessionDrainBranchIds.size === 0 || queuedSessionDrainCancel) return;
+    if (pendingDrainBranchIds.size === 0 || queuedSessionDrainCancel) return;
 
     queuedSessionDrainCancel = scheduleDeferredTask(() => {
       queuedSessionDrainCancel = null;
-      const branchIds = Array.from(queuedSessionDrainBranchIds);
-      queuedSessionDrainBranchIds.clear();
+      const branchIds = Array.from(pendingDrainBranchIds);
+      pendingDrainBranchIds.clear();
       for (const branchId of branchIds) {
         commands.drainQueuedSessions(branchId).catch((e) => {
           console.error('[ProjectHome] Failed to drain queued sessions on startup:', e);
@@ -377,135 +258,31 @@
     }, 3000);
   }
 
-  function applyProjectBranches(
-    projectId: string,
-    branches: Branch[],
-    generation: number,
-    options: { drainQueuedSessions?: boolean } = {}
-  ): Branch[] | null {
-    if (generation !== loadGeneration) return null;
-
-    const mergedBranches = mergeBranchesPreservingWorktree(
-      branchesByProject.get(projectId) || [],
-      branches
-    );
-    branchesByProject = new Map(branchesByProject).set(projectId, mergedBranches);
-    workspaceLifecycle.enqueueInitialSetup(projectId, mergedBranches);
-    projectRunActionsStore
-      .hydrateFromProjectBranches(branchesByProject, {
-        branchIds: mergedBranches.map((b) => b.id),
-      })
-      .catch(console.error);
-
-    if (options.drainQueuedSessions) {
-      scheduleQueuedSessionDrain(mergedBranches);
+  // View-lifecycle side effects wired off the store's branch data — worktree/
+  // workspace setup, the startup queued-session drain, and run-action
+  // hydration. All three dedupe internally, so re-running on every branch map
+  // reassignment is cheap. They stay out of the store deliberately: they are
+  // this view's policies, not properties of the data.
+  $effect(() => {
+    const branchMap = projectsDataStore.branchesByProject;
+    for (const [projectId, branches] of branchMap) {
+      if (branches.length > 0) {
+        workspaceLifecycle.enqueueInitialSetup(projectId, branches);
+      }
     }
+    scheduleQueuedSessionDrain(branchMap);
+    projectRunActionsStore.hydrateFromProjectBranches(branchMap).catch(console.error);
+  });
 
-    return mergedBranches;
-  }
+  let actionDetectionToken = 0;
 
-  function applyProjectRepos(projectId: string, repos: ProjectRepo[], generation: number) {
-    if (generation !== loadGeneration) return;
-    replaceProjectRepos(projectId, repos);
-    void repoBadgeStore.ensureForRepos(
-      repos.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
-    );
-  }
-
-  async function hydrateProject(
-    project: Project,
-    generation: number,
-    options: { drainQueuedSessions?: boolean } = {}
-  ): Promise<Branch[] | null> {
-    const [branchesResult, reposResult] = await Promise.all([
-      commands.listBranchesForProject(project.id),
-      commands.listProjectRepos(project.id),
-    ]);
-    if (generation !== loadGeneration) return null;
-
-    const mergedBranches = applyProjectBranches(project.id, branchesResult.data, generation, {
-      drainQueuedSessions: options.drainQueuedSessions,
-    });
-    applyProjectRepos(project.id, reposResult.data, generation);
-
-    if (branchesResult.revalidating) {
-      branchesResult.revalidating
-        .then((fresh) => {
-          applyProjectBranches(project.id, fresh, generation, {
-            drainQueuedSessions: options.drainQueuedSessions,
-          });
-        })
-        .catch((e) => {
-          console.error(`[ProjectHome] Failed to revalidate branches for '${project.id}':`, e);
-        });
-    }
-
-    if (reposResult.revalidating) {
-      reposResult.revalidating
-        .then((fresh) => applyProjectRepos(project.id, fresh, generation))
-        .catch((e) => {
-          console.error(`[ProjectHome] Failed to revalidate repos for '${project.id}':`, e);
-        });
-    }
-
-    return mergedBranches;
-  }
-
-  async function hydrateAllProjects(projectList: Project[], generation: number) {
-    await Promise.all(
-      projectList.map(async (project) => {
-        try {
-          await hydrateProject(project, generation, { drainQueuedSessions: true });
-        } catch (e) {
-          console.error(`[ProjectHome] Failed to hydrate project '${project.id}':`, e);
-        }
-      })
-    );
-  }
-
-  function scheduleBackgroundHydration(
-    projectList: Project[],
-    foregroundProjectId: string | null,
-    generation: number
-  ) {
-    cancelBackgroundHydration();
-
-    const queue = projectList.filter((project) => project.id !== foregroundProjectId);
-    if (queue.length === 0) return;
-
-    let cancelled = false;
-    let cancelScheduledTask: (() => void) | null = null;
-
-    const hydrateNext = () => {
-      cancelScheduledTask = null;
-      if (cancelled || generation !== loadGeneration) return;
-
-      const project = queue.shift();
-      if (!project) return;
-
-      hydrateProject(project, generation, { drainQueuedSessions: true })
-        .catch((e) => {
-          console.error(`[ProjectHome] Failed to background hydrate project '${project.id}':`, e);
-        })
-        .finally(() => {
-          if (cancelled || generation !== loadGeneration || queue.length === 0) return;
-          cancelScheduledTask = scheduleDeferredTask(hydrateNext, 3000);
-        });
-    };
-
-    cancelScheduledTask = scheduleDeferredTask(hydrateNext, 3000);
-    backgroundHydrationCancel = () => {
-      cancelled = true;
-      cancelScheduledTask?.();
-    };
-  }
-
-  async function hydrateActionDetection(projectList: Project[], generation: number) {
+  async function hydrateActionDetection() {
+    const token = ++actionDetectionToken;
     try {
       const contexts = await commands.listActionContexts();
-      if (generation !== loadGeneration) return;
+      if (token !== actionDetectionToken) return;
       detectingProjectIds = new Set(
-        projectList
+        projectsDataStore.projects
           .filter((project) =>
             contexts.some(
               (context) =>
@@ -521,122 +298,18 @@
     }
   }
 
-  async function hydrateForCurrentSelection(projectId: string | null) {
-    const generation = ++loadGeneration;
-    cancelBackgroundHydration();
-    error = null;
-
-    const projectList = projects;
-    if (projectId) {
-      const project = projectList.find((p) => p.id === projectId);
-      if (!project) return;
-      try {
-        await hydrateProject(project, generation, { drainQueuedSessions: true });
-      } catch (e) {
-        if (generation !== loadGeneration) return;
-        console.error(`[ProjectHome] Failed to hydrate selected project '${project.id}':`, e);
-      }
-      if (generation !== loadGeneration) return;
-      scheduleBackgroundHydration(projectList, projectId, generation);
-    } else {
-      await hydrateAllProjects(projectList, generation);
-    }
-
-    void hydrateActionDetection(projectList, generation);
-  }
-
-  async function loadData() {
-    const generation = ++loadGeneration;
-    initialLoadComplete = false;
-    cancelBackgroundHydration();
-    if (projects.length === 0) {
-      loading = true;
-    }
-    error = null;
-    await repoBadgeStore.loadAll();
-    try {
-      const { data: initialProjectList, revalidating: projectsRevalidating } =
-        await commands.listProjects();
-      if (generation !== loadGeneration) return;
-      await applyProjectList(initialProjectList, generation);
-      loading = false;
-
-      if (projectsRevalidating) {
-        try {
-          const fresh = await projectsRevalidating;
-          if (generation !== loadGeneration) return;
-          await applyProjectList(fresh, generation);
-        } catch (e) {
-          console.error('[ProjectHome] Failed to revalidate project list:', e);
-        }
-      }
-    } catch (e) {
-      if (generation !== loadGeneration) return;
-      error = e instanceof Error ? e.message : String(e);
-    } finally {
-      if (generation === loadGeneration) {
-        loading = false;
-      }
-    }
-  }
-
-  /**
-   * Apply a list of projects fetched from the backend: seed branch/repo maps,
-   * hydrate the selected project first, and background-hydrate the rest.
-   * Called once with cached data and again if SWR revalidation yields fresh data.
-   */
-  async function applyProjectList(projectList: Project[], generation: number) {
-    projects = projectList;
-    setProjects(projectList);
-
-    // Seed maps so project sections can render immediately.
-    const branchMap = new Map<string, Branch[]>();
-    for (const project of projectList) {
-      branchMap.set(project.id, branchesByProject.get(project.id) || []);
-    }
-    branchesByProject = branchMap;
-
-    // Drop cached repos for projects that no longer exist.
-    const projectIds = new Set(projectList.map((p) => p.id));
-    const prunedRepos = new Map<string, ProjectRepo>();
-    for (const [id, repo] of reposById) {
-      if (projectIds.has(repo.projectId)) prunedRepos.set(id, repo);
-    }
-    reposById = prunedRepos;
-
-    cancelBackgroundHydration();
-
-    if (selectedProjectId) {
-      const selectedProject = projectList.find((project) => project.id === selectedProjectId);
-      if (selectedProject) {
-        try {
-          await hydrateProject(selectedProject, generation, { drainQueuedSessions: true });
-        } catch (e) {
-          if (generation !== loadGeneration) return;
-          console.error(
-            `[ProjectHome] Failed to hydrate selected project '${selectedProject.id}':`,
-            e
-          );
-        }
-      }
-      if (generation !== loadGeneration) return;
-      scheduleBackgroundHydration(projectList, selectedProjectId, generation);
-    } else {
-      await hydrateAllProjects(projectList, generation);
-    }
-
-    if (generation !== loadGeneration) return;
-    lastSelectedProjectId = selectedProjectId;
-    initialLoadComplete = true;
-    void hydrateActionDetection(projectList, generation);
-  }
-
   $effect(() => {
     const projectId = selectedProjectId;
     if (!initialLoadComplete) return;
     if (projectId === lastSelectedProjectId) return;
     lastSelectedProjectId = projectId;
-    void hydrateForCurrentSelection(projectId);
+    // Foreground-refresh the newly selected project; ensureLoaded's
+    // background revalidation drips the rest through the idle queue.
+    void projectsDataStore.ensureLoaded();
+    if (projectId) {
+      void projectsDataStore.hydrateProject(projectId);
+    }
+    void hydrateActionDetection();
   });
 
   let visibleProjects = $derived(
@@ -684,18 +357,6 @@
   let selectedProjectDetecting = $derived(
     selectedProject ? detectingProjectIds.has(selectedProject.id) : false
   );
-  let repoCountsByProject = $derived(
-    new Map(
-      projects.map((project) => {
-        let knownCount = 0;
-        for (const repo of reposById.values()) {
-          if (repo.projectId === project.id) knownCount++;
-        }
-        const fallbackCount = project.githubRepo ? 1 : 0;
-        return [project.id, knownCount > 0 ? knownCount : fallbackCount] as const;
-      })
-    )
-  );
   // Track which projects are safe to delete (for button styling)
   let safeToDeleteProjects = $state<Set<string>>(new Set());
   let selectedProjectSafeToDelete = $derived(
@@ -711,22 +372,11 @@
   let selectedProjectExcludeRepos = $derived(
     selectedProject
       ? new Set(
-          [...reposById.values()]
-            .filter((repo) => repo.projectId === selectedProject.id)
-            .map((repo) => `${repo.githubRepo}\x00${repo.subpath ?? ''}`)
+          (reposByProject.get(selectedProject.id) ?? []).map(
+            (repo) => `${repo.githubRepo}\x00${repo.subpath ?? ''}`
+          )
         )
       : new Set<string>()
-  );
-  let reposByProject = $derived(
-    new Map(
-      projects.map((project) => {
-        const repos: ProjectRepo[] = [];
-        for (const repo of reposById.values()) {
-          if (repo.projectId === project.id) repos.push(repo);
-        }
-        return [project.id, repos] as const;
-      })
-    )
   );
 
   // Update safe-to-delete status when branches change.
@@ -739,18 +389,34 @@
   // depends on are unchanged; deduping on the signature keeps the expensive
   // per-branch git work from re-firing on every reassignment.
   let lastSafeSignature: string | null = null;
-  // Set by `flushPrStatusEvents` when a buffered `pr-status-changed` actually
-  // flips a branch's `prState` (e.g. → MERGED). A live transition while parked
-  // on a project is not a switch-time hydration storm, so the recompute below
-  // takes a prompt (next-tick) path instead of the idle window — keeping the
-  // delete button in step with the branch card's badge. Consumed (reset) by the
-  // effect once it acts on it.
+  // Set when a branch's `prState` actually flips (e.g. OPEN → MERGED) between
+  // runs — with the pr-status-changed listener living in the projectsData
+  // store, the transition is detected here by diffing against the previous
+  // run. A live transition while parked on a project is not a switch-time
+  // hydration storm, so the recompute below takes a prompt (next-tick) path
+  // instead of the idle window — keeping the delete button in step with the
+  // branch card's badge. Consumed (reset) by the effect once it acts on it.
   let prStateTransitionPending = false;
+  let lastKnownPrStates = new Map<string, Branch['prState']>();
   $effect(() => {
     // Read reactive deps synchronously so the effect re-subscribes correctly.
     const projectsSnapshot = visibleProjects;
     const branches = branchesByProject;
     const repoCounts = repoCountsByProject;
+
+    // Diff prState across all branches (not just visible ones) so a flip
+    // elsewhere still arms the fast path for the next genuine recompute.
+    const nextPrStates = new Map<string, Branch['prState']>();
+    for (const branchList of branches.values()) {
+      for (const b of branchList) {
+        nextPrStates.set(b.id, b.prState);
+        const previous = lastKnownPrStates.get(b.id);
+        if (previous !== undefined && previous !== b.prState) {
+          prStateTransitionPending = true;
+        }
+      }
+    }
+    lastKnownPrStates = nextPrStates;
 
     const signature = computeSafeToDeleteSignature(projectsSnapshot, branches, repoCounts);
     if (signature === lastSafeSignature) {
@@ -846,50 +512,12 @@
     showNewProjectModal = true;
   }
 
-  function handleMarkProjectUnread(project: Project) {
-    if (deletingProjectNames.has(project.id)) return;
-    projectStateStore.markAsUnread(project.id);
-  }
-
-  async function handleProjectCreated(project: Project) {
-    if (!projects.some((p) => p.id === project.id)) {
-      projects = [...projects, project];
-    }
+  function handleProjectCreated(project: Project) {
+    // The store registers the project synchronously and hydrates branches and
+    // repos in the background, so the modal closes instantly.
+    projectsDataStore.projectCreated(project);
     showNewProjectModal = false;
     selectProject(project.id);
-    // Hydrate branches and repos in the background so the modal closes instantly
-    try {
-      const [branches, repos] = await Promise.all([
-        commands.listBranchesForProject(project.id),
-        commands.listProjectRepos(project.id),
-      ]);
-      branchesByProject = new Map(branchesByProject).set(project.id, branches.data);
-      workspaceLifecycle.enqueueInitialSetup(project.id, branches.data);
-      replaceProjectRepos(project.id, repos.data);
-    } catch (e) {
-      console.error('[ProjectHome] Failed to hydrate newly created project:', e);
-    }
-  }
-
-  async function handleDeleteProjectRequest(project: Project) {
-    const branches = branchesByProject.get(project.id) || [];
-    const repoCount = repoCountsByProject.get(project.id) || 0;
-
-    const isSafeToDelete = await canDeleteProjectWithoutConfirmation({
-      branches,
-      repoCount,
-      hasUnpushedCommits: commands.hasUnpushedCommits,
-      onCheckError: (e) => console.error('Failed to check unpushed commits:', e),
-    });
-
-    if (isSafeToDelete) {
-      // Safe to delete without confirmation
-      projectToDelete = project;
-      await confirmDeleteProject();
-    } else {
-      // Show confirmation dialog
-      projectToDelete = project;
-    }
   }
 
   function handleDeleteCurrentProjectShortcut(event: Event) {
@@ -897,7 +525,7 @@
       !selectedProject ||
       deleteShortcutPending ||
       selectedProjectDeleting ||
-      projectToDelete ||
+      projectActions.pendingDelete ||
       branchToDelete ||
       showNewProjectModal ||
       showAddRepoModal
@@ -907,67 +535,9 @@
 
     event.preventDefault();
     deleteShortcutPending = true;
-    void handleDeleteProjectRequest(selectedProject).finally(() => {
+    void projectActions.requestRemoveProject(selectedProject).finally(() => {
       deleteShortcutPending = false;
     });
-  }
-
-  async function confirmDeleteProject() {
-    if (!projectToDelete) return;
-    const id = projectToDelete.id;
-    const name = projectDisplayName(projectToDelete);
-    const branchesToClear = branchesByProject.get(id) || [];
-    projectToDelete = null;
-    deletingProjectNames = new Map(deletingProjectNames).set(id, name);
-    window.dispatchEvent(
-      new CustomEvent('staged:project-delete-start', {
-        detail: { projectId: id, name },
-      })
-    );
-
-    // Navigate away immediately so the user doesn't have to wait for backend deletion.
-    // Skip projects that are already being deleted.
-    const currentIndex = projects.findIndex((p) => p.id === id);
-    const alive = projects.filter((p) => p.id !== id && !deletingProjectNames.has(p.id));
-    if (alive.length > 0) {
-      // Prefer the next project after the current one; fall back to the closest earlier one
-      const next = alive.find((p) => projects.indexOf(p) > currentIndex) ?? alive[alive.length - 1];
-      selectProject(next.id);
-    } else {
-      goHome();
-    }
-
-    try {
-      await commands.deleteProject(id);
-      projectStateStore.markAsRead(id);
-      projects = projects.filter((p) => p.id !== id);
-      setProjects(projects);
-      const nextBranches = new Map(branchesByProject);
-      nextBranches.delete(id);
-      branchesByProject = nextBranches;
-      const nextRepos = new Map(reposById);
-      for (const [repoId, repo] of nextRepos) {
-        if (repo.projectId === id) nextRepos.delete(repoId);
-      }
-      reposById = nextRepos;
-      commands.invalidateProjectBranchTimelines(branchesToClear.map((b) => b.id));
-      for (const branch of branchesToClear) {
-        workspaceLifecycle.clearBranchState(branch.id);
-      }
-    } catch (e) {
-      console.error('Failed to delete project:', e);
-      const message = e instanceof Error ? e.message : String(e);
-      toast.error('Unable to delete project', { description: message });
-    } finally {
-      const next = new Map(deletingProjectNames);
-      next.delete(id);
-      deletingProjectNames = next;
-      window.dispatchEvent(
-        new CustomEvent('staged:project-delete-end', {
-          detail: { projectId: id },
-        })
-      );
-    }
   }
 
   // ── Branch actions ──
@@ -988,24 +558,7 @@
         const noteTitle = `PR #${selection.prNumber}: ${selection.prTitle}`;
         await commands.createProjectNote(projectId, noteTitle, selection.prBody ?? '');
       }
-      const [projectsList, branches, repos] = await Promise.all([
-        commands.listProjects(),
-        commands.listBranchesForProject(projectId),
-        commands.listProjectRepos(projectId),
-      ]);
-      setProjects(projectsList.data);
-      projects = projectsList.data;
-      const mergedBranches = mergeBranchesPreservingWorktree(
-        branchesByProject.get(projectId) || [],
-        branches.data
-      );
-      branchesByProject = new Map(branchesByProject).set(projectId, mergedBranches);
-      commands.invalidateProjectBranchTimelines(mergedBranches.map((b) => b.id));
-      workspaceLifecycle.enqueueInitialSetup(projectId, mergedBranches);
-      replaceProjectRepos(projectId, repos.data);
-      void repoBadgeStore.ensureForRepos(
-        repos.data.map((r) => ({ githubRepo: r.githubRepo, subpath: r.subpath }))
-      );
+      await projectsDataStore.refreshProject(projectId);
     } catch (e) {
       console.error('Failed to add repo:', e);
       const message = e instanceof Error ? e.message : String(e);
@@ -1103,22 +656,16 @@
     try {
       if (branch.projectRepoId) {
         await commands.removeProjectRepo(branch.projectId, branch.projectRepoId);
-        const [projectsList, branches, repos] = await Promise.all([
-          commands.listProjects(),
-          commands.listBranchesForProject(branch.projectId),
-          commands.listProjectRepos(branch.projectId),
-        ]);
-        setProjects(projectsList.data);
-        projects = projectsList.data;
-        branchesByProject = new Map(branchesByProject).set(branch.projectId, branches.data);
-        replaceProjectRepos(branch.projectId, repos.data);
+        await projectsDataStore.refreshProject(branch.projectId);
       } else {
         await commands.deleteBranch(branch.id);
         // Fallback for legacy branches without repo linkage
         const existing = branchesByProject.get(branch.projectId) || [];
-        branchesByProject = new Map(branchesByProject).set(
-          branch.projectId,
-          existing.filter((b) => b.id !== branch.id)
+        projectsDataStore.setBranchesByProject(
+          new Map(branchesByProject).set(
+            branch.projectId,
+            existing.filter((b) => b.id !== branch.id)
+          )
         );
       }
       commands.invalidateBranchTimeline(branch.id);
@@ -1136,9 +683,11 @@
     try {
       const updated = await commands.renameBranch(branchId, branchName);
       const existing = branchesByProject.get(projectId) || [];
-      branchesByProject = new Map(branchesByProject).set(
-        projectId,
-        existing.map((b) => (b.id === updated.id ? updated : b))
+      projectsDataStore.setBranchesByProject(
+        new Map(branchesByProject).set(
+          projectId,
+          existing.map((b) => (b.id === updated.id ? updated : b))
+        )
       );
     } catch (e) {
       console.error('Failed to rename branch:', e);
@@ -1243,7 +792,7 @@
         selectedProjectSafeToDelete && 'border border-destructive text-destructive',
       ]}
       title="Remove project"
-      onclick={() => handleDeleteProjectRequest(selectedProject)}
+      onclick={() => projectActions.requestRemoveProject(selectedProject)}
     >
       <span
         class={[
@@ -1260,20 +809,8 @@
   {/if}
 {/snippet}
 
+<!-- The projects sidebar renders alongside this view from App.svelte. -->
 <div class="project-home">
-  <ProjectsSidebar
-    {projects}
-    {loading}
-    {error}
-    {deletingProjectNames}
-    {repoCountsByProject}
-    {reposByProject}
-    projectBranches={branchesByProject}
-    showAllProjectsRow={true}
-    onMarkProjectUnread={handleMarkProjectUnread}
-    onRemoveProject={handleDeleteProjectRequest}
-  />
-
   <div
     class="main-panel"
     class:no-pad={!loading && !hasContent}
@@ -1373,29 +910,6 @@
     showAddRepoModal = false;
   }}
 />
-
-<!-- Delete project confirmation -->
-<AlertDialog.Root
-  open={projectToDelete !== null}
-  onOpenChange={(v) => !v && (projectToDelete = null)}
->
-  <AlertDialog.Content>
-    {#if projectToDelete}
-      <AlertDialog.Header>
-        <AlertDialog.Title>Remove Project</AlertDialog.Title>
-        <AlertDialog.Description>
-          {`Remove "${projectDisplayName(projectToDelete)}" from Staged? There are unmerged changes in this project's branches. Deleting this project will lose any changes not pushed to GitHub.`}
-        </AlertDialog.Description>
-      </AlertDialog.Header>
-      <AlertDialog.Footer>
-        <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
-        <AlertDialog.Action variant="destructive" onclick={confirmDeleteProject}>
-          Remove
-        </AlertDialog.Action>
-      </AlertDialog.Footer>
-    {/if}
-  </AlertDialog.Content>
-</AlertDialog.Root>
 
 <!-- Delete branch confirmation -->
 <AlertDialog.Root

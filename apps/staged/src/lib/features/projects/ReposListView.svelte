@@ -12,6 +12,7 @@
   import Download from '@lucide/svelte/icons/download';
   import type { RepoHomeItem } from '../../types';
   import * as commands from '../../api/commands';
+  import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { darkMode } from '../../stores/isDark.svelte';
   import {
     badgeFg,
@@ -26,8 +27,10 @@
   import { Input } from '$lib/components/ui/input';
   import { Button } from '$lib/components/ui/button';
 
-  let repos = $state<RepoHomeItem[]>([]);
-  let loading = $state(true);
+  // Served from the shared home-repos cache: revisits paint instantly from
+  // memory while the store revalidates in the background.
+  let repos = $derived(projectsDataStore.homeRepos);
+  let loading = $derived(!projectsDataStore.homeReposLoaded);
   let searchQuery = $state('');
   let togglingPin = $state<Set<string>>(new Set());
   let cloningRepos = $state<Set<string>>(new Set());
@@ -49,21 +52,8 @@
   });
 
   onMount(() => {
-    loadRepos();
+    void projectsDataStore.ensureHomeReposLoaded();
   });
-
-  async function loadRepos() {
-    loading = true;
-    try {
-      repos = await commands.listReposForHome();
-    } catch (e) {
-      console.error('[ReposListView] Failed to load repos:', e);
-      const message = e instanceof Error ? e.message : String(e);
-      toast.error('Failed to load repos', { description: message });
-    } finally {
-      loading = false;
-    }
-  }
 
   async function togglePin(repo: RepoHomeItem, e: MouseEvent) {
     e.stopPropagation();
@@ -77,8 +67,9 @@
       } else {
         await commands.pinRepo(repo.githubRepo, repo.subpath);
       }
-      await loadRepos();
-      window.dispatchEvent(new CustomEvent('staged:pinned-repos-changed'));
+      // Refetching through the store updates every consumer (sidebar pinned
+      // list, landing-page strip), so no window event is needed here.
+      await projectsDataStore.refreshHomeRepos();
     } catch (e) {
       console.error('[ReposListView] Failed to toggle pin:', e);
       const message = e instanceof Error ? e.message : String(e);
@@ -98,7 +89,7 @@
     cloningRepos = new Set(cloningRepos).add(key);
     try {
       await commands.cloneRepoLocally(repo.githubRepo);
-      await loadRepos();
+      await projectsDataStore.refreshHomeRepos();
     } catch (e) {
       console.error('[ReposListView] Failed to clone repo:', e);
       const message = e instanceof Error ? e.message : String(e);

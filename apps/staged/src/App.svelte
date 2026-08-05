@@ -11,6 +11,8 @@
   import TopBar from './lib/features/layout/TopBar.svelte';
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
   import ProjectsList from './lib/features/projects/ProjectsList.svelte';
+  import ProjectsSidebar from './lib/features/projects/ProjectsSidebar.svelte';
+  import ProjectDeleteDialog from './lib/features/projects/ProjectDeleteDialog.svelte';
   import ReposListView from './lib/features/projects/ReposListView.svelte';
   import SessionLauncher from './lib/features/sessions/SessionLauncher.svelte';
   import SettingsPage from './lib/features/settings/SettingsPage.svelte';
@@ -44,6 +46,7 @@
   } from './lib/features/keyboard/shortcuts';
   import { runSearchShortcut } from './lib/features/keyboard/searchTargets';
   import { projectStateStore } from './lib/stores/projectState.svelte';
+  import { projectsDataStore } from './lib/stores/projectsData.svelte';
   import { initBloxEnv } from './lib/stores/bloxEnv.svelte';
   import { listenForSessionStatus } from './lib/listeners/sessionStatusListener';
   import { listenForCacheInvalidation } from './lib/listeners/cacheInvalidationListener';
@@ -304,6 +307,9 @@
     // Refresh provider discovery (and any loaded doctor report) once the
     // backend finishes installing/upgrading the managed ACP bridges.
     unlistenAcpToolsReconciled = listenForAcpToolsReconciled();
+    // Keep the shared project-list cache fresh for the app's lifetime — the
+    // store dedupes, so starting before any view consumes it is safe.
+    projectsDataStore.startListeners();
 
     try {
       await initPreferences();
@@ -493,6 +499,7 @@
     unlistenCacheInvalidation?.();
     unlistenPageLifecycle?.();
     unlistenAcpToolsReconciled?.();
+    projectsDataStore.stopListeners();
     stopUpdaterLoop?.();
   });
 
@@ -592,12 +599,21 @@
             subpath={diffRoute.subpath}
             onClose={() => closeDiffRouteIfCurrent(diffRoute)}
           />
-        {:else if reposUiEnabled && navigation.showReposList}
-          <ReposListView />
-        {:else if navigation.selectedProjectId}
-          <ProjectHome selectedProjectId={navigation.selectedProjectId} />
         {:else}
-          <ProjectsList />
+          <div class="workspace">
+            <!-- Hoisted out of ProjectHome so it survives project↔repos
+                 transitions; hidden on the landing page. -->
+            {#if navigation.selectedProjectId || (reposUiEnabled && navigation.showReposList)}
+              <ProjectsSidebar />
+            {/if}
+            {#if reposUiEnabled && navigation.showReposList}
+              <ReposListView />
+            {:else if navigation.selectedProjectId}
+              <ProjectHome selectedProjectId={navigation.selectedProjectId} />
+            {:else}
+              <ProjectsList />
+            {/if}
+          </div>
         {/if}
       </div>
     </main>
@@ -606,6 +622,10 @@
   {#if showSessionLab}
     <SessionLauncher onClose={() => (showSessionLab = false)} />
   {/if}
+
+  <!-- Shared remove-project confirmation — serves every route's delete entry
+       point (sidebar, landing grid, ProjectHome top bar/shortcut). -->
+  <ProjectDeleteDialog />
 
   <ReferenceModalHost />
   <Toaster position="bottom-right" visibleToasts={4} duration={8000} closeButton expand />
@@ -633,6 +653,16 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+
+  /* Sidebar + route view side by side (mirrors ProjectHome's old wrapper). */
+  .workspace {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    display: flex;
+    background-color: var(--bg-chrome);
+    overflow: hidden;
   }
 
   .reset-shell {

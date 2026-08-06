@@ -1351,15 +1351,6 @@ pub fn fetch_pr(repo: &Path, base_ref: &str, pr_number: u64) -> Result<DiffSpec,
 
 use crate::store::Comment;
 
-/// Result of syncing a review to GitHub.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GitHubSyncResult {
-    /// URL to the pending review on GitHub
-    pub review_url: String,
-    /// Number of comments synced
-    pub comment_count: usize,
-}
-
 /// Get the GitHub token from `gh auth token`.
 fn get_github_token() -> Result<String, GitError> {
     let gh_path = find_gh().ok_or_else(|| {
@@ -1445,52 +1436,15 @@ struct GitHubReviewComment {
     start_side: Option<&'static str>,
 }
 
-/// Request body for creating a review.
-#[derive(Debug, Serialize)]
-struct CreateReviewRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    body: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    event: Option<String>,
-    comments: Vec<GitHubReviewComment>,
-}
-
-/// Response from creating a review.
-#[derive(Debug, Deserialize)]
-struct CreateReviewResponse {
-    #[allow(dead_code)]
-    id: u64,
-    html_url: String,
-}
-
-/// A review on GitHub (from list reviews endpoint).
-#[derive(Debug, Deserialize)]
-struct GitHubReview {
-    id: u64,
-    state: String,
-    user: GhUser,
-}
-
-#[derive(Debug, Deserialize)]
-struct GhUser {
-    login: String,
-}
-
-/// A comment that couldn't be placed on a specific line (outside the diff).
-struct OutOfDiffComment {
-    path: String,
-    line_info: String,
-    content: String,
-}
-
 /// Convert a local Comment to a GitHub review comment.
 ///
 /// If `valid_lines` is provided, checks if the comment's lines are within the diff.
-/// Returns Err for comments outside the diff (they'll be added to the review body).
+/// Returns `None` for comments outside the diff (they fall back to a PR issue
+/// comment, which needs no line placement).
 fn convert_comment(
     comment: &Comment,
     valid_lines: Option<&std::collections::HashSet<u32>>,
-) -> std::result::Result<GitHubReviewComment, OutOfDiffComment> {
+) -> Option<GitHubReviewComment> {
     // Convert 0-indexed span to 1-indexed line numbers
     let line = comment.span.end; // end line (1-indexed, since end is exclusive)
     let start_line = comment.span.start + 1; // start line (1-indexed)
@@ -1500,31 +1454,21 @@ fn convert_comment(
         .map(|lines| lines.contains(&line))
         .unwrap_or(true);
 
-    if line_in_diff {
-        // For single-line comments, don't use start_line
-        let is_multiline = comment.span.end > comment.span.start + 1;
-
-        Ok(GitHubReviewComment {
-            path: comment.path.clone(),
-            body: comment.content.clone(),
-            line,
-            side: "RIGHT", // Always RIGHT since we only support comments on new code
-            start_line: if is_multiline { Some(start_line) } else { None },
-            start_side: if is_multiline { Some("RIGHT") } else { None },
-        })
-    } else {
-        let line_info = if comment.span.end > comment.span.start + 1 {
-            format!("Lines {start_line}-{line}")
-        } else {
-            format!("Line {line}")
-        };
-
-        Err(OutOfDiffComment {
-            path: comment.path.clone(),
-            line_info,
-            content: comment.content.clone(),
-        })
+    if !line_in_diff {
+        return None;
     }
+
+    // For single-line comments, don't use start_line
+    let is_multiline = comment.span.end > comment.span.start + 1;
+
+    Some(GitHubReviewComment {
+        path: comment.path.clone(),
+        body: comment.content.clone(),
+        line,
+        side: "RIGHT", // Always RIGHT since we only support comments on new code
+        start_line: if is_multiline { Some(start_line) } else { None },
+        start_side: if is_multiline { Some("RIGHT") } else { None },
+    })
 }
 
 pub fn github_single_comment_body(comment: &Comment) -> String {
@@ -1547,8 +1491,57 @@ pub fn github_issue_comment_body(comment: &Comment, body: &str) -> String {
     format!("**{}** ({})\n\n{}", comment.path, line_info, body)
 }
 
+/// Parse a unified diff patch into the set of line numbers that can carry a
+/// RIGHT-side comment (added and context lines, 1-indexed in the new file).
+fn valid_lines_from_patch(patch: Option<&str>) -> std::collections::HashSet<u32> {
+    let mut valid_lines = std::collections::HashSet::new();
+    let Some(patch) = patch else {
+        return valid_lines;
+    };
+
+    let mut current_line: u32 = 0;
+
+    for line in patch.lines() {
+        if line.starts_with("@@") {
+            // Parse hunk header: @@ -X,Y +Z,W @@
+            if let Some(plus_pos) = line.find('+') {
+                let after_plus = &line[plus_pos + 1..];
+                if let Some(comma_or_space) = after_plus.find([',', ' ']) {
+                    if let Ok(start) = after_plus[..comma_or_space].parse::<u32>() {
+                        current_line = start;
+                    }
+                }
+            }
+        } else if line.starts_with('-') {
+            // Deleted line - doesn't increment new file line number
+        } else if line.starts_with('+') || !line.starts_with('\\') {
+            // Added line or context line - valid for RIGHT side comments
+            valid_lines.insert(current_line);
+            current_line += 1;
+        }
+    }
+
+    valid_lines
+}
+
+/// Extract the `rel="next"` URL from a GitHub `Link` header, if present.
+fn parse_link_next(link_header: &str) -> Option<&str> {
+    link_header.split(',').find_map(|part| {
+        let mut segments = part.split(';');
+        let url = segments.next()?.trim();
+        if !segments.any(|s| s.trim() == "rel=\"next\"") {
+            return None;
+        }
+        url.strip_prefix('<')?.strip_suffix('>')
+    })
+}
+
 /// Fetch the valid line numbers for each file in a PR diff.
 /// Returns a map of file path -> set of valid line numbers (1-indexed, RIGHT side).
+///
+/// Follows `Link` pagination: a file missing from the map is treated as entirely
+/// outside the diff, so stopping at the first page would turn in-diff comments
+/// on large PRs into hard 422s instead of inline comments.
 async fn fetch_pr_diff_lines(
     client: &reqwest::Client,
     token: &str,
@@ -1556,280 +1549,457 @@ async fn fetch_pr_diff_lines(
     repo: &str,
     pr_number: u64,
 ) -> Result<std::collections::HashMap<String, std::collections::HashSet<u32>>, GitError> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files");
-
-    log::info!("Fetching PR files from: {url}");
-
-    let response = client
-        .get(&url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "staged-app")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .send()
-        .await
-        .map_err(|e| GitError::CommandFailed(format!("Failed to fetch PR files: {e}")))?;
-
-    if !response.status().is_success() {
-        return Err(GitError::CommandFailed(format!(
-            "Failed to fetch PR files from {}/{} PR #{}: {}",
-            owner,
-            repo,
-            pr_number,
-            response.status()
-        )));
-    }
-
     #[derive(Deserialize)]
     struct PullRequestFile {
         filename: String,
         patch: Option<String>,
     }
 
-    let files: Vec<PullRequestFile> = response
-        .json()
-        .await
-        .map_err(|e| GitError::CommandFailed(format!("Failed to parse PR files: {e}")))?;
-
+    let mut next_url = Some(format!(
+        "https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files?per_page=100"
+    ));
     let mut result = std::collections::HashMap::new();
 
-    for file in files {
-        let mut valid_lines = std::collections::HashSet::new();
+    while let Some(url) = next_url {
+        log::info!("Fetching PR files from: {url}");
 
-        if let Some(patch) = &file.patch {
-            // Parse the unified diff to extract valid line numbers
-            let mut current_line: u32 = 0;
+        let response = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Accept", "application/vnd.github+json")
+            .header("User-Agent", "staged-app")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .map_err(|e| GitError::CommandFailed(format!("Failed to fetch PR files: {e}")))?;
 
-            for line in patch.lines() {
-                if line.starts_with("@@") {
-                    // Parse hunk header: @@ -X,Y +Z,W @@
-                    if let Some(plus_pos) = line.find('+') {
-                        let after_plus = &line[plus_pos + 1..];
-                        if let Some(comma_or_space) = after_plus.find([',', ' ']) {
-                            if let Ok(start) = after_plus[..comma_or_space].parse::<u32>() {
-                                current_line = start;
-                            }
-                        }
-                    }
-                } else if line.starts_with('-') {
-                    // Deleted line - doesn't increment new file line number
-                } else if line.starts_with('+') || !line.starts_with('\\') {
-                    // Added line or context line - valid for RIGHT side comments
-                    valid_lines.insert(current_line);
-                    current_line += 1;
-                }
-            }
+        if !response.status().is_success() {
+            return Err(GitError::CommandFailed(format!(
+                "Failed to fetch PR files from {}/{} PR #{}: {}",
+                owner,
+                repo,
+                pr_number,
+                response.status()
+            )));
         }
 
-        result.insert(file.filename, valid_lines);
+        next_url = response
+            .headers()
+            .get(reqwest::header::LINK)
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_link_next)
+            .map(ToString::to_string);
+
+        let files: Vec<PullRequestFile> = response
+            .json()
+            .await
+            .map_err(|e| GitError::CommandFailed(format!("Failed to parse PR files: {e}")))?;
+
+        for file in files {
+            result.insert(file.filename, valid_lines_from_patch(file.patch.as_deref()));
+        }
     }
 
     Ok(result)
 }
 
-/// Get the current authenticated user's login.
-async fn get_current_user(client: &reqwest::Client, token: &str) -> Result<String, GitError> {
-    let response = client
-        .get("https://api.github.com/user")
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "staged-app")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .send()
-        .await
-        .map_err(|e| GitError::CommandFailed(format!("Failed to get current user: {e}")))?;
+// -----------------------------------------------------------------------------
+// GraphQL
+// -----------------------------------------------------------------------------
 
-    if !response.status().is_success() {
-        return Err(GitError::CommandFailed(format!(
-            "Failed to get current user: {}",
-            response.status()
-        )));
-    }
-
-    let user: GhUser = response
-        .json()
-        .await
-        .map_err(|e| GitError::CommandFailed(format!("Failed to parse user response: {e}")))?;
-
-    Ok(user.login)
-}
-
-/// Find an existing pending review by the current user.
-async fn find_pending_review(
-    client: &reqwest::Client,
-    token: &str,
-    owner: &str,
-    repo: &str,
-    pr_number: u64,
-    username: &str,
-) -> Result<Option<GitHubReview>, GitError> {
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/reviews");
-
-    let response = client
-        .get(&url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "staged-app")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .send()
-        .await
-        .map_err(|e| GitError::CommandFailed(format!("Failed to list reviews: {e}")))?;
-
-    if !response.status().is_success() {
-        return Err(GitError::CommandFailed(format!(
-            "Failed to list reviews: {}",
-            response.status()
-        )));
-    }
-
-    let reviews: Vec<GitHubReview> = response
-        .json()
-        .await
-        .map_err(|e| GitError::CommandFailed(format!("Failed to parse reviews: {e}")))?;
-
-    Ok(reviews
-        .into_iter()
-        .find(|r| r.state == "PENDING" && r.user.login == username))
-}
-
-/// Delete a pending review.
-async fn delete_pending_review(
-    client: &reqwest::Client,
-    token: &str,
-    owner: &str,
-    repo: &str,
-    pr_number: u64,
-    review_id: u64,
-) -> Result<(), GitError> {
-    let url = format!(
-        "https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/reviews/{review_id}"
-    );
-
-    let response = client
-        .delete(&url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "staged-app")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .send()
-        .await
-        .map_err(|e| GitError::CommandFailed(format!("Failed to delete review: {e}")))?;
-
-    if !response.status().is_success() {
-        return Err(GitError::CommandFailed(format!(
-            "Failed to delete pending review: {}",
-            response.status()
-        )));
-    }
-
-    Ok(())
-}
-
-/// Sync local comments to a GitHub PR as a pending review.
+/// Collect the messages from a GraphQL `errors` array, if present and non-empty.
 ///
-/// This will:
-/// 1. Delete any existing pending review by the current user
-/// 2. Create a new pending review with all comments
-/// 3. Return the URL to the review
-pub async fn sync_review_to_github(
-    repo: &Path,
-    pr_number: u64,
-    comments: &[Comment],
-) -> Result<GitHubSyncResult, GitError> {
-    if comments.is_empty() {
-        return Err(GitError::CommandFailed("No comments to sync".to_string()));
+/// GraphQL reports failures with HTTP 200 and a top-level `errors` array, so a
+/// response has to be inspected even when the request itself "succeeded".
+fn graphql_error_message(response: &serde_json::Value) -> Option<String> {
+    let errors = response.get("errors")?.as_array()?;
+    if errors.is_empty() {
+        return None;
     }
 
-    let token = get_github_token()?;
-    let (owner, repo_name) = get_github_repo(repo)?;
-    log::info!(
-        "Syncing {} comments to GitHub PR #{} in {}/{}",
-        comments.len(),
-        pr_number,
-        owner,
-        repo_name
-    );
-    let client = reqwest::Client::new();
+    Some(
+        errors
+            .iter()
+            .map(|error| {
+                error
+                    .get("message")
+                    .and_then(|message| message.as_str())
+                    .unwrap_or("unknown error")
+            })
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
+}
 
-    // Get current user
-    let username = get_current_user(&client, &token).await?;
-
-    // Fetch valid diff lines for each file
-    let valid_lines_by_file =
-        fetch_pr_diff_lines(&client, &token, &owner, &repo_name, pr_number).await?;
-
-    // Check for existing pending review and delete it
-    if let Some(existing) =
-        find_pending_review(&client, &token, &owner, &repo_name, pr_number, &username).await?
-    {
-        log::info!("Deleting existing pending review {}", existing.id);
-        delete_pending_review(&client, &token, &owner, &repo_name, pr_number, existing.id).await?;
-    }
-
-    // Convert comments to GitHub format, checking against valid lines
-    let mut gh_comments: Vec<GitHubReviewComment> = Vec::new();
-    let mut out_of_diff_comments: Vec<OutOfDiffComment> = Vec::new();
-
-    for comment in comments {
-        match convert_comment(comment, valid_lines_by_file.get(&comment.path)) {
-            Ok(gh_comment) => gh_comments.push(gh_comment),
-            Err(out_of_diff) => out_of_diff_comments.push(out_of_diff),
-        }
-    }
-
-    let comment_count = gh_comments.len() + out_of_diff_comments.len();
-
-    // Build review body from out-of-diff comments
-    let review_body = if out_of_diff_comments.is_empty() {
-        None
-    } else {
-        let mut body = String::from("### Comments on lines outside the diff\n\n");
-        for ooc in &out_of_diff_comments {
-            body.push_str(&format!(
-                "**{}** ({})\n\n{}\n\n---\n\n",
-                ooc.path, ooc.line_info, ooc.content
-            ));
-        }
-        Some(body)
-    };
-
-    // Create new pending review
-    let url = format!("https://api.github.com/repos/{owner}/{repo_name}/pulls/{pr_number}/reviews");
-
-    let request = CreateReviewRequest {
-        body: review_body,
-        event: None, // None = PENDING
-        comments: gh_comments,
-    };
-
+/// Send a GraphQL request to the GitHub API and return its `data` object.
+///
+/// Variables are passed as JSON rather than interpolated into the document:
+/// comment bodies are arbitrary markdown, and hand-escaping them is a bug farm.
+async fn graphql_request(
+    client: &reqwest::Client,
+    token: &str,
+    query: &str,
+    variables: serde_json::Value,
+    context: &str,
+) -> Result<serde_json::Value, GitError> {
     let response = client
-        .post(&url)
+        .post("https://api.github.com/graphql")
         .header("Authorization", format!("Bearer {token}"))
-        .header("Accept", "application/vnd.github+json")
         .header("User-Agent", "staged-app")
-        .header("X-GitHub-Api-Version", "2022-11-28")
-        .json(&request)
+        .json(&serde_json::json!({ "query": query, "variables": variables }))
         .send()
         .await
-        .map_err(|e| GitError::CommandFailed(format!("Failed to create review: {e}")))?;
+        .map_err(|e| GitError::CommandFailed(format!("{context}: {e}")))?;
 
     let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|e| GitError::CommandFailed(format!("{context}: {e}")))?;
+
     if !status.is_success() {
-        let error_body = response.text().await.unwrap_or_default();
         return Err(GitError::CommandFailed(format!(
-            "Failed to create review: {status} - {error_body}"
+            "{context}: {status} - {body}"
         )));
     }
 
-    let review: CreateReviewResponse = response
-        .json()
-        .await
-        .map_err(|e| GitError::CommandFailed(format!("Failed to parse review response: {e}")))?;
+    let parsed: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| GitError::CommandFailed(format!("{context}: {e}")))?;
 
-    Ok(GitHubSyncResult {
-        review_url: review.html_url,
-        comment_count,
+    if let Some(message) = graphql_error_message(&parsed) {
+        return Err(GitError::CommandFailed(format!("{context}: {message}")));
+    }
+
+    parsed
+        .get("data")
+        .filter(|data| !data.is_null())
+        .cloned()
+        .ok_or_else(|| GitError::CommandFailed(format!("{context}: response contained no data")))
+}
+
+// -----------------------------------------------------------------------------
+// Pending reviews
+// -----------------------------------------------------------------------------
+
+/// Find the GraphQL node ID of the viewer's pending (draft) review on a PR.
+///
+/// One GraphQL round trip instead of `GET /user` + `GET /pulls/{n}/reviews`, and
+/// `states: [PENDING]` filters server-side so a PR with many reviews cannot push
+/// the pending one off the first page.
+async fn find_viewer_pending_review(
+    client: &reqwest::Client,
+    token: &str,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+) -> Result<Option<String>, GitError> {
+    const QUERY: &str = r"query($owner: String!, $name: String!, $number: Int!) {
+        repository(owner: $owner, name: $name) {
+            pullRequest(number: $number) {
+                reviews(states: [PENDING], first: 20) {
+                    nodes { id viewerDidAuthor }
+                }
+            }
+        }
+    }";
+
+    let data = graphql_request(
+        client,
+        token,
+        QUERY,
+        serde_json::json!({ "owner": owner, "name": repo, "number": pr_number }),
+        "Failed to look up pending review",
+    )
+    .await?;
+
+    Ok(data
+        .pointer("/repository/pullRequest/reviews/nodes")
+        .and_then(|nodes| nodes.as_array())
+        .and_then(|nodes| {
+            nodes.iter().find(|node| {
+                node.get("viewerDidAuthor")
+                    .and_then(|authored| authored.as_bool())
+                    .unwrap_or(false)
+            })
+        })
+        .and_then(|node| node.get("id"))
+        .and_then(|id| id.as_str())
+        .map(ToString::to_string))
+}
+
+/// [`find_viewer_pending_review`], degraded to "no pending review" on failure.
+///
+/// Appending to a draft review is an improvement on posting a standalone
+/// comment, not a precondition for it, so a failed lookup must not block the
+/// post: the caller falls back to `POST /pulls/{n}/comments` and the conflict
+/// retry still covers the case where a draft really does exist.
+async fn find_viewer_pending_review_or_none(
+    client: &reqwest::Client,
+    token: &str,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+) -> Option<String> {
+    match find_viewer_pending_review(client, token, owner, repo, pr_number).await {
+        Ok(review_node_id) => review_node_id,
+        Err(e) => {
+            log::warn!(
+                "Failed to check for a pending review on {owner}/{repo} PR #{pr_number}: {e}"
+            );
+            None
+        }
+    }
+}
+
+/// Build the `AddPullRequestReviewThreadInput` payload for a review comment.
+fn build_add_thread_input(
+    gh_comment: &GitHubReviewComment,
+    review_node_id: &str,
+) -> serde_json::Value {
+    let mut input = serde_json::json!({
+        "pullRequestReviewId": review_node_id,
+        "path": gh_comment.path,
+        "body": gh_comment.body,
+        "line": gh_comment.line,
+        "side": gh_comment.side,
+        "subjectType": "LINE",
+    });
+
+    // Only multi-line comments carry a start position; sending one for a
+    // single-line comment is rejected.
+    if let Some(start_line) = gh_comment.start_line {
+        input["startLine"] = serde_json::json!(start_line);
+    }
+    if let Some(start_side) = gh_comment.start_side {
+        input["startSide"] = serde_json::json!(start_side);
+    }
+
+    input
+}
+
+/// Parse a GraphQL `fullDatabaseId`, a `BigInt` scalar serialized as a string.
+fn parse_full_database_id(value: &serde_json::Value) -> Option<i64> {
+    match value {
+        serde_json::Value::String(id) => id.parse().ok(),
+        serde_json::Value::Number(id) => id.as_i64(),
+        _ => None,
+    }
+}
+
+/// Read the `{ fullDatabaseId, url }` pair the pending-review mutations return.
+///
+/// `fullDatabaseId` is the REST comment ID, which is what the stored
+/// `#discussion_r{id}` anchor is built from and what later edits address. The
+/// GraphQL schema does not expose `databaseId` on a review comment.
+fn parse_pending_comment_result(
+    comment: &serde_json::Value,
+) -> Result<GitHubCommentResult, GitError> {
+    let comment_id = comment
+        .get("fullDatabaseId")
+        .and_then(parse_full_database_id)
+        .ok_or_else(|| {
+            GitError::CommandFailed(
+                "Failed to parse the ID of the comment in the pending review".to_string(),
+            )
+        })?;
+    let comment_url = comment
+        .get("url")
+        .and_then(|url| url.as_str())
+        .ok_or_else(|| {
+            GitError::CommandFailed(
+                "Failed to parse the URL of the comment in the pending review".to_string(),
+            )
+        })?
+        .to_string();
+
+    Ok(GitHubCommentResult {
+        comment_url,
+        comment_id,
+        comment_type: "review".to_string(),
+        pending: true,
     })
+}
+
+/// Append a comment to an existing pending review.
+///
+/// REST has no endpoint for this: `POST /pulls/{n}/comments` creates a
+/// *submitted* one-comment review, and GitHub allows one pending review per user
+/// per PR, so it 422s when the viewer already holds a draft.
+async fn add_comment_to_pending_review(
+    client: &reqwest::Client,
+    token: &str,
+    review_node_id: &str,
+    gh_comment: &GitHubReviewComment,
+) -> Result<GitHubCommentResult, GitError> {
+    const MUTATION: &str = r"mutation($input: AddPullRequestReviewThreadInput!) {
+        addPullRequestReviewThread(input: $input) {
+            thread {
+                comments(first: 1) {
+                    nodes { fullDatabaseId url }
+                }
+            }
+        }
+    }";
+
+    let data = graphql_request(
+        client,
+        token,
+        MUTATION,
+        serde_json::json!({ "input": build_add_thread_input(gh_comment, review_node_id) }),
+        "Failed to add comment to pending review",
+    )
+    .await?;
+
+    let comment = data
+        .pointer("/addPullRequestReviewThread/thread/comments/nodes/0")
+        .ok_or_else(|| {
+            GitError::CommandFailed(
+                "Failed to add comment to pending review: GitHub returned no comment".to_string(),
+            )
+        })?;
+
+    parse_pending_comment_result(comment)
+}
+
+/// Find the GraphQL node ID of a review comment sitting in the viewer's pending
+/// review.
+///
+/// The REST review-comment endpoints do not list draft comments, so an edit to
+/// one has to go through GraphQL — which addresses comments by node ID, while
+/// all Staged persists is the REST database ID. GraphQL cannot look a comment up
+/// by database ID, so the viewer's draft is scanned for the match.
+///
+/// Bounded to the first 100 comments of the draft. Past that the caller reports
+/// the failure it already has rather than claiming a false success.
+async fn find_pending_review_comment(
+    client: &reqwest::Client,
+    token: &str,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    comment_id: i64,
+) -> Result<Option<String>, GitError> {
+    const QUERY: &str = r"query($owner: String!, $name: String!, $number: Int!) {
+        repository(owner: $owner, name: $name) {
+            pullRequest(number: $number) {
+                reviews(states: [PENDING], first: 20) {
+                    nodes {
+                        viewerDidAuthor
+                        comments(first: 100) {
+                            nodes { id fullDatabaseId }
+                        }
+                    }
+                }
+            }
+        }
+    }";
+
+    let data = graphql_request(
+        client,
+        token,
+        QUERY,
+        serde_json::json!({ "owner": owner, "name": repo, "number": pr_number }),
+        "Failed to look up comment in pending review",
+    )
+    .await?;
+
+    Ok(find_pending_review_comment_in_response(&data, comment_id))
+}
+
+/// Pure half of [`find_pending_review_comment`].
+fn find_pending_review_comment_in_response(
+    data: &serde_json::Value,
+    comment_id: i64,
+) -> Option<String> {
+    data.pointer("/repository/pullRequest/reviews/nodes")?
+        .as_array()?
+        .iter()
+        .filter(|review| {
+            review
+                .get("viewerDidAuthor")
+                .and_then(|authored| authored.as_bool())
+                .unwrap_or(false)
+        })
+        .filter_map(|review| review.pointer("/comments/nodes")?.as_array())
+        .flatten()
+        .find(|comment| {
+            comment
+                .get("fullDatabaseId")
+                .and_then(parse_full_database_id)
+                == Some(comment_id)
+        })
+        .and_then(|comment| comment.get("id"))
+        .and_then(|id| id.as_str())
+        .map(ToString::to_string)
+}
+
+/// [`find_pending_review_comment`], degraded to "not in a pending review" on
+/// failure.
+///
+/// The caller only reaches this after a REST edit has already failed, and that
+/// failure is the more useful one to report, so a broken lookup must not replace
+/// it with a GraphQL error.
+async fn find_pending_review_comment_or_none(
+    client: &reqwest::Client,
+    token: &str,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    comment_id: i64,
+) -> Option<String> {
+    match find_pending_review_comment(client, token, owner, repo, pr_number, comment_id).await {
+        Ok(comment_node_id) => comment_node_id,
+        Err(e) => {
+            log::warn!(
+                "Failed to look up comment {comment_id} in a pending review on \
+                 {owner}/{repo} PR #{pr_number}: {e}"
+            );
+            None
+        }
+    }
+}
+
+/// Edit a review comment that is still part of a pending review.
+async fn update_pending_review_comment(
+    client: &reqwest::Client,
+    token: &str,
+    comment_node_id: &str,
+    body: &str,
+) -> Result<GitHubCommentResult, GitError> {
+    const MUTATION: &str = r"mutation($input: UpdatePullRequestReviewCommentInput!) {
+        updatePullRequestReviewComment(input: $input) {
+            pullRequestReviewComment { fullDatabaseId url }
+        }
+    }";
+
+    let data = graphql_request(
+        client,
+        token,
+        MUTATION,
+        serde_json::json!({
+            "input": { "pullRequestReviewCommentId": comment_node_id, "body": body },
+        }),
+        "Failed to update comment in pending review",
+    )
+    .await?;
+
+    let comment = data
+        .pointer("/updatePullRequestReviewComment/pullRequestReviewComment")
+        .ok_or_else(|| {
+            GitError::CommandFailed(
+                "Failed to update comment in pending review: GitHub returned no comment"
+                    .to_string(),
+            )
+        })?;
+
+    parse_pending_comment_result(comment)
+}
+
+/// Whether a `POST /pulls/{n}/comments` failure is GitHub refusing to open a
+/// second pending review for the viewer.
+fn is_pending_review_conflict(status: reqwest::StatusCode, body: &str) -> bool {
+    status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        && body.contains("one pending review per pull request")
 }
 
 /// Result of posting a single comment to a GitHub PR.
@@ -1842,9 +2012,18 @@ pub struct GitHubCommentResult {
     pub comment_id: i64,
     /// The type of comment: "review" (inline) or "issue" (fallback)
     pub comment_type: String,
+    /// Whether the comment joined a pending (draft) review, and so is not yet
+    /// visible to anyone but its author. Not persisted — it drives a one-shot
+    /// message to the user, since a draft comment otherwise looks published.
+    pub pending: bool,
 }
 
-/// Post a single comment to a GitHub PR as a submitted review (not pending).
+/// Post a single comment to a GitHub PR.
+///
+/// Normally this creates an immediately visible standalone review comment. If the
+/// viewer already has a pending (draft) review on the PR, the comment is appended
+/// to that review instead, because GitHub allows only one pending review per user
+/// per PR and rejects the standalone post outright.
 ///
 /// If the comment is on a line outside the PR diff, it falls back to a regular
 /// PR issue comment (not inline).
@@ -1916,7 +2095,23 @@ pub async fn post_single_comment_to_github(
     }
 
     match inline_comment {
-        Ok(gh_comment) => {
+        Some(gh_comment) => {
+            // A standalone comment implicitly opens and submits a one-comment
+            // review, which GitHub refuses while the viewer holds a draft. Append
+            // to the draft instead so the comment joins the review in progress.
+            if let Some(review_node_id) =
+                find_viewer_pending_review_or_none(&client, &token, &owner, &repo_name, pr_number)
+                    .await
+            {
+                return add_comment_to_pending_review(
+                    &client,
+                    &token,
+                    &review_node_id,
+                    &gh_comment,
+                )
+                .await;
+            }
+
             // Post as a direct pull request review comment (gives us the comment ID)
             let url = format!(
                 "https://api.github.com/repos/{owner}/{repo_name}/pulls/{pr_number}/comments"
@@ -1949,6 +2144,25 @@ pub async fn post_single_comment_to_github(
             let status = response.status();
             if !status.is_success() {
                 let error_body = response.text().await.unwrap_or_default();
+
+                // A review can be started between the lookup above and this POST,
+                // and the lookup itself is allowed to fail silently.
+                if is_pending_review_conflict(status, &error_body) {
+                    if let Some(review_node_id) = find_viewer_pending_review_or_none(
+                        &client, &token, &owner, &repo_name, pr_number,
+                    )
+                    .await
+                    {
+                        return add_comment_to_pending_review(
+                            &client,
+                            &token,
+                            &review_node_id,
+                            &gh_comment,
+                        )
+                        .await;
+                    }
+                }
+
                 return Err(GitError::CommandFailed(format!(
                     "Failed to post comment: {status} - {error_body}"
                 )));
@@ -1962,9 +2176,10 @@ pub async fn post_single_comment_to_github(
                 comment_url: created.html_url,
                 comment_id: created.id,
                 comment_type: "review".to_string(),
+                pending: false,
             })
         }
-        Err(_out_of_diff) => {
+        None => {
             // Fall back to a regular PR issue comment (not inline)
             let fallback_body = github_issue_comment_body(comment, &body);
 
@@ -1999,15 +2214,21 @@ pub async fn post_single_comment_to_github(
                 comment_url: created.html_url,
                 comment_id: created.id,
                 comment_type: "issue".to_string(),
+                pending: false,
             })
         }
     }
 }
 
 /// Update an existing comment on GitHub.
+///
+/// A review comment that joined a pending review may not be addressable through
+/// `PATCH /pulls/comments/{id}` at all — the REST review-comment endpoints do
+/// not list draft comments — so a not-found response falls back to editing the
+/// comment inside the draft over GraphQL.
 pub async fn update_comment_on_github(
     repo: &Path,
-    _pr_number: u64,
+    pr_number: u64,
     github_comment_id: i64,
     github_comment_type: &str,
     body: &str,
@@ -2044,6 +2265,25 @@ pub async fn update_comment_on_github(
     let status = response.status();
     if !status.is_success() {
         let error_body = response.text().await.unwrap_or_default();
+
+        // A comment that joined a draft review is invisible to REST, so a
+        // not-found here may just mean "still pending" rather than "gone".
+        if github_comment_type == "review" && status == reqwest::StatusCode::NOT_FOUND {
+            if let Some(comment_node_id) = find_pending_review_comment_or_none(
+                &client,
+                &token,
+                &owner,
+                &repo_name,
+                pr_number,
+                github_comment_id,
+            )
+            .await
+            {
+                return update_pending_review_comment(&client, &token, &comment_node_id, body)
+                    .await;
+            }
+        }
+
         return Err(GitError::CommandFailed(format!(
             "Failed to update comment: {status} - {error_body}"
         )));
@@ -2064,6 +2304,9 @@ pub async fn update_comment_on_github(
         comment_url: updated.html_url,
         comment_id: updated.id,
         comment_type: github_comment_type.to_string(),
+        // A REST edit reached the comment, so it is published; a draft comment
+        // takes the GraphQL path above and reports itself as pending there.
+        pending: false,
     })
 }
 
@@ -2514,101 +2757,51 @@ pub async fn update_pull_request(
     // that gh pr edit queries by default
     let client = reqwest::Client::new();
 
-    // Build the mutation
-    let mut updates = Vec::new();
-    if let Some(t) = title {
-        updates.push(format!("title: \"{}\"", t.replace('"', "\\\"")));
-    }
-    if let Some(b) = body {
-        updates.push(format!("body: \"{}\"", b.replace('"', "\\\"")));
-    }
-
     // First, get the PR's node ID
-    let pr_query = format!(
-        r#"query {{
-            repository(owner: "{owner}", name: "{repo_name}") {{
-                pullRequest(number: {pr_number}) {{
-                    id
-                }}
-            }}
-        }}"#
-    );
+    const PR_ID_QUERY: &str = r"query($owner: String!, $name: String!, $number: Int!) {
+        repository(owner: $owner, name: $name) {
+            pullRequest(number: $number) { id }
+        }
+    }";
 
-    #[derive(Deserialize)]
-    struct PrIdResponse {
-        data: PrIdData,
+    let data = graphql_request(
+        &client,
+        &token,
+        PR_ID_QUERY,
+        serde_json::json!({ "owner": owner, "name": repo_name, "number": pr_number }),
+        "Failed to get PR node ID",
+    )
+    .await?;
+
+    let pr_id = data
+        .pointer("/repository/pullRequest/id")
+        .and_then(|id| id.as_str())
+        .ok_or_else(|| GitError::CommandFailed("Failed to parse PR ID".to_string()))?;
+
+    // Now update the PR. Titles and bodies go over as variables — they are
+    // user-authored text, so interpolating them into the document is not safe.
+    let mut input = serde_json::json!({ "pullRequestId": pr_id });
+    if let Some(title) = title {
+        input["title"] = serde_json::json!(title);
+    }
+    if let Some(body) = body {
+        input["body"] = serde_json::json!(body);
     }
 
-    #[derive(Deserialize)]
-    struct PrIdData {
-        repository: PrIdRepo,
-    }
+    const UPDATE_MUTATION: &str = r"mutation($input: UpdatePullRequestInput!) {
+        updatePullRequest(input: $input) {
+            pullRequest { id }
+        }
+    }";
 
-    #[derive(Deserialize)]
-    struct PrIdRepo {
-        #[serde(rename = "pullRequest")]
-        pull_request: PrIdNode,
-    }
-
-    #[derive(Deserialize)]
-    struct PrIdNode {
-        id: String,
-    }
-
-    let response = client
-        .post("https://api.github.com/graphql")
-        .header("Authorization", format!("Bearer {token}"))
-        .header("User-Agent", "staged-app")
-        .json(&serde_json::json!({ "query": pr_query }))
-        .send()
-        .await
-        .map_err(|e| GitError::CommandFailed(format!("Failed to query PR: {e}")))?;
-
-    if !response.status().is_success() {
-        let error_body = response.text().await.unwrap_or_default();
-        return Err(GitError::CommandFailed(format!(
-            "Failed to get PR node ID: {error_body}"
-        )));
-    }
-
-    let pr_id_response: PrIdResponse = response
-        .json()
-        .await
-        .map_err(|e| GitError::CommandFailed(format!("Failed to parse PR ID: {e}")))?;
-
-    let pr_id = pr_id_response.data.repository.pull_request.id;
-
-    // Now update the PR
-    let mutation = format!(
-        r#"mutation {{
-            updatePullRequest(input: {{
-                pullRequestId: "{}"
-                {}
-            }}) {{
-                pullRequest {{
-                    id
-                }}
-            }}
-        }}"#,
-        pr_id,
-        updates.join("\n")
-    );
-
-    let response = client
-        .post("https://api.github.com/graphql")
-        .header("Authorization", format!("Bearer {token}"))
-        .header("User-Agent", "staged-app")
-        .json(&serde_json::json!({ "query": mutation }))
-        .send()
-        .await
-        .map_err(|e| GitError::CommandFailed(format!("Failed to update PR: {e}")))?;
-
-    if !response.status().is_success() {
-        let error_body = response.text().await.unwrap_or_default();
-        return Err(GitError::CommandFailed(format!(
-            "Failed to update PR: {error_body}"
-        )));
-    }
+    graphql_request(
+        &client,
+        &token,
+        UPDATE_MUTATION,
+        serde_json::json!({ "input": input }),
+        "Failed to update PR",
+    )
+    .await?;
 
     Ok(())
 }
@@ -3162,6 +3355,7 @@ mod tests {
             comment_url: "https://github.com/owner/repo/pull/1#discussion_r123".to_string(),
             comment_id: 123,
             comment_type: "review".to_string(),
+            pending: true,
         };
 
         assert_eq!(
@@ -3170,7 +3364,253 @@ mod tests {
                 "commentUrl": "https://github.com/owner/repo/pull/1#discussion_r123",
                 "commentId": 123,
                 "commentType": "review",
+                "pending": true,
             })
         );
+    }
+
+    /// The 422 GitHub returns for `POST /pulls/{n}/comments` when the viewer
+    /// already holds a pending review on the PR.
+    const PENDING_REVIEW_CONFLICT_BODY: &str = r#"{"message":"Validation Failed","errors":[{"resource":"PullRequestReview","code":"custom","field":"user_id","message":"user_id can only have one pending review per pull request"}],"documentation_url":"https://docs.github.com/rest/pulls/comments#create-a-review-comment-for-a-pull-request","status":"422"}"#;
+
+    #[test]
+    fn test_is_pending_review_conflict_matches_the_real_422() {
+        assert!(is_pending_review_conflict(
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            PENDING_REVIEW_CONFLICT_BODY
+        ));
+    }
+
+    #[test]
+    fn test_is_pending_review_conflict_rejects_other_failures() {
+        // Right status, unrelated validation failure.
+        assert!(!is_pending_review_conflict(
+            reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+            r#"{"message":"Validation Failed","errors":[{"resource":"PullRequestReviewComment","field":"line","code":"invalid"}]}"#
+        ));
+        // Right body, wrong status.
+        assert!(!is_pending_review_conflict(
+            reqwest::StatusCode::FORBIDDEN,
+            PENDING_REVIEW_CONFLICT_BODY
+        ));
+    }
+
+    fn review_comment(start_line: Option<u32>) -> GitHubReviewComment {
+        GitHubReviewComment {
+            path: "src/main.rs".to_string(),
+            body: "looks good".to_string(),
+            line: 42,
+            side: "RIGHT",
+            start_line,
+            start_side: start_line.map(|_| "RIGHT"),
+        }
+    }
+
+    #[test]
+    fn test_build_add_thread_input_omits_start_position_for_single_line() {
+        assert_eq!(
+            build_add_thread_input(&review_comment(None), "PRR_node"),
+            serde_json::json!({
+                "pullRequestReviewId": "PRR_node",
+                "path": "src/main.rs",
+                "body": "looks good",
+                "line": 42,
+                "side": "RIGHT",
+                "subjectType": "LINE",
+            })
+        );
+    }
+
+    #[test]
+    fn test_build_add_thread_input_includes_start_position_for_multi_line() {
+        assert_eq!(
+            build_add_thread_input(&review_comment(Some(40)), "PRR_node"),
+            serde_json::json!({
+                "pullRequestReviewId": "PRR_node",
+                "path": "src/main.rs",
+                "body": "looks good",
+                "line": 42,
+                "side": "RIGHT",
+                "subjectType": "LINE",
+                "startLine": 40,
+                "startSide": "RIGHT",
+            })
+        );
+    }
+
+    #[test]
+    fn test_build_add_thread_input_preserves_awkward_bodies() {
+        // Bodies are markdown: quotes, newlines, backslashes and backticks all
+        // have to survive as-is, which is why they go over as a JSON variable
+        // rather than being interpolated into the GraphQL document.
+        let body = "he said \"hi\"\n\n```rust\nlet p = \"C:\\\\tmp\";\n```\n\\end";
+        let mut gh_comment = review_comment(None);
+        gh_comment.body = body.to_string();
+
+        let input = build_add_thread_input(&gh_comment, "PRR_node");
+
+        assert_eq!(input["body"], serde_json::json!(body));
+    }
+
+    #[test]
+    fn test_parse_full_database_id_accepts_bigint_string_and_number() {
+        assert_eq!(
+            parse_full_database_id(&serde_json::json!("2731234567")),
+            Some(2_731_234_567)
+        );
+        assert_eq!(
+            parse_full_database_id(&serde_json::json!(2_731_234_567_i64)),
+            Some(2_731_234_567)
+        );
+        assert_eq!(parse_full_database_id(&serde_json::json!("nope")), None);
+        assert_eq!(parse_full_database_id(&serde_json::Value::Null), None);
+    }
+
+    #[test]
+    fn test_parse_pending_comment_result_keeps_the_rest_id_and_flags_pending() {
+        let comment = serde_json::json!({
+            "fullDatabaseId": "2731234567",
+            "url": "https://github.com/owner/repo/pull/1#discussion_r2731234567",
+        });
+
+        let result = parse_pending_comment_result(&comment).unwrap();
+
+        assert_eq!(result.comment_id, 2_731_234_567);
+        assert_eq!(
+            result.comment_url,
+            "https://github.com/owner/repo/pull/1#discussion_r2731234567"
+        );
+        assert_eq!(result.comment_type, "review");
+        assert!(result.pending);
+    }
+
+    #[test]
+    fn test_parse_pending_comment_result_rejects_a_missing_id_or_url() {
+        assert!(parse_pending_comment_result(&serde_json::json!({
+            "url": "https://github.com/owner/repo/pull/1#discussion_r1",
+        }))
+        .is_err());
+        assert!(
+            parse_pending_comment_result(&serde_json::json!({ "fullDatabaseId": "1" })).is_err()
+        );
+    }
+
+    /// A PR carrying the viewer's draft review alongside somebody else's, which
+    /// `states: [PENDING]` does not filter out.
+    fn pending_reviews_response() -> serde_json::Value {
+        serde_json::json!({
+            "repository": { "pullRequest": { "reviews": { "nodes": [
+                {
+                    "viewerDidAuthor": false,
+                    "comments": { "nodes": [
+                        { "id": "PRRC_theirs", "fullDatabaseId": "2731000001" },
+                    ] },
+                },
+                {
+                    "viewerDidAuthor": true,
+                    "comments": { "nodes": [
+                        { "id": "PRRC_first", "fullDatabaseId": "2731234567" },
+                        { "id": "PRRC_second", "fullDatabaseId": "2731234999" },
+                    ] },
+                },
+            ] } } },
+        })
+    }
+
+    #[test]
+    fn test_find_pending_review_comment_in_response_matches_on_the_rest_id() {
+        assert_eq!(
+            find_pending_review_comment_in_response(&pending_reviews_response(), 2_731_234_999),
+            Some("PRRC_second".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_pending_review_comment_in_response_ignores_other_authors_drafts() {
+        // Editing somebody else's draft comment is not ours to attempt, so the
+        // caller should keep its original REST failure instead.
+        assert_eq!(
+            find_pending_review_comment_in_response(&pending_reviews_response(), 2_731_000_001),
+            None
+        );
+    }
+
+    #[test]
+    fn test_find_pending_review_comment_in_response_handles_no_pending_reviews() {
+        assert_eq!(
+            find_pending_review_comment_in_response(&pending_reviews_response(), 999),
+            None
+        );
+        assert_eq!(
+            find_pending_review_comment_in_response(
+                &serde_json::json!({
+                    "repository": { "pullRequest": { "reviews": { "nodes": [] } } },
+                }),
+                2_731_234_567
+            ),
+            None
+        );
+        assert_eq!(
+            find_pending_review_comment_in_response(&serde_json::json!({}), 2_731_234_567),
+            None
+        );
+    }
+
+    #[test]
+    fn test_graphql_error_message_joins_messages() {
+        // GraphQL reports failures with HTTP 200 and a top-level `errors` array.
+        let response = serde_json::json!({
+            "data": null,
+            "errors": [
+                { "message": "Could not resolve to a node with the global id of 'PRR_bogus'." },
+                { "type": "FORBIDDEN" },
+            ],
+        });
+
+        assert_eq!(
+            graphql_error_message(&response).unwrap(),
+            "Could not resolve to a node with the global id of 'PRR_bogus'.; unknown error"
+        );
+    }
+
+    #[test]
+    fn test_graphql_error_message_ignores_successful_responses() {
+        assert_eq!(
+            graphql_error_message(&serde_json::json!({ "data": { "repository": null } })),
+            None
+        );
+        assert_eq!(
+            graphql_error_message(&serde_json::json!({ "data": {}, "errors": [] })),
+            None
+        );
+    }
+
+    #[test]
+    fn test_parse_link_next_finds_the_next_page() {
+        let link = "<https://api.github.com/repositories/1/pulls/2/files?per_page=100&page=2>; rel=\"next\", <https://api.github.com/repositories/1/pulls/2/files?per_page=100&page=5>; rel=\"last\"";
+
+        assert_eq!(
+            parse_link_next(link),
+            Some("https://api.github.com/repositories/1/pulls/2/files?per_page=100&page=2")
+        );
+    }
+
+    #[test]
+    fn test_parse_link_next_returns_none_on_the_last_page() {
+        let link = "<https://api.github.com/repositories/1/pulls/2/files?per_page=100&page=4>; rel=\"prev\", <https://api.github.com/repositories/1/pulls/2/files?per_page=100&page=1>; rel=\"first\"";
+
+        assert_eq!(parse_link_next(link), None);
+        assert_eq!(parse_link_next(""), None);
+    }
+
+    #[test]
+    fn test_valid_lines_from_patch_collects_added_and_context_lines() {
+        let patch = "@@ -1,3 +1,4 @@\n context\n+added\n-removed\n more context\n\\ No newline at end of file";
+
+        let mut lines: Vec<u32> = valid_lines_from_patch(Some(patch)).into_iter().collect();
+        lines.sort_unstable();
+
+        assert_eq!(lines, vec![1, 2, 3]);
+        assert!(valid_lines_from_patch(None).is_empty());
     }
 }

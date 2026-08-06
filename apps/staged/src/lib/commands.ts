@@ -1295,6 +1295,8 @@ export interface GitHubCommentResult {
   commentUrl: string;
   commentId: number;
   commentType: string;
+  /** The comment joined an existing pending review, so it isn't published yet. */
+  pending: boolean;
 }
 
 /** Rebase a branch via a pipeline.

@@ -28,11 +28,10 @@ pub use github::{
     list_github_repos, list_issues, list_issues_for_repo, list_pull_requests,
     list_pull_requests_for_repo, list_repo_directories, list_user_repos,
     post_single_comment_to_github, prune_remote_for_repo, push_branch, resolve_default_branch,
-    search_github_repos, search_issues, search_pull_requests, sync_review_to_github,
-    update_clone_to_remote_head, update_comment_on_github, update_pull_request,
-    validate_subpath_in_repo, ChecksSummary, CreatePrResult, FailedCheck, GitHubAuthStatus,
-    GitHubCommentResult, GitHubRepo, GitHubSyncResult, Issue, PrStatus, PullRequest,
-    PullRequestInfo,
+    search_github_repos, search_issues, search_pull_requests, update_clone_to_remote_head,
+    update_comment_on_github, update_pull_request, validate_subpath_in_repo, ChecksSummary,
+    CreatePrResult, FailedCheck, GitHubAuthStatus, GitHubCommentResult, GitHubRepo, Issue,
+    PrStatus, PullRequest, PullRequestInfo,
 };
 pub use refs::{
     branch_name_without_origin, detect_default_branch, detect_default_branch_from_remote,

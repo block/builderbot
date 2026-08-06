@@ -705,6 +705,13 @@
             : c
         );
       }
+      // A comment that joined a draft review looks sent but isn't visible to
+      // anyone else yet, so say so rather than leaving a silent checkmark.
+      if (result.pending) {
+        toast.success('Added to your pending review', {
+          description: 'Submit the review on GitHub to publish it.',
+        });
+      }
     } catch (e) {
       toast.error('Failed to post comment', {
         description: e instanceof Error ? e.message : String(e),

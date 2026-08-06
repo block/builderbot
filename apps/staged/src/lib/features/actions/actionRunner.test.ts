@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-describe('ActionRunner running-state hydration', () => {
+describe('ActionRunner', () => {
   let getRunningBranchActions: ReturnType<typeof vi.fn>;
   let getRunPhase: ReturnType<typeof vi.fn>;
 
@@ -103,6 +103,71 @@ describe('ActionRunner running-state hydration', () => {
     expect(runner.runPhases.get('branch-run')).toEqual({
       type: 'running',
       endpoint: 'http://localhost:5173',
+    });
+  });
+
+  it('distinguishes an empty action list from a failed load', async () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const empty = await newRunner({ loadActions: async () => [] });
+      expect(await empty.loadActions()).toBe(true);
+
+      const failing = await newRunner({
+        loadActions: async () => {
+          throw new Error('IPC unavailable');
+        },
+      });
+      // A failure still empties the list, so the boolean is the only way a
+      // caller can tell it apart from a context with no actions.
+      expect(await failing.loadActions()).toBe(false);
+      expect(failing.actions).toEqual([]);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('focuses a running execution instead of starting a second one', async () => {
+    const run = vi.fn().mockResolvedValue('execution-2');
+    const runner = await newRunner({ run });
+    runner.runningActions.push({
+      executionId: 'execution-1',
+      actionId: 'action-1',
+      actionName: 'Dev',
+      actionType: 'run',
+      status: 'running',
+    });
+
+    await runner.runAction({ id: 'action-1', name: 'Dev' } as never);
+
+    expect(run).not.toHaveBeenCalled();
+    expect(runner.outputModal?.executionId).toBe('execution-1');
+  });
+
+  it('opens the modal only when a re-run starts the execution', async () => {
+    const action = { id: 'action-1', name: 'Dev' };
+    const run = vi.fn().mockResolvedValue('execution-2');
+
+    // The run button starts the action without pulling up the modal...
+    const fromButton = await newRunner({ run });
+    await fromButton.runAction(action as never);
+    expect(run).toHaveBeenCalledWith('action-1');
+    expect(fromButton.outputModal).toBeNull();
+
+    // ...while Run Again repoints the open modal at the new execution.
+    const fromModal = await newRunner({ loadActions: async () => [action], run });
+    await fromModal.loadActions();
+    fromModal.outputModal = {
+      executionId: 'execution-1',
+      actionId: 'action-1',
+      actionName: 'Dev',
+      isStopping: false,
+    };
+    await fromModal.runAgain();
+    expect(fromModal.outputModal).toEqual({
+      executionId: 'execution-2',
+      actionId: 'action-1',
+      actionName: 'Dev',
+      isStopping: false,
     });
   });
 });

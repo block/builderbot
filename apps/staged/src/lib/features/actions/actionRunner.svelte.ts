@@ -209,12 +209,20 @@ export class ActionRunner {
     }
   }
 
-  async loadActions(): Promise<void> {
+  /**
+   * Load the scope's configured actions. Returns whether the read succeeded so
+   * callers can tell "this context has no actions" from "the read failed" —
+   * a failure also empties the list, and surfaces that offer an empty-context
+   * affordance would otherwise show it after a transient IPC error.
+   */
+  async loadActions(): Promise<boolean> {
     try {
       this.actions = await this.load();
+      return true;
     } catch (e) {
       console.error('Failed to load actions:', e);
       this.actions = [];
+      return false;
     }
   }
 
@@ -286,8 +294,16 @@ export class ActionRunner {
     );
   }
 
-  /** Run an action, or open the output modal if it's already running. */
-  async runAction(action: ProjectAction): Promise<void> {
+  /**
+   * Start an action, or focus the output modal on it when it's already
+   * running. `keepModal` is the only difference between the two entry points:
+   * a fresh start from the run button leaves the modal alone, while Run Again
+   * repoints the open modal at the new execution.
+   */
+  private async startOrFocus(
+    action: ProjectAction,
+    { keepModal }: { keepModal: boolean }
+  ): Promise<void> {
     this.clearStaleExecutions(action.id);
 
     const existingExecution = this.runningActions.find(
@@ -305,11 +321,24 @@ export class ActionRunner {
     }
 
     try {
-      await this.run(action.id);
+      const executionId = await this.run(action.id);
+      if (keepModal) {
+        this.outputModal = {
+          executionId,
+          actionId: action.id,
+          actionName: action.name,
+          isStopping: false,
+        };
+      }
     } catch (e) {
       console.error('Failed to run action:', e);
       notifyError(`Failed to run action "${action.name}"`, e);
     }
+  }
+
+  /** Run an action, or open the output modal if it's already running. */
+  async runAction(action: ProjectAction): Promise<void> {
+    await this.startOrFocus(action, { keepModal: false });
   }
 
   async stopAction(executionId: string, actionName: string): Promise<void> {
@@ -343,36 +372,7 @@ export class ActionRunner {
   async runAgain(): Promise<void> {
     const action = this.actions.find((a) => a.id === this.outputModal?.actionId);
     if (!action) return;
-
-    this.clearStaleExecutions(action.id);
-
-    // If already running, just switch the modal to that execution
-    const existingExecution = this.runningActions.find(
-      (a) => a.actionId === action.id && a.status === 'running'
-    );
-    if (existingExecution) {
-      this.outputModal = {
-        executionId: existingExecution.executionId,
-        actionId: action.id,
-        actionName: action.name,
-        isStopping: this.stoppingExecutions.has(existingExecution.executionId),
-      };
-      return;
-    }
-
-    try {
-      const newExecutionId = await this.run(action.id);
-      // Keep the modal open and switch to the new execution
-      this.outputModal = {
-        executionId: newExecutionId,
-        actionId: action.id,
-        actionName: action.name,
-        isStopping: false,
-      };
-    } catch (e) {
-      console.error('Failed to run action:', e);
-      notifyError(`Failed to run action "${action.name}"`, e);
-    }
+    await this.startOrFocus(action, { keepModal: true });
   }
 
   closeOutputModal(): void {

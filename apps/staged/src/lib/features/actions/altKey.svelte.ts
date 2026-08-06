@@ -15,6 +15,16 @@ function handleKeyUp(e: KeyboardEvent) {
   if (e.key === 'Alt') held = false;
 }
 
+/**
+ * Alt+Tab (and any other focus-stealing chord) lands its keyup in another
+ * window, so without this the flag would stay set for as long as any tracker
+ * is mounted — and with cards on most surfaces, that means app-wide action
+ * buttons stuck showing the stop icon.
+ */
+function handleBlur() {
+  held = false;
+}
+
 export const altKey = {
   get held() {
     return held;
@@ -26,11 +36,13 @@ export function trackAltKey(): () => void {
   if (trackers++ === 0) {
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleBlur);
   }
   return () => {
     if (--trackers === 0) {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleBlur);
       held = false;
     }
   };

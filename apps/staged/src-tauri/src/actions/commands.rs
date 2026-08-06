@@ -239,10 +239,23 @@ pub(crate) async fn detect_repo_actions_impl(
 
     // Clear the flag and announce the end of detection even when detection or
     // the persist failed — otherwise every surface keeps spinning on a run
-    // that is over.
-    let cleared = store
-        .mark_action_context_detected(&context.id)
-        .map_err(|e| format!("Failed to update detection status: {e}"));
+    // that is over. A flag left set while the event says detection is over is
+    // worse than either alone: the guard above would reject every later
+    // detection for this context and no UI path clears it, so fall back to
+    // clearing just the flag before giving up on it.
+    if let Err(e) = store.mark_action_context_detected(&context.id) {
+        log::error!(
+            "Failed to mark action context {} detected after detection: {e}",
+            context.id
+        );
+        if let Err(e) = store.set_action_context_detecting(&context.id, false) {
+            log::error!(
+                "Failed to clear the detecting flag for action context {}: {e} — \
+                 further detection for this repo will be rejected as already in progress",
+                context.id
+            );
+        }
+    }
     crate::web_server::emit_to_all(
         &app,
         "repo-actions-detection",
@@ -252,7 +265,6 @@ pub(crate) async fn detect_repo_actions_impl(
             detecting: false,
         },
     );
-    cleared?;
     result
 }
 
@@ -593,6 +605,30 @@ pub(crate) fn repo_action_scope_id(github_repo: &str, subpath: Option<&str>) -> 
     }
 }
 
+/// Check that `action` belongs to the (`github_repo`, `subpath`) context the
+/// caller claims it does.
+///
+/// The lookup is read-only on purpose: a context that does not exist cannot own
+/// the action, so a missing one is rejected exactly like an unrelated one.
+/// Getting-or-creating here would insert an empty context row for the repo on
+/// the way to refusing the run — the same reason `list_all_repo_actions` only
+/// reads.
+fn validate_repo_action_context(
+    store: &Store,
+    action: &crate::store::RepoAction,
+    github_repo: &str,
+    subpath: Option<&str>,
+) -> Result<(), String> {
+    let owns_action = store
+        .get_action_context_by_repo_and_subpath(github_repo, subpath)
+        .map_err(|e| format!("Failed to get action context: {e}"))?
+        .is_some_and(|context| context.id == action.context_id);
+    if !owns_action {
+        return Err("Action does not belong to this repo/subpath context".to_string());
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_repo_action_impl(
     github_repo: String,
@@ -613,12 +649,7 @@ pub(crate) async fn run_repo_action_impl(
         .map_err(|e| format!("Failed to get action: {e}"))?
         .ok_or_else(|| "Action not found".to_string())?;
 
-    let context = store
-        .get_or_create_action_context(&github_repo, subpath.as_deref())
-        .map_err(|e| format!("Failed to get action context: {e}"))?;
-    if action.context_id != context.id {
-        return Err("Action does not belong to this repo/subpath context".to_string());
-    }
+    validate_repo_action_context(&store, &action, &github_repo, subpath.as_deref())?;
 
     // Repo runs execute against the repo's main local clone; unlike branch
     // runs there is no worktree or remote-workspace fallback, so the clone
@@ -1229,6 +1260,46 @@ mod tests {
                 .map(|a| (a.name.as_str(), a.sort_order))
                 .collect::<Vec<_>>(),
             vec![("Dev", 0), ("Test", 1), ("Build", 2)]
+        );
+    }
+
+    #[test]
+    fn validating_a_repo_action_context_never_creates_one() {
+        let store = Store::in_memory().unwrap();
+        let context = store
+            .get_or_create_action_context("block/builderbot", Some("apps/staged"))
+            .unwrap();
+        let action = crate::store::RepoAction::new(
+            context.id.clone(),
+            "Dev".to_string(),
+            "just dev".to_string(),
+            ActionType::Run,
+            0,
+        );
+        store.create_repo_action(&action).unwrap();
+
+        validate_repo_action_context(&store, &action, "block/builderbot", Some("apps/staged"))
+            .unwrap();
+
+        // A repo with no context of its own is rejected without minting one,
+        // and so is the same repo at a different subpath.
+        assert!(validate_repo_action_context(&store, &action, "block/goose", None).is_err());
+        assert!(validate_repo_action_context(
+            &store,
+            &action,
+            "block/builderbot",
+            Some("apps/other")
+        )
+        .is_err());
+        assert_eq!(
+            store.count_action_contexts_for_repo("block/goose").unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .count_action_contexts_for_repo("block/builderbot")
+                .unwrap(),
+            1
         );
     }
 

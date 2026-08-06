@@ -21,7 +21,7 @@
     onClose     — callback to close this modal
 -->
 <script lang="ts">
-  import { onMount, onDestroy, tick } from 'svelte';
+  import { onDestroy, tick } from 'svelte';
   import X from '@lucide/svelte/icons/x';
   import AlertCircle from '@lucide/svelte/icons/alert-circle';
   import CircleStop from '@lucide/svelte/icons/circle-stop';
@@ -176,12 +176,20 @@
   // Lifecycle
   // =========================================================================
 
-  onMount(() => {
+  // Only track the selection while the modal is open. Every card mounts one of
+  // these persistently, so an unconditional document listener would cost a
+  // handler per mounted card on every selection change anywhere in the app,
+  // each walking an unmounted element's subtree.
+  $effect(() => {
+    if (!open) return;
     document.addEventListener('selectionchange', handleSelectionChange);
+    return () => {
+      document.removeEventListener('selectionchange', handleSelectionChange);
+      selectedText = '';
+    };
   });
 
   onDestroy(() => {
-    document.removeEventListener('selectionchange', handleSelectionChange);
     if (saveTimeout) clearTimeout(saveTimeout);
     cleanup();
   });

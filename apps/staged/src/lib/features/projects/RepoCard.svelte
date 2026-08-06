@@ -132,14 +132,24 @@
     void hydrateActions();
   });
 
+  /**
+   * Reload the action list, marking it loaded only once a read has actually
+   * succeeded. A failed load empties the list, and one failed bulk wave rejects
+   * every card joined to it, so trusting it would flip a whole surface of
+   * repos to the empty-context Detect affordance — inviting a real AI
+   * detection against repos that already have actions.
+   */
+  async function reloadActions() {
+    if (await runner.loadActions()) actionsLoaded = true;
+  }
+
   async function hydrateActions() {
-    await runner.loadActions();
-    actionsLoaded = true;
+    await reloadActions();
     await runner.loadRunningActions();
   }
 
   function handleActionsChanged() {
-    if (repo.hasLocalClone) runner.loadActions();
+    if (repo.hasLocalClone) void reloadActions();
   }
 
   onMount(() => {
@@ -153,7 +163,7 @@
       }
       detecting = event.detecting;
       if (!event.detecting && repo.hasLocalClone) {
-        runner.loadActions();
+        void reloadActions();
       }
     });
   });
@@ -211,6 +221,7 @@
       runner.setActions(
         await detectRepoActions(repo.githubRepo, repo.subpath || undefined, provider)
       );
+      actionsLoaded = true;
     } catch (e) {
       console.error('[RepoCard] Failed to detect actions:', e);
       toast.error('Failed to detect actions', {

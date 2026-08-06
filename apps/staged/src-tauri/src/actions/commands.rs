@@ -138,13 +138,72 @@ fn resolve_branch_repo_context(
     Ok((repo.to_string(), project.subpath.clone()))
 }
 
+/// Persist detected suggestions into an action context, skipping commands the
+/// context already has and continuing its sort order.
+///
+/// Persistence belongs inside the caller's detection window: every surface
+/// treats the `detecting: false` half of the `repo-actions-detection` broadcast
+/// as "this context's action list is final", so a caller that detects here and
+/// persists afterwards — as the repo card's Detect Actions button used to —
+/// reopens its own in-progress guard while the writes are still landing, and a
+/// second run dedupes against a list the first one hasn't finished writing.
+/// Both callers (this module's [`detect_repo_actions_impl`] and the
+/// prerun-actions path in [`crate::branches`]) write through here before
+/// marking the context detected.
+pub(crate) fn persist_suggested_actions(
+    store: &Store,
+    context_id: &str,
+    suggestions: Vec<SuggestedAction>,
+) -> Result<(), String> {
+    let existing_actions = store
+        .list_repo_actions(context_id)
+        .map_err(|e| format!("Failed to list actions: {e}"))?;
+    let mut existing_commands: std::collections::HashSet<String> =
+        existing_actions.iter().map(|a| a.command.clone()).collect();
+    let mut next_sort_order = existing_actions
+        .iter()
+        .map(|a| a.sort_order)
+        .max()
+        .unwrap_or(-1)
+        + 1;
+
+    for suggestion in suggestions {
+        if existing_commands.contains(&suggestion.command) {
+            continue;
+        }
+        existing_commands.insert(suggestion.command.clone());
+        let action = crate::store::RepoAction::new(
+            context_id.to_string(),
+            suggestion.name,
+            suggestion.command,
+            suggestion.action_type,
+            next_sort_order,
+        )
+        .with_auto_commit(suggestion.auto_commit);
+        store
+            .create_repo_action(&action)
+            .map_err(|e| format!("Failed to create detected action: {e}"))?;
+        next_sort_order += 1;
+    }
+
+    Ok(())
+}
+
+/// Detect actions for a repo+subpath context, persist the new suggestions, and
+/// return the context's resulting action list.
+///
+/// Detection and persistence both happen while `detecting_actions` is set, so
+/// the flag — and the `detecting: false` event that clears it — only drop once
+/// the list callers are about to load is complete. That also makes the
+/// already-in-progress guard below cover the writes, so a second click while
+/// the first run persists is rejected rather than starting another AI call.
 pub(crate) async fn detect_repo_actions_impl(
     github_repo: String,
     subpath: Option<String>,
     provider: Option<String>,
     app: AppHandle,
     store: Arc<Store>,
-) -> Result<Vec<SuggestedAction>, String> {
+) -> Result<Vec<crate::store::RepoAction>, String> {
     let context = store
         .get_or_create_action_context(&github_repo, subpath.as_deref())
         .map_err(|e| format!("Failed to get action context: {e}"))?;
@@ -164,16 +223,26 @@ pub(crate) async fn detect_repo_actions_impl(
         },
     );
 
-    let result =
+    let detected =
         detect_actions_for_repo_context(&github_repo, subpath.as_deref(), provider.as_deref())
             .await;
-    if let Err(ref e) = result {
+    if let Err(ref e) = detected {
         log::warn!("Action detection failed for {github_repo}: {e}");
     }
 
-    store
+    let result = detected.and_then(|suggestions| {
+        persist_suggested_actions(&store, &context.id, suggestions)?;
+        store
+            .list_repo_actions(&context.id)
+            .map_err(|e| format!("Failed to list actions: {e}"))
+    });
+
+    // Clear the flag and announce the end of detection even when detection or
+    // the persist failed — otherwise every surface keeps spinning on a run
+    // that is over.
+    let cleared = store
         .mark_action_context_detected(&context.id)
-        .map_err(|e| format!("Failed to update detection status: {e}"))?;
+        .map_err(|e| format!("Failed to update detection status: {e}"));
     crate::web_server::emit_to_all(
         &app,
         "repo-actions-detection",
@@ -183,10 +252,12 @@ pub(crate) async fn detect_repo_actions_impl(
             detecting: false,
         },
     );
+    cleared?;
     result
 }
 
-/// Detect available actions for a specific repo+subpath context using AI.
+/// Detect available actions for a specific repo+subpath context using AI and
+/// persist them; returns the context's actions afterwards.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn detect_repo_actions(
     github_repo: String,
@@ -194,7 +265,7 @@ pub async fn detect_repo_actions(
     provider: Option<String>,
     app: AppHandle,
     store: State<'_, Mutex<Option<Arc<Store>>>>,
-) -> Result<Vec<SuggestedAction>, String> {
+) -> Result<Vec<crate::store::RepoAction>, String> {
     let store = get_store(&store)?;
     detect_repo_actions_impl(github_repo, subpath, provider, app, store).await
 }
@@ -1110,6 +1181,55 @@ mod tests {
         assert!(get_all_running_actions_impl(&executor, &registry)
             .unwrap()
             .is_empty());
+    }
+
+    fn suggestion(name: &str, command: &str, action_type: ActionType) -> SuggestedAction {
+        SuggestedAction {
+            name: name.to_string(),
+            command: command.to_string(),
+            action_type,
+            auto_commit: false,
+            source: "justfile".to_string(),
+        }
+    }
+
+    #[test]
+    fn persist_suggested_actions_skips_known_commands_and_continues_sort_order() {
+        let store = Store::in_memory().unwrap();
+        let context = store
+            .get_or_create_action_context("block/builderbot", Some("apps/staged"))
+            .unwrap();
+
+        persist_suggested_actions(
+            &store,
+            &context.id,
+            vec![
+                suggestion("Dev", "just dev", ActionType::Run),
+                suggestion("Test", "just test", ActionType::Test),
+            ],
+        )
+        .unwrap();
+
+        // A re-detection that turns up one known command and one new one only
+        // writes the new one, appended after the existing sort orders.
+        persist_suggested_actions(
+            &store,
+            &context.id,
+            vec![
+                suggestion("Test (renamed)", "just test", ActionType::Test),
+                suggestion("Build", "just build", ActionType::Build),
+            ],
+        )
+        .unwrap();
+
+        let actions = store.list_repo_actions(&context.id).unwrap();
+        assert_eq!(
+            actions
+                .iter()
+                .map(|a| (a.name.as_str(), a.sort_order))
+                .collect::<Vec<_>>(),
+            vec![("Dev", 0), ("Test", 1), ("Build", 2)]
+        );
     }
 
     #[test]

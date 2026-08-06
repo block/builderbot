@@ -218,6 +218,15 @@ export class ActionRunner {
     }
   }
 
+  /**
+   * Adopt an action list the caller already has in hand, skipping a reload —
+   * detect_repo_actions returns the context's actions once it has persisted
+   * them, so the Detect Actions flow needs no second read.
+   */
+  setActions(actions: ProjectAction[]): void {
+    this.actions = actions;
+  }
+
   /** Add a hydrated execution to the live set unless it's already tracked. */
   private trackHydratedExecution(info: RunningActionInfo): void {
     if (this.runningActions.some((a) => a.executionId === info.executionId)) return;

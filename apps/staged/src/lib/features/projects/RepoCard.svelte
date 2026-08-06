@@ -194,40 +194,23 @@
   }
 
   /**
-   * Detect actions for this repo's context and persist the new suggestions.
-   * Detection normally runs during project setup, so a repo that was never
-   * attached to a project has an empty context; this is its way in. Mirrors
-   * the settings panel's detect flow (detect, then create the suggestions
-   * that don't already exist).
+   * Detect actions for this repo's context. Detection normally runs during
+   * project setup, so a repo that was never attached to a project has an empty
+   * context; this is its way in.
+   *
+   * detect_repo_actions persists what it detects before it reports detection
+   * finished, so there is no persist gap to guard here: the backend's
+   * in-progress check rejects a second run, and the detecting:false broadcast
+   * that reloads every other card showing this repo carries a complete list.
    */
   async function handleDetectActions() {
     if (detecting) return;
     detecting = true;
     try {
       const provider = getPreferredAgent(agentState.providers) ?? undefined;
-      const suggested = await detectRepoActions(
-        repo.githubRepo,
-        repo.subpath || undefined,
-        provider
+      runner.setActions(
+        await detectRepoActions(repo.githubRepo, repo.subpath || undefined, provider)
       );
-
-      const existingCommands = new Set(runner.actions.map((a) => a.command));
-      let nextSortOrder = Math.max(...runner.actions.map((a) => a.sortOrder), 0) + 1;
-      for (const suggestion of suggested) {
-        if (existingCommands.has(suggestion.command)) continue;
-        await commands.createRepoAction(
-          repo.githubRepo,
-          repo.subpath || undefined,
-          suggestion.name,
-          suggestion.command,
-          suggestion.actionType,
-          nextSortOrder++,
-          suggestion.autoCommit
-        );
-      }
-
-      await runner.loadActions();
-      window.dispatchEvent(new CustomEvent('project-actions-changed'));
     } catch (e) {
       console.error('[RepoCard] Failed to detect actions:', e);
       toast.error('Failed to detect actions', {

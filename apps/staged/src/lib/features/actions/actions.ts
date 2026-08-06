@@ -50,15 +50,6 @@ export interface ProjectAction {
   updatedAt: number;
 }
 
-/** An action suggested by AI detection. */
-export interface SuggestedAction {
-  name: string;
-  command: string;
-  actionType: ActionType;
-  autoCommit: boolean;
-  source: string; // e.g., "package.json", "justfile"
-}
-
 /** A chunk of output from a running action. */
 export interface OutputChunk {
   chunk: string;
@@ -119,13 +110,20 @@ export interface RunningActionSnapshot extends RunningActionInfo {
   phase: RunPhase | null;
 }
 
-/** Detect available actions for a repo+subpath context. */
+/**
+ * Detect available actions for a repo+subpath context and persist the new
+ * suggestions, resolving to the context's resulting action list.
+ *
+ * The backend persists inside the window it reports as detecting, so callers
+ * have nothing to write themselves — and the `detecting: false` broadcast every
+ * action surface listens for means the list is already final.
+ */
 export function detectRepoActions(
   githubRepo: string,
   subpath?: string,
   provider?: string
-): Promise<SuggestedAction[]> {
-  return invokeCommand<SuggestedAction[]>('detect_repo_actions', {
+): Promise<ProjectAction[]> {
+  return invokeCommand<ProjectAction[]>('detect_repo_actions', {
     githubRepo,
     subpath: subpath ?? null,
     provider: provider ?? null,

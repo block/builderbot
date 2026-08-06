@@ -2621,37 +2621,8 @@ pub(crate) async fn run_prerun_actions_for_branch(
             }
         };
 
-        // Persist detected actions (skip duplicates)
-        let existing_actions = store
-            .list_repo_actions(&context.id)
-            .map_err(|e| format!("Failed to list actions: {e}"))?;
-        let mut existing_commands: std::collections::HashSet<String> =
-            existing_actions.iter().map(|a| a.command.clone()).collect();
-        let mut next_sort_order = existing_actions
-            .iter()
-            .map(|a| a.sort_order)
-            .max()
-            .unwrap_or(-1)
-            + 1;
-
-        for suggestion in detected {
-            if existing_commands.contains(&suggestion.command) {
-                continue;
-            }
-            existing_commands.insert(suggestion.command.clone());
-            let action = crate::store::RepoAction::new(
-                context.id.clone(),
-                suggestion.name,
-                suggestion.command,
-                suggestion.action_type,
-                next_sort_order,
-            )
-            .with_auto_commit(suggestion.auto_commit);
-            store
-                .create_repo_action(&action)
-                .map_err(|e| format!("Failed to create detected action: {e}"))?;
-            next_sort_order += 1;
-        }
+        // Persist detected actions (skip duplicates) before the flag drops.
+        crate::actions::commands::persist_suggested_actions(store, &context.id, detected)?;
 
         store
             .mark_action_context_detected(&context.id)

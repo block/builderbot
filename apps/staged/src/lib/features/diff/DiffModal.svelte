@@ -687,6 +687,10 @@
       return;
     }
 
+    // A stale comment is edited in place rather than posted afresh, which the
+    // pending-review message below has to word differently.
+    const isEdit = comment.githubCommentId != null;
+
     sendingCommentIds = new Set([...sendingCommentIds, comment.id]);
 
     try {
@@ -708,7 +712,7 @@
       // A comment that joined a draft review looks sent but isn't visible to
       // anyone else yet, so say so rather than leaving a silent checkmark.
       if (result.pending) {
-        toast.success('Added to your pending review', {
+        toast.success(isEdit ? 'Updated in your pending review' : 'Added to your pending review', {
           description: 'Submit the review on GitHub to publish it.',
         });
       }

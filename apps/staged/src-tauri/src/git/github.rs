@@ -1786,6 +1786,40 @@ fn parse_full_database_id(value: &serde_json::Value) -> Option<i64> {
     }
 }
 
+/// Read the `{ fullDatabaseId, url }` pair the pending-review mutations return.
+///
+/// `fullDatabaseId` is the REST comment ID, which is what the stored
+/// `#discussion_r{id}` anchor is built from and what later edits address. The
+/// GraphQL schema does not expose `databaseId` on a review comment.
+fn parse_pending_comment_result(
+    comment: &serde_json::Value,
+) -> Result<GitHubCommentResult, GitError> {
+    let comment_id = comment
+        .get("fullDatabaseId")
+        .and_then(parse_full_database_id)
+        .ok_or_else(|| {
+            GitError::CommandFailed(
+                "Failed to parse the ID of the comment in the pending review".to_string(),
+            )
+        })?;
+    let comment_url = comment
+        .get("url")
+        .and_then(|url| url.as_str())
+        .ok_or_else(|| {
+            GitError::CommandFailed(
+                "Failed to parse the URL of the comment in the pending review".to_string(),
+            )
+        })?
+        .to_string();
+
+    Ok(GitHubCommentResult {
+        comment_url,
+        comment_id,
+        comment_type: "review".to_string(),
+        pending: true,
+    })
+}
+
 /// Append a comment to an existing pending review.
 ///
 /// REST has no endpoint for this: `POST /pulls/{n}/comments` creates a
@@ -1824,33 +1858,141 @@ async fn add_comment_to_pending_review(
             )
         })?;
 
-    // `fullDatabaseId` is the REST comment ID, which is what later edits and the
-    // stored `#discussion_r{id}` anchor are built from. The GraphQL schema does
-    // not expose `databaseId` on a review comment.
-    let comment_id = comment
-        .get("fullDatabaseId")
-        .and_then(parse_full_database_id)
+    parse_pending_comment_result(comment)
+}
+
+/// Find the GraphQL node ID of a review comment sitting in the viewer's pending
+/// review.
+///
+/// The REST review-comment endpoints do not list draft comments, so an edit to
+/// one has to go through GraphQL — which addresses comments by node ID, while
+/// all Staged persists is the REST database ID. GraphQL cannot look a comment up
+/// by database ID, so the viewer's draft is scanned for the match.
+///
+/// Bounded to the first 100 comments of the draft. Past that the caller reports
+/// the failure it already has rather than claiming a false success.
+async fn find_pending_review_comment(
+    client: &reqwest::Client,
+    token: &str,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    comment_id: i64,
+) -> Result<Option<String>, GitError> {
+    const QUERY: &str = r"query($owner: String!, $name: String!, $number: Int!) {
+        repository(owner: $owner, name: $name) {
+            pullRequest(number: $number) {
+                reviews(states: [PENDING], first: 20) {
+                    nodes {
+                        viewerDidAuthor
+                        comments(first: 100) {
+                            nodes { id fullDatabaseId }
+                        }
+                    }
+                }
+            }
+        }
+    }";
+
+    let data = graphql_request(
+        client,
+        token,
+        QUERY,
+        serde_json::json!({ "owner": owner, "name": repo, "number": pr_number }),
+        "Failed to look up comment in pending review",
+    )
+    .await?;
+
+    Ok(find_pending_review_comment_in_response(&data, comment_id))
+}
+
+/// Pure half of [`find_pending_review_comment`].
+fn find_pending_review_comment_in_response(
+    data: &serde_json::Value,
+    comment_id: i64,
+) -> Option<String> {
+    data.pointer("/repository/pullRequest/reviews/nodes")?
+        .as_array()?
+        .iter()
+        .filter(|review| {
+            review
+                .get("viewerDidAuthor")
+                .and_then(|authored| authored.as_bool())
+                .unwrap_or(false)
+        })
+        .filter_map(|review| review.pointer("/comments/nodes")?.as_array())
+        .flatten()
+        .find(|comment| {
+            comment
+                .get("fullDatabaseId")
+                .and_then(parse_full_database_id)
+                == Some(comment_id)
+        })
+        .and_then(|comment| comment.get("id"))
+        .and_then(|id| id.as_str())
+        .map(ToString::to_string)
+}
+
+/// [`find_pending_review_comment`], degraded to "not in a pending review" on
+/// failure.
+///
+/// The caller only reaches this after a REST edit has already failed, and that
+/// failure is the more useful one to report, so a broken lookup must not replace
+/// it with a GraphQL error.
+async fn find_pending_review_comment_or_none(
+    client: &reqwest::Client,
+    token: &str,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+    comment_id: i64,
+) -> Option<String> {
+    match find_pending_review_comment(client, token, owner, repo, pr_number, comment_id).await {
+        Ok(comment_node_id) => comment_node_id,
+        Err(e) => {
+            log::warn!(
+                "Failed to look up comment {comment_id} in a pending review on \
+                 {owner}/{repo} PR #{pr_number}: {e}"
+            );
+            None
+        }
+    }
+}
+
+/// Edit a review comment that is still part of a pending review.
+async fn update_pending_review_comment(
+    client: &reqwest::Client,
+    token: &str,
+    comment_node_id: &str,
+    body: &str,
+) -> Result<GitHubCommentResult, GitError> {
+    const MUTATION: &str = r"mutation($input: UpdatePullRequestReviewCommentInput!) {
+        updatePullRequestReviewComment(input: $input) {
+            pullRequestReviewComment { fullDatabaseId url }
+        }
+    }";
+
+    let data = graphql_request(
+        client,
+        token,
+        MUTATION,
+        serde_json::json!({
+            "input": { "pullRequestReviewCommentId": comment_node_id, "body": body },
+        }),
+        "Failed to update comment in pending review",
+    )
+    .await?;
+
+    let comment = data
+        .pointer("/updatePullRequestReviewComment/pullRequestReviewComment")
         .ok_or_else(|| {
             GitError::CommandFailed(
-                "Failed to parse the ID of the comment added to the pending review".to_string(),
+                "Failed to update comment in pending review: GitHub returned no comment"
+                    .to_string(),
             )
         })?;
-    let comment_url = comment
-        .get("url")
-        .and_then(|url| url.as_str())
-        .ok_or_else(|| {
-            GitError::CommandFailed(
-                "Failed to parse the URL of the comment added to the pending review".to_string(),
-            )
-        })?
-        .to_string();
 
-    Ok(GitHubCommentResult {
-        comment_url,
-        comment_id,
-        comment_type: "review".to_string(),
-        pending: true,
-    })
+    parse_pending_comment_result(comment)
 }
 
 /// Whether a `POST /pulls/{n}/comments` failure is GitHub refusing to open a
@@ -2079,9 +2221,14 @@ pub async fn post_single_comment_to_github(
 }
 
 /// Update an existing comment on GitHub.
+///
+/// A review comment that joined a pending review may not be addressable through
+/// `PATCH /pulls/comments/{id}` at all — the REST review-comment endpoints do
+/// not list draft comments — so a not-found response falls back to editing the
+/// comment inside the draft over GraphQL.
 pub async fn update_comment_on_github(
     repo: &Path,
-    _pr_number: u64,
+    pr_number: u64,
     github_comment_id: i64,
     github_comment_type: &str,
     body: &str,
@@ -2118,6 +2265,25 @@ pub async fn update_comment_on_github(
     let status = response.status();
     if !status.is_success() {
         let error_body = response.text().await.unwrap_or_default();
+
+        // A comment that joined a draft review is invisible to REST, so a
+        // not-found here may just mean "still pending" rather than "gone".
+        if github_comment_type == "review" && status == reqwest::StatusCode::NOT_FOUND {
+            if let Some(comment_node_id) = find_pending_review_comment_or_none(
+                &client,
+                &token,
+                &owner,
+                &repo_name,
+                pr_number,
+                github_comment_id,
+            )
+            .await
+            {
+                return update_pending_review_comment(&client, &token, &comment_node_id, body)
+                    .await;
+            }
+        }
+
         return Err(GitError::CommandFailed(format!(
             "Failed to update comment: {status} - {error_body}"
         )));
@@ -2138,8 +2304,8 @@ pub async fn update_comment_on_github(
         comment_url: updated.html_url,
         comment_id: updated.id,
         comment_type: github_comment_type.to_string(),
-        // An edit does not change whether the comment is a draft, and the PATCH
-        // response does not say; only a fresh post reports it.
+        // A REST edit reached the comment, so it is published; a draft comment
+        // takes the GraphQL path above and reports itself as pending there.
         pending: false,
     })
 }
@@ -3298,6 +3464,96 @@ mod tests {
         );
         assert_eq!(parse_full_database_id(&serde_json::json!("nope")), None);
         assert_eq!(parse_full_database_id(&serde_json::Value::Null), None);
+    }
+
+    #[test]
+    fn test_parse_pending_comment_result_keeps_the_rest_id_and_flags_pending() {
+        let comment = serde_json::json!({
+            "fullDatabaseId": "2731234567",
+            "url": "https://github.com/owner/repo/pull/1#discussion_r2731234567",
+        });
+
+        let result = parse_pending_comment_result(&comment).unwrap();
+
+        assert_eq!(result.comment_id, 2_731_234_567);
+        assert_eq!(
+            result.comment_url,
+            "https://github.com/owner/repo/pull/1#discussion_r2731234567"
+        );
+        assert_eq!(result.comment_type, "review");
+        assert!(result.pending);
+    }
+
+    #[test]
+    fn test_parse_pending_comment_result_rejects_a_missing_id_or_url() {
+        assert!(parse_pending_comment_result(&serde_json::json!({
+            "url": "https://github.com/owner/repo/pull/1#discussion_r1",
+        }))
+        .is_err());
+        assert!(
+            parse_pending_comment_result(&serde_json::json!({ "fullDatabaseId": "1" })).is_err()
+        );
+    }
+
+    /// A PR carrying the viewer's draft review alongside somebody else's, which
+    /// `states: [PENDING]` does not filter out.
+    fn pending_reviews_response() -> serde_json::Value {
+        serde_json::json!({
+            "repository": { "pullRequest": { "reviews": { "nodes": [
+                {
+                    "viewerDidAuthor": false,
+                    "comments": { "nodes": [
+                        { "id": "PRRC_theirs", "fullDatabaseId": "2731000001" },
+                    ] },
+                },
+                {
+                    "viewerDidAuthor": true,
+                    "comments": { "nodes": [
+                        { "id": "PRRC_first", "fullDatabaseId": "2731234567" },
+                        { "id": "PRRC_second", "fullDatabaseId": "2731234999" },
+                    ] },
+                },
+            ] } } },
+        })
+    }
+
+    #[test]
+    fn test_find_pending_review_comment_in_response_matches_on_the_rest_id() {
+        assert_eq!(
+            find_pending_review_comment_in_response(&pending_reviews_response(), 2_731_234_999),
+            Some("PRRC_second".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_pending_review_comment_in_response_ignores_other_authors_drafts() {
+        // Editing somebody else's draft comment is not ours to attempt, so the
+        // caller should keep its original REST failure instead.
+        assert_eq!(
+            find_pending_review_comment_in_response(&pending_reviews_response(), 2_731_000_001),
+            None
+        );
+    }
+
+    #[test]
+    fn test_find_pending_review_comment_in_response_handles_no_pending_reviews() {
+        assert_eq!(
+            find_pending_review_comment_in_response(&pending_reviews_response(), 999),
+            None
+        );
+        assert_eq!(
+            find_pending_review_comment_in_response(
+                &serde_json::json!({
+                    "repository": { "pullRequest": { "reviews": { "nodes": [] } } },
+                }),
+                2_731_234_567
+            ),
+            None
+        );
+        assert_eq!(
+            find_pending_review_comment_in_response(&serde_json::json!({}), 2_731_234_567),
+            None
+        );
     }
 
     #[test]

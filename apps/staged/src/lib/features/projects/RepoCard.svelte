@@ -61,6 +61,7 @@
   import PrimaryRunActionButton from '../actions/PrimaryRunActionButton.svelte';
   import RunningActionPills from '../actions/RunningActionPills.svelte';
   import { ActionRunner } from '../actions/actionRunner.svelte';
+  import { bulkRepoActions, bulkRunningForScope } from '../actions/repoActionsBulk';
   import { detectRepoActions, listenToRepoActionsDetection } from '../actions/actions';
   import { getPreferredAgent } from '../settings/preferences.svelte';
   import { agentState } from '../agents/agent.svelte';
@@ -99,10 +100,15 @@
   let dragOver = $state(false);
 
   // Actions state — the shared runner, scoped to this repo's synthetic scope
-  // id. Runs execute against the main local clone via run_repo_action.
+  // id. Runs execute against the main local clone via run_repo_action. Both
+  // hydration paths go through the bulk coalescer, so a surface rendering N
+  // cards (or an actions-changed broadcast reaching all of them) costs one
+  // call per wave rather than one per card.
   const runner = new ActionRunner({
     getScopeId: () => commands.repoActionScopeId(repo.githubRepo, repo.subpath || undefined),
-    loadActions: () => commands.listRepoActions(repo.githubRepo, repo.subpath || undefined),
+    loadActions: () => bulkRepoActions(repo.githubRepo, repo.subpath || undefined),
+    loadRunning: () =>
+      bulkRunningForScope(commands.repoActionScopeId(repo.githubRepo, repo.subpath || undefined)),
     run: (actionId) =>
       commands.runRepoAction(
         repo.githubRepo,

@@ -110,6 +110,15 @@ export interface RunningActionInfo {
   startedAt: number;
 }
 
+/**
+ * A running action with its run phase attached, as returned by the bulk
+ * `get_all_running_actions` query — the inline phase is what lets a caller skip
+ * the per-execution `get_run_phase` round trip.
+ */
+export interface RunningActionSnapshot extends RunningActionInfo {
+  phase: RunPhase | null;
+}
+
 /** Detect available actions for a repo+subpath context. */
 export function detectRepoActions(
   githubRepo: string,

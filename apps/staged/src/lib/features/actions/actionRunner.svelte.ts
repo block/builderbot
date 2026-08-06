@@ -4,12 +4,13 @@
  * output modal).
  *
  * Owns the configured action list, the live running-execution set (hydrated
- * via get_running_branch_actions, updated by action_status and
- * action:run-phase-changed events), stop/fade-out bookkeeping, and the output
- * modal state. The execution pipeline treats its routing id as an opaque
- * string, so the runner is parameterized by a scope id — a branch id, or the
- * synthetic repo scope id from repoActionScopeId() — plus loadActions/run
- * callbacks, letting branch cards and repo cards share one implementation.
+ * via get_running_branch_actions or an injected bulk loader, updated by
+ * action_status and action:run-phase-changed events), stop/fade-out
+ * bookkeeping, and the output modal state. The execution pipeline treats its
+ * routing id as an opaque string, so the runner is parameterized by a scope id
+ * — a branch id, or the synthetic repo scope id from repoActionScopeId() —
+ * plus loadActions/run callbacks, letting branch cards and repo cards share
+ * one implementation.
  */
 
 import { toast } from 'svelte-sonner';
@@ -21,6 +22,8 @@ import {
   stopBranchAction,
   type ActionStatusEvent,
   type ActionType,
+  type RunningActionInfo,
+  type RunningActionSnapshot,
   type RunPhase,
 } from './actions';
 import { onBranchActionStatus, onBranchRunPhaseChanged } from '../../services/branchEventService';
@@ -62,6 +65,13 @@ export interface ActionRunnerOptions {
   loadActions: () => Promise<ProjectAction[]>;
   /** Start an action and return its execution id (runBranchAction / runRepoAction). */
   run: (actionId: string) => Promise<string>;
+  /**
+   * Optional bulk source for the scope's live executions, each with its run
+   * phase inline. When given, hydration uses it instead of
+   * get_running_branch_actions plus a get_run_phase per execution — which is
+   * how a surface full of cards hydrates from a single call.
+   */
+  loadRunning?: () => Promise<RunningActionSnapshot[]>;
 }
 
 function notifyError(title: string, e: unknown): void {
@@ -75,6 +85,7 @@ export class ActionRunner {
   private getScopeId: () => string = undefined!;
   private load: () => Promise<ProjectAction[]> = undefined!;
   private run: (actionId: string) => Promise<string> = undefined!;
+  private loadRunning: (() => Promise<RunningActionSnapshot[]>) | undefined;
 
   actions = $state<ProjectAction[]>([]);
   runningActions = $state<RunningAction[]>([]);
@@ -99,6 +110,7 @@ export class ActionRunner {
     this.getScopeId = opts.getScopeId;
     this.load = opts.loadActions;
     this.run = opts.run;
+    this.loadRunning = opts.loadRunning;
   }
 
   /**
@@ -206,34 +218,44 @@ export class ActionRunner {
     }
   }
 
+  /** Add a hydrated execution to the live set unless it's already tracked. */
+  private trackHydratedExecution(info: RunningActionInfo): void {
+    if (this.runningActions.some((a) => a.executionId === info.executionId)) return;
+    this.runningActions.push({
+      executionId: info.executionId,
+      actionId: info.actionId,
+      actionName: info.actionName,
+      actionType: info.actionType,
+      status: 'running',
+      startedAt: info.startedAt,
+    });
+  }
+
+  /** Record a hydrated run phase, defaulting run actions to a phaseless run. */
+  private applyHydratedPhase(info: RunningActionInfo, phase: RunPhase | null): void {
+    if (phase) {
+      this.runPhases.set(info.executionId, phase);
+    } else if (info.actionType === 'run') {
+      this.runPhases.set(info.executionId, { type: 'running', endpoint: null });
+    }
+  }
+
   async loadRunningActions(): Promise<void> {
     try {
-      const running = await getRunningBranchActions(this.getScopeId());
-
-      for (const info of running) {
-        const existingIndex = this.runningActions.findIndex(
-          (a) => a.executionId === info.executionId
-        );
-        if (existingIndex === -1) {
-          this.runningActions.push({
-            executionId: info.executionId,
-            actionId: info.actionId,
-            actionName: info.actionName,
-            actionType: info.actionType,
-            status: 'running',
-            startedAt: info.startedAt,
-          });
+      if (this.loadRunning) {
+        // Bulk path: phases arrive inline, so there are no per-execution calls.
+        for (const snapshot of await this.loadRunning()) {
+          this.trackHydratedExecution(snapshot);
+          this.applyHydratedPhase(snapshot, snapshot.phase);
         }
-
-        try {
-          const phase = await getRunPhase(info.executionId);
-          if (phase) {
-            this.runPhases.set(info.executionId, phase);
-          } else if (info.actionType === 'run') {
-            this.runPhases.set(info.executionId, { type: 'running', endpoint: null });
+      } else {
+        for (const info of await getRunningBranchActions(this.getScopeId())) {
+          this.trackHydratedExecution(info);
+          try {
+            this.applyHydratedPhase(info, await getRunPhase(info.executionId));
+          } catch {
+            // Phase not available for this execution
           }
-        } catch {
-          // Phase not available for this execution
         }
       }
       this.runPhases = new Map(this.runPhases);

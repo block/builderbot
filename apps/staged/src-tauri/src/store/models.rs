@@ -1150,6 +1150,17 @@ impl RepoAction {
     }
 }
 
+/// One context's actions, as grouped by the bulk `list_all_repo_actions` query.
+/// Callers key contexts by repo + subpath rather than context id, so the
+/// context's identity travels alongside its actions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoContextActions {
+    pub github_repo: String,
+    pub subpath: Option<String>,
+    pub actions: Vec<RepoAction>,
+}
+
 // =============================================================================
 // Reviews
 // =============================================================================

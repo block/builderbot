@@ -2340,6 +2340,65 @@ fn test_repo_actions() {
 }
 
 #[test]
+fn test_list_all_repo_actions_groups_by_context() {
+    let store = Store::in_memory().unwrap();
+    let root = store
+        .get_or_create_action_context("test-owner/monorepo", None)
+        .unwrap();
+    let sub = store
+        .get_or_create_action_context("test-owner/monorepo", Some("apps/staged"))
+        .unwrap();
+    // A context with no actions is absent from the result — callers read that
+    // as an empty action list.
+    store
+        .get_or_create_action_context("test-owner/actionless", None)
+        .unwrap();
+
+    // Inserted out of sort order to prove the query orders within a context.
+    for (context_id, name, command, action_type, sort_order) in [
+        (&root.id, "Test", "cargo test", ActionType::Test, 1),
+        (&root.id, "Build", "cargo build", ActionType::Build, 0),
+        (&sub.id, "Dev", "just dev", ActionType::Run, 0),
+    ] {
+        store
+            .create_repo_action(&RepoAction::new(
+                context_id.clone(),
+                name.to_string(),
+                command.to_string(),
+                action_type,
+                sort_order,
+            ))
+            .unwrap();
+    }
+
+    let grouped = store.list_all_repo_actions().unwrap();
+    assert_eq!(grouped.len(), 2);
+    assert!(!grouped
+        .iter()
+        .any(|g| g.github_repo == "test-owner/actionless"));
+
+    let root_group = grouped.iter().find(|g| g.subpath.is_none()).unwrap();
+    assert_eq!(root_group.github_repo, "test-owner/monorepo");
+    assert_eq!(
+        root_group
+            .actions
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Build", "Test"]
+    );
+
+    let sub_group = grouped
+        .iter()
+        .find(|g| g.subpath.as_deref() == Some("apps/staged"))
+        .unwrap();
+    assert_eq!(sub_group.github_repo, "test-owner/monorepo");
+    assert_eq!(sub_group.actions.len(), 1);
+    assert_eq!(sub_group.actions[0].name, "Dev");
+    assert_eq!(sub_group.actions[0].context_id, sub.id);
+}
+
+#[test]
 fn test_reorder_actions() {
     let store = Store::in_memory().unwrap();
     let context = store

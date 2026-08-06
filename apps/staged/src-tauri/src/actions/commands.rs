@@ -732,6 +732,55 @@ pub fn get_running_branch_actions(
     get_running_branch_actions_impl(branch_id, &executor, &registry)
 }
 
+/// A live execution paired with its current run phase. Carrying the phase
+/// inline spares callers a `get_run_phase` round trip per execution.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunningActionSnapshot {
+    #[serde(flatten)]
+    pub info: RunningActionInfo,
+    pub phase: Option<RunPhase>,
+}
+
+/// Pair each registry entry that is still live in the executor with its run
+/// phase. `live_execution_ids` is the executor's liveness set, passed in so the
+/// filter and phase join are testable without a real execution.
+fn snapshot_running_actions(
+    registry: &ActionRegistry,
+    live_execution_ids: &std::collections::HashSet<String>,
+) -> Vec<RunningActionSnapshot> {
+    registry
+        .get_all_running()
+        .into_iter()
+        .filter(|info| live_execution_ids.contains(&info.execution_id))
+        .map(|info| RunningActionSnapshot {
+            phase: registry.get_run_phase(&info.execution_id),
+            info,
+        })
+        .collect()
+}
+
+pub(crate) fn get_all_running_actions_impl(
+    executor: &ActionExecutor,
+    registry: &ActionRegistry,
+) -> Result<Vec<RunningActionSnapshot>, String> {
+    let live_execution_ids: std::collections::HashSet<String> =
+        executor.get_running_ids().into_iter().collect();
+    Ok(snapshot_running_actions(registry, &live_execution_ids))
+}
+
+/// Get every currently running action across all scopes, each with its run
+/// phase. Cards slice the result by their own scope id, so a surface rendering
+/// N of them hydrates from one call instead of one (plus a phase call per
+/// execution) each.
+#[tauri::command]
+pub fn get_all_running_actions(
+    executor: State<'_, Arc<ActionExecutor>>,
+    registry: State<'_, Arc<ActionRegistry>>,
+) -> Result<Vec<RunningActionSnapshot>, String> {
+    get_all_running_actions_impl(&executor, &registry)
+}
+
 pub(crate) fn get_action_output_buffer_impl(
     execution_id: String,
     executor: &ActionExecutor,
@@ -992,6 +1041,76 @@ pub async fn update_run_detection_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    fn register(registry: &ActionRegistry, execution_id: &str, scope_id: &str, action_type: &str) {
+        registry.register(
+            execution_id.to_string(),
+            scope_id.to_string(),
+            format!("action-{execution_id}"),
+            format!("Action {execution_id}"),
+            action_type.to_string(),
+            0,
+        );
+    }
+
+    #[test]
+    fn snapshot_running_actions_drops_dead_executions_and_joins_phases() {
+        let registry = ActionRegistry::new();
+        let repo_scope = repo_action_scope_id("block/builderbot", Some("apps/staged"));
+        register(&registry, "live-run", &repo_scope, "run");
+        register(&registry, "live-test", "branch-1", "test");
+        register(&registry, "dead", "branch-1", "build");
+        registry.set_run_phase(
+            "live-run",
+            RunPhase::Running {
+                endpoint: Some("http://localhost:5173".to_string()),
+            },
+        );
+
+        let live: HashSet<String> = ["live-run", "live-test"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let mut snapshots = snapshot_running_actions(&registry, &live);
+        snapshots.sort_by(|a, b| a.info.execution_id.cmp(&b.info.execution_id));
+
+        // "dead" is still registered but no longer live in the executor.
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|s| s.info.execution_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["live-run", "live-test"]
+        );
+        assert!(matches!(
+            &snapshots[0].phase,
+            Some(RunPhase::Running { endpoint: Some(e) }) if e == "http://localhost:5173"
+        ));
+        assert!(snapshots[1].phase.is_none());
+        // Repo- and branch-scoped executions come back together; callers slice
+        // the result by their own scope id.
+        assert_eq!(snapshots[0].info.branch_id, repo_scope);
+        assert_eq!(snapshots[1].info.branch_id, "branch-1");
+
+        // The info fields flatten alongside the phase, so a snapshot reads like
+        // a RunningActionInfo with one extra key.
+        let json = serde_json::to_value(&snapshots[0]).unwrap();
+        assert_eq!(json["executionId"], "live-run");
+        assert_eq!(json["actionType"], "run");
+        assert_eq!(json["phase"]["type"], "running");
+    }
+
+    #[test]
+    fn get_all_running_actions_is_empty_when_the_executor_runs_nothing() {
+        let registry = ActionRegistry::new();
+        register(&registry, "stale", "branch-1", "test");
+
+        let executor = ActionExecutor::new();
+        assert!(get_all_running_actions_impl(&executor, &registry)
+            .unwrap()
+            .is_empty());
+    }
 
     #[test]
     fn repo_action_scope_id_includes_subpath_when_present() {

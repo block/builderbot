@@ -1775,6 +1775,16 @@ fn list_repo_actions(
         .map_err(|e| e.to_string())
 }
 
+/// Every action context's actions in one read-only call — the bulk hydration
+/// path for surfaces that render one card per repo.
+#[tauri::command]
+fn list_all_repo_actions(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+) -> Result<Vec<store::models::RepoContextActions>, String> {
+    let store = get_store(&store)?;
+    store.list_all_repo_actions().map_err(|e| e.to_string())
+}
+
 #[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
 fn create_repo_action(
@@ -2278,6 +2288,7 @@ pub fn run() {
             delete_project_action,
             list_action_contexts,
             list_repo_actions,
+            list_all_repo_actions,
             create_repo_action,
             delete_all_repo_actions,
             delete_action_context,
@@ -2379,6 +2390,7 @@ pub fn run() {
             actions::commands::run_repo_action,
             actions::commands::stop_branch_action,
             actions::commands::get_running_branch_actions,
+            actions::commands::get_all_running_actions,
             actions::commands::get_action_output_buffer,
             actions::commands::clear_action_execution,
             actions::commands::run_prerun_actions,

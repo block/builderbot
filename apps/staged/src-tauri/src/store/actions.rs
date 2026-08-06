@@ -2,7 +2,7 @@
 
 use rusqlite::{params, OptionalExtension};
 
-use super::models::{ActionContext, ActionType, RepoAction, RunDetectionMode};
+use super::models::{ActionContext, ActionType, RepoAction, RepoContextActions, RunDetectionMode};
 use super::{now_timestamp, Store, StoreError};
 
 impl Store {
@@ -156,6 +156,49 @@ impl Store {
         )?;
         let rows = stmt.query_map(params![context_id], Self::row_to_repo_action)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Every context's actions in a single query, grouped per context.
+    ///
+    /// Deliberately read-only: surfaces that render one card per repo use this
+    /// instead of a `get_or_create_action_context` lookup per card, so merely
+    /// rendering them can't insert context rows. A repo absent from the result
+    /// has no context yet, which callers treat as an empty action list.
+    pub fn list_all_repo_actions(&self) -> Result<Vec<RepoContextActions>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT a.id, a.context_id, a.name, a.command, a.action_type, a.sort_order, a.auto_commit, a.run_detection_mode, a.created_at, a.updated_at, c.github_repo, c.subpath
+             FROM repo_actions a
+             JOIN action_contexts c ON a.context_id = c.id
+             ORDER BY c.id ASC, a.sort_order ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let action = Self::row_to_repo_action(row)?;
+            let github_repo: String = row.get(10)?;
+            let subpath: Option<String> = row.get(11)?;
+            Ok((github_repo, subpath, action))
+        })?;
+
+        let mut grouped: Vec<RepoContextActions> = Vec::new();
+        let mut current_context: Option<String> = None;
+        for row in rows {
+            let (github_repo, subpath, action) = row?;
+            // Ordered by context id, so one context's actions arrive contiguously.
+            if current_context.as_deref() != Some(action.context_id.as_str()) {
+                current_context = Some(action.context_id.clone());
+                grouped.push(RepoContextActions {
+                    github_repo,
+                    subpath,
+                    actions: Vec::new(),
+                });
+            }
+            grouped
+                .last_mut()
+                .expect("a context group was just pushed")
+                .actions
+                .push(action);
+        }
+        Ok(grouped)
     }
 
     pub fn update_repo_action(&self, action: &RepoAction) -> Result<(), StoreError> {

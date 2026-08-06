@@ -2152,6 +2152,11 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(actions).unwrap())
         }
+        "list_all_repo_actions" => {
+            let store = get_store(store_mutex)?;
+            let contexts = store.list_all_repo_actions().map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(contexts).unwrap())
+        }
         "create_repo_action" => {
             let store = get_store(store_mutex)?;
             let github_repo: String = arg(&args, "githubRepo")?;
@@ -2259,6 +2264,13 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let branch_id: String = arg(&args, "branchId")?;
             let actions = crate::actions::commands::get_running_branch_actions_impl(
                 branch_id,
+                action_executor,
+                action_registry,
+            )?;
+            Ok(serde_json::to_value(actions).unwrap())
+        }
+        "get_all_running_actions" => {
+            let actions = crate::actions::commands::get_all_running_actions_impl(
                 action_executor,
                 action_registry,
             )?;

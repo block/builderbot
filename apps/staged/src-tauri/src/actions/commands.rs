@@ -188,6 +188,36 @@ pub(crate) fn persist_suggested_actions(
     Ok(())
 }
 
+/// Why a detection window handed back no action list.
+///
+/// The two arms mean opposite things to the caller. `Failed` says detection
+/// ran and came back empty-handed, so the context's current list is all there
+/// is going to be. `InProgress` says the list the caller wants is *about to
+/// exist*: another window owns the context and persists into it before it
+/// closes. Collapsing both into one string is what made the prerun paths treat
+/// the second as the first — see [`ensure_actions_detected`], which waits it
+/// out. The repo card's button renders either as text, via [`Display`].
+///
+/// [`Display`]: std::fmt::Display
+#[derive(Debug)]
+enum DetectionError {
+    /// A window is already open for this context — here, or in another Staged
+    /// instance sharing the database.
+    InProgress,
+    /// Detection failed, or its results could not be persisted or read back.
+    Failed(String),
+}
+
+impl std::fmt::Display for DetectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            // The string the Detect Actions button has always surfaced.
+            Self::InProgress => write!(f, "Detection is already in progress for this repository"),
+            Self::Failed(e) => write!(f, "{e}"),
+        }
+    }
+}
+
 /// Run one complete detection window for an action context: claim the
 /// `detecting_actions` flag, broadcast `detecting: true`, detect, persist the
 /// suggestions, and return the context's resulting action list.
@@ -204,23 +234,24 @@ pub(crate) fn persist_suggested_actions(
 /// no code here runs on, a hard kill, and it only heals at the next startup.)
 ///
 /// This is the one detection window in the app. The repo card's Detect Actions
-/// button ([`detect_repo_actions_impl`]) and both prerun-actions paths
-/// ([`run_prerun_actions_impl`] and [`crate::branches::run_prerun_actions_for_branch`])
-/// all route through here, so the claim also serializes them against each
-/// other: a branch created while a card's detection is in flight is told
-/// detection is already in progress instead of launching a second AI call
-/// whose dedupe reads a list the first run hasn't finished writing.
-pub(crate) async fn detect_and_persist_repo_actions(
+/// button ([`detect_repo_actions_impl`]) and both prerun-actions paths (via
+/// [`ensure_actions_detected`]) all route through here, so the claim also
+/// serializes them against each other: a branch created while a card's
+/// detection is in flight is told detection is already in progress instead of
+/// launching a second AI call whose dedupe reads a list the first run hasn't
+/// finished writing. What a caller does with that rejection is its own
+/// business — the button surfaces it, prerun waits it out.
+async fn detect_and_persist_repo_actions(
     app: &AppHandle,
     store: &Store,
     context: &crate::store::ActionContext,
     provider_id: Option<&str>,
-) -> Result<Vec<crate::store::RepoAction>, String> {
+) -> Result<Vec<crate::store::RepoAction>, DetectionError> {
     let claimed = store
         .claim_action_context_detection(&context.id, std::process::id())
-        .map_err(|e| format!("Failed to set detection status: {e}"))?;
+        .map_err(|e| DetectionError::Failed(format!("Failed to set detection status: {e}")))?;
     if !claimed {
-        return Err("Detection is already in progress for this repository".into());
+        return Err(DetectionError::InProgress);
     }
     // The window is open from here on — every path below must close it.
     let event = |detecting: bool| DetectingActionsEvent {
@@ -242,7 +273,7 @@ pub(crate) async fn detect_and_persist_repo_actions(
 
     let result = finish_detection_window(store, &context.id, detected);
     crate::web_server::emit_to_all(app, "repo-actions-detection", event(false));
-    result
+    result.map_err(DetectionError::Failed)
 }
 
 /// Store-side close-out for a detection window: persist the suggestions and
@@ -277,6 +308,197 @@ fn finish_detection_window(
     result
 }
 
+/// How a caller waits out a detection window someone else owns: how often it
+/// re-reads the claim, and how long it waits before giving up.
+///
+/// The AI call inside a window has no timeout of its own, so the wait needs a
+/// cap — an owner that never finishes must not hold branch setup open forever.
+/// Both knobs are injected so the tests can drive the loop tick by tick
+/// instead of by the clock.
+#[derive(Clone, Copy)]
+struct DetectionWaitPolicy {
+    interval: std::time::Duration,
+    max_wait: std::time::Duration,
+}
+
+impl Default for DetectionWaitPolicy {
+    fn default() -> Self {
+        Self {
+            interval: std::time::Duration::from_secs(1),
+            // Generous next to a detection that takes tens of seconds: waiting
+            // costs this caller no more than winning the claim would have,
+            // since that path awaits the same AI call.
+            max_wait: std::time::Duration::from_secs(300),
+        }
+    }
+}
+
+/// How [`wait_for_detection_window`] stopped waiting.
+#[derive(Debug, PartialEq, Eq)]
+enum DetectionWait {
+    /// The window closed. Its owner persisted inside it, so the context's
+    /// action list is final.
+    Closed,
+    /// The window's owner was gone and the claim was released, so the waiter
+    /// can claim the context and detect it itself.
+    Released,
+    /// Gave up with the window still open — the cap expired, or the claim
+    /// couldn't be read. The caller proceeds with the list it can see.
+    GaveUp,
+}
+
+/// Wait for a detection window owned by someone else to close.
+///
+/// The owner can be another Staged instance — `~/.staged/data.db` is shared,
+/// which is the entire reason `detecting_pid` exists — so this polls SQLite
+/// rather than waiting on an in-process primitive; a `Notify` keyed by context
+/// id would miss a foreign owner, and the `repo-actions-detection` broadcast is
+/// frontend-bound. [`Store::list_detecting_action_contexts`] answers both
+/// halves of a tick in one query: whether the flag is still set, and who owns
+/// it.
+///
+/// Each tick also runs the startup sweep's orphan test
+/// ([`recover_orphaned_detection_claims`]), with one inversion: mid-session a
+/// claim carrying *our own pid* is live — another task in this process owns
+/// that window — so it is waited on rather than released. An owner that is
+/// gone leaves nothing to wait for, so its claim is released and the waiter is
+/// told to detect the context itself. That is the "steal a dead owner's window,
+/// wedged until the next attempt rather than until the next launch" half the
+/// startup sweep deliberately left out.
+async fn wait_for_detection_window(
+    store: &Store,
+    context_id: &str,
+    policy: DetectionWaitPolicy,
+    is_alive: impl Fn(u32) -> bool,
+) -> DetectionWait {
+    let deadline = tokio::time::Instant::now() + policy.max_wait;
+    loop {
+        let claims = match store.list_detecting_action_contexts() {
+            Ok(claims) => claims,
+            Err(e) => {
+                log::warn!(
+                    "[actions] Failed to read the detection claim on action context {context_id}: {e}"
+                );
+                return DetectionWait::GaveUp;
+            }
+        };
+        let Some((_, pid)) = claims.into_iter().find(|(id, _)| id == context_id) else {
+            return DetectionWait::Closed;
+        };
+
+        let orphaned = match pid {
+            None => true,
+            Some(pid) if pid == std::process::id() => false,
+            Some(pid) => !is_alive(pid),
+        };
+        if orphaned {
+            // Guarded on the pid just read, so a window that changed hands
+            // between the read and here is left to its new owner and waited
+            // out on the next tick rather than clobbered.
+            match store.release_detection_claim(context_id, pid) {
+                Ok(true) => {
+                    log::info!(
+                        "[actions] Took over the detection claim on action context {context_id}: its owner ({pid:?}) is gone"
+                    );
+                    return DetectionWait::Released;
+                }
+                Ok(false) => {}
+                Err(e) => log::warn!(
+                    "[actions] Failed to release the orphaned detection claim on action context {context_id}: {e}"
+                ),
+            }
+        }
+
+        if tokio::time::Instant::now() >= deadline {
+            return DetectionWait::GaveUp;
+        }
+        tokio::time::sleep(policy.interval).await;
+    }
+}
+
+/// The prerun paths' way in to detection: make sure this context has been
+/// detected, then hand back its actions.
+///
+/// Its two callers — [`run_prerun_actions_impl`] and
+/// [`crate::branches::run_prerun_actions_for_branch`] — run once per branch,
+/// behind the atomic `mark_branch_setup_complete` claim, so the list they get
+/// here is the only one that branch's prerun will ever see. A miss is
+/// permanent for that worktree: it never gets its setup actions, and nothing
+/// retries.
+///
+/// - Already detected → list and return.
+/// - Claim won → detect best-effort. A failure is logged and prerun continues
+///   with whatever the context does have, rather than blocking a branch on a
+///   missing agent.
+/// - Claim lost → **wait**. The rejection means the actions aren't missing,
+///   they're about to exist: the winner persists inside its window, so listing
+///   now reads the pre-detection (typically empty) list, finds no prerun
+///   actions, and silently skips this branch's setup. No re-detection once the
+///   window closes — the winner marks the context detected on every exit,
+///   including a failed detection.
+pub(crate) async fn ensure_actions_detected(
+    app: &AppHandle,
+    store: &Store,
+    context: &crate::store::ActionContext,
+    provider_id: Option<&str>,
+) -> Result<Vec<crate::store::RepoAction>, String> {
+    let list = || {
+        store
+            .list_repo_actions(&context.id)
+            .map_err(|e| format!("Failed to list actions: {e}"))
+    };
+    if context.has_detected_actions {
+        return list();
+    }
+
+    let waited = match detect_and_persist_repo_actions(app, store, context, provider_id).await {
+        Ok(actions) => return Ok(actions),
+        Err(DetectionError::Failed(e)) => {
+            log::warn!(
+                "[actions] Detection failed for {} (subpath: {:?}): {e} — running prerun with the context's current action list",
+                context.github_repo,
+                context.subpath
+            );
+            return list();
+        }
+        Err(DetectionError::InProgress) => {
+            wait_for_detection_window(
+                store,
+                &context.id,
+                DetectionWaitPolicy::default(),
+                crate::session_runner::is_process_alive,
+            )
+            .await
+        }
+    };
+
+    match waited {
+        DetectionWait::Closed => list(),
+        // Nothing is going to persist into this context but us now.
+        DetectionWait::Released => {
+            match detect_and_persist_repo_actions(app, store, context, provider_id).await {
+                Ok(actions) => Ok(actions),
+                Err(e) => {
+                    log::warn!(
+                        "[actions] Detection failed for {} (subpath: {:?}) after taking over an orphaned window: {e}",
+                        context.github_repo,
+                        context.subpath
+                    );
+                    list()
+                }
+            }
+        }
+        DetectionWait::GaveUp => {
+            log::warn!(
+                "[actions] Gave up waiting for an in-progress detection of {} (subpath: {:?}) — running prerun with the context's current action list",
+                context.github_repo,
+                context.subpath
+            );
+            list()
+        }
+    }
+}
+
 /// On startup, release detection windows whose owner process is no longer
 /// alive; returns how many were released.
 ///
@@ -300,6 +522,10 @@ fn finish_detection_window(
 ///   pid we inherited.
 /// - a dead pid → release.
 /// - a live pid → leave it; another Staged instance owns that window.
+///
+/// The own-pid arm is why this is startup-only: mid-session that same claim is
+/// live, held by another task in this process. [`wait_for_detection_window`]
+/// runs the same test with that one arm inverted.
 ///
 /// `is_alive` is injected so the sweep is testable without spawning processes.
 /// It shells out per row, which is fine: the loop only visits rows with the
@@ -337,9 +563,14 @@ pub fn recover_orphaned_detection_claims(store: &Store, is_alive: impl Fn(u32) -
 }
 
 /// The repo card's Detect Actions button: resolve (or create) the context for
-/// a repo+subpath, then run one detection window over it. Unlike the prerun
-/// paths, this one propagates the window's error to the caller — the button
-/// surfaces it — including the already-in-progress rejection.
+/// a repo+subpath, then run one detection window over it.
+///
+/// Unlike the prerun paths, this one propagates the window's error to the
+/// caller — the button surfaces it — including the already-in-progress
+/// rejection. Waiting the way [`ensure_actions_detected`] does would freeze the
+/// button for the length of someone else's window, and there is nothing to wait
+/// for anyway: the spinner it drives is already running off the `detecting:
+/// true` event the winning window broadcast.
 pub(crate) async fn detect_repo_actions_impl(
     github_repo: String,
     subpath: Option<String>,
@@ -350,7 +581,9 @@ pub(crate) async fn detect_repo_actions_impl(
     let context = store
         .get_or_create_action_context(&github_repo, subpath.as_deref())
         .map_err(|e| format!("Failed to get action context: {e}"))?;
-    detect_and_persist_repo_actions(&app, &store, &context, provider.as_deref()).await
+    detect_and_persist_repo_actions(&app, &store, &context, provider.as_deref())
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Detect available actions for a specific repo+subpath context using AI and
@@ -1024,26 +1257,10 @@ pub(crate) async fn run_prerun_actions_impl(
         .get_or_create_action_context(&github_repo, subpath.as_deref())
         .map_err(|e| format!("Failed to get action context: {e}"))?;
 
-    // First time we see this repo+subpath, detect actions before running prerun.
-    // Detection is best-effort here: whatever went wrong, the window is closed
-    // by the time this returns, and prerun continues with whatever the context
-    // does have.
-    if !context.has_detected_actions {
-        if let Err(e) =
-            detect_and_persist_repo_actions(&app, &store, &context, provider_id.as_deref()).await
-        {
-            log::warn!(
-                "[run_prerun_actions] action detection failed for repo {} (subpath: {:?}): {e}",
-                github_repo,
-                subpath
-            );
-        }
-    }
-
-    // Get all actions for this context.
-    let actions = store
-        .list_repo_actions(&context.id)
-        .map_err(|e| format!("Failed to list actions: {e}"))?;
+    // First time we see this repo+subpath, detect actions before running
+    // prerun — waiting out another caller's detection rather than reading a
+    // list it hasn't finished writing.
+    let actions = ensure_actions_detected(&app, &store, &context, provider_id.as_deref()).await?;
 
     // Filter to prerun actions
     let prerun_actions = actions
@@ -1414,6 +1631,121 @@ mod tests {
         assert!(store
             .claim_action_context_detection(&context.id, std::process::id())
             .unwrap());
+    }
+
+    /// Poll without pausing between ticks, with a cap only the loop's own
+    /// exits reach — so a test ends on what it arranges, not on the clock.
+    const EAGER: DetectionWaitPolicy = DetectionWaitPolicy {
+        interval: std::time::Duration::ZERO,
+        max_wait: std::time::Duration::from_secs(30),
+    };
+
+    /// Poll once, then give up: stands in for a window still held long after
+    /// the cap.
+    const ONE_TICK: DetectionWaitPolicy = DetectionWaitPolicy {
+        interval: std::time::Duration::ZERO,
+        max_wait: std::time::Duration::ZERO,
+    };
+
+    #[tokio::test]
+    async fn the_wait_returns_once_a_live_window_closes() {
+        let store = Store::in_memory().unwrap();
+        let context = detecting_context(&store, 4242);
+
+        // The window's owner finishes between two ticks: still alive when the
+        // first tick probes it, done persisting by the second.
+        let owner_finishes = |_pid| {
+            finish_detection_window(
+                &store,
+                &context.id,
+                Ok(vec![suggestion(
+                    "Install",
+                    "just install",
+                    ActionType::Prerun,
+                )]),
+            )
+            .unwrap();
+            true
+        };
+
+        let waited = wait_for_detection_window(&store, &context.id, EAGER, owner_finishes).await;
+
+        assert_eq!(waited, DetectionWait::Closed);
+        // The regression: a caller that listed on the rejection instead of
+        // waiting reads the empty pre-detection list, finds no prerun actions,
+        // and skips this branch's setup for good.
+        assert_eq!(
+            store
+                .list_repo_actions(&context.id)
+                .unwrap()
+                .iter()
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Install"]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_wait_takes_over_a_window_whose_owner_died() {
+        let store = Store::in_memory().unwrap();
+        // A process killed mid-detection: nothing is going to persist into
+        // this context, so there is nothing to wait for.
+        let context = detecting_context(&store, 4242);
+
+        let waited = wait_for_detection_window(&store, &context.id, EAGER, |_| false).await;
+
+        assert_eq!(waited, DetectionWait::Released);
+        // Released, so the waiter can claim the window and detect it itself
+        // rather than wait out the cap for an owner that is gone.
+        assert!(store
+            .claim_action_context_detection(&context.id, std::process::id())
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn the_wait_gives_up_on_a_window_that_never_closes() {
+        let store = Store::in_memory().unwrap();
+        // Another live Staged instance, wedged mid-detection.
+        let context = detecting_context(&store, 4242);
+
+        let waited = wait_for_detection_window(&store, &context.id, ONE_TICK, |_| true).await;
+
+        // The AI call has no timeout of its own, so the cap is what keeps a
+        // wedged owner from holding branch setup open forever. Its claim is
+        // left alone; the caller proceeds with the list it can see.
+        assert_eq!(waited, DetectionWait::GaveUp);
+        assert!(!store
+            .claim_action_context_detection(&context.id, std::process::id())
+            .unwrap());
+    }
+
+    #[tokio::test]
+    async fn the_wait_treats_a_window_owned_by_this_process_as_live() {
+        let store = Store::in_memory().unwrap();
+        // The startup sweep releases our own pid — there it can only be a dead
+        // process whose pid we inherited. Mid-session it is the opposite:
+        // another task in this process owns the window, so it gets waited on
+        // even though the pid probe would call it dead.
+        let context = detecting_context(&store, std::process::id());
+
+        let waited = wait_for_detection_window(&store, &context.id, ONE_TICK, |_| false).await;
+
+        assert_eq!(waited, DetectionWait::GaveUp);
+        assert!(!store
+            .claim_action_context_detection(&context.id, std::process::id())
+            .unwrap());
+    }
+
+    #[test]
+    fn the_in_progress_rejection_reads_the_way_the_button_has_always_shown_it() {
+        assert_eq!(
+            DetectionError::InProgress.to_string(),
+            "Detection is already in progress for this repository"
+        );
+        assert_eq!(
+            DetectionError::Failed("no agent installed".into()).to_string(),
+            "no agent installed"
+        );
     }
 
     #[test]

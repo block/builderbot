@@ -2586,31 +2586,12 @@ pub(crate) async fn run_prerun_actions_for_branch(
         .get_or_create_action_context(&github_repo, subpath.as_deref())
         .map_err(|e| format!("Failed to get action context: {e}"))?;
 
-    // If actions haven't been detected yet for this repo+subpath, detect now.
-    // Detection is best-effort here: whatever went wrong, the window is closed
-    // by the time this returns, and prerun continues with whatever the context
-    // does have.
-    if !context.has_detected_actions {
-        if let Err(e) = crate::actions::commands::detect_and_persist_repo_actions(
-            app_handle,
-            store,
-            &context,
-            provider_id,
-        )
-        .await
-        {
-            log::warn!(
-                "[run_prerun_actions_for_branch] action detection failed for repo {} (subpath: {:?}): {e}",
-                github_repo,
-                subpath
-            );
-        }
-    }
-
-    // Get all prerun actions for this context
-    let actions = store
-        .list_repo_actions(&context.id)
-        .map_err(|e| format!("Failed to list actions: {e}"))?;
+    // If actions haven't been detected yet for this repo+subpath, detect now —
+    // waiting out another caller's detection rather than reading a list it
+    // hasn't finished writing.
+    let actions =
+        crate::actions::commands::ensure_actions_detected(app_handle, store, &context, provider_id)
+            .await?;
     let prerun_actions: Vec<_> = actions
         .into_iter()
         .filter(|a| matches!(a.action_type, ActionType::Prerun))

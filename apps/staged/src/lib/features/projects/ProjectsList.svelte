@@ -48,7 +48,6 @@
   import { repoSeedFromNewProjectEvent } from './newProjectEvent';
   import type { RepoSelection } from '../../shared/githubUrl';
   import { viewport } from '../../shared/viewport.svelte';
-  import { reposUiEnabled } from '../../featureFlags';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
 
   type FilterKind = 'unread' | 'running' | { repo: string; subpath: string };
@@ -262,9 +261,7 @@
     // Backend/window listeners for the shared data live in the projectsData
     // store, started once from App.svelte.
     void projectsDataStore.ensureLoaded();
-    if (reposUiEnabled) {
-      void projectsDataStore.ensureHomeReposLoaded();
-    }
+    void projectsDataStore.ensureHomeReposLoaded();
     void projectRunActionsStore.startListening();
 
     const onNewProject = (event: Event) => {
@@ -446,7 +443,7 @@
           onFormOpenChange={(open) => (showNewProjectModal = open)}
         />
       {:else}
-        {#if reposUiEnabled && homeRepos.length > 0}
+        {#if homeRepos.length > 0}
           <div class="repos-section">
             <div class="repos-header">
               <h2 class="repos-title">Repos</h2>

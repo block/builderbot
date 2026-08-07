@@ -44,7 +44,6 @@
   import * as commands from '../../api/commands';
   import { projectActions } from './projectActions.svelte';
   import * as ContextMenu from '$lib/components/ui/context-menu';
-  import { reposUiEnabled } from '../../featureFlags';
   import { Button } from '$lib/components/ui/button';
 
   const devBranch = import.meta.env.VITE_DEV_BRANCH as string | undefined;
@@ -302,9 +301,7 @@
 
     // Pin changes propagate through the store's staged:pinned-repos-changed
     // listener; this mount only has to make sure the cache is warm.
-    if (reposUiEnabled) {
-      void projectsDataStore.ensureHomeReposLoaded();
-    }
+    void projectsDataStore.ensureHomeReposLoaded();
 
     return () => {
       stopWatchingViewport();
@@ -421,7 +418,7 @@
         <div class="state">Loading projects…</div>
       {:else}
         <div class="projects-list">
-          {#if reposUiEnabled && pinnedRepos.length > 0}
+          {#if pinnedRepos.length > 0}
             <button
               class="project-row all-repos-row"
               class:active={navigation.showReposList}

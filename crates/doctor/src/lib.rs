@@ -1027,9 +1027,12 @@ where
 {
     use std::io::{BufRead, BufReader};
 
-    let mut child = build_shell_command(command, &[], env)
+    let mut command = build_shell_command(command, &[], env);
+    command
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    command::configure_command(&mut command);
+    let mut child = command
         .spawn()
         .map_err(|e| format!("Failed to run command: {e}"))?;
 

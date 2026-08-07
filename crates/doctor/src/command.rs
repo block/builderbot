@@ -19,6 +19,20 @@ use wait_timeout::ChildExt;
 pub(crate) const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const FRESHNESS_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Configure a child process so doctor probes do not flash a console window on
+/// Windows. This is a no-op on other platforms.
+pub(crate) fn configure_command(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
 #[derive(Debug)]
 pub(crate) enum CommandError {
     Spawn {
@@ -111,6 +125,8 @@ pub(crate) fn run_command_with_timeout(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+
+    configure_command(&mut command);
 
     #[cfg(unix)]
     {
@@ -223,6 +239,33 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output.stderr), "stderr");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn command_runner_does_not_create_a_console_window() {
+        let script = r#"
+            Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class Native { [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow(); }';
+            if ([Native]::GetConsoleWindow() -ne [IntPtr]::Zero) { exit 1 }
+        "#;
+        let mut command = Command::new("powershell.exe");
+        command
+            .arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-Command")
+            .arg(script);
+
+        let output = run_command_with_timeout(
+            command,
+            "powershell.exe -NoProfile -NonInteractive -Command GetConsoleWindow",
+            Duration::from_secs(10),
+        )
+        .unwrap();
+
+        assert!(
+            output.status.success(),
+            "PowerShell reported a console window: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     #[cfg(unix)]
     #[test]
     fn command_runner_returns_when_escaped_descendant_keeps_pipes_open() {

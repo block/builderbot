@@ -257,24 +257,6 @@ pub(crate) fn get_store(
         .ok_or_else(|| "Database not initialized — please reset from the startup prompt".into())
 }
 
-/// Emit a `worktree-setup-progress` event for a given branch and phase.
-fn emit_setup_progress(
-    handle: &tauri::AppHandle,
-    branch_id: &str,
-    phase: &str,
-    detail: Option<String>,
-) {
-    web_server::emit_to_all(
-        handle,
-        "worktree-setup-progress",
-        branches::WorktreeSetupProgress {
-            branch_id: branch_id.to_string(),
-            phase: phase.to_string(),
-            detail,
-        },
-    );
-}
-
 fn stop_actions_for_app_shutdown(app_handle: &tauri::AppHandle) {
     let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
     let registry = app_handle.state::<Arc<actions::ActionRegistry>>();
@@ -558,42 +540,18 @@ fn create_project(
                 let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
                 let act_registry = app_handle.state::<Arc<actions::ActionRegistry>>();
 
-                // Atomically claim setup ownership before running prerun actions.
-                match store_bg.mark_branch_setup_complete(&branch_id) {
-                    Ok(true) => {
-                        emit_setup_progress(&app_handle, &branch_id, "running_setup_actions", None);
-                        match branches::run_prerun_actions_for_branch(
-                            &store_bg,
-                            &app_handle,
-                            &branch_id,
-                            &executor,
-                            &act_registry,
-                            None,
-                        )
-                        .await
-                        {
-                            Ok(count) => {
-                                log::info!("[create_project] ran {count} prerun actions");
-                                web_server::emit_to_all(
-                                    &app_handle,
-                                    "project-setup-progress",
-                                    project_id,
-                                );
-                            }
-                            Err(e) => {
-                                log::warn!("[create_project] prerun actions failed: {e}");
-                            }
-                        }
-                    }
-                    Ok(false) => {
-                        log::info!(
-                            "[create_project] branch {} already setup complete, skipping prerun",
-                            branch_id
-                        );
-                    }
-                    Err(e) => {
-                        log::warn!("[create_project] failed to mark setup complete: {e}");
-                    }
+                if let branches::PrerunOutcome::Ran(_) = branches::claim_and_run_prerun_actions(
+                    &store_bg,
+                    &app_handle,
+                    &branch_id,
+                    &executor,
+                    &act_registry,
+                    None,
+                    "create_project",
+                )
+                .await
+                {
+                    web_server::emit_to_all(&app_handle, "project-setup-progress", project_id);
                 }
 
                 // If the repo already has commits on this branch, kick off
@@ -745,42 +703,22 @@ async fn add_project_repo(
 
                 let executor = app_handle.state::<Arc<actions::ActionExecutor>>();
                 let act_registry = app_handle.state::<Arc<actions::ActionRegistry>>();
-                // Atomically claim setup ownership before running prerun actions.
-                match store.mark_branch_setup_complete(&branch.id) {
-                    Ok(true) => {
-                        emit_setup_progress(&app_handle, &branch.id, "running_setup_actions", None);
-                        match branches::run_prerun_actions_for_branch(
-                            &store,
-                            &app_handle,
-                            &branch.id,
-                            &executor,
-                            &act_registry,
-                            None,
-                        )
-                        .await
-                        {
-                            Ok(count) => {
-                                log::info!("[add_project_repo] ran {count} prerun actions");
-                                web_server::emit_to_all(
-                                    &app_handle,
-                                    "project-setup-progress",
-                                    project_id.clone(),
-                                );
-                            }
-                            Err(e) => {
-                                log::warn!("[add_project_repo] prerun actions failed: {e}");
-                            }
-                        }
-                    }
-                    Ok(false) => {
-                        log::info!(
-                            "[add_project_repo] branch {} already setup complete, skipping prerun",
-                            branch.id
-                        );
-                    }
-                    Err(e) => {
-                        log::warn!("[add_project_repo] failed to mark setup complete: {e}");
-                    }
+                if let branches::PrerunOutcome::Ran(_) = branches::claim_and_run_prerun_actions(
+                    &store,
+                    &app_handle,
+                    &branch.id,
+                    &executor,
+                    &act_registry,
+                    None,
+                    "add_project_repo",
+                )
+                .await
+                {
+                    web_server::emit_to_all(
+                        &app_handle,
+                        "project-setup-progress",
+                        project_id.clone(),
+                    );
                 }
 
                 // If the repo already has commits on this branch, kick off

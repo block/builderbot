@@ -20,6 +20,24 @@ pub(crate) struct WorktreeSetupProgress {
     pub detail: Option<String>,
 }
 
+/// Emit a `worktree-setup-progress` event for a branch and phase.
+pub(crate) fn emit_setup_progress(
+    handle: &AppHandle,
+    branch_id: &str,
+    phase: &str,
+    detail: Option<String>,
+) {
+    crate::web_server::emit_to_all(
+        handle,
+        "worktree-setup-progress",
+        WorktreeSetupProgress {
+            branch_id: branch_id.to_string(),
+            phase: phase.to_string(),
+            detail,
+        },
+    );
+}
+
 /// Default idle timeout (in minutes) for Staged workstations.
 pub(crate) const WORKSPACE_IDLE_TIMEOUT_MINUTES: u32 = 10080;
 
@@ -1353,6 +1371,11 @@ pub async fn setup_worktree(
 /// Like [`setup_worktree`], but also runs prerun actions after the worktree is
 /// ready.  Used by the frontend retry path so that a failed initial setup
 /// (which skips prerun actions) can be fully recovered by the user.
+///
+/// Resolves at worktree-ready: the prerun run is detached
+/// ([`spawn_prerun_actions`]) because the frontend holds the branch in
+/// `pendingSetupBranches` — and the card in "Setting up…" — until this command
+/// returns, and nothing in what it returns comes from prerun.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn setup_worktree_and_run_prerun(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -1363,41 +1386,13 @@ pub async fn setup_worktree_and_run_prerun(
     // Delegate to the existing setup_worktree command for worktree creation.
     let result = setup_worktree(store.clone(), branch_id.clone()).await?;
 
-    let store = get_store(&store)?;
-
-    // Atomically claim setup ownership — only run prerun actions if we win.
-    match store.mark_branch_setup_complete(&branch_id) {
-        Ok(true) => {
-            let executor = app_handle.state::<Arc<ActionExecutor>>();
-            let act_registry = app_handle.state::<Arc<ActionRegistry>>();
-            match run_prerun_actions_for_branch(
-                &store,
-                &app_handle,
-                &branch_id,
-                &executor,
-                &act_registry,
-                provider.as_deref(),
-            )
-            .await
-            {
-                Ok(count) => {
-                    log::info!("[setup_worktree_and_run_prerun] ran {count} prerun actions");
-                }
-                Err(e) => {
-                    log::warn!("[setup_worktree_and_run_prerun] prerun actions failed: {e}");
-                }
-            }
-        }
-        Ok(false) => {
-            log::info!(
-                "[setup_worktree_and_run_prerun] branch {} already setup complete, skipping prerun",
-                branch_id
-            );
-        }
-        Err(e) => {
-            log::warn!("[setup_worktree_and_run_prerun] failed to mark setup complete: {e}");
-        }
-    }
+    spawn_prerun_actions(
+        get_store(&store)?,
+        app_handle,
+        branch_id,
+        provider,
+        "setup_worktree_and_run_prerun",
+    );
 
     Ok(result)
 }
@@ -2469,15 +2464,7 @@ pub(crate) fn setup_worktree_sync(
 ) -> Result<String, String> {
     let emit_progress = |phase: &str, detail: Option<String>| {
         if let Some(handle) = app_handle {
-            crate::web_server::emit_to_all(
-                handle,
-                "worktree-setup-progress",
-                WorktreeSetupProgress {
-                    branch_id: branch_id.to_string(),
-                    phase: phase.to_string(),
-                    detail,
-                },
-            );
+            emit_setup_progress(handle, branch_id, phase, detail);
         }
     };
 
@@ -2546,11 +2533,122 @@ pub(crate) fn setup_worktree_sync(
     Ok(worktree_str)
 }
 
+/// What [`claim_and_run_prerun_actions`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PrerunOutcome {
+    /// This caller won the setup claim and the branch's prerun actions all ran
+    /// to completion; the count is how many.
+    Ran(usize),
+    /// Nothing ran — another caller had already claimed this branch's setup, or
+    /// the claim or the run failed. Failures are logged, not returned: no
+    /// caller has anything to do with one.
+    NotRun,
+}
+
+/// Claim setup ownership of a branch and, if this caller wins the claim, run
+/// the branch's prerun actions.
+///
+/// `mark_branch_setup_complete` is a one-shot atomic claim, so the claim and
+/// the run belong in one place: a caller that takes the claim and then doesn't
+/// run leaves that worktree without its setup actions forever, and nothing
+/// retries it. Keeping them together is why this is the only way in to
+/// [`run_prerun_actions_for_branch`], which is private for that reason.
+///
+/// **Never await this on a caller's critical path.** Detection inside it waits
+/// out another caller's detection window for up to five minutes
+/// ([`crate::actions::commands::ensure_actions_detected`]), and each prerun
+/// action then runs to completion in turn — a dependency install alone can
+/// outlast any request timeout. Every entry point either already runs in a
+/// background task or reaches this through [`spawn_prerun_actions`].
+///
+/// `tag` names the entry point in this function's log lines.
+pub(crate) async fn claim_and_run_prerun_actions(
+    store: &Arc<Store>,
+    app_handle: &AppHandle,
+    branch_id: &str,
+    executor: &Arc<ActionExecutor>,
+    act_registry: &Arc<ActionRegistry>,
+    provider: Option<&str>,
+    tag: &str,
+) -> PrerunOutcome {
+    match store.mark_branch_setup_complete(branch_id) {
+        Ok(true) => {
+            emit_setup_progress(app_handle, branch_id, "running_setup_actions", None);
+            match run_prerun_actions_for_branch(
+                store,
+                app_handle,
+                branch_id,
+                executor,
+                act_registry,
+                provider,
+            )
+            .await
+            {
+                Ok(count) => {
+                    log::info!("[{tag}] ran {count} prerun actions");
+                    PrerunOutcome::Ran(count)
+                }
+                Err(e) => {
+                    log::warn!("[{tag}] prerun actions failed: {e}");
+                    PrerunOutcome::NotRun
+                }
+            }
+        }
+        Ok(false) => {
+            log::info!("[{tag}] branch {branch_id} already setup complete, skipping prerun");
+            PrerunOutcome::NotRun
+        }
+        Err(e) => {
+            log::warn!("[{tag}] failed to mark setup complete: {e}");
+            PrerunOutcome::NotRun
+        }
+    }
+}
+
+/// [`claim_and_run_prerun_actions`], detached from the caller.
+///
+/// For the entry points whose caller is on a clock — the branch card's Retry
+/// button, over Tauri and over HTTP — where prerun's result is discarded
+/// anyway. They return as soon as the worktree exists and leave this running:
+/// the worktree has been on disk for seconds by then, while prerun can take
+/// minutes, and the frontend holds the branch in "Setting up…" until the
+/// command resolves.
+///
+/// The claim goes into the task with the run so it can't be consumed by a task
+/// that never runs the prerun; see [`claim_and_run_prerun_actions`].
+pub(crate) fn spawn_prerun_actions(
+    store: Arc<Store>,
+    app_handle: AppHandle,
+    branch_id: String,
+    provider: Option<String>,
+    tag: &'static str,
+) {
+    tauri::async_runtime::spawn(async move {
+        let executor = app_handle.state::<Arc<ActionExecutor>>().inner().clone();
+        let act_registry = app_handle.state::<Arc<ActionRegistry>>().inner().clone();
+        claim_and_run_prerun_actions(
+            &store,
+            &app_handle,
+            &branch_id,
+            &executor,
+            &act_registry,
+            provider.as_deref(),
+            tag,
+        )
+        .await;
+    });
+}
+
 /// Run detect_actions (if needed) and all prerun actions for a branch.
 ///
 /// This replicates the core logic from `actions::commands::run_prerun_actions`
 /// without requiring Tauri state.
-pub(crate) async fn run_prerun_actions_for_branch(
+///
+/// Private on purpose: prerun runs exactly once per branch, behind the
+/// `mark_branch_setup_complete` claim, so [`claim_and_run_prerun_actions`] is
+/// the only caller — the two can't drift apart if there is nowhere else to
+/// call this from.
+async fn run_prerun_actions_for_branch(
     store: &Arc<Store>,
     app_handle: &AppHandle,
     branch_id: &str,

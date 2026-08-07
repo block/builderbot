@@ -512,11 +512,16 @@ async fn wait_for_detection_window(
 /// detected, then hand back its actions.
 ///
 /// Its two callers — [`run_prerun_actions_impl`] and
-/// [`crate::branches::run_prerun_actions_for_branch`] — run once per branch,
+/// [`crate::branches::claim_and_run_prerun_actions`] — run once per branch,
 /// behind the atomic `mark_branch_setup_complete` claim, so the list they get
 /// here is the only one that branch's prerun will ever see. A miss is
 /// permanent for that worktree: it never gets its setup actions, and nothing
 /// retries.
+///
+/// The wait is why prerun must not sit on a caller's critical path; the three
+/// entry points whose callers were on a clock now detach it
+/// ([`crate::branches::spawn_prerun_actions`]), so the only thing that ever
+/// spends this cap is a background task.
 ///
 /// - Already detected → list and return.
 /// - Claim won → detect best-effort. A failure is logged and prerun continues
@@ -1409,7 +1414,16 @@ pub(crate) async fn run_prerun_actions_impl(
     Ok(execution_ids)
 }
 
-/// Run all prerun actions for a branch after creation
+/// Run all prerun actions for a branch after creation.
+///
+/// The setup paths detach prerun ([`crate::branches::spawn_prerun_actions`])
+/// because they discard its result; this one *is* its result — the execution
+/// ids — so it can't be, and a caller asking to run prerun now is asking to
+/// wait. It therefore carries the full exposure the setup paths shed: before
+/// the first action starts, [`ensure_actions_detected`] can spend up to five
+/// minutes waiting out another caller's detection window, and each action then
+/// runs to completion in turn. There is no frontend caller today; this exists
+/// as an API surface reachable over HTTP.
 #[tauri::command]
 pub async fn run_prerun_actions(
     branch_id: String,

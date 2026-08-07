@@ -1698,36 +1698,15 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
 
             let result = crate::branches::to_branch_with_workdir(branch, Some(worktree_str));
 
-            // Run prerun actions if we win the setup-complete race
-            match store.mark_branch_setup_complete(&branch_id) {
-                Ok(true) => {
-                    match crate::branches::run_prerun_actions_for_branch(
-                        &store,
-                        app_handle,
-                        &branch_id,
-                        action_executor,
-                        action_registry,
-                        provider.as_deref(),
-                    )
-                    .await
-                    {
-                        Ok(count) => {
-                            log::info!("[setup_worktree_and_run_prerun] ran {count} prerun actions")
-                        }
-                        Err(e) => {
-                            log::warn!("[setup_worktree_and_run_prerun] prerun actions failed: {e}")
-                        }
-                    }
-                }
-                Ok(false) => {
-                    log::info!("[setup_worktree_and_run_prerun] branch {} already setup complete, skipping prerun", branch_id);
-                }
-                Err(e) => {
-                    log::warn!(
-                        "[setup_worktree_and_run_prerun] failed to mark setup complete: {e}"
-                    );
-                }
-            }
+            // Prerun runs detached: this is an HTTP request with no timeout
+            // layer in front of it, and prerun can take minutes.
+            crate::branches::spawn_prerun_actions(
+                store,
+                app_handle.clone(),
+                branch_id,
+                provider,
+                "setup_worktree_and_run_prerun",
+            );
 
             Ok(serde_json::to_value(result).unwrap())
         }

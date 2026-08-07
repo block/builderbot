@@ -2586,57 +2586,25 @@ pub(crate) async fn run_prerun_actions_for_branch(
         .get_or_create_action_context(&github_repo, subpath.as_deref())
         .map_err(|e| format!("Failed to get action context: {e}"))?;
 
-    // If actions haven't been detected yet for this repo+subpath, detect now
+    // If actions haven't been detected yet for this repo+subpath, detect now.
+    // Detection is best-effort here: whatever went wrong, the window is closed
+    // by the time this returns, and prerun continues with whatever the context
+    // does have.
     if !context.has_detected_actions {
-        store
-            .set_action_context_detecting(&context.id, true)
-            .map_err(|e| format!("Failed to set detection status: {e}"))?;
-
-        crate::web_server::emit_to_all(
+        if let Err(e) = crate::actions::commands::detect_and_persist_repo_actions(
             app_handle,
-            "repo-actions-detection",
-            serde_json::json!({
-                "githubRepo": github_repo,
-                "subpath": subpath,
-                "detecting": true,
-            }),
-        );
-
-        // Run detection (may call out to AI)
-        let detected = match crate::actions::commands::detect_actions_for_repo_context(
-            &github_repo,
-            subpath.as_deref(),
+            store,
+            &context,
             provider_id,
         )
         .await
         {
-            Ok(actions) => actions,
-            Err(e) => {
-                log::warn!(
-                    "[run_prerun_actions_for_branch] action detection failed for repo {} (subpath: {:?}): {e}",
-                    github_repo,
-                    subpath
-                );
-                Vec::new()
-            }
-        };
-
-        // Persist detected actions (skip duplicates) before the flag drops.
-        crate::actions::commands::persist_suggested_actions(store, &context.id, detected)?;
-
-        store
-            .mark_action_context_detected(&context.id)
-            .map_err(|e| format!("Failed to update detection status: {e}"))?;
-
-        crate::web_server::emit_to_all(
-            app_handle,
-            "repo-actions-detection",
-            serde_json::json!({
-                "githubRepo": github_repo,
-                "subpath": subpath,
-                "detecting": false,
-            }),
-        );
+            log::warn!(
+                "[run_prerun_actions_for_branch] action detection failed for repo {} (subpath: {:?}): {e}",
+                github_repo,
+                subpath
+            );
+        }
     }
 
     // Get all prerun actions for this context

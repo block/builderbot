@@ -141,15 +141,14 @@ fn resolve_branch_repo_context(
 /// Persist detected suggestions into an action context, skipping commands the
 /// context already has and continuing its sort order.
 ///
-/// Persistence belongs inside the caller's detection window: every surface
-/// treats the `detecting: false` half of the `repo-actions-detection` broadcast
-/// as "this context's action list is final", so a caller that detects here and
-/// persists afterwards — as the repo card's Detect Actions button used to —
-/// reopens its own in-progress guard while the writes are still landing, and a
-/// second run dedupes against a list the first one hasn't finished writing.
-/// Both callers (this module's [`detect_repo_actions_impl`] and the
-/// prerun-actions path in [`crate::branches`]) write through here before
-/// marking the context detected.
+/// Persistence belongs inside the detection window: every surface treats the
+/// `detecting: false` half of the `repo-actions-detection` broadcast as "this
+/// context's action list is final", so a caller that detects here and persists
+/// afterwards — as the repo card's Detect Actions button used to — reopens its
+/// own in-progress guard while the writes are still landing, and a second run
+/// dedupes against a list the first one hasn't finished writing. Its sole
+/// caller is [`finish_detection_window`], which runs it with the flag still
+/// set.
 pub(crate) fn persist_suggested_actions(
     store: &Store,
     context_id: &str,
@@ -189,14 +188,97 @@ pub(crate) fn persist_suggested_actions(
     Ok(())
 }
 
-/// Detect actions for a repo+subpath context, persist the new suggestions, and
-/// return the context's resulting action list.
+/// Run one complete detection window for an action context: claim the
+/// `detecting_actions` flag, broadcast `detecting: true`, detect, persist the
+/// suggestions, and return the context's resulting action list.
 ///
-/// Detection and persistence both happen while `detecting_actions` is set, so
-/// the flag — and the `detecting: false` event that clears it — only drop once
-/// the list callers are about to load is complete. That also makes the
-/// already-in-progress guard below cover the writes, so a second click while
-/// the first run persists is rejected rather than starting another AI call.
+/// Detection and persistence both happen while the flag is set, so the flag —
+/// and the `detecting: false` event that clears it — only drop once the list
+/// callers are about to load is complete. Once the window is open, *every*
+/// exit closes it: a detection failure, a persist failure, and a mark failure
+/// all clear the flag and emit `detecting: false` before returning. Leaving
+/// either half behind wedges the repo: surfaces spin on a run that is over,
+/// and a flag still set in SQLite makes the claim below reject every later
+/// detection for this context — across restarts, with no UI path to clear it.
+///
+/// This is the one detection window in the app. The repo card's Detect Actions
+/// button ([`detect_repo_actions_impl`]) and both prerun-actions paths
+/// ([`run_prerun_actions_impl`] and [`crate::branches::run_prerun_actions_for_branch`])
+/// all route through here, so the claim also serializes them against each
+/// other: a branch created while a card's detection is in flight is told
+/// detection is already in progress instead of launching a second AI call
+/// whose dedupe reads a list the first run hasn't finished writing.
+pub(crate) async fn detect_and_persist_repo_actions(
+    app: &AppHandle,
+    store: &Store,
+    context: &crate::store::ActionContext,
+    provider_id: Option<&str>,
+) -> Result<Vec<crate::store::RepoAction>, String> {
+    let claimed = store
+        .claim_action_context_detection(&context.id)
+        .map_err(|e| format!("Failed to set detection status: {e}"))?;
+    if !claimed {
+        return Err("Detection is already in progress for this repository".into());
+    }
+    // The window is open from here on — every path below must close it.
+    let event = |detecting: bool| DetectingActionsEvent {
+        github_repo: context.github_repo.clone(),
+        subpath: context.subpath.clone(),
+        detecting,
+    };
+    crate::web_server::emit_to_all(app, "repo-actions-detection", event(true));
+
+    let detected = detect_actions_for_repo_context(
+        &context.github_repo,
+        context.subpath.as_deref(),
+        provider_id,
+    )
+    .await;
+    if let Err(ref e) = detected {
+        log::warn!("Action detection failed for {}: {e}", context.github_repo);
+    }
+
+    let result = finish_detection_window(store, &context.id, detected);
+    crate::web_server::emit_to_all(app, "repo-actions-detection", event(false));
+    result
+}
+
+/// Store-side close-out for a detection window: persist the suggestions and
+/// read back the context's action list, then mark the context detected —
+/// which is also what drops the `detecting_actions` flag.
+///
+/// The mark runs on every path, including a failed detection: a context that
+/// detection could not read stays marked detected so prerun doesn't retry it
+/// for every branch. Should the mark itself fail, fall back to clearing just
+/// the flag, since a flag left set is what rejects all later detection.
+fn finish_detection_window(
+    store: &Store,
+    context_id: &str,
+    detected: Result<Vec<SuggestedAction>, String>,
+) -> Result<Vec<crate::store::RepoAction>, String> {
+    let result = detected.and_then(|suggestions| {
+        persist_suggested_actions(store, context_id, suggestions)?;
+        store
+            .list_repo_actions(context_id)
+            .map_err(|e| format!("Failed to list actions: {e}"))
+    });
+
+    if let Err(e) = store.mark_action_context_detected(context_id) {
+        log::error!("Failed to mark action context {context_id} detected after detection: {e}");
+        if let Err(e) = store.set_action_context_detecting(context_id, false) {
+            log::error!(
+                "Failed to clear the detecting flag for action context {context_id}: {e} — \
+                 further detection for this repo will be rejected as already in progress"
+            );
+        }
+    }
+    result
+}
+
+/// The repo card's Detect Actions button: resolve (or create) the context for
+/// a repo+subpath, then run one detection window over it. Unlike the prerun
+/// paths, this one propagates the window's error to the caller — the button
+/// surfaces it — including the already-in-progress rejection.
 pub(crate) async fn detect_repo_actions_impl(
     github_repo: String,
     subpath: Option<String>,
@@ -207,65 +289,7 @@ pub(crate) async fn detect_repo_actions_impl(
     let context = store
         .get_or_create_action_context(&github_repo, subpath.as_deref())
         .map_err(|e| format!("Failed to get action context: {e}"))?;
-    if context.detecting_actions {
-        return Err("Detection is already in progress for this repository".into());
-    }
-    store
-        .set_action_context_detecting(&context.id, true)
-        .map_err(|e| format!("Failed to set detection status: {e}"))?;
-    crate::web_server::emit_to_all(
-        &app,
-        "repo-actions-detection",
-        DetectingActionsEvent {
-            github_repo: github_repo.clone(),
-            subpath: subpath.clone(),
-            detecting: true,
-        },
-    );
-
-    let detected =
-        detect_actions_for_repo_context(&github_repo, subpath.as_deref(), provider.as_deref())
-            .await;
-    if let Err(ref e) = detected {
-        log::warn!("Action detection failed for {github_repo}: {e}");
-    }
-
-    let result = detected.and_then(|suggestions| {
-        persist_suggested_actions(&store, &context.id, suggestions)?;
-        store
-            .list_repo_actions(&context.id)
-            .map_err(|e| format!("Failed to list actions: {e}"))
-    });
-
-    // Clear the flag and announce the end of detection even when detection or
-    // the persist failed — otherwise every surface keeps spinning on a run
-    // that is over. A flag left set while the event says detection is over is
-    // worse than either alone: the guard above would reject every later
-    // detection for this context and no UI path clears it, so fall back to
-    // clearing just the flag before giving up on it.
-    if let Err(e) = store.mark_action_context_detected(&context.id) {
-        log::error!(
-            "Failed to mark action context {} detected after detection: {e}",
-            context.id
-        );
-        if let Err(e) = store.set_action_context_detecting(&context.id, false) {
-            log::error!(
-                "Failed to clear the detecting flag for action context {}: {e} — \
-                 further detection for this repo will be rejected as already in progress",
-                context.id
-            );
-        }
-    }
-    crate::web_server::emit_to_all(
-        &app,
-        "repo-actions-detection",
-        DetectingActionsEvent {
-            github_repo,
-            subpath,
-            detecting: false,
-        },
-    );
-    result
+    detect_and_persist_repo_actions(&app, &store, &context, provider.as_deref()).await
 }
 
 /// Detect available actions for a specific repo+subpath context using AI and
@@ -940,81 +964,19 @@ pub(crate) async fn run_prerun_actions_impl(
         .map_err(|e| format!("Failed to get action context: {e}"))?;
 
     // First time we see this repo+subpath, detect actions before running prerun.
+    // Detection is best-effort here: whatever went wrong, the window is closed
+    // by the time this returns, and prerun continues with whatever the context
+    // does have.
     if !context.has_detected_actions {
-        store
-            .set_action_context_detecting(&context.id, true)
-            .map_err(|e| format!("Failed to set detection status: {e}"))?;
-        crate::web_server::emit_to_all(
-            &app,
-            "repo-actions-detection",
-            DetectingActionsEvent {
-                github_repo: github_repo.clone(),
-                subpath: subpath.clone(),
-                detecting: true,
-            },
-        );
-
-        let detected = match detect_actions_for_repo_context(
-            &github_repo,
-            subpath.as_deref(),
-            provider_id.as_deref(),
-        )
-        .await
+        if let Err(e) =
+            detect_and_persist_repo_actions(&app, &store, &context, provider_id.as_deref()).await
         {
-            Ok(actions) => actions,
-            Err(e) => {
-                log::warn!(
-                    "[run_prerun_actions] action detection failed for repo {} (subpath: {:?}): {e}",
-                    github_repo,
-                    subpath
-                );
-                Vec::new()
-            }
-        };
-
-        let existing_actions = store
-            .list_repo_actions(&context.id)
-            .map_err(|e| format!("Failed to list actions: {e}"))?;
-        let mut existing_commands: std::collections::HashSet<String> =
-            existing_actions.iter().map(|a| a.command.clone()).collect();
-        let mut next_sort_order = existing_actions
-            .iter()
-            .map(|a| a.sort_order)
-            .max()
-            .unwrap_or(-1)
-            + 1;
-
-        for suggestion in detected {
-            if existing_commands.contains(&suggestion.command) {
-                continue;
-            }
-            existing_commands.insert(suggestion.command.clone());
-            let action = crate::store::RepoAction::new(
-                context.id.clone(),
-                suggestion.name,
-                suggestion.command,
-                suggestion.action_type,
-                next_sort_order,
-            )
-            .with_auto_commit(suggestion.auto_commit);
-            store
-                .create_repo_action(&action)
-                .map_err(|e| format!("Failed to create detected action: {e}"))?;
-            next_sort_order += 1;
+            log::warn!(
+                "[run_prerun_actions] action detection failed for repo {} (subpath: {:?}): {e}",
+                github_repo,
+                subpath
+            );
         }
-
-        store
-            .mark_action_context_detected(&context.id)
-            .map_err(|e| format!("Failed to update detection status: {e}"))?;
-        crate::web_server::emit_to_all(
-            &app,
-            "repo-actions-detection",
-            DetectingActionsEvent {
-                github_repo: github_repo.clone(),
-                subpath: subpath.clone(),
-                detecting: false,
-            },
-        );
     }
 
     // Get all actions for this context.
@@ -1261,6 +1223,68 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("Dev", 0), ("Test", 1), ("Build", 2)]
         );
+    }
+
+    /// A context mid-detection: the flag claimed, nothing marked yet.
+    fn detecting_context(store: &Store) -> crate::store::ActionContext {
+        let context = store
+            .get_or_create_action_context("block/builderbot", Some("apps/staged"))
+            .unwrap();
+        assert!(store.claim_action_context_detection(&context.id).unwrap());
+        context
+    }
+
+    #[test]
+    fn finish_detection_window_persists_and_closes_the_window() {
+        let store = Store::in_memory().unwrap();
+        let context = detecting_context(&store);
+
+        let actions = finish_detection_window(
+            &store,
+            &context.id,
+            Ok(vec![
+                suggestion("Dev", "just dev", ActionType::Run),
+                suggestion("Test", "just test", ActionType::Test),
+            ]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            actions.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            vec!["Dev", "Test"]
+        );
+        let context = store.get_action_context(&context.id).unwrap().unwrap();
+        assert!(!context.detecting_actions);
+        assert!(context.has_detected_actions);
+    }
+
+    #[test]
+    fn finish_detection_window_closes_the_window_when_detection_failed() {
+        let store = Store::in_memory().unwrap();
+        let context = detecting_context(&store);
+
+        let err = finish_detection_window(&store, &context.id, Err("no agent installed".into()))
+            .unwrap_err();
+        assert_eq!(err, "no agent installed");
+
+        // The error reaches the caller, but the window still closed: a flag
+        // left set would reject every later detection for this repo — with no
+        // UI path to clear it — while every surface spins on a run that is over.
+        let context = store.get_action_context(&context.id).unwrap().unwrap();
+        assert!(!context.detecting_actions);
+        assert!(context.has_detected_actions);
+    }
+
+    #[test]
+    fn a_claimed_detection_window_rejects_a_second_claim_until_it_closes() {
+        let store = Store::in_memory().unwrap();
+        let context = detecting_context(&store);
+
+        // The check-and-set is one statement, so the racing caller loses.
+        assert!(!store.claim_action_context_detection(&context.id).unwrap());
+
+        finish_detection_window(&store, &context.id, Ok(Vec::new())).unwrap();
+        assert!(store.claim_action_context_detection(&context.id).unwrap());
     }
 
     #[test]

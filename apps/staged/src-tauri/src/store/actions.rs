@@ -98,6 +98,25 @@ impl Store {
         Ok(())
     }
 
+    /// Atomically claim the detection window for a context.
+    ///
+    /// Returns `true` when this caller flipped `detecting_actions` from unset
+    /// to set (i.e. it "won" and owns the window), `false` when detection was
+    /// already in progress — or when the context no longer exists. Reading the
+    /// flag and then setting it in two calls lets two racing callers both pass
+    /// the check and start concurrent AI detections; this is the one-statement
+    /// version, mirroring [`Store::mark_branch_setup_complete`].
+    pub fn claim_action_context_detection(&self, context_id: &str) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE action_contexts
+             SET detecting_actions = 1, updated_at = ?1
+             WHERE id = ?2 AND detecting_actions = 0",
+            params![now_timestamp(), context_id],
+        )?;
+        Ok(rows > 0)
+    }
+
     pub fn mark_action_context_detected(&self, context_id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(

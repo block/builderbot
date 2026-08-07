@@ -83,22 +83,24 @@ impl Store {
         .map_err(Into::into)
     }
 
-    pub fn set_action_context_detecting(
-        &self,
-        context_id: &str,
-        detecting: bool,
-    ) -> Result<(), StoreError> {
+    /// Close a detection window without marking the context detected.
+    ///
+    /// The fallback for a failed [`Store::mark_action_context_detected`]: a
+    /// flag left set rejects every later detection for the context. Only the
+    /// claim opens a window, so there is no "set detecting" counterpart — the
+    /// owner pid has to be recorded with it.
+    pub fn clear_action_context_detection(&self, context_id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE action_contexts
-             SET detecting_actions = ?1, updated_at = ?2
-             WHERE id = ?3",
-            params![detecting as i32, now_timestamp(), context_id],
+             SET detecting_actions = 0, detecting_pid = NULL, updated_at = ?1
+             WHERE id = ?2",
+            params![now_timestamp(), context_id],
         )?;
         Ok(())
     }
 
-    /// Atomically claim the detection window for a context.
+    /// Atomically claim the detection window for a context on behalf of `pid`.
     ///
     /// Returns `true` when this caller flipped `detecting_actions` from unset
     /// to set (i.e. it "won" and owns the window), `false` when detection was
@@ -106,13 +108,23 @@ impl Store {
     /// flag and then setting it in two calls lets two racing callers both pass
     /// the check and start concurrent AI detections; this is the one-statement
     /// version, mirroring [`Store::mark_branch_setup_complete`].
-    pub fn claim_action_context_detection(&self, context_id: &str) -> Result<bool, StoreError> {
+    ///
+    /// `pid` is the claiming process, recorded so a window orphaned by a hard
+    /// kill can be told apart from one another live Staged instance still owns
+    /// — see [`Store::list_detecting_action_contexts`]. Callers pass
+    /// `std::process::id()`; tests pass an arbitrary pid to stand in for
+    /// another process.
+    pub fn claim_action_context_detection(
+        &self,
+        context_id: &str,
+        pid: u32,
+    ) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
         let rows = conn.execute(
             "UPDATE action_contexts
-             SET detecting_actions = 1, updated_at = ?1
-             WHERE id = ?2 AND detecting_actions = 0",
-            params![now_timestamp(), context_id],
+             SET detecting_actions = 1, detecting_pid = ?1, updated_at = ?2
+             WHERE id = ?3 AND detecting_actions = 0",
+            params![pid, now_timestamp(), context_id],
         )?;
         Ok(rows > 0)
     }
@@ -121,11 +133,67 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE action_contexts
-             SET has_detected_actions = 1, detecting_actions = 0, updated_at = ?1
+             SET has_detected_actions = 1, detecting_actions = 0, detecting_pid = NULL, updated_at = ?1
              WHERE id = ?2",
             params![now_timestamp(), context_id],
         )?;
         Ok(())
+    }
+
+    /// Claim a detection window the way a build predating `detecting_pid` did:
+    /// the flag set with no owner recorded. Only the sweep's tests need one.
+    #[cfg(test)]
+    pub(crate) fn claim_action_context_detection_without_owner(
+        &self,
+        context_id: &str,
+    ) -> Result<(), StoreError> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE action_contexts
+             SET detecting_actions = 1, detecting_pid = NULL, updated_at = ?1
+             WHERE id = ?2",
+            params![now_timestamp(), context_id],
+        )?;
+        Ok(())
+    }
+
+    /// Every context currently holding a detection window, with the pid that
+    /// claimed it (`None` for rows written before `detecting_pid` existed).
+    ///
+    /// Only the startup sweep reads the owner pid, so it stays off
+    /// [`ActionContext`] and the six SELECT column lists that build it.
+    pub fn list_detecting_action_contexts(&self) -> Result<Vec<(String, Option<u32>)>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, detecting_pid FROM action_contexts
+             WHERE detecting_actions = 1
+             ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Release a detection window claimed by `expected_pid`, returning whether
+    /// a row matched.
+    ///
+    /// The expectation lives in the WHERE clause so the sweep's read-then-write
+    /// is safe: if the claim changed hands in between — the window closed and
+    /// another process opened a new one — this matches zero rows instead of
+    /// clobbering a live window. `IS` rather than `=` so a NULL `expected_pid`
+    /// matches the pre-migration rows it stands for.
+    pub fn release_detection_claim(
+        &self,
+        context_id: &str,
+        expected_pid: Option<u32>,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE action_contexts
+             SET detecting_actions = 0, detecting_pid = NULL, updated_at = ?1
+             WHERE id = ?2 AND detecting_actions = 1 AND detecting_pid IS ?3",
+            params![now_timestamp(), context_id, expected_pid],
+        )?;
+        Ok(rows > 0)
     }
 
     pub fn create_repo_action(&self, action: &RepoAction) -> Result<(), StoreError> {

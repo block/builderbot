@@ -2107,6 +2107,19 @@ pub fn run() {
                         app.handle().clone(),
                     );
                     session_runner::recover_stale_queued_session_messages(&store_arc);
+                    // Release action-detection windows whose owner process is
+                    // dead — a hard kill mid-detection otherwise leaves the
+                    // flag set forever, rejecting all later detection for that
+                    // repo. Windows owned by other live instances stay put.
+                    match actions::commands::recover_orphaned_detection_claims(
+                        &store_arc,
+                        session_runner::is_process_alive,
+                    ) {
+                        0 => {}
+                        n => log::info!(
+                            "Released {n} orphaned action-detection claim(s) from previous run(s)"
+                        ),
+                    }
                     // Clean up images left in "pending" state from compose
                     // dialogs that were abandoned (e.g. user quit mid-dialog).
                     match store_arc.cleanup_pending_images() {

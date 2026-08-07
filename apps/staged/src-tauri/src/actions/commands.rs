@@ -200,6 +200,8 @@ pub(crate) fn persist_suggested_actions(
 /// either half behind wedges the repo: surfaces spin on a run that is over,
 /// and a flag still set in SQLite makes the claim below reject every later
 /// detection for this context — across restarts, with no UI path to clear it.
+/// ([`recover_orphaned_detection_claims`] is the backstop for the one exit
+/// no code here runs on, a hard kill, and it only heals at the next startup.)
 ///
 /// This is the one detection window in the app. The repo card's Detect Actions
 /// button ([`detect_repo_actions_impl`]) and both prerun-actions paths
@@ -215,7 +217,7 @@ pub(crate) async fn detect_and_persist_repo_actions(
     provider_id: Option<&str>,
 ) -> Result<Vec<crate::store::RepoAction>, String> {
     let claimed = store
-        .claim_action_context_detection(&context.id)
+        .claim_action_context_detection(&context.id, std::process::id())
         .map_err(|e| format!("Failed to set detection status: {e}"))?;
     if !claimed {
         return Err("Detection is already in progress for this repository".into());
@@ -265,7 +267,7 @@ fn finish_detection_window(
 
     if let Err(e) = store.mark_action_context_detected(context_id) {
         log::error!("Failed to mark action context {context_id} detected after detection: {e}");
-        if let Err(e) = store.set_action_context_detecting(context_id, false) {
+        if let Err(e) = store.clear_action_context_detection(context_id) {
             log::error!(
                 "Failed to clear the detecting flag for action context {context_id}: {e} — \
                  further detection for this repo will be rejected as already in progress"
@@ -273,6 +275,65 @@ fn finish_detection_window(
         }
     }
     result
+}
+
+/// On startup, release detection windows whose owner process is no longer
+/// alive; returns how many were released.
+///
+/// Every path through [`detect_and_persist_repo_actions`] closes its own
+/// window, so the only way one outlives its process is a hard kill during the
+/// AI call — tens of seconds, and it runs during first-touch branch setup.
+/// The flag it leaves behind is durable: the claim then rejects the Detect
+/// Actions button on every surface and skips prerun detection for every
+/// branch on that repo, forever, with nothing in the UI to explain it.
+///
+/// A blanket `UPDATE action_contexts SET detecting_actions = 0` would do it if
+/// the database belonged to this process, but `~/.staged/data.db` is shared —
+/// nothing stops two Staged instances from opening it, which is why `sessions`
+/// and `queued_session_messages` carry `owner_pid` for exactly this recovery.
+/// Clearing a live foreign claim would let a second instance start the
+/// concurrent detection the claim exists to prevent, so this checks the owner,
+/// mirroring [`crate::session_runner::recover_dead_sessions`]:
+///
+/// - `None` → release; a row written before `detecting_pid` existed.
+/// - our own pid → release; at startup that can only be a dead process whose
+///   pid we inherited.
+/// - a dead pid → release.
+/// - a live pid → leave it; another Staged instance owns that window.
+///
+/// `is_alive` is injected so the sweep is testable without spawning processes.
+/// It shells out per row, which is fine: the loop only visits rows with the
+/// flag set, normally none.
+pub fn recover_orphaned_detection_claims(store: &Store, is_alive: impl Fn(u32) -> bool) -> usize {
+    let claims = match store.list_detecting_action_contexts() {
+        Ok(claims) => claims,
+        Err(e) => {
+            log::warn!("[actions] Failed to query in-progress action detections: {e}");
+            return 0;
+        }
+    };
+
+    let mut released = 0;
+    for (context_id, pid) in claims {
+        let orphaned = match pid {
+            None => true,
+            Some(pid) if pid == std::process::id() => true,
+            Some(pid) => !is_alive(pid),
+        };
+        if !orphaned {
+            continue;
+        }
+        // Guarded on the pid we just read, so a claim that changed hands in
+        // between is left alone rather than clobbered.
+        match store.release_detection_claim(&context_id, pid) {
+            Ok(true) => released += 1,
+            Ok(false) => {}
+            Err(e) => log::warn!(
+                "[actions] Failed to release the orphaned detection claim on action context {context_id}: {e}"
+            ),
+        }
+    }
+    released
 }
 
 /// The repo card's Detect Actions button: resolve (or create) the context for
@@ -1225,19 +1286,21 @@ mod tests {
         );
     }
 
-    /// A context mid-detection: the flag claimed, nothing marked yet.
-    fn detecting_context(store: &Store) -> crate::store::ActionContext {
+    /// A context mid-detection: the flag claimed by `pid`, nothing marked yet.
+    fn detecting_context(store: &Store, pid: u32) -> crate::store::ActionContext {
         let context = store
             .get_or_create_action_context("block/builderbot", Some("apps/staged"))
             .unwrap();
-        assert!(store.claim_action_context_detection(&context.id).unwrap());
+        assert!(store
+            .claim_action_context_detection(&context.id, pid)
+            .unwrap());
         context
     }
 
     #[test]
     fn finish_detection_window_persists_and_closes_the_window() {
         let store = Store::in_memory().unwrap();
-        let context = detecting_context(&store);
+        let context = detecting_context(&store, std::process::id());
 
         let actions = finish_detection_window(
             &store,
@@ -1261,7 +1324,7 @@ mod tests {
     #[test]
     fn finish_detection_window_closes_the_window_when_detection_failed() {
         let store = Store::in_memory().unwrap();
-        let context = detecting_context(&store);
+        let context = detecting_context(&store, std::process::id());
 
         let err = finish_detection_window(&store, &context.id, Err("no agent installed".into()))
             .unwrap_err();
@@ -1278,13 +1341,79 @@ mod tests {
     #[test]
     fn a_claimed_detection_window_rejects_a_second_claim_until_it_closes() {
         let store = Store::in_memory().unwrap();
-        let context = detecting_context(&store);
+        let pid = std::process::id();
+        let context = detecting_context(&store, pid);
 
         // The check-and-set is one statement, so the racing caller loses.
-        assert!(!store.claim_action_context_detection(&context.id).unwrap());
+        assert!(!store
+            .claim_action_context_detection(&context.id, pid)
+            .unwrap());
 
         finish_detection_window(&store, &context.id, Ok(Vec::new())).unwrap();
-        assert!(store.claim_action_context_detection(&context.id).unwrap());
+        assert!(store
+            .claim_action_context_detection(&context.id, pid)
+            .unwrap());
+    }
+
+    #[test]
+    fn the_sweep_releases_a_window_whose_owner_died() {
+        let store = Store::in_memory().unwrap();
+        // A process killed mid-detection: the flag is set, the owner is gone.
+        let context = detecting_context(&store, 4242);
+
+        assert_eq!(recover_orphaned_detection_claims(&store, |_| false), 1);
+
+        // The regression: without the sweep this claim — and so every later
+        // detection for the repo, on every surface, across restarts — is
+        // rejected as already in progress.
+        assert!(store
+            .claim_action_context_detection(&context.id, std::process::id())
+            .unwrap());
+    }
+
+    #[test]
+    fn the_sweep_leaves_a_window_owned_by_a_live_process_alone() {
+        let store = Store::in_memory().unwrap();
+        // Another Staged instance, mid-detection on the shared database.
+        let context = detecting_context(&store, 4242);
+
+        assert_eq!(recover_orphaned_detection_claims(&store, |_| true), 0);
+
+        // Releasing it would let this instance start the concurrent detection
+        // the claim exists to prevent.
+        assert!(!store
+            .claim_action_context_detection(&context.id, std::process::id())
+            .unwrap());
+    }
+
+    #[test]
+    fn the_sweep_releases_a_window_with_no_recorded_owner() {
+        let store = Store::in_memory().unwrap();
+        let context = store
+            .get_or_create_action_context("block/builderbot", Some("apps/staged"))
+            .unwrap();
+        // A row claimed before `detecting_pid` existed.
+        store
+            .claim_action_context_detection_without_owner(&context.id)
+            .unwrap();
+
+        assert_eq!(recover_orphaned_detection_claims(&store, |_| true), 1);
+        assert!(store
+            .claim_action_context_detection(&context.id, std::process::id())
+            .unwrap());
+    }
+
+    #[test]
+    fn the_sweep_releases_a_window_carrying_our_own_pid() {
+        let store = Store::in_memory().unwrap();
+        // At startup our pid on a claim can only be a dead process we
+        // inherited it from, so it goes even though the pid reads as live.
+        let context = detecting_context(&store, std::process::id());
+
+        assert_eq!(recover_orphaned_detection_claims(&store, |_| true), 1);
+        assert!(store
+            .claim_action_context_detection(&context.id, std::process::id())
+            .unwrap());
     }
 
     #[test]

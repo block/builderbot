@@ -2432,6 +2432,80 @@ fn test_reorder_actions() {
     assert_eq!(actions[1].name, "A");
 }
 
+#[test]
+fn test_claim_action_context_detection_records_the_owner_pid() {
+    let store = Store::in_memory().unwrap();
+    let context = store
+        .get_or_create_action_context("test-owner/test-repo", None)
+        .unwrap();
+
+    assert!(store
+        .claim_action_context_detection(&context.id, 4242)
+        .unwrap());
+    assert_eq!(
+        store.list_detecting_action_contexts().unwrap(),
+        vec![(context.id.clone(), Some(4242))]
+    );
+
+    // Closing the window drops the owner with the flag: a pid outliving its
+    // window would read as a live claim the day that pid is reused.
+    store.mark_action_context_detected(&context.id).unwrap();
+    assert!(store.list_detecting_action_contexts().unwrap().is_empty());
+    store
+        .claim_action_context_detection(&context.id, 4242)
+        .unwrap();
+    store.clear_action_context_detection(&context.id).unwrap();
+    assert!(store.list_detecting_action_contexts().unwrap().is_empty());
+}
+
+#[test]
+fn test_release_detection_claim_only_matches_the_expected_owner() {
+    let store = Store::in_memory().unwrap();
+    let context = store
+        .get_or_create_action_context("test-owner/test-repo", None)
+        .unwrap();
+    assert!(store
+        .claim_action_context_detection(&context.id, 4242)
+        .unwrap());
+
+    // The claim changed hands between a sweep's read and its write: the
+    // release matches nothing rather than clobbering the live window.
+    assert!(!store
+        .release_detection_claim(&context.id, Some(9999))
+        .unwrap());
+    assert!(!store.release_detection_claim(&context.id, None).unwrap());
+    assert!(!store
+        .claim_action_context_detection(&context.id, 1)
+        .unwrap());
+
+    assert!(store
+        .release_detection_claim(&context.id, Some(4242))
+        .unwrap());
+    assert!(store.list_detecting_action_contexts().unwrap().is_empty());
+    assert!(store
+        .claim_action_context_detection(&context.id, 1)
+        .unwrap());
+}
+
+#[test]
+fn test_release_detection_claim_matches_a_null_owner() {
+    let store = Store::in_memory().unwrap();
+    let context = store
+        .get_or_create_action_context("test-owner/test-repo", None)
+        .unwrap();
+    // A row claimed before `detecting_pid` existed.
+    store
+        .claim_action_context_detection_without_owner(&context.id)
+        .unwrap();
+    assert_eq!(
+        store.list_detecting_action_contexts().unwrap(),
+        vec![(context.id.clone(), None)]
+    );
+
+    assert!(store.release_detection_claim(&context.id, None).unwrap());
+    assert!(store.list_detecting_action_contexts().unwrap().is_empty());
+}
+
 // =============================================================================
 // Reviews
 // =============================================================================

@@ -134,7 +134,7 @@
 <!-- Success and in-progress rows only echo the check and clock icons already
      in the card header, so the footer status shows only when it adds something
      (failed, cancelled, pending). -->
-{#if includeStatus && viewModel.statusTone !== 'success' && viewModel.statusTone !== 'running'}
+{#if includeStatus && ['danger', 'cancelled', 'muted'].includes(viewModel.statusTone)}
   <div
     class="tool-code-status"
     class:status-danger={viewModel.statusTone === 'danger'}

@@ -222,17 +222,6 @@ impl std::fmt::Display for DetectionError {
 /// `detecting_actions` flag, broadcast `detecting: true`, detect, persist the
 /// suggestions, and return the context's resulting action list.
 ///
-/// Detection and persistence both happen while the flag is set, so the flag —
-/// and the `detecting: false` event that clears it — only drop once the list
-/// callers are about to load is complete. Once the window is open, *every*
-/// exit closes it: a detection failure, a persist failure, and a mark failure
-/// all clear the flag and emit `detecting: false` before returning. Leaving
-/// either half behind wedges the repo: surfaces spin on a run that is over,
-/// and a flag still set in SQLite makes the claim below reject every later
-/// detection for this context — across restarts, with no UI path to clear it.
-/// ([`recover_orphaned_detection_claims`] is the backstop for the one exit
-/// no code here runs on, a hard kill, and it only heals at the next startup.)
-///
 /// This is the one detection window in the app. The repo card's Detect Actions
 /// button ([`detect_repo_actions_impl`]) and both prerun-actions paths (via
 /// [`ensure_actions_detected`]) all route through here, so the claim also
@@ -241,6 +230,10 @@ impl std::fmt::Display for DetectionError {
 /// launching a second AI call whose dedupe reads a list the first run hasn't
 /// finished writing. What a caller does with that rejection is its own
 /// business — the button surfaces it, prerun waits it out.
+///
+/// One of the two ways into [`run_claimed_detection_window`], and the only one
+/// that opens the window: the other is [`wait_for_detection_window`] taking
+/// over a claim whose owner died, which arrives holding one already.
 async fn detect_and_persist_repo_actions(
     app: &AppHandle,
     store: &Store,
@@ -253,7 +246,35 @@ async fn detect_and_persist_repo_actions(
     if !claimed {
         return Err(DetectionError::InProgress);
     }
-    // The window is open from here on — every path below must close it.
+    run_claimed_detection_window(app, store, context, provider_id)
+        .await
+        .map_err(DetectionError::Failed)
+}
+
+/// The body of a detection window whose claim this caller already holds:
+/// broadcast `detecting: true`, detect, persist, and close the window.
+///
+/// Detection and persistence both happen while the flag is set, so the flag —
+/// and the `detecting: false` event that clears it — only drop once the list
+/// callers are about to load is complete. Once the window is open, *every*
+/// exit closes it: a detection failure, a persist failure, and a mark failure
+/// all clear the flag and emit `detecting: false` before returning. Leaving
+/// either half behind wedges the repo: surfaces spin on a run that is over,
+/// and a flag still set in SQLite makes [`Store::claim_action_context_detection`]
+/// reject every later detection for this context — across restarts, with no UI
+/// path to clear it. ([`recover_orphaned_detection_claims`] is the backstop for
+/// the one exit no code here runs on, a hard kill, and it only heals at the
+/// next startup.)
+///
+/// Split from [`detect_and_persist_repo_actions`] so a waiter that takes over
+/// an orphaned window can run it without re-claiming: its takeover already
+/// moved the claim, in the single UPDATE that keeps the flag set throughout.
+async fn run_claimed_detection_window(
+    app: &AppHandle,
+    store: &Store,
+    context: &crate::store::ActionContext,
+    provider_id: Option<&str>,
+) -> Result<Vec<crate::store::RepoAction>, String> {
     let event = |detecting: bool| DetectingActionsEvent {
         github_repo: context.github_repo.clone(),
         subpath: context.subpath.clone(),
@@ -273,7 +294,7 @@ async fn detect_and_persist_repo_actions(
 
     let result = finish_detection_window(store, &context.id, detected);
     crate::web_server::emit_to_all(app, "repo-actions-detection", event(false));
-    result.map_err(DetectionError::Failed)
+    result
 }
 
 /// Store-side close-out for a detection window: persist the suggestions and
@@ -339,9 +360,10 @@ enum DetectionWait {
     /// The window closed. Its owner persisted inside it, so the context's
     /// action list is final.
     Closed,
-    /// The window's owner was gone and the claim was released, so the waiter
-    /// can claim the context and detect it itself.
-    Released,
+    /// The window's owner was gone, so the waiter took the claim over — with
+    /// the flag never unset in between — and now holds the window itself. It
+    /// owes the context a detection, and the window it inherited a close.
+    TookOver,
     /// Gave up with the window still open — the cap expired, or the claim
     /// couldn't be read. The caller proceeds with the list it can see.
     GaveUp,
@@ -360,11 +382,21 @@ enum DetectionWait {
 /// Each tick also runs the startup sweep's orphan test
 /// ([`recover_orphaned_detection_claims`]), with one inversion: mid-session a
 /// claim carrying *our own pid* is live — another task in this process owns
-/// that window — so it is waited on rather than released. An owner that is
-/// gone leaves nothing to wait for, so its claim is released and the waiter is
-/// told to detect the context itself. That is the "steal a dead owner's window,
-/// wedged until the next attempt rather than until the next launch" half the
-/// startup sweep deliberately left out.
+/// that window — so it is waited on rather than taken over. An owner that is
+/// gone leaves nothing to wait for, so its claim is moved to this process and
+/// the waiter is told to detect the context itself. That is the "steal a dead
+/// owner's window, wedged until the next attempt rather than until the next
+/// launch" half the startup sweep deliberately left out.
+///
+/// Where the sweep releases such a claim, this *takes it over* — one UPDATE
+/// that swaps the owner with the flag still set
+/// ([`Store::take_over_detection_claim`]), rather than a release followed by a
+/// fresh claim. The two-statement version reopens the read-then-write gap the
+/// single-statement claim exists to close, and it falls either way onto the
+/// silently skipped prerun this wait exists to prevent: another waiter ticking
+/// in the gap sees no window and takes this context's undetected action list
+/// for final, and a claim landing in the gap sends the taker-over back an
+/// in-progress rejection for a window it had just won.
 async fn wait_for_detection_window(
     store: &Store,
     context_id: &str,
@@ -392,19 +424,26 @@ async fn wait_for_detection_window(
             Some(pid) => !is_alive(pid),
         };
         if orphaned {
+            // One UPDATE that moves the owner rather than a release and a
+            // fresh claim: the flag never drops, so a second waiter ticking in
+            // between can't read "no window open" and take this context's
+            // undetected action list for final, and nothing can slip a claim
+            // into the gap and hand this caller an in-progress rejection for a
+            // window it just won.
+            //
             // Guarded on the pid just read, so a window that changed hands
             // between the read and here is left to its new owner and waited
-            // out on the next tick rather than clobbered.
-            match store.release_detection_claim(context_id, pid) {
+            // out on the next tick rather than stolen.
+            match store.take_over_detection_claim(context_id, pid, std::process::id()) {
                 Ok(true) => {
                     log::info!(
                         "[actions] Took over the detection claim on action context {context_id}: its owner ({pid:?}) is gone"
                     );
-                    return DetectionWait::Released;
+                    return DetectionWait::TookOver;
                 }
                 Ok(false) => {}
                 Err(e) => log::warn!(
-                    "[actions] Failed to release the orphaned detection claim on action context {context_id}: {e}"
+                    "[actions] Failed to take over the orphaned detection claim on action context {context_id}: {e}"
                 ),
             }
         }
@@ -435,7 +474,9 @@ async fn wait_for_detection_window(
 ///   now reads the pre-detection (typically empty) list, finds no prerun
 ///   actions, and silently skips this branch's setup. No re-detection once the
 ///   window closes — the winner marks the context detected on every exit,
-///   including a failed detection.
+///   including a failed detection. Should the wait find the window's owner
+///   gone, it takes the claim over rather than releasing it, and what runs here
+///   is the body of that inherited window — never a second claim.
 pub(crate) async fn ensure_actions_detected(
     app: &AppHandle,
     store: &Store,
@@ -474,9 +515,12 @@ pub(crate) async fn ensure_actions_detected(
 
     match waited {
         DetectionWait::Closed => list(),
-        // Nothing is going to persist into this context but us now.
-        DetectionWait::Released => {
-            match detect_and_persist_repo_actions(app, store, context, provider_id).await {
+        // The wait took the claim over rather than releasing it, so the window
+        // is ours already — run its body directly instead of claiming a second
+        // time, which would leave the flag unset in between and could come back
+        // rejected for a window we hold.
+        DetectionWait::TookOver => {
+            match run_claimed_detection_window(app, store, context, provider_id).await {
                 Ok(actions) => Ok(actions),
                 Err(e) => {
                     log::warn!(
@@ -1694,12 +1738,51 @@ mod tests {
 
         let waited = wait_for_detection_window(&store, &context.id, EAGER, |_| false).await;
 
-        assert_eq!(waited, DetectionWait::Released);
-        // Released, so the waiter can claim the window and detect it itself
-        // rather than wait out the cap for an owner that is gone.
-        assert!(store
+        assert_eq!(waited, DetectionWait::TookOver);
+        // Taken over rather than released, so the waiter detects the context
+        // itself instead of waiting out the cap for an owner that is gone —
+        // and the flag never drops on the way. A window that blinked closed
+        // here would let a second waiter's tick read this context's
+        // pre-detection list as final, and let a claim land in the gap and
+        // reject the caller that just won the window.
+        assert_eq!(
+            store.list_detecting_action_contexts().unwrap(),
+            vec![(context.id.clone(), Some(std::process::id()))]
+        );
+        assert!(!store
             .claim_action_context_detection(&context.id, std::process::id())
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn the_wait_leaves_a_window_that_changed_hands_to_its_new_owner() {
+        let store = Store::in_memory().unwrap();
+        let context = detecting_context(&store, 4242);
+
+        // The dead owner's window closed and another process opened a new one
+        // between the tick's read and its takeover. The takeover is guarded on
+        // the pid just read, so it matches nothing and the new owner keeps its
+        // window — the next tick (here, the cap) would find it alive and wait.
+        let reclaimed = std::cell::Cell::new(false);
+        let owner_changes_hands = |_pid| {
+            if !reclaimed.replace(true) {
+                store.mark_action_context_detected(&context.id).unwrap();
+                assert!(store
+                    .claim_action_context_detection(&context.id, 9999)
+                    .unwrap());
+                return false;
+            }
+            true
+        };
+
+        let waited =
+            wait_for_detection_window(&store, &context.id, ONE_TICK, owner_changes_hands).await;
+
+        assert_eq!(waited, DetectionWait::GaveUp);
+        assert_eq!(
+            store.list_detecting_action_contexts().unwrap(),
+            vec![(context.id.clone(), Some(9999))]
+        );
     }
 
     #[tokio::test]

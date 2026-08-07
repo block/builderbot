@@ -196,6 +196,41 @@ impl Store {
         Ok(rows > 0)
     }
 
+    /// Move a detection window claimed by `expected_pid` to `new_pid` without
+    /// ever dropping the flag, returning whether a row matched.
+    ///
+    /// What a waiter that finds an orphaned window uses instead of
+    /// [`Store::release_detection_claim`] plus a fresh
+    /// [`Store::claim_action_context_detection`]: those two statements leave a
+    /// gap with the flag unset, which is exactly the read-then-write race the
+    /// claim was collapsed into one UPDATE to close. In that gap another waiter
+    /// reads "no window open" and takes the context's half-written action list
+    /// for final, and anyone claiming there sends the taker-over back an
+    /// already-in-progress rejection for a window it thought it had won. Here
+    /// `detecting_actions` stays 1 throughout and only the owner changes, so
+    /// every concurrent reader sees a window that was open the whole time.
+    ///
+    /// The expectation is in the WHERE clause for the same reason it is on the
+    /// release: a claim that changed hands between the read and this call
+    /// matches zero rows rather than being stolen from its new owner. `IS`
+    /// rather than `=` so a NULL `expected_pid` matches the pre-migration rows
+    /// it stands for.
+    pub fn take_over_detection_claim(
+        &self,
+        context_id: &str,
+        expected_pid: Option<u32>,
+        new_pid: u32,
+    ) -> Result<bool, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE action_contexts
+             SET detecting_pid = ?1, updated_at = ?2
+             WHERE id = ?3 AND detecting_actions = 1 AND detecting_pid IS ?4",
+            params![new_pid, now_timestamp(), context_id, expected_pid],
+        )?;
+        Ok(rows > 0)
+    }
+
     pub fn create_repo_action(&self, action: &RepoAction) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         let run_detection_mode_json = action

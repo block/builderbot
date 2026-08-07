@@ -330,16 +330,18 @@ fn finish_detection_window(
 }
 
 /// How a caller waits out a detection window someone else owns: how often it
-/// re-reads the claim, and how long it waits before giving up.
+/// re-reads the claim, how often it re-checks the claim's owner, and how long
+/// it waits before giving up.
 ///
 /// The AI call inside a window has no timeout of its own, so the wait needs a
 /// cap — an owner that never finishes must not hold branch setup open forever.
-/// Both knobs are injected so the tests can drive the loop tick by tick
+/// All three knobs are injected so the tests can drive the loop tick by tick
 /// instead of by the clock.
 #[derive(Clone, Copy)]
 struct DetectionWaitPolicy {
     interval: std::time::Duration,
     max_wait: std::time::Duration,
+    liveness_probe_interval: std::time::Duration,
 }
 
 impl Default for DetectionWaitPolicy {
@@ -350,7 +352,55 @@ impl Default for DetectionWaitPolicy {
             // costs this caller no more than winning the claim would have,
             // since that path awaits the same AI call.
             max_wait: std::time::Duration::from_secs(300),
+            // Reading the claim is a SQLite query; probing its owner spawns a
+            // `kill -0` subprocess, so it runs on its own, much slower clock —
+            // at most 20 probes across the cap rather than one per tick. See
+            // [`OwnerLiveness`].
+            liveness_probe_interval: std::time::Duration::from_secs(15),
         }
+    }
+}
+
+/// The window owner's liveness, remembered between ticks.
+///
+/// [`crate::session_runner::is_process_alive`] shells out to `kill -0` and
+/// blocks the thread on `Command::status()`. That is fine for the startup
+/// sweep, which visits each claim once, but this wait re-runs the same test
+/// every tick for up to [`DetectionWaitPolicy::max_wait`] — a subprocess spawn
+/// per second, on a tokio worker, for five minutes, to re-answer a question
+/// whose answer barely moves. So the verdict is cached for
+/// [`DetectionWaitPolicy::liveness_probe_interval`].
+///
+/// The cache is keyed on the pid, and a different pid is always probed afresh:
+/// a window that changed hands mid-wait has a new owner the previous verdict
+/// says nothing about, and reusing a dead reading there would take a *live*
+/// owner's window over.
+struct OwnerLiveness<F> {
+    is_alive: F,
+    ttl: std::time::Duration,
+    /// The pid last probed, what it answered, and when.
+    last: Option<(u32, bool, tokio::time::Instant)>,
+}
+
+impl<F: Fn(u32) -> bool> OwnerLiveness<F> {
+    fn new(is_alive: F, ttl: std::time::Duration) -> Self {
+        Self {
+            is_alive,
+            ttl,
+            last: None,
+        }
+    }
+
+    fn alive(&mut self, pid: u32) -> bool {
+        let now = tokio::time::Instant::now();
+        if let Some((probed, alive, at)) = self.last {
+            if probed == pid && now.duration_since(at) < self.ttl {
+                return alive;
+            }
+        }
+        let alive = (self.is_alive)(pid);
+        self.last = Some((pid, alive, now));
+        alive
     }
 }
 
@@ -386,7 +436,9 @@ enum DetectionWait {
 /// gone leaves nothing to wait for, so its claim is moved to this process and
 /// the waiter is told to detect the context itself. That is the "steal a dead
 /// owner's window, wedged until the next attempt rather than until the next
-/// launch" half the startup sweep deliberately left out.
+/// launch" half the startup sweep deliberately left out. Only the claim itself
+/// is re-read every tick; its owner's liveness is a subprocess spawn away and
+/// runs on the slower clock [`OwnerLiveness`] keeps.
 ///
 /// Where the sweep releases such a claim, this *takes it over* — one UPDATE
 /// that swaps the owner with the flag still set
@@ -404,6 +456,7 @@ async fn wait_for_detection_window(
     is_alive: impl Fn(u32) -> bool,
 ) -> DetectionWait {
     let deadline = tokio::time::Instant::now() + policy.max_wait;
+    let mut owner = OwnerLiveness::new(is_alive, policy.liveness_probe_interval);
     loop {
         let claims = match store.list_detecting_action_contexts() {
             Ok(claims) => claims,
@@ -421,7 +474,7 @@ async fn wait_for_detection_window(
         let orphaned = match pid {
             None => true,
             Some(pid) if pid == std::process::id() => false,
-            Some(pid) => !is_alive(pid),
+            Some(pid) => !owner.alive(pid),
         };
         if orphaned {
             // One UPDATE that moves the owner rather than a release and a
@@ -572,8 +625,9 @@ pub(crate) async fn ensure_actions_detected(
 /// runs the same test with that one arm inverted.
 ///
 /// `is_alive` is injected so the sweep is testable without spawning processes.
-/// It shells out per row, which is fine: the loop only visits rows with the
-/// flag set, normally none.
+/// It shells out per row, which is fine *here*: this loop runs once and visits
+/// only rows with the flag set, normally none. The same test on a loop that
+/// runs for minutes needs [`OwnerLiveness`] in front of it.
 pub fn recover_orphaned_detection_claims(store: &Store, is_alive: impl Fn(u32) -> bool) -> usize {
     let claims = match store.list_detecting_action_contexts() {
         Ok(claims) => claims,
@@ -1679,9 +1733,12 @@ mod tests {
 
     /// Poll without pausing between ticks, with a cap only the loop's own
     /// exits reach — so a test ends on what it arranges, not on the clock.
+    /// Probes every tick, since these tests use the probe as their hook into
+    /// the loop.
     const EAGER: DetectionWaitPolicy = DetectionWaitPolicy {
         interval: std::time::Duration::ZERO,
         max_wait: std::time::Duration::from_secs(30),
+        liveness_probe_interval: std::time::Duration::ZERO,
     };
 
     /// Poll once, then give up: stands in for a window still held long after
@@ -1689,6 +1746,18 @@ mod tests {
     const ONE_TICK: DetectionWaitPolicy = DetectionWaitPolicy {
         interval: std::time::Duration::ZERO,
         max_wait: std::time::Duration::ZERO,
+        liveness_probe_interval: std::time::Duration::ZERO,
+    };
+
+    /// Many ticks, each far shorter than the probe interval — the shipped
+    /// policy's shape (300 ticks, 20 probes) compressed into milliseconds, so
+    /// the tests below can count probes against ticks without a clock of their
+    /// own. How many ticks actually fit is up to the machine; the assertions
+    /// don't depend on it.
+    const MANY_TICKS: DetectionWaitPolicy = DetectionWaitPolicy {
+        interval: std::time::Duration::from_millis(1),
+        max_wait: std::time::Duration::from_millis(50),
+        liveness_probe_interval: std::time::Duration::from_secs(60),
     };
 
     #[tokio::test]
@@ -1817,6 +1886,111 @@ mod tests {
         assert!(!store
             .claim_action_context_detection(&context.id, std::process::id())
             .unwrap());
+    }
+
+    #[tokio::test]
+    async fn the_wait_probes_the_owner_once_across_many_ticks() {
+        let store = Store::in_memory().unwrap();
+        // Another live Staged instance, wedged mid-detection: the wait re-reads
+        // its claim until the cap, and every read used to re-probe the owner —
+        // a `kill -0` subprocess spawn, blocking a tokio worker, up to 300
+        // times for one waiting caller.
+        let context = detecting_context(&store, 4242);
+
+        let probes = std::cell::Cell::new(0);
+        let counting_probe = |_pid| {
+            probes.set(probes.get() + 1);
+            true
+        };
+
+        let waited =
+            wait_for_detection_window(&store, &context.id, MANY_TICKS, counting_probe).await;
+
+        assert_eq!(waited, DetectionWait::GaveUp);
+        // Every tick re-read the claim (a SQLite query, which is the cheap
+        // half) and none of them re-probed: the probe interval outlasts the
+        // whole wait here, so the first verdict stands for all of it.
+        assert_eq!(probes.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_wait_reprobes_an_owner_it_has_not_seen_before() {
+        let store = Store::in_memory().unwrap();
+        let context = detecting_context(&store, 4242);
+
+        // The first owner finishes and a second claims the context, well
+        // inside the probe interval. A cached verdict is about the pid it was
+        // taken on and can't stand in for a new owner's: here that would mean
+        // waiting out the cap on a window whose owner is already gone, and
+        // (with the verdicts the other way around) taking a live owner's
+        // window over.
+        let probed = std::cell::RefCell::new(Vec::new());
+        let owner_changes_hands = |pid| {
+            probed.borrow_mut().push(pid);
+            if pid == 4242 {
+                store.mark_action_context_detected(&context.id).unwrap();
+                assert!(store
+                    .claim_action_context_detection(&context.id, 9999)
+                    .unwrap());
+                return true;
+            }
+            false
+        };
+
+        let waited =
+            wait_for_detection_window(&store, &context.id, MANY_TICKS, owner_changes_hands).await;
+
+        assert_eq!(waited, DetectionWait::TookOver);
+        assert_eq!(*probed.borrow(), vec![4242, 9999]);
+    }
+
+    #[test]
+    fn a_liveness_verdict_stands_until_the_probe_interval_expires() {
+        let probes = std::cell::Cell::new(0);
+        let mut owner = OwnerLiveness::new(
+            |_pid| {
+                probes.set(probes.get() + 1);
+                true
+            },
+            std::time::Duration::from_secs(60),
+        );
+
+        assert!(owner.alive(4242));
+        assert!(owner.alive(4242));
+        assert!(owner.alive(4242));
+        assert_eq!(probes.get(), 1);
+
+        // A zero interval is every-tick probing, which is what the tests that
+        // use the probe as their hook into the wait loop rely on.
+        let mut eager = OwnerLiveness::new(
+            |_pid| {
+                probes.set(probes.get() + 1);
+                true
+            },
+            std::time::Duration::ZERO,
+        );
+        assert!(eager.alive(4242));
+        assert!(eager.alive(4242));
+        assert_eq!(probes.get(), 3);
+    }
+
+    #[test]
+    fn a_liveness_verdict_never_carries_over_to_another_pid() {
+        let probed = std::cell::RefCell::new(Vec::new());
+        let mut owner = OwnerLiveness::new(
+            |pid| {
+                probed.borrow_mut().push(pid);
+                // Only the second owner is alive. Carrying the first one's
+                // verdict over would take a live window from underneath it.
+                pid == 9999
+            },
+            std::time::Duration::from_secs(60),
+        );
+
+        assert!(!owner.alive(4242));
+        assert!(owner.alive(9999));
+        assert!(owner.alive(9999));
+        assert_eq!(*probed.borrow(), vec![4242, 9999]);
     }
 
     #[test]

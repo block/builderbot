@@ -501,15 +501,18 @@
 </div>
 
 <!-- No branchId: repo-scoped executions have no branch to attach notes to,
-     so the modal hides its save-selection-as-note affordance. -->
-<ActionOutputModal
-  open={runner.outputModal !== null}
-  executionId={runner.outputModal?.executionId ?? ''}
-  actionName={runner.outputModal?.actionName ?? ''}
-  isStopping={runner.outputModal?.isStopping}
-  onClose={() => runner.closeOutputModal()}
-  onRunAgain={() => runner.runAgain()}
-/>
+     so the modal hides its save-selection-as-note affordance. Mounted only
+     while showing so a grid of N cards doesn't hold N idle instances. -->
+{#if runner.outputModal}
+  <ActionOutputModal
+    open={true}
+    executionId={runner.outputModal.executionId}
+    actionName={runner.outputModal.actionName}
+    isStopping={runner.outputModal.isStopping}
+    onClose={() => runner.closeOutputModal()}
+    onRunAgain={() => runner.runAgain()}
+  />
+{/if}
 
 <style>
   .repo-card {

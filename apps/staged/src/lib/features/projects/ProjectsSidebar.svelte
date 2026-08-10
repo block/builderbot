@@ -81,6 +81,13 @@
     pinnedRepos = projectsDataStore.homeRepos.filter((r) => r.pinned);
   });
 
+  // Any repo (pinned or not) earns the All Repos entry; keeping it while the
+  // repos view is active means the row highlighting that view can't vanish
+  // out from under it.
+  let showAllReposRow = $derived(
+    projectsDataStore.homeRepos.length > 0 || navigation.showReposList
+  );
+
   function handleDragStart(index: number) {
     return (e: DragEvent) => {
       dragSourceIndex = index;
@@ -418,7 +425,7 @@
         <div class="state">Loading projects…</div>
       {:else}
         <div class="projects-list">
-          {#if pinnedRepos.length > 0}
+          {#if showAllReposRow}
             <button
               class="project-row all-repos-row"
               class:active={navigation.showReposList}
@@ -430,20 +437,22 @@
               </div>
             </button>
 
-            <div class="pinned-repos-list" role="list" aria-label="Pinned repos">
-              {#each pinnedRepos as repo, index (repo.githubRepo + '\t' + repo.subpath)}
-                <RepoCard
-                  {repo}
-                  hidePinButton
-                  reorderable
-                  onReorderStart={handleDragStart(index)}
-                  onReorderOver={handleDragOver(index)}
-                  onReorderDrop={handleDrop(index)}
-                  onReorderEnd={handleDragEnd()}
-                  onChange={() => projectsDataStore.refreshHomeRepos()}
-                />
-              {/each}
-            </div>
+            {#if pinnedRepos.length > 0}
+              <div class="pinned-repos-list" role="list" aria-label="Pinned repos">
+                {#each pinnedRepos as repo, index (repo.githubRepo + '\t' + repo.subpath)}
+                  <RepoCard
+                    {repo}
+                    hidePinButton
+                    reorderable
+                    onReorderStart={handleDragStart(index)}
+                    onReorderOver={handleDragOver(index)}
+                    onReorderDrop={handleDrop(index)}
+                    onReorderEnd={handleDragEnd()}
+                    onChange={() => projectsDataStore.refreshHomeRepos()}
+                  />
+                {/each}
+              </div>
+            {/if}
 
             <div class="section-divider"></div>
           {/if}

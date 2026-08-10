@@ -511,12 +511,14 @@ async fn wait_for_detection_window(
 /// The prerun paths' way in to detection: make sure this context has been
 /// detected, then hand back its actions.
 ///
-/// Its two callers — [`run_prerun_actions_impl`] and
-/// [`crate::branches::claim_and_run_prerun_actions`] — run once per branch,
-/// behind the atomic `mark_branch_setup_complete` claim, so the list they get
-/// here is the only one that branch's prerun will ever see. A miss is
-/// permanent for that worktree: it never gets its setup actions, and nothing
-/// retries.
+/// The invariant that justifies the wait below belongs to one of its two
+/// callers: [`crate::branches::claim_and_run_prerun_actions`] runs once per
+/// branch, behind the one-shot atomic `mark_branch_setup_complete` claim, so
+/// the list it gets here is the only one that branch's prerun will ever see —
+/// a miss is permanent for that worktree, which never gets its setup actions,
+/// and nothing retries. The other caller, [`run_prerun_actions_impl`] (the
+/// `run_prerun_actions` command), takes no claim: a miss there costs one
+/// invocation, which the caller can simply repeat.
 ///
 /// The wait is why prerun must not sit on a caller's critical path; the three
 /// entry points whose callers were on a clock now detach it

@@ -13,9 +13,11 @@
   interface Props {
     githubRepo: string;
     subpath?: string | null;
+    /** Wrap across as many lines as the path needs instead of truncating it. */
+    wrap?: boolean;
   }
 
-  let { githubRepo, subpath = null }: Props = $props();
+  let { githubRepo, subpath = null, wrap = false }: Props = $props();
 
   let prefix = $derived.by(() => {
     if (subpath) {
@@ -36,7 +38,7 @@
   let fullLabel = $derived(subpath ? `${githubRepo}/${subpath}` : githubRepo);
 </script>
 
-<span class="repo-label" title={fullLabel}
+<span class="repo-label" class:wrap title={fullLabel}
   >{#if prefix}<span class="repo-label-prefix">{prefix}</span>{/if}<span class="repo-label-emphasis"
     >{emphasis}</span
   ></span
@@ -48,6 +50,13 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .repo-label.wrap {
+    overflow: visible;
+    white-space: normal;
+    /* Paths have no spaces, so break inside a segment when nothing else fits. */
+    overflow-wrap: anywhere;
   }
 
   .repo-label-prefix {

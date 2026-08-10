@@ -42,6 +42,7 @@
     canDeleteProjectWithoutConfirmation,
     computeSafeToDeleteSignature,
   } from './projectDeleteSafety';
+  import { repoSeedFromNewProjectEvent } from './newProjectEvent';
 
   interface Props {
     selectedProjectId?: string | null;
@@ -100,6 +101,7 @@
 
   // Modal state
   let showNewProjectModal = $state(false);
+  let newProjectInitialRepo = $state<RepoPickerSelection | null>(null);
   let showAddRepoModal = $state(false);
 
   // Project-detail top-bar title handoff.
@@ -135,7 +137,7 @@
     checkStoreAndLoad();
     void projectRunActionsStore.startListening();
 
-    const onNewProject = () => handleNewProject();
+    const onNewProject = (event: Event) => handleNewProject(repoSeedFromNewProjectEvent(event));
     window.addEventListener('staged:new-project', onNewProject);
     const onDeleteCurrentProject = (event: Event) => handleDeleteCurrentProjectShortcut(event);
     window.addEventListener('staged:delete-current-project', onDeleteCurrentProject);
@@ -508,7 +510,8 @@
 
   // ── Project actions ──
 
-  function handleNewProject() {
+  function handleNewProject(initialRepo: RepoPickerSelection | null = null) {
+    newProjectInitialRepo = initialRepo;
     showNewProjectModal = true;
   }
 
@@ -898,6 +901,7 @@
 <!-- New project modal (only when projects exist; splash screen handles inline form otherwise) -->
 <NewProjectModal
   open={showNewProjectModal && hasContent}
+  initialRepo={newProjectInitialRepo}
   onCreated={handleProjectCreated}
   onClose={() => (showNewProjectModal = false)}
 />

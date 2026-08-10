@@ -302,34 +302,16 @@
     detecting = true;
     try {
       const provider = getPreferredAgent(agentState.providers) ?? undefined;
-      const suggested = await detectRepoActions(githubRepo, subpath, provider);
+      // The backend persists the suggestions it detects — inside the window it
+      // reports as detecting, so the list it hands back is final and every
+      // action surface reloads off the same detecting:false broadcast.
+      const detected = await detectRepoActions(githubRepo, subpath, provider);
 
-      // After the await the user may have navigated away from this context.
-      // Only mutate local `actions` state when we're still viewing the same
-      // context; the backend writes are always scoped to the captured values.
-      const existingCommands = new Set(actions.map((a) => a.command));
-      let nextSortOrder = Math.max(...actions.map((a) => a.sortOrder), 0) + 1;
-
-      let actionsAdded = false;
-      for (const suggestion of suggested) {
-        if (existingCommands.has(suggestion.command)) continue;
-        const newAction = await commands.createRepoAction(
-          githubRepo,
-          subpath,
-          suggestion.name,
-          suggestion.command,
-          suggestion.actionType,
-          nextSortOrder++,
-          suggestion.autoCommit
-        );
-        if (selectedRepoKey === entryKey) {
-          actions = [...actions, newAction];
-        }
-        actionsAdded = true;
-      }
-
-      if (actionsAdded) {
-        window.dispatchEvent(new CustomEvent('project-actions-changed'));
+      // After the await the user may have navigated away from this context, so
+      // only adopt the list while we're still viewing the one we detected for;
+      // the backend writes were scoped to the captured values regardless.
+      if (selectedRepoKey === entryKey) {
+        actions = detected;
       }
 
       await loadContexts();

@@ -1698,36 +1698,15 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
 
             let result = crate::branches::to_branch_with_workdir(branch, Some(worktree_str));
 
-            // Run prerun actions if we win the setup-complete race
-            match store.mark_branch_setup_complete(&branch_id) {
-                Ok(true) => {
-                    match crate::branches::run_prerun_actions_for_branch(
-                        &store,
-                        app_handle,
-                        &branch_id,
-                        action_executor,
-                        action_registry,
-                        provider.as_deref(),
-                    )
-                    .await
-                    {
-                        Ok(count) => {
-                            log::info!("[setup_worktree_and_run_prerun] ran {count} prerun actions")
-                        }
-                        Err(e) => {
-                            log::warn!("[setup_worktree_and_run_prerun] prerun actions failed: {e}")
-                        }
-                    }
-                }
-                Ok(false) => {
-                    log::info!("[setup_worktree_and_run_prerun] branch {} already setup complete, skipping prerun", branch_id);
-                }
-                Err(e) => {
-                    log::warn!(
-                        "[setup_worktree_and_run_prerun] failed to mark setup complete: {e}"
-                    );
-                }
-            }
+            // Prerun runs detached: this is an HTTP request with no timeout
+            // layer in front of it, and prerun can take minutes.
+            crate::branches::spawn_prerun_actions(
+                store,
+                app_handle.clone(),
+                branch_id,
+                provider,
+                "setup_worktree_and_run_prerun",
+            );
 
             Ok(serde_json::to_value(result).unwrap())
         }
@@ -2152,6 +2131,11 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(actions).unwrap())
         }
+        "list_all_repo_actions" => {
+            let store = get_store(store_mutex)?;
+            let contexts = store.list_all_repo_actions().map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(contexts).unwrap())
+        }
         "create_repo_action" => {
             let store = get_store(store_mutex)?;
             let github_repo: String = arg(&args, "githubRepo")?;
@@ -2231,6 +2215,25 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             .await?;
             Ok(serde_json::to_value(execution_id).unwrap())
         }
+        "run_repo_action" => {
+            let store = get_store(store_mutex)?;
+            let github_repo: String = arg(&args, "githubRepo")?;
+            let subpath: Option<String> = opt_arg(&args, "subpath")?;
+            let action_id: String = arg(&args, "actionId")?;
+            let provider: Option<String> = opt_arg(&args, "provider")?;
+            let execution_id = crate::actions::commands::run_repo_action_impl(
+                github_repo,
+                subpath,
+                action_id,
+                provider,
+                app_handle.clone(),
+                store,
+                Arc::clone(action_executor),
+                Arc::clone(action_registry),
+            )
+            .await?;
+            Ok(serde_json::to_value(execution_id).unwrap())
+        }
         "stop_branch_action" => {
             let execution_id: String = arg(&args, "executionId")?;
             crate::actions::commands::stop_branch_action_impl(execution_id, action_executor)?;
@@ -2240,6 +2243,13 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let branch_id: String = arg(&args, "branchId")?;
             let actions = crate::actions::commands::get_running_branch_actions_impl(
                 branch_id,
+                action_executor,
+                action_registry,
+            )?;
+            Ok(serde_json::to_value(actions).unwrap())
+        }
+        "get_all_running_actions" => {
+            let actions = crate::actions::commands::get_all_running_actions_impl(
                 action_executor,
                 action_registry,
             )?;

@@ -40,11 +40,10 @@
     SIDEBAR_MIN_WIDTH,
   } from './projectsSidebarState.svelte';
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
-  import SidebarPinnedRepo from './SidebarPinnedRepo.svelte';
+  import RepoCard from './RepoCard.svelte';
   import * as commands from '../../api/commands';
   import { projectActions } from './projectActions.svelte';
   import * as ContextMenu from '$lib/components/ui/context-menu';
-  import { reposUiEnabled } from '../../featureFlags';
   import { Button } from '$lib/components/ui/button';
 
   const devBranch = import.meta.env.VITE_DEV_BRANCH as string | undefined;
@@ -81,6 +80,13 @@
   $effect(() => {
     pinnedRepos = projectsDataStore.homeRepos.filter((r) => r.pinned);
   });
+
+  // Any repo (pinned or not) earns the All Repos entry; keeping it while the
+  // repos view is active means the row highlighting that view can't vanish
+  // out from under it.
+  let showAllReposRow = $derived(
+    projectsDataStore.homeRepos.length > 0 || navigation.showReposList
+  );
 
   function handleDragStart(index: number) {
     return (e: DragEvent) => {
@@ -302,9 +308,7 @@
 
     // Pin changes propagate through the store's staged:pinned-repos-changed
     // listener; this mount only has to make sure the cache is warm.
-    if (reposUiEnabled) {
-      void projectsDataStore.ensureHomeReposLoaded();
-    }
+    void projectsDataStore.ensureHomeReposLoaded();
 
     return () => {
       stopWatchingViewport();
@@ -421,7 +425,7 @@
         <div class="state">Loading projects…</div>
       {:else}
         <div class="projects-list">
-          {#if reposUiEnabled && pinnedRepos.length > 0}
+          {#if showAllReposRow}
             <button
               class="project-row all-repos-row"
               class:active={navigation.showReposList}
@@ -433,17 +437,22 @@
               </div>
             </button>
 
-            <div class="pinned-repos-list" role="list" aria-label="Pinned repos">
-              {#each pinnedRepos as repo, index (repo.githubRepo + '\t' + repo.subpath)}
-                <SidebarPinnedRepo
-                  {repo}
-                  onReorderStart={handleDragStart(index)}
-                  onReorderOver={handleDragOver(index)}
-                  onReorderDrop={handleDrop(index)}
-                  onReorderEnd={handleDragEnd()}
-                />
-              {/each}
-            </div>
+            {#if pinnedRepos.length > 0}
+              <div class="pinned-repos-list" role="list" aria-label="Pinned repos">
+                {#each pinnedRepos as repo, index (repo.githubRepo + '\t' + repo.subpath)}
+                  <RepoCard
+                    {repo}
+                    hidePinButton
+                    reorderable
+                    onReorderStart={handleDragStart(index)}
+                    onReorderOver={handleDragOver(index)}
+                    onReorderDrop={handleDrop(index)}
+                    onReorderEnd={handleDragEnd()}
+                    onChange={() => projectsDataStore.refreshHomeRepos()}
+                  />
+                {/each}
+              </div>
+            {/if}
 
             <div class="section-divider"></div>
           {/if}
@@ -898,7 +907,8 @@
   .pinned-repos-list {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 6px;
+    padding: 2px 0;
   }
 
   .section-divider {

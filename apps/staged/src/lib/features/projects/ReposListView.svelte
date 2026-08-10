@@ -1,40 +1,32 @@
 <!--
   ReposListView.svelte - Full grid view of all repos with search and pin management.
 
-  Shows pinned repos first (by sort order), then unpinned (by project count).
-  Each card has a pin/unpin toggle. Includes a search input for filtering.
+  Splits the repos into a "Pinned repos" section (by sort order) and an
+  "All repos" section for the unpinned rest (by project count). Each card is the
+  shared RepoCard, so the grid carries the same repo path label and action row
+  as the pinned repos in the projects sidebar.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import Pin from '@lucide/svelte/icons/pin';
-  import PinOff from '@lucide/svelte/icons/pin-off';
   import Search from '@lucide/svelte/icons/search';
-  import Download from '@lucide/svelte/icons/download';
-  import type { RepoHomeItem } from '../../types';
-  import * as commands from '../../api/commands';
+  import type { Project, RepoHomeItem } from '../../types';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
-  import { darkMode } from '../../stores/isDark.svelte';
-  import {
-    badgeFg,
-    badgeBg,
-    badgeBgHover,
-    badgeBorder,
-    badgeBorderHover,
-  } from '../../shared/badgeColors';
-  import { toast } from 'svelte-sonner';
-  import Spinner from '../../shared/Spinner.svelte';
+  import RepoCard from './RepoCard.svelte';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
   import { Input } from '$lib/components/ui/input';
-  import { Button } from '$lib/components/ui/button';
+  import NewProjectModal from './NewProjectModal.svelte';
+  import { repoSeedFromNewProjectEvent } from './newProjectEvent';
+  import { selectProject } from '../layout/navigation.svelte';
+  import type { RepoSelection } from '../../shared/githubUrl';
 
   // Served from the shared home-repos cache: revisits paint instantly from
   // memory while the store revalidates in the background.
   let repos = $derived(projectsDataStore.homeRepos);
   let loading = $derived(!projectsDataStore.homeReposLoaded);
   let searchQuery = $state('');
-  let togglingPin = $state<Set<string>>(new Set());
-  let cloningRepos = $state<Set<string>>(new Set());
   let searchInputEl = $state<HTMLInputElement | null>(null);
+  let showNewProjectModal = $state(false);
+  let newProjectInitialRepo = $state<RepoSelection | null>(null);
 
   function repoKey(r: RepoHomeItem): string {
     return `${r.githubRepo}:${r.subpath}`;
@@ -51,60 +43,33 @@
     );
   });
 
+  let pinnedRepos = $derived(filteredRepos.filter((r) => r.pinned));
+  let unpinnedRepos = $derived(filteredRepos.filter((r) => !r.pinned));
+
   onMount(() => {
     void projectsDataStore.ensureHomeReposLoaded();
+
+    // This view replaces ProjectsList/ProjectHome (the other listeners for
+    // this event), so it must handle new-project requests itself.
+    const onNewProject = (event: Event) => {
+      newProjectInitialRepo = repoSeedFromNewProjectEvent(event);
+      showNewProjectModal = true;
+    };
+    window.addEventListener('staged:new-project', onNewProject);
+    return () => window.removeEventListener('staged:new-project', onNewProject);
   });
 
-  async function togglePin(repo: RepoHomeItem, e: MouseEvent) {
-    e.stopPropagation();
-    const key = repoKey(repo);
-    if (togglingPin.has(key)) return;
-
-    togglingPin = new Set(togglingPin).add(key);
-    try {
-      if (repo.pinned) {
-        await commands.unpinRepo(repo.githubRepo, repo.subpath);
-      } else {
-        await commands.pinRepo(repo.githubRepo, repo.subpath);
-      }
-      // Refetching through the store updates every consumer (sidebar pinned
-      // list, landing-page strip), so no window event is needed here.
-      await projectsDataStore.refreshHomeRepos();
-    } catch (e) {
-      console.error('[ReposListView] Failed to toggle pin:', e);
-      const message = e instanceof Error ? e.message : String(e);
-      toast.error('Failed to update pin', { description: message });
-    } finally {
-      const next = new Set(togglingPin);
-      next.delete(key);
-      togglingPin = next;
-    }
+  function handleProjectCreated(project: Project) {
+    projectsDataStore.projectCreated(project);
+    showNewProjectModal = false;
+    selectProject(project.id);
   }
 
-  async function handleCloneRepo(repo: RepoHomeItem, e: MouseEvent) {
-    e.stopPropagation();
-    const key = repoKey(repo);
-    if (cloningRepos.has(key)) return;
-
-    cloningRepos = new Set(cloningRepos).add(key);
-    try {
-      await commands.cloneRepoLocally(repo.githubRepo);
-      await projectsDataStore.refreshHomeRepos();
-    } catch (e) {
-      console.error('[ReposListView] Failed to clone repo:', e);
-      const message = e instanceof Error ? e.message : String(e);
-      toast.error('Failed to clone repo', { description: message });
-    } finally {
-      const next = new Set(cloningRepos);
-      next.delete(key);
-      cloningRepos = next;
-    }
-  }
-
-  function subtitle(repo: RepoHomeItem): string {
-    const base = repo.githubRepo;
-    if (repo.subpath) return `${base}/${repo.subpath}`;
-    return base;
+  // RepoCard pins, unpins and clones in place; refetching through the store
+  // updates every consumer (sidebar pinned list, landing-page strip), so no
+  // window event is needed here.
+  function handleRepoChange() {
+    void projectsDataStore.refreshHomeRepos();
   }
 </script>
 
@@ -133,75 +98,33 @@
       {:else if filteredRepos.length === 0}
         <div class="state">No repos yet.</div>
       {:else}
-        <div class="repos-grid">
-          {#each filteredRepos as repo (repoKey(repo))}
-            {@const accent = badgeFg(repo.hue, darkMode.value)}
-            {@const bg = badgeBg(repo.hue, darkMode.value)}
-            {@const bgHover = badgeBgHover(repo.hue, darkMode.value)}
-            {@const border = badgeBorder(repo.hue, darkMode.value)}
-            {@const borderHover = badgeBorderHover(repo.hue, darkMode.value)}
-            {@const key = repoKey(repo)}
-            <div class="repo-card-wrapper">
-              <div
-                class="repo-card"
-                style="--accent: {accent}; --card-bg: {bg}; --card-bg-hover: {bgHover}; --card-border: {border}; --card-border-hover: {borderHover};"
-              >
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  class={[
-                    'absolute top-2 right-2 z-[2] size-7 rounded-md bg-transparent hover:bg-[var(--bg-hover)] [&_svg]:!size-3.5',
-                    repo.pinned
-                      ? 'text-[var(--accent)] hover:text-[var(--accent)]'
-                      : 'text-[var(--text-faint)] hover:text-foreground',
-                  ]}
-                  title={repo.pinned ? 'Unpin repo' : 'Pin repo'}
-                  aria-label={repo.pinned ? 'Unpin repo' : 'Pin repo'}
-                  onclick={(e) => togglePin(repo, e)}
-                  disabled={togglingPin.has(key)}
-                >
-                  {#if togglingPin.has(key)}
-                    <Spinner size={14} />
-                  {:else if repo.pinned}
-                    <Pin size={14} />
-                  {:else}
-                    <PinOff size={14} />
-                  {/if}
-                </Button>
-
-                <span class="card-title" title={repo.shortName}>{repo.shortName}</span>
-                <span class="card-subtitle" title={subtitle(repo)}>{subtitle(repo)}</span>
-
-                {#if !repo.hasLocalClone}
-                  <div class="card-footer">
-                    <Button
-                      variant="outline"
-                      size="icon-sm"
-                      class="size-7 rounded-md border-[var(--card-border)] bg-transparent text-[var(--accent)] shadow-none hover:border-[var(--card-border-hover)] hover:bg-[var(--card-bg-hover)] hover:text-[var(--accent)] [&_svg]:!size-3.5"
-                      title="Clone repo locally"
-                      aria-label="Clone repo locally"
-                      onclick={(e) => handleCloneRepo(repo, e)}
-                      disabled={cloningRepos.has(key)}
-                    >
-                      {#if cloningRepos.has(key)}
-                        <Spinner size={14} />
-                      {:else}
-                        <Download size={14} />
-                      {/if}
-                    </Button>
-                  </div>
-                {/if}
-              </div>
-              {#if repo.pinned}
-                <div class="card-label">Pinned</div>
-              {/if}
-            </div>
-          {/each}
-        </div>
+        {#if pinnedRepos.length > 0}
+          <h2 class="section-title">Pinned repos</h2>
+          <div class="repos-grid">
+            {#each pinnedRepos as repo (repoKey(repo))}
+              <RepoCard {repo} onChange={handleRepoChange} />
+            {/each}
+          </div>
+        {/if}
+        {#if unpinnedRepos.length > 0}
+          <h2 class="section-title">All repos</h2>
+          <div class="repos-grid">
+            {#each unpinnedRepos as repo (repoKey(repo))}
+              <RepoCard {repo} onChange={handleRepoChange} />
+            {/each}
+          </div>
+        {/if}
       {/if}
     </div>
   </div>
 </div>
+
+<NewProjectModal
+  open={showNewProjectModal}
+  initialRepo={newProjectInitialRepo}
+  onCreated={handleProjectCreated}
+  onClose={() => (showNewProjectModal = false)}
+/>
 
 <style>
   .repos-list-page {
@@ -257,70 +180,22 @@
     padding: 16px 2px;
   }
 
+  .section-title {
+    margin: 0 0 10px;
+    font-size: var(--size-md);
+    font-weight: 700;
+    color: var(--text-primary);
+  }
+
+  .repos-grid + .section-title {
+    margin-top: 24px;
+  }
+
   .repos-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     grid-auto-rows: 1fr;
     gap: 12px;
-  }
-
-  .repo-card-wrapper {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-
-  .repo-card-wrapper .repo-card {
-    flex: 1;
-  }
-
-  .card-label {
-    color: var(--text-faint);
-    font-size: var(--size-xs);
-    padding: 0 4px;
-  }
-
-  .repo-card {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    text-align: left;
-    min-height: 120px;
-    padding: 14px;
-    border: 1px solid var(--card-border);
-    border-radius: 10px;
-    background: var(--card-bg);
-    color: inherit;
-    transition: all 0.15s ease;
-    box-sizing: border-box;
-  }
-
-  .card-title {
-    font-size: var(--size-md);
-    font-weight: 700;
-    color: var(--accent);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    padding-right: 32px;
-  }
-
-  .card-subtitle {
-    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
-    font-size: 11px;
-    font-weight: 500;
-    color: var(--text-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .card-footer {
-    margin-top: auto;
-    display: flex;
-    align-items: center;
-    min-height: 20px;
   }
 
   @media (max-width: 900px) {
@@ -337,10 +212,6 @@
     .repos-grid {
       grid-template-columns: minmax(0, 1fr);
       gap: 10px;
-    }
-
-    .repo-card {
-      min-height: 104px;
     }
   }
 </style>

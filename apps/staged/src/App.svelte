@@ -54,7 +54,6 @@
   import { listenForAcpToolsReconciled } from './lib/listeners/acpToolsListener';
   import { darkMode } from './lib/stores/isDark.svelte';
   import * as prPollingService from './lib/services/prPollingService';
-  import { reposUiEnabled } from './lib/featureFlags';
   import type { StoreIncompatibility } from './lib/types';
 
   const updaterEnabled = import.meta.env.VITE_UPDATER_ENABLED === 'true';
@@ -603,10 +602,10 @@
           <div class="workspace">
             <!-- Hoisted out of ProjectHome so it survives project↔repos
                  transitions; hidden on the landing page. -->
-            {#if navigation.selectedProjectId || (reposUiEnabled && navigation.showReposList)}
+            {#if navigation.selectedProjectId || navigation.showReposList}
               <ProjectsSidebar />
             {/if}
-            {#if reposUiEnabled && navigation.showReposList}
+            {#if navigation.showReposList}
               <ReposListView />
             {:else if navigation.selectedProjectId}
               <ProjectHome selectedProjectId={navigation.selectedProjectId} />

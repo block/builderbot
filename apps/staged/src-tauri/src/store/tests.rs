@@ -2340,6 +2340,65 @@ fn test_repo_actions() {
 }
 
 #[test]
+fn test_list_all_repo_actions_groups_by_context() {
+    let store = Store::in_memory().unwrap();
+    let root = store
+        .get_or_create_action_context("test-owner/monorepo", None)
+        .unwrap();
+    let sub = store
+        .get_or_create_action_context("test-owner/monorepo", Some("apps/staged"))
+        .unwrap();
+    // A context with no actions is absent from the result — callers read that
+    // as an empty action list.
+    store
+        .get_or_create_action_context("test-owner/actionless", None)
+        .unwrap();
+
+    // Inserted out of sort order to prove the query orders within a context.
+    for (context_id, name, command, action_type, sort_order) in [
+        (&root.id, "Test", "cargo test", ActionType::Test, 1),
+        (&root.id, "Build", "cargo build", ActionType::Build, 0),
+        (&sub.id, "Dev", "just dev", ActionType::Run, 0),
+    ] {
+        store
+            .create_repo_action(&RepoAction::new(
+                context_id.clone(),
+                name.to_string(),
+                command.to_string(),
+                action_type,
+                sort_order,
+            ))
+            .unwrap();
+    }
+
+    let grouped = store.list_all_repo_actions().unwrap();
+    assert_eq!(grouped.len(), 2);
+    assert!(!grouped
+        .iter()
+        .any(|g| g.github_repo == "test-owner/actionless"));
+
+    let root_group = grouped.iter().find(|g| g.subpath.is_none()).unwrap();
+    assert_eq!(root_group.github_repo, "test-owner/monorepo");
+    assert_eq!(
+        root_group
+            .actions
+            .iter()
+            .map(|a| a.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Build", "Test"]
+    );
+
+    let sub_group = grouped
+        .iter()
+        .find(|g| g.subpath.as_deref() == Some("apps/staged"))
+        .unwrap();
+    assert_eq!(sub_group.github_repo, "test-owner/monorepo");
+    assert_eq!(sub_group.actions.len(), 1);
+    assert_eq!(sub_group.actions[0].name, "Dev");
+    assert_eq!(sub_group.actions[0].context_id, sub.id);
+}
+
+#[test]
 fn test_reorder_actions() {
     let store = Store::in_memory().unwrap();
     let context = store
@@ -2371,6 +2430,149 @@ fn test_reorder_actions() {
     let actions = store.list_repo_actions(&context.id).unwrap();
     assert_eq!(actions[0].name, "B");
     assert_eq!(actions[1].name, "A");
+}
+
+#[test]
+fn test_claim_action_context_detection_records_the_owner_pid() {
+    let store = Store::in_memory().unwrap();
+    let context = store
+        .get_or_create_action_context("test-owner/test-repo", None)
+        .unwrap();
+
+    assert!(store
+        .claim_action_context_detection(&context.id, 4242)
+        .unwrap());
+    assert_eq!(
+        store.list_detecting_action_contexts().unwrap(),
+        vec![(context.id.clone(), Some(4242))]
+    );
+
+    // Closing the window drops the owner with the flag: a pid outliving its
+    // window would read as a live claim the day that pid is reused.
+    store.mark_action_context_detected(&context.id).unwrap();
+    assert!(store.list_detecting_action_contexts().unwrap().is_empty());
+    store
+        .claim_action_context_detection(&context.id, 4242)
+        .unwrap();
+    store.clear_action_context_detection(&context.id).unwrap();
+    assert!(store.list_detecting_action_contexts().unwrap().is_empty());
+}
+
+#[test]
+fn test_release_detection_claim_only_matches_the_expected_owner() {
+    let store = Store::in_memory().unwrap();
+    let context = store
+        .get_or_create_action_context("test-owner/test-repo", None)
+        .unwrap();
+    assert!(store
+        .claim_action_context_detection(&context.id, 4242)
+        .unwrap());
+
+    // The claim changed hands between a sweep's read and its write: the
+    // release matches nothing rather than clobbering the live window.
+    assert!(!store
+        .release_detection_claim(&context.id, Some(9999))
+        .unwrap());
+    assert!(!store.release_detection_claim(&context.id, None).unwrap());
+    assert!(!store
+        .claim_action_context_detection(&context.id, 1)
+        .unwrap());
+
+    assert!(store
+        .release_detection_claim(&context.id, Some(4242))
+        .unwrap());
+    assert!(store.list_detecting_action_contexts().unwrap().is_empty());
+    assert!(store
+        .claim_action_context_detection(&context.id, 1)
+        .unwrap());
+}
+
+#[test]
+fn test_release_detection_claim_matches_a_null_owner() {
+    let store = Store::in_memory().unwrap();
+    let context = store
+        .get_or_create_action_context("test-owner/test-repo", None)
+        .unwrap();
+    // A row claimed before `detecting_pid` existed.
+    store
+        .claim_action_context_detection_without_owner(&context.id)
+        .unwrap();
+    assert_eq!(
+        store.list_detecting_action_contexts().unwrap(),
+        vec![(context.id.clone(), None)]
+    );
+
+    assert!(store.release_detection_claim(&context.id, None).unwrap());
+    assert!(store.list_detecting_action_contexts().unwrap().is_empty());
+}
+
+#[test]
+fn test_take_over_detection_claim_swaps_the_owner_without_dropping_the_flag() {
+    let store = Store::in_memory().unwrap();
+    let context = store
+        .get_or_create_action_context("test-owner/test-repo", None)
+        .unwrap();
+    assert!(store
+        .claim_action_context_detection(&context.id, 4242)
+        .unwrap());
+
+    assert!(store
+        .take_over_detection_claim(&context.id, Some(4242), 7)
+        .unwrap());
+    // The whole point of doing this in one statement: the window is never
+    // observably closed, so a concurrent reader can't take the context's
+    // undetected action list for final, and nothing can claim in a gap and
+    // reject the caller that just won the window.
+    assert_eq!(
+        store.list_detecting_action_contexts().unwrap(),
+        vec![(context.id.clone(), Some(7))]
+    );
+    assert!(!store
+        .claim_action_context_detection(&context.id, 1)
+        .unwrap());
+
+    // And the new owner closes it like any other.
+    store.mark_action_context_detected(&context.id).unwrap();
+    assert!(store.list_detecting_action_contexts().unwrap().is_empty());
+}
+
+#[test]
+fn test_take_over_detection_claim_only_matches_the_expected_owner() {
+    let store = Store::in_memory().unwrap();
+    let context = store
+        .get_or_create_action_context("test-owner/test-repo", None)
+        .unwrap();
+    // A row claimed before `detecting_pid` existed: the null owner is a real
+    // expectation, not a wildcard.
+    store
+        .claim_action_context_detection_without_owner(&context.id)
+        .unwrap();
+    assert!(!store
+        .take_over_detection_claim(&context.id, Some(4242), 7)
+        .unwrap());
+    assert!(store
+        .take_over_detection_claim(&context.id, None, 7)
+        .unwrap());
+
+    // The claim changed hands between a waiter's read and its write: the
+    // takeover matches nothing rather than stealing it from its new owner.
+    assert!(!store
+        .take_over_detection_claim(&context.id, Some(4242), 9)
+        .unwrap());
+    assert_eq!(
+        store.list_detecting_action_contexts().unwrap(),
+        vec![(context.id.clone(), Some(7))]
+    );
+
+    // A closed window has no claim to take over, however it is addressed.
+    store.mark_action_context_detected(&context.id).unwrap();
+    assert!(!store
+        .take_over_detection_claim(&context.id, Some(7), 9)
+        .unwrap());
+    assert!(!store
+        .take_over_detection_claim(&context.id, None, 9)
+        .unwrap());
+    assert!(store.list_detecting_action_contexts().unwrap().is_empty());
 }
 
 // =============================================================================

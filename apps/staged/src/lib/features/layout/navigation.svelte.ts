@@ -20,7 +20,6 @@ import type { CommitTimelineItem } from '../../types';
 import { projectStateStore } from '../../stores/projectState.svelte';
 import { projectsDataStore } from '../../stores/projectsData.svelte';
 import { requestProjectsListRestore } from '../projects/projectsListViewState.svelte';
-import { reposUiEnabled } from '../../featureFlags';
 
 const LAST_PROJECT_STORE_KEY = 'last-viewed-project';
 
@@ -177,7 +176,6 @@ export async function initNavigation(): Promise<void> {
 
 /** Navigate to the repos list view. */
 export function showAllRepos(): void {
-  if (!reposUiEnabled) return;
   pushOrReplaceRoute({ kind: 'repos' });
 }
 

@@ -700,7 +700,7 @@ impl ProjectToolsHandler {
     }
 
     #[tool(
-        description = "Add a GitHub repository to the current project. Use this when the task requires a repository that isn't yet in the project. Waits until the repository worktree is ready and setup actions have completed before returning."
+        description = "Add a GitHub repository to the current project. Use this when the task requires a repository that isn't yet in the project. Returns once the repository worktree is ready; any setup actions then run in the background."
     )]
     async fn add_project_repo(&self, Parameters(p): Parameters<AddProjectRepoParams>) -> String {
         log::debug!(
@@ -867,76 +867,86 @@ impl ProjectToolsHandler {
                 }
             };
 
-            // Run detect_actions + prerun actions if we have an executor
-            if let (Some(executor), Some(act_registry)) =
-                (self.action_executor.as_ref(), self.action_registry.as_ref())
-            {
-                // Atomically claim setup ownership before running prerun actions.
-                match self.store.mark_branch_setup_complete(&branch.id) {
-                    Ok(true) => {
-                        log::debug!(
-                            "[project_mcp] add_project_repo: running prerun actions for branch {}",
-                            branch.id
-                        );
-                        match crate::branches::run_prerun_actions_for_branch(
-                            &self.store,
-                            &self.app_handle,
-                            &branch.id,
-                            executor,
-                            act_registry,
+            // Prerun waits out any in-flight action detection and then runs
+            // each setup action to completion — minutes, against an MCP
+            // client's request timeout. Nothing in the reply derives from it,
+            // so the whole tail is detached, in one task so the auto-review
+            // still follows the setup actions. Structurally this is now the
+            // Tauri `add_project_repo` command's spawned setup task. Note that
+            // the reply therefore also lands before the auto-review is queued.
+            let store = Arc::clone(&self.store);
+            let app_handle = self.app_handle.clone();
+            let project_id = self.project_id.clone();
+            let branch_id = branch.id.clone();
+            let executor = self.action_executor.clone();
+            let act_registry = self.action_registry.clone();
+            tauri::async_runtime::spawn(async move {
+                // Run detect_actions + prerun actions if we have an executor
+                if let (Some(executor), Some(act_registry)) = (executor, act_registry) {
+                    if let crate::branches::PrerunOutcome::Ran(_) =
+                        crate::branches::claim_and_run_prerun_actions(
+                            &store,
+                            &app_handle,
+                            &branch_id,
+                            &executor,
+                            &act_registry,
                             None,
+                            "project_mcp add_project_repo",
                         )
                         .await
-                        {
-                            Ok(count) => {
-                                log::debug!(
-                                    "[project_mcp] add_project_repo: ran {count} prerun actions for branch {}",
-                                    branch.id
-                                );
-                                // Notify UI that prerun actions finished
-                                crate::web_server::emit_to_all(
-                                    &self.app_handle,
-                                    "project-setup-progress",
-                                    self.project_id.clone(),
-                                );
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "[project_mcp] add_project_repo: prerun actions failed (continuing): {e}"
-                                );
-                            }
-                        }
-                    }
-                    Ok(false) => {
-                        log::debug!(
-                            "[project_mcp] add_project_repo: branch {} already setup complete, skipping prerun",
-                            branch.id
+                    {
+                        // Notify UI that prerun actions finished
+                        crate::web_server::emit_to_all(
+                            &app_handle,
+                            "project-setup-progress",
+                            project_id,
                         );
                     }
-                    Err(e) => {
-                        log::warn!(
-                            "[project_mcp] add_project_repo: failed to mark setup complete: {e}"
-                        );
-                    }
+                } else {
+                    log::debug!(
+                        "[project_mcp] add_project_repo: no action executor available, skipping prerun actions"
+                    );
                 }
-            } else {
-                log::debug!(
-                    "[project_mcp] add_project_repo: no action executor available, skipping prerun actions"
-                );
-            }
 
-            // If the repo already has commits on this branch, kick off
-            // an automatic code review so the user gets immediate feedback.
-            crate::maybe_trigger_auto_review_for_new_repo(
-                &self.store,
-                &self.app_handle,
-                &branch.id,
-                Some(&worktree_path),
-            )
-            .await;
+                // If the repo already has commits on this branch, kick off
+                // an automatic code review so the user gets immediate feedback.
+                crate::maybe_trigger_auto_review_for_new_repo(
+                    &store,
+                    &app_handle,
+                    &branch_id,
+                    Some(&worktree_path),
+                )
+                .await;
+            });
+
+            // The reply is the agent's whole account of what just happened, so
+            // it only promises setup actions when the task above can actually
+            // run them. Whether the executor is there is known right here,
+            // synchronously — the task's other way out (losing the one-shot
+            // setup claim) isn't, but the branch was created moments ago by
+            // this call, so nothing else has had it to claim.
+            return worktree_ready_reply(
+                &github_repo,
+                self.action_executor.is_some() && self.action_registry.is_some(),
+            );
         }
 
         format!("Added repository {github_repo} to project")
+    }
+}
+
+/// `add_project_repo`'s reply once the worktree is on disk.
+///
+/// `runs_setup_actions` is whether this handler has the action executor and
+/// registry its detached setup task needs; without them that task logs and
+/// skips, so the reply must not claim setup actions are in flight.
+fn worktree_ready_reply(github_repo: &str, runs_setup_actions: bool) -> String {
+    if runs_setup_actions {
+        format!(
+            "Added repository {github_repo} to project — the worktree is ready; setup actions are running in the background"
+        )
+    } else {
+        format!("Added repository {github_repo} to project — the worktree is ready")
     }
 }
 
@@ -1009,9 +1019,31 @@ pub async fn start_project_mcp_server(
 
 #[cfg(test)]
 mod tests {
-    use super::{ProjectToolsHandler, RepoArtifactKind, REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS};
+    use super::{
+        worktree_ready_reply, ProjectToolsHandler, RepoArtifactKind,
+        REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS,
+    };
     use crate::store::{MessageRole, Session, SessionMessage};
     use std::path::Path;
+
+    #[test]
+    fn worktree_ready_reply_only_promises_setup_actions_when_they_can_run() {
+        let with_executor = worktree_ready_reply("block/staged", true);
+        assert!(
+            with_executor.contains("setup actions are running in the background"),
+            "unexpected reply: {with_executor}"
+        );
+
+        let without_executor = worktree_ready_reply("block/staged", false);
+        assert!(
+            !without_executor.contains("setup actions"),
+            "reply must not promise setup actions with no executor: {without_executor}"
+        );
+        assert!(
+            without_executor.contains("block/staged") && without_executor.contains("worktree"),
+            "unexpected reply: {without_executor}"
+        );
+    }
 
     #[test]
     fn repo_session_handles_round_trip() {

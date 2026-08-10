@@ -15,8 +15,7 @@
   import SlidersHorizontal from '@lucide/svelte/icons/sliders-horizontal';
   import Sprout from '@lucide/svelte/icons/sprout';
   import Trash2 from '@lucide/svelte/icons/trash-2';
-  import type { Project, WorkspaceStatus, RepoHomeItem } from '../../types';
-  import * as commands from '../../api/commands';
+  import type { Project, WorkspaceStatus } from '../../types';
   import RepoCard from './RepoCard.svelte';
   import {
     projectDisplayName,
@@ -36,7 +35,6 @@
   import Spinner from '../../shared/Spinner.svelte';
   import SineWave from '../../shared/SineWave.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
-  import { toast } from 'svelte-sonner';
   import { Button } from '$lib/components/ui/button';
 
   import {
@@ -47,8 +45,9 @@
   import { darkMode } from '../../stores/isDark.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { badgeBg, badgeFg, badgeBgHover } from '../../shared/badgeColors';
+  import { repoSeedFromNewProjectEvent } from './newProjectEvent';
+  import type { RepoSelection } from '../../shared/githubUrl';
   import { viewport } from '../../shared/viewport.svelte';
-  import { reposUiEnabled } from '../../featureFlags';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
 
   type FilterKind = 'unread' | 'running' | { repo: string; subpath: string };
@@ -69,6 +68,7 @@
   let error = $derived(projectsDataStore.error);
 
   let showNewProjectModal = $state(false);
+  let newProjectInitialRepo = $state<RepoSelection | null>(null);
   let isCommandKeyHeld = $state(false);
   let mainPanelEl = $state<HTMLDivElement | null>(null);
   let activeFilters = $state<Set<string>>(new Set());
@@ -261,12 +261,11 @@
     // Backend/window listeners for the shared data live in the projectsData
     // store, started once from App.svelte.
     void projectsDataStore.ensureLoaded();
-    if (reposUiEnabled) {
-      void projectsDataStore.ensureHomeReposLoaded();
-    }
+    void projectsDataStore.ensureHomeReposLoaded();
     void projectRunActionsStore.startListening();
 
-    const onNewProject = () => {
+    const onNewProject = (event: Event) => {
+      newProjectInitialRepo = repoSeedFromNewProjectEvent(event);
       showNewProjectModal = true;
     };
     window.addEventListener('staged:new-project', onNewProject);
@@ -293,17 +292,6 @@
       .hydrateFromProjectBranches(projectsDataStore.branchesByProject)
       .catch(console.error);
   });
-
-  async function handleCloneRepo(repo: RepoHomeItem) {
-    try {
-      await commands.cloneRepoLocally(repo.githubRepo);
-      await projectsDataStore.refreshHomeRepos();
-    } catch (e) {
-      console.error('[ProjectsList] Failed to clone repo:', e);
-      const message = e instanceof Error ? e.message : String(e);
-      toast.error('Failed to clone repo', { description: message });
-    }
-  }
 
   function handleProjectCreated(project: Project) {
     projectsDataStore.projectCreated(project);
@@ -420,7 +408,10 @@
       size="icon-xs"
       class="max-md:size-10 [&_svg]:size-3.5"
       aria-label="New project"
-      onclick={() => (showNewProjectModal = true)}
+      onclick={() => {
+        newProjectInitialRepo = null;
+        showNewProjectModal = true;
+      }}
     >
       <Plus size={14} />
     </Button>
@@ -452,7 +443,7 @@
           onFormOpenChange={(open) => (showNewProjectModal = open)}
         />
       {:else}
-        {#if reposUiEnabled && homeRepos.length > 0}
+        {#if homeRepos.length > 0}
           <div class="repos-section">
             <div class="repos-header">
               <h2 class="repos-title">Repos</h2>
@@ -465,7 +456,7 @@
             </div>
             <div class="repos-scroll-row">
               {#each homeRepos as repo (repo.githubRepo + ':' + repo.subpath)}
-                <RepoCard {repo} onclone={() => handleCloneRepo(repo)} />
+                <RepoCard {repo} onChange={() => projectsDataStore.refreshHomeRepos()} />
               {/each}
             </div>
           </div>
@@ -677,6 +668,7 @@
 
 <NewProjectModal
   open={showNewProjectModal && projects.length > 0}
+  initialRepo={newProjectInitialRepo}
   onCreated={handleProjectCreated}
   onClose={() => (showNewProjectModal = false)}
 />
@@ -848,6 +840,11 @@
     padding-bottom: 4px;
     scrollbar-width: thin;
     scrollbar-color: var(--border-muted) transparent;
+  }
+
+  .repos-scroll-row > :global(.repo-card) {
+    width: 200px;
+    flex-shrink: 0;
   }
 
   .repos-scroll-row::-webkit-scrollbar {

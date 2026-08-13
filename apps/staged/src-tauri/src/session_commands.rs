@@ -2178,9 +2178,10 @@ This is a remote-workspace project. Use the project MCP tools to orchestrate wor
     let start_repo_session_desc = if is_remote {
         "- start_repo_session: Use this to make changes or run tasks in one of the project's \
 repositories. It enqueues work and returns a `repo_session_id` immediately. Use \
-`expected_outcome=\"note_in_repo\"` for repo notes and `expected_outcome=\"commit\"` for \
-code changes/commits; commit sessions create signed-off conventional commits. For remote branches \
-this subagent runs on the remote workspace, where file access, notes, and commits must happen.\n\
+`expected_outcome=\"note_in_repo\"` for repo notes, `expected_outcome=\"commit\"` for \
+code changes/commits, and `expected_outcome=\"code_review\"` for an AI code review of the \
+changes on a repo's branch; commit sessions create signed-off conventional commits. For remote branches \
+this subagent runs on the remote workspace, where file access, notes, commits, and reviews must happen.\n\
 - wait_for_repo_session: Use this to wait on a previously started repo session by passing the \
 `repo_session_id`. It returns the queue state (`queued`, `running`, `completed`, `cancelled`, \
 or `failed`), any available artifacts, and activity details. Prefer another \
@@ -2191,9 +2192,11 @@ down a different path rather than when you are surprised at how long the session
     } else {
         "- start_repo_session: Use this to make changes or run tasks in one of the project's \
 repositories. It enqueues work and returns a `repo_session_id` immediately. Use \
-`expected_outcome=\"note_in_repo\"` for repo notes and `expected_outcome=\"commit\"` for \
-code changes/commits; commit sessions create signed-off conventional commits. Do not ask for both \
-a note and a commit in a single start_repo_session request — choose one outcome per call. All \
+`expected_outcome=\"note_in_repo\"` for repo notes, `expected_outcome=\"commit\"` for \
+code changes/commits, and `expected_outcome=\"code_review\"` for an AI code review of the \
+changes on a repo's branch; commit sessions create signed-off conventional commits. Do not ask for \
+multiple outcomes (e.g. a note and a commit) in a single start_repo_session request — choose one \
+outcome per call. All \
 reasoning specific to a repo must be done within a repo session rather than in this project-wide \
 context. You MUST NOT write files directly — all file writes MUST go through start_repo_session \
 with expected_outcome=\"commit\".\n\
@@ -3418,13 +3421,68 @@ fn resolve_provider_from_ids(
 /// When no provider is supplied, mirrors the frontend's `getPreferredAgent`
 /// logic: read `recent-agents`, filter against available providers, then fall
 /// back to the first available provider.
-fn resolve_review_provider(provider: Option<String>, is_remote: bool) -> Result<String, String> {
+pub(crate) fn resolve_review_provider(
+    provider: Option<String>,
+    is_remote: bool,
+) -> Result<String, String> {
     resolve_provider_from_ids(
         provider,
         &available_provider_ids(is_remote),
         &read_recent_agent_ids(),
         is_remote,
     )
+}
+
+/// [`resolve_review_provider`] for a provider that was *inherited* rather than
+/// chosen — the project session provider a `start_repo_session` review runs
+/// with, which the calling agent has no parameter to override.
+///
+/// The explicit-provider path of [`resolve_review_provider`] is a hard match:
+/// a provider that can't run reviews (not installed locally, or not one of the
+/// agents available on remote workstations) is an error. That's right for a
+/// provider the user picked, but an inherited one is only a preference, and
+/// erroring would leave the caller with no way to get a review at all — so fall
+/// back to the preferred review-capable provider instead.
+///
+/// `async` because local resolution probes every known agent through a login
+/// shell: the MCP `start_repo_session` handler this serves promises to return
+/// immediately, so the discovery runs on a blocking thread rather than holding
+/// an async worker for the round-trip.
+pub(crate) async fn resolve_inherited_review_provider(
+    provider: Option<String>,
+    is_remote: bool,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        resolve_inherited_provider_from_ids(
+            provider,
+            &available_provider_ids(is_remote),
+            &read_recent_agent_ids(),
+            is_remote,
+        )
+    })
+    .await
+    .map_err(|e| format!("Failed to resolve the review provider: {e}"))?
+}
+
+fn resolve_inherited_provider_from_ids(
+    provider: Option<String>,
+    available_ids: &[String],
+    recent_ids: &[String],
+    is_remote: bool,
+) -> Result<String, String> {
+    match resolve_provider_from_ids(provider.clone(), available_ids, recent_ids, is_remote) {
+        Ok(resolved) => Ok(resolved),
+        // Only the "inherited provider can't review" case falls back; with no
+        // inherited provider the first call already took the preferred path, so
+        // retrying it would just repeat the same error.
+        Err(e) if provider.is_some() => {
+            log::info!(
+                "[review] inherited provider {provider:?} unusable for reviews ({e}); falling back to the preferred provider"
+            );
+            resolve_provider_from_ids(None, available_ids, recent_ids, is_remote)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Core logic for starting an automatic review for a branch.
@@ -6694,6 +6752,42 @@ mod tests {
     }
 
     #[test]
+    fn resolve_inherited_provider_falls_back_when_it_cannot_review() {
+        // A project session running on codex asking for a review on a remote
+        // branch, where only goose and claude are available.
+        let resolved = resolve_inherited_provider_from_ids(
+            Some("codex".to_string()),
+            &ids(&["goose", "claude"]),
+            &ids(&["claude"]),
+            true,
+        )
+        .expect("unusable inherited provider should fall back");
+
+        assert_eq!(resolved, "claude");
+    }
+
+    #[test]
+    fn resolve_inherited_provider_keeps_a_review_capable_provider() {
+        let resolved = resolve_inherited_provider_from_ids(
+            Some("goose".to_string()),
+            &ids(&["goose", "claude"]),
+            &ids(&["claude"]),
+            true,
+        )
+        .expect("review-capable inherited provider should be kept");
+
+        assert_eq!(resolved, "goose");
+    }
+
+    #[test]
+    fn resolve_inherited_provider_still_errors_without_any_provider() {
+        let err = resolve_inherited_provider_from_ids(Some("codex".to_string()), &[], &[], true)
+            .unwrap_err();
+
+        assert!(err.contains("No remote ACP provider is configured"));
+    }
+
+    #[test]
     fn infer_branch_resume_session_type_detects_pr_prompts() {
         assert_eq!(
             infer_branch_resume_session_type("Create a pull request for the current branch."),
@@ -6772,6 +6866,13 @@ mod tests {
         assert!(!prompt.contains("repo session is taking a long time"));
     }
 
+    fn assert_project_session_outcome_guidance(prompt: &str) {
+        assert!(prompt.contains("expected_outcome=\"note_in_repo\""));
+        assert!(prompt.contains("expected_outcome=\"commit\""));
+        assert!(prompt.contains("expected_outcome=\"code_review\""));
+        assert!(prompt.contains("AI code review"));
+    }
+
     fn assert_pikchr_note_guidance(prompt: &str, reference: &str) {
         assert!(prompt.contains("Staged notes support rendered diagrams"));
         assert!(prompt.contains("fenced `pikchr` code blocks"));
@@ -6843,6 +6944,7 @@ mod tests {
 
         assert_project_session_reference_guidance(&prompt);
         assert_project_session_repo_session_progress_guidance(&prompt);
+        assert_project_session_outcome_guidance(&prompt);
         assert_pikchr_note_guidance(&prompt, PIKCHR_GRAMMAR_URL);
         assert_note_standalone_output_guidance(&prompt);
     }
@@ -6856,6 +6958,7 @@ mod tests {
 
         assert_project_session_reference_guidance(&prompt);
         assert_project_session_repo_session_progress_guidance(&prompt);
+        assert_project_session_outcome_guidance(&prompt);
         assert_pikchr_note_guidance(&prompt, PIKCHR_GRAMMAR_URL);
         assert_note_standalone_output_guidance(&prompt);
     }

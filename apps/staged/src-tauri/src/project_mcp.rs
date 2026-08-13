@@ -34,6 +34,10 @@ enum RepoSessionOutcome {
     /// is created and the agent is instructed to commit with a signed-off conventional
     /// commit message.
     Commit,
+    /// The session should run an AI code review of the changes on the repo's branch.
+    /// A review record is created and populated with a confidence title and inline
+    /// comments when the session completes.
+    CodeReview,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -47,15 +51,22 @@ struct StartRepoSessionParams {
     /// Instructions to give the agent. Notes previously created for this repo are available
     /// to the session, so you can refer to them by name (e.g. "refer to the architecture
     /// overview note").
+    ///
+    /// For `"code_review"` leave this empty for a standard review of the branch's
+    /// changes. Provide instructions only when there is something specific you want
+    /// looked into or have concerns about (e.g. "focus on the migration ordering").
     pub instructions: String,
     /// What the session should produce. Controls the prompt given to the agent and what
     /// artifact (if any) is created in the database.
     ///
     /// - `"note_in_repo"`: Use this for generating notes that can be referred to again
     ///   later by other sessions or by the user. Useful for architecture overviews, plans,
-    ///   research, reviews.
+    ///   research.
     /// - `"commit"`: Use this to request code changes. Agent makes code changes and
     ///   creates a signed-off commit with a conventional commit message.
+    /// - `"code_review"`: Use this to request an AI code review of the changes on the
+    ///   repo's branch. Produces a review with a confidence title and inline comments
+    ///   anchored to the diff.
     pub expected_outcome: RepoSessionOutcome,
 }
 
@@ -108,6 +119,7 @@ struct RepoSessionActivityCounts {
 enum RepoArtifactKind {
     Note,
     Commit,
+    Review,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -120,6 +132,41 @@ struct RepoSessionHandle {
 struct ResolvedRepoTarget {
     repo: ProjectRepo,
     branch: Branch,
+}
+
+/// The `start_line` / `end_line` pair reported for a review comment.
+///
+/// Comment spans are stored the way the review prompt asks for them: 0-indexed
+/// lines from the "after" side of the diff with an exclusive end. The payload
+/// reports 1-indexed inclusive lines instead — what the field names imply to
+/// the reading agent, and the same conversion review comments already get when
+/// they're posted to GitHub. An empty span (`start == end`, an anchor covering
+/// no lines) collapses to the single line it sits on rather than reporting an
+/// end before the start.
+fn comment_line_range(span: crate::git::Span) -> (u32, u32) {
+    let start_line = span.start.saturating_add(1);
+    (start_line, span.end.max(start_line))
+}
+
+/// The ACP config selection a queued repo session should carry.
+///
+/// The parent project session's selection names config and value IDs that only
+/// exist on the parent's own provider, so it is inherited only when the repo
+/// session runs on that provider. When review provider resolution falls back
+/// to a different agent, the selection is dropped: the fallback agent would
+/// fail config application at session start, and because a retried
+/// `start_repo_session` stamps the handler's selection onto a fresh row, the
+/// failure would repeat on every retry rather than self-heal.
+fn inherited_acp_config_selection(
+    inherited_provider: Option<&str>,
+    session_provider: Option<&str>,
+    selection: Option<&AcpConfigSelection>,
+) -> Option<AcpConfigSelection> {
+    if session_provider == inherited_provider {
+        selection.cloned()
+    } else {
+        None
+    }
 }
 
 impl ProjectToolsHandler {
@@ -327,6 +374,7 @@ impl ProjectToolsHandler {
                 "type": match handle.artifact_kind {
                     RepoArtifactKind::Note => "note",
                     RepoArtifactKind::Commit => "commit",
+                    RepoArtifactKind::Review => "review",
                 },
                 "id": handle.artifact_id,
             },
@@ -372,6 +420,33 @@ impl ProjectToolsHandler {
                         payload["commit"] = serde_json::json!({
                             "id": commit.id,
                             "sha": commit.sha,
+                        });
+                    }
+                }
+                RepoArtifactKind::Review => {
+                    let review = self
+                        .store
+                        .get_review(&handle.artifact_id)
+                        .map_err(|e| format!("Error loading review: {e}"))?;
+                    if let Some(review) = review {
+                        payload["review"] = serde_json::json!({
+                            "id": review.id,
+                            "title": review.title,
+                            "completed_at": review.completed_at,
+                            "comments": review
+                                .comments
+                                .iter()
+                                .map(|c| {
+                                    let (start_line, end_line) = comment_line_range(c.span);
+                                    serde_json::json!({
+                                        "path": c.path,
+                                        "start_line": start_line,
+                                        "end_line": end_line,
+                                        "type": c.comment_type.as_ref().map(|t| t.as_str()),
+                                        "content": c.content,
+                                    })
+                                })
+                                .collect::<Vec<_>>(),
                         });
                     }
                 }
@@ -470,7 +545,7 @@ impl ProjectToolsHandler {
 #[tool_router]
 impl ProjectToolsHandler {
     #[tool(
-        description = "Enqueue an agent session in one of the project's repositories and return immediately with an opaque `repo_session_id`. Use `expected_outcome=\"note_in_repo\"` for repo notes or `expected_outcome=\"commit\"` for code changes and a signed-off conventional commit. The `repo` + `subpath` combination must exactly match an entry already in the project."
+        description = "Enqueue an agent session in one of the project's repositories and return immediately with an opaque `repo_session_id`. Use `expected_outcome=\"note_in_repo\"` for repo notes, `expected_outcome=\"commit\"` for code changes and a signed-off conventional commit, or `expected_outcome=\"code_review\"` for an AI code review of the changes on the repo's branch. The `repo` + `subpath` combination must exactly match an entry already in the project."
     )]
     async fn start_repo_session(
         &self,
@@ -489,11 +564,53 @@ impl ProjectToolsHandler {
             Err(e) => return e,
         };
 
+        // Review sessions only run on review-capable providers, so resolve (and
+        // validate) the provider before creating any rows — a failure at drain
+        // time would strand a queued session the drain loop can never start.
+        // The provider is inherited from the parent project session rather than
+        // chosen for the review, so one that can't review (e.g. an agent that
+        // isn't available on remote workstations) falls back to the preferred
+        // review-capable provider instead of failing a call the agent has no
+        // provider parameter to work around.
+        let session_provider = if matches!(p.expected_outcome, RepoSessionOutcome::CodeReview) {
+            match crate::session_commands::resolve_inherited_review_provider(
+                self.provider.clone(),
+                target.branch.workspace_name.is_some(),
+            )
+            .await
+            {
+                Ok(provider) => Some(provider),
+                Err(e) => return e,
+            }
+        } else {
+            self.provider.clone()
+        };
+
+        // An in-flight auto review of the same branch would duplicate a requested
+        // review, and is invalidated by a commit (which triggers a fresh auto review
+        // once it lands), so cancel it first — same as user-initiated sessions.
+        if matches!(
+            p.expected_outcome,
+            RepoSessionOutcome::CodeReview | RepoSessionOutcome::Commit
+        ) {
+            if let Err(e) = crate::session_commands::cancel_in_flight_auto_review_for_branch(
+                &self.store,
+                &self.registry,
+                &target.branch.id,
+            ) {
+                return format!("Error cancelling in-flight auto review: {e}");
+            }
+        }
+
         let mut session = crate::store::Session::new_queued(&p.instructions);
-        if let Some(ref provider) = self.provider {
+        if let Some(ref provider) = session_provider {
             session = session.with_provider(provider);
         }
-        if let Some(selection) = self.acp_config_selection.clone() {
+        if let Some(selection) = inherited_acp_config_selection(
+            self.provider.as_deref(),
+            session_provider.as_deref(),
+            self.acp_config_selection.as_ref(),
+        ) {
             session = session.with_acp_config_selection(selection);
         }
         if let Err(e) = self.store.create_session(&session) {
@@ -519,6 +636,22 @@ impl ProjectToolsHandler {
                 }
                 (commit_id, RepoArtifactKind::Commit)
             }
+            RepoSessionOutcome::CodeReview => {
+                // The commit_sha is filled in at drain time, when the workspace
+                // exists and the branch tip can be read (same as queued user
+                // review sessions).
+                let review = crate::store::Review::new(
+                    &target.branch.id,
+                    "",
+                    crate::store::ReviewScope::Branch,
+                )
+                .with_session(&session.id);
+                let review_id = review.id.clone();
+                if let Err(e) = self.store.create_review(&review) {
+                    return format!("Error creating review stub: {e}");
+                }
+                (review_id, RepoArtifactKind::Review)
+            }
         };
 
         let repo_session_id =
@@ -527,6 +660,11 @@ impl ProjectToolsHandler {
                 Err(e) => return e,
             };
 
+        // The inherited provider, not the review-resolved one: this argument is the
+        // branch-wide default the drain pass applies to every queued session without
+        // a stored provider, so a review's fallback agent must not pull unrelated
+        // queued sessions off the project session's provider. The session created
+        // above carries its own resolved provider on its row.
         if let Err(e) = crate::session_commands::drain_queued_sessions_for_branch(
             Arc::clone(&self.store),
             Arc::clone(&self.registry),
@@ -546,6 +684,7 @@ impl ProjectToolsHandler {
                 "type": match artifact_kind {
                     RepoArtifactKind::Note => "note",
                     RepoArtifactKind::Commit => "commit",
+                    RepoArtifactKind::Review => "review",
                 },
                 "id": artifact_id,
             },
@@ -1020,11 +1159,72 @@ pub async fn start_project_mcp_server(
 #[cfg(test)]
 mod tests {
     use super::{
-        worktree_ready_reply, ProjectToolsHandler, RepoArtifactKind,
-        REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS,
+        comment_line_range, inherited_acp_config_selection, worktree_ready_reply,
+        ProjectToolsHandler, RepoArtifactKind, REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS,
     };
-    use crate::store::{MessageRole, Session, SessionMessage};
+    use crate::git::Span;
+    use crate::store::{
+        AcpConfigSelection, AcpConfigValueSelection, MessageRole, Session, SessionMessage,
+    };
     use std::path::Path;
+
+    #[test]
+    fn comment_line_range_reports_one_indexed_inclusive_lines() {
+        // Stored spans are 0-indexed with an exclusive end, so lines 11..=15
+        // of the file are stored as 10..15.
+        assert_eq!(comment_line_range(Span::new(10, 15)), (11, 15));
+        // Single-line comment.
+        assert_eq!(comment_line_range(Span::new(10, 11)), (11, 11));
+        // Empty span: collapse onto the line it anchors to.
+        assert_eq!(comment_line_range(Span::new(10, 10)), (11, 11));
+        // First line of the file.
+        assert_eq!(comment_line_range(Span::new(0, 1)), (1, 1));
+    }
+
+    #[test]
+    fn inherited_acp_config_selection_follows_the_inherited_provider_only() {
+        let selection = AcpConfigSelection {
+            model: Some(AcpConfigValueSelection {
+                config_id: "model".to_string(),
+                value_id: "claude-opus-5".to_string(),
+                label: None,
+            }),
+            effort: None,
+        };
+
+        // The session runs on the parent's own provider: selection inherited.
+        assert_eq!(
+            inherited_acp_config_selection(Some("claude"), Some("claude"), Some(&selection)),
+            Some(selection.clone())
+        );
+
+        // Review provider resolution fell back to a different agent: the
+        // parent's config/value IDs don't exist there, so no selection.
+        assert_eq!(
+            inherited_acp_config_selection(Some("codex"), Some("claude"), Some(&selection)),
+            None
+        );
+
+        // No inherited provider to compare against (the review resolved the
+        // preferred provider instead): the selection's provider is unknown,
+        // so it is dropped rather than risked on the resolved agent.
+        assert_eq!(
+            inherited_acp_config_selection(None, Some("claude"), Some(&selection)),
+            None
+        );
+
+        // Non-review outcomes pass the inherited provider through unchanged,
+        // including when it is absent.
+        assert_eq!(
+            inherited_acp_config_selection(None, None, Some(&selection)),
+            Some(selection)
+        );
+
+        assert_eq!(
+            inherited_acp_config_selection(Some("claude"), Some("claude"), None),
+            None
+        );
+    }
 
     #[test]
     fn worktree_ready_reply_only_promises_setup_actions_when_they_can_run() {
@@ -1059,6 +1259,22 @@ mod tests {
         assert_eq!(decoded.session_id, "session-123");
         assert!(matches!(decoded.artifact_kind, RepoArtifactKind::Commit));
         assert_eq!(decoded.artifact_id, "commit-456");
+    }
+
+    #[test]
+    fn review_repo_session_handles_round_trip() {
+        let encoded = ProjectToolsHandler::encode_repo_session_handle(
+            "session-123",
+            RepoArtifactKind::Review,
+            "review-789",
+        )
+        .expect("handle should encode");
+        let decoded = ProjectToolsHandler::decode_repo_session_handle(&encoded)
+            .expect("handle should decode");
+
+        assert_eq!(decoded.session_id, "session-123");
+        assert!(matches!(decoded.artifact_kind, RepoArtifactKind::Review));
+        assert_eq!(decoded.artifact_id, "review-789");
     }
 
     #[test]
@@ -1161,6 +1377,45 @@ mod tests {
             REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS + 3
         );
         assert!(preview.ends_with("..."));
+    }
+
+    #[test]
+    fn start_repo_session_description_lists_all_outcomes() {
+        let router = ProjectToolsHandler::tool_router();
+        let start_description = router
+            .get("start_repo_session")
+            .and_then(|tool| tool.description.as_deref())
+            .expect("start tool description");
+
+        assert!(start_description.contains("note_in_repo"));
+        assert!(start_description.contains("\"commit\""));
+        assert!(start_description.contains("code_review"));
+        assert!(start_description.contains("AI code review"));
+    }
+
+    #[test]
+    fn start_repo_session_schema_lets_review_instructions_stay_empty() {
+        let router = ProjectToolsHandler::tool_router();
+        let instructions = router
+            .get("start_repo_session")
+            .and_then(|tool| {
+                tool.input_schema
+                    .get("properties")?
+                    .get("instructions")?
+                    .get("description")?
+                    .as_str()
+                    .map(ToOwned::to_owned)
+            })
+            .expect("instructions description");
+
+        assert!(
+            instructions.contains("code_review"),
+            "instructions must explain the review outcome: {instructions}"
+        );
+        assert!(
+            instructions.contains("leave this empty"),
+            "instructions must say a standard review needs none: {instructions}"
+        );
     }
 
     #[test]

@@ -7,8 +7,9 @@
   as many lines as it needs) above a row of actions: a labelled "Add project"
   button on the left, then — right-aligned — the action-runner surfaces (running
   pills and the primary run button) or a clone button, the pin toggle, and a
-  more menu carrying every repo action, an Actions submenu, and the local-clone
-  openers. Card tint, border and accent all come from the repo's badge hue.
+  more menu carrying every repo action, an Actions submenu, the local-clone
+  openers, and a Repo Settings jump to this repo's entry in Settings → Repos.
+  Card tint, border and accent all come from the repo's badge hue.
 
   Action runs go through the shared ActionRunner, scoped to the synthetic
   repoActionScopeId and executed by run_repo_action against the repo's main
@@ -31,6 +32,7 @@
   import PinOff from '@lucide/svelte/icons/pin-off';
   import Copy from '@lucide/svelte/icons/copy';
   import FolderOpen from '@lucide/svelte/icons/folder-open';
+  import Settings2 from '@lucide/svelte/icons/settings-2';
   import Zap from '@lucide/svelte/icons/zap';
   import type { RepoHomeItem } from '../../types';
   import type { UnlistenFn } from '../../transport';
@@ -64,6 +66,7 @@
   import { bulkRepoActions, bulkRunningForScope } from '../actions/repoActionsBulk';
   import { detectRepoActions, listenToRepoActionsDetection } from '../actions/actions';
   import { getPreferredAgent } from '../settings/preferences.svelte';
+  import { openRepoSettings } from '../settings/repoSettingsTarget';
   import { agentState } from '../agents/agent.svelte';
 
   interface Props {
@@ -494,6 +497,10 @@
               <DropdownMenu.Item disabled>Loading…</DropdownMenu.Item>
             {/if}
           {/if}
+          <DropdownMenu.Separator />
+          <DropdownMenu.Item onSelect={() => openRepoSettings(repo.githubRepo, repo.subpath)}>
+            <Settings2 size={14} /> Repo Settings
+          </DropdownMenu.Item>
         </DropdownMenu.Content>
       </DropdownMenu.Root>
     </div>

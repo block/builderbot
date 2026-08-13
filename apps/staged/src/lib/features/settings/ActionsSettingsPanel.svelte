@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy, untrack } from 'svelte';
+  import { onMount, onDestroy, tick, untrack } from 'svelte';
   import { cubicInOut } from 'svelte/easing';
   import FolderGit2 from '@lucide/svelte/icons/folder-git-2';
   import Play from '@lucide/svelte/icons/play';
@@ -38,6 +38,7 @@
   import { getPreferredAgent } from './preferences.svelte';
   import { agentState } from '../agents/agent.svelte';
   import { navigation } from '../layout/navigation.svelte';
+  import { consumeRepoSettingsTarget } from './repoSettingsTarget';
 
   type RepoAttachment = {
     projectId: string;
@@ -61,6 +62,7 @@
   let repoAttachmentsByContext = $state<Record<string, RepoAttachment[]>>({});
   let repoAttachmentLoadGeneration = 0;
   let repoSearch = $state('');
+  let sidebarEl: HTMLElement | null = null;
 
   let actions = $state<ProjectAction[]>([]);
   let loadingActions = $state(false);
@@ -243,12 +245,23 @@
   }
 
   async function loadContexts() {
+    // A repo card's "Repo Settings" action parks the repo it wants selected.
+    // Take it up front so a failed load drops the request rather than leaving
+    // it parked for some later, unrelated visit to Settings → Repos.
+    const requested = consumeRepoSettingsTarget();
+    const requestedKey = requested ? repoKey(requested.githubRepo, requested.subpath) : null;
+    let revealRequested = false;
+
     loadingContexts = true;
     try {
       const nextContexts = await commands.listActionContexts();
       contexts = nextContexts;
       await loadRepoAttachments(nextContexts);
-      if (!selectedRepoKey && mergedEntries.length > 0) {
+      // Honor the parked target now that the entry list is resolved.
+      if (requestedKey && mergedEntries.some((e) => e.key === requestedKey)) {
+        selectedRepoKey = requestedKey;
+        revealRequested = true;
+      } else if (!selectedRepoKey && mergedEntries.length > 0) {
         selectedRepoKey = mergedEntries[0].key;
       } else if (selectedRepoKey && !mergedEntries.some((e) => e.key === selectedRepoKey)) {
         selectedRepoKey = mergedEntries.length > 0 ? mergedEntries[0].key : null;
@@ -258,7 +271,16 @@
       console.error('Failed to load action contexts:', e);
     } finally {
       loadingContexts = false;
+      // The sidebar renders a spinner until this flag clears, so the selected
+      // row only exists to scroll to after it does.
+      if (revealRequested) void revealSelectedRepo();
     }
+  }
+
+  /** Scroll the selected repo's sidebar row into view once it has rendered. */
+  async function revealSelectedRepo() {
+    await tick();
+    sidebarEl?.querySelector('.context-item.selected')?.scrollIntoView({ block: 'nearest' });
   }
 
   async function loadActions() {
@@ -546,7 +568,7 @@
 
 <div class="actions-settings-panel">
   <div class="panel-body">
-    <aside class="sidebar" transition:sidebarSlide|global>
+    <aside class="sidebar" bind:this={sidebarEl} transition:sidebarSlide|global>
       <div class="sidebar-header">
         <h2>
           <FolderGit2 size={16} />

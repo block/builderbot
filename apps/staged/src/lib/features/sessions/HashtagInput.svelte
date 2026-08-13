@@ -25,7 +25,12 @@
   import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
   import FileSearch from '@lucide/svelte/icons/file-search';
   import ImageLucide from '@lucide/svelte/icons/image';
-  import { HASHTAG_TOKEN_RE, hashtagTypeIconSvg, escapeHtml } from './hashtagItems';
+  import {
+    HASHTAG_TOKEN_RE,
+    createExtractedValueBuilder,
+    hashtagTypeIconSvg,
+    escapeHtml,
+  } from './hashtagItems';
   import { focusAtEndSync } from '../../shared/focusAtEnd';
   import { portal } from '../../shared/portal';
   import RepoLabel from '../../shared/RepoLabel.svelte';
@@ -304,28 +309,28 @@
   }
 
   function extractFromNode(node: Node): string {
-    let result = '';
+    const builder = createExtractedValueBuilder();
     for (const child of node.childNodes) {
       if (child.nodeType === Node.TEXT_NODE) {
-        result += (child.textContent ?? '').replace(/\u200B/g, '');
+        builder.appendText((child.textContent ?? '').replace(/\u200B/g, ''));
       } else if (child instanceof HTMLBRElement) {
-        result += '\n';
+        builder.appendText('\n');
       } else if (child instanceof HTMLElement) {
         if (child.dataset.token) {
-          result += child.dataset.token;
+          builder.appendToken(child.dataset.token);
         } else if (child.tagName === 'DIV') {
           // Browsers sometimes wrap lines in <div> elements on Enter
           const innerText = extractFromNode(child);
-          if (result.length > 0 && !result.endsWith('\n')) {
-            result += '\n';
+          if (builder.value.length > 0 && !builder.value.endsWith('\n')) {
+            builder.appendText('\n');
           }
-          result += innerText;
+          builder.appendText(innerText);
         } else {
-          result += extractFromNode(child);
+          builder.appendText(extractFromNode(child));
         }
       }
     }
-    return result;
+    return builder.value;
   }
 
   function handleInput(e: Event) {

@@ -3,6 +3,7 @@ import type { Branch, BranchTimeline, HashtagItem, ProjectNote } from '../../typ
 import { getBranchTimeline, listProjectNotes } from '../../commands';
 import {
   buildProjectHashtagItems,
+  createExtractedValueBuilder,
   findHashtagItemForReference,
   projectNotesToHashtagItems,
   renderHashtagTokens,
@@ -330,6 +331,58 @@ describe('renderHashtagTokens', () => {
     expect(html).not.toContain('role="button"');
     expect(html).not.toContain('tabindex="0"');
     expect(html).not.toContain('data-hashtag-ref');
+  });
+});
+
+describe('createExtractedValueBuilder', () => {
+  it('inserts a space between a token and immediately following text', () => {
+    const builder = createExtractedValueBuilder();
+    builder.appendToken('#note:note-1');
+    builder.appendText('some words');
+
+    expect(builder.value).toBe('#note:note-1 some words');
+  });
+
+  it('does not add a space when the following text already starts with whitespace', () => {
+    const builder = createExtractedValueBuilder();
+    builder.appendText('Re: ');
+    builder.appendToken('#note:note-1');
+    builder.appendText(' already spaced');
+
+    expect(builder.value).toBe('Re: #note:note-1 already spaced');
+  });
+
+  it('does not add a space before a newline after a token', () => {
+    const builder = createExtractedValueBuilder();
+    builder.appendToken('#commit:abc123');
+    builder.appendText('\nnext line');
+
+    expect(builder.value).toBe('#commit:abc123\nnext line');
+  });
+
+  it('separates adjacent tokens even across empty text chunks', () => {
+    const builder = createExtractedValueBuilder();
+    builder.appendToken('#note:note-1');
+    builder.appendText('');
+    builder.appendToken('#commit:abc123');
+
+    expect(builder.value).toBe('#note:note-1 #commit:abc123');
+  });
+
+  it('does not add a trailing space after a token at the end', () => {
+    const builder = createExtractedValueBuilder();
+    builder.appendText('see ');
+    builder.appendToken('#note:note-1');
+
+    expect(builder.value).toBe('see #note:note-1');
+  });
+
+  it('joins plain text chunks without inserting spaces', () => {
+    const builder = createExtractedValueBuilder();
+    builder.appendText('hel');
+    builder.appendText('lo');
+
+    expect(builder.value).toBe('hello');
   });
 });
 

@@ -52,11 +52,9 @@ struct StartRepoSessionParams {
     /// to the session, so you can refer to them by name (e.g. "refer to the architecture
     /// overview note").
     ///
-    /// For `"code_review"` the review prompt itself — how to diff the branch, the comment
-    /// taxonomy, the required output format — is supplied by the app and these instructions
-    /// are appended to it. Use them only to steer what the review pays attention to (e.g.
-    /// "focus on the migration ordering"); restating the request or specifying an output
-    /// format here fights the built-in prompt.
+    /// For `"code_review"` leave this empty for a standard review of the branch's
+    /// changes. Provide instructions only when there is something specific you want
+    /// looked into or have concerns about (e.g. "focus on the migration ordering").
     pub instructions: String,
     /// What the session should produce. Controls the prompt given to the agent and what
     /// artifact (if any) is created in the database.
@@ -1324,7 +1322,7 @@ mod tests {
     }
 
     #[test]
-    fn start_repo_session_schema_scopes_review_instructions_to_focus_areas() {
+    fn start_repo_session_schema_lets_review_instructions_stay_empty() {
         let router = ProjectToolsHandler::tool_router();
         let instructions = router
             .get("start_repo_session")
@@ -1343,8 +1341,8 @@ mod tests {
             "instructions must explain the review outcome: {instructions}"
         );
         assert!(
-            instructions.contains("output format"),
-            "instructions must warn against respecifying the output format: {instructions}"
+            instructions.contains("leave this empty"),
+            "instructions must say a standard review needs none: {instructions}"
         );
     }
 

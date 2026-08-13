@@ -6,6 +6,36 @@ import { branchTimelineReadyKey } from '../branches/branchTimelineReady';
 export const HASHTAG_TOKEN_RE = /#(note|commit|review|project-note|image):([^\s]+)/g;
 
 /**
+ * Incrementally joins editor content chunks into the raw `value` string,
+ * inserting a space between a `#type:id` badge token and immediately
+ * following non-whitespace text. Token ids match greedily up to whitespace
+ * (HASHTAG_TOKEN_RE), so `#note:1hello` would swallow the text into the id.
+ */
+export function createExtractedValueBuilder() {
+  let result = '';
+  let afterToken = false;
+
+  const push = (text: string, isToken: boolean) => {
+    if (!text) return;
+    if (afterToken && !/^\s/.test(text)) result += ' ';
+    result += text;
+    afterToken = isToken;
+  };
+
+  return {
+    appendText(text: string) {
+      push(text, false);
+    },
+    appendToken(token: string) {
+      push(token, true);
+    },
+    get value() {
+      return result;
+    },
+  };
+}
+
+/**
  * Inline SVG markup for each hashtag type icon (lucide icons at 12px).
  *
  * NOTE: These raw SVG strings intentionally duplicate the lucide icon paths

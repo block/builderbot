@@ -4,16 +4,18 @@
   Collapsed: one line summarizing the shared filter state — muted "Filter
   projects" when nothing is active; otherwise the active status filters as
   text, the active repo filters as badges, and a matched/total count, plus a
-  ✕ that clears everything without expanding. Expanded: the same
-  ProjectFilterChips bar the landing page renders, so the two surfaces can't
-  drift. Only the open/closed state is local — the selection itself lives in
-  projectFiltersStore.
+  ✕ that clears everything without expanding. The row is a Popover trigger:
+  opening it floats the same ProjectFilterChips bar the landing page renders
+  in an elevated dropdown under the row (so the two surfaces can't drift),
+  dismissed by clicking anywhere outside. Only the open/closed state is
+  local — the selection itself lives in projectFiltersStore.
 -->
 <script lang="ts">
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import ListFilter from '@lucide/svelte/icons/list-filter';
   import X from '@lucide/svelte/icons/x';
+  import * as Popover from '$lib/components/ui/popover';
   import RepoBadge from '../../shared/RepoBadge.svelte';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
@@ -21,7 +23,7 @@
   import { filterKey, projectFiltersStore } from './projectFilters.svelte';
   import ProjectFilterChips from './ProjectFilterChips.svelte';
 
-  let expanded = $state(false);
+  let open = $state(false);
 
   let statusLabels = $derived.by(() => {
     const labels: string[] = [];
@@ -49,71 +51,72 @@
   // otherwise only fills via the store's idle drip — the landing page forces
   // hydration but the sidebar never did, so kick it when the chips become
   // visible or they could render missing or undercounted when the app opens
-  // straight into a project. Re-runs when a reload lands while expanded.
+  // straight into a project. Re-runs when a reload lands while open.
   $effect(() => {
-    if (!expanded || !projectsDataStore.loaded) return;
+    if (!open || !projectsDataStore.loaded) return;
     void projectsDataStore.ensureProjectsHydrated();
   });
 </script>
 
-<div class="filter-row" class:filtering={projectFiltersStore.hasActiveFilters}>
-  <button
-    class="summary-button"
-    aria-expanded={expanded}
-    title={expanded ? 'Hide filter options' : 'Filter projects'}
-    onclick={() => (expanded = !expanded)}
-  >
-    <span class="filter-icon"><ListFilter size={13} /></span>
-    {#if projectFiltersStore.hasActiveFilters}
-      <span class="summary">
-        {#if statusLabels.length > 0}
-          <span class="status-labels">{statusLabels.join(', ')}</span>
-        {/if}
-        {#if activeRepos.length > 0}
-          <span class="badge-row">
-            {#each activeRepos as { filter, badge } (filterKey(filter))}
-              {#if badge}
-                <RepoBadge shortName={badge.shortName} hue={badge.hue} small />
-              {:else}
-                <span class="repo-fallback">
-                  <RepoLabel githubRepo={filter.repo} subpath={filter.subpath || null} />
-                </span>
-              {/if}
-            {/each}
-          </span>
-        {/if}
-      </span>
-      <span class="match-count">
-        {projectFiltersStore.filteredProjects.length}/{projectsDataStore.projects.length}
-      </span>
-    {:else}
-      <span class="summary placeholder">Filter projects</span>
-    {/if}
-    <span class="chevron">
-      {#if expanded}
-        <ChevronDown size={12} />
-      {:else}
-        <ChevronRight size={12} />
-      {/if}
-    </span>
-  </button>
-  {#if projectFiltersStore.hasActiveFilters}
-    <button
-      class="clear-button"
-      aria-label="Clear filters"
-      title="Clear filters"
-      onclick={() => projectFiltersStore.clearFilters()}
+<Popover.Root bind:open>
+  <div class="filter-row" class:filtering={projectFiltersStore.hasActiveFilters}>
+    <Popover.Trigger
+      class="sidebar-filter-trigger"
+      title={open ? 'Hide filter options' : 'Filter projects'}
     >
-      <X size={12} />
-    </button>
-  {/if}
-</div>
-
-{#if expanded}
-  <div class="chips-container">
-    <ProjectFilterChips compact />
+      <span class="filter-icon"><ListFilter size={13} /></span>
+      {#if projectFiltersStore.hasActiveFilters}
+        <span class="summary">
+          {#if statusLabels.length > 0}
+            <span class="status-labels">{statusLabels.join(', ')}</span>
+          {/if}
+          {#if activeRepos.length > 0}
+            <span class="badge-row">
+              {#each activeRepos as { filter, badge } (filterKey(filter))}
+                {#if badge}
+                  <RepoBadge shortName={badge.shortName} hue={badge.hue} small />
+                {:else}
+                  <span class="repo-fallback">
+                    <RepoLabel githubRepo={filter.repo} subpath={filter.subpath || null} />
+                  </span>
+                {/if}
+              {/each}
+            </span>
+          {/if}
+        </span>
+        <span class="match-count">
+          {projectFiltersStore.filteredProjects.length}/{projectsDataStore.projects.length}
+        </span>
+      {:else}
+        <span class="summary placeholder">Filter projects</span>
+      {/if}
+      <span class="chevron">
+        {#if open}
+          <ChevronDown size={12} />
+        {:else}
+          <ChevronRight size={12} />
+        {/if}
+      </span>
+    </Popover.Trigger>
+    {#if projectFiltersStore.hasActiveFilters}
+      <button
+        class="clear-button"
+        aria-label="Clear filters"
+        title="Clear filters"
+        onclick={() => projectFiltersStore.clearFilters()}
+      >
+        <X size={12} />
+      </button>
+    {/if}
   </div>
-{/if}
+  <Popover.Content
+    align="start"
+    sideOffset={4}
+    class="sidebar-filter-panel w-[var(--bits-popover-anchor-width)] ring-0"
+  >
+    <ProjectFilterChips compact />
+  </Popover.Content>
+</Popover.Root>
 
 <style>
   .filter-row {
@@ -124,7 +127,10 @@
     margin: 0 calc(-1 * var(--project-row-bleed));
   }
 
-  .summary-button {
+  /* Popover.Trigger renders in a child component, so its class escapes this
+     component's scoping; the descendants below are authored here and stay
+     scoped. */
+  :global(.sidebar-filter-trigger) {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -144,7 +150,7 @@
       color 0.15s ease;
   }
 
-  .summary-button:hover {
+  :global(.sidebar-filter-trigger:hover) {
     background-color: var(--projects-sidebar-hover-bg);
     color: var(--text-primary);
   }
@@ -235,7 +241,15 @@
     color: var(--text-primary);
   }
 
-  .chips-container {
-    padding: 2px 2px 6px;
+  /* Unlayered, so it wins over the Tailwind utility defaults (p-4, gap-4,
+     bg-popover) baked into Popover.Content — same pattern as the settings
+     panel's theme dropdown. */
+  :global(.sidebar-filter-panel) {
+    gap: 0;
+    padding: 8px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-muted);
+    border-radius: 6px;
+    box-shadow: var(--shadow-elevated);
   }
 </style>

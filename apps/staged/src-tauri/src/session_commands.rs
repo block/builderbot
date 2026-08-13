@@ -4587,24 +4587,33 @@ fn write_image_to_temp_file(
 
 /// Format a single note's content for inclusion in an agent context string.
 ///
-/// Wrapper around `format_note_with_heading` that uses "Note" as the heading
-/// and returns `Option<String>` for backward compatibility with timeline filtering.
-pub(crate) fn format_note_for_context(
-    id: &str,
-    title: &str,
-    content: &str,
-    workspace_name: Option<&str>,
-) -> Option<String> {
-    Some(format_note_with_heading(
-        id,
-        title,
-        content,
+/// Like `format_note_with_heading` with a "Note" heading, but a child note also
+/// gets a reference line naming itself and its parent project note, so the agent
+/// can connect it to the `#note:<id>` citations in the parent note's body.
+pub(crate) fn format_note_for_context(note: &store::Note, workspace_name: Option<&str>) -> String {
+    let heading = format!("### Note: {}", note.title);
+    let reference = match &note.parent_project_note_id {
+        Some(parent_id) => format!(
+            "\n\nChild note #note:{} of project note #project-note:{parent_id}.",
+            note.id
+        ),
+        None => String::new(),
+    };
+
+    write_content_to_temp_file(
+        &note.id,
+        &note.content,
         workspace_name,
-        "Note",
-    ))
+        "staged-note",
+        |path| format!("{heading}{reference}\n\nSee: `{path}`"),
+    )
+    .unwrap_or_else(|| format!("{heading}{reference}\n\n{}", note.content))
 }
 
 /// Convert notes from the DB into timeline entries.
+///
+/// Child notes are included: they are hidden from the UI timeline, but agents
+/// need them in branch history to read the notes their parent project note cites.
 ///
 /// When `workspace_name` is `Some`, notes are written to temp files inside the
 /// remote workspace via `ws_exec`. When `None`, notes are written to local temp
@@ -4614,7 +4623,7 @@ fn note_timeline_entries(
     branch_id: &str,
     workspace_name: Option<&str>,
 ) -> Vec<TimelineEntry> {
-    let notes = match store.list_notes_for_branch(branch_id) {
+    let notes = match store.list_all_notes_for_branch(branch_id) {
         Ok(n) => n,
         Err(e) => {
             log::warn!("Failed to list notes for branch context: {e}");
@@ -4627,15 +4636,11 @@ fn note_timeline_entries(
         if note.content.is_empty() {
             continue; // skip notes still generating
         }
-        if let Some(content) =
-            format_note_for_context(&note.id, &note.title, &note.content, workspace_name)
-        {
-            entries.push(TimelineEntry {
-                timestamp: note.completed_at.unwrap_or(note.created_at) / 1000,
-                order: 0,
-                content,
-            });
-        }
+        entries.push(TimelineEntry {
+            timestamp: note.completed_at.unwrap_or(note.created_at) / 1000,
+            order: 0,
+            content: format_note_for_context(note, workspace_name),
+        });
     }
     entries
 }
@@ -7511,5 +7516,40 @@ mod tests {
                 review_id: None,
             })
         );
+    }
+
+    #[test]
+    fn note_timeline_entries_include_children_annotated_with_their_parent() {
+        let (store, branch) = setup_branch_store();
+
+        let parent = store::ProjectNote::new(&branch.project_id, "Parent", "aggregated");
+        store.create_project_note(&parent).unwrap();
+
+        let standalone = store::Note::new(&branch.id, "Standalone", "top-level body");
+        store.create_note(&standalone).unwrap();
+        let child = store::Note::new(&branch.id, "Child", "child body")
+            .with_parent_project_note(&parent.id);
+        store.create_note(&child).unwrap();
+
+        let entries = note_timeline_entries(&store, &branch.id, None);
+        assert_eq!(entries.len(), 2);
+
+        // The child is back in branch history, cross-referenced to its parent.
+        let child_entry = entries
+            .iter()
+            .find(|e| e.content.contains("### Note: Child"))
+            .expect("child note missing from branch history");
+        assert!(child_entry.content.contains(&format!("#note:{}", child.id)));
+        assert!(child_entry
+            .content
+            .contains(&format!("#project-note:{}", parent.id)));
+
+        // A parentless note is rendered exactly as before — no reference line.
+        let standalone_entry = entries
+            .iter()
+            .find(|e| e.content.contains("### Note: Standalone"))
+            .expect("standalone note missing from branch history");
+        assert!(!standalone_entry.content.contains("Child note"));
+        assert!(!standalone_entry.content.contains("#project-note:"));
     }
 }

@@ -2348,6 +2348,34 @@ fn test_list_child_notes_returns_children_and_excludes_them_from_branch_timeline
 }
 
 #[test]
+fn test_list_all_notes_for_branch_includes_children_in_order() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let parent = ProjectNote::new(&project.id, "Parent", "aggregated");
+    store.create_project_note(&parent).unwrap();
+
+    let standalone = Note::new(&branch.id, "Standalone", "top-level");
+    store.create_note(&standalone).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let child = Note::new(&branch.id, "Child", "c").with_parent_project_note(&parent.id);
+    store.create_note(&child).unwrap();
+
+    // Branch history sees both, newest first — children interleave like any note.
+    let all = store.list_all_notes_for_branch(&branch.id).unwrap();
+    let all_ids: Vec<_> = all.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(all_ids, vec![child.id.as_str(), standalone.id.as_str()]);
+
+    // The UI timeline still hides the child.
+    let timeline = store.list_notes_for_branch(&branch.id).unwrap();
+    let timeline_ids: Vec<_> = timeline.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(timeline_ids, vec![standalone.id.as_str()]);
+}
+
+#[test]
 fn test_delete_project_note_cascades_to_child_notes() {
     let store = Store::in_memory().unwrap();
     let project = Project::new("test-owner/test-repo");

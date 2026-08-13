@@ -1337,6 +1337,10 @@ mod tests {
         assert_eq!(children[0].id, note.id);
         // ...but excluded from the repo's visible timeline.
         assert!(store.list_notes_for_branch(&branch.id).unwrap().is_empty());
+        // Agent branch history still sees it, so `#note:<id>` citations resolve.
+        let history = store.list_all_notes_for_branch(&branch.id).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, note.id);
     }
 
     #[test]

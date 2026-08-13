@@ -7,7 +7,7 @@
  * into a project and back for the app session — deliberately not persisted
  * to disk, matching how nothing about the filter UI persisted before.
  *
- * The derived getters read the global data stores directly; the underlying
+ * The $derived fields read the global data stores directly; the underlying
  * computations are exported as plain functions taking data as arguments so
  * the repo-fallback rules (repos list vs. legacy project.githubRepo,
  * headRepo ?? githubRepo) stay unit-testable without store plumbing.
@@ -83,8 +83,18 @@ export function computeRepoFilters(
   });
 }
 
+/**
+ * True when the set holds any repo filter. Classifies through
+ * parseRepoFilterKey so this and the repo matching in filterProjects agree by
+ * construction — classifying by exclusion instead ("anything that isn't
+ * unread or running") would silently promote a future third status filter to
+ * a repo filter that no project's repos can match, filtering everything out.
+ */
 export function hasRepoFilterKeys(activeFilters: Set<string>): boolean {
-  return [...activeFilters].some((key) => key !== 'unread' && key !== 'running');
+  for (const key of activeFilters) {
+    if (parseRepoFilterKey(key) !== null) return true;
+  }
+  return false;
 }
 
 /**
@@ -147,49 +157,49 @@ class ProjectFiltersStore {
   private _activeFilters = $state<Set<string>>(new Set());
 
   // ── Reactive reads ──
+  //
+  // $derived fields rather than getters so every consumer shares one
+  // computation instead of recomputing per read: filteredProjects is read by
+  // the landing grid, the sidebar's project list and the sidebar row's match
+  // count, and each pass would otherwise call getProjectStatus for every
+  // project when `running` is active. The counts are read twice per chip.
 
   get activeFilters(): Set<string> {
     return this._activeFilters;
   }
 
-  get hasActiveFilters(): boolean {
-    return this._activeFilters.size > 0;
-  }
+  hasActiveFilters = $derived(this._activeFilters.size > 0);
 
   /** True when any repo (non-status) filter is active. */
-  get hasRepoFilters(): boolean {
-    return hasRepoFilterKeys(this._activeFilters);
-  }
+  hasRepoFilters = $derived(hasRepoFilterKeys(this._activeFilters));
 
-  get repoFilters(): RepoFilter[] {
-    return computeRepoFilters(projectsDataStore.projects, projectsDataStore.reposByProject);
-  }
+  repoFilters: RepoFilter[] = $derived.by(() =>
+    computeRepoFilters(projectsDataStore.projects, projectsDataStore.reposByProject)
+  );
 
   /** The active repo filters, parsed from their keys. Kept independent of
    *  repoFilters so a stale-but-active selection still renders a summary. */
-  get activeRepoFilters(): RepoFilterRef[] {
-    return [...this._activeFilters]
-      .map(parseRepoFilterKey)
-      .filter((f): f is RepoFilterRef => f !== null);
-  }
+  activeRepoFilters: RepoFilterRef[] = $derived.by(() =>
+    [...this._activeFilters].map(parseRepoFilterKey).filter((f): f is RepoFilterRef => f !== null)
+  );
 
-  get unreadCount(): number {
-    return projectsDataStore.projects.filter((p) => projectStateStore.isUnread(p.id)).length;
-  }
+  unreadCount = $derived.by(
+    () => projectsDataStore.projects.filter((p) => projectStateStore.isUnread(p.id)).length
+  );
 
-  get runningCount(): number {
-    return projectsDataStore.projects.filter((p) => this.isProjectRunning(p.id)).length;
-  }
+  runningCount = $derived.by(
+    () => projectsDataStore.projects.filter((p) => this.isProjectRunning(p.id)).length
+  );
 
-  get filteredProjects(): Project[] {
-    return filterProjects(
+  filteredProjects: Project[] = $derived.by(() =>
+    filterProjects(
       projectsDataStore.projects,
       this._activeFilters,
       projectsDataStore.reposByProject,
       (projectId) => projectStateStore.isUnread(projectId),
       (projectId) => this.isProjectRunning(projectId)
-    );
-  }
+    )
+  );
 
   // ── Mutations ──
 

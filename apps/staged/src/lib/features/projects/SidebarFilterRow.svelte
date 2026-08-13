@@ -15,9 +15,10 @@
   import ListFilter from '@lucide/svelte/icons/list-filter';
   import X from '@lucide/svelte/icons/x';
   import RepoBadge from '../../shared/RepoBadge.svelte';
+  import RepoLabel from '../../shared/RepoLabel.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
-  import { projectFiltersStore } from './projectFilters.svelte';
+  import { filterKey, projectFiltersStore } from './projectFilters.svelte';
   import ProjectFilterChips from './ProjectFilterChips.svelte';
 
   let expanded = $state(false);
@@ -29,11 +30,19 @@
     return labels;
   });
 
-  let activeBadges = $derived(
+  // A badge lookup can miss — badges are only ensured for a repo's
+  // githubRepo, while filter keys use headRepo ?? githubRepo, so a
+  // fork-backed repo has no badge under its head name. Fall back to the repo
+  // path instead of dropping the entry: a filter that names nothing leaves
+  // this row showing a funnel and a bare count, which is the one thing it
+  // exists to explain.
+  let activeRepos = $derived(
     projectFiltersStore.activeRepoFilters
-      .map((f) => repoBadgeStore.lookup(f.repo, f.subpath || undefined))
-      .filter((b): b is NonNullable<typeof b> => Boolean(b))
-      .sort((a, b) => a.shortName.localeCompare(b.shortName))
+      .map((filter) => {
+        const badge = repoBadgeStore.lookup(filter.repo, filter.subpath || undefined);
+        return { filter, badge, sortKey: badge?.shortName ?? filter.repo };
+      })
+      .sort((a, b) => a.sortKey.localeCompare(b.sortKey))
   );
 
   // The repo chips and their counts derive from reposByProject, which
@@ -60,10 +69,16 @@
         {#if statusLabels.length > 0}
           <span class="status-labels">{statusLabels.join(', ')}</span>
         {/if}
-        {#if activeBadges.length > 0}
+        {#if activeRepos.length > 0}
           <span class="badge-row">
-            {#each activeBadges as badge}
-              <RepoBadge shortName={badge.shortName} hue={badge.hue} small />
+            {#each activeRepos as { filter, badge } (filterKey(filter))}
+              {#if badge}
+                <RepoBadge shortName={badge.shortName} hue={badge.hue} small />
+              {:else}
+                <span class="repo-fallback">
+                  <RepoLabel githubRepo={filter.repo} subpath={filter.subpath || null} />
+                </span>
+              {/if}
             {/each}
           </span>
         {/if}
@@ -172,6 +187,15 @@
     min-width: 0;
     min-height: 14px;
     overflow: hidden;
+  }
+
+  .repo-fallback {
+    display: inline-flex;
+    align-items: center;
+    max-width: 96px;
+    overflow: hidden;
+    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+    font-size: 9.5px;
   }
 
   .match-count {

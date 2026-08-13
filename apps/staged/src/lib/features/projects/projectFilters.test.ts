@@ -48,10 +48,19 @@ beforeEach(() => {
   vi.resetModules();
   // The store's runes compile away in the app build; under vitest they stay
   // plain global calls, so stub $state as identity (projectsData.test.ts
-  // precedent).
+  // precedent). $derived needs the same treatment for the store's derived
+  // fields, and since the stub evaluates them eagerly at construction the
+  // mocked data stores have to carry the shape those fields read.
   vi.stubGlobal('$state', (initial: unknown) => initial);
-  vi.doMock('../../stores/projectsData.svelte', () => ({ projectsDataStore: {} }));
-  vi.doMock('../../stores/projectState.svelte', () => ({ projectStateStore: {} }));
+  const derived = (value: unknown) => value;
+  derived.by = (compute: () => unknown) => compute();
+  vi.stubGlobal('$derived', derived);
+  vi.doMock('../../stores/projectsData.svelte', () => ({
+    projectsDataStore: { projects: [], reposByProject: new Map() },
+  }));
+  vi.doMock('../../stores/projectState.svelte', () => ({
+    projectStateStore: { isUnread: () => false },
+  }));
   vi.doMock('./projectStatus', () => ({ getProjectStatus: vi.fn() }));
 });
 
@@ -282,10 +291,20 @@ describe('toggleFilterKey', () => {
 });
 
 describe('hasRepoFilterKeys', () => {
-  it('is true only when a non-status key is active', async () => {
+  it('is true only when a repo key is active', async () => {
     const { hasRepoFilterKeys } = await importHelpers();
     expect(hasRepoFilterKeys(new Set())).toBe(false);
     expect(hasRepoFilterKeys(new Set(['unread', 'running']))).toBe(false);
     expect(hasRepoFilterKeys(new Set(['unread', 'repo:org/alpha:']))).toBe(true);
+  });
+
+  it('does not treat an unrecognized status key as a repo filter', async () => {
+    const { hasRepoFilterKeys, filterProjects } = await importHelpers();
+    // A third status filter must not make every project fail the repo check.
+    expect(hasRepoFilterKeys(new Set(['archived']))).toBe(false);
+    const projects = [project({ id: 'p1' })];
+    expect(filterProjects(projects, new Set(['archived']), new Map(), never, never)).toHaveLength(
+      1
+    );
   });
 });

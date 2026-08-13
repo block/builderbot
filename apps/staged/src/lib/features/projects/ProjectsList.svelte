@@ -76,7 +76,31 @@
   let restoreToken = 0;
   const projectCardElements = new Map<string, HTMLElement>();
 
-  let filteredProjects = $derived(projectFiltersStore.filteredProjects);
+  // The card you just came back from stays in the grid even when the active
+  // filters no longer match it: visiting a project marks it read, so with
+  // Unread active the card returnTargetProjectId points at — the one the
+  // scroll restore is aiming for — would otherwise be gone on arrival. Same
+  // exception the sidebar makes for the selected project. Captured at mount
+  // (this component is created fresh on every return to the landing page) and
+  // dropped on the first filter change, so a deliberate re-filter hides it.
+  let stickyProjectId = $state<string | null>(projectsListViewState.returnTargetProjectId);
+  let lastSeenFilters: Set<string> | null = null;
+  $effect(() => {
+    const active = projectFiltersStore.activeFilters;
+    if (lastSeenFilters && lastSeenFilters !== active) {
+      stickyProjectId = null;
+    }
+    lastSeenFilters = active;
+  });
+
+  let filteredProjects = $derived.by(() => {
+    const filtered = projectFiltersStore.filteredProjects;
+    if (!stickyProjectId || filtered.some((p) => p.id === stickyProjectId)) return filtered;
+    // Rebuilt from the full list rather than appended so the sticky card keeps
+    // its place in the grid — the position the scroll restore captured.
+    const matched = new Set(filtered.map((p) => p.id));
+    return projects.filter((p) => matched.has(p.id) || p.id === stickyProjectId);
+  });
 
   function trackProjectCard(node: HTMLElement, projectId: string) {
     let currentProjectId = projectId;
@@ -131,15 +155,24 @@
   }
 
   $effect(() => {
-    const readyToRestore =
+    const readyToDecide =
       projectsListViewState.restorePending &&
       !restoreInProgress &&
       !loading &&
       !error &&
-      filteredProjects.length > 0 &&
       mainPanelEl;
 
-    if (!readyToRestore) return;
+    if (!readyToDecide) return;
+
+    // Nothing to restore to — the shared filters can outlive this view and
+    // match no project at all. Drop the request rather than leaving it armed:
+    // it would otherwise fire whenever the list next became non-empty, jumping
+    // scroll to a position captured for a different list.
+    if (filteredProjects.length === 0) {
+      finishProjectsListRestore();
+      return;
+    }
+
     void restoreProjectsListPosition();
   });
 
@@ -349,6 +382,9 @@
         {/if}
 
         <ProjectFilterChips />
+        {#if filteredProjects.length === 0}
+          <div class="state">No projects match filters</div>
+        {/if}
         <div class="projects-grid">
           {#each filteredProjects as project, index (project.id)}
             {@const status = getProjectStatus(

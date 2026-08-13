@@ -6,6 +6,7 @@
   row can never drift. `compact` shrinks the chips for the narrow sidebar.
 -->
 <script lang="ts">
+  import X from '@lucide/svelte/icons/x';
   import RepoLabel from '../../shared/RepoLabel.svelte';
   import { badgeBg, badgeBgHover, badgeFg } from '../../shared/badgeColors';
   import { darkMode } from '../../stores/isDark.svelte';
@@ -57,6 +58,23 @@
       <span class="filter-count">{rf.count}</span>
     </button>
   {/each}
+  <!--
+    The filters outlive this bar's chips, so clearing has to be reachable from
+    the bar itself: repo chips only exist for repos computeRepoFilters still
+    sees (delete the last project using one and its filter stays active with
+    no chip to click), and both status chips go disabled when their counts hit
+    0. The sidebar's ✕ covers desktop, but the sidebar is hidden on mobile.
+  -->
+  {#if projectFiltersStore.hasActiveFilters}
+    <button
+      class="filter-chip clear-chip"
+      title="Clear filters"
+      onclick={() => projectFiltersStore.clearFilters()}
+    >
+      <X size={compact ? 11 : 12} />
+      Clear
+    </button>
+  {/if}
 </div>
 
 <style>
@@ -122,6 +140,15 @@
     background: var(--repo-bg, var(--ui-accent));
     color: var(--repo-fg, white);
     border-color: transparent;
+  }
+
+  .filter-chip.clear-chip {
+    gap: 4px;
+    color: var(--text-muted);
+  }
+
+  .filter-chip.clear-chip:hover {
+    color: var(--text-primary);
   }
 
   .filter-count {

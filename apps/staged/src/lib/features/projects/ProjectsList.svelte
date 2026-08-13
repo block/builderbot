@@ -81,25 +81,29 @@
   // Unread active the card returnTargetProjectId points at — the one the
   // scroll restore is aiming for — would otherwise be gone on arrival. Same
   // exception the sidebar makes for the selected project. Captured at mount
-  // (this component is created fresh on every return to the landing page) and
-  // dropped on the first filter change, so a deliberate re-filter hides it.
-  let stickyProjectId = $state<string | null>(projectsListViewState.returnTargetProjectId);
-  let lastSeenFilters: Set<string> | null = null;
-  $effect(() => {
-    const active = projectFiltersStore.activeFilters;
-    if (lastSeenFilters && lastSeenFilters !== active) {
-      stickyProjectId = null;
-    }
-    lastSeenFilters = active;
-  });
+  // (this component is created fresh on every return to the landing page),
+  // but only while a restore is actually pending: returnTargetProjectId is
+  // never cleared, so an ordinary mount — landing → settings → back, where
+  // requestProjectsListRestore(null) early-returns — would otherwise pin a
+  // project from a previous visit. restorePending is still true here; the
+  // effect that finishes the restore runs after mount.
+  const stickyProjectId = projectsListViewState.restorePending
+    ? projectsListViewState.returnTargetProjectId
+    : null;
+  // The exception lasts only until the first filter change, so a deliberate
+  // re-filter hides the card. The store replaces the Set on every change, so
+  // identity is the signal — derived rather than tracked in an effect, which
+  // would paint the stale card once under the new filters before removing it.
+  const filtersAtMount = projectFiltersStore.activeFilters;
 
   let filteredProjects = $derived.by(() => {
     const filtered = projectFiltersStore.filteredProjects;
-    if (!stickyProjectId || filtered.some((p) => p.id === stickyProjectId)) return filtered;
+    const sticky = projectFiltersStore.activeFilters === filtersAtMount ? stickyProjectId : null;
+    if (!sticky || filtered.some((p) => p.id === sticky)) return filtered;
     // Rebuilt from the full list rather than appended so the sticky card keeps
     // its place in the grid — the position the scroll restore captured.
     const matched = new Set(filtered.map((p) => p.id));
-    return projects.filter((p) => matched.has(p.id) || p.id === stickyProjectId);
+    return projects.filter((p) => matched.has(p.id) || p.id === sticky);
   });
 
   function trackProjectCard(node: HTMLElement, projectId: string) {

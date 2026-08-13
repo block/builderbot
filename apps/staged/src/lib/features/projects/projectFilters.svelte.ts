@@ -170,9 +170,6 @@ class ProjectFiltersStore {
 
   hasActiveFilters = $derived(this._activeFilters.size > 0);
 
-  /** True when any repo (non-status) filter is active. */
-  hasRepoFilters = $derived(hasRepoFilterKeys(this._activeFilters));
-
   repoFilters: RepoFilter[] = $derived.by(() =>
     computeRepoFilters(projectsDataStore.projects, projectsDataStore.reposByProject)
   );

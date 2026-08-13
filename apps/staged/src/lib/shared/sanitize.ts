@@ -28,18 +28,7 @@ export function sanitize(dirty: string): string {
       td: ['align'],
       th: ['align'],
       code: ['class'], // for syntax-highlight class names
-      // `class` for syntax-highlight + hashtag-badge styling; the
-      // `data-hashtag-*` attributes carry the reference target for
-      // click-to-navigate on rendered hashtag badges. Deliberately scoped to
-      // span — `style` stays stripped so badge colours must come from CSS
-      // classes.
-      span: [
-        'class',
-        'data-hashtag-kind',
-        'data-hashtag-type',
-        'data-hashtag-id',
-        'data-hashtag-ref',
-      ],
+      span: ['class'], // for syntax-highlight class names
       pre: ['class'],
     },
     // Only allow checkbox inputs (GFM task lists)

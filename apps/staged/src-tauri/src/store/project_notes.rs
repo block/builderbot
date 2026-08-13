@@ -5,6 +5,30 @@ use rusqlite::{params, OptionalExtension};
 use super::models::ProjectNote;
 use super::{now_timestamp, Store, StoreError};
 
+/// Sessions left behind by [`Store::delete_project_note`].
+///
+/// The store only removes rows; cancelling the processes those sessions are
+/// still driving is the command layer's job (it owns the session registry), so
+/// the delete reports every session it orphaned.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DeletedProjectNoteSessions {
+    /// The project note's own session, if it had one.
+    pub project_note_session_id: Option<String>,
+    /// Sessions belonging to the child notes removed by the cascade.
+    pub child_session_ids: Vec<String>,
+}
+
+impl DeletedProjectNoteSessions {
+    /// Every orphaned session id, children first.
+    pub fn all_session_ids(&self) -> Vec<String> {
+        self.child_session_ids
+            .iter()
+            .cloned()
+            .chain(self.project_note_session_id.clone())
+            .collect()
+    }
+}
+
 impl Store {
     pub fn create_project_note(&self, note: &ProjectNote) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
@@ -133,17 +157,27 @@ impl Store {
         Ok(())
     }
 
-    /// Delete a project note and return its session_id (if any) atomically.
+    /// Delete a project note and report the sessions it orphaned, atomically.
     ///
     /// Child notes aggregated under this project note (linked via
     /// `parent_project_note_id`) are deleted in the same transaction. The
     /// `notes` and `project_notes` tables have independent lifecycles with no
     /// FK between them, so this cleanup is enforced here in code. Deleting the
-    /// children fires `trg_cleanup_session_after_note_delete`, so any sessions
-    /// orphaned by the removed children are cleaned up as well.
-    pub fn delete_project_note(&self, id: &str) -> Result<Option<String>, StoreError> {
+    /// children fires `trg_cleanup_session_after_note_delete`, which cleans up
+    /// their sessions — but that trigger deliberately skips sessions that are
+    /// still `running`, so the child session ids are returned for the caller to
+    /// cancel and remove (see `note_commands::delete_project_note`).
+    pub fn delete_project_note(&self, id: &str) -> Result<DeletedProjectNoteSessions, StoreError> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction()?;
+        let child_session_ids: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT session_id FROM notes
+                 WHERE parent_project_note_id = ?1 AND session_id IS NOT NULL",
+            )?;
+            let rows = stmt.query_map(params![id], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
         tx.execute(
             "DELETE FROM notes WHERE parent_project_note_id = ?1",
             params![id],
@@ -156,7 +190,10 @@ impl Store {
             )
             .optional()?;
         tx.commit()?;
-        Ok(session_id.flatten())
+        Ok(DeletedProjectNoteSessions {
+            project_note_session_id: session_id.flatten(),
+            child_session_ids,
+        })
     }
 
     fn row_to_project_note(row: &rusqlite::Row) -> rusqlite::Result<ProjectNote> {

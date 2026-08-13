@@ -38,12 +38,7 @@
   import ImageAttachment from './ImageAttachment.svelte';
   import HashtagInput from './HashtagInput.svelte';
   import { buildBranchHashtagItems } from './hashtagItems';
-  import {
-    foldSnippetsIntoPrompt,
-    shouldOfferClipboardSnippet,
-    snippetLabel,
-    type TextSnippet,
-  } from './sessionModalHelpers';
+  import { foldSnippetsIntoPrompt, snippetLabel, type TextSnippet } from './sessionModalHelpers';
   import * as Dialog from '$lib/components/ui/dialog';
   import { Button } from '$lib/components/ui/button';
   import { subscribeDragDrop } from '../branches/dragDrop';
@@ -122,10 +117,8 @@
   });
 
   // Text-snippet attachment state (modal-local — folded into the prompt on
-  // submit, never persisted to the backend).
+  // submit or on close, never persisted to the backend).
   let textSnippets = $state<TextSnippet[]>([]);
-  // Eligible clipboard text (length > threshold), or null when nothing to offer.
-  let clipboardSnippetText = $state<string | null>(null);
   // Monotonic id source for snippet chips (modal-local, no backend id).
   let snippetCounter = 0;
 
@@ -344,40 +337,30 @@
     }
   });
 
-  // Read the clipboard on open and whenever the window regains focus so the
-  // "Attach clipboard" button reflects fresh copies. Reads via the Tauri
-  // plugin (more reliable in the WebView); failures simply hide the button.
-  async function refreshClipboardSnippet() {
-    if (!open) return;
-    try {
-      const text = await readClipboardText();
-      clipboardSnippetText = shouldOfferClipboardSnippet(text) ? text : null;
-    } catch {
-      clipboardSnippetText = null;
-    }
-  }
-
-  $effect(() => {
-    if (!open) return;
-    void refreshClipboardSnippet();
-    const onFocus = () => void refreshClipboardSnippet();
-    window.addEventListener('focus', onFocus);
-    return () => window.removeEventListener('focus', onFocus);
-  });
-
   function addSnippet(text: string) {
     const trimmed = text.trim();
     if (!trimmed) return;
+    // Clicking attach twice on the same clipboard contents is a slip, not a
+    // request for two identical snippets.
+    if (textSnippets.some((s) => s.text === trimmed)) return;
     textSnippets = [
       ...textSnippets,
       { id: `snippet-${snippetCounter++}`, label: snippetLabel(trimmed), text: trimmed },
     ];
   }
 
-  function attachClipboardSnippet() {
-    if (!clipboardSnippetText) return;
-    addSnippet(clipboardSnippetText);
-    clipboardSnippetText = null;
+  // Read the clipboard only when the user clicks "Attach clipboard". Polling it
+  // on open/focus would prompt for paste permission in web mode just for
+  // opening the dialog, and would attach whatever was cached at the last read
+  // rather than what's on the clipboard now. Reads via the Tauri plugin (more
+  // reliable in the WebView); failures are silent.
+  async function attachClipboardSnippet() {
+    try {
+      const text = await readClipboardText();
+      if (text) addSnippet(text);
+    } catch (e) {
+      console.error('[NewSessionModal] Failed to read clipboard:', e);
+    }
   }
 
   function removeSnippet(id: string) {
@@ -436,7 +419,14 @@
   }
 
   function handleClose() {
-    onClose({ prompt, mode: currentMode, imageIds });
+    // Snippets are modal-local state, so they'd die with the component on an
+    // accidental dismiss. Fold them into the preserved draft prompt instead —
+    // reopening then shows the same text the submit would have sent.
+    onClose({
+      prompt: foldSnippetsIntoPrompt(prompt, textSnippets),
+      mode: currentMode,
+      imageIds,
+    });
   }
 
   function handleAcpSelectionChange(selection: AcpConfigPickerSelection) {
@@ -623,7 +613,6 @@
           {onImageIdsChange}
           {textSnippets}
           onRemoveSnippet={removeSnippet}
-          clipboardText={clipboardSnippetText}
           onAttachClipboard={attachClipboardSnippet}
         />
       {/if}
@@ -647,7 +636,6 @@
               {onImageIdsChange}
               {textSnippets}
               onRemoveSnippet={removeSnippet}
-              clipboardText={clipboardSnippetText}
               onAttachClipboard={attachClipboardSnippet}
             />
           {/if}

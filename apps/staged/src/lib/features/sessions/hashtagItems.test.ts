@@ -4,7 +4,6 @@ import { getBranchTimeline, listProjectNotes } from '../../commands';
 import {
   buildProjectHashtagItems,
   createExtractedValueBuilder,
-  createHashtagMarked,
   findHashtagItemForReference,
   projectNotesToHashtagItems,
   renderHashtagTokens,
@@ -308,6 +307,17 @@ describe('renderHashtagTokens', () => {
     expect(projectNoteHtml).toContain('data-hashtag-type="project-note"');
   });
 
+  it('renders each hashtag kind with its own type class', () => {
+    const html = renderHashtagTokens('#note:n1 #commit:deadbeef #review:r1 #image:i1', []);
+
+    expect(html).toContain('hashtag-badge type-note');
+    expect(html).toContain('hashtag-badge type-commit');
+    expect(html).toContain('hashtag-badge type-review');
+    expect(html).toContain('hashtag-badge type-image');
+    // Colours come from those classes, never an inline style attribute.
+    expect(html).not.toContain('style=');
+  });
+
   it('can render presentational badges without interaction attributes', () => {
     const html = renderHashtagTokens(
       'See #note:note-1',
@@ -418,64 +428,5 @@ describe('buildProjectHashtagItems', () => {
         title: 'Provided note',
       })
     );
-  });
-});
-
-describe('createHashtagMarked', () => {
-  function hashtagItem(overrides: Partial<HashtagItem> = {}): HashtagItem {
-    return {
-      type: 'note',
-      id: 'abc123',
-      title: 'My child note',
-      color: '--note-color',
-      bgColor: '--note-bg',
-      ...overrides,
-    };
-  }
-
-  function render(text: string, items: HashtagItem[] = []): string {
-    return createHashtagMarked(items).parse(text) as string;
-  }
-
-  it('renders a #note:id token in body markdown as a clickable badge span', () => {
-    const html = render('See #note:abc123 for details.', [hashtagItem()]);
-
-    expect(html).toContain('class="hashtag-badge type-note stable-raster stable-raster-glyphs"');
-    expect(html).toContain('data-hashtag-kind="note"');
-    expect(html).toContain('data-hashtag-id="abc123"');
-    // Resolved title from the provided items.
-    expect(html).toContain('My child note');
-  });
-
-  it('falls back to the raw id when the item is unknown', () => {
-    const html = render('See #note:missing-id here.', []);
-
-    expect(html).toContain('data-hashtag-id="missing-id"');
-    expect(html).toContain('missing-id</span>');
-  });
-
-  it('renders each hashtag kind with its own type class', () => {
-    const html = render('#commit:deadbeef #review:r1 #project-note:p1 #image:i1', []);
-
-    expect(html).toContain('hashtag-badge type-commit');
-    expect(html).toContain('hashtag-badge type-review');
-    expect(html).toContain('hashtag-badge type-project-note');
-    expect(html).toContain('hashtag-badge type-image');
-  });
-
-  it('leaves tokens inside inline code untouched', () => {
-    const html = render('Use `#note:abc123` literally.', [hashtagItem()]);
-
-    expect(html).not.toContain('hashtag-badge');
-    expect(html).not.toContain('data-hashtag-id');
-    expect(html).toContain('<code>#note:abc123</code>');
-  });
-
-  it('leaves tokens inside fenced code blocks untouched', () => {
-    const html = render('```\n#note:abc123\n```', [hashtagItem()]);
-
-    expect(html).not.toContain('hashtag-badge');
-    expect(html).not.toContain('data-hashtag-id');
-    expect(html).toContain('#note:abc123');
   });
 });

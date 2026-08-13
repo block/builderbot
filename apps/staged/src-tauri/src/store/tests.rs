@@ -2421,11 +2421,53 @@ fn test_delete_project_note_cleans_up_child_note_sessions() {
         .with_parent_project_note(&parent.id);
     store.create_note(&child).unwrap();
 
-    store.delete_project_note(&parent.id).unwrap();
+    let orphaned = store.delete_project_note(&parent.id).unwrap();
 
     // Deleting the child fired the note-delete trigger, cleaning up its session.
     assert!(store.get_note(&child.id).unwrap().is_none());
     assert!(store.get_session(&session.id).unwrap().is_none());
+    // The child session is still reported so the command layer can cancel it.
+    assert_eq!(orphaned.child_session_ids, vec![session.id.clone()]);
+    assert_eq!(orphaned.project_note_session_id, None);
+}
+
+/// A child session that is still running survives the note-delete trigger (it
+/// skips `running` sessions), so `delete_project_note` must report it for the
+/// command layer to cancel and delete.
+#[test]
+fn test_delete_project_note_reports_running_child_sessions() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let parent_session = Session::new_running("write project note", Path::new("/tmp"));
+    store.create_session(&parent_session).unwrap();
+    let parent =
+        ProjectNote::new(&project.id, "Parent", "aggregated").with_session(&parent_session.id);
+    store.create_project_note(&parent).unwrap();
+
+    let child_session = Session::new_running("write child note", Path::new("/tmp"));
+    store.create_session(&child_session).unwrap();
+    let child = Note::new(&branch.id, "Child", "c")
+        .with_session(&child_session.id)
+        .with_parent_project_note(&parent.id);
+    store.create_note(&child).unwrap();
+
+    let orphaned = store.delete_project_note(&parent.id).unwrap();
+
+    assert_eq!(orphaned.child_session_ids, vec![child_session.id.clone()]);
+    assert_eq!(
+        orphaned.project_note_session_id,
+        Some(parent_session.id.clone())
+    );
+    // The trigger left the running session behind; the caller cleans it up.
+    assert!(store.get_session(&child_session.id).unwrap().is_some());
+    assert_eq!(
+        orphaned.all_session_ids(),
+        vec![child_session.id, parent_session.id]
+    );
 }
 
 // =============================================================================

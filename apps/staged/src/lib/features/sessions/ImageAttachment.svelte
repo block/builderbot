@@ -7,8 +7,8 @@
 
   Text snippets are modal-local (folded into the prompt on submit, never
   persisted): they render as chips alongside the image thumbnails, and an
-  optional "Attach clipboard" button is shown when the parent supplies
-  eligible clipboard text.
+  optional "Attach clipboard" button asks the parent to read the clipboard and
+  attach it as a snippet.
 
   Props:
     branchId        — branch to associate images with, or null for project-only images
@@ -18,8 +18,8 @@
     onImageIdsChange — callback when the image list changes
     textSnippets     — current list of attached text snippets
     onRemoveSnippet  — callback to remove a snippet by id
-    clipboardText    — eligible clipboard text, or null when not offering it
-    onAttachClipboard — callback to attach the current clipboard text as a snippet
+    onAttachClipboard — callback to attach the clipboard as a snippet; the
+                        "Attach clipboard" button is shown only when supplied
 -->
 <script lang="ts">
   import X from '@lucide/svelte/icons/x';
@@ -42,7 +42,6 @@
     onImageIdsChange: (update: ImageIdsUpdate) => void;
     textSnippets?: TextSnippet[];
     onRemoveSnippet?: (id: string) => void;
-    clipboardText?: string | null;
     onAttachClipboard?: () => void;
   }
 
@@ -54,7 +53,6 @@
     onImageIdsChange,
     textSnippets = [],
     onRemoveSnippet,
-    clipboardText = null,
     onAttachClipboard,
   }: Props = $props();
 
@@ -211,7 +209,7 @@
       >
         <Plus size={16} />
       </Button>
-      {#if clipboardText}
+      {#if onAttachClipboard}
         <Button
           variant="outline"
           size="icon"
@@ -236,7 +234,7 @@
       <ImagePlus size={14} />
       <span>Attach images or text snippets</span>
     </Button>
-    {#if clipboardText}
+    {#if onAttachClipboard}
       <Button
         variant="outline"
         type="button"

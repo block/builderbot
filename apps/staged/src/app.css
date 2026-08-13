@@ -266,10 +266,9 @@ mark.search-match-current {
 }
 
 /*
- * Per-type badge colours, mirroring `hashtagTypeColors` in hashtagItems.ts.
- * Sourced as CSS classes (not inline `style`) so badges injected into
- * sanitized note-body HTML keep their colours — `sanitize` strips `style` but
- * allows `class` on span.
+ * Per-type badge colours, keyed off the `type-<kind>` class that
+ * `renderHashtagBadge` emits. These live here rather than in an inline `style`
+ * attribute so a badge keeps its colours wherever its HTML ends up.
  */
 .hashtag-badge.type-note,
 .hashtag-badge.type-project-note {

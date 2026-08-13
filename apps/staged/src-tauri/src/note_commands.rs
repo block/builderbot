@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex};
 /// Convert a stored [`Note`] into a [`NoteTimelineItem`] with its session
 /// status resolved. Mirrors the mapping used when building branch timelines so
 /// note lookups outside the timeline (e.g. the project-note child view) stay
-/// consistent.
-fn note_to_timeline_item(store: &Store, note: Note) -> NoteTimelineItem {
+/// consistent. Shared with the web-server dispatch so both runtimes resolve
+/// session status identically.
+pub(crate) fn note_to_timeline_item(store: &Store, note: Note) -> NoteTimelineItem {
     let resolved = store.resolve_session_status(note.session_id.as_deref());
     NoteTimelineItem {
         id: note.id,
@@ -167,18 +168,26 @@ pub fn get_project_note_by_session(
         .map_err(|e| e.to_string())
 }
 
-/// Delete a project note and its linked session (if any).
+/// Delete a project note, its child notes, and every session they owned.
+///
+/// The store cascade removes the child-note rows, but their sessions may still
+/// be running — the note-delete trigger skips those, and a child session that
+/// outlived its note would keep running with nowhere to write its result. So
+/// each orphaned session (the project note's own plus every child's) is
+/// cancelled in the registry and then deleted.
 #[tauri::command(rename_all = "camelCase")]
 pub fn delete_project_note(
+    registry: tauri::State<'_, Arc<crate::session_runner::SessionRegistry>>,
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     note_id: String,
 ) -> Result<(), String> {
     let store = crate::get_store(&store)?;
-    let session_id = store
+    let orphaned = store
         .delete_project_note(&note_id)
         .map_err(|e| e.to_string())?;
 
-    if let Some(sid) = session_id {
+    for sid in orphaned.all_session_ids() {
+        registry.cancel(&sid);
         let _ = store.delete_session(&sid);
     }
     Ok(())

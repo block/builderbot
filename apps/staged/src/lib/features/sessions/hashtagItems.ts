@@ -1,4 +1,3 @@
-import { Marked, type TokenizerAndRendererExtension } from 'marked';
 import type { BranchTimeline, HashtagItem, ProjectNote, Branch, ProjectRepo } from '../../types';
 import { getBranchTimeline, listProjectNotes } from '../../commands';
 import { branchTimelineReadyKey } from '../branches/branchTimelineReady';
@@ -55,15 +54,6 @@ export const hashtagTypeIconSvg: Record<string, string> = {
     '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 13H8"/><path d="M16 13h-2"/><path d="M10 17H8"/><path d="M16 17h-2"/></svg>',
   image:
     '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>',
-};
-
-/** CSS custom-property names for each hashtag type's foreground and background colors. */
-export const hashtagTypeColors: Record<string, { color: string; bg: string }> = {
-  note: { color: '--note-color', bg: '--note-bg' },
-  commit: { color: '--commit-color', bg: '--commit-bg' },
-  review: { color: '--review-color', bg: '--review-bg' },
-  'project-note': { color: '--note-color', bg: '--note-bg' },
-  image: { color: '--image-color', bg: '--image-bg' },
 };
 
 type SortableHashtagItem = HashtagItem & {
@@ -384,9 +374,9 @@ function hashtagBadgeLabel(type: string, id: string, item: HashtagItem | undefin
  * Build the HTML for a single hashtag badge.
  *
  * Colours come from CSS classes (`.hashtag-badge.type-<kind>`) rather than
- * inline `style`, so the badge survives `sanitize` (which strips `style` but
- * keeps `class`). The `data-hashtag-*` attributes let a delegated click handler
- * navigate to the referenced item.
+ * inline `style`, so a badge keeps them in any context that strips `style`.
+ * The `data-hashtag-*` attributes let a delegated click handler navigate to the
+ * referenced item.
  */
 export function renderHashtagBadge(
   type: string,
@@ -404,8 +394,7 @@ export function renderHashtagBadge(
     : '';
   return (
     `<span class="hashtag-badge type-${targetType} stable-raster stable-raster-glyphs"` +
-    `${interactionAttributes} data-hashtag-kind="${escapeHtml(targetType)}" ` +
-    `data-hashtag-type="${escapeHtml(targetType)}" ` +
+    `${interactionAttributes} data-hashtag-type="${escapeHtml(targetType)}" ` +
     `data-hashtag-id="${escapeHtml(item?.id ?? id)}">${iconSvg} ${escapeHtml(label)}</span>`
   );
 }
@@ -452,48 +441,4 @@ export function renderHashtagTokens(
   }
 
   return parts.join('');
-}
-
-/**
- * Build a `marked` instance that renders `#type:id` hashtag tokens as badge
- * spans during Markdown parsing.
- *
- * Running as an inline tokenizer extension (rather than a regex over the
- * produced HTML) means fenced and inline code are already separate tokens by
- * the time this runs, so tokens inside code are left untouched. Titles are
- * resolved from `items`; unknown ids fall back to a readable label.
- */
-export function createHashtagMarked(items: HashtagItem[]): Marked {
-  const itemsByKey = new Map<string, HashtagItem>();
-  for (const item of items) {
-    itemsByKey.set(`${item.type}:${item.id}`, item);
-  }
-
-  // Where the next possible hashtag begins (used by marked to bound plain-text
-  // runs); the anchored `tokenRe` then confirms a full match at that position.
-  const startRe = /#(?:note|commit|review|project-note|image):/;
-  const tokenRe = new RegExp(`^${HASHTAG_TOKEN_RE.source}`);
-
-  const hashtagExtension: TokenizerAndRendererExtension = {
-    name: 'hashtag',
-    level: 'inline',
-    start(src) {
-      const index = src.search(startRe);
-      return index < 0 ? undefined : index;
-    },
-    tokenizer(src) {
-      const match = tokenRe.exec(src);
-      if (!match) return undefined;
-      return { type: 'hashtag', raw: match[0], kind: match[1], id: match[2] };
-    },
-    renderer(token) {
-      const kind = String(token.kind);
-      const id = String(token.id);
-      return renderHashtagBadge(kind, id, findHashtagItemInMap(itemsByKey, kind, id));
-    },
-  };
-
-  const md = new Marked({ breaks: true, gfm: true });
-  md.use({ extensions: [hashtagExtension] });
-  return md;
 }

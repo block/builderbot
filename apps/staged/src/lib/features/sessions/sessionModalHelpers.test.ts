@@ -1,11 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
-  CLIPBOARD_SNIPPET_MIN_LENGTH,
   foldSnippetsIntoPrompt,
   formatToolDisplay,
   makePathsRelative,
   sessionEndMessage,
-  shouldOfferClipboardSnippet,
   snippetLabel,
 } from './sessionModalHelpers';
 
@@ -28,21 +26,6 @@ describe('foldSnippetsIntoPrompt', () => {
     expect(foldSnippetsIntoPrompt('', [{ text: 'just context' }])).toBe(
       '\n\n<attached-snippet>\njust context\n</attached-snippet>'
     );
-  });
-});
-
-describe('shouldOfferClipboardSnippet', () => {
-  it('is false for empty or nullish clipboard text', () => {
-    expect(shouldOfferClipboardSnippet(null)).toBe(false);
-    expect(shouldOfferClipboardSnippet(undefined)).toBe(false);
-    expect(shouldOfferClipboardSnippet('')).toBe(false);
-  });
-
-  it('gates strictly above the threshold length', () => {
-    const atThreshold = 'a'.repeat(CLIPBOARD_SNIPPET_MIN_LENGTH);
-    const overThreshold = 'a'.repeat(CLIPBOARD_SNIPPET_MIN_LENGTH + 1);
-    expect(shouldOfferClipboardSnippet(atThreshold)).toBe(false);
-    expect(shouldOfferClipboardSnippet(overThreshold)).toBe(true);
   });
 });
 

@@ -317,7 +317,12 @@
     void ensureHashtagItems();
   });
 
-  function childNoteToHashtagItem(note: NoteTimelineItem): HashtagItem {
+  /**
+   * Adapt a fetched note into a hashtag item so `#note:<id>` references
+   * resolve. Used for a project note's children and for notes fetched on
+   * demand when a reference isn't in the merged item list.
+   */
+  function noteToHashtagItem(note: NoteTimelineItem): HashtagItem {
     return {
       type: 'note',
       id: note.id,
@@ -337,7 +342,7 @@
       const children = await commands.listChildNotes(parentProjectNoteId);
       if (generation !== childHashtagLoadGeneration) return;
       if (openNote?.noteId !== parentProjectNoteId) return;
-      childHashtagItems = children.filter((note) => note.title.trim()).map(childNoteToHashtagItem);
+      childHashtagItems = children.filter((note) => note.title.trim()).map(noteToHashtagItem);
     } catch (e) {
       if (generation !== childHashtagLoadGeneration) return;
       if (openNote?.noteId !== parentProjectNoteId) return;
@@ -416,8 +421,18 @@
       hashtagItems: noteModalHashtagItems,
       diffContext: referenceDiffContext,
     });
-    if (!target) return;
+    if (target) {
+      openHashtagTarget(target);
+      return;
+    }
 
+    // A `#note:<id>` can point outside the merged item list — e.g. a child of a
+    // different project note, or one this project's timelines don't carry.
+    // Fetch it directly so the reference opens instead of silently no-opping.
+    if (click.type === 'note') void openUnresolvedNoteReference(click);
+  }
+
+  function openHashtagTarget(target: ReferenceHistoryEntry) {
     const current = currentDialogReferenceEntry();
     if (current) pushReferenceEntry(current);
     pushReferenceEntry(target);
@@ -425,6 +440,27 @@
     if (target.kind === 'diff') {
       openDiffRoute(target.route);
     }
+  }
+
+  async function openUnresolvedNoteReference(click: HashtagClickInfo) {
+    const originNoteId = openNote?.noteId;
+    let note: NoteTimelineItem | null;
+    try {
+      note = await commands.getNote(click.id);
+    } catch (e) {
+      console.error('[ProjectSection] Failed to load referenced note:', e);
+      return;
+    }
+    if (!note) return;
+    // The dialog the click came from may have closed or moved on while the
+    // fetch was in flight; opening now would push a stale back-stack entry.
+    if (openNote?.noteId !== originNoteId) return;
+
+    const target = resolveHashtagReference(
+      { ...click, item: noteToHashtagItem(note) },
+      { hashtagItems: noteModalHashtagItems, diffContext: referenceDiffContext }
+    );
+    if (target) openHashtagTarget(target);
   }
 
   function handleOpenInnerSession(sessionId: string) {

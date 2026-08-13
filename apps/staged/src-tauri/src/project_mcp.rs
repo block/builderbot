@@ -51,6 +51,12 @@ struct StartRepoSessionParams {
     /// Instructions to give the agent. Notes previously created for this repo are available
     /// to the session, so you can refer to them by name (e.g. "refer to the architecture
     /// overview note").
+    ///
+    /// For `"code_review"` the review prompt itself — how to diff the branch, the comment
+    /// taxonomy, the required output format — is supplied by the app and these instructions
+    /// are appended to it. Use them only to steer what the review pays attention to (e.g.
+    /// "focus on the migration ordering"); restating the request or specifying an output
+    /// format here fights the built-in prompt.
     pub instructions: String,
     /// What the session should produce. Controls the prompt given to the agent and what
     /// artifact (if any) is created in the database.
@@ -547,11 +553,13 @@ impl ProjectToolsHandler {
         // isn't available on remote workstations) falls back to the preferred
         // review-capable provider instead of failing a call the agent has no
         // provider parameter to work around.
-        let provider = if matches!(p.expected_outcome, RepoSessionOutcome::CodeReview) {
+        let session_provider = if matches!(p.expected_outcome, RepoSessionOutcome::CodeReview) {
             match crate::session_commands::resolve_inherited_review_provider(
                 self.provider.clone(),
                 target.branch.workspace_name.is_some(),
-            ) {
+            )
+            .await
+            {
                 Ok(provider) => Some(provider),
                 Err(e) => return e,
             }
@@ -559,9 +567,13 @@ impl ProjectToolsHandler {
             self.provider.clone()
         };
 
-        // A running auto review of the same branch would duplicate the requested
-        // review, so cancel it first — same as user-initiated review sessions.
-        if matches!(p.expected_outcome, RepoSessionOutcome::CodeReview) {
+        // An in-flight auto review of the same branch would duplicate a requested
+        // review, and is invalidated by a commit (which triggers a fresh auto review
+        // once it lands), so cancel it first — same as user-initiated sessions.
+        if matches!(
+            p.expected_outcome,
+            RepoSessionOutcome::CodeReview | RepoSessionOutcome::Commit
+        ) {
             if let Err(e) = crate::session_commands::cancel_in_flight_auto_review_for_branch(
                 &self.store,
                 &self.registry,
@@ -572,7 +584,7 @@ impl ProjectToolsHandler {
         }
 
         let mut session = crate::store::Session::new_queued(&p.instructions);
-        if let Some(ref provider) = provider {
+        if let Some(ref provider) = session_provider {
             session = session.with_provider(provider);
         }
         if let Some(selection) = self.acp_config_selection.clone() {
@@ -625,12 +637,17 @@ impl ProjectToolsHandler {
                 Err(e) => return e,
             };
 
+        // The inherited provider, not the review-resolved one: this argument is the
+        // branch-wide default the drain pass applies to every queued session without
+        // a stored provider, so a review's fallback agent must not pull unrelated
+        // queued sessions off the project session's provider. The session created
+        // above carries its own resolved provider on its row.
         if let Err(e) = crate::session_commands::drain_queued_sessions_for_branch(
             Arc::clone(&self.store),
             Arc::clone(&self.registry),
             self.app_handle.clone(),
             target.branch.id.clone(),
-            provider,
+            self.provider.clone(),
         )
         .await
         {
@@ -1304,6 +1321,31 @@ mod tests {
         assert!(start_description.contains("\"commit\""));
         assert!(start_description.contains("code_review"));
         assert!(start_description.contains("AI code review"));
+    }
+
+    #[test]
+    fn start_repo_session_schema_scopes_review_instructions_to_focus_areas() {
+        let router = ProjectToolsHandler::tool_router();
+        let instructions = router
+            .get("start_repo_session")
+            .and_then(|tool| {
+                tool.input_schema
+                    .get("properties")?
+                    .get("instructions")?
+                    .get("description")?
+                    .as_str()
+                    .map(ToOwned::to_owned)
+            })
+            .expect("instructions description");
+
+        assert!(
+            instructions.contains("code_review"),
+            "instructions must explain the review outcome: {instructions}"
+        );
+        assert!(
+            instructions.contains("output format"),
+            "instructions must warn against respecifying the output format: {instructions}"
+        );
     }
 
     #[test]

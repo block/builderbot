@@ -3443,16 +3443,25 @@ pub(crate) fn resolve_review_provider(
 /// provider the user picked, but an inherited one is only a preference, and
 /// erroring would leave the caller with no way to get a review at all — so fall
 /// back to the preferred review-capable provider instead.
-pub(crate) fn resolve_inherited_review_provider(
+///
+/// `async` because local resolution probes every known agent through a login
+/// shell: the MCP `start_repo_session` handler this serves promises to return
+/// immediately, so the discovery runs on a blocking thread rather than holding
+/// an async worker for the round-trip.
+pub(crate) async fn resolve_inherited_review_provider(
     provider: Option<String>,
     is_remote: bool,
 ) -> Result<String, String> {
-    resolve_inherited_provider_from_ids(
-        provider,
-        &available_provider_ids(is_remote),
-        &read_recent_agent_ids(),
-        is_remote,
-    )
+    tokio::task::spawn_blocking(move || {
+        resolve_inherited_provider_from_ids(
+            provider,
+            &available_provider_ids(is_remote),
+            &read_recent_agent_ids(),
+            is_remote,
+        )
+    })
+    .await
+    .map_err(|e| format!("Failed to resolve the review provider: {e}"))?
 }
 
 fn resolve_inherited_provider_from_ids(

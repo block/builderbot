@@ -41,6 +41,8 @@
   } from './projectsSidebarState.svelte';
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
   import RepoCard from './RepoCard.svelte';
+  import SidebarFilterRow from './SidebarFilterRow.svelte';
+  import { projectFiltersStore } from './projectFilters.svelte';
   import * as commands from '../../api/commands';
   import { projectActions } from './projectActions.svelte';
   import * as ContextMenu from '$lib/components/ui/context-menu';
@@ -87,6 +89,18 @@
   let showAllReposRow = $derived(
     projectsDataStore.homeRepos.length > 0 || navigation.showReposList
   );
+
+  // Project rows follow the shared filter state, with one exception: the
+  // selected project stays visible (appended if filtered out) so the row
+  // highlighting the active view can't vanish out from under it — the same
+  // rule that keeps the All Repos row above.
+  let sidebarProjects = $derived.by(() => {
+    const filtered = projectFiltersStore.filteredProjects;
+    const selectedId = navigation.selectedProjectId;
+    if (!selectedId || filtered.some((p) => p.id === selectedId)) return filtered;
+    const selected = projects.find((p) => p.id === selectedId);
+    return selected ? [...filtered, selected] : filtered;
+  });
 
   function handleDragStart(index: number) {
     return (e: DragEvent) => {
@@ -473,7 +487,17 @@
           {#if projects.length === 0}
             <div class="state">No projects yet.</div>
           {:else}
-            {#each projects as project (project.id)}
+            <SidebarFilterRow />
+            {#if sidebarProjects.length === 0}
+              <div class="state no-matches">
+                <span>No projects match filters</span>
+                <button
+                  class="clear-filters-link"
+                  onclick={() => projectFiltersStore.clearFilters()}>Clear filters</button
+                >
+              </div>
+            {/if}
+            {#each sidebarProjects as project (project.id)}
               {@const status = getProjectStatus(
                 project.id,
                 deletingProjectNames,
@@ -925,6 +949,28 @@
 
   .state.error {
     color: var(--ui-danger);
+  }
+
+  .state.no-matches {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 8px 2px;
+  }
+
+  .clear-filters-link {
+    border: none;
+    background: transparent;
+    padding: 0;
+    color: var(--ui-accent);
+    font-size: var(--size-xs);
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .clear-filters-link:hover {
+    text-decoration: underline;
   }
 
   .resize-handle {

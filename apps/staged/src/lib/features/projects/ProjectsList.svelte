@@ -44,17 +44,18 @@
   } from './projectsListViewState.svelte';
   import { darkMode } from '../../stores/isDark.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
-  import { badgeBg, badgeFg, badgeBgHover } from '../../shared/badgeColors';
+  import { badgeBg, badgeFg } from '../../shared/badgeColors';
+  import { projectFiltersStore } from './projectFilters.svelte';
+  import ProjectFilterChips from './ProjectFilterChips.svelte';
   import { repoSeedFromNewProjectEvent } from './newProjectEvent';
   import type { RepoSelection } from '../../shared/githubUrl';
   import { viewport } from '../../shared/viewport.svelte';
   import TopBarPortal from '../layout/TopBarPortal.svelte';
 
-  type FilterKind = 'unread' | 'running' | { repo: string; subpath: string };
-
   // Data comes from the shared projectsData store — returning to the landing
   // page paints instantly from memory while the store revalidates in the
-  // background. Filters, scroll restore, and modal state stay view-local.
+  // background. Filters live in the shared projectFiltersStore so the sidebar
+  // sees the same selection; scroll restore and modal state stay view-local.
   let projects = $derived(projectsDataStore.projects);
   let projectBranches = $derived(projectsDataStore.branchesByProject);
   let reposByProject = $derived(projectsDataStore.reposByProject);
@@ -71,126 +72,11 @@
   let newProjectInitialRepo = $state<RepoSelection | null>(null);
   let isCommandKeyHeld = $state(false);
   let mainPanelEl = $state<HTMLDivElement | null>(null);
-  let activeFilters = $state<Set<string>>(new Set());
   let restoreInProgress = false;
   let restoreToken = 0;
   const projectCardElements = new Map<string, HTMLElement>();
 
-  /** Unique repo+subpath entries sorted alphabetically by full display string */
-  let repoFilters = $derived.by(() => {
-    const counts = new Map<string, { repo: string; subpath: string; count: number }>();
-    for (const project of projects) {
-      const repos = reposByProject.get(project.id) ?? [];
-      if (repos.length > 0) {
-        for (const r of repos) {
-          const displayRepo = r.headRepo ?? r.githubRepo;
-          const key = `${displayRepo}:${r.subpath ?? ''}`;
-          const entry = counts.get(key);
-          if (entry) {
-            entry.count++;
-          } else {
-            counts.set(key, { repo: displayRepo, subpath: r.subpath ?? '', count: 1 });
-          }
-        }
-      } else if (project.githubRepo) {
-        const key = `${project.githubRepo}:${project.subpath ?? ''}`;
-        const entry = counts.get(key);
-        if (entry) {
-          entry.count++;
-        } else {
-          counts.set(key, { repo: project.githubRepo, subpath: project.subpath ?? '', count: 1 });
-        }
-      }
-    }
-    return [...counts.values()].sort((a, b) => {
-      const aDisplay = a.subpath ? `${a.repo}/${a.subpath}` : a.repo;
-      const bDisplay = b.subpath ? `${b.repo}/${b.subpath}` : b.repo;
-      return aDisplay.localeCompare(bDisplay);
-    });
-  });
-
-  function filterKey(filter: FilterKind): string {
-    if (typeof filter === 'string') return filter;
-    return `repo:${filter.repo}:${filter.subpath}`;
-  }
-
-  let allFilters = $derived.by(() => {
-    const filters: FilterKind[] = ['unread', 'running'];
-    for (const rf of repoFilters) {
-      filters.push({ repo: rf.repo, subpath: rf.subpath });
-    }
-    return filters;
-  });
-
-  let unreadCount = $derived(projects.filter((p) => projectStateStore.isUnread(p.id)).length);
-
-  let runningCount = $derived(
-    projects.filter((p) => {
-      const status = getProjectStatus(p.id, deletingProjectNames, projectBranches.get(p.id) || []);
-      return status.kind === 'running' || status.kind === 'runAction';
-    }).length
-  );
-
-  let hasRepoFilters = $derived(
-    [...activeFilters].some((key) => key !== 'unread' && key !== 'running')
-  );
-
-  let filteredProjects = $derived.by(() => {
-    if (activeFilters.size === 0) return projects;
-    return projects.filter((p) => {
-      // Status filters are AND'd with each other and with repo filters
-      if (activeFilters.has('unread') && !projectStateStore.isUnread(p.id)) return false;
-      if (activeFilters.has('running')) {
-        const status = getProjectStatus(
-          p.id,
-          deletingProjectNames,
-          projectBranches.get(p.id) || []
-        );
-        if (status.kind !== 'running' && status.kind !== 'runAction') return false;
-      }
-      // Repo filters are OR'd with each other
-      if (!hasRepoFilters) return true;
-      const repos = reposByProject.get(p.id) ?? [];
-      if (repos.length > 0) {
-        return repos.some((r) =>
-          activeFilters.has(
-            filterKey({ repo: r.headRepo ?? r.githubRepo, subpath: r.subpath ?? '' })
-          )
-        );
-      }
-      if (p.githubRepo) {
-        return activeFilters.has(filterKey({ repo: p.githubRepo, subpath: p.subpath ?? '' }));
-      }
-      return false;
-    });
-  });
-
-  function toggleFilter(filter: FilterKind, event?: MouseEvent) {
-    const key = filterKey(filter);
-
-    if (event?.shiftKey) {
-      // Shift+click: toggle individual filter
-      const next = new Set(activeFilters);
-      if (next.has(key)) {
-        next.delete(key);
-      } else {
-        next.add(key);
-      }
-      activeFilters = next;
-    } else {
-      // Plain click: switch to this filter exclusively
-      if (activeFilters.size === 1 && activeFilters.has(key)) {
-        // Clicking the only active filter deselects it (back to showing all)
-        activeFilters = new Set();
-      } else {
-        activeFilters = new Set([key]);
-      }
-    }
-  }
-
-  function isFilterActive(filter: FilterKind): boolean {
-    return activeFilters.has(filterKey(filter));
-  }
+  let filteredProjects = $derived(projectFiltersStore.filteredProjects);
 
   function trackProjectCard(node: HTMLElement, projectId: string) {
     let currentProjectId = projectId;
@@ -462,44 +348,7 @@
           </div>
         {/if}
 
-        {#if projects.length > 0}
-          <div class="filter-bar">
-            <button
-              class="filter-chip"
-              class:active={isFilterActive('unread')}
-              onclick={(e: MouseEvent) => toggleFilter('unread', e)}
-              disabled={unreadCount === 0 && !isFilterActive('unread')}
-            >
-              Unread
-              <span class="filter-count">{unreadCount}</span>
-            </button>
-            <button
-              class="filter-chip"
-              class:active={isFilterActive('running')}
-              onclick={(e: MouseEvent) => toggleFilter('running', e)}
-              disabled={runningCount === 0 && !isFilterActive('running')}
-            >
-              Running
-              <span class="filter-count">{runningCount}</span>
-            </button>
-            {#each repoFilters as rf}
-              {@const badge = repoBadgeStore.lookup(rf.repo, rf.subpath || undefined)}
-              {@const filter = { repo: rf.repo, subpath: rf.subpath }}
-              {@const active = isFilterActive(filter)}
-              <button
-                class="filter-chip repo-filter"
-                class:active
-                onclick={(e: MouseEvent) => toggleFilter(filter, e)}
-                style={badge
-                  ? `--repo-bg: ${badgeBg(badge.hue, darkMode.value)}; --repo-fg: ${badgeFg(badge.hue, darkMode.value)}; --repo-bg-hover: ${badgeBgHover(badge.hue, darkMode.value)}`
-                  : ''}
-              >
-                <RepoLabel githubRepo={rf.repo} subpath={rf.subpath || null} />
-                <span class="filter-count">{rf.count}</span>
-              </button>
-            {/each}
-          </div>
-        {/if}
+        <ProjectFilterChips />
         <div class="projects-grid">
           {#each filteredProjects as project, index (project.id)}
             {@const status = getProjectStatus(
@@ -714,105 +563,6 @@
 
   .state.error {
     color: var(--ui-danger);
-  }
-
-  .filter-bar {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-bottom: 14px;
-  }
-
-  .filter-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 10px;
-    border: 1px solid var(--border-muted);
-    border-radius: 999px;
-    background: var(--bg-elevated);
-    color: var(--text-secondary);
-    font-size: var(--size-sm);
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.15s ease;
-    white-space: nowrap;
-  }
-
-  .filter-chip:hover:not(:disabled) {
-    background: var(--bg-hover);
-    border-color: var(--border-emphasis);
-  }
-
-  .filter-chip.active:hover:not(:disabled) {
-    background: var(--ui-accent);
-    border-color: var(--ui-accent);
-  }
-
-  .filter-chip:disabled {
-    opacity: 0.4;
-    cursor: default;
-  }
-
-  .filter-chip.active {
-    background: var(--ui-accent);
-    border-color: var(--ui-accent);
-    color: white;
-  }
-
-  .filter-chip.repo-filter {
-    font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
-    font-size: 11px;
-    font-weight: 600;
-    background: var(--repo-bg, var(--bg-elevated));
-    color: var(--repo-fg, var(--text-secondary));
-    border-color: transparent;
-  }
-
-  .filter-chip.repo-filter:hover:not(:disabled) {
-    background: var(--repo-bg-hover, var(--bg-hover));
-  }
-
-  .filter-chip.repo-filter.active {
-    box-shadow: 0 0 0 2px var(--repo-fg, var(--ui-accent));
-    background: var(--repo-bg, var(--ui-accent));
-    color: var(--repo-fg, white);
-    border-color: transparent;
-  }
-
-  .filter-count {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 18px;
-    height: 18px;
-    padding: 0 5px;
-    border-radius: 999px;
-    background: rgba(128, 128, 128, 0.15);
-    font-size: 11px;
-    font-weight: 600;
-    line-height: 1;
-  }
-
-  .filter-chip.active .filter-count {
-    background: rgba(255, 255, 255, 0.25);
-  }
-
-  .filter-chip.repo-filter .filter-count {
-    background: rgba(128, 128, 128, 0.15);
-  }
-
-  .filter-chip.repo-filter.active .filter-count {
-    background: rgba(128, 128, 128, 0.2);
-  }
-
-  .filter-chip.repo-filter :global(.repo-label-prefix) {
-    color: inherit;
-    opacity: 0.6;
-  }
-
-  .filter-chip.repo-filter :global(.repo-label-emphasis) {
-    color: inherit;
   }
 
   .repos-section {
@@ -1082,18 +832,6 @@
   @media (max-width: 640px) {
     .content {
       padding: 16px;
-    }
-
-    .filter-bar {
-      flex-wrap: nowrap;
-      gap: 8px;
-      overflow-x: auto;
-      margin: 0 -16px 14px;
-      padding: 0 16px 4px;
-    }
-
-    .filter-chip {
-      min-height: 36px;
     }
 
     .projects-grid {

@@ -208,9 +208,16 @@ fn elect_primary_repo(
     Ok(())
 }
 
+/// Whether `err` is a constraint violation naming one of `needles`.
+///
+/// The index or column name only comes back as message text, so the code has to
+/// be checked too: without it any future error that happens to mention
+/// `project_repos` would be rewritten into a confidently wrong explanation.
 fn is_unique_violation(err: &rusqlite::Error, needles: &[&str]) -> bool {
     match err {
-        rusqlite::Error::SqliteFailure(_, Some(msg)) => {
+        rusqlite::Error::SqliteFailure(inner, Some(msg))
+            if inner.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
             needles.iter().any(|needle| msg.contains(needle))
         }
         _ => false,
@@ -570,5 +577,25 @@ mod tests {
                 .project_id,
             f.source.id
         );
+    }
+
+    /// Only a constraint violation may be rewritten into the friendly message:
+    /// the index name is matched in the error's text, so an unrelated failure
+    /// that happens to mention it has to keep its own words.
+    #[test]
+    fn explains_only_constraint_violations() {
+        let busy = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+            Some("database is locked writing idx_project_repos_unique".to_string()),
+        );
+        let violation = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE),
+            Some("UNIQUE constraint failed: index 'idx_project_repos_unique'".to_string()),
+        );
+
+        assert!(duplicate_repo_error(&busy).to_string().contains("locked"));
+        assert!(duplicate_repo_error(&violation)
+            .to_string()
+            .contains("already has this repository"));
     }
 }

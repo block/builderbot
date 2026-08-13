@@ -28,6 +28,7 @@
     filterMoveTargets,
     isMoveTargetChecking,
     moveTargetInvalidReason,
+    nextMoveTargetIndex,
   } from './moveBranchTarget';
   import type { Branch, Project, ProjectRepo } from '../../types';
 
@@ -43,7 +44,6 @@
   const searchId = `move-branch-search-${++inputCounter}`;
   let query = $state('');
   let selectedId = $state<string | null>(null);
-  let highlightedIndex = $state(-1);
   let error = $state<string | null>(null);
   let moving = $state(false);
   let searchElement = $state<HTMLInputElement | null>(null);
@@ -53,7 +53,6 @@
     if (open && !wasOpen) {
       query = '';
       selectedId = null;
-      highlightedIndex = -1;
       error = null;
       moving = false;
       // Repos hydrate lazily, so the duplicate-repo check can't be trusted
@@ -72,6 +71,9 @@
   let candidates = $derived(projectsDataStore.projects.filter((p) => p.id !== branch.projectId));
   let filtered = $derived(filterMoveTargets(candidates, projectsDataStore.reposByProject, query));
   let selected = $derived(filtered.find((p) => p.id === selectedId) ?? null);
+  // Derived, not tracked: a stale cursor could outlive the row it named — the
+  // query narrowing the list, or a click moving the selection out from under it.
+  let highlightedIndex = $derived(filtered.findIndex((p) => p.id === selectedId));
   let selectedRepos = $derived(
     selected ? projectsDataStore.reposByProject.get(selected.id) : undefined
   );
@@ -97,16 +99,12 @@
   }
 
   function handleSearchKeydown(e: KeyboardEvent) {
-    if (filtered.length === 0) return;
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      highlightedIndex = Math.min(highlightedIndex + 1, filtered.length - 1);
-      selectProject(filtered[highlightedIndex]);
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      highlightedIndex = Math.max(highlightedIndex - 1, 0);
-      selectProject(filtered[highlightedIndex]);
-    }
+    const delta = e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0;
+    if (delta === 0) return;
+    e.preventDefault();
+    const next = nextMoveTargetIndex(highlightedIndex, delta, filtered.length);
+    if (next < 0) return;
+    selectProject(filtered[next]);
   }
 
   async function handleSubmit(e: SubmitEvent) {

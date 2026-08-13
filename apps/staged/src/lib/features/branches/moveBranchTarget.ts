@@ -85,6 +85,19 @@ export function moveTargetInvalidReason(
   return null;
 }
 
+/**
+ * The row an arrow key moves the keyboard cursor to, clamped into the list.
+ *
+ * `current` is derived from the selection rather than tracked alongside it, so
+ * it is `-1` while nothing is selected and can name a row the current query has
+ * filtered away; both have to land back inside the list rather than index off
+ * the end of it. Returns `-1` for an empty list, which selects nothing.
+ */
+export function nextMoveTargetIndex(current: number, delta: number, length: number): number {
+  if (length === 0) return -1;
+  return Math.min(Math.max(current + delta, 0), length - 1);
+}
+
 /** Whether the target's repos still have to land before the move can be judged. */
 export function isMoveTargetChecking(
   target: Project,

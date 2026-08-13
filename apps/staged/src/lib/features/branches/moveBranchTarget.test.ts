@@ -4,6 +4,7 @@ import {
   filterMoveTargets,
   isMoveTargetChecking,
   moveTargetInvalidReason,
+  nextMoveTargetIndex,
   repoKey,
 } from './moveBranchTarget';
 import type { Project, ProjectRepo } from '../../types';
@@ -148,6 +149,30 @@ describe('moveTargetInvalidReason', () => {
     expect(
       moveTargetInvalidReason(target, branchRepo, [repo({ id: 'r1', githubRepo: 'other/gadgets' })])
     ).toBeNull();
+  });
+});
+
+describe('nextMoveTargetIndex', () => {
+  it('starts at the first row when nothing is selected', () => {
+    expect(nextMoveTargetIndex(-1, 1, 3)).toBe(0);
+    expect(nextMoveTargetIndex(-1, -1, 3)).toBe(0);
+  });
+
+  it('steps within the list and stops at both ends', () => {
+    expect(nextMoveTargetIndex(0, 1, 3)).toBe(1);
+    expect(nextMoveTargetIndex(2, 1, 3)).toBe(2);
+    expect(nextMoveTargetIndex(1, -1, 3)).toBe(0);
+    expect(nextMoveTargetIndex(0, -1, 3)).toBe(0);
+  });
+
+  it('clamps a cursor left past the end by a narrowing query', () => {
+    expect(nextMoveTargetIndex(7, -1, 2)).toBe(1);
+    expect(nextMoveTargetIndex(7, 1, 2)).toBe(1);
+  });
+
+  it('selects nothing when the query matched nothing', () => {
+    expect(nextMoveTargetIndex(-1, 1, 0)).toBe(-1);
+    expect(nextMoveTargetIndex(3, -1, 0)).toBe(-1);
   });
 });
 

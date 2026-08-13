@@ -2435,6 +2435,9 @@ fn plan_branch_move(
     }
 
     // The move pulls the worktree out from under anything running in it.
+    // [`apply_branch_move`] plans again under the branch's session launch lock,
+    // which is what keeps a session from starting between this check and the
+    // rename that acts on it.
     if store
         .has_running_session_for_branch(branch_id)
         .map_err(|e| e.to_string())?
@@ -2547,7 +2550,8 @@ fn plan_branch_move(
 ///
 /// The move runs in three stages that have to agree with each other: the
 /// worktree relocation on disk, the re-parent transaction, and the image files.
-/// A failed transaction puts the worktree back.
+/// The first two go together in [`apply_branch_move`], under the branch's
+/// session launch lock; a failed transaction puts the worktree back.
 pub(crate) async fn move_branch_impl(
     store: &Arc<Store>,
     executor: &ActionExecutor,
@@ -2555,50 +2559,23 @@ pub(crate) async fn move_branch_impl(
     branch_id: &str,
     target_project_id: &str,
 ) -> Result<BranchWithWorkdir, String> {
-    let BranchMovePlan {
-        source_project,
-        github_repo,
-        mv,
-    } = plan_branch_move(store, branch_id, target_project_id)?;
+    // Pre-flight, so an impossible move is refused before anything the branch is
+    // running gets stopped for it. [`apply_branch_move`] plans again under the
+    // launch lock, which is what makes the answer safe to act on.
+    plan_branch_move(store, branch_id, target_project_id)?;
 
     crate::actions::commands::stop_actions_for_branches(executor, registry, &[branch_id]);
 
-    let repo_path = crate::paths::repos_dir()
-        .map(|d| d.join(&github_repo))
-        .ok_or("Cannot determine clone path")?;
-    let workdir_move = mv.workdir.clone();
-
-    // A branch whose setup never finished has nothing on disk to relocate.
-    let mut moved_on_disk = false;
-    if let Some(wd) = &workdir_move {
-        let old_path = PathBuf::from(&wd.old_path);
-        let new_path = PathBuf::from(&wd.new_path);
-        if old_path.exists() {
-            let repo_path = repo_path.clone();
-            tauri::async_runtime::spawn_blocking(move || {
-                git::move_worktree(&repo_path, &old_path, &new_path)
-            })
-            .await
-            .map_err(|e| format!("Failed to move worktree: {e}"))?
-            .map_err(|e| format!("Failed to move worktree: {e}"))?;
-            moved_on_disk = true;
-        }
-    }
-
-    if let Err(e) = store.move_branch_to_project(&mv) {
-        // Disk and database have to agree, so undo the half that landed.
-        if let (true, Some(wd)) = (moved_on_disk, &workdir_move) {
-            if let Err(revert) =
-                git::move_worktree(&repo_path, Path::new(&wd.new_path), Path::new(&wd.old_path))
-            {
-                log::warn!(
-                    "Failed to move worktree for branch {branch_id} back to {}: {revert}",
-                    wd.old_path
-                );
-            }
-        }
-        return Err(e.to_string());
-    }
+    let source_project = {
+        let store = Arc::clone(store);
+        let branch_id = branch_id.to_string();
+        let target_project_id = target_project_id.to_string();
+        tauri::async_runtime::spawn_blocking(move || {
+            apply_branch_move(&store, &branch_id, &target_project_id)
+        })
+        .await
+        .map_err(|e| format!("Failed to move branch: {e}"))??
+    };
 
     move_branch_image_files(store, branch_id, &source_project.id, target_project_id);
 
@@ -2620,6 +2597,75 @@ pub(crate) async fn move_branch_impl(
         .map_err(|e| e.to_string())?
         .map(|w| w.path);
     Ok(to_branch_with_workdir(updated, workdir))
+}
+
+/// Plan the move and apply it: the worktree on disk first, then the transaction
+/// that re-parents the branch, with the rename undone if the transaction fails.
+/// Returns the source project, which the caller still needs to relocate the
+/// branch's images and drop its diff cache.
+///
+/// Synchronous and holding the branch's session launch lock throughout, the way
+/// [`crate::prs`] holds it around its queue-or-start decisions: the plan's "no
+/// session is running on this branch" precondition is only worth acting on for
+/// as long as no session can start underneath it, and two moves of the same
+/// branch — the Tauri command and the web router are separate entry points —
+/// would otherwise race the same rename. The plan is resolved in here for that
+/// reason rather than handed in from outside the lock.
+fn apply_branch_move(
+    store: &Arc<Store>,
+    branch_id: &str,
+    target_project_id: &str,
+) -> Result<store::Project, String> {
+    let launch_lock = crate::session_commands::branch_session_launch_lock_for(branch_id);
+    let _guard = launch_lock.lock().unwrap();
+
+    let BranchMovePlan {
+        source_project,
+        github_repo,
+        mv,
+    } = plan_branch_move(store, branch_id, target_project_id)?;
+
+    let repo_path = crate::paths::repos_dir()
+        .map(|d| d.join(&github_repo))
+        .ok_or("Cannot determine clone path")?;
+
+    // A branch whose setup never finished has nothing on disk to relocate — and
+    // neither does one whose move was interrupted between this rename and the
+    // commit below, because `new_path` is derived rather than stored: re-running
+    // the move finds the worktree already sitting where the transaction is about
+    // to record it, and completes.
+    let mut moved_on_disk = false;
+    if let Some(wd) = &mv.workdir {
+        let old_path = Path::new(&wd.old_path);
+        if old_path.exists() {
+            git::move_worktree(&repo_path, old_path, Path::new(&wd.new_path))
+                .map_err(|e| format!("Failed to move worktree: {e}"))?;
+            moved_on_disk = true;
+        }
+    }
+
+    if let Err(e) = store.move_branch_to_project(&mv) {
+        // Disk and database have to agree, so undo the half that landed.
+        if let (true, Some(wd)) = (moved_on_disk, &mv.workdir) {
+            if let Err(revert) =
+                git::move_worktree(&repo_path, Path::new(&wd.new_path), Path::new(&wd.old_path))
+            {
+                log::warn!(
+                    "Failed to move worktree for branch {branch_id} back to {}: {revert}",
+                    wd.old_path
+                );
+                // Reporting only the store error would read as "nothing changed"
+                // while the worktree sits where neither project expects it.
+                return Err(format!(
+                    "{e} The worktree could not be moved back either, so it is now at {} instead of {}: {revert}",
+                    wd.new_path, wd.old_path
+                ));
+            }
+        }
+        return Err(e.to_string());
+    }
+
+    Ok(source_project)
 }
 
 /// Relocate a moved branch's image files into the destination project's

@@ -122,18 +122,22 @@ impl Store {
             // worktree belongs to this branch and nothing else, and it catches
             // sessions whose link to the branch runs through something this
             // query would otherwise have to enumerate. The suffix is preserved
-            // so a session rooted at a repo subpath keeps it.
-            let old_prefix = format!("{}/", wd.old_path);
+            // so a session rooted at a repo subpath keeps it, separator and
+            // all — `substr` starts at the separator character itself.
+            let (old_slash, old_backslash) = session_dir_prefixes(&wd.old_path, cfg!(windows));
             tx.execute(
                 "UPDATE sessions
                     SET working_dir = ?1 || substr(working_dir, ?2), updated_at = ?3
-                  WHERE working_dir = ?4 OR instr(working_dir, ?5) = 1",
+                  WHERE working_dir = ?4
+                     OR instr(working_dir, ?5) = 1
+                     OR instr(working_dir, ?6) = 1",
                 params![
                     wd.new_path,
                     wd.old_path.chars().count() as i64 + 1,
                     now,
                     wd.old_path,
-                    old_prefix,
+                    old_slash,
+                    old_backslash,
                 ],
             )?;
         }
@@ -151,6 +155,23 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+}
+
+/// The prefixes a `sessions.working_dir` can start with when it lives under
+/// `old_path`. Working dirs are stored via `Path::to_string_lossy`, so on
+/// Windows the separator `PathBuf::join` inserts after the worktree root is
+/// `\`, while a path that arrived as a string can still use `/`; both have to
+/// match. On Unix the pair collapses to `/` alone: a backslash is an ordinary
+/// filename character there, and matching it would move a sibling directory
+/// that merely has one in its name.
+fn session_dir_prefixes(old_path: &str, windows: bool) -> (String, String) {
+    let slash = format!("{old_path}/");
+    let backslash = if windows {
+        format!("{old_path}\\")
+    } else {
+        slash.clone()
+    };
+    (slash, backslash)
 }
 
 /// Make sure a project has exactly one primary repo and that
@@ -419,6 +440,91 @@ mod tests {
         assert_eq!(
             working_dir(&elsewhere.id),
             "/wt/source/acme-widgets--feature-two"
+        );
+    }
+
+    /// Windows records a `\` after the worktree root but can still hold `/`
+    /// in paths that arrived as strings; Unix must treat `\` as a filename
+    /// character, not a separator.
+    #[test]
+    fn session_prefixes_match_the_platforms_separators() {
+        assert_eq!(
+            session_dir_prefixes(r"C:\wt\x", true),
+            (r"C:\wt\x/".to_string(), r"C:\wt\x\".to_string())
+        );
+        assert_eq!(
+            session_dir_prefixes("/wt/x", false),
+            ("/wt/x/".to_string(), "/wt/x/".to_string())
+        );
+    }
+
+    /// A sibling directory whose name happens to continue the worktree's with
+    /// a backslash is not under the worktree on Unix and must stay put.
+    #[cfg(not(windows))]
+    #[test]
+    fn leaves_a_backslash_named_sibling_alone_on_unix() {
+        let f = fixture();
+        let workdir = Workdir::new(&f.source.id, "/wt/source/acme-widgets--feature")
+            .with_branch(&f.branch.id);
+        f.store.create_workdir(&workdir).unwrap();
+        let sibling =
+            Session::new_running("other", Path::new(r"/wt/source/acme-widgets--feature\evil"));
+        f.store.create_session(&sibling).unwrap();
+
+        f.store
+            .move_branch_to_project(&reparent(
+                &f,
+                Some(WorkdirMove {
+                    workdir_id: workdir.id.clone(),
+                    old_path: workdir.path.clone(),
+                    new_path: "/wt/target/acme-widgets--feature".to_string(),
+                }),
+            ))
+            .unwrap();
+
+        assert_eq!(
+            f.store
+                .get_session(&sibling.id)
+                .unwrap()
+                .unwrap()
+                .working_dir,
+            r"/wt/source/acme-widgets--feature\evil"
+        );
+    }
+
+    /// On Windows the session paths under the worktree continue with `\`, and
+    /// have to follow the move just as `/`-separated ones do.
+    #[cfg(windows)]
+    #[test]
+    fn rewrites_backslash_separated_session_paths_on_windows() {
+        let f = fixture();
+        let workdir = Workdir::new(&f.source.id, r"C:\wt\source\acme-widgets--feature")
+            .with_branch(&f.branch.id);
+        f.store.create_workdir(&workdir).unwrap();
+        let at_subpath = Session::new_running(
+            "sub",
+            Path::new(r"C:\wt\source\acme-widgets--feature\apps\web"),
+        );
+        f.store.create_session(&at_subpath).unwrap();
+
+        f.store
+            .move_branch_to_project(&reparent(
+                &f,
+                Some(WorkdirMove {
+                    workdir_id: workdir.id.clone(),
+                    old_path: workdir.path.clone(),
+                    new_path: r"C:\wt\target\acme-widgets--feature".to_string(),
+                }),
+            ))
+            .unwrap();
+
+        assert_eq!(
+            f.store
+                .get_session(&at_subpath.id)
+                .unwrap()
+                .unwrap()
+                .working_dir,
+            r"C:\wt\target\acme-widgets--feature\apps\web"
         );
     }
 

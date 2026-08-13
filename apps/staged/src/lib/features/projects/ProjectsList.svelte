@@ -286,8 +286,8 @@
     if ((e.metaKey || e.ctrlKey) && /^[1-9]$/.test(e.key)) {
       e.preventDefault();
       const index = parseInt(e.key) - 1;
-      if (index < projects.length) {
-        openProject(projects[index].id);
+      if (index < filteredProjects.length) {
+        openProject(filteredProjects[index].id);
       }
     }
   }

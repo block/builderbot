@@ -130,6 +130,20 @@ struct ResolvedRepoTarget {
     branch: Branch,
 }
 
+/// The `start_line` / `end_line` pair reported for a review comment.
+///
+/// Comment spans are stored the way the review prompt asks for them: 0-indexed
+/// lines from the "after" side of the diff with an exclusive end. The payload
+/// reports 1-indexed inclusive lines instead — what the field names imply to
+/// the reading agent, and the same conversion review comments already get when
+/// they're posted to GitHub. An empty span (`start == end`, an anchor covering
+/// no lines) collapses to the single line it sits on rather than reporting an
+/// end before the start.
+fn comment_line_range(span: crate::git::Span) -> (u32, u32) {
+    let start_line = span.start.saturating_add(1);
+    (start_line, span.end.max(start_line))
+}
+
 impl ProjectToolsHandler {
     fn resolve_repo_target(
         &self,
@@ -397,13 +411,16 @@ impl ProjectToolsHandler {
                             "comments": review
                                 .comments
                                 .iter()
-                                .map(|c| serde_json::json!({
-                                    "path": c.path,
-                                    "start_line": c.span.start,
-                                    "end_line": c.span.end,
-                                    "type": c.comment_type.as_ref().map(|t| t.as_str()),
-                                    "content": c.content,
-                                }))
+                                .map(|c| {
+                                    let (start_line, end_line) = comment_line_range(c.span);
+                                    serde_json::json!({
+                                        "path": c.path,
+                                        "start_line": start_line,
+                                        "end_line": end_line,
+                                        "type": c.comment_type.as_ref().map(|t| t.as_str()),
+                                        "content": c.content,
+                                    })
+                                })
                                 .collect::<Vec<_>>(),
                         });
                     }
@@ -525,8 +542,13 @@ impl ProjectToolsHandler {
         // Review sessions only run on review-capable providers, so resolve (and
         // validate) the provider before creating any rows — a failure at drain
         // time would strand a queued session the drain loop can never start.
+        // The provider is inherited from the parent project session rather than
+        // chosen for the review, so one that can't review (e.g. an agent that
+        // isn't available on remote workstations) falls back to the preferred
+        // review-capable provider instead of failing a call the agent has no
+        // provider parameter to work around.
         let provider = if matches!(p.expected_outcome, RepoSessionOutcome::CodeReview) {
-            match crate::session_commands::resolve_review_provider(
+            match crate::session_commands::resolve_inherited_review_provider(
                 self.provider.clone(),
                 target.branch.workspace_name.is_some(),
             ) {
@@ -1097,11 +1119,25 @@ pub async fn start_project_mcp_server(
 #[cfg(test)]
 mod tests {
     use super::{
-        worktree_ready_reply, ProjectToolsHandler, RepoArtifactKind,
+        comment_line_range, worktree_ready_reply, ProjectToolsHandler, RepoArtifactKind,
         REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS,
     };
+    use crate::git::Span;
     use crate::store::{MessageRole, Session, SessionMessage};
     use std::path::Path;
+
+    #[test]
+    fn comment_line_range_reports_one_indexed_inclusive_lines() {
+        // Stored spans are 0-indexed with an exclusive end, so lines 11..=15
+        // of the file are stored as 10..15.
+        assert_eq!(comment_line_range(Span::new(10, 15)), (11, 15));
+        // Single-line comment.
+        assert_eq!(comment_line_range(Span::new(10, 11)), (11, 11));
+        // Empty span: collapse onto the line it anchors to.
+        assert_eq!(comment_line_range(Span::new(10, 10)), (11, 11));
+        // First line of the file.
+        assert_eq!(comment_line_range(Span::new(0, 1)), (1, 1));
+    }
 
     #[test]
     fn worktree_ready_reply_only_promises_setup_actions_when_they_can_run() {

@@ -3433,6 +3433,49 @@ pub(crate) fn resolve_review_provider(
     )
 }
 
+/// [`resolve_review_provider`] for a provider that was *inherited* rather than
+/// chosen — the project session provider a `start_repo_session` review runs
+/// with, which the calling agent has no parameter to override.
+///
+/// The explicit-provider path of [`resolve_review_provider`] is a hard match:
+/// a provider that can't run reviews (not installed locally, or not one of the
+/// agents available on remote workstations) is an error. That's right for a
+/// provider the user picked, but an inherited one is only a preference, and
+/// erroring would leave the caller with no way to get a review at all — so fall
+/// back to the preferred review-capable provider instead.
+pub(crate) fn resolve_inherited_review_provider(
+    provider: Option<String>,
+    is_remote: bool,
+) -> Result<String, String> {
+    resolve_inherited_provider_from_ids(
+        provider,
+        &available_provider_ids(is_remote),
+        &read_recent_agent_ids(),
+        is_remote,
+    )
+}
+
+fn resolve_inherited_provider_from_ids(
+    provider: Option<String>,
+    available_ids: &[String],
+    recent_ids: &[String],
+    is_remote: bool,
+) -> Result<String, String> {
+    match resolve_provider_from_ids(provider.clone(), available_ids, recent_ids, is_remote) {
+        Ok(resolved) => Ok(resolved),
+        // Only the "inherited provider can't review" case falls back; with no
+        // inherited provider the first call already took the preferred path, so
+        // retrying it would just repeat the same error.
+        Err(e) if provider.is_some() => {
+            log::info!(
+                "[review] inherited provider {provider:?} unusable for reviews ({e}); falling back to the preferred provider"
+            );
+            resolve_provider_from_ids(None, available_ids, recent_ids, is_remote)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Core logic for starting an automatic review for a branch.
 ///
 /// Creates a review with `is_auto = true`, starts a session, and emits
@@ -6697,6 +6740,42 @@ mod tests {
         let err = resolve_provider_from_ids(None, &[], &[], false).unwrap_err();
 
         assert!(err.contains("No ACP agent found"));
+    }
+
+    #[test]
+    fn resolve_inherited_provider_falls_back_when_it_cannot_review() {
+        // A project session running on codex asking for a review on a remote
+        // branch, where only goose and claude are available.
+        let resolved = resolve_inherited_provider_from_ids(
+            Some("codex".to_string()),
+            &ids(&["goose", "claude"]),
+            &ids(&["claude"]),
+            true,
+        )
+        .expect("unusable inherited provider should fall back");
+
+        assert_eq!(resolved, "claude");
+    }
+
+    #[test]
+    fn resolve_inherited_provider_keeps_a_review_capable_provider() {
+        let resolved = resolve_inherited_provider_from_ids(
+            Some("goose".to_string()),
+            &ids(&["goose", "claude"]),
+            &ids(&["claude"]),
+            true,
+        )
+        .expect("review-capable inherited provider should be kept");
+
+        assert_eq!(resolved, "goose");
+    }
+
+    #[test]
+    fn resolve_inherited_provider_still_errors_without_any_provider() {
+        let err = resolve_inherited_provider_from_ids(Some("codex".to_string()), &[], &[], true)
+            .unwrap_err();
+
+        assert!(err.contains("No remote ACP provider is configured"));
     }
 
     #[test]

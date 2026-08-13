@@ -25,6 +25,7 @@
   import RepoBadge from '../../shared/RepoBadge.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
+  import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import SineWave from '../../shared/SineWave.svelte';
@@ -100,6 +101,17 @@
     if (!selectedId || filtered.some((p) => p.id === selectedId)) return filtered;
     const selected = projects.find((p) => p.id === selectedId);
     return selected ? [...filtered, selected] : filtered;
+  });
+
+  // Keep run-action state hydrated for the row status dots and the Running
+  // filter — on the repos route this is the only mounted surface that can
+  // feed branch data to the store (ProjectsList and ProjectHome run the same
+  // sweep on their routes). The store dedupes branches it has already
+  // queried, so overlapping with ProjectHome on the project route is cheap.
+  $effect(() => {
+    projectRunActionsStore
+      .hydrateFromProjectBranches(projectsDataStore.branchesByProject)
+      .catch(console.error);
   });
 
   function handleDragStart(index: number) {

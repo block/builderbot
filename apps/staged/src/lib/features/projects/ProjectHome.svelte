@@ -128,14 +128,14 @@
   onMount(() => {
     // Backend/window listeners for the shared data (pr-status-changed,
     // session-status-changed, project-setup-progress, cache-stale) live in
-    // the projectsData store, started once from App.svelte.
+    // the projectsData and projectRunActions stores, started once from
+    // App.svelte.
     workspaceLifecycle.start({
       getBranchesByProject: () => projectsDataStore.branchesByProject,
       setBranchesByProject: (next) => projectsDataStore.setBranchesByProject(next),
       isProjectDeleting: (projectId) => projectsDataStore.isProjectDeleting(projectId),
     });
     checkStoreAndLoad();
-    void projectRunActionsStore.startListening();
 
     const onNewProject = (event: Event) => handleNewProject(repoSeedFromNewProjectEvent(event));
     window.addEventListener('staged:new-project', onNewProject);
@@ -165,7 +165,6 @@
       unlistenDetection();
       cancelQueuedSessionDrain();
       workspaceLifecycle.stop();
-      projectRunActionsStore.stopListening();
     };
   });
 

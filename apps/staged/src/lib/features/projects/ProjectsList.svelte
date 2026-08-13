@@ -182,10 +182,9 @@
 
   onMount(() => {
     // Backend/window listeners for the shared data live in the projectsData
-    // store, started once from App.svelte.
+    // and projectRunActions stores, started once from App.svelte.
     void projectsDataStore.ensureLoaded();
     void projectsDataStore.ensureHomeReposLoaded();
-    void projectRunActionsStore.startListening();
 
     const onNewProject = (event: Event) => {
       newProjectInitialRepo = repoSeedFromNewProjectEvent(event);
@@ -194,7 +193,6 @@
     window.addEventListener('staged:new-project', onNewProject);
 
     return () => {
-      projectRunActionsStore.stopListening();
       window.removeEventListener('staged:new-project', onNewProject);
     };
   });

@@ -711,8 +711,6 @@
         projectsDataStore.refreshProject(targetProjectId),
       ]);
       commands.invalidateBranchTimeline(branchId);
-      const target = projectsDataStore.projects.find((p) => p.id === targetProjectId);
-      toast.success(`Branch moved to ${target ? projectDisplayName(target) : 'the project'}`);
     } catch (e) {
       console.error('Failed to move branch:', e);
       throw e;

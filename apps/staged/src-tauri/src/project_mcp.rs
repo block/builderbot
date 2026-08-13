@@ -148,6 +148,27 @@ fn comment_line_range(span: crate::git::Span) -> (u32, u32) {
     (start_line, span.end.max(start_line))
 }
 
+/// The ACP config selection a queued repo session should carry.
+///
+/// The parent project session's selection names config and value IDs that only
+/// exist on the parent's own provider, so it is inherited only when the repo
+/// session runs on that provider. When review provider resolution falls back
+/// to a different agent, the selection is dropped: the fallback agent would
+/// fail config application at session start, and because a retried
+/// `start_repo_session` stamps the handler's selection onto a fresh row, the
+/// failure would repeat on every retry rather than self-heal.
+fn inherited_acp_config_selection(
+    inherited_provider: Option<&str>,
+    session_provider: Option<&str>,
+    selection: Option<&AcpConfigSelection>,
+) -> Option<AcpConfigSelection> {
+    if session_provider == inherited_provider {
+        selection.cloned()
+    } else {
+        None
+    }
+}
+
 impl ProjectToolsHandler {
     fn resolve_repo_target(
         &self,
@@ -585,7 +606,11 @@ impl ProjectToolsHandler {
         if let Some(ref provider) = session_provider {
             session = session.with_provider(provider);
         }
-        if let Some(selection) = self.acp_config_selection.clone() {
+        if let Some(selection) = inherited_acp_config_selection(
+            self.provider.as_deref(),
+            session_provider.as_deref(),
+            self.acp_config_selection.as_ref(),
+        ) {
             session = session.with_acp_config_selection(selection);
         }
         if let Err(e) = self.store.create_session(&session) {
@@ -1134,11 +1159,13 @@ pub async fn start_project_mcp_server(
 #[cfg(test)]
 mod tests {
     use super::{
-        comment_line_range, worktree_ready_reply, ProjectToolsHandler, RepoArtifactKind,
-        REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS,
+        comment_line_range, inherited_acp_config_selection, worktree_ready_reply,
+        ProjectToolsHandler, RepoArtifactKind, REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS,
     };
     use crate::git::Span;
-    use crate::store::{MessageRole, Session, SessionMessage};
+    use crate::store::{
+        AcpConfigSelection, AcpConfigValueSelection, MessageRole, Session, SessionMessage,
+    };
     use std::path::Path;
 
     #[test]
@@ -1152,6 +1179,51 @@ mod tests {
         assert_eq!(comment_line_range(Span::new(10, 10)), (11, 11));
         // First line of the file.
         assert_eq!(comment_line_range(Span::new(0, 1)), (1, 1));
+    }
+
+    #[test]
+    fn inherited_acp_config_selection_follows_the_inherited_provider_only() {
+        let selection = AcpConfigSelection {
+            model: Some(AcpConfigValueSelection {
+                config_id: "model".to_string(),
+                value_id: "claude-opus-5".to_string(),
+                label: None,
+            }),
+            effort: None,
+        };
+
+        // The session runs on the parent's own provider: selection inherited.
+        assert_eq!(
+            inherited_acp_config_selection(Some("claude"), Some("claude"), Some(&selection)),
+            Some(selection.clone())
+        );
+
+        // Review provider resolution fell back to a different agent: the
+        // parent's config/value IDs don't exist there, so no selection.
+        assert_eq!(
+            inherited_acp_config_selection(Some("codex"), Some("claude"), Some(&selection)),
+            None
+        );
+
+        // No inherited provider to compare against (the review resolved the
+        // preferred provider instead): the selection's provider is unknown,
+        // so it is dropped rather than risked on the resolved agent.
+        assert_eq!(
+            inherited_acp_config_selection(None, Some("claude"), Some(&selection)),
+            None
+        );
+
+        // Non-review outcomes pass the inherited provider through unchanged,
+        // including when it is absent.
+        assert_eq!(
+            inherited_acp_config_selection(None, None, Some(&selection)),
+            Some(selection)
+        );
+
+        assert_eq!(
+            inherited_acp_config_selection(Some("claude"), Some("claude"), None),
+            None
+        );
     }
 
     #[test]

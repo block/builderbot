@@ -245,18 +245,22 @@
   }
 
   async function loadContexts() {
+    // A repo card's "Repo Settings" action parks the repo it wants selected.
+    // Take it up front so a failed load drops the request rather than leaving
+    // it parked for some later, unrelated visit to Settings → Repos.
+    const requested = consumeRepoSettingsTarget();
+    const requestedKey = requested ? repoKey(requested.githubRepo, requested.subpath) : null;
+    let revealRequested = false;
+
     loadingContexts = true;
     try {
       const nextContexts = await commands.listActionContexts();
       contexts = nextContexts;
       await loadRepoAttachments(nextContexts);
-      // A repo card's "Repo Settings" action parks the repo it wants selected;
-      // honor it now that the entry list is resolved.
-      const requested = consumeRepoSettingsTarget();
-      const requestedKey = requested ? repoKey(requested.githubRepo, requested.subpath) : null;
+      // Honor the parked target now that the entry list is resolved.
       if (requestedKey && mergedEntries.some((e) => e.key === requestedKey)) {
         selectedRepoKey = requestedKey;
-        void revealSelectedRepo();
+        revealRequested = true;
       } else if (!selectedRepoKey && mergedEntries.length > 0) {
         selectedRepoKey = mergedEntries[0].key;
       } else if (selectedRepoKey && !mergedEntries.some((e) => e.key === selectedRepoKey)) {
@@ -267,6 +271,9 @@
       console.error('Failed to load action contexts:', e);
     } finally {
       loadingContexts = false;
+      // The sidebar renders a spinner until this flag clears, so the selected
+      // row only exists to scroll to after it does.
+      if (revealRequested) void revealSelectedRepo();
     }
   }
 

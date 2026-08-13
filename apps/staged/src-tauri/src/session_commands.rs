@@ -2178,9 +2178,10 @@ This is a remote-workspace project. Use the project MCP tools to orchestrate wor
     let start_repo_session_desc = if is_remote {
         "- start_repo_session: Use this to make changes or run tasks in one of the project's \
 repositories. It enqueues work and returns a `repo_session_id` immediately. Use \
-`expected_outcome=\"note_in_repo\"` for repo notes and `expected_outcome=\"commit\"` for \
-code changes/commits; commit sessions create signed-off conventional commits. For remote branches \
-this subagent runs on the remote workspace, where file access, notes, and commits must happen.\n\
+`expected_outcome=\"note_in_repo\"` for repo notes, `expected_outcome=\"commit\"` for \
+code changes/commits, and `expected_outcome=\"code_review\"` for an AI code review of the \
+changes on a repo's branch; commit sessions create signed-off conventional commits. For remote branches \
+this subagent runs on the remote workspace, where file access, notes, commits, and reviews must happen.\n\
 - wait_for_repo_session: Use this to wait on a previously started repo session by passing the \
 `repo_session_id`. It returns the queue state (`queued`, `running`, `completed`, `cancelled`, \
 or `failed`), any available artifacts, and activity details. Prefer another \
@@ -2191,9 +2192,11 @@ down a different path rather than when you are surprised at how long the session
     } else {
         "- start_repo_session: Use this to make changes or run tasks in one of the project's \
 repositories. It enqueues work and returns a `repo_session_id` immediately. Use \
-`expected_outcome=\"note_in_repo\"` for repo notes and `expected_outcome=\"commit\"` for \
-code changes/commits; commit sessions create signed-off conventional commits. Do not ask for both \
-a note and a commit in a single start_repo_session request — choose one outcome per call. All \
+`expected_outcome=\"note_in_repo\"` for repo notes, `expected_outcome=\"commit\"` for \
+code changes/commits, and `expected_outcome=\"code_review\"` for an AI code review of the \
+changes on a repo's branch; commit sessions create signed-off conventional commits. Do not ask for \
+multiple outcomes (e.g. a note and a commit) in a single start_repo_session request — choose one \
+outcome per call. All \
 reasoning specific to a repo must be done within a repo session rather than in this project-wide \
 context. You MUST NOT write files directly — all file writes MUST go through start_repo_session \
 with expected_outcome=\"commit\".\n\
@@ -3418,7 +3421,10 @@ fn resolve_provider_from_ids(
 /// When no provider is supplied, mirrors the frontend's `getPreferredAgent`
 /// logic: read `recent-agents`, filter against available providers, then fall
 /// back to the first available provider.
-fn resolve_review_provider(provider: Option<String>, is_remote: bool) -> Result<String, String> {
+pub(crate) fn resolve_review_provider(
+    provider: Option<String>,
+    is_remote: bool,
+) -> Result<String, String> {
     resolve_provider_from_ids(
         provider,
         &available_provider_ids(is_remote),
@@ -6772,6 +6778,13 @@ mod tests {
         assert!(!prompt.contains("repo session is taking a long time"));
     }
 
+    fn assert_project_session_outcome_guidance(prompt: &str) {
+        assert!(prompt.contains("expected_outcome=\"note_in_repo\""));
+        assert!(prompt.contains("expected_outcome=\"commit\""));
+        assert!(prompt.contains("expected_outcome=\"code_review\""));
+        assert!(prompt.contains("AI code review"));
+    }
+
     fn assert_pikchr_note_guidance(prompt: &str, reference: &str) {
         assert!(prompt.contains("Staged notes support rendered diagrams"));
         assert!(prompt.contains("fenced `pikchr` code blocks"));
@@ -6843,6 +6856,7 @@ mod tests {
 
         assert_project_session_reference_guidance(&prompt);
         assert_project_session_repo_session_progress_guidance(&prompt);
+        assert_project_session_outcome_guidance(&prompt);
         assert_pikchr_note_guidance(&prompt, PIKCHR_GRAMMAR_URL);
         assert_note_standalone_output_guidance(&prompt);
     }
@@ -6856,6 +6870,7 @@ mod tests {
 
         assert_project_session_reference_guidance(&prompt);
         assert_project_session_repo_session_progress_guidance(&prompt);
+        assert_project_session_outcome_guidance(&prompt);
         assert_pikchr_note_guidance(&prompt, PIKCHR_GRAMMAR_URL);
         assert_note_standalone_output_guidance(&prompt);
     }

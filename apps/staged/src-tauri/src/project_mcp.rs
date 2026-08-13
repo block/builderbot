@@ -34,6 +34,10 @@ enum RepoSessionOutcome {
     /// is created and the agent is instructed to commit with a signed-off conventional
     /// commit message.
     Commit,
+    /// The session should run an AI code review of the changes on the repo's branch.
+    /// A review record is created and populated with a confidence title and inline
+    /// comments when the session completes.
+    CodeReview,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -53,9 +57,12 @@ struct StartRepoSessionParams {
     ///
     /// - `"note_in_repo"`: Use this for generating notes that can be referred to again
     ///   later by other sessions or by the user. Useful for architecture overviews, plans,
-    ///   research, reviews.
+    ///   research.
     /// - `"commit"`: Use this to request code changes. Agent makes code changes and
     ///   creates a signed-off commit with a conventional commit message.
+    /// - `"code_review"`: Use this to request an AI code review of the changes on the
+    ///   repo's branch. Produces a review with a confidence title and inline comments
+    ///   anchored to the diff.
     pub expected_outcome: RepoSessionOutcome,
 }
 
@@ -108,6 +115,7 @@ struct RepoSessionActivityCounts {
 enum RepoArtifactKind {
     Note,
     Commit,
+    Review,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -327,6 +335,7 @@ impl ProjectToolsHandler {
                 "type": match handle.artifact_kind {
                     RepoArtifactKind::Note => "note",
                     RepoArtifactKind::Commit => "commit",
+                    RepoArtifactKind::Review => "review",
                 },
                 "id": handle.artifact_id,
             },
@@ -372,6 +381,30 @@ impl ProjectToolsHandler {
                         payload["commit"] = serde_json::json!({
                             "id": commit.id,
                             "sha": commit.sha,
+                        });
+                    }
+                }
+                RepoArtifactKind::Review => {
+                    let review = self
+                        .store
+                        .get_review(&handle.artifact_id)
+                        .map_err(|e| format!("Error loading review: {e}"))?;
+                    if let Some(review) = review {
+                        payload["review"] = serde_json::json!({
+                            "id": review.id,
+                            "title": review.title,
+                            "completed_at": review.completed_at,
+                            "comments": review
+                                .comments
+                                .iter()
+                                .map(|c| serde_json::json!({
+                                    "path": c.path,
+                                    "start_line": c.span.start,
+                                    "end_line": c.span.end,
+                                    "type": c.comment_type.as_ref().map(|t| t.as_str()),
+                                    "content": c.content,
+                                }))
+                                .collect::<Vec<_>>(),
                         });
                     }
                 }
@@ -470,7 +503,7 @@ impl ProjectToolsHandler {
 #[tool_router]
 impl ProjectToolsHandler {
     #[tool(
-        description = "Enqueue an agent session in one of the project's repositories and return immediately with an opaque `repo_session_id`. Use `expected_outcome=\"note_in_repo\"` for repo notes or `expected_outcome=\"commit\"` for code changes and a signed-off conventional commit. The `repo` + `subpath` combination must exactly match an entry already in the project."
+        description = "Enqueue an agent session in one of the project's repositories and return immediately with an opaque `repo_session_id`. Use `expected_outcome=\"note_in_repo\"` for repo notes, `expected_outcome=\"commit\"` for code changes and a signed-off conventional commit, or `expected_outcome=\"code_review\"` for an AI code review of the changes on the repo's branch. The `repo` + `subpath` combination must exactly match an entry already in the project."
     )]
     async fn start_repo_session(
         &self,
@@ -489,8 +522,35 @@ impl ProjectToolsHandler {
             Err(e) => return e,
         };
 
+        // Review sessions only run on review-capable providers, so resolve (and
+        // validate) the provider before creating any rows — a failure at drain
+        // time would strand a queued session the drain loop can never start.
+        let provider = if matches!(p.expected_outcome, RepoSessionOutcome::CodeReview) {
+            match crate::session_commands::resolve_review_provider(
+                self.provider.clone(),
+                target.branch.workspace_name.is_some(),
+            ) {
+                Ok(provider) => Some(provider),
+                Err(e) => return e,
+            }
+        } else {
+            self.provider.clone()
+        };
+
+        // A running auto review of the same branch would duplicate the requested
+        // review, so cancel it first — same as user-initiated review sessions.
+        if matches!(p.expected_outcome, RepoSessionOutcome::CodeReview) {
+            if let Err(e) = crate::session_commands::cancel_in_flight_auto_review_for_branch(
+                &self.store,
+                &self.registry,
+                &target.branch.id,
+            ) {
+                return format!("Error cancelling in-flight auto review: {e}");
+            }
+        }
+
         let mut session = crate::store::Session::new_queued(&p.instructions);
-        if let Some(ref provider) = self.provider {
+        if let Some(ref provider) = provider {
             session = session.with_provider(provider);
         }
         if let Some(selection) = self.acp_config_selection.clone() {
@@ -519,6 +579,22 @@ impl ProjectToolsHandler {
                 }
                 (commit_id, RepoArtifactKind::Commit)
             }
+            RepoSessionOutcome::CodeReview => {
+                // The commit_sha is filled in at drain time, when the workspace
+                // exists and the branch tip can be read (same as queued user
+                // review sessions).
+                let review = crate::store::Review::new(
+                    &target.branch.id,
+                    "",
+                    crate::store::ReviewScope::Branch,
+                )
+                .with_session(&session.id);
+                let review_id = review.id.clone();
+                if let Err(e) = self.store.create_review(&review) {
+                    return format!("Error creating review stub: {e}");
+                }
+                (review_id, RepoArtifactKind::Review)
+            }
         };
 
         let repo_session_id =
@@ -532,7 +608,7 @@ impl ProjectToolsHandler {
             Arc::clone(&self.registry),
             self.app_handle.clone(),
             target.branch.id.clone(),
-            self.provider.clone(),
+            provider,
         )
         .await
         {
@@ -546,6 +622,7 @@ impl ProjectToolsHandler {
                 "type": match artifact_kind {
                     RepoArtifactKind::Note => "note",
                     RepoArtifactKind::Commit => "commit",
+                    RepoArtifactKind::Review => "review",
                 },
                 "id": artifact_id,
             },
@@ -1062,6 +1139,22 @@ mod tests {
     }
 
     #[test]
+    fn review_repo_session_handles_round_trip() {
+        let encoded = ProjectToolsHandler::encode_repo_session_handle(
+            "session-123",
+            RepoArtifactKind::Review,
+            "review-789",
+        )
+        .expect("handle should encode");
+        let decoded = ProjectToolsHandler::decode_repo_session_handle(&encoded)
+            .expect("handle should decode");
+
+        assert_eq!(decoded.session_id, "session-123");
+        assert!(matches!(decoded.artifact_kind, RepoArtifactKind::Review));
+        assert_eq!(decoded.artifact_id, "review-789");
+    }
+
+    #[test]
     fn repo_session_handles_reject_invalid_prefix() {
         let err = ProjectToolsHandler::decode_repo_session_handle("session-123")
             .expect_err("invalid handle should fail");
@@ -1161,6 +1254,20 @@ mod tests {
             REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS + 3
         );
         assert!(preview.ends_with("..."));
+    }
+
+    #[test]
+    fn start_repo_session_description_lists_all_outcomes() {
+        let router = ProjectToolsHandler::tool_router();
+        let start_description = router
+            .get("start_repo_session")
+            .and_then(|tool| tool.description.as_deref())
+            .expect("start tool description");
+
+        assert!(start_description.contains("note_in_repo"));
+        assert!(start_description.contains("\"commit\""));
+        assert!(start_description.contains("code_review"));
+        assert!(start_description.contains("AI code review"));
     }
 
     #[test]

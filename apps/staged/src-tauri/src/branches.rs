@@ -2353,6 +2353,320 @@ pub async fn delete_branch(
     store.delete_branch(&branch_id).map_err(|e| e.to_string())
 }
 
+/// Move a branch into another project, taking its notes, commits, reviews,
+/// sessions and images with it.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn move_branch(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    executor: tauri::State<'_, Arc<ActionExecutor>>,
+    registry: tauri::State<'_, Arc<ActionRegistry>>,
+    branch_id: String,
+    target_project_id: String,
+) -> Result<BranchWithWorkdir, String> {
+    let store = get_store(&store)?;
+    move_branch_impl(&store, &executor, &registry, &branch_id, &target_project_id).await
+}
+
+/// The `(github_repo, subpath)` identity of a repo inside a project, matching
+/// `idx_project_repos_unique`'s `(project_id, github_repo, COALESCE(subpath,
+/// ''))`: a NULL subpath and an empty one are the same repo.
+fn repo_subpath_key(github_repo: &str, subpath: Option<&str>) -> String {
+    format!("{github_repo}\u{0}{}", subpath.unwrap_or(""))
+}
+
+fn describe_repo(github_repo: &str, subpath: Option<&str>) -> String {
+    match subpath.filter(|s| !s.is_empty()) {
+        Some(subpath) => format!("{github_repo} ({subpath})"),
+        None => github_repo.to_string(),
+    }
+}
+
+/// A validated branch move: what to rewrite, and where the worktree has to end
+/// up, resolved against the database before anything is mutated.
+#[derive(Debug)]
+struct BranchMovePlan {
+    source_project: store::Project,
+    /// The branch's repo slug, resolved through `project_repos` or the source
+    /// project's primary. Names the local clone the worktree belongs to.
+    github_repo: String,
+    mv: store::BranchMove,
+}
+
+/// Check every precondition on a move and resolve what it will rewrite.
+///
+/// Split out from [`move_branch_impl`] because this is the whole of the move's
+/// decision-making — which `project_repos` row travels, which is cloned, what
+/// counts as a destination that already has the repo — and it needs nothing but
+/// the store to run.
+fn plan_branch_move(
+    store: &Arc<Store>,
+    branch_id: &str,
+    target_project_id: &str,
+) -> Result<BranchMovePlan, String> {
+    let branch = store
+        .get_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+    if branch.project_id == target_project_id {
+        return Err("This branch is already in that project".to_string());
+    }
+
+    let source_project = store
+        .get_project(&branch.project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
+    let target_project = store
+        .get_project(target_project_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Project not found: {target_project_id}"))?;
+
+    // Remote branches of a project share one Blox workspace, so moving one out
+    // would mean cross-workspace surgery on a filesystem we don't own.
+    for project in [&source_project, &target_project] {
+        if project.location == store::ProjectLocation::Remote {
+            return Err(format!(
+                "Project '{}' runs on a remote workspace; branches can only move between local projects",
+                project.name
+            ));
+        }
+    }
+    if branch.branch_type == store::BranchType::Remote {
+        return Err("Remote branches can't be moved between projects".to_string());
+    }
+
+    // The move pulls the worktree out from under anything running in it.
+    if store
+        .has_running_session_for_branch(branch_id)
+        .map_err(|e| e.to_string())?
+    {
+        return Err("A session is running on this branch — wait for the running session to finish before moving it".to_string());
+    }
+
+    let source_repo = match &branch.project_repo_id {
+        Some(repo_id) => store.get_project_repo(repo_id).map_err(|e| e.to_string())?,
+        None => None,
+    };
+    // Mirrors `resolve_branch_repo_slug`: a branch with no repo link falls back
+    // to its project's primary repo.
+    let (github_repo, subpath) = match &source_repo {
+        Some(repo) => (repo.github_repo.clone(), repo.subpath.clone()),
+        None => (
+            project_primary_repo(&source_project)?.to_string(),
+            source_project.subpath.clone(),
+        ),
+    };
+
+    let key = repo_subpath_key(&github_repo, subpath.as_deref());
+    if store
+        .list_project_repos(target_project_id)
+        .map_err(|e| e.to_string())?
+        .iter()
+        .any(|repo| repo_subpath_key(&repo.github_repo, repo.subpath.as_deref()) == key)
+    {
+        return Err(format!(
+            "'{}' already has {} attached",
+            target_project.name,
+            describe_repo(&github_repo, subpath.as_deref())
+        ));
+    }
+
+    // A `project_repos` row can be shared by several branches, so it only
+    // travels when this branch is the last one on it.
+    let placement = match &source_repo {
+        Some(repo) => {
+            let shared = store
+                .list_branches_for_project(&source_project.id)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .any(|b| {
+                    b.id != branch.id && b.project_repo_id.as_deref() == Some(repo.id.as_str())
+                });
+            if shared {
+                let mut clone = store::ProjectRepo::new(
+                    target_project_id,
+                    &repo.github_repo,
+                    &repo.branch_name,
+                    repo.subpath.clone(),
+                );
+                clone.reason = repo.reason.clone();
+                clone.head_repo = repo.head_repo.clone();
+                store::RepoPlacement::Clone(clone)
+            } else {
+                store::RepoPlacement::Reparent {
+                    repo_id: repo.id.clone(),
+                }
+            }
+        }
+        // Legacy branch with no repo link: materialize a row rather than carry
+        // the NULL across, which `resolve_branch_repo_slug` would resolve to the
+        // *destination's* primary repo — a wrong-repo read.
+        None => store::RepoPlacement::Clone(store::ProjectRepo::new(
+            target_project_id,
+            &github_repo,
+            &branch.branch_name,
+            subpath.clone(),
+        )),
+    };
+
+    // `workdirs.path` is the source of truth for where the worktree actually
+    // is — some branches still sit in the legacy non-project-scoped layout.
+    let workdir = match store
+        .get_workdir_for_branch(branch_id)
+        .map_err(|e| e.to_string())?
+    {
+        Some(wd) => {
+            let new_path = git::project_worktree_path_for(
+                target_project_id,
+                &github_repo,
+                &branch.branch_name,
+            )
+            .map_err(|e| e.to_string())?;
+            Some(store::WorkdirMove {
+                workdir_id: wd.id,
+                old_path: wd.path,
+                new_path: new_path.to_string_lossy().to_string(),
+            })
+        }
+        None => None,
+    };
+
+    Ok(BranchMovePlan {
+        mv: store::BranchMove {
+            branch_id: branch_id.to_string(),
+            source_project_id: source_project.id.clone(),
+            target_project_id: target_project_id.to_string(),
+            repo: placement,
+            workdir,
+        },
+        source_project,
+        github_repo,
+    })
+}
+
+/// The body of [`move_branch`], shared with the web router.
+///
+/// The move runs in three stages that have to agree with each other: the
+/// worktree relocation on disk, the re-parent transaction, and the image files.
+/// A failed transaction puts the worktree back.
+pub(crate) async fn move_branch_impl(
+    store: &Arc<Store>,
+    executor: &ActionExecutor,
+    registry: &ActionRegistry,
+    branch_id: &str,
+    target_project_id: &str,
+) -> Result<BranchWithWorkdir, String> {
+    let BranchMovePlan {
+        source_project,
+        github_repo,
+        mv,
+    } = plan_branch_move(store, branch_id, target_project_id)?;
+
+    crate::actions::commands::stop_actions_for_branches(executor, registry, &[branch_id]);
+
+    let repo_path = crate::paths::repos_dir()
+        .map(|d| d.join(&github_repo))
+        .ok_or("Cannot determine clone path")?;
+    let workdir_move = mv.workdir.clone();
+
+    // A branch whose setup never finished has nothing on disk to relocate.
+    let mut moved_on_disk = false;
+    if let Some(wd) = &workdir_move {
+        let old_path = PathBuf::from(&wd.old_path);
+        let new_path = PathBuf::from(&wd.new_path);
+        if old_path.exists() {
+            let repo_path = repo_path.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                git::move_worktree(&repo_path, &old_path, &new_path)
+            })
+            .await
+            .map_err(|e| format!("Failed to move worktree: {e}"))?
+            .map_err(|e| format!("Failed to move worktree: {e}"))?;
+            moved_on_disk = true;
+        }
+    }
+
+    if let Err(e) = store.move_branch_to_project(&mv) {
+        // Disk and database have to agree, so undo the half that landed.
+        if let (true, Some(wd)) = (moved_on_disk, &workdir_move) {
+            if let Err(revert) =
+                git::move_worktree(&repo_path, Path::new(&wd.new_path), Path::new(&wd.old_path))
+            {
+                log::warn!(
+                    "Failed to move worktree for branch {branch_id} back to {}: {revert}",
+                    wd.old_path
+                );
+            }
+        }
+        return Err(e.to_string());
+    }
+
+    move_branch_image_files(store, branch_id, &source_project.id, target_project_id);
+
+    // Cheaper to drop than to move, and it rebuilds on the next diff read.
+    if let Err(e) = crate::diff_cache::delete_branch_cache(
+        source_project.location,
+        &source_project.id,
+        branch_id,
+    ) {
+        log::warn!("Failed to clear diff cache for moved branch {branch_id}: {e}");
+    }
+
+    let updated = store
+        .get_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
+    let workdir = store
+        .get_workdir_for_branch(branch_id)
+        .map_err(|e| e.to_string())?
+        .map(|w| w.path);
+    Ok(to_branch_with_workdir(updated, workdir))
+}
+
+/// Relocate a moved branch's image files into the destination project's
+/// `images/` directory.
+///
+/// Tolerant per entry, like [`crate::paths::migrate_directory_contents`]: a file
+/// that won't move costs one broken attachment, not the whole move — and the
+/// rows already point at the destination by the time this runs.
+fn move_branch_image_files(
+    store: &Arc<Store>,
+    branch_id: &str,
+    source_project_id: &str,
+    target_project_id: &str,
+) {
+    let images = match store.list_all_images_for_branch(branch_id) {
+        Ok(images) => images,
+        Err(e) => {
+            log::warn!("Cannot list images for moved branch {branch_id}: {e}");
+            return;
+        }
+    };
+
+    for image in images {
+        let from = store::images::image_file_path(source_project_id, &image.id, &image.filename);
+        let to = store::images::image_file_path(target_project_id, &image.id, &image.filename);
+        let (Ok(from), Ok(to)) = (from, to) else {
+            continue;
+        };
+        if !from.exists() {
+            continue;
+        }
+        if let Some(parent) = to.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                log::warn!("Cannot create image directory {}: {e}", parent.display());
+                continue;
+            }
+        }
+        if let Err(e) = std::fs::rename(&from, &to) {
+            log::warn!(
+                "Failed to move image {} -> {}: {e}",
+                from.display(),
+                to.display()
+            );
+        }
+    }
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub async fn rename_branch(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
@@ -2989,6 +3303,202 @@ mod tests {
         assert!(
             is_missing_remote_ref_fetch_error(&err),
             "expected missing remote ref error, got: {err}"
+        );
+    }
+
+    // ── plan_branch_move ────────────────────────────────────────────────────
+
+    struct MoveFixture {
+        store: Arc<Store>,
+        source: store::Project,
+        target: store::Project,
+        repo: store::ProjectRepo,
+        branch: store::Branch,
+    }
+
+    fn move_fixture() -> MoveFixture {
+        let store = Arc::new(Store::in_memory().unwrap());
+        let source = store::Project::named("source").with_primary_repo("acme/widgets");
+        let target = store::Project::named("target");
+        store.create_project(&source).unwrap();
+        store.create_project(&target).unwrap();
+
+        let repo = store::ProjectRepo::new(&source.id, "acme/widgets", "feature", None).primary();
+        store.create_project_repo(&repo).unwrap();
+        let branch =
+            store::Branch::new(&source.id, "feature", "origin/main").with_project_repo(&repo.id);
+        store.create_branch(&branch).unwrap();
+
+        MoveFixture {
+            store,
+            source,
+            target,
+            repo,
+            branch,
+        }
+    }
+
+    #[test]
+    fn plan_move_carries_a_sole_branch_repo_row_across() {
+        let f = move_fixture();
+
+        let plan = plan_branch_move(&f.store, &f.branch.id, &f.target.id).unwrap();
+
+        match &plan.mv.repo {
+            store::RepoPlacement::Reparent { repo_id } => assert_eq!(repo_id, &f.repo.id),
+            other => panic!("expected the repo row to travel, got {other:?}"),
+        }
+        assert_eq!(plan.github_repo, "acme/widgets");
+        // Nothing on disk yet, so there is no worktree to relocate.
+        assert!(plan.mv.workdir.is_none());
+    }
+
+    #[test]
+    fn plan_move_clones_a_repo_row_a_sibling_branch_shares() {
+        let f = move_fixture();
+        let sibling =
+            store::Branch::new(&f.source.id, "other", "origin/main").with_project_repo(&f.repo.id);
+        f.store.create_branch(&sibling).unwrap();
+
+        let plan = plan_branch_move(&f.store, &f.branch.id, &f.target.id).unwrap();
+
+        match plan.mv.repo {
+            store::RepoPlacement::Clone(repo) => {
+                assert_ne!(repo.id, f.repo.id);
+                assert_eq!(repo.github_repo, "acme/widgets");
+                assert_eq!(repo.project_id, f.target.id);
+            }
+            other => panic!("expected a cloned repo row, got {other:?}"),
+        }
+    }
+
+    /// A NULL `project_repo_id` would resolve to the *destination's* primary
+    /// repo after the move, so the plan materializes a row instead.
+    #[test]
+    fn plan_move_materializes_a_row_for_a_branch_with_no_repo_link() {
+        let f = move_fixture();
+        let legacy = store::Branch::new(&f.source.id, "legacy", "origin/main");
+        f.store.create_branch(&legacy).unwrap();
+
+        let plan = plan_branch_move(&f.store, &legacy.id, &f.target.id).unwrap();
+
+        match plan.mv.repo {
+            store::RepoPlacement::Clone(repo) => {
+                assert_eq!(repo.github_repo, "acme/widgets");
+                assert_eq!(repo.branch_name, "legacy");
+            }
+            other => panic!("expected a materialized repo row, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plan_move_relocates_the_worktree_into_the_destination_project() {
+        let f = move_fixture();
+        let workdir = store::Workdir::new(&f.source.id, "/wt/old/path").with_branch(&f.branch.id);
+        f.store.create_workdir(&workdir).unwrap();
+
+        let plan = plan_branch_move(&f.store, &f.branch.id, &f.target.id).unwrap();
+
+        let wd = plan.mv.workdir.expect("worktree should be relocated");
+        assert_eq!(wd.workdir_id, workdir.id);
+        // The old path comes from the row, not a recomputed one — legacy-layout
+        // worktrees move from wherever they actually are.
+        assert_eq!(wd.old_path, "/wt/old/path");
+        let expected = git::project_worktree_path_for(&f.target.id, "acme/widgets", "feature")
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(wd.new_path, expected);
+    }
+
+    #[test]
+    fn plan_move_rejects_a_remote_project_on_either_end() {
+        let f = move_fixture();
+        let mut remote = store::Project::named("remote-target");
+        remote.location = store::ProjectLocation::Remote;
+        f.store.create_project(&remote).unwrap();
+
+        let err = plan_branch_move(&f.store, &f.branch.id, &remote.id).unwrap_err();
+        assert!(err.contains("remote workspace"), "unexpected error: {err}");
+
+        // …and the same when the branch is leaving a remote project.
+        let remote_repo =
+            store::ProjectRepo::new(&remote.id, "acme/other", "feature", None).primary();
+        f.store.create_project_repo(&remote_repo).unwrap();
+        let remote_branch = store::Branch::new(&remote.id, "feature", "origin/main")
+            .with_project_repo(&remote_repo.id);
+        f.store.create_branch(&remote_branch).unwrap();
+
+        let err = plan_branch_move(&f.store, &remote_branch.id, &f.target.id).unwrap_err();
+        assert!(err.contains("remote workspace"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn plan_move_rejects_a_branch_with_a_session_running_on_it() {
+        let f = move_fixture();
+        let session = store::Session::new_running("work", Path::new("/wt/old/path"))
+            .with_branch(&f.branch.id);
+        f.store.create_session(&session).unwrap();
+
+        let err = plan_branch_move(&f.store, &f.branch.id, &f.target.id).unwrap_err();
+
+        assert!(
+            err.contains("session is running"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn plan_move_rejects_a_destination_that_already_has_the_repo() {
+        let f = move_fixture();
+        f.store
+            .create_project_repo(&store::ProjectRepo::new(
+                &f.target.id,
+                "acme/widgets",
+                "main",
+                None,
+            ))
+            .unwrap();
+
+        let err = plan_branch_move(&f.store, &f.branch.id, &f.target.id).unwrap_err();
+
+        assert!(
+            err.contains("already has acme/widgets"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// `idx_project_repos_unique` coalesces the subpath, so a NULL subpath and
+    /// an empty one are the same repo — the check has to agree.
+    #[test]
+    fn plan_move_treats_a_null_and_an_empty_subpath_as_the_same_repo() {
+        let f = move_fixture();
+        f.store
+            .create_project_repo(&store::ProjectRepo::new(
+                &f.target.id,
+                "acme/widgets",
+                "main",
+                Some(String::new()),
+            ))
+            .unwrap();
+
+        let err = plan_branch_move(&f.store, &f.branch.id, &f.target.id).unwrap_err();
+
+        assert!(
+            err.contains("already has acme/widgets"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn plan_move_rejects_a_move_into_the_branchs_own_project() {
+        let f = move_fixture();
+
+        let err = plan_branch_move(&f.store, &f.branch.id, &f.source.id).unwrap_err();
+
+        assert!(
+            err.contains("already in that project"),
+            "unexpected error: {err}"
         );
     }
 }

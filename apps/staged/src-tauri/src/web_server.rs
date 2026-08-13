@@ -1316,6 +1316,20 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
+        "move_branch" => {
+            let store = get_store(store_mutex)?;
+            let branch_id: String = arg(&args, "branchId")?;
+            let target_project_id: String = arg(&args, "targetProjectId")?;
+            let moved = crate::branches::move_branch_impl(
+                &store,
+                action_executor,
+                action_registry,
+                &branch_id,
+                &target_project_id,
+            )
+            .await?;
+            Ok(serde_json::to_value(moved).unwrap())
+        }
         "get_blox_env" => Ok(serde_json::to_value(std::env::var("BLOX_ENV").ok()).unwrap()),
         // =====================================================================
         // Workspace / Blox commands (Tier 3)

@@ -353,6 +353,24 @@ export function renameBranch(branchId: string, branchName: string): Promise<Bran
   return invokeCommand('rename_branch', { branchId, branchName });
 }
 
+/**
+ * Move a branch into another project, taking its notes, commits, reviews,
+ * sessions and images with it. Both projects must be local.
+ *
+ * A move reshapes both ends — each project's branch list, its repos, and the
+ * `github_repo` each one denormalizes from its primary — so all three caches go
+ * stale, the way `deleteProject` treats them.
+ */
+export async function moveBranch(branchId: string, targetProjectId: string): Promise<Branch> {
+  const branch = await invokeCommand<Branch>('move_branch', { branchId, targetProjectId });
+  await Promise.all([
+    invalidateCacheByCommand('list_projects'),
+    invalidateCacheByCommand('list_branches_for_project'),
+    invalidateCacheByCommand('list_project_repos'),
+  ]);
+  return branch;
+}
+
 /** Return the BLOX_ENV environment variable value, or null if unset. */
 export function getBloxEnv(): Promise<string | null> {
   return invokeCommand('get_blox_env');

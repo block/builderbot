@@ -9,6 +9,10 @@
   in an elevated dropdown under the row (so the two surfaces can't drift),
   dismissed by clicking anywhere outside. Only the open/closed state is
   local — the selection itself lives in projectFiltersStore.
+
+  The row is sticky: once the sidebar scrolls past its natural position it
+  pins to the top of the scroll area, so the filter summary (and the way out
+  of a filtered-down list) stays reachable from anywhere in a long list.
 -->
 <script lang="ts">
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
@@ -24,6 +28,35 @@
   import ProjectFilterChips from './ProjectFilterChips.svelte';
 
   let open = $state(false);
+  let stuck = $state(false);
+
+  // The hairline under the row should only exist while it's pinned, and CSS
+  // has no pinned-state selector for sticky elements. With the scroll
+  // container's top edge inset by 1px, being clipped at the *top* is unique
+  // to the pinned state — clipped at the bottom just means the row scrolled
+  // below the fold — and an observer also catches pinning caused by content
+  // above the row changing height, which fires no scroll event.
+  function observeStuck(node: HTMLElement) {
+    let scrollParent = node.parentElement;
+    while (scrollParent && !/auto|scroll/.test(getComputedStyle(scrollParent).overflowY)) {
+      scrollParent = scrollParent.parentElement;
+    }
+    if (!scrollParent) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        stuck =
+          entry.intersectionRatio < 1 &&
+          entry.boundingClientRect.top <= (entry.rootBounds?.top ?? Number.NEGATIVE_INFINITY);
+      },
+      { root: scrollParent, threshold: 1, rootMargin: '-1px 0px 0px 0px' }
+    );
+    observer.observe(node);
+    return {
+      destroy() {
+        observer.disconnect();
+      },
+    };
+  }
 
   let statusLabels = $derived.by(() => {
     const labels: string[] = [];
@@ -59,7 +92,12 @@
 </script>
 
 <Popover.Root bind:open>
-  <div class="filter-row" class:filtering={projectFiltersStore.hasActiveFilters}>
+  <div
+    class="filter-row"
+    class:filtering={projectFiltersStore.hasActiveFilters}
+    class:stuck
+    use:observeStuck
+  >
     <Popover.Trigger
       class="sidebar-filter-trigger"
       title={open ? 'Hide filter options' : 'Filter projects'}
@@ -120,11 +158,21 @@
 
 <style>
   .filter-row {
+    position: sticky;
+    top: 0;
+    z-index: 2;
     display: flex;
     align-items: center;
     gap: 2px;
     width: calc(100% + (2 * var(--project-row-bleed)));
     margin: 0 calc(-1 * var(--project-row-bleed));
+    /* Opaque so rows scrolling under the pinned row are masked, invisible at
+       rest since it matches the sidebar. */
+    background: var(--bg-app-bar);
+  }
+
+  .filter-row.stuck {
+    box-shadow: 0 1px 0 color-mix(in srgb, var(--border-subtle) 50%, transparent);
   }
 
   /* Popover.Trigger renders in a child component, so its class escapes this

@@ -16,6 +16,7 @@
   import { tick } from 'svelte';
   import Cloud from '@lucide/svelte/icons/cloud';
   import Search from '@lucide/svelte/icons/search';
+  import X from '@lucide/svelte/icons/x';
   import * as Dialog from '$lib/components/ui/dialog';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
@@ -134,15 +135,32 @@
     }
   }}
 >
-  <Dialog.Content class="sm:max-w-[480px] gap-4">
-    <Dialog.Header>
-      <Dialog.Title>Move to Project</Dialog.Title>
-      <Dialog.Description>
+  <Dialog.Content
+    class="sm:max-w-[480px] p-0 gap-0 overflow-hidden flex flex-col"
+    showCloseButton={false}
+  >
+    <header class="modal-header">
+      <Dialog.Title class="text-[var(--size-sm)] font-semibold text-foreground">
+        Move to Project
+      </Dialog.Title>
+      <Button
+        variant="ghost"
+        size="icon"
+        class="size-7 shrink-0 text-muted-foreground hover:bg-[var(--bg-hover)] hover:text-foreground max-[768px]:size-10 [&_svg]:!size-[18px]"
+        title="Close"
+        aria-label="Close"
+        onclick={requestClose}
+        disabled={moving}
+      >
+        <X size={18} />
+      </Button>
+    </header>
+
+    <form class="modal-body" onsubmit={handleSubmit}>
+      <Dialog.Description class="text-[var(--size-sm)]">
         {branch.branchName} moves with its notes, commits, reviews and sessions.
       </Dialog.Description>
-    </Dialog.Header>
 
-    <form class="move-form" onsubmit={handleSubmit}>
       <div class="search-field">
         <Search size={14} class="search-icon" />
         <Input
@@ -152,7 +170,7 @@
           disabled={moving}
           placeholder="Search projects…"
           autocomplete="off"
-          class="pl-8"
+          class="pl-8 bg-[var(--bg-primary)] focus-visible:ring-0 focus-visible:border-[var(--border-emphasis)]"
           onkeydown={handleSearchKeydown}
         />
       </div>
@@ -200,11 +218,22 @@
         <p class="move-warning" role="alert">{invalidReason}</p>
       {/if}
 
-      <Dialog.Footer>
-        <Button type="button" variant="outline" onclick={requestClose} disabled={moving}>
+      <div class="form-actions">
+        <Button
+          type="button"
+          variant="outline"
+          class="gap-1.5 px-4 py-2 text-sm font-medium text-muted-foreground hover:text-foreground max-[768px]:h-11 max-[768px]:flex-1 max-[768px]:justify-center"
+          onclick={requestClose}
+          disabled={moving}
+        >
           Cancel
         </Button>
-        <Button type="submit" disabled={!selected || !!invalidReason || checking || moving}>
+        <Button
+          type="submit"
+          variant="accent"
+          class="gap-1.5 px-4 py-2 text-sm max-[768px]:h-11 max-[768px]:flex-1 max-[768px]:justify-center"
+          disabled={!selected || !!invalidReason || checking || moving}
+        >
           {#if moving}
             <Spinner size={14} />
             <span>Moving...</span>
@@ -214,16 +243,28 @@
             Move
           {/if}
         </Button>
-      </Dialog.Footer>
+      </div>
     </form>
   </Dialog.Content>
 </Dialog.Root>
 
 <style>
-  .move-form {
+  .modal-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 18px;
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .modal-body {
+    padding: 18px;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 14px;
+    flex: 1;
+    min-height: 0;
   }
 
   .search-field {
@@ -245,6 +286,10 @@
     gap: 2px;
     max-height: 260px;
     overflow-y: auto;
+    padding: 4px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-muted);
+    border-radius: 6px;
   }
 
   .project-row {
@@ -253,7 +298,7 @@
     gap: 2px;
     padding: 8px 10px;
     border: 1px solid transparent;
-    border-radius: 8px;
+    border-radius: 6px;
     background: transparent;
     text-align: left;
     cursor: pointer;
@@ -290,7 +335,7 @@
 
   .empty-state {
     margin: 0;
-    padding: 12px 2px;
+    padding: 12px 10px;
     color: var(--text-muted);
     font-size: var(--size-xs);
   }
@@ -305,5 +350,31 @@
     margin: 0;
     color: var(--text-muted);
     font-size: var(--size-xs);
+  }
+
+  .form-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 4px;
+    flex-shrink: 0;
+  }
+
+  @media (max-width: 768px) {
+    .modal-header {
+      padding: 12px 16px;
+    }
+
+    .modal-body {
+      padding: 16px;
+    }
+
+    /* Full-screen on mobile: let the list take the leftover height instead of
+       capping at the desktop popover size. */
+    .project-list {
+      max-height: none;
+      flex: 1;
+      min-height: 0;
+    }
   }
 </style>

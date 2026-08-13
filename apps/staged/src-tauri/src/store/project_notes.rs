@@ -213,6 +213,25 @@ impl Store {
         })
     }
 
+    /// Find a project note by id with session status resolved.
+    ///
+    /// Unlike [`Self::list_project_notes_with_status`] this takes no project
+    /// scope, so it can serve a `#project-note:<id>` reference that points at
+    /// another project's note.
+    pub fn get_project_note_with_status(
+        &self,
+        id: &str,
+    ) -> Result<Option<ProjectNote>, StoreError> {
+        let mut note = match self.get_project_note(id)? {
+            Some(n) => n,
+            None => return Ok(None),
+        };
+        let resolved = self.resolve_session_status(note.session_id.as_deref());
+        note.session_status = resolved.status;
+        note.completion_reason = resolved.completion_reason;
+        Ok(Some(note))
+    }
+
     /// Find a project note by session ID with session status resolved.
     pub fn get_project_note_by_session_with_status(
         &self,

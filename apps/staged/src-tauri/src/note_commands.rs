@@ -157,6 +157,23 @@ pub fn list_project_notes(
         .map_err(|e| e.to_string())
 }
 
+/// Fetch a single project note by id (no project filter), with resolved
+/// session status.
+///
+/// The `#project-note:<id>` counterpart of [`get_note`]: branch history renders
+/// a child note as "of project note #project-note:<id>", so an agent can quote
+/// that reference into a note body whose reader is scoped to a different
+/// project. This lets such a reference open instead of silently no-opping.
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_project_note(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    project_note_id: String,
+) -> Result<Option<crate::store::ProjectNote>, String> {
+    crate::get_store(&store)?
+        .get_project_note_with_status(&project_note_id)
+        .map_err(|e| e.to_string())
+}
+
 /// Get a single project note by its linked session ID, with resolved session status.
 #[tauri::command(rename_all = "camelCase")]
 pub fn get_project_note_by_session(

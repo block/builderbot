@@ -318,6 +318,38 @@ describe('renderHashtagTokens', () => {
     expect(html).not.toContain('style=');
   });
 
+  it('resolves references that sit next to sentence punctuation', () => {
+    const items: HashtagItem[] = [
+      {
+        type: 'note',
+        id: 'note-1',
+        title: 'Child note title',
+        color: '--note-color',
+        bgColor: '--note-bg',
+      },
+    ];
+
+    // Agents are prompted to cite children inline, so the id is routinely
+    // followed by prose punctuation. It must stay out of the token: otherwise
+    // the badge shows a raw id and a click resolves nothing.
+    for (const text of ['Collected in #note:note-1.', 'Collected in (#note:note-1),']) {
+      const html = renderHashtagTokens(text, items);
+      expect(html).toContain('Child note title');
+      expect(html).toContain('data-hashtag-ref="#note:note-1"');
+      expect(html).toContain('data-hashtag-id="note-1"');
+    }
+
+    // The punctuation itself survives as text, outside the badge.
+    expect(renderHashtagTokens('See #note:note-1.', items)).toMatch(/<\/span>\.$/);
+  });
+
+  it('keeps punctuation inside an id, dropping only the trailing run', () => {
+    const html = renderHashtagTokens('#note:a.b).', []);
+
+    expect(html).toContain('data-hashtag-id="a.b"');
+    expect(html).toMatch(/<\/span>\)\.$/);
+  });
+
   it('can render presentational badges without interaction attributes', () => {
     const html = renderHashtagTokens(
       'See #note:note-1',

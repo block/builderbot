@@ -2,8 +2,18 @@ import type { BranchTimeline, HashtagItem, ProjectNote, Branch, ProjectRepo } fr
 import { getBranchTimeline, listProjectNotes } from '../../commands';
 import { branchTimelineReadyKey } from '../branches/branchTimelineReady';
 
-/** Regex matching `#type:id` hashtag tokens in plain text. Use with `new RegExp(source, 'g')` for stateful iteration. */
-export const HASHTAG_TOKEN_RE = /#(note|commit|review|project-note|image):([^\s]+)/g;
+/**
+ * Regex matching `#type:id` hashtag tokens in plain text. Use with
+ * `new RegExp(source, 'g')` for stateful iteration.
+ *
+ * The id runs to the next whitespace but may not END in sentence punctuation.
+ * Notes are cited inline in prose (`… collected in #note:<id>.`), and every id
+ * is a uuid or a hex sha, so a trailing `.`/`,`/`)` is the surrounding sentence
+ * rather than part of the id. Interior punctuation is still kept — only the
+ * trailing run is left outside the token.
+ */
+export const HASHTAG_TOKEN_RE =
+  /#(note|commit|review|project-note|image):([^\s]*[^\s.,;:!?)\]}'"])/g;
 
 /**
  * Incrementally joins editor content chunks into the raw `value` string,

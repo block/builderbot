@@ -18,7 +18,7 @@
     NoteTimelineItem,
   } from '../../types';
   import * as commands from '../../api/commands';
-  import { buildProjectHashtagItems } from '../sessions/hashtagItems';
+  import { buildProjectHashtagItems, projectNotesToHashtagItems } from '../sessions/hashtagItems';
   import { branchTimelineReadyKey } from '../branches/branchTimelineReady';
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
@@ -426,10 +426,14 @@
       return;
     }
 
-    // A `#note:<id>` can point outside the merged item list — e.g. a child of a
-    // different project note, or one this project's timelines don't carry.
-    // Fetch it directly so the reference opens instead of silently no-opping.
-    if (click.type === 'note') void openUnresolvedNoteReference(click);
+    // A note reference can point outside the merged item list — e.g. a child of
+    // a different project note, or another project's project note (branch
+    // history renders a child as "of project note #project-note:<id>", which an
+    // agent may quote into a body read from here). Fetch it directly so the
+    // reference opens instead of silently no-opping.
+    if (click.type === 'note' || click.type === 'project-note') {
+      void openUnresolvedNoteReference(click);
+    }
   }
 
   function openHashtagTarget(target: ReferenceHistoryEntry) {
@@ -442,22 +446,34 @@
     }
   }
 
+  /** Fetch the note behind an unresolved reference as a hashtag item. */
+  async function fetchUnresolvedNoteItem(click: HashtagClickInfo): Promise<HashtagItem | null> {
+    if (click.type === 'note') {
+      const note = await commands.getNote(click.id);
+      if (note) return noteToHashtagItem(note);
+    }
+    // `#note:<id>` also accepts a project note (see the lookup aliases in
+    // hashtagItems), so both kinds fall through to the project-note lookup.
+    const projectNote = await commands.getProjectNote(click.id);
+    return projectNote ? (projectNotesToHashtagItems([projectNote]).at(0) ?? null) : null;
+  }
+
   async function openUnresolvedNoteReference(click: HashtagClickInfo) {
     const originNoteId = openNote?.noteId;
-    let note: NoteTimelineItem | null;
+    let item: HashtagItem | null;
     try {
-      note = await commands.getNote(click.id);
+      item = await fetchUnresolvedNoteItem(click);
     } catch (e) {
       console.error('[ProjectSection] Failed to load referenced note:', e);
       return;
     }
-    if (!note) return;
+    if (!item) return;
     // The dialog the click came from may have closed or moved on while the
     // fetch was in flight; opening now would push a stale back-stack entry.
     if (openNote?.noteId !== originNoteId) return;
 
     const target = resolveHashtagReference(
-      { ...click, item: noteToHashtagItem(note) },
+      { ...click, item },
       { hashtagItems: noteModalHashtagItems, diffContext: referenceDiffContext }
     );
     if (target) openHashtagTarget(target);

@@ -2256,6 +2256,7 @@ pub fn run() {
             note_commands::list_child_notes,
             note_commands::create_project_note,
             note_commands::list_project_notes,
+            note_commands::get_project_note,
             note_commands::get_project_note_by_session,
             note_commands::get_branch_note_by_session,
             note_commands::delete_project_note,

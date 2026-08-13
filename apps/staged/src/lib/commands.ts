@@ -225,6 +225,17 @@ export function createProjectNote(
   return invokeCommand('create_project_note', { projectId, title, content });
 }
 
+/**
+ * Fetch a single project note by id (no project filter). The
+ * `#project-note:<id>` counterpart of {@link getNote}: used to open a reference
+ * that points outside the current project's note list.
+ */
+export function getProjectNote(
+  projectNoteId: string
+): Promise<import('./types').ProjectNote | null> {
+  return invokeCommand('get_project_note', { projectNoteId });
+}
+
 export function getProjectNoteBySession(
   sessionId: string
 ): Promise<import('./types').ProjectNote | null> {

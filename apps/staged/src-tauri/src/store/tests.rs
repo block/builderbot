@@ -182,6 +182,32 @@ fn test_list_project_notes_orders_by_completion_time() {
 }
 
 #[test]
+fn test_get_project_note_with_status_is_not_project_scoped() {
+    let store = Store::in_memory().unwrap();
+    let other_project = Project::new("test-owner/other-repo");
+    store.create_project(&other_project).unwrap();
+
+    let session = Session::new_running("write the project note", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    let note = ProjectNote::new(&other_project.id, "Foreign", "Body").with_session(&session.id);
+    store.create_project_note(&note).unwrap();
+
+    // A `#project-note:<id>` reference clicked from another project has no
+    // project scope to search, so the lookup is by id alone.
+    let fetched = store
+        .get_project_note_with_status(&note.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.project_id, other_project.id);
+    assert_eq!(fetched.session_status.as_deref(), Some("running"));
+
+    assert!(store
+        .get_project_note_with_status("missing")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
 fn test_delete_project_cascades() {
     let store = Store::in_memory().unwrap();
     let project = Project::new("test-owner/test-repo");

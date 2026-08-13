@@ -44,7 +44,8 @@ class ProjectRunActionsStore {
 
   /**
    * Start listening to global Tauri events.
-   * Called when ProjectsList or ProjectHome mounts.
+   * Called once from App.svelte — the state feeds the shared project filters,
+   * which every route renders via the sidebar or the landing grid.
    */
   startListening(): void {
     if (this.initialized) return;
@@ -76,7 +77,7 @@ class ProjectRunActionsStore {
   }
 
   /**
-   * Stop listening and reset state. Call on cleanup.
+   * Stop listening and reset state. Called on app teardown.
    */
   stopListening(): void {
     for (const unlisten of this.unlisteners) {
@@ -106,8 +107,9 @@ class ProjectRunActionsStore {
 
   /**
    * Update the branch→project map and hydrate run-action state from a
-   * project→branches map. Convenience wrapper used by both ProjectsList
-   * and ProjectHome after loading branch data.
+   * project→branches map. Convenience wrapper the project surfaces
+   * (ProjectsList, ProjectHome, ProjectsSidebar) run against the shared
+   * branch data; already-queried branches are skipped unless forced.
    */
   async hydrateFromProjectBranches(
     branchesByProject: Map<string, Branch[]>,

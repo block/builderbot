@@ -47,6 +47,7 @@
   import { runSearchShortcut } from './lib/features/keyboard/searchTargets';
   import { projectStateStore } from './lib/stores/projectState.svelte';
   import { projectsDataStore } from './lib/stores/projectsData.svelte';
+  import { projectRunActionsStore } from './lib/stores/projectRunActions.svelte';
   import { initBloxEnv } from './lib/stores/bloxEnv.svelte';
   import { listenForSessionStatus } from './lib/listeners/sessionStatusListener';
   import { listenForCacheInvalidation } from './lib/listeners/cacheInvalidationListener';
@@ -309,6 +310,12 @@
     // Keep the shared project-list cache fresh for the app's lifetime — the
     // store dedupes, so starting before any view consumes it is safe.
     projectsDataStore.startListeners();
+    // Run-action state feeds the shared project filters (Running chip,
+    // filtered lists), which every route renders via the sidebar or the
+    // landing grid — so its listeners are app-lifetime too. A view-scoped
+    // lifecycle wiped the state on the repos route, where neither view that
+    // used to own it is mounted.
+    projectRunActionsStore.startListening();
 
     try {
       await initPreferences();
@@ -499,6 +506,7 @@
     unlistenPageLifecycle?.();
     unlistenAcpToolsReconciled?.();
     projectsDataStore.stopListeners();
+    projectRunActionsStore.stopListening();
     stopUpdaterLoop?.();
   });
 

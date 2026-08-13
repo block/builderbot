@@ -25,6 +25,7 @@
   import RepoBadge from '../../shared/RepoBadge.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
+  import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import SineWave from '../../shared/SineWave.svelte';
@@ -41,6 +42,8 @@
   } from './projectsSidebarState.svelte';
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
   import RepoCard from './RepoCard.svelte';
+  import SidebarFilterRow from './SidebarFilterRow.svelte';
+  import { projectFiltersStore } from './projectFilters.svelte';
   import * as commands from '../../api/commands';
   import { projectActions } from './projectActions.svelte';
   import * as ContextMenu from '$lib/components/ui/context-menu';
@@ -87,6 +90,29 @@
   let showAllReposRow = $derived(
     projectsDataStore.homeRepos.length > 0 || navigation.showReposList
   );
+
+  // Project rows follow the shared filter state, with one exception: the
+  // selected project stays visible (appended if filtered out) so the row
+  // highlighting the active view can't vanish out from under it — the same
+  // rule that keeps the All Repos row above.
+  let sidebarProjects = $derived.by(() => {
+    const filtered = projectFiltersStore.filteredProjects;
+    const selectedId = navigation.selectedProjectId;
+    if (!selectedId || filtered.some((p) => p.id === selectedId)) return filtered;
+    const selected = projects.find((p) => p.id === selectedId);
+    return selected ? [...filtered, selected] : filtered;
+  });
+
+  // Keep run-action state hydrated for the row status dots and the Running
+  // filter — on the repos route this is the only mounted surface that can
+  // feed branch data to the store (ProjectsList and ProjectHome run the same
+  // sweep on their routes). The store dedupes branches it has already
+  // queried, so overlapping with ProjectHome on the project route is cheap.
+  $effect(() => {
+    projectRunActionsStore
+      .hydrateFromProjectBranches(projectsDataStore.branchesByProject)
+      .catch(console.error);
+  });
 
   function handleDragStart(index: number) {
     return (e: DragEvent) => {
@@ -473,7 +499,17 @@
           {#if projects.length === 0}
             <div class="state">No projects yet.</div>
           {:else}
-            {#each projects as project (project.id)}
+            <SidebarFilterRow />
+            {#if sidebarProjects.length === 0}
+              <div class="state no-matches">
+                <span>No projects match filters</span>
+                <button
+                  class="clear-filters-link"
+                  onclick={() => projectFiltersStore.clearFilters()}>Clear filters</button
+                >
+              </div>
+            {/if}
+            {#each sidebarProjects as project (project.id)}
               {@const status = getProjectStatus(
                 project.id,
                 deletingProjectNames,
@@ -925,6 +961,28 @@
 
   .state.error {
     color: var(--ui-danger);
+  }
+
+  .state.no-matches {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 8px 2px;
+  }
+
+  .clear-filters-link {
+    border: none;
+    background: transparent;
+    padding: 0;
+    color: var(--ui-accent);
+    font-size: var(--size-xs);
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .clear-filters-link:hover {
+    text-decoration: underline;
   }
 
   .resize-handle {

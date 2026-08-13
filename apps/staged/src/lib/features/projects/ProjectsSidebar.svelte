@@ -4,29 +4,14 @@
   import { fade } from 'svelte/transition';
   import House from '@lucide/svelte/icons/house';
   import Plus from '@lucide/svelte/icons/plus';
-  import Cloud from '@lucide/svelte/icons/cloud';
-  import GitPullRequest from '@lucide/svelte/icons/git-pull-request';
-  import GitPullRequestClosed from '@lucide/svelte/icons/git-pull-request-closed';
-  import GitPullRequestDraft from '@lucide/svelte/icons/git-pull-request-draft';
   import GitBranch from '@lucide/svelte/icons/git-branch';
-  import Sprout from '@lucide/svelte/icons/sprout';
   import FolderGit2 from '@lucide/svelte/icons/folder-git-2';
   import Mail from '@lucide/svelte/icons/mail';
   import Trash2 from '@lucide/svelte/icons/trash-2';
-  import type { Project, WorkspaceStatus, RepoHomeItem } from '../../types';
+  import type { RepoHomeItem } from '../../types';
   import { goHome, navigation, selectProject, showAllRepos } from '../layout/navigation.svelte';
-  import {
-    projectDisplayName,
-    aggregateProjectPrStatus,
-    projectHasCodeChanges,
-    projectSubtitle,
-    projectActivity,
-  } from '../../shared/utils';
-  import RepoBadge from '../../shared/RepoBadge.svelte';
-  import { repoBadgeStore } from '../../stores/repoBadges.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
   import { projectRunActionsStore } from '../../stores/projectRunActions.svelte';
-  import { projectStateStore } from '../../stores/projectState.svelte';
   import Spinner from '../../shared/Spinner.svelte';
   import SineWave from '../../shared/SineWave.svelte';
   import StagedIcon from '../../shared/StagedIcon.svelte';
@@ -42,6 +27,7 @@
   } from './projectsSidebarState.svelte';
   import { viewport, watchViewport } from '../../shared/viewport.svelte';
   import RepoCard from './RepoCard.svelte';
+  import ProjectRowContent from './ProjectRowContent.svelte';
   import SidebarFilterRow from './SidebarFilterRow.svelte';
   import { projectFiltersStore } from './projectFilters.svelte';
   import * as commands from '../../api/commands';
@@ -61,8 +47,6 @@
   // state (width, scroll, drag) lives here or in projectsSidebarState.
   let projects = $derived(projectsDataStore.projects);
   let projectBranches = $derived(projectsDataStore.branchesByProject);
-  let reposByProject = $derived(projectsDataStore.reposByProject);
-  let repoCountsByProject = $derived(projectsDataStore.repoCountsByProject);
   let deletingProjectNames = $derived(projectsDataStore.deletingProjectNames);
   let loading = $derived(projectsDataStore.loading || !projectsDataStore.loaded);
   let error = $derived(projectsDataStore.error);
@@ -287,37 +271,6 @@
     }
   }
 
-  function repoCountForProject(project: Project): number {
-    return repoCountsByProject.get(project.id) ?? (project.githubRepo ? 1 : 0);
-  }
-
-  function getProjectPrStatus(
-    projectId: string
-  ): 'merged' | 'open' | 'closed' | 'checks_failing' | 'conflict' | null {
-    const branches = projectBranches.get(projectId) || [];
-    return aggregateProjectPrStatus(branches);
-  }
-
-  function getProjectWorkspaceStatus(projectId: string): WorkspaceStatus | null {
-    const branches = projectBranches.get(projectId) || [];
-    return branches.find((b) => b.workspaceStatus)?.workspaceStatus ?? null;
-  }
-
-  function cloudStatusClass(status: WorkspaceStatus | null): string {
-    switch (status) {
-      case 'running':
-        return 'cloud-running';
-      case 'starting':
-        return 'cloud-starting';
-      case 'error':
-        return 'cloud-error';
-      case 'stopped':
-      case 'suspended':
-      default:
-        return 'cloud-inactive';
-    }
-  }
-
   let resizing = $state(false);
   let resizeStartX = 0;
   let resizeStartWidth = SIDEBAR_DEFAULT_WIDTH;
@@ -515,17 +468,6 @@
                 deletingProjectNames,
                 projectBranches.get(project.id) || []
               )}
-              {@const repoCount = repoCountForProject(project)}
-              {@const prStatus = getProjectPrStatus(project.id)}
-              {@const workspaceStatus =
-                project.location === 'remote' ? getProjectWorkspaceStatus(project.id) : null}
-              {@const sessionTypes = projectStateStore.getRunningSessionTypes(project.id)}
-              {@const repos = reposByProject.get(project.id) ?? []}
-              {@const badges = repos
-                .map((r) => repoBadgeStore.lookup(r.githubRepo, r.subpath))
-                .filter((b): b is NonNullable<typeof b> => Boolean(b))
-                .sort((a, b) => a.shortName.localeCompare(b.shortName))}
-              {@const activity = projectActivity(sessionTypes, status.runActionPhase)}
               <ContextMenu.Root>
                 <ContextMenu.Trigger class="contents" disabled={status.kind === 'deleting'}>
                   <button
@@ -537,49 +479,7 @@
                     disabled={status.kind === 'deleting'}
                     title={status.kind === 'deleting' ? 'Project deletion in progress' : undefined}
                   >
-                    <div class="row-main">
-                      {#if project.location === 'remote'}
-                        <Cloud size={14} class={cloudStatusClass(workspaceStatus)} />
-                      {:else if prStatus === 'merged'}
-                        <GitPullRequest size={14} class="pr-status-merged" />
-                      {:else if prStatus === 'checks_failing'}
-                        <GitPullRequest size={14} class="pr-status-checks-failing" />
-                      {:else if prStatus === 'open'}
-                        <GitPullRequest size={14} />
-                      {:else if prStatus === 'closed'}
-                        <GitPullRequestClosed size={14} />
-                      {:else if prStatus === 'conflict'}
-                        <GitPullRequestClosed size={14} class="pr-status-conflict" />
-                      {:else if projectHasCodeChanges(projectBranches.get(project.id) || [])}
-                        <GitPullRequestDraft size={14} class="pr-status-draft" />
-                      {:else}
-                        <Sprout size={14} class="pr-status-clean" />
-                      {/if}
-                      <div class="row-text">
-                        <span class="project-name">{projectDisplayName(project)}</span>
-                        <div class="row-meta">
-                          {#if badges.length > 0}
-                            <span class="badge-row">
-                              {#each badges as badge}
-                                <RepoBadge shortName={badge.shortName} hue={badge.hue} small />
-                              {/each}
-                            </span>
-                            {#if activity}
-                              <span class="activity-separator">&middot;</span>
-                              <span class="activity-text">{activity}</span>
-                            {/if}
-                          {:else}
-                            <span class="repo-count"
-                              >{projectSubtitle(
-                                repoCount,
-                                sessionTypes,
-                                status.runActionPhase
-                              )}</span
-                            >
-                          {/if}
-                        </div>
-                      </div>
-                    </div>
+                    <ProjectRowContent {project} />
                     <div class="row-status">
                       {#if status.runActionPhase === 'running' && status.kind === 'running'}
                         <span
@@ -774,12 +674,12 @@
   .project-row.active {
     color: var(--text-primary);
     background-color: var(--bg-hover);
+    /* Read by ProjectRowContent: brighten its meta line to match the row. */
+    --project-row-meta-color: var(--text-primary);
   }
 
-  .project-row.active .row-meta,
-  .project-row.active .repo-count,
-  .project-row.active :global(svg) {
-    color: var(--text-primary);
+  .project-row.active .row-status :global(svg),
+  .all-repos-row.active .row-main :global(svg) {
     stroke: var(--text-primary);
   }
 
@@ -810,98 +710,10 @@
     width: 16px;
   }
 
-  .row-main :global(svg.pr-status-merged) {
-    stroke: var(--ui-success);
-  }
-
-  .row-main :global(svg.pr-status-conflict) {
-    stroke: var(--ui-danger);
-  }
-
-  .row-main :global(svg.pr-status-checks-failing) {
-    stroke: var(--ui-danger);
-  }
-
-  .row-main :global(svg.pr-status-draft) {
-    stroke: var(--text-faint);
-  }
-
-  .row-main :global(svg.pr-status-clean) {
-    stroke: var(--text-faint);
-  }
-
-  .row-main :global(svg.cloud-running) {
-    stroke: var(--ui-accent);
-  }
-
-  .row-main :global(svg.cloud-starting) {
-    stroke: var(--ui-info);
-  }
-
-  .row-main :global(svg.cloud-error) {
-    stroke: var(--ui-danger);
-  }
-
-  .row-main :global(svg.cloud-inactive) {
-    stroke: var(--text-muted);
-  }
-
-  .row-text {
-    min-width: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-  }
-
   .project-name {
     font-size: var(--size-sm);
     font-weight: 600;
     color: inherit;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .row-meta {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-height: 14px;
-    font-size: calc(var(--size-xs) - 1px);
-    line-height: 14px;
-    color: var(--text-faint);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .repo-count {
-    color: var(--text-faint);
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .badge-row {
-    display: inline-flex;
-    align-items: center;
-    gap: 3px;
-    min-width: 0;
-    max-width: 100%;
-    min-height: 14px;
-    overflow: hidden;
-    white-space: nowrap;
-  }
-
-  .activity-separator {
-    color: var(--text-faint);
-    margin: 0 1px;
-  }
-
-  .activity-text {
-    color: var(--text-faint);
-    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

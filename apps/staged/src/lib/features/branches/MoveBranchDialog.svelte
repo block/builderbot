@@ -14,16 +14,14 @@
 
 <script lang="ts">
   import { tick } from 'svelte';
-  import Cloud from '@lucide/svelte/icons/cloud';
   import Search from '@lucide/svelte/icons/search';
   import X from '@lucide/svelte/icons/x';
   import * as Dialog from '$lib/components/ui/dialog';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
   import Spinner from '../../shared/Spinner.svelte';
-  import RepoLabel from '../../shared/RepoLabel.svelte';
+  import ProjectRowContent from '../projects/ProjectRowContent.svelte';
   import { projectsDataStore } from '../../stores/projectsData.svelte';
-  import { projectDisplayName } from '../../shared/utils';
   import {
     branchRepoIdentity,
     filterMoveTargets,
@@ -177,7 +175,6 @@
 
       <div class="project-list" role="radiogroup" aria-label="Destination project">
         {#each filtered as project (project.id)}
-          {@const repos = projectsDataStore.reposByProject.get(project.id) ?? []}
           <button
             type="button"
             class="project-row"
@@ -187,19 +184,7 @@
             disabled={moving}
             onclick={() => selectProject(project)}
           >
-            <span class="project-name">
-              {#if project.location === 'remote'}
-                <Cloud size={14} />
-              {/if}
-              {projectDisplayName(project)}
-            </span>
-            {#if repos.length > 0}
-              <span class="project-repos">
-                {#each repos as repo (repo.id)}
-                  <RepoLabel githubRepo={repo.githubRepo} subpath={repo.subpath} />
-                {/each}
-              </span>
-            {/if}
+            <ProjectRowContent {project} />
           </button>
         {:else}
           <p class="empty-state">
@@ -294,12 +279,12 @@
 
   .project-row {
     display: flex;
-    flex-direction: column;
-    gap: 2px;
+    align-items: center;
     padding: 8px 10px;
     border: 1px solid transparent;
     border-radius: 6px;
     background: transparent;
+    color: var(--text-primary);
     text-align: left;
     cursor: pointer;
   }
@@ -316,21 +301,6 @@
   .project-row:disabled {
     cursor: not-allowed;
     opacity: 0.6;
-  }
-
-  .project-name {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    color: var(--text-primary);
-    font-size: var(--size-sm);
-  }
-
-  .project-repos {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    font-size: var(--size-xs);
   }
 
   .empty-state {

@@ -232,7 +232,7 @@
       onclick={openFilePicker}
     >
       <ImagePlus size={14} />
-      <span>Attach images or text snippets</span>
+      <span>Attach images</span>
     </Button>
     {#if onAttachClipboard}
       <Button

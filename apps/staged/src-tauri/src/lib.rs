@@ -1595,6 +1595,7 @@ fn list_project_actions(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
 fn update_project_action(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
     action_id: String,
@@ -1603,6 +1604,8 @@ fn update_project_action(
     action_type: String,
     sort_order: i32,
     auto_commit: bool,
+    pinned: bool,
+    icon: Option<String>,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
     let action = store
@@ -1620,6 +1623,8 @@ fn update_project_action(
         sort_order,
         auto_commit,
         run_detection_mode: action.run_detection_mode,
+        pinned,
+        icon,
         created_at: action.created_at,
         updated_at: store::now_timestamp(),
     };
@@ -1684,6 +1689,8 @@ fn create_repo_action(
     action_type: String,
     sort_order: i32,
     auto_commit: bool,
+    pinned: bool,
+    icon: Option<String>,
 ) -> Result<store::models::RepoAction, String> {
     let store = get_store(&store)?;
     let context = store
@@ -1692,7 +1699,9 @@ fn create_repo_action(
     let parsed_type = builderbot_actions::ActionType::parse(&action_type)
         .ok_or_else(|| format!("Invalid action type: {action_type}"))?;
     let action = store::models::RepoAction::new(context.id, name, command, parsed_type, sort_order)
-        .with_auto_commit(auto_commit);
+        .with_auto_commit(auto_commit)
+        .with_pinned(pinned)
+        .with_icon(icon);
     store
         .create_repo_action(&action)
         .map_err(|e| e.to_string())?;

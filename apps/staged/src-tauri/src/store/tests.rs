@@ -2613,9 +2613,55 @@ fn test_repo_actions() {
     let actions = store.list_repo_actions(&context.id).unwrap();
     assert_eq!(actions.len(), 1);
     assert_eq!(actions[0].name, "Build");
+    // Header presence is opt-in, and no icon means "the default for the type".
+    assert!(!actions[0].pinned);
+    assert_eq!(actions[0].icon, None);
 
     store.delete_repo_action(&action.id).unwrap();
     assert!(store.list_repo_actions(&context.id).unwrap().is_empty());
+}
+
+#[test]
+fn test_repo_action_round_trips_pinned_and_icon() {
+    let store = Store::in_memory().unwrap();
+    let context = store
+        .get_or_create_action_context("test-owner/test-repo", None)
+        .unwrap();
+
+    let action = RepoAction::new(
+        context.id.clone(),
+        "Dev".to_string(),
+        "just dev".to_string(),
+        ActionType::Run,
+        0,
+    )
+    .with_pinned(true)
+    .with_icon(Some("rocket".to_string()));
+    store.create_repo_action(&action).unwrap();
+
+    let stored = store.get_repo_action(&action.id).unwrap().unwrap();
+    assert!(stored.pinned);
+    assert_eq!(stored.icon.as_deref(), Some("rocket"));
+
+    // Unpinning and clearing the icon both have to survive the update path —
+    // a NULL icon is what sends the button back to its action-type default.
+    let updated = RepoAction {
+        pinned: false,
+        icon: None,
+        ..stored
+    };
+    store.update_repo_action(&updated).unwrap();
+
+    let reread = store.get_repo_action(&action.id).unwrap().unwrap();
+    assert!(!reread.pinned);
+    assert_eq!(reread.icon, None);
+
+    // The bulk read builds actions from its own SELECT list, so it needs the
+    // columns too.
+    let grouped = store.list_all_repo_actions().unwrap();
+    let bulk = &grouped[0].actions[0];
+    assert!(!bulk.pinned);
+    assert_eq!(bulk.icon, None);
 }
 
 #[test]

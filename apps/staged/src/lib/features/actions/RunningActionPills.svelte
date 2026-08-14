@@ -1,6 +1,6 @@
 <!--
   RunningActionPills.svelte — pill row for a scope's running actions,
-  excluding the primary run action (which PrimaryRunActionButton renders).
+  excluding the pinned ones (each of which PinnedActionButton renders).
 
   Each pill shows the action's live status (spinner, sine wave for a serving
   run action, check/alert on completion), opens the output modal on click, and

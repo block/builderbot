@@ -46,6 +46,10 @@ export interface ProjectAction {
   sortOrder: number;
   autoCommit: boolean;
   runDetectionMode?: RunDetectionMode;
+  /** Whether the action gets its own button in a card header. */
+  pinned: boolean;
+  /** Kebab-case Lucide icon name, or null for the action type's default. */
+  icon: string | null;
   createdAt: number;
   updatedAt: number;
 }

@@ -1,7 +1,8 @@
 /**
  * Pure helpers for grouping a scope's configured actions and splitting its
- * running executions into the primary run action vs everything else.
- * Shared by the action-runner state machine and the Actions submenu builder.
+ * running executions into the ones that already have a header button vs
+ * everything else. Shared by the action-runner state machine and the Actions
+ * submenu builder.
  */
 
 import type { ProjectAction } from '../../api/commands';
@@ -26,30 +27,22 @@ export function groupActionsByType(actions: ProjectAction[]): Record<string, Pro
   return groups;
 }
 
-export function getPrimaryRunAction(
-  groupedActions: Record<string, ProjectAction[]>
-): ProjectAction | null {
-  return groupedActions.run?.[0] ?? null;
+/**
+ * The actions a card header renders as their own button, in the order the
+ * settings list shows them.
+ */
+export function getPinnedActions(actions: ProjectAction[]): ProjectAction[] {
+  return actions.filter((a) => a.pinned).sort((a, b) => a.sortOrder - b.sortOrder);
 }
 
-export function getRemainingRunActions(
-  groupedActions: Record<string, ProjectAction[]>
-): ProjectAction[] {
-  return groupedActions.run?.slice(1) ?? [];
-}
-
-export function getPrimaryActionExecution<T extends { actionId: string }>(
-  runningActions: T[],
-  primaryRunActionId: string | null
-): T | null {
-  if (!primaryRunActionId) return null;
-  return runningActions.find((a) => a.actionId === primaryRunActionId) ?? null;
-}
-
+/**
+ * The running executions that need a pill: every one whose action isn't
+ * already showing its own header button.
+ */
 export function getSecondaryRunningActions<T extends { actionId: string }>(
   runningActions: T[],
-  primaryRunActionId: string | null
+  pinnedActionIds: Set<string>
 ): T[] {
-  if (!primaryRunActionId) return runningActions;
-  return runningActions.filter((a) => a.actionId !== primaryRunActionId);
+  if (pinnedActionIds.size === 0) return runningActions;
+  return runningActions.filter((a) => !pinnedActionIds.has(a.actionId));
 }

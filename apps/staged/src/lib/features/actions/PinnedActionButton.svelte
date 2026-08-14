@@ -1,17 +1,20 @@
 <!--
-  PrimaryRunActionButton.svelte — the scope's primary run action, driven by an
-  ActionRunner.
+  PinnedActionButton.svelte — one pinned action's button in a card header,
+  driven by an ActionRunner.
 
-  Renders as a circular play button (spinner while building, sine wave while
-  running, check/alert on completion), or as an endpoint pill with a copy-URL
-  button once a serving run action reports its endpoint. Click opens the
-  output modal; alt-click stops the running execution.
+  Renders as a circular button showing the action's icon (spinner while
+  building, sine wave while a run action serves, check/alert on completion), or
+  as an endpoint pill with a copy-URL button once a serving run action reports
+  its endpoint. Click opens the output modal; alt-click stops the running
+  execution. A header renders one of these per pinned action, each tracking its
+  own execution — pinned non-run actions simply never reach the serving or
+  endpoint states.
 
   Props:
+    action             — the pinned action this button runs.
     show               — extra render gate (e.g. hide while a branch is
-                         setting up); part of the same if-block as the
-                         primary-action check so the slide transition plays
-                         for both.
+                         setting up); wraps the whole button so the slide
+                         transition plays for it.
     canResolveEndpoint — false when the endpoint URL can't be rewritten yet
                          (e.g. a remote workspace id is still unknown);
                          suppresses the endpoint pill.
@@ -28,7 +31,6 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { slide, fade } from 'svelte/transition';
-  import Play from '@lucide/svelte/icons/play';
   import Check from '@lucide/svelte/icons/check';
   import CheckCircle from '@lucide/svelte/icons/check-circle';
   import AlertCircle from '@lucide/svelte/icons/alert-circle';
@@ -37,11 +39,14 @@
   import Spinner from '../../shared/Spinner.svelte';
   import SineWave from '../../shared/SineWave.svelte';
   import { Button } from '$lib/components/ui/button';
+  import type { ProjectAction } from '../../api/commands';
   import type { ActionRunner } from './actionRunner.svelte';
   import { altKey, trackAltKey } from './altKey.svelte';
+  import ActionIcon from './ActionIcon.svelte';
 
   interface Props {
     runner: ActionRunner;
+    action: ProjectAction;
     show?: boolean;
     canResolveEndpoint?: boolean;
     getEndpointCopyUrl?: (endpoint: string) => string;
@@ -50,6 +55,7 @@
 
   let {
     runner,
+    action,
     show = true,
     canResolveEndpoint = true,
     getEndpointCopyUrl = (endpoint) => endpoint,
@@ -57,8 +63,6 @@
   }: Props = $props();
 
   let outline = $derived(variant === 'outline');
-
-  let primaryRunAction = $derived(runner.primaryRunAction);
 
   // Tracks which endpoint copy buttons are showing the "copied" tick
   let endpointCopied = $state<Record<string, boolean>>({});
@@ -71,8 +75,8 @@
   });
 </script>
 
-{#if show && primaryRunAction}
-  {@const execution = runner.primaryActionExecution}
+{#if show}
+  {@const execution = runner.executionFor(action.id)}
   {@const isRunning = execution?.status === 'running'}
   {@const isStopping = execution && runner.stoppingExecutions.has(execution.executionId)}
   {@const showStopIcon = altKey.held && isRunning && !isStopping}
@@ -83,13 +87,13 @@
       ? getEndpointCopyUrl(phase.endpoint)
       : ''}
   <div
-    class="primary-action-container"
+    class="pinned-action-container"
     in:slide={{ duration: 300, axis: 'x' }}
     out:slide={{ duration: 300, axis: 'x' }}
   >
     {#if isRunning && hasEndpoint && phase?.type === 'running' && phase.endpoint}
       <!-- Pill-shaped button when running with endpoint -->
-      <div class="primary-action-pill" class:outline>
+      <div class="pinned-action-pill" class:outline>
         <Button
           variant="ghost"
           class={[
@@ -100,16 +104,16 @@
           title={isStopping
             ? 'Stopping…'
             : showStopIcon
-              ? `Stop ${primaryRunAction.name}`
-              : `View output for ${primaryRunAction.name}`}
+              ? `Stop ${action.name}`
+              : `View output for ${action.name}`}
           aria-label={isStopping
             ? 'Stopping'
             : showStopIcon
-              ? `Stop ${primaryRunAction.name}`
-              : `View output for ${primaryRunAction.name}`}
+              ? `Stop ${action.name}`
+              : `View output for ${action.name}`}
           onclick={() => {
             if (altKey.held && !isStopping && execution) {
-              runner.stopAction(execution.executionId, primaryRunAction.name);
+              runner.stopAction(execution.executionId, action.name);
             } else if (execution) {
               runner.showOutput(execution);
             }
@@ -196,34 +200,34 @@
         title={isStopping
           ? 'Stopping…'
           : showStopIcon
-            ? `Stop ${primaryRunAction.name}`
+            ? `Stop ${action.name}`
             : isRunning
-              ? `View output for ${primaryRunAction.name}`
+              ? `View output for ${action.name}`
               : execution?.status === 'completed'
-                ? `${primaryRunAction.name} completed`
+                ? `${action.name} completed`
                 : execution?.status === 'failed'
-                  ? `${primaryRunAction.name} failed`
-                  : primaryRunAction.name}
+                  ? `${action.name} failed`
+                  : action.name}
         aria-label={isStopping
           ? 'Stopping'
           : showStopIcon
-            ? `Stop ${primaryRunAction.name}`
+            ? `Stop ${action.name}`
             : isRunning
-              ? `View output for ${primaryRunAction.name}`
+              ? `View output for ${action.name}`
               : execution?.status === 'completed'
-                ? `${primaryRunAction.name} completed`
+                ? `${action.name} completed`
                 : execution?.status === 'failed'
-                  ? `${primaryRunAction.name} failed`
-                  : primaryRunAction.name}
+                  ? `${action.name} failed`
+                  : action.name}
         onclick={() => {
           if (isRunning && altKey.held && !isStopping && execution) {
-            runner.stopAction(execution.executionId, primaryRunAction.name);
+            runner.stopAction(execution.executionId, action.name);
           } else if (isRunning && execution) {
             runner.showOutput(execution);
           } else if (isStopping && execution) {
             runner.showOutput(execution);
           } else {
-            runner.runAction(primaryRunAction);
+            runner.runAction(action);
           }
         }}
       >
@@ -231,7 +235,9 @@
           <Spinner size={14} class="danger" />
         {:else if showStopIcon}
           <StopCircle size={14} />
-        {:else if isRunning && phase?.type === 'building'}
+        {:else if isRunning && (phase?.type === 'building' || action.actionType !== 'run')}
+          <!-- A pinned non-run action has no serving phase: it spins, then
+               reports its outcome. -->
           <Spinner size={14} />
         {:else if isRunning}
           <SineWave size={14} />
@@ -240,7 +246,7 @@
         {:else if execution?.status === 'failed'}
           <AlertCircle size={14} />
         {:else}
-          <Play size={14} />
+          <ActionIcon icon={action.icon} actionType={action.actionType} size={14} />
         {/if}
       </Button>
     {/if}
@@ -248,15 +254,15 @@
 {/if}
 
 <style>
-  /* Primary action button — circular icon-only */
-  .primary-action-container {
+  /* Pinned action button — circular icon-only */
+  .pinned-action-container {
     display: flex;
     align-items: center;
     overflow: hidden;
   }
 
-  /* Primary action pill (endpoint running state) */
-  .primary-action-pill {
+  /* Pinned action pill (endpoint running state) */
+  .pinned-action-pill {
     display: flex;
     align-items: center;
     height: 28px;
@@ -265,7 +271,7 @@
     overflow: hidden;
   }
 
-  .primary-action-pill.outline {
+  .pinned-action-pill.outline {
     background: transparent;
     border: 1px solid var(--card-border-hover);
     box-sizing: border-box;

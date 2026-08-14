@@ -2142,6 +2142,8 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let action_type: String = arg(&args, "actionType")?;
             let sort_order: i32 = arg(&args, "sortOrder")?;
             let auto_commit: bool = arg(&args, "autoCommit")?;
+            let pinned: bool = arg(&args, "pinned")?;
+            let icon: Option<String> = opt_arg(&args, "icon")?;
             let action = store
                 .get_repo_action(&action_id)
                 .map_err(|e| e.to_string())?
@@ -2156,6 +2158,8 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 sort_order,
                 auto_commit,
                 run_detection_mode: action.run_detection_mode,
+                pinned,
+                icon,
                 created_at: action.created_at,
                 updated_at: crate::store::now_timestamp(),
             };
@@ -2203,6 +2207,8 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let action_type: String = arg(&args, "actionType")?;
             let sort_order: i32 = arg(&args, "sortOrder")?;
             let auto_commit: bool = arg(&args, "autoCommit")?;
+            let pinned: bool = arg(&args, "pinned")?;
+            let icon: Option<String> = opt_arg(&args, "icon")?;
             let context = store
                 .get_or_create_action_context(&github_repo, subpath.as_deref())
                 .map_err(|e| e.to_string())?;
@@ -2215,7 +2221,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 parsed_type,
                 sort_order,
             )
-            .with_auto_commit(auto_commit);
+            .with_auto_commit(auto_commit)
+            .with_pinned(pinned)
+            .with_icon(icon);
             store
                 .create_repo_action(&action)
                 .map_err(|e| e.to_string())?;

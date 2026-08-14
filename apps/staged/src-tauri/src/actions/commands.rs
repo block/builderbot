@@ -141,6 +141,14 @@ fn resolve_branch_repo_context(
 /// Persist detected suggestions into an action context, skipping commands the
 /// context already has and continuing its sort order.
 ///
+/// A context that had no run action at all before this call gets the first
+/// run-type suggestion pinned, so a freshly detected repo arrives with the play
+/// button in its card header that detection has always implied. The gate is
+/// "had no run actions", not "has nothing pinned": a user who deliberately
+/// unpins their run action would otherwise have it pinned right back by the
+/// next re-detect. Contexts that predate pinning are covered by the 0026
+/// migration instead.
+///
 /// Persistence belongs inside the detection window: every surface treats the
 /// `detecting: false` half of the `repo-actions-detection` broadcast as "this
 /// context's action list is final", so a caller that detects here and persists
@@ -165,12 +173,17 @@ pub(crate) fn persist_suggested_actions(
         .max()
         .unwrap_or(-1)
         + 1;
+    let mut pin_next_run_action = !existing_actions
+        .iter()
+        .any(|a| a.action_type == ActionType::Run);
 
     for suggestion in suggestions {
         if existing_commands.contains(&suggestion.command) {
             continue;
         }
         existing_commands.insert(suggestion.command.clone());
+        let pinned = pin_next_run_action && suggestion.action_type == ActionType::Run;
+        pin_next_run_action &= !pinned;
         let action = crate::store::RepoAction::new(
             context_id.to_string(),
             suggestion.name,
@@ -178,7 +191,8 @@ pub(crate) fn persist_suggested_actions(
             suggestion.action_type,
             next_sort_order,
         )
-        .with_auto_commit(suggestion.auto_commit);
+        .with_auto_commit(suggestion.auto_commit)
+        .with_pinned(pinned);
         store
             .create_repo_action(&action)
             .map_err(|e| format!("Failed to create detected action: {e}"))?;
@@ -1615,6 +1629,67 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("Dev", 0), ("Test", 1), ("Build", 2)]
         );
+
+        // The context started with no run action, so the first run suggestion
+        // is what the card header ends up showing — and only that one.
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|a| a.pinned)
+                .map(|a| a.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Dev"]
+        );
+        // Detection never picks an icon; NULL means the action type's default.
+        assert!(actions.iter().all(|a| a.icon.is_none()));
+    }
+
+    #[test]
+    fn persist_suggested_actions_pins_only_the_first_run_action_of_a_fresh_context() {
+        let store = Store::in_memory().unwrap();
+        let context = store
+            .get_or_create_action_context("block/builderbot", Some("apps/staged"))
+            .unwrap();
+
+        persist_suggested_actions(
+            &store,
+            &context.id,
+            vec![
+                suggestion("Build", "just build", ActionType::Build),
+                suggestion("Dev", "just dev", ActionType::Run),
+                suggestion("Storybook", "just storybook", ActionType::Run),
+            ],
+        )
+        .unwrap();
+
+        let pinned = |store: &Store| -> Vec<String> {
+            store
+                .list_repo_actions(&context.id)
+                .unwrap()
+                .into_iter()
+                .filter(|a| a.pinned)
+                .map(|a| a.name)
+                .collect()
+        };
+        assert_eq!(pinned(&store), vec!["Dev".to_string()]);
+
+        // Unpinning is a deliberate choice, so a later re-detect that turns up
+        // another run action leaves the header empty rather than re-pinning.
+        let dev = store
+            .list_repo_actions(&context.id)
+            .unwrap()
+            .into_iter()
+            .find(|a| a.name == "Dev")
+            .unwrap();
+        store.update_repo_action(&dev.with_pinned(false)).unwrap();
+
+        persist_suggested_actions(
+            &store,
+            &context.id,
+            vec![suggestion("Preview", "just preview", ActionType::Run)],
+        )
+        .unwrap();
+        assert!(pinned(&store).is_empty());
     }
 
     /// A context mid-detection: the flag claimed by `pid`, nothing marked yet.

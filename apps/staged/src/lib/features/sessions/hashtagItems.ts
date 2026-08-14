@@ -6,19 +6,22 @@ import { branchTimelineReadyKey } from '../branches/branchTimelineReady';
  * Regex matching `#type:id` hashtag tokens in plain text. Use with
  * `new RegExp(source, 'g')` for stateful iteration.
  *
- * The id runs to the next whitespace but may not END in sentence punctuation.
- * Notes are cited inline in prose (`… collected in #note:<id>.`), and every id
- * is a uuid or a hex sha, so a trailing `.`/`,`/`)` is the surrounding sentence
- * rather than part of the id. Interior punctuation is still kept — only the
- * trailing run is left outside the token.
+ * The id is an allowlist of id characters — alphanumerics and `_`, with
+ * interior (never leading/trailing) `-` runs — rather than "anything up to
+ * whitespace minus a punctuation denylist". Every real id is a uuid or a hex
+ * sha, and notes are cited inline in prose (`… collected in #note:<id>.`), so
+ * any character outside that shape is the surrounding sentence, not the id.
+ * Unlike a trailing-punctuation denylist, this also keeps out Unicode
+ * punctuation that binds with no whitespace (`#note:<id>—still prose`, curly
+ * quotes, ellipses) at any position, not just token-final.
  */
 export const HASHTAG_TOKEN_RE =
-  /#(note|commit|review|project-note|image):([^\s]*[^\s.,;:!?)\]}'"])/g;
+  /#(note|commit|review|project-note|image):([A-Za-z0-9_](?:[A-Za-z0-9_-]*[A-Za-z0-9_])?)/g;
 
 /**
  * Incrementally joins editor content chunks into the raw `value` string,
  * inserting a space between a `#type:id` badge token and immediately
- * following non-whitespace text. Token ids match greedily up to whitespace
+ * following non-whitespace text. Token ids match greedily over id characters
  * (HASHTAG_TOKEN_RE), so `#note:1hello` would swallow the text into the id.
  */
 export function createExtractedValueBuilder() {

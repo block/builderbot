@@ -330,9 +330,16 @@ describe('renderHashtagTokens', () => {
     ];
 
     // Agents are prompted to cite children inline, so the id is routinely
-    // followed by prose punctuation. It must stay out of the token: otherwise
-    // the badge shows a raw id and a click resolves nothing.
-    for (const text of ['Collected in #note:note-1.', 'Collected in (#note:note-1),']) {
+    // followed by prose punctuation — ASCII or Unicode, and (for em-dashes
+    // and ellipses) with no whitespace in between. It must stay out of the
+    // token: otherwise the badge shows a raw id and a click resolves nothing.
+    for (const text of [
+      'Collected in #note:note-1.',
+      'Collected in (#note:note-1),',
+      'Collected in #note:note-1—also prose',
+      'Collected in “#note:note-1”',
+      'Collected in #note:note-1…',
+    ]) {
       const html = renderHashtagTokens(text, items);
       expect(html).toContain('Child note title');
       expect(html).toContain('data-hashtag-ref="#note:note-1"');
@@ -341,13 +348,19 @@ describe('renderHashtagTokens', () => {
 
     // The punctuation itself survives as text, outside the badge.
     expect(renderHashtagTokens('See #note:note-1.', items)).toMatch(/<\/span>\.$/);
+    expect(renderHashtagTokens('See #note:note-1—also', items)).toMatch(/<\/span>—also$/);
   });
 
-  it('keeps punctuation inside an id, dropping only the trailing run', () => {
-    const html = renderHashtagTokens('#note:a.b).', []);
+  it('stops the id at the first character outside the id shape', () => {
+    // Ids are uuids or hex shas: alphanumerics with interior hyphens. Anything
+    // else — at any position, not just token-final — is surrounding prose.
+    const html = renderHashtagTokens('#note:a1.b2).', []);
+    expect(html).toContain('data-hashtag-id="a1"');
+    expect(html).toMatch(/<\/span>\.b2\)\.$/);
 
-    expect(html).toContain('data-hashtag-id="a.b"');
-    expect(html).toMatch(/<\/span>\)\.$/);
+    // Interior hyphens stay in the id; a trailing hyphen is left as text.
+    expect(renderHashtagTokens('#note:note-1-x', [])).toContain('data-hashtag-id="note-1-x"');
+    expect(renderHashtagTokens('#note:note-1- next', [])).toContain('data-hashtag-id="note-1"');
   });
 
   it('can render presentational badges without interaction attributes', () => {

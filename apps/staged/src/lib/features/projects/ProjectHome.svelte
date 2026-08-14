@@ -696,6 +696,26 @@
       throw e;
     }
   }
+
+  async function handleMoveBranch(
+    branchId: string,
+    sourceProjectId: string,
+    targetProjectId: string
+  ) {
+    try {
+      await commands.moveBranch(branchId, targetProjectId);
+      // A move reshapes both ends: the branch leaves one project's list and
+      // joins the other's, and each project's repos may have changed with it.
+      await Promise.all([
+        projectsDataStore.refreshProject(sourceProjectId),
+        projectsDataStore.refreshProject(targetProjectId),
+      ]);
+      commands.invalidateBranchTimeline(branchId);
+    } catch (e) {
+      console.error('Failed to move branch:', e);
+      throw e;
+    }
+  }
 </script>
 
 <TopBarPortal
@@ -887,6 +907,8 @@
             onDeleteBranch={(branchId) => handleDeleteBranchRequest(branchId, project)}
             onRenameBranch={(branchId, branchName) =>
               handleRenameBranch(branchId, project.id, branchName)}
+            onMoveBranch={(branchId, targetProjectId) =>
+              handleMoveBranch(branchId, project.id, targetProjectId)}
             onProjectTitleElement={selectedProjectId ? setProjectTitleElement : undefined}
             onRepoSelected={(selection) => handleRepoSelected(project.id, selection)}
             onRetryWorktree={(branchId) => setupBranchWorktree(branchId, project.id)}

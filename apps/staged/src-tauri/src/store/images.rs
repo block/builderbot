@@ -53,6 +53,21 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// Every image row attached to a branch, session-scoped ones included.
+    ///
+    /// [`Self::list_images_for_branch`] is the timeline view and stops at
+    /// branch-level attachments; this is the whole set, for callers that have to
+    /// account for the files on disk (moving a branch between projects).
+    pub fn list_all_images_for_branch(&self, branch_id: &str) -> Result<Vec<Image>, StoreError> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, branch_id, project_id, session_id, filename, mime_type, size_bytes, created_at
+             FROM images WHERE branch_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt.query_map(params![branch_id], Self::row_to_image)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// Return a filename that is unique among images on the given branch (or project if no branch).
     /// If `filename` is already taken, appends ` 2`, ` 3`, … before the extension
     /// (e.g. `Screenshot.png` → `Screenshot 2.png`).

@@ -116,6 +116,7 @@
     workspaceError?: string;
     onDelete?: () => void;
     onRename?: (branchName: string) => void | Promise<void>;
+    onMove?: (targetProjectId: string) => void | Promise<void>;
     onRetryWorktree?: () => void;
   }
 
@@ -128,6 +129,7 @@
     workspaceError,
     onDelete,
     onRename,
+    onMove,
     onRetryWorktree,
   }: Props = $props();
 
@@ -1927,6 +1929,7 @@
           {remoteWorkspaceStatus}
           {onDelete}
           {onRename}
+          {onMove}
           onNoteCreated={() => loadTimeline()}
           onRebaseBranch={() => startBranchCommandPipeline('rebase')}
           onSquashCommits={() => startBranchCommandPipeline('squash')}

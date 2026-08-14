@@ -2229,6 +2229,7 @@ pub fn run() {
             branches::resume_workspace,
             branches::delete_branch,
             branches::rename_branch,
+            branches::move_branch,
             branches::get_blox_env,
             branches::get_workspace_info,
             branches::poll_workspace_status,

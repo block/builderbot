@@ -59,6 +59,7 @@
     workspaceErrors?: Map<string, string>;
     onDeleteBranch?: (branchId: string) => void;
     onRenameBranch?: (branchId: string, branchName: string) => void | Promise<void>;
+    onMoveBranch?: (branchId: string, targetProjectId: string) => void | Promise<void>;
     onProjectTitleElement?: (element: HTMLHeadingElement | null) => void;
     onRepoSelected?: (selection: RepoPickerSelection) => void | Promise<void>;
     onRetryWorktree?: (branchId: string) => void;
@@ -74,6 +75,7 @@
     workspaceErrors = new Map(),
     onDeleteBranch,
     onRenameBranch,
+    onMoveBranch,
     onProjectTitleElement,
     onRepoSelected,
     onRetryWorktree,
@@ -532,6 +534,7 @@
         workspaceError={workspaceErrors.get(branch.id)}
         onDelete={() => onDeleteBranch?.(branch.id)}
         onRename={(branchName) => onRenameBranch?.(branch.id, branchName)}
+        onMove={(targetProjectId) => onMoveBranch?.(branch.id, targetProjectId)}
         onRetryWorktree={() => onRetryWorktree?.(branch.id)}
       />
     {/each}

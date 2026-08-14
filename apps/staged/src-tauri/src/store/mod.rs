@@ -14,6 +14,7 @@
 pub mod models;
 
 mod actions;
+mod branch_move;
 mod branches;
 mod commits;
 pub mod images;
@@ -37,6 +38,7 @@ mod migration_tests;
 mod tests;
 
 // Re-export all model types for backwards compatibility.
+pub use branch_move::{BranchMove, RepoPlacement, WorkdirMove};
 pub use models::*;
 pub use repo_badges::{fallback_short_name, next_hue};
 

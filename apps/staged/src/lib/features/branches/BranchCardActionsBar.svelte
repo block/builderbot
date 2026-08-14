@@ -12,6 +12,7 @@
   import { onMount, onDestroy } from 'svelte';
   import GitBranch from '@lucide/svelte/icons/git-branch';
   import Copy from '@lucide/svelte/icons/copy';
+  import FolderInput from '@lucide/svelte/icons/folder-input';
   import ExternalLink from '@lucide/svelte/icons/external-link';
   import Trash2 from '@lucide/svelte/icons/trash-2';
   import MoreVertical from '@lucide/svelte/icons/more-vertical';
@@ -31,6 +32,7 @@
   import { agentState } from '../agents/agent.svelte';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu';
   import RenameBranchDialog from './RenameBranchDialog.svelte';
+  import MoveBranchDialog from './MoveBranchDialog.svelte';
 
   interface Props {
     branch: Branch;
@@ -41,6 +43,7 @@
     remoteWorkspaceStatus: string | null;
     onDelete?: () => void;
     onRename?: (branchName: string) => void | Promise<void>;
+    onMove?: (targetProjectId: string) => void | Promise<void>;
     onNoteCreated?: () => void;
     onRebaseBranch?: () => void;
     onSquashCommits?: () => void;
@@ -59,6 +62,7 @@
     remoteWorkspaceStatus,
     onDelete,
     onRename,
+    onMove,
     onNoteCreated,
     onRebaseBranch,
     onSquashCommits,
@@ -95,6 +99,7 @@
   });
 
   let renameDialogOpen = $state(false);
+  let moveDialogOpen = $state(false);
 
   // More menu state
   let openerApps = $state<OpenerApp[]>([]);
@@ -145,6 +150,10 @@
 
   function handleRenameFromMenu() {
     renameDialogOpen = true;
+  }
+
+  function handleMoveFromMenu() {
+    moveDialogOpen = true;
   }
 
   const terminalAppIds = new Set([
@@ -272,6 +281,11 @@
       <DropdownMenu.Item onSelect={handleRenameFromMenu}>
         <GitBranch size={14} /> Rename Branch
       </DropdownMenu.Item>
+      {#if isLocal}
+        <DropdownMenu.Item onSelect={handleMoveFromMenu}>
+          <FolderInput size={14} /> Move to Project…
+        </DropdownMenu.Item>
+      {/if}
       <DropdownMenu.Item disabled={rebaseSquashDisabled} onSelect={() => onRebaseBranch?.()}>
         <GitBranch size={14} /> Rebase Branch
       </DropdownMenu.Item>
@@ -289,6 +303,8 @@
 </DropdownMenu.Root>
 
 <RenameBranchDialog bind:open={renameDialogOpen} branchName={branch.branchName} {onRename} />
+
+<MoveBranchDialog bind:open={moveDialogOpen} {branch} {repoLabel} {onMove} />
 
 <ActionOutputModal
   open={runner.outputModal !== null}

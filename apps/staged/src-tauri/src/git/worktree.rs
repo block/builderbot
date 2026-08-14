@@ -184,6 +184,28 @@ pub fn create_worktree_for_existing_branch_at_path(
     Ok(worktree_path.to_path_buf())
 }
 
+/// Move an existing worktree to a new path.
+///
+/// Goes through `git worktree move` rather than `fs::rename` because a
+/// worktree is two pointers, not one directory: the `.git` gitfile inside the
+/// worktree names the repo's admin directory, and that admin directory's
+/// `gitdir` file names the worktree. A rename updates neither, leaving both
+/// dangling; `git worktree move` rewrites both.
+pub fn move_worktree(repo: &Path, from: &Path, to: &Path) -> Result<(), GitError> {
+    ensure_worktree_parent_exists(to)?;
+    ensure_worktree_absent(to)?;
+
+    let from_str = from
+        .to_str()
+        .ok_or_else(|| GitError::InvalidPath(from.display().to_string()))?;
+    let to_str = to
+        .to_str()
+        .ok_or_else(|| GitError::InvalidPath(to.display().to_string()))?;
+
+    cli::run(repo, &["worktree", "move", from_str, to_str])?;
+    Ok(())
+}
+
 /// Remove a worktree and its associated branch.
 ///
 /// Removes the worktree directory, git worktree reference, and the local git branch.
@@ -959,6 +981,39 @@ mod tests {
         assert_eq!(paths.remove_paths, vec!["staged-new.txt", "untracked.txt"]);
         assert_eq!(paths.conflicted_paths, vec!["conflicted.txt"]);
         assert!(paths.reset_required);
+    }
+
+    /// The reason this goes through `git worktree move`: after the move the
+    /// worktree still has to be a working tree at its new path, which requires
+    /// both the gitfile and the repo's `gitdir` pointer to have been rewritten.
+    #[test]
+    fn move_worktree_leaves_a_working_tree_at_the_new_path() {
+        let repo = crate::test_utils::TempGitRepo::new();
+        repo.write_file("tracked.txt", "base\n");
+        repo.commit("base");
+
+        repo.run_git(&["branch", "feature"]);
+
+        let name = repo.path().file_name().unwrap().to_str().unwrap();
+        let parent = repo.path().parent().unwrap();
+        let from = parent.join(format!("{name}-wt-from"));
+        let to = parent.join(format!("{name}-wt-to"));
+        create_worktree_for_existing_branch_at_path(repo.path(), "feature", &from).unwrap();
+
+        move_worktree(repo.path(), &from, &to).unwrap();
+
+        assert!(!from.exists());
+        assert!(to.join("tracked.txt").exists());
+        // A dangling gitfile or gitdir pointer fails both of these.
+        assert!(cli::run(&to, &["status", "--porcelain"]).is_ok());
+        assert_eq!(
+            cli::run(&to, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .unwrap()
+                .trim(),
+            "feature"
+        );
+
+        let _ = std::fs::remove_dir_all(&to);
     }
 
     #[test]

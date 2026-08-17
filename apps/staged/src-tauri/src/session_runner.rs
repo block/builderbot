@@ -290,6 +290,44 @@ impl SessionRegistry {
         self.inner.lock().unwrap().running.contains_key(session_id)
     }
 
+    /// Ids of every session this process is currently running.
+    ///
+    /// The shutdown path uses this to cancel them all: the registry, not the DB,
+    /// is what says which running rows belong to *this* process's threads.
+    pub fn running_session_ids(&self) -> Vec<String> {
+        self.inner.lock().unwrap().running.keys().cloned().collect()
+    }
+
+    /// Wait until none of `session_ids` are registered as running, or until
+    /// `timeout` elapses. Returns `true` if they all deregistered in time.
+    ///
+    /// Modelled on `ActionExecutor::wait_for_executions`: session threads
+    /// deregister themselves as they exit, so polling the registry is how the
+    /// shutdown path learns a cancelled session's agent is actually gone rather
+    /// than exiting out from under it.
+    pub fn wait_for_sessions(&self, session_ids: &[String], timeout: Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+
+        loop {
+            let all_stopped = {
+                let inner = self.inner.lock().unwrap();
+                session_ids
+                    .iter()
+                    .all(|session_id| !inner.running.contains_key(session_id))
+            };
+
+            if all_stopped {
+                return true;
+            }
+
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     /// Register a session whose work is driven outside `start_session` (e.g. a
     /// pikchr diagram child session run by a `generate_pikchr` worker thread),
     /// so a user cancel reaches the actual work instead of taking
@@ -3577,6 +3615,35 @@ mod tests {
             Some("provider unavailable")
         );
         assert_eq!(failed.completion_reason, Some(CompletionReason::Crashed));
+    }
+
+    #[test]
+    fn wait_for_sessions_returns_once_every_session_deregisters() {
+        let registry = Arc::new(SessionRegistry::new());
+        registry.register("session-1");
+        registry.register("session-2");
+        let session_ids = registry.running_session_ids();
+        assert_eq!(session_ids.len(), 2);
+
+        let deregistering = Arc::clone(&registry);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            deregistering.deregister("session-1");
+            deregistering.deregister("session-2");
+        });
+
+        assert!(registry.wait_for_sessions(&session_ids, Duration::from_secs(2)));
+        assert!(registry.running_session_ids().is_empty());
+    }
+
+    #[test]
+    fn wait_for_sessions_times_out_while_a_session_is_still_running() {
+        let registry = SessionRegistry::new();
+        registry.register("session-1");
+
+        assert!(!registry.wait_for_sessions(&["session-1".to_string()], Duration::from_millis(50)));
+        // Unknown ids count as stopped, so a stale snapshot can't block a quit.
+        assert!(registry.wait_for_sessions(&["gone".to_string()], Duration::from_millis(50)));
     }
 
     #[test]

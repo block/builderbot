@@ -912,7 +912,7 @@ pub struct ActiveSessionInfo {
 /// sessions (pr/push) link no artifact, so their branch comes from the
 /// session row's own `branch_id` and their type falls back to prompt
 /// inference.
-fn project_active_session(store: &Store, session: &store::Session) -> ActiveSessionInfo {
+pub(crate) fn project_active_session(store: &Store, session: &store::Session) -> ActiveSessionInfo {
     let project_note = store
         .get_project_note_by_session(&session.id)
         .ok()

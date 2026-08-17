@@ -635,6 +635,21 @@ pub fn set_foreground_project(
     scheduler.set_foreground(client_id, project_id);
 }
 
+/// Report a native window's focus from the backend, bypassing the frontend.
+///
+/// `app_lifecycle` hides and shows windows itself, and a hidden native window
+/// does not reliably deliver a blur to its webview — so without this the
+/// scheduler would keep polling on the focused tier for a window nobody can
+/// see. The id mirrors the frontend's own `tauri-{label}` scheme, so both sides
+/// address the same per-window client.
+pub(crate) fn set_tauri_client_focus(
+    scheduler: &PrPollScheduler,
+    window_label: &str,
+    focused: bool,
+) {
+    scheduler.set_focus(format!("{TAURI_CLIENT_PREFIX}{window_label}"), focused);
+}
+
 /// Report a client's window focus. With no client focused, periodic polling
 /// pauses (an explicit `refresh_now` still fetches).
 #[tauri::command(rename_all = "camelCase")]

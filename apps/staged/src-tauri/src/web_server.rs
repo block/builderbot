@@ -556,6 +556,16 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         }
 
         // =====================================================================
+        // App lifecycle
+        // =====================================================================
+        // Refused rather than proxied: a browser client must not be able to
+        // terminate the desktop host every other client is connected to. The
+        // quit prompt these answer is only ever raised on a native window.
+        "quit_app" | "confirm_quit" | "cancel_quit" => {
+            Err(format!("{command} is not available in web mode"))
+        }
+
+        // =====================================================================
         // Projects
         // =====================================================================
         "list_projects" => {

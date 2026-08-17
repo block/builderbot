@@ -96,7 +96,9 @@ impl AgentDriver for SimpleDriverWrapper {
 ///
 /// # Returns
 ///
-/// The agent's text response
+/// The agent's text response. Tool calls and tool results the agent made along
+/// the way are not included, so the result stays parseable when the prompt asks
+/// for structured output.
 pub async fn run_acp_prompt(agent: &AcpAgent, working_dir: &Path, prompt: &str) -> Result<String> {
     run_acp_prompt_with_options(agent, working_dir, prompt, None).await
 }

@@ -297,43 +297,27 @@ fn has_git_hooks_path_override(working_dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Parse the AI response and extract suggested actions
+/// Parse the AI response and extract suggested actions.
+///
+/// The response is not guaranteed to be bare JSON: agents wrap the array in a
+/// markdown code fence, prefix it with prose, and may emit brackets of their own
+/// (`[1]`, glob patterns, transcript markers) before the answer. So candidate
+/// `[` positions are scanned from the **end** of the response — the agent's
+/// final array wins — and each candidate is prefix-parsed, which lets trailing
+/// text such as a closing fence be ignored. A candidate only counts if it
+/// deserializes into `Vec<SuggestedAction>`, so unrelated arrays are skipped.
 fn parse_ai_response(response: &str) -> Result<Vec<SuggestedAction>> {
-    let json_str = extract_json_array(response)?;
-
-    let actions: Vec<SuggestedAction> = serde_json::from_str(&json_str).map_err(|e| {
-        anyhow::anyhow!(
-            "Failed to parse AI response as JSON: {}. Response was: {}",
-            e,
-            json_str
-        )
-    })?;
-
-    Ok(actions)
-}
-
-/// Extract JSON array from AI response that might contain extra text
-fn extract_json_array(text: &str) -> Result<String> {
-    // First try to parse the entire response as JSON
-    if text.trim().starts_with('[') && serde_json::from_str::<serde_json::Value>(text).is_ok() {
-        return Ok(text.to_string());
-    }
-
-    // Look for JSON array in the text
-    if let Some(start) = text.find('[') {
-        if let Some(end) = text.rfind(']') {
-            if end > start {
-                let json_str = &text[start..=end];
-                if serde_json::from_str::<serde_json::Value>(json_str).is_ok() {
-                    return Ok(json_str.to_string());
-                }
-            }
+    for (start, _) in response.rmatch_indices('[') {
+        let mut stream = serde_json::Deserializer::from_str(&response[start..])
+            .into_iter::<Vec<SuggestedAction>>();
+        if let Some(Ok(actions)) = stream.next() {
+            return Ok(actions);
         }
     }
 
     Err(anyhow::anyhow!(
         "Could not find valid JSON array in AI response. Response was: {}",
-        text
+        response
     ))
 }
 
@@ -341,23 +325,76 @@ fn extract_json_array(text: &str) -> Result<String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_extract_json_array() {
-        let text = r#"Here are some actions:
-[
-  {"name": "Test", "command": "npm test", "actionType": "check", "autoCommit": false, "source": "package.json"}
-]
-That's all!"#;
+    const TEST_ACTION: &str = r#"{"name": "Test", "command": "npm test", "actionType": "check", "autoCommit": false, "source": "package.json"}"#;
 
-        let result = extract_json_array(text);
-        assert!(result.is_ok());
+    #[test]
+    fn parses_array_surrounded_by_prose() {
+        let text = format!("Here are some actions:\n[\n  {TEST_ACTION}\n]\nThat's all!");
+
+        let actions = parse_ai_response(&text).expect("array between prose should parse");
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].name, "Test");
     }
 
     #[test]
-    fn test_extract_json_array_clean() {
-        let text = r#"[{"name": "Test", "command": "npm test", "actionType": "check", "autoCommit": false, "source": "package.json"}]"#;
+    fn parses_bare_array() {
+        let text = format!("[{TEST_ACTION}]");
 
-        let result = extract_json_array(text);
-        assert!(result.is_ok());
+        let actions = parse_ai_response(&text).expect("bare array should parse");
+
+        assert_eq!(actions.len(), 1);
+    }
+
+    #[test]
+    fn parses_fenced_array_after_tool_transcript() {
+        // Regression: one-shot transcripts used to interleave `[Tool: …]` /
+        // `[Result: …]` markers, whose leading `[` swallowed the real array.
+        let text = format!(
+            "I'll explore the project structure.\n\
+             [Tool: Terminal]\n\
+             [Result: List top-level project files]\n\
+             ```json\n\
+             [{TEST_ACTION}]\n\
+             ```\n"
+        );
+
+        let actions = parse_ai_response(&text).expect("fenced array after markers should parse");
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].command, "npm test");
+    }
+
+    #[test]
+    fn prefers_the_final_array_over_earlier_ones() {
+        let text = format!(
+            "Example of the shape I will return:\n\
+             [{{\"name\": \"Example\", \"command\": \"echo hi\", \"actionType\": \"run\", \"autoCommit\": false, \"source\": \"README.md\"}}]\n\
+             Here is the real answer:\n\
+             [{TEST_ACTION}]"
+        );
+
+        let actions = parse_ai_response(&text).expect("last valid array should win");
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].name, "Test");
+    }
+
+    #[test]
+    fn skips_arrays_that_are_not_actions() {
+        let text = format!("Candidates: [\"justfile\", \"package.json\"]\n[{TEST_ACTION}]\n[1, 2]");
+
+        let actions = parse_ai_response(&text).expect("non-action arrays should be skipped");
+
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].source, "package.json");
+    }
+
+    #[test]
+    fn errors_when_no_action_array_is_present() {
+        let err = parse_ai_response("I could not find any build files. [Tool: Terminal]")
+            .expect_err("responses without an action array should fail");
+
+        assert!(err.to_string().contains("Could not find valid JSON array"));
     }
 }

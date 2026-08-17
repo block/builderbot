@@ -2595,6 +2595,11 @@ fn extract_content_preview(content: &[ToolCallContent]) -> Option<String> {
 // =============================================================================
 
 /// Simple in-memory message writer for basic usage.
+///
+/// Only agent *text* is recorded. Tool calls and tool results are deliberately
+/// dropped: this writer backs one-shot prompting ([`crate::run_acp_prompt`]),
+/// whose callers parse the accumulated text as machine-readable output (JSON).
+/// Interleaving tool markers would corrupt that payload.
 pub struct BasicMessageWriter {
     text: Mutex<String>,
     last_flush_at: Mutex<Instant>,
@@ -2634,11 +2639,11 @@ impl MessageWriter for BasicMessageWriter {
     async fn record_tool_call(
         &self,
         _tool_call_id: &str,
-        title: &str,
+        _title: &str,
         _raw_input: Option<&serde_json::Value>,
     ) {
-        let mut current = self.text.lock().await;
-        current.push_str(&format!("\n[Tool: {}]\n", title));
+        // Intentionally ignored: see the type-level docs. Tool activity must not
+        // land in the buffer that one-shot callers parse.
     }
 
     async fn update_tool_call_title(
@@ -2650,9 +2655,8 @@ impl MessageWriter for BasicMessageWriter {
         // Nothing to do for basic implementation
     }
 
-    async fn record_tool_result(&self, _tool_call_id: &str, content: &str) {
-        let mut current = self.text.lock().await;
-        current.push_str(&format!("\n[Result: {}]\n", content));
+    async fn record_tool_result(&self, _tool_call_id: &str, _content: &str) {
+        // Intentionally ignored: see the type-level docs.
     }
 }
 
@@ -3521,6 +3525,20 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
 
         assert!(completed);
         assert_eq!(buffer.match_cursor, 2);
+    }
+
+    #[tokio::test]
+    async fn basic_writer_records_only_agent_text() {
+        let writer = BasicMessageWriter::new();
+
+        writer.append_text("[").await;
+        writer.record_tool_call("call-1", "Terminal", None).await;
+        writer.record_tool_result("call-1", "total 42").await;
+        writer.append_text("]").await;
+
+        // One-shot callers parse this buffer as JSON, so tool activity must not
+        // leak into it.
+        assert_eq!(writer.get_text().await, "[]");
     }
 
     #[tokio::test]

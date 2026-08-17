@@ -81,7 +81,7 @@ if let Some(agent) = find_acp_agent_by_id("goose") {
 
 ### Prompt Functions
 
-- `run_acp_prompt(agent, working_dir, prompt) -> anyhow::Result<String>` - Send a one-shot prompt
+- `run_acp_prompt(agent, working_dir, prompt) -> anyhow::Result<String>` - Send a one-shot prompt; returns the agent's text only (tool calls and results are omitted)
 
 ### Types
 

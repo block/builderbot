@@ -306,19 +306,44 @@ fn has_git_hooks_path_override(working_dir: &Path) -> bool {
 /// final array wins — and each candidate is prefix-parsed, which lets trailing
 /// text such as a closing fence be ignored. A candidate only counts if it
 /// deserializes into `Vec<SuggestedAction>`, so unrelated arrays are skipped.
+///
+/// When nothing parses, a candidate that is a valid JSON array of objects but
+/// fails the `SuggestedAction` shape is almost certainly the agent's answer
+/// with a drifted field, so the typed error for the closest such near-miss is
+/// surfaced instead of the generic not-found message.
 fn parse_ai_response(response: &str) -> Result<Vec<SuggestedAction>> {
+    let mut near_miss: Option<serde_json::Error> = None;
+
     for (start, _) in response.rmatch_indices('[') {
-        let mut stream = serde_json::Deserializer::from_str(&response[start..])
-            .into_iter::<Vec<SuggestedAction>>();
-        if let Some(Ok(actions)) = stream.next() {
-            return Ok(actions);
+        let candidate = &response[start..];
+        let mut stream =
+            serde_json::Deserializer::from_str(candidate).into_iter::<Vec<SuggestedAction>>();
+        match stream.next() {
+            Some(Ok(actions)) => return Ok(actions),
+            Some(Err(shape_err)) if near_miss.is_none() => {
+                let mut untyped = serde_json::Deserializer::from_str(candidate)
+                    .into_iter::<Vec<serde_json::Value>>();
+                if let Some(Ok(values)) = untyped.next() {
+                    if values.iter().all(|v| v.is_object()) {
+                        near_miss = Some(shape_err);
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
-    Err(anyhow::anyhow!(
-        "Could not find valid JSON array in AI response. Response was: {}",
-        response
-    ))
+    match near_miss {
+        Some(shape_err) => Err(anyhow::anyhow!(
+            "Found a JSON array of objects in the AI response, but it does not match the expected action shape ({}). Response was: {}",
+            shape_err,
+            response
+        )),
+        None => Err(anyhow::anyhow!(
+            "Could not find valid JSON array in AI response. Response was: {}",
+            response
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -393,6 +418,37 @@ mod tests {
     #[test]
     fn errors_when_no_action_array_is_present() {
         let err = parse_ai_response("I could not find any build files. [Tool: Terminal]")
+            .expect_err("responses without an action array should fail");
+
+        assert!(err.to_string().contains("Could not find valid JSON array"));
+    }
+
+    #[test]
+    fn surfaces_the_shape_error_for_near_miss_arrays() {
+        // One malformed actionType in an otherwise valid array: the serde
+        // error should reach the caller instead of the generic message.
+        let text = r#"[{"name": "Lint", "command": "just lint", "actionType": "lintfix", "autoCommit": false, "source": "justfile"}]"#;
+
+        let err = parse_ai_response(text).expect_err("near-miss arrays should fail");
+
+        let message = err.to_string();
+        assert!(message.contains("does not match the expected action shape"));
+        assert!(message.contains("lintfix"));
+    }
+
+    #[test]
+    fn near_miss_error_is_not_masked_by_trailing_junk_arrays() {
+        let text = r#"[{"name": "Lint", "command": "just lint", "actionType": "lintfix", "autoCommit": false, "source": "justfile"}]
+Exit codes seen: [1, 2]"#;
+
+        let err = parse_ai_response(text).expect_err("near-miss arrays should fail");
+
+        assert!(err.to_string().contains("lintfix"));
+    }
+
+    #[test]
+    fn non_object_arrays_do_not_count_as_near_misses() {
+        let err = parse_ai_response(r#"Files found: ["justfile", "package.json"]"#)
             .expect_err("responses without an action array should fail");
 
         assert!(err.to_string().contains("Could not find valid JSON array"));

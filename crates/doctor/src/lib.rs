@@ -673,6 +673,55 @@ struct FreshnessTarget {
     version_args: Option<&'static [&'static str]>,
 }
 
+/// Opt-in piped stdin for a fix subprocess. Create with [`FixStdin::pipe`];
+/// keep the [`FixStdinWriter`], put the `FixStdin` in
+/// [`ExecuteFixOptions::stdin`]. Cloning shares the underlying receiver: the
+/// first execution to spawn takes it, so a cloned options struct cannot feed
+/// two children.
+#[derive(Debug, Clone)]
+pub struct FixStdin {
+    rx: Arc<Mutex<Option<std::sync::mpsc::Receiver<String>>>>,
+}
+
+impl FixStdin {
+    /// Create a connected pair: a cloneable writer for the caller to keep and
+    /// the `FixStdin` to place in [`ExecuteFixOptions::stdin`]. Lines sent
+    /// before the fix subprocess spawns are buffered and written once it does;
+    /// dropping every writer clone closes the child's stdin (EOF).
+    pub fn pipe() -> (FixStdinWriter, FixStdin) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (
+            FixStdinWriter { tx },
+            FixStdin {
+                rx: Arc::new(Mutex::new(Some(rx))),
+            },
+        )
+    }
+
+    /// Take the receiving end for a spawned child. First caller wins; `None`
+    /// on later calls (a clone already fed an execution).
+    fn take_receiver(&self) -> Option<std::sync::mpsc::Receiver<String>> {
+        self.rx.lock().ok().and_then(|mut rx| rx.take())
+    }
+}
+
+/// Cloneable handle for feeding lines to a fix subprocess's stdin.
+#[derive(Debug, Clone)]
+pub struct FixStdinWriter {
+    tx: std::sync::mpsc::Sender<String>,
+}
+
+impl FixStdinWriter {
+    /// Queue one line for the fix's stdin; a trailing `\n` is appended and the
+    /// pipe is flushed. `Err` when the fix has already finished (its stdin
+    /// pipe is closed).
+    pub fn send_line(&self, line: impl Into<String>) -> Result<(), String> {
+        self.tx
+            .send(line.into())
+            .map_err(|_| "Fix is no longer accepting input".to_string())
+    }
+}
+
 /// Options for executing a doctor fix command.
 #[derive(Debug, Clone, Default)]
 pub struct ExecuteFixOptions {
@@ -682,11 +731,20 @@ pub struct ExecuteFixOptions {
     pub npm_registry: Option<String>,
     /// Optional caller-provided environment snapshot for the fix subprocess.
     pub env: Option<DoctorEnv>,
+    /// Opt-in piped stdin for the fix subprocess (see [`FixStdin::pipe`]).
+    /// `None` keeps the child inheriting the host process's stdin, so
+    /// terminal hosts can still run interactive fixes directly.
+    pub stdin: Option<FixStdin>,
 }
 
 impl ExecuteFixOptions {
     pub fn with_env_snapshot(mut self, vars: Vec<(String, String)>) -> Self {
         self.env = Some(DoctorEnv::new(vars));
+        self
+    }
+
+    pub fn with_stdin(mut self, stdin: FixStdin) -> Self {
+        self.stdin = Some(stdin);
         self
     }
 }
@@ -723,6 +781,7 @@ pub async fn execute_fix_with_options(
             command_override,
             npm_registry: npm_registry.map(str::to_string),
             env: None,
+            stdin: None,
         },
     )
     .await
@@ -780,6 +839,7 @@ where
             command_override,
             npm_registry: npm_registry.map(str::to_string),
             env: None,
+            stdin: None,
         },
         on_line,
     )
@@ -814,20 +874,21 @@ where
     // Fixes are intentionally not routed through the bounded probe runner:
     // these are user-triggered install/auth/update actions and can reasonably
     // be interactive or long-running.
-    run_command_streaming(command, opts.env, on_line).await
+    run_command_streaming(command, opts.env, opts.stdin, on_line).await
 }
 
 /// Async wrapper that runs `run_command_streaming_blocking` on the blocking pool.
 pub(crate) async fn run_command_streaming<F>(
     command: String,
     env: Option<DoctorEnv>,
+    stdin: Option<FixStdin>,
     on_line: F,
 ) -> Result<(), String>
 where
     F: FnMut(&str) + Send + 'static,
 {
     tokio::task::spawn_blocking(move || {
-        run_command_streaming_blocking(&command, env.as_ref(), on_line)
+        run_command_streaming_blocking(&command, env.as_ref(), stdin, on_line)
     })
     .await
     .unwrap_or_else(|e| Err(format!("Task failed: {e}")))
@@ -1020,21 +1081,56 @@ pub(crate) fn execute_command_with_path_prefix_with_env(
 fn run_command_streaming_blocking<F>(
     command: &str,
     env: Option<&DoctorEnv>,
+    stdin: Option<FixStdin>,
     mut on_line: F,
 ) -> Result<(), String>
 where
     F: FnMut(&str),
 {
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Write};
 
     let mut command = build_shell_command(command, &[], env);
     command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    // Opt-in only: without a `FixStdin` the child keeps inheriting the host
+    // process's stdin, so interactive fixes in terminal hosts are untouched.
+    if stdin.is_some() {
+        command.stdin(std::process::Stdio::piped());
+    }
     command::configure_command(&mut command);
     let mut child = command
         .spawn()
         .map_err(|e| format!("Failed to run command: {e}"))?;
+
+    if let Some(fix_stdin) = stdin {
+        let mut child_stdin = child.stdin.take().expect("stdin was piped");
+        match fix_stdin.take_receiver() {
+            Some(stdin_rx) => {
+                // Detached on purpose: joining would hang the fix whenever a
+                // caller still holds a writer after the child exits (the
+                // thread would be parked in `iter()`). It exits on its own
+                // when every writer drops (channel closed) or a write fails
+                // once the child is gone (Rust ignores SIGPIPE, so EPIPE
+                // surfaces as a clean `Err`); dropping `child_stdin` then
+                // delivers EOF.
+                std::thread::spawn(move || {
+                    for line in stdin_rx.iter() {
+                        if child_stdin
+                            .write_all(format!("{line}\n").as_bytes())
+                            .and_then(|()| child_stdin.flush())
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+            }
+            // A clone of this `FixStdin` already fed another execution; no
+            // line can ever arrive, so close the pipe now (immediate EOF).
+            None => drop(child_stdin),
+        }
+    }
 
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
@@ -1198,6 +1294,7 @@ mod tests {
         let result = run_command_streaming(
             "echo doctor-streaming-marker-hello && echo doctor-streaming-marker-world".to_string(),
             None,
+            None,
             move |line| {
                 lines_clone.lock().unwrap().push(line.to_string());
             },
@@ -1217,6 +1314,95 @@ mod tests {
                 .iter()
                 .any(|l| l == "doctor-streaming-marker-world"),
             "did not see 'world' marker; captured: {captured:?}",
+        );
+    }
+
+    /// A line sent through the `FixStdin` pipe must reach the child's stdin
+    /// and dropping the last writer must deliver EOF: `cat` echoes the line
+    /// and exits 0 only when its stdin closes. Sending before the child
+    /// spawns also exercises the pre-spawn buffering guarantee.
+    #[tokio::test]
+    async fn run_command_streaming_piped_stdin_round_trips_through_cat() {
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let (writer, stdin) = FixStdin::pipe();
+
+        writer.send_line("doctor-stdin-marker-echo").unwrap();
+        drop(writer);
+
+        let result = run_command_streaming("cat".to_string(), None, Some(stdin), move |line| {
+            lines_clone.lock().unwrap().push(line.to_string());
+        })
+        .await;
+
+        assert!(result.is_ok(), "cat should exit 0 on EOF; got {result:?}");
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured.iter().any(|l| l == "doctor-stdin-marker-echo"),
+            "cat should echo the line written to its piped stdin; captured: {captured:?}",
+        );
+    }
+
+    /// The paste-an-auth-code shape: the command prompts by blocking on a
+    /// line read, and the caller feeds the answer through the writer while
+    /// the fix is running.
+    #[tokio::test]
+    async fn run_command_streaming_piped_stdin_feeds_prompt_style_read() {
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let (writer, stdin) = FixStdin::pipe();
+
+        let handle = tokio::spawn(run_command_streaming(
+            "read -r line && echo \"got-$line\"".to_string(),
+            None,
+            Some(stdin),
+            move |line| {
+                lines_clone.lock().unwrap().push(line.to_string());
+            },
+        ));
+
+        writer.send_line("doctor-stdin-auth-code").unwrap();
+        drop(writer);
+
+        let result = handle.await.unwrap();
+        assert!(result.is_ok(), "read/echo should exit 0; got {result:?}");
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured.iter().any(|l| l == "got-doctor-stdin-auth-code"),
+            "prompt-style read should see the sent line; captured: {captured:?}",
+        );
+    }
+
+    /// A writer held across the fix's completion must not hang the run — the
+    /// stdin writer thread is detached, never joined. Afterwards, `send_line`
+    /// must fail cleanly (never panic): the first post-exit send may still
+    /// queue, but it wakes the writer thread, whose write fails with EPIPE
+    /// and drops the receiver, so sends error from then on.
+    #[tokio::test]
+    async fn run_command_streaming_piped_stdin_no_hang_when_writer_outlives_child() {
+        let (writer, stdin) = FixStdin::pipe();
+
+        let result = run_command_streaming(
+            "echo doctor-stdin-done".to_string(),
+            None,
+            Some(stdin),
+            |_| {},
+        )
+        .await;
+
+        assert!(result.is_ok(), "echo fix should complete; got {result:?}");
+
+        let mut saw_error = false;
+        for _ in 0..100 {
+            if writer.send_line("late-line").is_err() {
+                saw_error = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            saw_error,
+            "send_line after child exit should eventually return Err",
         );
     }
 
@@ -1622,6 +1808,7 @@ mod tests {
                 command_override: Some(script_name.to_string()),
                 npm_registry: None,
                 env: Some(env),
+                stdin: None,
             },
             move |line| {
                 lines_clone.lock().unwrap().push(line.to_string());
@@ -1676,6 +1863,7 @@ mod tests {
                 command_override: Some(command.to_string()),
                 npm_registry: None,
                 env: Some(env),
+                stdin: None,
             },
             move |line| {
                 lines_clone.lock().unwrap().push(line.to_string());

@@ -59,6 +59,9 @@ fn execute_fix_options(
         command_override,
         npm_registry: crate::managed_acp_tools::npm_registry().map(str::to_string),
         env: None,
+        // Staged's fixes are non-interactive: nothing here feeds a prompt, so
+        // the child keeps inheriting stdin rather than getting a piped one.
+        stdin: None,
     }
     .with_env_snapshot(env_vars)
 }

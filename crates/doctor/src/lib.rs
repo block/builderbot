@@ -675,9 +675,12 @@ struct FreshnessTarget {
 
 /// Opt-in piped stdin for a fix subprocess. Create with [`FixStdin::pipe`];
 /// keep the [`FixStdinWriter`], put the `FixStdin` in
-/// [`ExecuteFixOptions::stdin`]. Cloning shares the underlying receiver: the
-/// first execution to spawn takes it, so a cloned options struct cannot feed
-/// two children.
+/// [`ExecuteFixOptions::stdin`].
+///
+/// Single-use: the first execution claims the underlying receiver, and any
+/// later execution handed the same `FixStdin` — or a clone of it, including one
+/// carried along by a cloned [`ExecuteFixOptions`] — fails with an error
+/// instead of spawning. Retrying a fix needs a fresh pipe.
 #[derive(Debug, Clone)]
 pub struct FixStdin {
     rx: Arc<Mutex<Option<std::sync::mpsc::Receiver<String>>>>,
@@ -698,8 +701,9 @@ impl FixStdin {
         )
     }
 
-    /// Take the receiving end for a spawned child. First caller wins; `None`
-    /// on later calls (a clone already fed an execution).
+    /// Take the receiving end for a child about to be spawned. First caller
+    /// wins; `None` on later calls (a clone already fed an execution), which
+    /// the caller turns into an error rather than an immediately-EOF'd pipe.
     fn take_receiver(&self) -> Option<std::sync::mpsc::Receiver<String>> {
         self.rx.lock().ok().and_then(|mut rx| rx.take())
     }
@@ -734,6 +738,10 @@ pub struct ExecuteFixOptions {
     /// Opt-in piped stdin for the fix subprocess (see [`FixStdin::pipe`]).
     /// `None` keeps the child inheriting the host process's stdin, so
     /// terminal hosts can still run interactive fixes directly.
+    ///
+    /// A `FixStdin` feeds exactly one execution, so a cached options struct
+    /// must have this field refreshed (or be rebuilt) before a fix is retried;
+    /// reusing it fails the run.
     pub stdin: Option<FixStdin>,
 }
 
@@ -743,6 +751,9 @@ impl ExecuteFixOptions {
         self
     }
 
+    /// Attach an opt-in stdin pipe (see [`FixStdin::pipe`]). The `FixStdin`
+    /// feeds exactly one execution: call this again with a fresh pipe for
+    /// every retry rather than reusing a built options struct.
     pub fn with_stdin(mut self, stdin: FixStdin) -> Self {
         self.stdin = Some(stdin);
         self
@@ -1089,13 +1100,27 @@ where
 {
     use std::io::{BufRead, BufReader, Write};
 
+    // Claim the write end before anything is launched: a `FixStdin` whose
+    // receiver a previous execution already took can never deliver a line, so
+    // the child would block forever on a pipe nobody writes — the exact hang
+    // this option exists to fix. Always a caller bug, so surface it at the call
+    // site rather than spawning a doomed subprocess.
+    let stdin_rx = match stdin {
+        Some(fix_stdin) => Some(fix_stdin.take_receiver().ok_or_else(|| {
+            "FixStdin already consumed by a previous fix execution; \
+             create a fresh pipe with FixStdin::pipe() for each run"
+                .to_string()
+        })?),
+        None => None,
+    };
+
     let mut command = build_shell_command(command, &[], env);
     command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     // Opt-in only: without a `FixStdin` the child keeps inheriting the host
     // process's stdin, so interactive fixes in terminal hosts are untouched.
-    if stdin.is_some() {
+    if stdin_rx.is_some() {
         command.stdin(std::process::Stdio::piped());
     }
     command::configure_command(&mut command);
@@ -1103,33 +1128,25 @@ where
         .spawn()
         .map_err(|e| format!("Failed to run command: {e}"))?;
 
-    if let Some(fix_stdin) = stdin {
+    if let Some(stdin_rx) = stdin_rx {
         let mut child_stdin = child.stdin.take().expect("stdin was piped");
-        match fix_stdin.take_receiver() {
-            Some(stdin_rx) => {
-                // Detached on purpose: joining would hang the fix whenever a
-                // caller still holds a writer after the child exits (the
-                // thread would be parked in `iter()`). It exits on its own
-                // when every writer drops (channel closed) or a write fails
-                // once the child is gone (Rust ignores SIGPIPE, so EPIPE
-                // surfaces as a clean `Err`); dropping `child_stdin` then
-                // delivers EOF.
-                std::thread::spawn(move || {
-                    for line in stdin_rx.iter() {
-                        if child_stdin
-                            .write_all(format!("{line}\n").as_bytes())
-                            .and_then(|()| child_stdin.flush())
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                });
+        // Detached on purpose: joining would hang the fix whenever a caller
+        // still holds a writer after the child exits (the thread would be
+        // parked in `iter()`). It exits on its own when every writer drops
+        // (channel closed) or a write fails once the child is gone (Rust
+        // ignores SIGPIPE, so EPIPE surfaces as a clean `Err`); dropping
+        // `child_stdin` then delivers EOF.
+        std::thread::spawn(move || {
+            for line in stdin_rx.iter() {
+                if child_stdin
+                    .write_all(format!("{line}\n").as_bytes())
+                    .and_then(|()| child_stdin.flush())
+                    .is_err()
+                {
+                    break;
+                }
             }
-            // A clone of this `FixStdin` already fed another execution; no
-            // line can ever arrive, so close the pipe now (immediate EOF).
-            None => drop(child_stdin),
-        }
+        });
     }
 
     let stdout = child.stdout.take().expect("stdout was piped");
@@ -1403,6 +1420,42 @@ mod tests {
         assert!(
             saw_error,
             "send_line after child exit should eventually return Err",
+        );
+    }
+
+    /// Reusing a `FixStdin` (or a clone) for a second execution must fail
+    /// loudly rather than hand the child an immediately-EOF'd stdin — the
+    /// receiver lives with the first run, so a second could only hang. The
+    /// second run must also never spawn: nothing reaches `on_line`.
+    #[tokio::test]
+    async fn run_command_streaming_piped_stdin_errors_when_reused() {
+        let (writer, stdin) = FixStdin::pipe();
+        let reused = stdin.clone();
+        writer.send_line("doctor-stdin-reuse-first").unwrap();
+        drop(writer);
+
+        let first = run_command_streaming("cat".to_string(), None, Some(stdin), |_| {}).await;
+        assert!(first.is_ok(), "first run should succeed; got {first:?}");
+
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let second = run_command_streaming(
+            "echo doctor-stdin-reuse-second".to_string(),
+            None,
+            Some(reused),
+            move |line| lines_clone.lock().unwrap().push(line.to_string()),
+        )
+        .await;
+
+        let err = second.expect_err("reusing a consumed FixStdin should fail");
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            err.contains("already consumed"),
+            "error should name the reuse; got {err:?}",
+        );
+        assert!(
+            captured.is_empty(),
+            "second run must not spawn; captured: {captured:?}",
         );
     }
 

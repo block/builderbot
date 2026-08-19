@@ -492,6 +492,17 @@ export async function warmProjectTimelines(projectId: string): Promise<void> {
   }
 }
 
+/**
+ * Drop a branch's timeline from every cache layer and tell open views to
+ * refetch.
+ *
+ * Don't call this after a store-backed mutation — those publish
+ * branch-changed / notes-changed / review-changed, and
+ * cacheInvalidationListener already invalidates centrally in every window.
+ * The remaining call sites cover what the change feed deliberately doesn't:
+ * git-only worktree operations (reset, discard) and session-family writes
+ * (queueing or cancelling sessions), which publish nothing.
+ */
 export function invalidateBranchTimeline(branchId: string): void {
   timelineCache.delete(branchId);
   inFlightTimelines.delete(branchId);
@@ -499,6 +510,20 @@ export function invalidateBranchTimeline(branchId: string): void {
   window.dispatchEvent(
     new CustomEvent('timeline-invalidated', { detail: { branchIds: [branchId] } })
   );
+}
+
+/**
+ * Drop *every* branch's timeline and tell all open views to refetch — the
+ * blunt version of `invalidateBranchTimeline` for when we don't know which
+ * branches changed. Reserved for the store change feed's lag recovery
+ * (`branch-changed` with a null branchId); nothing else should need it.
+ */
+export function invalidateAllBranchTimelines(): void {
+  timelineCache.clear();
+  inFlightTimelines.clear();
+  invalidateCacheByCommand('get_branch_timeline');
+  // `branchIds: null` means "all" — every listening card reloads.
+  window.dispatchEvent(new CustomEvent('timeline-invalidated', { detail: { branchIds: null } }));
 }
 
 interface GetBranchTimelineOptions {
@@ -1553,6 +1578,26 @@ export function refreshPrStatusesNow(clientId: string, projectId: string): Promi
 /** Tell the backend this client has disconnected so its interest is dropped. */
 export function disconnectPrPollClient(clientId: string): Promise<void> {
   return invokeCommand('disconnect_client', { clientId });
+}
+
+// =============================================================================
+// Windows
+// =============================================================================
+
+/**
+ * Open a new full-peer app window, optionally seeded with the opener's
+ * selected project. Returns the new window's label.
+ */
+export function newWindow(seedProjectId: string | null): Promise<string> {
+  return invokeCommand('new_window', { seedProjectId });
+}
+
+/**
+ * One-shot read of the project this window was seeded with by its opener, if
+ * any. Consumes the seed; only secondary (`win-*`) windows ever have one.
+ */
+export function takeWindowSeed(): Promise<string | null> {
+  return invokeCommand('take_window_seed');
 }
 
 // =============================================================================

@@ -15,6 +15,70 @@
 
 export const isTauri: boolean = typeof window !== 'undefined' && '__TAURI__' in window;
 
+let reportedMissingWindowLabel = false;
+
+/**
+ * The current Tauri window's label (`main`, `win-2`, …), or `null` in web
+ * mode. Read synchronously from the internals Tauri injects before any script
+ * runs (the same lookup `@tauri-apps/api/window` does), so it is safe to call
+ * at module-initialization time.
+ *
+ * Fails loudly. `null` in web mode is the expected answer and is returned
+ * silently, but `null` in Tauri mode means the internals were reshaped (most
+ * likely by an upgrade) and every window is about to collapse to the shared
+ * `main` identity — a regression whose only symptom would otherwise be
+ * mysteriously wrong PR-poll cadence. That case is reported via
+ * `console.error` once per page, followed by the label the official API sees.
+ */
+export function getWindowLabel(): string | null {
+  if (!isTauri) return null;
+  const internals = (
+    window as unknown as {
+      __TAURI_INTERNALS__?: { metadata?: { currentWindow?: { label?: string } } };
+    }
+  ).__TAURI_INTERNALS__;
+  const label = internals?.metadata?.currentWindow?.label ?? null;
+  if (label === null) reportMissingWindowLabel();
+  return label;
+}
+
+/**
+ * Report a failed label lookup exactly once per page. The once-flag matters
+ * because `persistLastProject()` calls `getWindowLabel()` on every navigation
+ * persist — unguarded, a broken upgrade would spam the console on every route
+ * change.
+ */
+function reportMissingWindowLabel(): void {
+  if (reportedMissingWindowLabel) return;
+  reportedMissingWindowLabel = true;
+
+  console.error(
+    '[transport] Tauri window label unavailable — __TAURI_INTERNALS__.metadata.currentWindow.label is ' +
+      'missing. All windows degrade to the shared "main" identity: PR-poll focus/selection hints will ' +
+      'clobber each other across windows, all windows share the legacy last-viewed-project key, and ' +
+      "secondary windows won't consume their opener's project seed. Likely a Tauri upgrade reshaped the " +
+      'internals; compare with getCurrentWindow() in @tauri-apps/api/window.'
+  );
+
+  // Diagnostic only. The npm package ships in lockstep with the Tauri release
+  // that injects the internals, so after a reshape it still reads the label
+  // correctly — turning "the read failed" into "the label is actually win-2,
+  // update getWindowLabel() to match". Deliberately not used to retro-correct:
+  // the PR-poll client id is already baked, and switching the navigation key
+  // mid-session would split reads and writes across two keys.
+  void import('@tauri-apps/api/window')
+    .then(({ getCurrentWindow }) => {
+      console.error(
+        `[transport] @tauri-apps/api reports the current window label is "${getCurrentWindow().label}" — ` +
+          'update getWindowLabel() to read the new internals shape.'
+      );
+    })
+    .catch(() => {
+      // The official API is no more readable than the internals here; the
+      // error above is the whole diagnosis available.
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Command invocation
 // ---------------------------------------------------------------------------
@@ -94,6 +158,37 @@ export function listenToEvent<T>(event: string, callback: (payload: T) => void):
   };
 }
 
+/**
+ * Listen to a backend event addressed to *this window* (e.g. menu routing).
+ * `listenToEvent` registers an any-target listener, which Tauri matches
+ * against every emit — including ones targeted at other windows — so events
+ * that must reach exactly one window need this window-scoped variant paired
+ * with a backend `emit_to(label, ..)`. In web mode it falls back to the shared
+ * WebSocket stream, where the page is the only "window".
+ */
+export function listenToWindowEvent<T>(event: string, callback: (payload: T) => void): UnlistenFn {
+  if (!isTauri) {
+    return webSocketListen<T>(event, callback);
+  }
+
+  let cancelled = false;
+  let unlisten: UnlistenFn | undefined;
+
+  void (async () => {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window');
+    const u = await getCurrentWindow().listen<T>(event, (e) => callback(e.payload));
+    if (cancelled) u();
+    else unlisten = u;
+  })().catch((e) => {
+    console.error(`[transport] Failed to register window listener for event "${event}":`, e);
+  });
+
+  return () => {
+    cancelled = true;
+    unlisten?.();
+  };
+}
+
 // ---------------------------------------------------------------------------
 // WebSocket singleton for web-mode events
 // ---------------------------------------------------------------------------
@@ -110,6 +205,14 @@ let wsListeners: WebSocketListener[] = [];
 let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let wsHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
 let wsConnecting = false;
+/**
+ * True once any socket has been created in this page's lifetime, so the next
+ * one can tell a first connect from a reconnect. Deliberately "a socket
+ * existed", not "a socket opened": a failed first attempt followed by a
+ * successful retry is also a gap, since HTTP loads complete happily while no
+ * feed is live.
+ */
+let wsHadSocket = false;
 
 async function getWsUrl(): Promise<string> {
   const { getPrPollClientId } = await import('./services/prPollingService');
@@ -159,6 +262,29 @@ function rehydrateBusyState(): void {
     });
 }
 
+/**
+ * Revalidate every cached surface after a reconnect. The server keeps no
+ * per-client queue, so store change-feed events emitted while the socket was
+ * down are gone — and since those events are now the *only* thing that
+ * invalidates caches after a store-backed mutation (mutations themselves travel
+ * over HTTP, which works fine with the socket down), a lost echo strands the
+ * view indefinitely. Reuses the page-resume recovery, whose `cache-stale`
+ * consumers already cover every surface the feed feeds.
+ *
+ * No gap-duration threshold, unlike the resume path: there a brief tab switch
+ * leaves the socket alive, whereas here the socket was provably down, and even a
+ * two-second gap can swallow a mutation echo. Dynamically imported both to match
+ * the house style above and to avoid a static cycle (pageLifecycleListener
+ * imports `isTauri` from here).
+ */
+function revalidateAfterEventGap(): void {
+  void import('./listeners/pageLifecycleListener')
+    .then(({ revalidateAll }) => revalidateAll())
+    .catch((e) => {
+      console.error('[transport] Failed to revalidate after reconnect:', e);
+    });
+}
+
 async function ensureWebSocket(): Promise<void> {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
     return;
@@ -172,6 +298,9 @@ async function ensureWebSocket(): Promise<void> {
     return;
   }
 
+  const isReconnect = wsHadSocket;
+  wsHadSocket = true;
+
   const socket = new WebSocket(url);
   ws = socket;
 
@@ -180,6 +309,7 @@ async function ensureWebSocket(): Promise<void> {
     startHeartbeat();
     replayCurrentPrPollInterestHints();
     rehydrateBusyState();
+    if (isReconnect) revalidateAfterEventGap();
     if (wsReconnectTimer) {
       clearTimeout(wsReconnectTimer);
       wsReconnectTimer = null;

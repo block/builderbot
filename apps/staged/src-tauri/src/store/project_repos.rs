@@ -3,7 +3,7 @@
 use rusqlite::{params, OptionalExtension};
 
 use super::models::ProjectRepo;
-use super::{now_timestamp, Store, StoreError};
+use super::{now_timestamp, Store, StoreChange, StoreError};
 
 impl Store {
     pub fn create_project_repo(&self, repo: &ProjectRepo) -> Result<(), StoreError> {
@@ -39,6 +39,9 @@ impl Store {
             }
             return Err(e.into());
         }
+        self.publish(StoreChange::Project {
+            project_id: Some(repo.project_id.clone()),
+        });
         Ok(())
     }
 
@@ -92,6 +95,9 @@ impl Store {
             "UPDATE project_repos SET branch_name = ?1, updated_at = ?2 WHERE id = ?3 AND project_id = ?4",
             params![branch_name, now_timestamp(), repo_id, project_id],
         )?;
+        self.publish(StoreChange::Project {
+            project_id: Some(project_id.to_string()),
+        });
         Ok(())
     }
 
@@ -110,6 +116,9 @@ impl Store {
             "UPDATE project_repos SET is_primary = 1, updated_at = ?1 WHERE id = ?2 AND project_id = ?3",
             params![now, repo_id, project_id],
         )?;
+        self.publish(StoreChange::Project {
+            project_id: Some(project_id.to_string()),
+        });
         Ok(())
     }
 
@@ -119,12 +128,26 @@ impl Store {
             "UPDATE project_repos SET reason = NULL, updated_at = ?1 WHERE id = ?2",
             params![now_timestamp(), repo_id],
         )?;
+        self.publish_with(|| StoreChange::Project {
+            project_id: Self::lookup_id(
+                &conn,
+                "SELECT project_id FROM project_repos WHERE id = ?1",
+                repo_id,
+            ),
+        });
         Ok(())
     }
 
     pub fn delete_project_repo(&self, repo_id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        // Resolved before the row disappears, published only if the delete lands.
+        let project_id = Self::lookup_id(
+            &conn,
+            "SELECT project_id FROM project_repos WHERE id = ?1",
+            repo_id,
+        );
         conn.execute("DELETE FROM project_repos WHERE id = ?1", params![repo_id])?;
+        self.publish(StoreChange::Project { project_id });
         Ok(())
     }
 

@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { isTauri, listenToEvent, getWindowSync, type UnlistenFn } from './lib/transport';
+  import { isTauri, getWindowSync, type UnlistenFn } from './lib/transport';
   import * as commands from './lib/api/commands';
   import TopBar from './lib/features/layout/TopBar.svelte';
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
@@ -53,6 +53,7 @@
   import { listenForCacheInvalidation } from './lib/listeners/cacheInvalidationListener';
   import { listenForPageLifecycle } from './lib/listeners/pageLifecycleListener';
   import { listenForAcpToolsReconciled } from './lib/listeners/acpToolsListener';
+  import { listenForMenuEvents } from './lib/listeners/menuListener';
   import { darkMode } from './lib/stores/isDark.svelte';
   import * as prPollingService from './lib/services/prPollingService';
   import type { StoreIncompatibility } from './lib/types';
@@ -61,14 +62,7 @@
   const updaterCheckIntervalMs = 15 * 60 * 1000;
 
   let showSessionLab = $state(false);
-  let unlistenSettings: UnlistenFn | undefined;
-  let unlistenFind: UnlistenFn | undefined;
-  let unlistenFindNext: UnlistenFn | undefined;
-  let unlistenFindPrevious: UnlistenFn | undefined;
-  let unlistenDeleteProject: UnlistenFn | undefined;
-  let unlistenZoomIn: UnlistenFn | undefined;
-  let unlistenZoomOut: UnlistenFn | undefined;
-  let unlistenZoomReset: UnlistenFn | undefined;
+  let unlistenMenu: UnlistenFn | undefined;
   let unlistenSessionStatus: UnlistenFn | undefined;
   let unlistenCacheInvalidation: UnlistenFn | undefined;
   let unlistenPageLifecycle: (() => void) | undefined;
@@ -273,31 +267,9 @@
       void commands.warmProjectTimelines(navigation.selectedProjectId);
     }
 
-    // Listen for the app menu Preferences item.
-    unlistenSettings = listenToEvent('menu:settings', () => {
-      if (!triggerShortcut('app-open-settings')) openSettings();
-    });
-    unlistenFind = listenToEvent('menu:find', () => {
-      if (!triggerShortcut('search-find')) runSearchShortcut('find');
-    });
-    unlistenFindNext = listenToEvent('menu:find-next', () => {
-      if (!triggerShortcut('search-find-next')) runSearchShortcut('next');
-    });
-    unlistenFindPrevious = listenToEvent('menu:find-previous', () => {
-      if (!triggerShortcut('search-find-previous')) runSearchShortcut('previous');
-    });
-    unlistenDeleteProject = listenToEvent('menu:delete-project', () => {
-      triggerShortcut('app-delete-project');
-    });
-    unlistenZoomIn = listenToEvent('menu:zoom-in', () => {
-      if (!triggerShortcut('view-increase-size')) increaseSize();
-    });
-    unlistenZoomOut = listenToEvent('menu:zoom-out', () => {
-      if (!triggerShortcut('view-decrease-size')) decreaseSize();
-    });
-    unlistenZoomReset = listenToEvent('menu:zoom-reset', () => {
-      if (!triggerShortcut('view-reset-size')) resetSize();
-    });
+    // App-menu items, all nine registered and torn down as one. See
+    // menuListener.ts for why they're window-scoped.
+    unlistenMenu = listenForMenuEvents();
 
     // Global session-status listener — must live at App level so it works
     // regardless of which view the user is on. See sessionStatusListener.ts.
@@ -368,8 +340,10 @@
         id: 'app-new-project',
         description: 'New project',
         category: 'app',
+        // ⇧⌘N — plain ⌘N is the native File ▸ New Window accelerator, which
+        // the menu consumes before the webview ever sees the keydown.
         keys: ['n'],
-        modifiers: { meta: true },
+        modifiers: { meta: true, shift: true },
         handler: requestNewProject,
       },
       {
@@ -493,14 +467,7 @@
     prPollingService.dispose();
     document.removeEventListener('keydown', handleKonamiKey);
     unregisterShortcuts?.();
-    unlistenSettings?.();
-    unlistenFind?.();
-    unlistenFindNext?.();
-    unlistenFindPrevious?.();
-    unlistenDeleteProject?.();
-    unlistenZoomIn?.();
-    unlistenZoomOut?.();
-    unlistenZoomReset?.();
+    unlistenMenu?.();
     unlistenSessionStatus?.();
     unlistenCacheInvalidation?.();
     unlistenPageLifecycle?.();

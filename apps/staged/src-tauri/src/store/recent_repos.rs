@@ -3,7 +3,7 @@
 use rusqlite::params;
 
 use super::models::RecentRepo;
-use super::{now_timestamp, Store, StoreError};
+use super::{now_timestamp, Store, StoreChange, StoreError};
 
 impl Store {
     /// Record that a repository was used, keeping only the most recent 20.
@@ -35,6 +35,9 @@ impl Store {
             [],
         )?;
 
+        self.publish(StoreChange::Repos {
+            github_repo: Some(github_repo.to_string()),
+        });
         Ok(())
     }
 

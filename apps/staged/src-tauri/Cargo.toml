@@ -85,6 +85,16 @@ tiny-skia = "0.12"
 tar = "0.4"
 flate2 = "1"
 
+[dev-dependencies]
+# test-util: `#[tokio::test(start_paused = true)]` for the store-events
+# coalescer tests, so the 50ms window is driven by the paused clock instead
+# of a real sleep.
+tokio = { version = "1.50.0", features = ["test-util"] }
+# test: tauri's `MockRuntime`, so window_commands' failure paths can be driven
+# without a real event loop. Feature unification enables it only when
+# compiling tests; the shipped binary's tauri is unchanged.
+tauri = { version = "2.10.2", features = ["test"] }
+
 [features]
 # no-block-npm-registry: downloads the managed Node.js runtime from upstream
 # nodejs.org instead of Block's Artifactory mirror, and lets npm-backed

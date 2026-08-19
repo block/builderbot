@@ -35,7 +35,7 @@
   import { sanitize } from '../../shared/sanitize';
   import * as Dialog from '$lib/components/ui/dialog';
   import { Button } from '$lib/components/ui/button';
-  import { createNote, invalidateBranchTimeline } from '../../commands';
+  import { createNote } from '../../commands';
   import type { ActionStatusEvent, ActionOutputEvent, OutputChunk, ActionStatus } from './actions';
   import {
     getActionOutputBuffer,
@@ -150,7 +150,6 @@
       saveError = null;
       const title = `${actionName} log`;
       await createNote(branchId, title, '```\n' + content + '\n```');
-      invalidateBranchTimeline(branchId);
       onNoteCreated?.();
       saveState = 'saved';
       if (saveTimeout) clearTimeout(saveTimeout);

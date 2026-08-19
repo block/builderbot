@@ -3,7 +3,7 @@
 use rusqlite::{params, OptionalExtension};
 
 use super::models::Workdir;
-use super::{now_timestamp, Store, StoreError};
+use super::{now_timestamp, Store, StoreChange, StoreError};
 
 impl Store {
     pub fn create_workdir(&self, workdir: &Workdir) -> Result<(), StoreError> {
@@ -20,6 +20,13 @@ impl Store {
                 workdir.updated_at,
             ],
         )?;
+        // A workdir is only UI-visible through the branch occupying it.
+        if let Some(branch_id) = &workdir.branch_id {
+            self.publish(StoreChange::Branch {
+                branch_id: branch_id.clone(),
+                project_id: Some(workdir.project_id.clone()),
+            });
+        }
         Ok(())
     }
 
@@ -80,22 +87,46 @@ impl Store {
             "UPDATE workdirs SET branch_id = ?1, updated_at = ?2 WHERE id = ?3",
             params![branch_id, now_timestamp(), workdir_id],
         )?;
+        self.publish_with(|| StoreChange::Branch {
+            branch_id: branch_id.to_string(),
+            project_id: Self::branch_project_id(&conn, branch_id),
+        });
         Ok(())
     }
 
     /// Release a workdir (clear its branch assignment).
     pub fn release_workdir(&self, workdir_id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        // The branch losing its workdir is the visible change; resolve it
+        // before the assignment is cleared.
+        let branch_id = Self::lookup_id(
+            &conn,
+            "SELECT branch_id FROM workdirs WHERE id = ?1",
+            workdir_id,
+        );
         conn.execute(
             "UPDATE workdirs SET branch_id = NULL, updated_at = ?1 WHERE id = ?2",
             params![now_timestamp(), workdir_id],
         )?;
+        if let Some(branch_id) = branch_id {
+            self.publish_with(|| StoreChange::Branch {
+                project_id: Self::branch_project_id(&conn, &branch_id),
+                branch_id,
+            });
+        }
         Ok(())
     }
 
     pub fn delete_workdir(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        let branch_id = Self::lookup_id(&conn, "SELECT branch_id FROM workdirs WHERE id = ?1", id);
         conn.execute("DELETE FROM workdirs WHERE id = ?1", params![id])?;
+        if let Some(branch_id) = branch_id {
+            self.publish_with(|| StoreChange::Branch {
+                project_id: Self::branch_project_id(&conn, &branch_id),
+                branch_id,
+            });
+        }
         Ok(())
     }
 

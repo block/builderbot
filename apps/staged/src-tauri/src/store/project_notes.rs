@@ -3,7 +3,7 @@
 use rusqlite::{params, OptionalExtension};
 
 use super::models::ProjectNote;
-use super::{now_timestamp, Store, StoreError};
+use super::{now_timestamp, Store, StoreChange, StoreError};
 
 /// Sessions left behind by [`Store::delete_project_note`].
 ///
@@ -48,6 +48,10 @@ impl Store {
                 note.suggested_next_note_step,
             ],
         )?;
+        self.publish(StoreChange::Notes {
+            branch_id: None,
+            project_id: Some(note.project_id.clone()),
+        });
         Ok(())
     }
 
@@ -144,6 +148,14 @@ impl Store {
              WHERE id = ?7",
             params![title, content, now, now, suggested_next_commit_step, suggested_next_note_step, id],
         )?;
+        self.publish_with(|| StoreChange::Notes {
+            branch_id: None,
+            project_id: Self::lookup_id(
+                &conn,
+                "SELECT project_id FROM project_notes WHERE id = ?1",
+                id,
+            ),
+        });
         Ok(())
     }
 
@@ -154,6 +166,14 @@ impl Store {
             "UPDATE project_notes SET completed_at = COALESCE(completed_at, ?1) WHERE id = ?2",
             params![now, id],
         )?;
+        self.publish_with(|| StoreChange::Notes {
+            branch_id: None,
+            project_id: Self::lookup_id(
+                &conn,
+                "SELECT project_id FROM project_notes WHERE id = ?1",
+                id,
+            ),
+        });
         Ok(())
     }
 
@@ -182,16 +202,27 @@ impl Store {
             "DELETE FROM notes WHERE parent_project_note_id = ?1",
             params![id],
         )?;
-        let session_id: Option<Option<String>> = tx
+        let deleted: Option<(Option<String>, String)> = tx
             .query_row(
-                "DELETE FROM project_notes WHERE id = ?1 RETURNING session_id",
+                "DELETE FROM project_notes WHERE id = ?1 RETURNING session_id, project_id",
                 params![id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
         tx.commit()?;
+
+        let (project_note_session_id, project_id) = match deleted {
+            Some((session_id, project_id)) => (session_id, Some(project_id)),
+            None => (None, None),
+        };
+        if project_id.is_some() || !child_session_ids.is_empty() {
+            self.publish(StoreChange::Notes {
+                branch_id: None,
+                project_id,
+            });
+        }
         Ok(DeletedProjectNoteSessions {
-            project_note_session_id: session_id.flatten(),
+            project_note_session_id,
             child_session_ids,
         })
     }

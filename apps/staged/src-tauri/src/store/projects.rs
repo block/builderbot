@@ -3,7 +3,7 @@
 use rusqlite::{params, OptionalExtension};
 
 use super::models::Project;
-use super::{now_timestamp, Store, StoreError};
+use super::{now_timestamp, Store, StoreChange, StoreError};
 
 impl Store {
     pub fn create_project(&self, project: &Project) -> Result<(), StoreError> {
@@ -21,6 +21,9 @@ impl Store {
                 project.updated_at,
             ],
         )?;
+        self.publish(StoreChange::Project {
+            project_id: Some(project.id.clone()),
+        });
         Ok(())
     }
 
@@ -129,12 +132,18 @@ impl Store {
             "UPDATE projects SET name = ?1, github_repo = ?2, location = ?3, subpath = ?4, updated_at = ?5 WHERE id = ?6",
             params![name, github_repo, location.as_str(), subpath, now_timestamp(), id],
         )?;
+        self.publish(StoreChange::Project {
+            project_id: Some(id.to_string()),
+        });
         Ok(())
     }
 
     pub fn delete_project(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM projects WHERE id = ?1", params![id])?;
+        self.publish(StoreChange::Project {
+            project_id: Some(id.to_string()),
+        });
         Ok(())
     }
 }

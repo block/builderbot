@@ -70,7 +70,6 @@ function projectRepo(overrides: Partial<ProjectRepo> = {}): ProjectRepo {
 
 let deleteProject: ReturnType<typeof vi.fn>;
 let hasUnpushedCommits: ReturnType<typeof vi.fn>;
-let invalidateProjectBranchTimelines: ReturnType<typeof vi.fn>;
 let markAsRead: ReturnType<typeof vi.fn>;
 let markAsUnread: ReturnType<typeof vi.fn>;
 let clearBranchState: ReturnType<typeof vi.fn>;
@@ -79,7 +78,7 @@ let selectProject: ReturnType<typeof vi.fn>;
 let goHome: ReturnType<typeof vi.fn>;
 let navigationState: { selectedProjectId: string | null };
 let projectDeleteStarted: ReturnType<typeof vi.fn>;
-let projectDeleteFinished: ReturnType<typeof vi.fn>;
+let projectDeleteFailed: ReturnType<typeof vi.fn>;
 let ensureProjectHydrated: ReturnType<typeof vi.fn>;
 
 /** Mutable backing state for the mocked projectsDataStore. */
@@ -103,7 +102,6 @@ beforeEach(() => {
 
   deleteProject = vi.fn().mockResolvedValue(undefined);
   hasUnpushedCommits = vi.fn().mockResolvedValue(false);
-  invalidateProjectBranchTimelines = vi.fn();
   markAsRead = vi.fn();
   markAsUnread = vi.fn();
   clearBranchState = vi.fn();
@@ -112,7 +110,7 @@ beforeEach(() => {
   goHome = vi.fn();
   navigationState = { selectedProjectId: null };
   projectDeleteStarted = vi.fn();
-  projectDeleteFinished = vi.fn();
+  projectDeleteFailed = vi.fn();
   // Default: the project is already hydrated, so ensuring it is a no-op.
   ensureProjectHydrated = vi.fn().mockResolvedValue(undefined);
 
@@ -126,7 +124,6 @@ beforeEach(() => {
   vi.doMock('../../api/commands', () => ({
     deleteProject,
     hasUnpushedCommits,
-    invalidateProjectBranchTimelines,
   }));
   vi.doMock('../layout/navigation.svelte', () => ({
     navigation: navigationState,
@@ -157,7 +154,7 @@ beforeEach(() => {
       isProjectDeleting: (projectId: string) => storeState.deletingProjectNames.has(projectId),
       ensureProjectHydrated,
       projectDeleteStarted,
-      projectDeleteFinished,
+      projectDeleteFailed,
     },
   }));
   vi.doMock('../../stores/projectState.svelte', () => ({
@@ -212,8 +209,9 @@ describe('requestRemoveProject', () => {
     expect(projectDeleteStarted).toHaveBeenCalledWith('p1', 'Alpha');
     expect(deleteProject).toHaveBeenCalledWith('p1');
     expect(markAsRead).toHaveBeenCalledWith('p1');
-    expect(projectDeleteFinished).toHaveBeenCalledWith('p1', { removed: true });
-    expect(invalidateProjectBranchTimelines).toHaveBeenCalledWith(['b1']);
+    // Success leaves the deleting marker alone: the delete's project-changed
+    // refetch prunes the project and the marker together.
+    expect(projectDeleteFailed).not.toHaveBeenCalled();
     expect(clearBranchState).toHaveBeenCalledWith('b1');
   });
 
@@ -247,7 +245,7 @@ describe('requestRemoveProject', () => {
     expect(toastError).toHaveBeenCalledWith('Unable to delete project', {
       description: 'backend down',
     });
-    expect(projectDeleteFinished).toHaveBeenCalledWith('p1');
+    expect(projectDeleteFailed).toHaveBeenCalledWith('p1');
     expect(markAsRead).not.toHaveBeenCalled();
     expect(clearBranchState).not.toHaveBeenCalled();
   });
@@ -318,7 +316,6 @@ describe('hydration before the safety check', () => {
     await actions.requestRemoveProject(p);
 
     expect(deleteProject).toHaveBeenCalledWith('p1');
-    expect(invalidateProjectBranchTimelines).toHaveBeenCalledWith(['b1', 'b2']);
     expect(clearBranchState).toHaveBeenCalledWith('b1');
     expect(clearBranchState).toHaveBeenCalledWith('b2');
   });
@@ -352,7 +349,7 @@ describe('confirmation dialog flow', () => {
 
     expect(actions.pendingDelete).toBeNull();
     expect(deleteProject).toHaveBeenCalledWith('p1');
-    expect(projectDeleteFinished).toHaveBeenCalledWith('p1', { removed: true });
+    expect(projectDeleteFailed).not.toHaveBeenCalled();
   });
 
   it('cancelPendingDelete dismisses without deleting', async () => {

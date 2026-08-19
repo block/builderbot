@@ -20,7 +20,6 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::Emitter;
 
 /// TTL for cached git user identity lookups (5 minutes).
 const GIT_USER_IDENTITY_TTL_MS: u128 = 300_000;
@@ -734,7 +733,8 @@ pub(crate) fn refresh_branch_git_state_impl(
     };
 
     if let Some(state) = git_state {
-        let _ = app.emit(
+        crate::web_server::emit_to_all(
+            app,
             "git-state-updated",
             GitStateUpdatedPayload {
                 branch_id: branch_id.to_string(),

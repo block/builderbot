@@ -14,6 +14,12 @@
  * Going hidden also persists a synchronous snapshot of the in-memory timeline
  * cache (see commands.ts) — iOS tears the tab down while hidden, so this is the
  * last chance to capture state for the next cold boot's first-frame paint.
+ *
+ * The revalidation itself (`revalidateAll`) is exported, because page resume is
+ * no longer its only trigger: the web-mode event socket calls it on reconnect
+ * (transport.ts), where every event emitted during the socket gap is lost for
+ * good. It is the shared "assume everything since the last known-good point was
+ * missed" recovery — the gating differs per caller, the recovery doesn't.
  */
 
 import { isTauri } from '../transport';
@@ -39,9 +45,27 @@ function shouldRevalidateAfterResume(): boolean {
   return hiddenAt === 0 || Date.now() - hiddenAt > RESUME_REVALIDATE_THRESHOLD_MS;
 }
 
-async function revalidateAll() {
+/**
+ * Recover from an unknown-length gap in event delivery: every cached entry is
+ * marked stale so the next read revalidates over the network, and mounted views
+ * refetch immediately.
+ *
+ * Callers: page resume (gated on the hidden duration, below) and web-mode
+ * WebSocket reconnect (transport.ts), where the store change feed, PR-poll and
+ * session events emitted while the socket was down are unrecoverable — the
+ * server keeps no per-client queue.
+ *
+ * `markAllStale()` must precede the `cache-stale` dispatch: an unmarked SWR hit
+ * would serve a cached list with no revalidating leg, so the handlers would
+ * refetch nothing.
+ */
+export async function revalidateAll() {
   await markAllStale();
   window.dispatchEvent(new CustomEvent('cache-stale'));
+  // Project notes are the one surface with no `cache-stale` consumer: they
+  // refetch only on this event, so a note change missed during the gap would
+  // stay invisible until the next notes-changed.
+  window.dispatchEvent(new CustomEvent('project-notes-invalidated'));
 }
 
 /** Record the page going hidden and snapshot caches for the next cold boot. */

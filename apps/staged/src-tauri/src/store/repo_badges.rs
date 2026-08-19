@@ -3,7 +3,7 @@
 use rusqlite::params;
 
 use super::models::RepoBadge;
-use super::{Store, StoreError};
+use super::{Store, StoreChange, StoreError};
 
 /// All columns selected in badge queries, in a fixed order.
 const BADGE_COLUMNS: &str =
@@ -75,6 +75,9 @@ impl Store {
                 badge.default_branch,
             ],
         )?;
+        self.publish(StoreChange::Repos {
+            github_repo: Some(badge.github_repo.clone()),
+        });
         Ok(())
     }
 
@@ -98,6 +101,9 @@ impl Store {
                 "No badge found for {github_repo} subpath={subpath}"
             )));
         }
+        self.publish(StoreChange::Repos {
+            github_repo: Some(github_repo.to_string()),
+        });
         Ok(())
     }
 
@@ -124,6 +130,9 @@ impl Store {
             "DELETE FROM repo_badges WHERE github_repo = ?1 AND subpath = ?2",
             params![github_repo, subpath],
         )?;
+        self.publish(StoreChange::Repos {
+            github_repo: Some(github_repo.to_string()),
+        });
         Ok(())
     }
 
@@ -158,6 +167,9 @@ impl Store {
                 "No badge found for {github_repo} subpath={subpath}"
             )));
         }
+        self.publish(StoreChange::Repos {
+            github_repo: Some(github_repo.to_string()),
+        });
         Ok(())
     }
 
@@ -174,6 +186,9 @@ impl Store {
                 "No badge found for {github_repo} subpath={subpath}"
             )));
         }
+        self.publish(StoreChange::Repos {
+            github_repo: Some(github_repo.to_string()),
+        });
         Ok(())
     }
 
@@ -192,6 +207,8 @@ impl Store {
             )?;
         }
         tx.commit()?;
+        // Bulk reorder — no single repo to name.
+        self.publish(StoreChange::Repos { github_repo: None });
         Ok(())
     }
 
@@ -258,6 +275,9 @@ impl Store {
                 "No badge found for {github_repo} subpath={subpath}"
             )));
         }
+        self.publish(StoreChange::Repos {
+            github_repo: Some(github_repo.to_string()),
+        });
         Ok(())
     }
 }

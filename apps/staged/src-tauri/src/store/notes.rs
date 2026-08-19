@@ -3,12 +3,17 @@
 use rusqlite::{params, OptionalExtension};
 
 use super::models::Note;
-use super::{now_timestamp, Store, StoreError};
+use super::{now_timestamp, Store, StoreChange, StoreError};
 
 impl Store {
     pub fn create_note(&self, note: &Note) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
-        Self::insert_note(&conn, note)
+        Self::insert_note(&conn, note)?;
+        self.publish(StoreChange::Notes {
+            branch_id: Some(note.branch_id.clone()),
+            project_id: None,
+        });
+        Ok(())
     }
 
     /// Like [`Store::create_note`], but if the requested title collides with
@@ -24,7 +29,12 @@ impl Store {
         if !note.title.is_empty() {
             note.title = Self::resolve_unique_note_title(&conn, &note.branch_id, &note.title)?;
         }
-        Self::insert_note(&conn, note)
+        Self::insert_note(&conn, note)?;
+        self.publish(StoreChange::Notes {
+            branch_id: Some(note.branch_id.clone()),
+            project_id: None,
+        });
+        Ok(())
     }
 
     fn insert_note(conn: &rusqlite::Connection, note: &Note) -> Result<(), StoreError> {
@@ -195,6 +205,10 @@ impl Store {
             "UPDATE notes SET title = ?1, content = ?2, updated_at = ?3, completed_at = COALESCE(completed_at, ?4), suggested_next_commit_step = ?5, suggested_next_note_step = ?6 WHERE id = ?7",
             params![title, content, now, now, suggested_next_commit_step, suggested_next_note_step, id],
         )?;
+        self.publish_with(|| StoreChange::Notes {
+            branch_id: Self::lookup_id(&conn, "SELECT branch_id FROM notes WHERE id = ?1", id),
+            project_id: None,
+        });
         Ok(())
     }
 
@@ -205,6 +219,10 @@ impl Store {
             "UPDATE notes SET content = ?1, updated_at = ?2, completed_at = COALESCE(completed_at, ?3) WHERE id = ?4",
             params![content, now, now, id],
         )?;
+        self.publish_with(|| StoreChange::Notes {
+            branch_id: Self::lookup_id(&conn, "SELECT branch_id FROM notes WHERE id = ?1", id),
+            project_id: None,
+        });
         Ok(())
     }
 
@@ -215,12 +233,24 @@ impl Store {
             "UPDATE notes SET completed_at = COALESCE(completed_at, ?1) WHERE id = ?2",
             params![now, id],
         )?;
+        self.publish_with(|| StoreChange::Notes {
+            branch_id: Self::lookup_id(&conn, "SELECT branch_id FROM notes WHERE id = ?1", id),
+            project_id: None,
+        });
         Ok(())
     }
 
     pub fn delete_note(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        // Resolved before the row disappears, published only if the delete lands.
+        let branch_id = Self::lookup_id(&conn, "SELECT branch_id FROM notes WHERE id = ?1", id);
         conn.execute("DELETE FROM notes WHERE id = ?1", params![id])?;
+        if branch_id.is_some() {
+            self.publish(StoreChange::Notes {
+                branch_id,
+                project_id: None,
+            });
+        }
         Ok(())
     }
 

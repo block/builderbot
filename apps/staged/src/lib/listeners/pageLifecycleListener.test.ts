@@ -25,15 +25,22 @@ import {
 describe('pageLifecycleListener', () => {
   let unlisten: () => void;
   let cacheStaleEvents: Event[];
+  let projectNotesEvents: Event[];
 
   function onCacheStale(e: Event) {
     cacheStaleEvents.push(e);
   }
 
+  function onProjectNotesInvalidated(e: Event) {
+    projectNotesEvents.push(e);
+  }
+
   beforeEach(() => {
     mockMarkAllStale.mockClear();
     cacheStaleEvents = [];
+    projectNotesEvents = [];
     window.addEventListener('cache-stale', onCacheStale);
+    window.addEventListener('project-notes-invalidated', onProjectNotesInvalidated);
     _setLastActivityTimestamp(Date.now());
     // Reset the hide timestamp so each test starts from "no recorded hide",
     // which (safely) revalidates on resume.
@@ -44,6 +51,7 @@ describe('pageLifecycleListener', () => {
   afterEach(() => {
     unlisten();
     window.removeEventListener('cache-stale', onCacheStale);
+    window.removeEventListener('project-notes-invalidated', onProjectNotesInvalidated);
   });
 
   describe('resume event', () => {
@@ -55,6 +63,8 @@ describe('pageLifecycleListener', () => {
         expect(mockMarkAllStale).toHaveBeenCalledTimes(1);
       });
       expect(cacheStaleEvents).toHaveLength(1);
+      // Project notes have no cache-stale consumer of their own.
+      expect(projectNotesEvents).toHaveLength(1);
     });
 
     it('updates lastActivityTimestamp after resume', async () => {

@@ -12,7 +12,7 @@
 use rusqlite::{params, OptionalExtension};
 
 use super::models::ProjectRepo;
-use super::{now_timestamp, Store, StoreError};
+use super::{now_timestamp, Store, StoreChange, StoreError};
 
 /// Which `project_repos` row the moved branch points at once it lands.
 ///
@@ -153,6 +153,26 @@ impl Store {
         elect_primary_repo(&tx, &mv.target_project_id, now)?;
 
         tx.commit()?;
+        // A move mutates *two* projects' branch surfaces, and `project_id` on a
+        // `Branch` change means "this project's branch list is affected", not
+        // "this branch's current parent" — so name both. Without the source
+        // publish nothing in the feed says the branch left, and a consumer that
+        // scopes its invalidation to the named project would leave the branch
+        // listed under its old project too.
+        self.publish(StoreChange::Branch {
+            branch_id: mv.branch_id.clone(),
+            project_id: Some(mv.target_project_id.clone()),
+        });
+        self.publish(StoreChange::Branch {
+            branch_id: mv.branch_id.clone(),
+            project_id: Some(mv.source_project_id.clone()),
+        });
+        self.publish(StoreChange::Project {
+            project_id: Some(mv.source_project_id.clone()),
+        });
+        self.publish(StoreChange::Project {
+            project_id: Some(mv.target_project_id.clone()),
+        });
         Ok(())
     }
 }
@@ -294,7 +314,12 @@ mod tests {
     /// A branch on its own `project_repos` row in `source`, plus an empty
     /// `target` project to move it into.
     fn fixture() -> Fixture {
-        let store = Store::in_memory().unwrap();
+        fixture_in(Store::in_memory().unwrap())
+    }
+
+    /// [`fixture`] over a caller-supplied store, so the change-feed test can
+    /// build the same shape on a store with a sender attached.
+    fn fixture_in(store: Store) -> Fixture {
         let source = Project::named("source").with_primary_repo("acme/widgets");
         let target = Project::named("target");
         store.create_project(&source).unwrap();
@@ -325,6 +350,40 @@ mod tests {
             },
             workdir,
         }
+    }
+
+    /// A move rewrites two projects' branch lists, so the feed names both. A
+    /// consumer that scopes its invalidation to the named project has no other
+    /// way to hear that the branch left the source — the branch row itself now
+    /// points at the target, so an enrichment lookup could never resolve it.
+    #[test]
+    fn change_feed_publishes_one_branch_change_per_touched_project() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+        let f = fixture_in(Store::in_memory().unwrap().with_change_sender(tx));
+        while rx.try_recv().is_ok() {}
+
+        f.store.move_branch_to_project(&reparent(&f, None)).unwrap();
+
+        let branch_change = |project_id: &str| StoreChange::Branch {
+            branch_id: f.branch.id.clone(),
+            project_id: Some(project_id.to_string()),
+        };
+        assert_eq!(rx.try_recv().unwrap(), branch_change(&f.target.id));
+        assert_eq!(rx.try_recv().unwrap(), branch_change(&f.source.id));
+        // The two `Project` changes cover the repo re-election on either side.
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            StoreChange::Project {
+                project_id: Some(f.source.id.clone()),
+            }
+        );
+        assert_eq!(
+            rx.try_recv().unwrap(),
+            StoreChange::Project {
+                project_id: Some(f.target.id.clone()),
+            }
+        );
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

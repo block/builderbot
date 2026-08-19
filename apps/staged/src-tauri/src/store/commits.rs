@@ -3,7 +3,7 @@
 use rusqlite::{params, OptionalExtension};
 
 use super::models::Commit;
-use super::{now_timestamp, Store, StoreError};
+use super::{now_timestamp, Store, StoreChange, StoreError};
 
 impl Store {
     pub fn create_commit(&self, commit: &Commit) -> Result<(), StoreError> {
@@ -20,6 +20,10 @@ impl Store {
                 commit.updated_at,
             ],
         )?;
+        self.publish_with(|| StoreChange::Branch {
+            branch_id: commit.branch_id.clone(),
+            project_id: Self::branch_project_id(&conn, &commit.branch_id),
+        });
         Ok(())
     }
 
@@ -94,6 +98,14 @@ impl Store {
             "UPDATE commits SET sha = ?1, updated_at = ?2 WHERE id = ?3",
             params![sha, now_timestamp(), id],
         )?;
+        if let Some(branch_id) =
+            Self::lookup_id(&conn, "SELECT branch_id FROM commits WHERE id = ?1", id)
+        {
+            self.publish_with(|| StoreChange::Branch {
+                project_id: Self::branch_project_id(&conn, &branch_id),
+                branch_id,
+            });
+        }
         Ok(())
     }
 
@@ -127,6 +139,10 @@ impl Store {
                 "DELETE FROM commits WHERE id = ?1 AND branch_id = ?2 AND sha IS NULL",
                 params![id, branch_id],
             )?;
+            self.publish_with(|| StoreChange::Branch {
+                branch_id: branch_id.to_string(),
+                project_id: Self::branch_project_id(&conn, branch_id),
+            });
             return Ok(false);
         }
 
@@ -134,6 +150,12 @@ impl Store {
             "UPDATE commits SET sha = ?1, updated_at = ?2 WHERE id = ?3 AND branch_id = ?4 AND sha IS NULL",
             params![sha, now_timestamp(), id, branch_id],
         )?;
+        if rows > 0 {
+            self.publish_with(|| StoreChange::Branch {
+                branch_id: branch_id.to_string(),
+                project_id: Self::branch_project_id(&conn, branch_id),
+            });
+        }
         Ok(rows > 0)
     }
 
@@ -186,16 +208,36 @@ impl Store {
         }
 
         tx.commit()?;
+        if remapped > 0 {
+            self.publish_with(|| StoreChange::Branch {
+                branch_id: branch_id.to_string(),
+                project_id: Self::branch_project_id(&conn, branch_id),
+            });
+        }
         Ok(remapped)
     }
 
     /// Delete a linked pending commit row if it has not landed.
     pub fn delete_pending_commit_for_session(&self, session_id: &str) -> Result<bool, StoreError> {
         let conn = self.conn.lock().unwrap();
+        // Resolved before the row disappears, published only if the delete lands.
+        let branch_id = Self::lookup_id(
+            &conn,
+            "SELECT branch_id FROM commits WHERE session_id = ?1 AND sha IS NULL",
+            session_id,
+        );
         let rows = conn.execute(
             "DELETE FROM commits WHERE session_id = ?1 AND sha IS NULL",
             params![session_id],
         )?;
+        if rows > 0 {
+            if let Some(branch_id) = branch_id {
+                self.publish_with(|| StoreChange::Branch {
+                    project_id: Self::branch_project_id(&conn, &branch_id),
+                    branch_id,
+                });
+            }
+        }
         Ok(rows > 0)
     }
 
@@ -214,7 +256,14 @@ impl Store {
 
     pub fn delete_commit(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        let branch_id = Self::lookup_id(&conn, "SELECT branch_id FROM commits WHERE id = ?1", id);
         conn.execute("DELETE FROM commits WHERE id = ?1", params![id])?;
+        if let Some(branch_id) = branch_id {
+            self.publish_with(|| StoreChange::Branch {
+                project_id: Self::branch_project_id(&conn, &branch_id),
+                branch_id,
+            });
+        }
         Ok(())
     }
 

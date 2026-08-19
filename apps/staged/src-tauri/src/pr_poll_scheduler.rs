@@ -14,7 +14,7 @@
 //!
 //! ## Per-client interest (Phase 2)
 //!
-//! Interest is tracked **per connected client** — the native Tauri window plus
+//! Interest is tracked **per connected client** — each native Tauri window plus
 //! each WebSocket browser session — keyed by a frontend-supplied `client_id`.
 //! The cadence for a project is the union across all clients ([`PollState::any_focused`],
 //! [`PollState::is_foreground`], [`PollState::project_has_pending`]), so a project
@@ -22,11 +22,20 @@
 //! bookkeeping (`last_polled_at`/`failures`/`stale`/`forced`) stays project-keyed
 //! and shared, so N clients still trigger only one poll per project per tier.
 //!
-//! Clients are evicted on disconnect (clean WS close ⇒ [`PrPollScheduler::disconnect_client`])
-//! and via a [`CLIENT_TTL_MS`] fallback for dirty drops ([`PollState::evict_stale_clients`],
-//! swept each tick). The native window uses the fixed [`TAURI_CLIENT_ID`], which
-//! is pre-seeded at launch and exempt from TTL eviction (process death is its
-//! teardown), so single-client behaviour stays byte-for-byte equivalent to Phase 1.
+//! Clients are evicted on disconnect (clean WS close or native window destroyed
+//! ⇒ [`PrPollScheduler::disconnect_client`]) and via a [`CLIENT_TTL_MS`] fallback
+//! for dirty drops ([`PollState::evict_stale_clients`], swept each tick). Native
+//! windows use `tauri-{window label}` ids ([`TAURI_CLIENT_PREFIX`]), which are
+//! exempt from TTL eviction — they have no WS heartbeat; the first window's id
+//! ([`TAURI_CLIENT_ID`]) is pre-seeded at launch, so single-window behaviour
+//! stays byte-for-byte equivalent to Phase 1.
+//!
+//! The TTL exemption is only sound because the `tauri-*` namespace is
+//! *reserved*: [`is_reserved_client_id`] names the invariant, and the web
+//! boundaries in `web_server.rs` (the `/api/events` WS `clientId` and the
+//! PR-poll `/api/dispatch` verbs) reject ids that claim it. An exempt entry
+//! must have a window-`Destroyed` teardown behind it, so the exemption and the
+//! rejection are one invariant split across two files.
 //!
 //! Poll-state (last-polled timestamps, failure counts) is intentionally **not
 //! persisted** — on restart everything is "due", matching the frontend's
@@ -68,9 +77,15 @@ const MAX_CONSECUTIVE_FAILURES: u32 = 3;
 /// wake the loop immediately, so this only bounds the *periodic* re-poll delay.
 const TICK_INTERVAL_SECS: u64 = 5;
 
-/// Well-known id for the native Tauri window. It has no WS heartbeat (the
-/// process dying is its teardown), so it is pre-seeded at launch and exempt from
-/// TTL eviction. Must match `TAURI_CLIENT_ID` in `prPollingService.ts`.
+/// Id prefix for native Tauri windows: `tauri-{window label}`. Native windows
+/// have no WS heartbeat, so ids with this prefix are exempt from TTL eviction —
+/// their teardown is the window being destroyed (the `on_window_event` hook in
+/// `lib.rs` calls [`PrPollScheduler::disconnect_client`]) or the process dying.
+/// Must match the prefix used in `prPollingService.ts`.
+pub const TAURI_CLIENT_PREFIX: &str = "tauri-";
+
+/// Well-known id for the first native window (label `main`). Pre-seeded at
+/// launch as focused so the very first tick polls before any hint arrives.
 const TAURI_CLIENT_ID: &str = "tauri-main";
 
 /// How long a client's interest survives without a heartbeat before the tick
@@ -79,6 +94,20 @@ const TAURI_CLIENT_ID: &str = "tauri-main";
 /// transient lag while bounding spurious pending-tier polls from a dead-but-
 /// counted client to ≲6. The Tauri id is exempt.
 const CLIENT_TTL_MS: i64 = 90_000;
+
+/// Whether a caller-supplied client id claims the native-window namespace.
+///
+/// `tauri-*` ids are exempt from TTL eviction ([`PollState::evict_stale_clients`]),
+/// which is only safe when the id was minted by native window code — teardown is
+/// then guaranteed by the window-`Destroyed` hook in `lib.rs`. Web boundaries (the
+/// `/api/events` WS `clientId`, the PR-poll `/api/dispatch` verbs) must reject
+/// these: a web client claiming one would leak its interest forever on a dirty
+/// drop (nothing evicts it, and no window exists to be destroyed), or spoof a real
+/// window's entry. Legitimate web clients use a UUID, so rejecting the namespace
+/// can never hit one.
+pub fn is_reserved_client_id(id: &str) -> bool {
+    id.starts_with(TAURI_CLIENT_PREFIX)
+}
 
 // ---------------------------------------------------------------------------
 // Poll-state — pure decision logic, no clock / store / Tauri handles
@@ -310,12 +339,14 @@ impl PollState {
         self.clients.remove(client_id);
     }
 
-    /// Dirty-drop fallback: evict clients not heard from within `ttl_ms`. The
-    /// Tauri id is exempt (the native window has no WS heartbeat; the process
-    /// dying tears it down).
+    /// Dirty-drop fallback: evict clients not heard from within `ttl_ms`.
+    /// Native window ids ([`is_reserved_client_id`]) are exempt — they have no WS
+    /// heartbeat; window destruction or process death tears them down. That
+    /// guarantee holds only because the web boundaries reject the reserved
+    /// namespace, so an exempt id here is always a real window's.
     fn evict_stale_clients(&mut self, now: i64, ttl_ms: i64) {
         self.clients
-            .retain(|id, c| id == TAURI_CLIENT_ID || now.saturating_sub(c.last_seen) <= ttl_ms);
+            .retain(|id, c| is_reserved_client_id(id) || now.saturating_sub(c.last_seen) <= ttl_ms);
     }
 }
 
@@ -959,6 +990,8 @@ mod tests {
         st.set_focus("web", true, 0);
         st.set_foreground("web", Some("p".into()), 0);
         assert!(st.is_foreground("p"));
+        // A second native window: no heartbeat, idle since launch.
+        st.set_foreground("tauri-win-2", Some("q".into()), 0);
 
         // Sweep well past the TTL relative to last_seen = 0.
         st.evict_stale_clients(CLIENT_TTL_MS + 1, CLIENT_TTL_MS);
@@ -966,9 +999,30 @@ mod tests {
         // The stale web client is gone; its interest no longer counts.
         assert!(!st.clients.contains_key("web"));
         assert!(!st.is_foreground("p"));
-        // The Tauri client is exempt despite last_seen = 0, and stays focused.
+        // Native window ids are exempt despite last_seen = 0: the first window
+        // stays focused and the idle second window keeps its foreground.
         assert!(st.clients.contains_key(TAURI_CLIENT_ID));
         assert!(st.any_focused());
+        assert!(st.is_foreground("q"));
+
+        // A destroyed native window is torn down via explicit disconnect.
+        st.disconnect_client("tauri-win-2");
+        assert!(!st.is_foreground("q"));
+    }
+
+    #[test]
+    fn reserved_client_ids_are_the_tauri_namespace() {
+        // Exactly the ids the native windows mint (see `prPollingService.ts`).
+        assert!(is_reserved_client_id(TAURI_CLIENT_ID));
+        assert!(is_reserved_client_id("tauri-win-2"));
+        // Web ids never claim the namespace; the match is an exact, case-
+        // sensitive prefix, matching the frontend's lowercase minting.
+        assert!(!is_reserved_client_id("3f1a-uuid"));
+        assert!(!is_reserved_client_id(""));
+        assert!(!is_reserved_client_id("TAURI-main"));
+        assert!(!is_reserved_client_id("tauri"));
+        assert!(!is_reserved_client_id(" tauri-main"));
+        assert!(!is_reserved_client_id("web-tauri-main"));
     }
 
     #[test]

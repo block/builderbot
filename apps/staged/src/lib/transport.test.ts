@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 
 class MockWebSocket {
   static CONNECTING = 0;
@@ -63,6 +63,7 @@ describe('web transport', () => {
   afterEach(() => {
     vi.doUnmock('./services/prPollingService');
     vi.doUnmock('./listeners/sessionStatusListener');
+    vi.doUnmock('./listeners/pageLifecycleListener');
     vi.unstubAllGlobals();
     vi.useRealTimers();
   });
@@ -148,5 +149,89 @@ describe('web transport', () => {
     await vi.waitFor(() => expect(hydrateActiveSessions).toHaveBeenCalledTimes(2));
 
     unlisten();
+  });
+
+  it('revalidates every cached surface on reconnect but not on the first connect', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    // The revalidation reaches into the SWR cache and rune-based stores, so the
+    // module is mocked like the busy-state hydrator above.
+    const revalidateAll = vi.fn().mockResolvedValue(undefined);
+    vi.doMock('./listeners/pageLifecycleListener', () => ({ revalidateAll }));
+
+    const { listenToEvent } = await import('./transport');
+    const unlisten = listenToEvent('pr-refresh-state', vi.fn());
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+
+    // First connect: the page's own loads are already current.
+    sockets[0].open();
+    await vi.waitFor(() => expect(hydrateActiveSessions).toHaveBeenCalledTimes(1));
+    expect(revalidateAll).not.toHaveBeenCalled();
+
+    // Reconnect: every event emitted during the gap is unrecoverable.
+    sockets[0].close();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.waitFor(() => expect(sockets).toHaveLength(2));
+
+    sockets[1].open();
+    await vi.waitFor(() => expect(revalidateAll).toHaveBeenCalledTimes(1));
+
+    unlisten();
+  });
+});
+
+describe('tauri window label', () => {
+  let consoleError: MockInstance<typeof console.error>;
+
+  beforeEach(() => {
+    // Resets the module-level once-flag along with the module.
+    vi.resetModules();
+    consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.doUnmock('@tauri-apps/api/window');
+    vi.unstubAllGlobals();
+    consoleError.mockRestore();
+  });
+
+  it('reads the label from the injected internals', async () => {
+    vi.stubGlobal('__TAURI__', {});
+    vi.stubGlobal('__TAURI_INTERNALS__', { metadata: { currentWindow: { label: 'win-2' } } });
+
+    const { getWindowLabel } = await import('./transport');
+
+    expect(getWindowLabel()).toBe('win-2');
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it('reports reshaped internals once, naming the label the official API sees', async () => {
+    vi.stubGlobal('__TAURI__', {});
+    // The shape a Tauri upgrade might move the label to.
+    vi.stubGlobal('__TAURI_INTERNALS__', { metadata: { window: { label: 'win-2' } } });
+    vi.doMock('@tauri-apps/api/window', () => ({
+      getCurrentWindow: () => ({ label: 'win-2' }),
+    }));
+
+    const { getWindowLabel } = await import('./transport');
+
+    expect(getWindowLabel()).toBeNull();
+    expect(consoleError).toHaveBeenCalledTimes(1);
+    expect(consoleError.mock.calls[0][0]).toContain('Tauri window label unavailable');
+
+    await vi.waitFor(() => expect(consoleError).toHaveBeenCalledTimes(2));
+    expect(consoleError.mock.calls[1][0]).toContain('the current window label is "win-2"');
+
+    // Every navigation persist calls through here, so a second failed lookup
+    // must stay quiet.
+    expect(getWindowLabel()).toBeNull();
+    expect(consoleError).toHaveBeenCalledTimes(2);
+  });
+
+  it('stays silent in web mode, where a null label is the expected answer', async () => {
+    const { getWindowLabel } = await import('./transport');
+
+    expect(getWindowLabel()).toBeNull();
+    expect(consoleError).not.toHaveBeenCalled();
   });
 });

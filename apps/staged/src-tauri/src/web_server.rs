@@ -299,11 +299,33 @@ async fn ws_events(
     Query(query): Query<EventsQuery>,
     State(state): State<WebAppState>,
 ) -> Response {
-    let client_id = query
-        .client_id
-        .map(|id| id.trim().to_string())
-        .filter(|id| !id.is_empty());
+    let client_id = normalize_ws_client_id(query.client_id);
     ws.on_upgrade(move |socket| handle_ws(socket, state, client_id))
+}
+
+/// The scheduler client id a WS connection may claim, or `None` for "don't track
+/// this socket in the PR-poll scheduler" — the socket still delivers events.
+///
+/// Drops blank ids, and ids in the reserved native-window namespace (see
+/// [`crate::pr_poll_scheduler::is_reserved_client_id`]): those are TTL-exempt, so
+/// a web client holding one would pin its interest forever on a dirty drop, and
+/// could spoof or tear down a real window's entry. Stripping rather than failing
+/// the upgrade is deliberate — this socket also carries the change feed and
+/// session events, so killing event delivery over a bad `clientId` would be the
+/// worse failure mode. The warning is what makes a buggy client visible.
+fn normalize_ws_client_id(client_id: Option<String>) -> Option<String> {
+    client_id
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty())
+        .filter(|id| {
+            let reserved = crate::pr_poll_scheduler::is_reserved_client_id(id);
+            if reserved {
+                log::warn!(
+                    "[web_server] ignoring WS clientId {id:?}: the 'tauri-' prefix is reserved for native windows"
+                );
+            }
+            !reserved
+        })
 }
 
 // clippy's suggested fix (collapsing the inner `if` into a match guard) doesn't
@@ -427,6 +449,24 @@ fn opt_arg<T: serde::de::DeserializeOwned>(args: &Value, key: &str) -> Result<Op
     }
 }
 
+/// The `clientId` for the PR-poll dispatch verbs, rejecting the reserved
+/// native-window namespace (see [`crate::pr_poll_scheduler::is_reserved_client_id`]).
+///
+/// A web caller must not be able to create a TTL-exempt entry that no window
+/// teardown will ever reclaim, nor mutate a real window's interest. Erroring
+/// (rather than silently ignoring) is right here — the id *is* the point of these
+/// verbs, the frontend already logs dispatch failures, and a legitimate web client
+/// uses a UUID so it can never trip this.
+fn web_client_id(args: &Value) -> Result<String, String> {
+    let client_id: String = arg(args, "clientId")?;
+    if crate::pr_poll_scheduler::is_reserved_client_id(&client_id) {
+        return Err(format!(
+            "clientId '{client_id}' uses the reserved native-window prefix 'tauri-'"
+        ));
+    }
+    Ok(client_id)
+}
+
 /// Helper to get the Store Arc from the shared mutex slot.
 fn get_store(store: &Mutex<Option<Arc<Store>>>) -> Result<Arc<Store>, String> {
     store
@@ -479,6 +519,15 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "confirm_reset_store" => {
             // Not applicable in web context
             Err("confirm_reset_store is not supported in web mode".to_string())
+        }
+
+        // =====================================================================
+        // Windows (native only — a browser client opens its own tab instead)
+        // =====================================================================
+        "new_window" => Err("new_window is not supported in web mode".to_string()),
+        "take_window_seed" => {
+            // Web clients are never opener-seeded; report "no seed".
+            Ok(Value::Null)
         }
 
         // =====================================================================
@@ -3586,19 +3635,19 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         // PR poll scheduler
         // =====================================================================
         "set_foreground_project" => {
-            let client_id: String = arg(&args, "clientId")?;
+            let client_id = web_client_id(&args)?;
             let project_id: Option<String> = opt_arg(&args, "projectId")?;
             pr_scheduler.set_foreground(client_id, project_id);
             Ok(Value::Null)
         }
         "set_focus" => {
-            let client_id: String = arg(&args, "clientId")?;
+            let client_id = web_client_id(&args)?;
             let focused: bool = arg(&args, "focused")?;
             pr_scheduler.set_focus(client_id, focused);
             Ok(Value::Null)
         }
         "set_branch_pending" => {
-            let client_id: String = arg(&args, "clientId")?;
+            let client_id = web_client_id(&args)?;
             let branch_id: String = arg(&args, "branchId")?;
             let project_id: String = arg(&args, "projectId")?;
             let pending: bool = arg(&args, "pending")?;
@@ -3606,14 +3655,18 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             Ok(Value::Null)
         }
         "refresh_now" => {
-            let client_id: String = arg(&args, "clientId")?;
+            // Validated before either scheduler call: a rejected id must not
+            // half-apply (no `touch`, and no `force` either).
+            let client_id = web_client_id(&args)?;
             let project_id: String = arg(&args, "projectId")?;
             pr_scheduler.touch(client_id);
             pr_scheduler.force(project_id);
             Ok(Value::Null)
         }
         "disconnect_client" => {
-            let client_id: String = arg(&args, "clientId")?;
+            // Guarded too: this is the reverse-spoofing hole — a web caller
+            // tearing down a real native window's interest.
+            let client_id = web_client_id(&args)?;
             pr_scheduler.disconnect_client(client_id);
             Ok(Value::Null)
         }
@@ -3723,7 +3776,49 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
 
 #[cfg(test)]
 mod tests {
+    use super::{normalize_ws_client_id, web_client_id};
+    use serde_json::json;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn ws_client_id_drops_blank_and_reserved_ids() {
+        // A normal web id (a UUID in practice) is trimmed and kept.
+        assert_eq!(
+            normalize_ws_client_id(Some(" 3f1a-uuid ".into())),
+            Some("3f1a-uuid".into())
+        );
+        assert_eq!(normalize_ws_client_id(None), None);
+        assert_eq!(normalize_ws_client_id(Some("   ".into())), None);
+
+        // The native-window namespace is reserved: dropped rather than tracked,
+        // so no TTL-exempt entry is minted and the close path can't aim
+        // `disconnect_client` at a real window.
+        assert_eq!(normalize_ws_client_id(Some("tauri-main".into())), None);
+        assert_eq!(normalize_ws_client_id(Some("tauri-win-2".into())), None);
+        // Trimming happens first, so padding can't smuggle one through.
+        assert_eq!(normalize_ws_client_id(Some(" tauri-main ".into())), None);
+    }
+
+    #[test]
+    fn web_client_id_rejects_the_reserved_namespace() {
+        assert_eq!(
+            web_client_id(&json!({ "clientId": "3f1a-uuid" })),
+            Ok("3f1a-uuid".to_string())
+        );
+
+        for reserved in ["tauri-main", "tauri-win-2", "tauri-"] {
+            let err = web_client_id(&json!({ "clientId": reserved }))
+                .expect_err("reserved client ids must be rejected");
+            assert!(err.contains(reserved), "unexpected error: {err}");
+            assert!(err.contains("reserved"), "unexpected error: {err}");
+        }
+
+        // Non-reserved lookalikes still pass; the missing/invalid cases keep
+        // `arg`'s errors.
+        assert!(web_client_id(&json!({ "clientId": "TAURI-main" })).is_ok());
+        assert!(web_client_id(&json!({})).is_err());
+        assert!(web_client_id(&json!({ "clientId": 7 })).is_err());
+    }
 
     #[test]
     fn web_dispatch_covers_tauri_commands() {

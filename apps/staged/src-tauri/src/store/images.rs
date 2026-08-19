@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use rusqlite::{params, OptionalExtension};
 
 use super::models::Image;
-use super::{Store, StoreError};
+use super::{Store, StoreChange, StoreError};
 
 impl Store {
     pub fn create_image(&self, image: &Image) -> Result<(), StoreError> {
@@ -24,6 +24,17 @@ impl Store {
                 image.created_at,
             ],
         )?;
+        // Only branch-attached images without a session appear on the
+        // timeline; session-scoped attachments live in the chat history,
+        // which polls.
+        if image.session_id.is_none() {
+            if let Some(branch_id) = &image.branch_id {
+                self.publish_with(|| StoreChange::Branch {
+                    branch_id: branch_id.clone(),
+                    project_id: Some(image.project_id.clone()),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -149,7 +160,19 @@ impl Store {
 
     pub fn delete_image(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
+        // Timeline-visible only when branch-attached with no session scope.
+        let branch_id = Self::lookup_id(
+            &conn,
+            "SELECT branch_id FROM images WHERE id = ?1 AND session_id IS NULL",
+            id,
+        );
         conn.execute("DELETE FROM images WHERE id = ?1", params![id])?;
+        if let Some(branch_id) = branch_id {
+            self.publish_with(|| StoreChange::Branch {
+                project_id: Self::branch_project_id(&conn, &branch_id),
+                branch_id,
+            });
+        }
         Ok(())
     }
 

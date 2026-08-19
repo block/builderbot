@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { ProjectAction } from '../../api/commands';
-import { getPinnedActions, getSecondaryRunningActions, groupActionsByType } from './actionGroups';
+import {
+  getPinnedActions,
+  getSecondaryRunningActions,
+  groupActionsByType,
+  shouldPinNewAction,
+} from './actionGroups';
 
 function action(
   name: string,
@@ -39,6 +44,31 @@ describe('getPinnedActions', () => {
     ];
 
     expect(getPinnedActions(actions)).toEqual([]);
+  });
+});
+
+describe('shouldPinNewAction', () => {
+  it('pins the first action a hand-built context gets, so its header is not empty', () => {
+    expect(shouldPinNewAction([])).toBe(true);
+    expect(
+      shouldPinNewAction([
+        action('Test', { actionType: 'test', sortOrder: 0 }),
+        action('Build', { actionType: 'build', sortOrder: 1 }),
+      ])
+    ).toBe(true);
+  });
+
+  it('leaves later actions unpinned once the header has a button', () => {
+    expect(
+      shouldPinNewAction([
+        action('Dev', { actionType: 'run', sortOrder: 0, pinned: true }),
+        action('Test', { actionType: 'test', sortOrder: 1 }),
+      ])
+    ).toBe(false);
+  });
+
+  it('does not treat an unpinned run action as filling the header', () => {
+    expect(shouldPinNewAction([action('Dev', { actionType: 'run', sortOrder: 0 })])).toBe(true);
   });
 });
 

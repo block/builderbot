@@ -27,6 +27,7 @@
     listenToRepoActionsDetection,
     type ActionType,
   } from '../actions/actions';
+  import { shouldPinNewAction } from '../actions/actionGroups';
   import ActionIcon from '../actions/ActionIcon.svelte';
   import IconPicker from '../actions/IconPicker.svelte';
   import { repoBadgeStore } from '../../stores/repoBadges.svelte';
@@ -352,7 +353,9 @@
       command: '',
       actionType: 'run',
       autoCommit: false,
-      pinned: false,
+      // A context with nothing pinned has an empty card header, so the action
+      // filling it in opts in by default — see shouldPinNewAction.
+      pinned: shouldPinNewAction(actions),
       icon: null,
     };
     editingAction = {} as ProjectAction;

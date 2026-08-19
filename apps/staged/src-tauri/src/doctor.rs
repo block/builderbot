@@ -55,13 +55,17 @@ fn execute_fix_options(
     command_override: Option<String>,
     env_vars: Vec<(String, String)>,
 ) -> ExecuteFixOptions {
+    // Everything else stays at doctor's defaults: Staged's fixes are
+    // non-interactive, so nothing here feeds a prompt and the child keeps
+    // inheriting stdin rather than getting a piped one; the standard fix
+    // timeout is far above any install or login this runs. Spelled with
+    // `..Default::default()` so a new doctor option doesn't break this
+    // workspace-excluded crate, which `cargo check` under `crates/` never
+    // compiles but `staged-ci.yml` does.
     ExecuteFixOptions {
         command_override,
         npm_registry: crate::managed_acp_tools::npm_registry().map(str::to_string),
-        env: None,
-        // Staged's fixes are non-interactive: nothing here feeds a prompt, so
-        // the child keeps inheriting stdin rather than getting a piped one.
-        stdin: None,
+        ..Default::default()
     }
     .with_env_snapshot(env_vars)
 }

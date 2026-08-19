@@ -193,7 +193,11 @@ fn clean_up_after_incomplete_wait(child: &mut Child) {
     let _ = child.wait();
 }
 
-fn kill_child_process_group_or_child(child: &mut Child) {
+/// Best-effort kill: target the child's process group first so a shell's whole
+/// command tree goes with it, falling back to the direct child when the group
+/// lookup fails (the child wasn't spawned with `process_group(0)`, or it isn't
+/// Unix). Callers must still reap afterwards.
+pub(crate) fn kill_child_process_group_or_child(child: &mut Child) {
     if kill_child_process_group(child) {
         return;
     }

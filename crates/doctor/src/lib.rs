@@ -19,7 +19,9 @@ pub use types::{AgentVersionInfo, CheckStatus, DoctorCheck, DoctorReport, FixTyp
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use agents::{
     bundled_version_probe_args, check_single_ai_agent, derive_update_command, lookup_fix_command,
@@ -691,6 +693,11 @@ impl FixStdin {
     /// the `FixStdin` to place in [`ExecuteFixOptions::stdin`]. Lines sent
     /// before the fix subprocess spawns are buffered and written once it does;
     /// dropping every writer clone closes the child's stdin (EOF).
+    ///
+    /// Dropping the writers is how you say "no more input", but it is not what
+    /// bounds the machinery: the writer thread also retires shortly after the
+    /// fix ends, so a writer a host forgets to drop can't strand a thread or
+    /// the child's stdin handle.
     pub fn pipe() -> (FixStdinWriter, FixStdin) {
         let (tx, rx) = std::sync::mpsc::channel();
         (
@@ -717,14 +724,60 @@ pub struct FixStdinWriter {
 
 impl FixStdinWriter {
     /// Queue one line for the fix's stdin; a trailing `\n` is appended and the
-    /// pipe is flushed. `Err` when the fix has already finished (its stdin
-    /// pipe is closed).
+    /// pipe is flushed. Delivery is best-effort — `Ok` means the line reached
+    /// the writer thread's queue, not that the child read it. `Err` once that
+    /// thread has retired, which happens a fraction of a second after the fix
+    /// finishes, or immediately when a write hits the closed pipe.
     pub fn send_line(&self, line: impl Into<String>) -> Result<(), String> {
         self.tx
             .send(line.into())
             .map_err(|_| "Fix is no longer accepting input".to_string())
     }
 }
+
+/// How often the stdin writer thread wakes to ask whether the fix has
+/// finished. Sets the worst-case lag between a fix completing and its writer
+/// thread (plus the child's stdin handle) being reclaimed, which matters
+/// because a host is free to hold its [`FixStdinWriter`] and simply stop
+/// sending — nothing else would ever wake a thread parked on the channel.
+const STDIN_WRITER_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+/// Wall-clock bound on a single fix execution.
+///
+/// Fixes are install/auth/update actions, so the bound has to clear a
+/// cold-cache `npm install -g` behind a corporate proxy and a human doing SSO
+/// in a browser — orders of magnitude above the probe timeouts in
+/// [`crate::command`]. This is an enum rather than `Option<Duration>` because
+/// `None` reads as both "use the default" and "no timeout"; here every literal
+/// has to say which it means, and `Unbounded` stays reachable for a caller
+/// that genuinely wants the old forever-wait.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FixTimeout {
+    /// [`DEFAULT_FIX_TIMEOUT`].
+    #[default]
+    Standard,
+    /// A caller-chosen bound.
+    After(Duration),
+    /// No bound at all: the fix runs until it exits on its own.
+    Unbounded,
+}
+
+impl FixTimeout {
+    /// The wall-clock bound, or `None` for [`FixTimeout::Unbounded`].
+    fn duration(self) -> Option<Duration> {
+        match self {
+            FixTimeout::Standard => Some(DEFAULT_FIX_TIMEOUT),
+            FixTimeout::After(duration) => Some(duration),
+            FixTimeout::Unbounded => None,
+        }
+    }
+}
+
+/// Deadline applied by [`FixTimeout::Standard`]. Deliberately generous: it
+/// exists to stop a wedged fix from pinning a blocking worker and a process
+/// tree for the lifetime of the host, not to police slow-but-honest installs
+/// or a leisurely browser login.
+pub const DEFAULT_FIX_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Options for executing a doctor fix command.
 #[derive(Debug, Clone, Default)]
@@ -743,6 +796,8 @@ pub struct ExecuteFixOptions {
     /// must have this field refreshed (or be rebuilt) before a fix is retried;
     /// reusing it fails the run.
     pub stdin: Option<FixStdin>,
+    /// Wall-clock bound on the fix. Defaults to [`FixTimeout::Standard`].
+    pub timeout: FixTimeout,
 }
 
 impl ExecuteFixOptions {
@@ -756,6 +811,12 @@ impl ExecuteFixOptions {
     /// every retry rather than reusing a built options struct.
     pub fn with_stdin(mut self, stdin: FixStdin) -> Self {
         self.stdin = Some(stdin);
+        self
+    }
+
+    /// Override the wall-clock bound on the fix (see [`FixTimeout`]).
+    pub fn with_timeout(mut self, timeout: FixTimeout) -> Self {
+        self.timeout = timeout;
         self
     }
 }
@@ -791,8 +852,7 @@ pub async fn execute_fix_with_options(
         ExecuteFixOptions {
             command_override,
             npm_registry: npm_registry.map(str::to_string),
-            env: None,
-            stdin: None,
+            ..Default::default()
         },
     )
     .await
@@ -849,8 +909,7 @@ where
         ExecuteFixOptions {
             command_override,
             npm_registry: npm_registry.map(str::to_string),
-            env: None,
-            stdin: None,
+            ..Default::default()
         },
         on_line,
     )
@@ -884,8 +943,9 @@ where
 
     // Fixes are intentionally not routed through the bounded probe runner:
     // these are user-triggered install/auth/update actions and can reasonably
-    // be interactive or long-running.
-    run_command_streaming(command, opts.env, opts.stdin, on_line).await
+    // be interactive or long-running, so they get the far more generous
+    // `FixTimeout` bound instead of a probe timeout.
+    run_command_streaming(command, opts.env, opts.stdin, opts.timeout, on_line).await
 }
 
 /// Async wrapper that runs `run_command_streaming_blocking` on the blocking pool.
@@ -893,13 +953,14 @@ pub(crate) async fn run_command_streaming<F>(
     command: String,
     env: Option<DoctorEnv>,
     stdin: Option<FixStdin>,
+    timeout: FixTimeout,
     on_line: F,
 ) -> Result<(), String>
 where
     F: FnMut(&str) + Send + 'static,
 {
     tokio::task::spawn_blocking(move || {
-        run_command_streaming_blocking(&command, env.as_ref(), stdin, on_line)
+        run_command_streaming_blocking(&command, env.as_ref(), stdin, timeout, on_line)
     })
     .await
     .unwrap_or_else(|e| Err(format!("Task failed: {e}")))
@@ -1083,22 +1144,54 @@ pub(crate) fn execute_command_with_path_prefix_with_env(
     }
 }
 
+/// Sets the shared "the fix is over" flag when `run_command_streaming_blocking`
+/// leaves its body — normal return, error return, or a panic in `on_line`. That
+/// is the only signal the detached stdin writer thread has, so it has to fire on
+/// every path or the thread outlives the fix.
+struct FixFinishedFlag(Arc<AtomicBool>);
+
+impl Drop for FixFinishedFlag {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
 /// Spawn `command` through a login shell, stream stdout/stderr lines to
-/// `on_line`, and return based on the process exit status. This path is
-/// deliberately unbounded: fix commands are user-triggered install/auth/update
-/// actions and may prompt or run package managers. Stderr lines are also
-/// accumulated so a non-zero exit can surface a useful error message (matching
-/// the non-streaming behavior of the previous `execute_command`).
+/// `on_line`, and return based on the process exit status. Bounded by
+/// `timeout`, which is generous rather than tight: fix commands are
+/// user-triggered install/auth/update actions and may prompt or run package
+/// managers. Stderr lines are also accumulated so a non-zero exit can surface a
+/// useful error message (matching the non-streaming behavior of the previous
+/// `execute_command`).
 fn run_command_streaming_blocking<F>(
     command: &str,
     env: Option<&DoctorEnv>,
     stdin: Option<FixStdin>,
+    timeout: FixTimeout,
     mut on_line: F,
 ) -> Result<(), String>
 where
     F: FnMut(&str),
 {
     use std::io::{BufRead, BufReader, Write};
+    use std::sync::mpsc::RecvTimeoutError;
+
+    use wait_timeout::ChildExt;
+
+    fn consume<F: FnMut(&str)>(msg: StreamLine, on_line: &mut F, stderr_accum: &mut String) {
+        match msg {
+            StreamLine::Stdout(s) => {
+                on_line(&s);
+            }
+            StreamLine::Stderr(s) => {
+                on_line(&s);
+                if !stderr_accum.is_empty() {
+                    stderr_accum.push('\n');
+                }
+                stderr_accum.push_str(&s);
+            }
+        }
+    }
 
     // Claim the write end before anything is launched: a `FixStdin` whose
     // receiver a previous execution already took can never deliver a line, so
@@ -1114,37 +1207,60 @@ where
         None => None,
     };
 
-    let mut command = build_shell_command(command, &[], env);
-    command
+    let mut shell_command = build_shell_command(command, &[], env);
+    shell_command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     // Opt-in only: without a `FixStdin` the child keeps inheriting the host
     // process's stdin, so interactive fixes in terminal hosts are untouched.
     if stdin_rx.is_some() {
-        command.stdin(std::process::Stdio::piped());
+        shell_command.stdin(std::process::Stdio::piped());
+        // Own the whole tree so a timeout can kill more than the login shell:
+        // `kill(-pid)` only reaches an `npm install` under `zsh -lc` if the
+        // shell leads its own group. Gated on piped stdin because a child in
+        // its own group that reads the controlling terminal gets SIGTTIN and
+        // stops — impossible here precisely because doctor owns its stdin, but
+        // a real regression for a terminal host on the inherited-stdin path.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            shell_command.process_group(0);
+        }
     }
-    command::configure_command(&mut command);
-    let mut child = command
+    command::configure_command(&mut shell_command);
+    let mut child = shell_command
         .spawn()
         .map_err(|e| format!("Failed to run command: {e}"))?;
+
+    let finished = Arc::new(AtomicBool::new(false));
+    let _finished_guard = FixFinishedFlag(finished.clone());
 
     if let Some(stdin_rx) = stdin_rx {
         let mut child_stdin = child.stdin.take().expect("stdin was piped");
         // Detached on purpose: joining would hang the fix whenever a caller
-        // still holds a writer after the child exits (the thread would be
-        // parked in `iter()`). It exits on its own when every writer drops
-        // (channel closed) or a write fails once the child is gone (Rust
-        // ignores SIGPIPE, so EPIPE surfaces as a clean `Err`); dropping
-        // `child_stdin` then delivers EOF.
-        std::thread::spawn(move || {
-            for line in stdin_rx.iter() {
-                if child_stdin
-                    .write_all(format!("{line}\n").as_bytes())
-                    .and_then(|()| child_stdin.flush())
-                    .is_err()
-                {
-                    break;
+        // still holds a writer after the child exits. Instead of parking on the
+        // channel, the thread polls, so it retires on any of three signals —
+        // every writer dropped (channel closed), a write failing once the child
+        // is gone (Rust ignores SIGPIPE, so EPIPE surfaces as a clean `Err`),
+        // or the fix finishing while a host still holds its writer. Dropping
+        // `child_stdin` on the way out delivers EOF.
+        std::thread::spawn(move || loop {
+            match stdin_rx.recv_timeout(STDIN_WRITER_POLL_INTERVAL) {
+                Ok(line) => {
+                    if child_stdin
+                        .write_all(format!("{line}\n").as_bytes())
+                        .and_then(|()| child_stdin.flush())
+                        .is_err()
+                    {
+                        break;
+                    }
                 }
+                Err(RecvTimeoutError::Timeout) => {
+                    if finished.load(Ordering::Relaxed) {
+                        break;
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
             }
         });
     }
@@ -1172,28 +1288,75 @@ where
         }
     });
 
+    let limit = timeout.duration();
+    let deadline = limit.map(|limit| Instant::now() + limit);
     let mut stderr_accum = String::new();
-    for msg in rx.iter() {
-        match msg {
-            StreamLine::Stdout(s) => {
-                on_line(&s);
-            }
-            StreamLine::Stderr(s) => {
-                on_line(&s);
-                if !stderr_accum.is_empty() {
-                    stderr_accum.push('\n');
+    let mut expired = false;
+
+    loop {
+        let msg = match deadline {
+            Some(deadline) => {
+                match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok(msg) => msg,
+                    Err(RecvTimeoutError::Timeout) => {
+                        expired = true;
+                        break;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
                 }
-                stderr_accum.push_str(&s);
             }
-        }
+            // `recv_timeout(Duration::MAX)` overflows instantly, so the
+            // unbounded case keeps the plain blocking receive.
+            None => match rx.recv() {
+                Ok(msg) => msg,
+                Err(_) => break,
+            },
+        };
+        consume(msg, &mut on_line, &mut stderr_accum);
     }
 
-    let _ = stdout_thread.join();
-    let _ = stderr_thread.join();
+    let status = if expired {
+        None
+    } else {
+        // Both pipes hit EOF, so the readers are already done and joining is
+        // immediate. The process can still outlive its pipes, though, so the
+        // reap is bounded by the same deadline.
+        let _ = stdout_thread.join();
+        let _ = stderr_thread.join();
+        match deadline {
+            Some(deadline) => child
+                .wait_timeout(deadline.saturating_duration_since(Instant::now()))
+                .map_err(|e| format!("Failed to wait for command: {e}"))?,
+            None => Some(
+                child
+                    .wait()
+                    .map_err(|e| format!("Failed to wait for command: {e}"))?,
+            ),
+        }
+    };
 
-    let status = child
-        .wait()
-        .map_err(|e| format!("Failed to wait for command: {e}"))?;
+    let Some(status) = status else {
+        let limit = limit.expect("a deadline only exists when the fix is bounded");
+        // Anything the readers already queued is real output the user should
+        // see before the notice explaining why it stopped.
+        while let Ok(msg) = rx.try_recv() {
+            consume(msg, &mut on_line, &mut stderr_accum);
+        }
+        on_line(&format!(
+            "doctor: fix timed out after {} — terminating",
+            format_duration(limit)
+        ));
+        command::kill_child_process_group_or_child(&mut child);
+        let _ = child.wait();
+        // The reader threads are deliberately not joined: a descendant that
+        // escaped the process group can hold the inherited stdout open long
+        // after the fix is dead, and waiting on that is the hang this timeout
+        // exists to end. Dropping `rx` retires them at their next send.
+        return Err(format!(
+            "Fix timed out after {} without finishing: {command}",
+            format_duration(limit)
+        ));
+    };
 
     if status.success() {
         Ok(())
@@ -1213,7 +1376,7 @@ mod tests {
 
     use std::path::Path;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn timeout(label: &str, command: &str) -> CommandTimeout {
         CommandTimeout::new(label, command, Duration::from_secs(15))
@@ -1312,6 +1475,7 @@ mod tests {
             "echo doctor-streaming-marker-hello && echo doctor-streaming-marker-world".to_string(),
             None,
             None,
+            FixTimeout::Standard,
             move |line| {
                 lines_clone.lock().unwrap().push(line.to_string());
             },
@@ -1347,9 +1511,15 @@ mod tests {
         writer.send_line("doctor-stdin-marker-echo").unwrap();
         drop(writer);
 
-        let result = run_command_streaming("cat".to_string(), None, Some(stdin), move |line| {
-            lines_clone.lock().unwrap().push(line.to_string());
-        })
+        let result = run_command_streaming(
+            "cat".to_string(),
+            None,
+            Some(stdin),
+            FixTimeout::Standard,
+            move |line| {
+                lines_clone.lock().unwrap().push(line.to_string());
+            },
+        )
         .await;
 
         assert!(result.is_ok(), "cat should exit 0 on EOF; got {result:?}");
@@ -1373,6 +1543,7 @@ mod tests {
             "read -r line && echo \"got-$line\"".to_string(),
             None,
             Some(stdin),
+            FixTimeout::Standard,
             move |line| {
                 lines_clone.lock().unwrap().push(line.to_string());
             },
@@ -1391,35 +1562,31 @@ mod tests {
     }
 
     /// A writer held across the fix's completion must not hang the run — the
-    /// stdin writer thread is detached, never joined. Afterwards, `send_line`
-    /// must fail cleanly (never panic): the first post-exit send may still
-    /// queue, but it wakes the writer thread, whose write fails with EPIPE
-    /// and drops the receiver, so sends error from then on.
+    /// stdin writer thread is detached, never joined — and the thread must not
+    /// leak either. It polls `STDIN_WRITER_POLL_INTERVAL` for the finished
+    /// flag, so within one interval of the fix returning it has retired and
+    /// dropped the receiver, which makes `send_line` fail cleanly (never
+    /// panic) rather than queueing into a void. Waiting several intervals
+    /// keeps this a fixed assertion instead of a poll loop.
     #[tokio::test]
-    async fn run_command_streaming_piped_stdin_no_hang_when_writer_outlives_child() {
+    async fn run_command_streaming_piped_stdin_reclaims_writer_thread_after_child_exits() {
         let (writer, stdin) = FixStdin::pipe();
 
         let result = run_command_streaming(
             "echo doctor-stdin-done".to_string(),
             None,
             Some(stdin),
+            FixTimeout::Standard,
             |_| {},
         )
         .await;
 
         assert!(result.is_ok(), "echo fix should complete; got {result:?}");
 
-        let mut saw_error = false;
-        for _ in 0..100 {
-            if writer.send_line("late-line").is_err() {
-                saw_error = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        tokio::time::sleep(STDIN_WRITER_POLL_INTERVAL * 4).await;
         assert!(
-            saw_error,
-            "send_line after child exit should eventually return Err",
+            writer.send_line("late-line").is_err(),
+            "writer thread should have retired within one poll interval of the fix finishing",
         );
     }
 
@@ -1434,7 +1601,14 @@ mod tests {
         writer.send_line("doctor-stdin-reuse-first").unwrap();
         drop(writer);
 
-        let first = run_command_streaming("cat".to_string(), None, Some(stdin), |_| {}).await;
+        let first = run_command_streaming(
+            "cat".to_string(),
+            None,
+            Some(stdin),
+            FixTimeout::Standard,
+            |_| {},
+        )
+        .await;
         assert!(first.is_ok(), "first run should succeed; got {first:?}");
 
         let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1443,6 +1617,7 @@ mod tests {
             "echo doctor-stdin-reuse-second".to_string(),
             None,
             Some(reused),
+            FixTimeout::Standard,
             move |line| lines_clone.lock().unwrap().push(line.to_string()),
         )
         .await;
@@ -1456,6 +1631,118 @@ mod tests {
         assert!(
             captured.is_empty(),
             "second run must not spawn; captured: {captured:?}",
+        );
+    }
+
+    /// The default bound must stay at fix scale, not probe scale. A fix is an
+    /// `npm install -g` behind a corporate proxy or a human doing SSO in a
+    /// browser; retuning this toward `DEFAULT_PROBE_TIMEOUT` would kill honest
+    /// work mid-flight.
+    #[test]
+    fn default_fix_timeout_stays_at_fix_scale() {
+        assert_eq!(DEFAULT_FIX_TIMEOUT, Duration::from_secs(600));
+        assert_eq!(ExecuteFixOptions::default().timeout, FixTimeout::Standard);
+        assert_eq!(FixTimeout::Standard.duration(), Some(DEFAULT_FIX_TIMEOUT));
+        assert_eq!(FixTimeout::Unbounded.duration(), None);
+        assert!(
+            DEFAULT_FIX_TIMEOUT >= DEFAULT_PROBE_TIMEOUT * 30,
+            "fix timeout must stay far above probe scale",
+        );
+    }
+
+    /// A fix that never finishes must return on its deadline instead of
+    /// pinning the blocking worker forever — the whole point of the bound.
+    #[tokio::test]
+    async fn run_command_streaming_returns_when_the_fix_outlives_its_timeout() {
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let started = Instant::now();
+
+        let result = run_command_streaming(
+            "sleep 60".to_string(),
+            None,
+            None,
+            FixTimeout::After(Duration::from_millis(100)),
+            move |line| lines_clone.lock().unwrap().push(line.to_string()),
+        )
+        .await;
+
+        let err = result.expect_err("a fix past its deadline should fail");
+        assert!(
+            err.contains("timed out") && err.contains("sleep 60"),
+            "error should name the timeout and the command; got {err:?}",
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout path waited for the fix instead of its deadline",
+        );
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured
+                .iter()
+                .any(|l| l.starts_with("doctor: fix timed out")),
+            "callers should see a notice line explaining the stop; captured: {captured:?}",
+        );
+    }
+
+    /// With piped stdin the shell leads its own process group, so the timeout
+    /// kill must take the whole tree — not just the login shell, leaving a
+    /// backgrounded installer running.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_streaming_timeout_kills_the_whole_process_tree() {
+        let tmp = unique_tmp_dir("fix-timeout-tree");
+        let marker = tmp.join("grandchild-ran");
+        let (_writer, stdin) = FixStdin::pipe();
+
+        let result = run_command_streaming(
+            format!("(sleep 2; touch {}) & sleep 60", marker.display()),
+            None,
+            Some(stdin),
+            FixTimeout::After(Duration::from_millis(300)),
+            |_| {},
+        )
+        .await;
+
+        assert!(result.is_err(), "timed-out fix should fail; got {result:?}");
+        // Past when the backgrounded grandchild would have written its marker
+        // had it survived the group kill.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let survived = marker.exists();
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            !survived,
+            "backgrounded grandchild outlived the timeout kill",
+        );
+    }
+
+    /// A descendant that escaped the process group keeps the inherited
+    /// stdout/stderr open, so the reader threads never see EOF. The timeout
+    /// path must not join them — it must return on the deadline regardless
+    /// (the streaming twin of `command_runner_returns_when_escaped_descendant_
+    /// keeps_pipes_open`).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_streaming_timeout_returns_when_escaped_descendant_keeps_pipes_open() {
+        let started = Instant::now();
+
+        let result = run_command_streaming(
+            "perl -MPOSIX=setsid -e 'setsid(); sleep 5' & wait".to_string(),
+            None,
+            None,
+            FixTimeout::After(Duration::from_millis(250)),
+            |_| {},
+        )
+        .await;
+
+        let err = result.expect_err("a fix past its deadline should fail");
+        assert!(
+            err.contains("timed out"),
+            "error should name the timeout; got {err:?}",
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout path waited for the escaped descendant to close the pipes",
         );
     }
 
@@ -1859,9 +2146,8 @@ mod tests {
             FixType::UpdateMain,
             ExecuteFixOptions {
                 command_override: Some(script_name.to_string()),
-                npm_registry: None,
                 env: Some(env),
-                stdin: None,
+                ..Default::default()
             },
             move |line| {
                 lines_clone.lock().unwrap().push(line.to_string());
@@ -1914,9 +2200,8 @@ mod tests {
             FixType::UpdateMain,
             ExecuteFixOptions {
                 command_override: Some(command.to_string()),
-                npm_registry: None,
                 env: Some(env),
-                stdin: None,
+                ..Default::default()
             },
             move |line| {
                 lines_clone.lock().unwrap().push(line.to_string());

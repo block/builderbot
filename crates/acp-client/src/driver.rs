@@ -19,7 +19,7 @@ use agent_client_protocol::{
     schema::{
         v1::{
             AgentCapabilities, AuthMethod, AuthenticateRequest, CancelNotification,
-            ContentBlock as AcpContentBlock, ContentChunk, ImageContent, Implementation,
+            ContentBlock as AcpContentBlock, ContentChunk, ErrorCode, ImageContent, Implementation,
             InitializeRequest, InitializeResponse, LoadSessionRequest, McpCapabilities, McpServer,
             NewSessionRequest, PermissionOption as SchemaPermissionOption, PermissionOptionId,
             PermissionOptionKind as SchemaPermissionOptionKind, PromptRequest, PromptResponse,
@@ -31,7 +31,7 @@ use agent_client_protocol::{
         },
         ProtocolVersion,
     },
-    Agent, ByteStreams, Client, ConnectionTo,
+    Agent, ByteStreams, Client, ConnectionTo, JsonRpcRequest,
 };
 use async_trait::async_trait;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -2343,7 +2343,9 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
         ));
     }
 
-    authenticate_if_advertised(connection, &init_response.auth_methods).await?;
+    // Authentication methods are capabilities, not proof that authentication
+    // is currently required. Existing provider credentials (for example a
+    // persisted ChatGPT login) may already make session setup succeed.
 
     // Required servers must all have a supported transport, or the session
     // fails. Route the decision through mcp_server_transport_supported so the
@@ -2381,14 +2383,17 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
                 "Resuming ACP session {existing_id} via load_session for session {our_session_id}"
             );
 
-            let load_response = connection
-                .send_request(
-                    LoadSessionRequest::new(existing_id.to_string(), working_dir.to_path_buf())
-                        .mcp_servers(mcp_servers.to_vec()),
-                )
-                .block_task()
-                .await
-                .map_err(|e| format!("Failed to load ACP session: {e:?}"))?;
+            let load_request = || {
+                LoadSessionRequest::new(existing_id.to_string(), working_dir.to_path_buf())
+                    .mcp_servers(mcp_servers.to_vec())
+            };
+            let load_response = send_session_setup_request(
+                connection,
+                load_request,
+                &init_response.auth_methods,
+                "load ACP session",
+            )
+            .await?;
 
             if let Some(ref modes) = load_response.modes {
                 writer.on_model_state_update(modes).await;
@@ -2409,13 +2414,16 @@ async fn setup_acp_session(context: AcpSessionSetupContext<'_>) -> Result<AcpSes
             })
         }
         None => {
-            let new_session_request =
-                NewSessionRequest::new(working_dir.to_path_buf()).mcp_servers(mcp_servers.to_vec());
-            let session_response = connection
-                .send_request(new_session_request)
-                .block_task()
-                .await
-                .map_err(|e| format!("Failed to create ACP session: {e:?}"))?;
+            let new_session_request = || {
+                NewSessionRequest::new(working_dir.to_path_buf()).mcp_servers(mcp_servers.to_vec())
+            };
+            let session_response = send_session_setup_request(
+                connection,
+                new_session_request,
+                &init_response.auth_methods,
+                "create ACP session",
+            )
+            .await?;
 
             let new_id = session_response.session_id.to_string();
             store
@@ -2486,16 +2494,41 @@ fn describe_auth_methods(auth_methods: &[AuthMethod]) -> String {
         .join(", ")
 }
 
-async fn authenticate_if_advertised(
+async fn send_session_setup_request<Req, MakeRequest>(
+    connection: &ConnectionTo<Agent>,
+    make_request: MakeRequest,
+    auth_methods: &[AuthMethod],
+    operation: &str,
+) -> Result<Req::Response, String>
+where
+    Req: JsonRpcRequest,
+    MakeRequest: Fn() -> Req,
+{
+    match connection.send_request(make_request()).block_task().await {
+        Ok(response) => Ok(response),
+        Err(error) if error.code == ErrorCode::AuthRequired => {
+            authenticate_with_usable_method(connection, auth_methods).await?;
+            connection
+                .send_request(make_request())
+                .block_task()
+                .await
+                .map_err(|error| format!("Failed to {operation} after authentication: {error:?}"))
+        }
+        Err(error) => Err(format!("Failed to {operation}: {error:?}")),
+    }
+}
+
+async fn authenticate_with_usable_method(
     connection: &ConnectionTo<Agent>,
     auth_methods: &[AuthMethod],
 ) -> Result<(), String> {
-    let Some(method) = auth_methods.first() else {
-        return Ok(());
-    };
+    let method = select_auth_method(auth_methods).ok_or_else(|| {
+        "ACP authentication is required, but the agent advertised no usable authentication method"
+            .to_string()
+    })?;
 
     log::debug!(
-        "ACP agent advertised authentication methods; selecting {} ({})",
+        "ACP authentication required; selecting {} ({})",
         method.name(),
         method.id()
     );
@@ -2504,15 +2537,55 @@ async fn authenticate_if_advertised(
         .send_request(AuthenticateRequest::new(method.id().clone()))
         .block_task()
         .await
-        .map_err(|e| {
+        .map_err(|error| {
             format!(
-                "ACP authentication failed with method {} ({}): {e:?}",
+                "ACP authentication failed with method {} ({}): {error:?}",
                 method.name(),
                 method.id()
             )
         })?;
 
     Ok(())
+}
+
+fn select_auth_method(auth_methods: &[AuthMethod]) -> Option<&AuthMethod> {
+    // Agent-managed methods do not require the client to collect credentials.
+    // Prefer a non-API-key method so providers such as Codex use an existing
+    // browser login instead of an unavailable key merely because `api-key` was
+    // advertised first.
+    auth_methods
+        .iter()
+        .find(|method| matches!(method, AuthMethod::Agent(_)) && !looks_like_api_key(method))
+        .or_else(|| {
+            auth_methods
+                .iter()
+                .find(|method| auth_method_is_usable(method))
+        })
+}
+
+fn auth_method_is_usable(method: &AuthMethod) -> bool {
+    match method {
+        // Agent-managed methods own their credential lookup. If no better
+        // method is available, let the agent report any missing credential.
+        AuthMethod::Agent(_) => true,
+        AuthMethod::EnvVar(method) => method.vars.iter().all(|var| {
+            var.optional || std::env::var_os(&var.name).is_some_and(|value| !value.is_empty())
+        }),
+        // Terminal methods require a separate interactive client flow that the
+        // driver does not currently implement. Unknown future methods are also
+        // unusable until the client explicitly supports their flow.
+        AuthMethod::Terminal(_) => false,
+        _ => false,
+    }
+}
+
+fn looks_like_api_key(method: &AuthMethod) -> bool {
+    [method.id().to_string(), method.name().to_string()]
+        .iter()
+        .any(|value| {
+            let value = value.to_ascii_lowercase();
+            value.contains("api") && value.contains("key")
+        })
 }
 
 fn build_prompt_content_blocks(
@@ -2668,17 +2741,20 @@ mod tests {
         is_config_selection_unavailable_error, is_missing_mcp_transport_error,
         mcp_server_transport_supported, permission_response_for_options, remote_acp_segments,
         resolve_acp_working_dir, resolve_session_config_option_selection,
-        resolve_spawn_working_dir, sanitize_remote_acp_chunk, shell_exec_line, shell_quote,
-        AcpDriver, AcpEventMetadata, AcpNotificationHandler, AcpPermissionOption,
-        AcpPermissionOptionKind, AcpPermissionRequest, AcpSessionConfigOptionSelection,
+        resolve_spawn_working_dir, sanitize_remote_acp_chunk, select_auth_method,
+        send_session_setup_request, setup_acp_session, shell_exec_line, shell_quote, AcpDriver,
+        AcpEventMetadata, AcpNotificationHandler, AcpPermissionOption, AcpPermissionOptionKind,
+        AcpPermissionRequest, AcpSessionConfigOptionSelection, AcpSessionSetupContext,
         AgentRunOutcome, BasicMessageWriter, MessageWriter, RemoteLineOutcome, ReplayBoundary,
-        ReplayBuffer, ReplayEvent,
+        ReplayBuffer, ReplayEvent, Store,
     };
     use agent_client_protocol::schema::v1::{
+        AuthMethod, AuthMethodAgent, AuthenticateRequest, AuthenticateResponse,
         ContentBlock as AcpContentBlock, McpCapabilities, McpServer, McpServerHttp, McpServerSse,
-        McpServerStdio, PermissionOption, PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority,
-        PlanEntryStatus, RequestPermissionOutcome, SessionConfigOption,
-        SessionConfigOptionCategory, SessionConfigSelectOption, SessionNotification, SessionUpdate,
+        McpServerStdio, NewSessionRequest, NewSessionResponse, PermissionOption,
+        PermissionOptionKind, Plan, PlanEntry, PlanEntryPriority, PlanEntryStatus,
+        RequestPermissionOutcome, SessionConfigOption, SessionConfigOptionCategory,
+        SessionConfigSelectOption, SessionNotification, SessionUpdate,
         SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
     };
     use std::ffi::OsString;
@@ -2686,6 +2762,160 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn auth_selection_prefers_chat_login_over_first_advertised_api_key() {
+        let methods = vec![
+            AuthMethod::Agent(AuthMethodAgent::new("api-key", "API Key")),
+            AuthMethod::Agent(AuthMethodAgent::new("chat-gpt", "ChatGPT")),
+        ];
+
+        let selected = select_auth_method(&methods).expect("chat login should be usable");
+
+        assert_eq!(selected.id().to_string(), "chat-gpt");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_setup_authenticates_with_usable_method_and_retries_on_auth_required() {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let calls_for_auth = Arc::clone(&calls);
+        let calls_for_session = Arc::clone(&calls);
+        let session_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let session_attempts_for_handler = Arc::clone(&session_attempts);
+        let agent = agent_client_protocol::Agent
+            .builder()
+            .on_receive_request(
+                async move |request: AuthenticateRequest, responder, _cx| {
+                    calls_for_auth
+                        .lock()
+                        .unwrap()
+                        .push(format!("authenticate:{}", request.method_id));
+                    responder.respond(AuthenticateResponse::new())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: NewSessionRequest, responder, _cx| {
+                    calls_for_session.lock().unwrap().push("session/new".into());
+                    if session_attempts_for_handler
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        == 0
+                    {
+                        responder.respond_with_error(agent_client_protocol::Error::auth_required())
+                    } else {
+                        responder.respond(NewSessionResponse::new("session-1"))
+                    }
+                },
+                agent_client_protocol::on_receive_request!(),
+            );
+        let methods = vec![
+            AuthMethod::Agent(AuthMethodAgent::new("api-key", "API Key")),
+            AuthMethod::Agent(AuthMethodAgent::new("chat-gpt", "ChatGPT")),
+        ];
+
+        agent_client_protocol::Client
+            .connect_with(agent, async |connection| {
+                send_session_setup_request(
+                    &connection,
+                    || NewSessionRequest::new(PathBuf::from("/tmp")),
+                    &methods,
+                    "create ACP session",
+                )
+                .await
+                .map(|_| ())
+                .map_err(agent_client_protocol::util::internal_error)
+            })
+            .await
+            .expect("protocol should succeed");
+
+        assert_eq!(
+            calls.lock().unwrap().as_slice(),
+            &["session/new", "authenticate:chat-gpt", "session/new"]
+        );
+    }
+
+    #[derive(Default)]
+    struct RecordingStore {
+        agent_session_ids: Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Store for RecordingStore {
+        fn set_agent_session_id(
+            &self,
+            session_id: &str,
+            agent_session_id: &str,
+        ) -> Result<(), String> {
+            self.agent_session_ids
+                .lock()
+                .unwrap()
+                .push((session_id.to_string(), agent_session_id.to_string()));
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn full_session_setup_uses_existing_login_without_eager_authentication() {
+        use agent_client_protocol::schema::v1::{InitializeRequest, InitializeResponse};
+
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let calls_for_auth = Arc::clone(&calls);
+        let calls_for_session = Arc::clone(&calls);
+        let agent = agent_client_protocol::Agent
+            .builder()
+            .on_receive_request(
+                async |request: InitializeRequest, responder, _cx| {
+                    responder.respond(
+                        InitializeResponse::new(request.protocol_version).auth_methods(vec![
+                            AuthMethod::Agent(AuthMethodAgent::new("api-key", "API Key")),
+                            AuthMethod::Agent(AuthMethodAgent::new("chat-gpt", "ChatGPT")),
+                        ]),
+                    )
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |request: AuthenticateRequest, responder, _cx| {
+                    calls_for_auth
+                        .lock()
+                        .unwrap()
+                        .push(format!("authenticate:{}", request.method_id));
+                    responder.respond_with_error(agent_client_protocol::Error::internal_error())
+                },
+                agent_client_protocol::on_receive_request!(),
+            )
+            .on_receive_request(
+                async move |_request: NewSessionRequest, responder, _cx| {
+                    calls_for_session.lock().unwrap().push("session/new".into());
+                    responder.respond(NewSessionResponse::new("session-1"))
+                },
+                agent_client_protocol::on_receive_request!(),
+            );
+        let store: Arc<dyn Store> = Arc::new(RecordingStore::default());
+        let writer: Arc<dyn MessageWriter> = Arc::new(BasicMessageWriter::new());
+
+        agent_client_protocol::Client
+            .connect_with(agent, async |connection| {
+                setup_acp_session(AcpSessionSetupContext {
+                    connection: &connection,
+                    working_dir: Path::new("/tmp"),
+                    store: &store,
+                    writer: &writer,
+                    our_session_id: "local-session",
+                    acp_session_id: None,
+                    config_options: &[],
+                    mcp_servers: &[],
+                    agent_label: "Codex",
+                })
+                .await
+                .map(|_| ())
+                .map_err(agent_client_protocol::util::internal_error)
+            })
+            .await
+            .expect("existing login should create a session without authenticate");
+
+        assert_eq!(calls.lock().unwrap().as_slice(), &["session/new"]);
+    }
 
     fn unique_test_dir(prefix: &str) -> PathBuf {
         let nonce = SystemTime::now()

@@ -78,8 +78,17 @@
     stopSessionAsyncTask,
     type AcpConfigDiscovery,
     type AcpConfigSelector,
+    type DoctorLoginOutput,
   } from '../../api/commands';
   import { listenToEvent, type UnlistenFn } from '../../transport';
+  import { openSettings } from '../layout/navigation.svelte';
+  import { doctorState, runChecks } from '../doctor/doctor.svelte';
+  import {
+    canOfferLogin,
+    doctorCheckForProvider,
+    isAuthCodePrompt,
+    isAuthenticationError,
+  } from './authRecovery';
   import AcpFixedConfigPicker from '../agents/AcpFixedConfigPicker.svelte';
   import { agentState } from '../agents/agent.svelte';
   import {
@@ -239,6 +248,13 @@
    * `noteTaskStopOutcome`.
    */
   let taskStopNotices = $state<Map<string, string>>(new Map());
+  let loginRunning = $state(false);
+  let loginError = $state<string | null>(null);
+  let loginCodePrompt = $state(false);
+  let loginCode = $state('');
+  let loginOutputUnlisten: UnlistenFn | null = null;
+  let loginCheck = $derived(doctorCheckForProvider(session?.provider, doctorState.report));
+  let canLogin = $derived(canOfferLogin(loginCheck));
 
   let inputText = $state('');
   let queuedMessages = $state<QueuedSessionMessage[]>([]);
@@ -614,6 +630,7 @@
     stopPolling();
     unlistenStatus?.();
     unlistenBackgroundHold?.();
+    loginOutputUnlisten?.();
   });
 
   // This pane can be mounted once and reused across opens (the `active` prop toggles
@@ -774,6 +791,45 @@
     backgroundHold = null;
     if (stoppingTaskIds.size > 0) stoppingTaskIds = new Set();
     if (taskStopNotices.size > 0) taskStopNotices = new Map();
+  }
+
+  async function startLogin() {
+    if (!session?.provider || !canLogin || loginRunning) return;
+    loginRunning = true;
+    loginError = null;
+    loginCodePrompt = false;
+    try {
+      const { startDoctorLogin } = await import('../../api/commands');
+      loginOutputUnlisten?.();
+      const unlisten = listenToEvent<DoctorLoginOutput>('doctor-login-output', (output) => {
+        if (output.checkId !== `ai-agent-${session?.provider}`) return;
+        if (output.line && isAuthCodePrompt(output.line)) loginCodePrompt = true;
+        if (output.done) {
+          loginRunning = false;
+          unlisten();
+          loginOutputUnlisten = null;
+          if (output.error) loginError = output.error;
+          else void runChecks();
+        }
+      });
+      loginOutputUnlisten = unlisten;
+      await startDoctorLogin(`ai-agent-${session.provider}`);
+    } catch (e) {
+      loginRunning = false;
+      loginError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async function submitLoginCode() {
+    if (!session?.provider || !loginCode.trim()) return;
+    try {
+      const { sendDoctorLoginCode } = await import('../../api/commands');
+      await sendDoctorLoginCode(`ai-agent-${session.provider}`, loginCode.trim());
+      loginCode = '';
+      loginCodePrompt = false;
+    } catch (e) {
+      loginError = e instanceof Error ? e.message : String(e);
+    }
   }
 
   function isComposerFocused(): boolean {
@@ -2308,10 +2364,47 @@
          was killed from outside with a recorded reason (e.g. a Pikchr child
          session whose generate_pikchr call timed out) and reads as an error. -->
     {#if (session?.status === 'error' || session?.status === 'cancelled') && session.errorMessage}
+      {@const authError = isAuthenticationError(session.errorMessage)}
       <Alert.Root variant="destructive" class="mt-3">
         <AlertCircle />
         <Alert.Description>{session.errorMessage}</Alert.Description>
+        {#if authError}
+          <Alert.Action>
+            <div class="auth-actions">
+              <Button variant="outline" size="xs" onclick={() => openSettings('doctor')}>
+                Fix
+              </Button>
+              {#if canLogin}
+                <Button variant="outline" size="xs" disabled={loginRunning} onclick={startLogin}>
+                  {loginRunning ? 'Logging in…' : 'Log in'}
+                </Button>
+              {/if}
+            </div>
+          </Alert.Action>
+        {/if}
       </Alert.Root>
+      {#if loginError}
+        <p class="text-destructive text-sm">{loginError}</p>
+      {/if}
+      {#if loginCodePrompt}
+        <div class="login-code-row">
+          <input
+            class="login-code-input"
+            aria-label="Authentication code"
+            placeholder="Paste authentication code"
+            bind:value={loginCode}
+            onkeydown={(event) => event.key === 'Enter' && submitLoginCode()}
+          />
+          <Button
+            variant="outline"
+            size="xs"
+            onclick={submitLoginCode}
+            disabled={!loginCode.trim()}
+          >
+            Submit code
+          </Button>
+        </div>
+      {/if}
     {:else if session && session.status !== 'running' && session.status !== 'queued'}
       {#if isResumableReason(session.completionReason)}
         {@const isWarning =
@@ -2940,6 +3033,24 @@
   }
 
   /* ----- Input wrapper + queue popover ----------------------------------- */
+
+  .auth-actions,
+  .login-code-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .login-code-input {
+    min-width: 180px;
+    border: 1px solid var(--border-subtle);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    padding: 4px 8px;
+    font-size: var(--size-xs);
+  }
 
   .input-wrapper {
     flex-shrink: 0;

@@ -1110,6 +1110,7 @@ pub async fn start_session(
             branch_id: None,
             project_id: None,
             expose_pikchr_tools: false,
+            parent_project_note_id: None,
         },
         store,
         app_handle,
@@ -1368,6 +1369,9 @@ pub(crate) async fn resume_session_for_store(
             branch_id: config_branch_id,
             project_id: config_project_id,
             expose_pikchr_tools,
+            // When resuming a project session, keep its parent project note in
+            // scope so `child_note` repo sessions still attach to it.
+            parent_project_note_id: project_note.as_ref().map(|note| note.id.clone()),
         },
         Arc::clone(&store),
         app_handle,
@@ -2177,11 +2181,13 @@ This is a remote-workspace project. Use the project MCP tools to orchestrate wor
 
     let start_repo_session_desc = if is_remote {
         "- start_repo_session: Use this to make changes or run tasks in one of the project's \
-repositories. It enqueues work and returns a `repo_session_id` immediately. Use \
-`expected_outcome=\"note_in_repo\"` for repo notes, `expected_outcome=\"commit\"` for \
-code changes/commits, and `expected_outcome=\"code_review\"` for an AI code review of the \
-changes on a repo's branch; commit sessions create signed-off conventional commits. For remote branches \
-this subagent runs on the remote workspace, where file access, notes, commits, and reviews must happen.\n\
+repositories. It enqueues work and returns a `repo_session_id` immediately. For notes, prefer \
+`expected_outcome=\"child_note\"` so the note attaches to this project note and stays out of the \
+repo's visible timeline; use `expected_outcome=\"note_in_repo\"` (a detached note) only when the \
+note should stand alone in the repo. Use `expected_outcome=\"commit\"` for code changes/commits and \
+`expected_outcome=\"code_review\"` for an AI code review of the changes on a repo's branch; commit \
+sessions create signed-off conventional commits. For remote branches this subagent runs on the \
+remote workspace, where file access, notes, commits, and reviews must happen.\n\
 - wait_for_repo_session: Use this to wait on a previously started repo session by passing the \
 `repo_session_id`. It returns the queue state (`queued`, `running`, `completed`, `cancelled`, \
 or `failed`), any available artifacts, and activity details. Prefer another \
@@ -2191,15 +2197,16 @@ when the user wants the session stopped. Cancellation is best used when the user
 down a different path rather than when you are surprised at how long the session is taking."
     } else {
         "- start_repo_session: Use this to make changes or run tasks in one of the project's \
-repositories. It enqueues work and returns a `repo_session_id` immediately. Use \
-`expected_outcome=\"note_in_repo\"` for repo notes, `expected_outcome=\"commit\"` for \
-code changes/commits, and `expected_outcome=\"code_review\"` for an AI code review of the \
-changes on a repo's branch; commit sessions create signed-off conventional commits. Do not ask for \
-multiple outcomes (e.g. a note and a commit) in a single start_repo_session request — choose one \
-outcome per call. All \
-reasoning specific to a repo must be done within a repo session rather than in this project-wide \
-context. You MUST NOT write files directly — all file writes MUST go through start_repo_session \
-with expected_outcome=\"commit\".\n\
+repositories. It enqueues work and returns a `repo_session_id` immediately. For notes, prefer \
+`expected_outcome=\"child_note\"` so the note attaches to this project note and stays out of the \
+repo's visible timeline; use `expected_outcome=\"note_in_repo\"` (a detached note) only when the \
+note should stand alone in the repo. Use `expected_outcome=\"commit\"` for code changes/commits and \
+`expected_outcome=\"code_review\"` for an AI code review of the changes on a repo's branch; commit \
+sessions create signed-off conventional commits. Do not ask for multiple outcomes (e.g. a note and \
+a commit) in a single start_repo_session request — choose one outcome per call. All reasoning \
+specific to a repo must be done within a repo session rather than in this project-wide context. \
+You MUST NOT write files directly — all file writes MUST go through start_repo_session with \
+expected_outcome=\"commit\".\n\
 - wait_for_repo_session: Use this to wait on a previously started repo session by passing the \
 `repo_session_id`. It returns the queue state (`queued`, `running`, `completed`, `cancelled`, \
 or `failed`), any available artifacts, and activity details. Prefer another \
@@ -2239,6 +2246,10 @@ error and the next action needed.\
 To discover repositories that might be relevant, use `gh` to explore repos in the user's \
 GitHub organizations. Only add repos from organizations the user already belongs to.\n\n\
 {standalone_guidance}\n\n\
+When you delegate work via `start_repo_session`, organize the end of the note into sections \
+that group the delegated work — for example `## Research`, `## Plans`, or `## Collected logs` — \
+and reference each spawned child note using the hashtag form `#note:<id>`, where `<id>` is the \
+`artifact.id` returned by `start_repo_session`.\n\n\
 To return the note, include a horizontal rule (---) followed by the note content. \
 Begin the note with a markdown H1 heading as the title.\n\n"
     )
@@ -2334,6 +2345,9 @@ pub async fn start_project_session(
             project_id: Some(project_id),
             // Project sessions are always local and write project notes.
             expose_pikchr_tools: true,
+            // This project session's note is the parent for any `child_note`
+            // repo sessions it spawns.
+            parent_project_note_id: Some(note_id.clone()),
         },
         store,
         app_handle,
@@ -2728,6 +2742,7 @@ fn launch_running_branch_session(
             branch_id: Some(branch_id),
             project_id: Some(project_id),
             expose_pikchr_tools,
+            parent_project_note_id: None,
         },
         store,
         app_handle,
@@ -3270,6 +3285,7 @@ async fn start_queued_session_for_branch(
                 matches!(session_type, BranchSessionType::Note),
                 branch.workspace_name.as_deref(),
             ),
+            parent_project_note_id: None,
         },
         store,
         app_handle,
@@ -3669,6 +3685,7 @@ pub async fn trigger_auto_review(
             project_id: Some(branch.project_id.clone()),
             // Auto-review sessions don't write notes.
             expose_pikchr_tools: false,
+            parent_project_note_id: None,
         },
         store,
         app_handle,
@@ -4570,24 +4587,33 @@ fn write_image_to_temp_file(
 
 /// Format a single note's content for inclusion in an agent context string.
 ///
-/// Wrapper around `format_note_with_heading` that uses "Note" as the heading
-/// and returns `Option<String>` for backward compatibility with timeline filtering.
-pub(crate) fn format_note_for_context(
-    id: &str,
-    title: &str,
-    content: &str,
-    workspace_name: Option<&str>,
-) -> Option<String> {
-    Some(format_note_with_heading(
-        id,
-        title,
-        content,
+/// Like `format_note_with_heading` with a "Note" heading, but a child note also
+/// gets a reference line naming itself and its parent project note, so the agent
+/// can connect it to the `#note:<id>` citations in the parent note's body.
+pub(crate) fn format_note_for_context(note: &store::Note, workspace_name: Option<&str>) -> String {
+    let heading = format!("### Note: {}", note.title);
+    let reference = match &note.parent_project_note_id {
+        Some(parent_id) => format!(
+            "\n\nChild note #note:{} of project note #project-note:{parent_id}.",
+            note.id
+        ),
+        None => String::new(),
+    };
+
+    write_content_to_temp_file(
+        &note.id,
+        &note.content,
         workspace_name,
-        "Note",
-    ))
+        "staged-note",
+        |path| format!("{heading}{reference}\n\nSee: `{path}`"),
+    )
+    .unwrap_or_else(|| format!("{heading}{reference}\n\n{}", note.content))
 }
 
 /// Convert notes from the DB into timeline entries.
+///
+/// Child notes are included: they are hidden from the UI timeline, but agents
+/// need them in branch history to read the notes their parent project note cites.
 ///
 /// When `workspace_name` is `Some`, notes are written to temp files inside the
 /// remote workspace via `ws_exec`. When `None`, notes are written to local temp
@@ -4597,7 +4623,7 @@ fn note_timeline_entries(
     branch_id: &str,
     workspace_name: Option<&str>,
 ) -> Vec<TimelineEntry> {
-    let notes = match store.list_notes_for_branch(branch_id) {
+    let notes = match store.list_all_notes_for_branch(branch_id) {
         Ok(n) => n,
         Err(e) => {
             log::warn!("Failed to list notes for branch context: {e}");
@@ -4610,15 +4636,11 @@ fn note_timeline_entries(
         if note.content.is_empty() {
             continue; // skip notes still generating
         }
-        if let Some(content) =
-            format_note_for_context(&note.id, &note.title, &note.content, workspace_name)
-        {
-            entries.push(TimelineEntry {
-                timestamp: note.completed_at.unwrap_or(note.created_at) / 1000,
-                order: 0,
-                content,
-            });
-        }
+        entries.push(TimelineEntry {
+            timestamp: note.completed_at.unwrap_or(note.created_at) / 1000,
+            order: 0,
+            content: format_note_for_context(note, workspace_name),
+        });
     }
     entries
 }
@@ -7494,5 +7516,40 @@ mod tests {
                 review_id: None,
             })
         );
+    }
+
+    #[test]
+    fn note_timeline_entries_include_children_annotated_with_their_parent() {
+        let (store, branch) = setup_branch_store();
+
+        let parent = store::ProjectNote::new(&branch.project_id, "Parent", "aggregated");
+        store.create_project_note(&parent).unwrap();
+
+        let standalone = store::Note::new(&branch.id, "Standalone", "top-level body");
+        store.create_note(&standalone).unwrap();
+        let child = store::Note::new(&branch.id, "Child", "child body")
+            .with_parent_project_note(&parent.id);
+        store.create_note(&child).unwrap();
+
+        let entries = note_timeline_entries(&store, &branch.id, None);
+        assert_eq!(entries.len(), 2);
+
+        // The child is back in branch history, cross-referenced to its parent.
+        let child_entry = entries
+            .iter()
+            .find(|e| e.content.contains("### Note: Child"))
+            .expect("child note missing from branch history");
+        assert!(child_entry.content.contains(&format!("#note:{}", child.id)));
+        assert!(child_entry
+            .content
+            .contains(&format!("#project-note:{}", parent.id)));
+
+        // A parentless note is rendered exactly as before — no reference line.
+        let standalone_entry = entries
+            .iter()
+            .find(|e| e.content.contains("### Note: Standalone"))
+            .expect("standalone note missing from branch history");
+        assert!(!standalone_entry.content.contains("Child note"));
+        assert!(!standalone_entry.content.contains("#project-note:"));
     }
 }

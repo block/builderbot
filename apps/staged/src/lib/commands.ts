@@ -225,6 +225,17 @@ export function createProjectNote(
   return invokeCommand('create_project_note', { projectId, title, content });
 }
 
+/**
+ * Fetch a single project note by id (no project filter). The
+ * `#project-note:<id>` counterpart of {@link getNote}: used to open a reference
+ * that points outside the current project's note list.
+ */
+export function getProjectNote(
+  projectNoteId: string
+): Promise<import('./types').ProjectNote | null> {
+  return invokeCommand('get_project_note', { projectNoteId });
+}
+
 export function getProjectNoteBySession(
   sessionId: string
 ): Promise<import('./types').ProjectNote | null> {
@@ -233,6 +244,26 @@ export function getProjectNoteBySession(
 
 export function deleteProjectNote(noteId: string): Promise<void> {
   return invokeCommand('delete_project_note', { noteId });
+}
+
+/**
+ * Fetch a single note by id (no branch filter). Used to open a `#note:<id>`
+ * hashtag reference from a rendered note body, including child notes that live
+ * on other repo branches.
+ */
+export function getNote(noteId: string): Promise<import('./types').NoteTimelineItem | null> {
+  return invokeCommand('get_note', { noteId });
+}
+
+/**
+ * List the child notes aggregated under a given project note. Children are
+ * hidden from branch timelines, so this is the dedicated path the project-note
+ * view uses to resolve `#note:<id>` references to their titles.
+ */
+export function listChildNotes(
+  parentProjectNoteId: string
+): Promise<import('./types').NoteTimelineItem[]> {
+  return invokeCommand('list_child_notes', { parentProjectNoteId });
 }
 
 export function startProjectSession(

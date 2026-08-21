@@ -1,5 +1,47 @@
 import { describe, expect, it } from 'vitest';
-import { formatToolDisplay, makePathsRelative, sessionEndMessage } from './sessionModalHelpers';
+import {
+  foldSnippetsIntoPrompt,
+  formatToolDisplay,
+  makePathsRelative,
+  sessionEndMessage,
+  snippetLabel,
+} from './sessionModalHelpers';
+
+describe('foldSnippetsIntoPrompt', () => {
+  it('returns the prompt unchanged when there are no snippets', () => {
+    expect(foldSnippetsIntoPrompt('do the thing', [])).toBe('do the thing');
+  });
+
+  it('appends each snippet wrapped in <attached-snippet> delimiters', () => {
+    expect(
+      foldSnippetsIntoPrompt('do the thing', [{ text: 'context one' }, { text: 'context two' }])
+    ).toBe(
+      'do the thing' +
+        '\n\n<attached-snippet>\ncontext one\n</attached-snippet>' +
+        '\n\n<attached-snippet>\ncontext two\n</attached-snippet>'
+    );
+  });
+
+  it('folds snippets onto an empty prompt (snippet-only submit)', () => {
+    expect(foldSnippetsIntoPrompt('', [{ text: 'just context' }])).toBe(
+      '\n\n<attached-snippet>\njust context\n</attached-snippet>'
+    );
+  });
+});
+
+describe('snippetLabel', () => {
+  it('collapses whitespace to a single line', () => {
+    expect(snippetLabel('first line\n  second line')).toBe('first line second line');
+  });
+
+  it('truncates long previews with an ellipsis', () => {
+    expect(snippetLabel('x'.repeat(100), 10)).toBe('xxxxxxxxx…');
+  });
+
+  it('falls back to a generic label for whitespace-only text', () => {
+    expect(snippetLabel('   \n  ')).toBe('snippet');
+  });
+});
 
 describe('makePathsRelative', () => {
   it('matches symlink-style alias pairs', () => {

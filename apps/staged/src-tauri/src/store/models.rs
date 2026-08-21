@@ -887,6 +887,10 @@ pub struct Note {
     pub suggested_next_commit_step: Option<String>,
     /// AI-suggested prompt for a follow-up note session.
     pub suggested_next_note_step: Option<String>,
+    /// When set, this note is a child aggregated under the given project note
+    /// rather than a standalone branch note. Children are hidden from the
+    /// branch timeline and fetched via the parent project-note view.
+    pub parent_project_note_id: Option<String>,
 }
 
 impl Note {
@@ -904,11 +908,17 @@ impl Note {
             completed_at: if has_content { Some(now) } else { None },
             suggested_next_commit_step: None,
             suggested_next_note_step: None,
+            parent_project_note_id: None,
         }
     }
 
     pub fn with_session(mut self, session_id: &str) -> Self {
         self.session_id = Some(session_id.to_string());
+        self
+    }
+
+    pub fn with_parent_project_note(mut self, id: &str) -> Self {
+        self.parent_project_note_id = Some(id.to_string());
         self
     }
 }

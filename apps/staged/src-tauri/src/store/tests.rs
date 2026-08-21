@@ -182,6 +182,32 @@ fn test_list_project_notes_orders_by_completion_time() {
 }
 
 #[test]
+fn test_get_project_note_with_status_is_not_project_scoped() {
+    let store = Store::in_memory().unwrap();
+    let other_project = Project::new("test-owner/other-repo");
+    store.create_project(&other_project).unwrap();
+
+    let session = Session::new_running("write the project note", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    let note = ProjectNote::new(&other_project.id, "Foreign", "Body").with_session(&session.id);
+    store.create_project_note(&note).unwrap();
+
+    // A `#project-note:<id>` reference clicked from another project has no
+    // project scope to search, so the lookup is by id alone.
+    let fetched = store
+        .get_project_note_with_status(&note.id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(fetched.project_id, other_project.id);
+    assert_eq!(fetched.session_status.as_deref(), Some("running"));
+
+    assert!(store
+        .get_project_note_with_status("missing")
+        .unwrap()
+        .is_none());
+}
+
+#[test]
 fn test_delete_project_cascades() {
     let store = Store::in_memory().unwrap();
     let project = Project::new("test-owner/test-repo");
@@ -2309,6 +2335,165 @@ fn test_create_note_with_unique_title_skips_empty_titles() {
     store.create_note_with_unique_title(&mut second).unwrap();
     assert_eq!(first.title, "");
     assert_eq!(second.title, "");
+}
+
+#[test]
+fn test_list_child_notes_returns_children_and_excludes_them_from_branch_timeline() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let parent = ProjectNote::new(&project.id, "Parent", "aggregated");
+    store.create_project_note(&parent).unwrap();
+
+    // A standalone branch note plus two children aggregated under the parent.
+    let standalone = Note::new(&branch.id, "Standalone", "top-level");
+    store.create_note(&standalone).unwrap();
+    let child_a = Note::new(&branch.id, "Child A", "a").with_parent_project_note(&parent.id);
+    store.create_note(&child_a).unwrap();
+    let child_b = Note::new(&branch.id, "Child B", "b").with_parent_project_note(&parent.id);
+    store.create_note(&child_b).unwrap();
+
+    // Children are returned by the dedicated parent-note query.
+    let children = store.list_child_notes(&parent.id).unwrap();
+    let child_ids: Vec<_> = children.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(children.len(), 2);
+    assert!(child_ids.contains(&child_a.id.as_str()));
+    assert!(child_ids.contains(&child_b.id.as_str()));
+    assert_eq!(
+        children[0].parent_project_note_id.as_deref(),
+        Some(parent.id.as_str())
+    );
+
+    // ...but excluded from the branch timeline, which only shows the standalone note.
+    let timeline = store.list_notes_for_branch(&branch.id).unwrap();
+    let timeline_ids: Vec<_> = timeline.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(timeline_ids, vec![standalone.id.as_str()]);
+}
+
+#[test]
+fn test_list_all_notes_for_branch_includes_children_in_order() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let parent = ProjectNote::new(&project.id, "Parent", "aggregated");
+    store.create_project_note(&parent).unwrap();
+
+    let standalone = Note::new(&branch.id, "Standalone", "top-level");
+    store.create_note(&standalone).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let child = Note::new(&branch.id, "Child", "c").with_parent_project_note(&parent.id);
+    store.create_note(&child).unwrap();
+
+    // Branch history sees both, newest first — children interleave like any note.
+    let all = store.list_all_notes_for_branch(&branch.id).unwrap();
+    let all_ids: Vec<_> = all.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(all_ids, vec![child.id.as_str(), standalone.id.as_str()]);
+
+    // The UI timeline still hides the child.
+    let timeline = store.list_notes_for_branch(&branch.id).unwrap();
+    let timeline_ids: Vec<_> = timeline.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(timeline_ids, vec![standalone.id.as_str()]);
+}
+
+#[test]
+fn test_delete_project_note_cascades_to_child_notes() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let parent = ProjectNote::new(&project.id, "Parent", "aggregated");
+    store.create_project_note(&parent).unwrap();
+
+    let child = Note::new(&branch.id, "Child", "c").with_parent_project_note(&parent.id);
+    store.create_note(&child).unwrap();
+    let unrelated = Note::new(&branch.id, "Unrelated", "u");
+    store.create_note(&unrelated).unwrap();
+
+    store.delete_project_note(&parent.id).unwrap();
+
+    // The child note is gone, but the unrelated branch note survives.
+    assert!(store.get_note(&child.id).unwrap().is_none());
+    assert!(store.list_child_notes(&parent.id).unwrap().is_empty());
+    assert!(store.get_note(&unrelated.id).unwrap().is_some());
+}
+
+#[test]
+fn test_delete_project_note_cleans_up_child_note_sessions() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let parent = ProjectNote::new(&project.id, "Parent", "aggregated");
+    store.create_project_note(&parent).unwrap();
+
+    let session = Session::new_running("write child note", Path::new("/tmp"));
+    store.create_session(&session).unwrap();
+    store
+        .update_session_status(&session.id, SessionStatus::Completed, None, None)
+        .unwrap();
+
+    let child = Note::new(&branch.id, "Child", "c")
+        .with_session(&session.id)
+        .with_parent_project_note(&parent.id);
+    store.create_note(&child).unwrap();
+
+    let orphaned = store.delete_project_note(&parent.id).unwrap();
+
+    // Deleting the child fired the note-delete trigger, cleaning up its session.
+    assert!(store.get_note(&child.id).unwrap().is_none());
+    assert!(store.get_session(&session.id).unwrap().is_none());
+    // The child session is still reported so the command layer can cancel it.
+    assert_eq!(orphaned.child_session_ids, vec![session.id.clone()]);
+    assert_eq!(orphaned.project_note_session_id, None);
+}
+
+/// A child session that is still running survives the note-delete trigger (it
+/// skips `running` sessions), so `delete_project_note` must report it for the
+/// command layer to cancel and delete.
+#[test]
+fn test_delete_project_note_reports_running_child_sessions() {
+    let store = Store::in_memory().unwrap();
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+
+    let parent_session = Session::new_running("write project note", Path::new("/tmp"));
+    store.create_session(&parent_session).unwrap();
+    let parent =
+        ProjectNote::new(&project.id, "Parent", "aggregated").with_session(&parent_session.id);
+    store.create_project_note(&parent).unwrap();
+
+    let child_session = Session::new_running("write child note", Path::new("/tmp"));
+    store.create_session(&child_session).unwrap();
+    let child = Note::new(&branch.id, "Child", "c")
+        .with_session(&child_session.id)
+        .with_parent_project_note(&parent.id);
+    store.create_note(&child).unwrap();
+
+    let orphaned = store.delete_project_note(&parent.id).unwrap();
+
+    assert_eq!(orphaned.child_session_ids, vec![child_session.id.clone()]);
+    assert_eq!(
+        orphaned.project_note_session_id,
+        Some(parent_session.id.clone())
+    );
+    // The trigger left the running session behind; the caller cleans it up.
+    assert!(store.get_session(&child_session.id).unwrap().is_some());
+    assert_eq!(
+        orphaned.all_session_ids(),
+        vec![child_session.id, parent_session.id]
+    );
 }
 
 // =============================================================================

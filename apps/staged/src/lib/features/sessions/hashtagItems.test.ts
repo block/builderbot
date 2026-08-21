@@ -307,6 +307,62 @@ describe('renderHashtagTokens', () => {
     expect(projectNoteHtml).toContain('data-hashtag-type="project-note"');
   });
 
+  it('renders each hashtag kind with its own type class', () => {
+    const html = renderHashtagTokens('#note:n1 #commit:deadbeef #review:r1 #image:i1', []);
+
+    expect(html).toContain('hashtag-badge type-note');
+    expect(html).toContain('hashtag-badge type-commit');
+    expect(html).toContain('hashtag-badge type-review');
+    expect(html).toContain('hashtag-badge type-image');
+    // Colours come from those classes, never an inline style attribute.
+    expect(html).not.toContain('style=');
+  });
+
+  it('resolves references that sit next to sentence punctuation', () => {
+    const items: HashtagItem[] = [
+      {
+        type: 'note',
+        id: 'note-1',
+        title: 'Child note title',
+        color: '--note-color',
+        bgColor: '--note-bg',
+      },
+    ];
+
+    // Agents are prompted to cite children inline, so the id is routinely
+    // followed by prose punctuation — ASCII or Unicode, and (for em-dashes
+    // and ellipses) with no whitespace in between. It must stay out of the
+    // token: otherwise the badge shows a raw id and a click resolves nothing.
+    for (const text of [
+      'Collected in #note:note-1.',
+      'Collected in (#note:note-1),',
+      'Collected in #note:note-1—also prose',
+      'Collected in “#note:note-1”',
+      'Collected in #note:note-1…',
+    ]) {
+      const html = renderHashtagTokens(text, items);
+      expect(html).toContain('Child note title');
+      expect(html).toContain('data-hashtag-ref="#note:note-1"');
+      expect(html).toContain('data-hashtag-id="note-1"');
+    }
+
+    // The punctuation itself survives as text, outside the badge.
+    expect(renderHashtagTokens('See #note:note-1.', items)).toMatch(/<\/span>\.$/);
+    expect(renderHashtagTokens('See #note:note-1—also', items)).toMatch(/<\/span>—also$/);
+  });
+
+  it('stops the id at the first character outside the id shape', () => {
+    // Ids are uuids or hex shas: alphanumerics with interior hyphens. Anything
+    // else — at any position, not just token-final — is surrounding prose.
+    const html = renderHashtagTokens('#note:a1.b2).', []);
+    expect(html).toContain('data-hashtag-id="a1"');
+    expect(html).toMatch(/<\/span>\.b2\)\.$/);
+
+    // Interior hyphens stay in the id; a trailing hyphen is left as text.
+    expect(renderHashtagTokens('#note:note-1-x', [])).toContain('data-hashtag-id="note-1-x"');
+    expect(renderHashtagTokens('#note:note-1- next', [])).toContain('data-hashtag-id="note-1"');
+  });
+
   it('can render presentational badges without interaction attributes', () => {
     const html = renderHashtagTokens(
       'See #note:note-1',
@@ -322,10 +378,10 @@ describe('renderHashtagTokens', () => {
       { interactive: false }
     );
 
-    expect(html).toContain('class="hashtag-badge stable-raster stable-raster-glyphs"');
+    expect(html).toContain('class="hashtag-badge type-note stable-raster stable-raster-glyphs"');
     expect(html).toContain('Note title');
     expect(html).toContain('viewBox="0 0 24 24"');
-    expect(html).toContain('style="background: var(--note-bg); color: var(--note-color);"');
+    expect(html).not.toContain('style=');
     expect(html).toContain('data-hashtag-type="note"');
     expect(html).toContain('data-hashtag-id="note-1"');
     expect(html).not.toContain('role="button"');

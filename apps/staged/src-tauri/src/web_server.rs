@@ -2438,6 +2438,25 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             }
             Ok(Value::Null)
         }
+        "get_note" => {
+            let store = get_store(store_mutex)?;
+            let note_id: String = arg(&args, "noteId")?;
+            let note = store.get_note(&note_id).map_err(|e| e.to_string())?;
+            let item = note.map(|n| crate::note_commands::note_to_timeline_item(&store, n));
+            Ok(serde_json::to_value(item).unwrap())
+        }
+        "list_child_notes" => {
+            let store = get_store(store_mutex)?;
+            let parent_project_note_id: String = arg(&args, "parentProjectNoteId")?;
+            let notes = store
+                .list_child_notes(&parent_project_note_id)
+                .map_err(|e| e.to_string())?;
+            let items: Vec<crate::NoteTimelineItem> = notes
+                .into_iter()
+                .map(|n| crate::note_commands::note_to_timeline_item(&store, n))
+                .collect();
+            Ok(serde_json::to_value(items).unwrap())
+        }
         "create_project_note" => {
             let store = get_store(store_mutex)?;
             let project_id: String = arg(&args, "projectId")?;
@@ -2456,6 +2475,14 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .list_project_notes_with_status(&project_id)
                 .map_err(|e| e.to_string())?;
             Ok(serde_json::to_value(notes).unwrap())
+        }
+        "get_project_note" => {
+            let store = get_store(store_mutex)?;
+            let project_note_id: String = arg(&args, "projectNoteId")?;
+            let note = store
+                .get_project_note_with_status(&project_note_id)
+                .map_err(|e| e.to_string())?;
+            Ok(serde_json::to_value(note).unwrap())
         }
         "get_project_note_by_session" => {
             let store = get_store(store_mutex)?;
@@ -2476,10 +2503,13 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
         "delete_project_note" => {
             let store = get_store(store_mutex)?;
             let note_id: String = arg(&args, "noteId")?;
-            let session_id = store
+            let orphaned = store
                 .delete_project_note(&note_id)
                 .map_err(|e| e.to_string())?;
-            if let Some(sid) = session_id {
+            // Mirrors note_commands::delete_project_note: child sessions can
+            // still be running, so cancel before removing their rows.
+            for sid in orphaned.all_session_ids() {
+                session_registry.cancel(&sid);
                 let _ = store.delete_session(&sid);
             }
             Ok(Value::Null)
@@ -2920,6 +2950,7 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     branch_id: None,
                     project_id: None,
                     expose_pikchr_tools: false,
+                    parent_project_note_id: None,
                 },
                 store,
                 app_handle.clone(),
@@ -3116,6 +3147,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     branch_id: config_branch_id,
                     project_id: config_project_id,
                     expose_pikchr_tools,
+                    // When resuming a project session, keep its parent project note
+                    // in scope so `child_note` repo sessions still attach to it.
+                    parent_project_note_id: project_note.as_ref().map(|note| note.id.clone()),
                 },
                 Arc::clone(&store),
                 app_handle.clone(),
@@ -3287,6 +3321,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     project_id: Some(project_id),
                     // Project sessions are always local and write project notes.
                     expose_pikchr_tools: true,
+                    // This project session's note is the parent for any
+                    // `child_note` repo sessions it spawns.
+                    parent_project_note_id: Some(note_id.clone()),
                 },
                 store,
                 app_handle.clone(),

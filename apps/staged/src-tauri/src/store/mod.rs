@@ -40,6 +40,7 @@ mod tests;
 // Re-export all model types for backwards compatibility.
 pub use branch_move::{BranchMove, RepoPlacement, WorkdirMove};
 pub use models::*;
+pub use project_notes::DeletedProjectNoteSessions;
 pub use repo_badges::{fallback_short_name, next_hue};
 
 use rusqlite::{Connection, OptionalExtension};

@@ -326,6 +326,19 @@ export async function writeClipboardText(text: string): Promise<void> {
   await navigator.clipboard.writeText(text);
 }
 
+/**
+ * Read text from the clipboard. Uses Tauri's clipboard plugin in desktop mode
+ * (more reliable in the WebView than navigator.clipboard, fewer focus/permission
+ * constraints), falls back to the Web Clipboard API in browser mode.
+ */
+export async function readClipboardText(): Promise<string> {
+  if (isTauri) {
+    const { readText } = await import('@tauri-apps/plugin-clipboard-manager');
+    return readText();
+  }
+  return navigator.clipboard.readText();
+}
+
 // ---------------------------------------------------------------------------
 // Drag & Drop
 // ---------------------------------------------------------------------------

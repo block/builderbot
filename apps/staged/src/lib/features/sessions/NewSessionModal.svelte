@@ -38,6 +38,7 @@
   import ImageAttachment from './ImageAttachment.svelte';
   import HashtagInput from './HashtagInput.svelte';
   import { buildBranchHashtagItems } from './hashtagItems';
+  import { foldSnippetsIntoPrompt, snippetLabel, type TextSnippet } from './sessionModalHelpers';
   import * as Dialog from '$lib/components/ui/dialog';
   import { Button } from '$lib/components/ui/button';
   import { subscribeDragDrop } from '../branches/dragDrop';
@@ -47,6 +48,7 @@
     insertFilePathsAtCursor,
   } from '../branches/branchCardHelpers';
   import { createImage } from '../../commands';
+  import { readClipboardText } from '../../transport';
   import { viewport } from '../../shared/viewport.svelte';
   import { isMac } from '../keyboard/shortcuts';
 
@@ -114,6 +116,12 @@
     acpConfigSelection: null,
   });
 
+  // Text-snippet attachment state (modal-local — folded into the prompt on
+  // submit or on close, never persisted to the backend).
+  let textSnippets = $state<TextSnippet[]>([]);
+  // Monotonic id source for snippet chips (modal-local, no backend id).
+  let snippetCounter = 0;
+
   let isCommit = $derived(currentMode === 'commit');
   let isReview = $derived(currentMode === 'review');
   let isNote = $derived(!isCommit && !isReview);
@@ -123,7 +131,10 @@
   let activeWorkingDir = $derived(branch?.worktreePath ?? null);
   let currentWillQueue = $derived(willQueueForMode?.(currentMode) ?? willQueue);
   let canSubmit = $derived(
-    !!activeProjectId && !starting && !submitDisabledReason && (isReview || !!prompt.trim())
+    !!activeProjectId &&
+      !starting &&
+      !submitDisabledReason &&
+      (isReview || !!prompt.trim() || textSnippets.length > 0)
   );
   let submitLabel = $derived(currentWillQueue ? 'Queue' : isProjectNote ? 'New' : 'Start');
   const footerControlClass =
@@ -326,6 +337,36 @@
     }
   });
 
+  function addSnippet(text: string) {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    // Clicking attach twice on the same clipboard contents is a slip, not a
+    // request for two identical snippets.
+    if (textSnippets.some((s) => s.text === trimmed)) return;
+    textSnippets = [
+      ...textSnippets,
+      { id: `snippet-${snippetCounter++}`, label: snippetLabel(trimmed), text: trimmed },
+    ];
+  }
+
+  // Read the clipboard only when the user clicks "Attach clipboard". Polling it
+  // on open/focus would prompt for paste permission in web mode just for
+  // opening the dialog, and would attach whatever was cached at the last read
+  // rather than what's on the clipboard now. Reads via the Tauri plugin (more
+  // reliable in the WebView); failures are silent.
+  async function attachClipboardSnippet() {
+    try {
+      const text = await readClipboardText();
+      if (text) addSnippet(text);
+    } catch (e) {
+      console.error('[NewSessionModal] Failed to read clipboard:', e);
+    }
+  }
+
+  function removeSnippet(id: string) {
+    textSnippets = textSnippets.filter((s) => s.id !== id);
+  }
+
   // Focus textarea on mount (one-time).
   // We await tick() so the DOM reflects the prompt value set by the init effect above.
   $effect(() => {
@@ -360,12 +401,14 @@
 
   function handleSubmit(e?: Event) {
     e?.preventDefault();
-    // Review mode allows empty prompts; other modes require text
+    // Review mode allows empty prompts; other modes require text or a snippet.
     if (!canSubmit) return;
 
     starting = true;
+    // Fold attached snippets into the prompt; the onSubmit signature is unchanged.
+    const finalPrompt = foldSnippetsIntoPrompt(prompt.trim(), textSnippets);
     onSubmit({
-      prompt: prompt.trim(),
+      prompt: finalPrompt,
       mode: currentMode,
       imageIds,
       provider: acpPickerSelection.providerId ?? undefined,
@@ -376,7 +419,14 @@
   }
 
   function handleClose() {
-    onClose({ prompt, mode: currentMode, imageIds });
+    // Snippets are modal-local state, so they'd die with the component on an
+    // accidental dismiss. Fold them into the preserved draft prompt instead —
+    // reopening then shows the same text the submit would have sent.
+    onClose({
+      prompt: foldSnippetsIntoPrompt(prompt, textSnippets),
+      mode: currentMode,
+      imageIds,
+    });
   }
 
   function handleAcpSelectionChange(selection: AcpConfigPickerSelection) {
@@ -554,13 +604,16 @@
         />
       </div>
 
-      {#if imageIds.length > 0}
+      {#if imageIds.length > 0 || textSnippets.length > 0}
         <ImageAttachment
           branchId={activeBranchId}
           projectId={activeProjectId}
           disabled={starting}
           {imageIds}
           {onImageIdsChange}
+          {textSnippets}
+          onRemoveSnippet={removeSnippet}
+          onAttachClipboard={attachClipboardSnippet}
         />
       {/if}
 
@@ -574,13 +627,16 @@
             workingDir={activeWorkingDir}
             onSelectionChange={handleAcpSelectionChange}
           />
-          {#if imageIds.length === 0}
+          {#if imageIds.length === 0 && textSnippets.length === 0}
             <ImageAttachment
               branchId={activeBranchId}
               projectId={activeProjectId}
               disabled={starting}
               {imageIds}
               {onImageIdsChange}
+              {textSnippets}
+              onRemoveSnippet={removeSnippet}
+              onAttachClipboard={attachClipboardSnippet}
             />
           {/if}
         </div>

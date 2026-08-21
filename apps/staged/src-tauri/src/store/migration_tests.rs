@@ -145,7 +145,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
         )
         .unwrap();
 
-    assert_eq!(version, 24);
+    assert_eq!(version, 25);
     assert_eq!(app_version, super::APP_VERSION);
     assert!(table_exists(&conn, "projects"));
     assert!(table_exists(&conn, "project_notes"));
@@ -162,6 +162,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
     assert!(column_exists(&conn, "sessions", "acp_title"));
     assert!(column_exists(&conn, "sessions", "branch_id"));
     assert!(column_exists(&conn, "sessions", "completion_effects_at"));
+    assert!(column_exists(&conn, "notes", "parent_project_note_id"));
 
     let trigger_count: i64 = conn
         .query_row(
@@ -205,6 +206,7 @@ fn test_store_repairs_github_comment_tracking_user_version() {
             created_at  INTEGER NOT NULL,
             image_ids   TEXT DEFAULT NULL
         );
+        CREATE TABLE notes (id TEXT PRIMARY KEY);
         CREATE TABLE repo_badges (
             github_repo TEXT NOT NULL,
             subpath     TEXT NOT NULL DEFAULT '',
@@ -237,7 +239,7 @@ fn test_store_repairs_github_comment_tracking_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 24);
+    assert_eq!(version, 25);
     assert!(column_exists(&conn, "sessions", "pipeline"));
     assert!(column_exists(&conn, "sessions", "acp_config_selection"));
     assert!(column_exists(&conn, "sessions", "acp_title"));
@@ -279,6 +281,7 @@ fn test_store_repairs_pipeline_user_version() {
             created_at  INTEGER NOT NULL,
             image_ids   TEXT DEFAULT NULL
         );
+        CREATE TABLE notes (id TEXT PRIMARY KEY);
         CREATE TABLE repo_badges (
             github_repo TEXT NOT NULL,
             subpath     TEXT NOT NULL DEFAULT '',
@@ -306,7 +309,7 @@ fn test_store_repairs_pipeline_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 24);
+    assert_eq!(version, 25);
     assert!(column_exists(&conn, "comments", "github_comment_id"));
     assert!(column_exists(&conn, "comments", "github_comment_type"));
     assert!(column_exists(&conn, "comments", "github_comment_stale"));
@@ -352,6 +355,8 @@ fn test_completion_effects_migration_backfills_finished_pipeline_sessions() {
             id                 TEXT PRIMARY KEY,
             detecting_actions  INTEGER NOT NULL DEFAULT 0
         );
+        -- Only the table the 0025 column add targets.
+        CREATE TABLE notes (id TEXT PRIMARY KEY);
         ",
     )
     .unwrap();
@@ -364,7 +369,7 @@ fn test_completion_effects_migration_backfills_finished_pipeline_sessions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 24);
+    assert_eq!(version, 25);
     assert!(column_exists(&conn, "sessions", "completion_effects_at"));
 
     let marker = |id: &str| -> Option<i64> {
@@ -406,6 +411,8 @@ fn test_detecting_pid_migration_clears_orphaned_detection_flags() {
         INSERT INTO action_contexts (id, detecting_actions) VALUES
             ('wedged', 1),
             ('idle',   0);
+        -- Only the table the 0025 column add targets.
+        CREATE TABLE notes (id TEXT PRIMARY KEY);
         ",
     )
     .unwrap();
@@ -418,7 +425,7 @@ fn test_detecting_pid_migration_clears_orphaned_detection_flags() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 24);
+    assert_eq!(version, 25);
     assert!(column_exists(&conn, "action_contexts", "detecting_pid"));
 
     // No shipped build ever cleared the flag from outside the process that set

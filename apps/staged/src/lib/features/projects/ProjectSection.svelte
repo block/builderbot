@@ -15,9 +15,10 @@
     Branch,
     ProjectNote,
     HashtagItem,
+    NoteTimelineItem,
   } from '../../types';
   import * as commands from '../../api/commands';
-  import { buildProjectHashtagItems } from '../sessions/hashtagItems';
+  import { buildProjectHashtagItems, projectNotesToHashtagItems } from '../sessions/hashtagItems';
   import { branchTimelineReadyKey } from '../branches/branchTimelineReady';
   import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
   import { projectStateStore } from '../../stores/projectState.svelte';
@@ -306,12 +307,49 @@
   };
 
   let openNote = $state<OpenProjectNoteState | null>(null);
+  let childHashtagItems = $state<HashtagItem[]>([]);
+  let childHashtagLoadGeneration = 0;
+  let noteModalHashtagItems = $derived([...hashtagItems, ...childHashtagItems]);
 
   $effect(() => {
     const _signature = hashtagSignature;
     if (!openNote) return;
     void ensureHashtagItems();
   });
+
+  /**
+   * Adapt a fetched note into a hashtag item so `#note:<id>` references
+   * resolve. Used for a project note's children and for notes fetched on
+   * demand when a reference isn't in the merged item list.
+   */
+  function noteToHashtagItem(note: NoteTimelineItem): HashtagItem {
+    return {
+      type: 'note',
+      id: note.id,
+      title: note.title,
+      color: '--note-color',
+      bgColor: '--note-bg',
+      projectId: project.id,
+      noteContent: note.content,
+      noteSessionId: note.sessionId,
+      noteUpdatedAt: note.updatedAt,
+    };
+  }
+
+  async function loadChildHashtagItems(parentProjectNoteId: string) {
+    const generation = ++childHashtagLoadGeneration;
+    try {
+      const children = await commands.listChildNotes(parentProjectNoteId);
+      if (generation !== childHashtagLoadGeneration) return;
+      if (openNote?.noteId !== parentProjectNoteId) return;
+      childHashtagItems = children.filter((note) => note.title.trim()).map(noteToHashtagItem);
+    } catch (e) {
+      if (generation !== childHashtagLoadGeneration) return;
+      if (openNote?.noteId !== parentProjectNoteId) return;
+      console.error('[ProjectSection] Failed to load child notes:', e);
+      childHashtagItems = [];
+    }
+  }
 
   function isCompletedProjectNote(note: ProjectNote): boolean {
     const isRunning = isSessionActive(note.sessionStatus);
@@ -341,6 +379,15 @@
 
   function openProjectNote(note: ProjectNote, chatOpen = false) {
     openNote = projectNoteToOpenState(note, chatOpen);
+    childHashtagItems = [];
+    void ensureHashtagItems();
+    void loadChildHashtagItems(note.id);
+  }
+
+  function closeOpenNote() {
+    openNote = null;
+    childHashtagItems = [];
+    childHashtagLoadGeneration++;
   }
 
   function currentDialogReferenceEntry(): ReferenceHistoryEntry | null {
@@ -357,7 +404,7 @@
         noteUpdatedAt: openNote.noteUpdatedAt,
         projectId: project.id,
         repoDir: projectDisplayRootCandidates,
-        hashtagItems,
+        hashtagItems: noteModalHashtagItems,
         diffContext: referenceDiffContext,
       };
     }
@@ -366,16 +413,30 @@
   }
 
   function closeReferenceDialogs() {
-    openNote = null;
+    closeOpenNote();
   }
 
   function handleHashtagClick(click: HashtagClickInfo) {
     const target = resolveHashtagReference(click, {
-      hashtagItems,
+      hashtagItems: noteModalHashtagItems,
       diffContext: referenceDiffContext,
     });
-    if (!target) return;
+    if (target) {
+      openHashtagTarget(target);
+      return;
+    }
 
+    // A note reference can point outside the merged item list — e.g. a child of
+    // a different project note, or another project's project note (branch
+    // history renders a child as "of project note #project-note:<id>", which an
+    // agent may quote into a body read from here). Fetch it directly so the
+    // reference opens instead of silently no-opping.
+    if (click.type === 'note' || click.type === 'project-note') {
+      void openUnresolvedNoteReference(click);
+    }
+  }
+
+  function openHashtagTarget(target: ReferenceHistoryEntry) {
     const current = currentDialogReferenceEntry();
     if (current) pushReferenceEntry(current);
     pushReferenceEntry(target);
@@ -383,6 +444,39 @@
     if (target.kind === 'diff') {
       openDiffRoute(target.route);
     }
+  }
+
+  /** Fetch the note behind an unresolved reference as a hashtag item. */
+  async function fetchUnresolvedNoteItem(click: HashtagClickInfo): Promise<HashtagItem | null> {
+    if (click.type === 'note') {
+      const note = await commands.getNote(click.id);
+      if (note) return noteToHashtagItem(note);
+    }
+    // `#note:<id>` also accepts a project note (see the lookup aliases in
+    // hashtagItems), so both kinds fall through to the project-note lookup.
+    const projectNote = await commands.getProjectNote(click.id);
+    return projectNote ? (projectNotesToHashtagItems([projectNote]).at(0) ?? null) : null;
+  }
+
+  async function openUnresolvedNoteReference(click: HashtagClickInfo) {
+    const originNoteId = openNote?.noteId;
+    let item: HashtagItem | null;
+    try {
+      item = await fetchUnresolvedNoteItem(click);
+    } catch (e) {
+      console.error('[ProjectSection] Failed to load referenced note:', e);
+      return;
+    }
+    if (!item) return;
+    // The dialog the click came from may have closed or moved on while the
+    // fetch was in flight; opening now would push a stale back-stack entry.
+    if (openNote?.noteId !== originNoteId) return;
+
+    const target = resolveHashtagReference(
+      { ...click, item },
+      { hashtagItems: noteModalHashtagItems, diffContext: referenceDiffContext }
+    );
+    if (target) openHashtagTarget(target);
   }
 
   function handleOpenInnerSession(sessionId: string) {
@@ -585,10 +679,10 @@
     onChatOpenChange={(chatOpen) => {
       if (openNote) openNote = { ...openNote, chatOpen };
     }}
-    {hashtagItems}
+    hashtagItems={noteModalHashtagItems}
     referenceNav={disabledReferenceNav}
     onClose={() => {
-      openNote = null;
+      closeOpenNote();
       void loadProjectNotes();
     }}
     onOpenSession={handleOpenInnerSession}

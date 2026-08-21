@@ -27,8 +27,10 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum RepoSessionOutcome {
-    /// The session should produce a note in the repository. A note stub is created and
-    /// the agent is instructed to output note content after a horizontal rule (---).
+    /// The session should produce a "detached" note in the repository — a note that
+    /// stands alone in the repo's visible timeline, not aggregated under a project note.
+    /// A note stub is created and the agent is instructed to output note content after a
+    /// horizontal rule (---).
     NoteInRepo,
     /// The session should make code changes and create a commit. A pending commit record
     /// is created and the agent is instructed to commit with a signed-off conventional
@@ -38,6 +40,34 @@ enum RepoSessionOutcome {
     /// A review record is created and populated with a confidence title and inline
     /// comments when the session completes.
     CodeReview,
+    /// The session should produce a note attached to this project session's parent
+    /// project note. Behaves like `NoteInRepo` (a note stub bound to the spawned repo
+    /// session) but the note is additionally linked to the parent via
+    /// `parent_project_note_id`, so it is hidden from the repo's visible timeline and
+    /// aggregated under the parent (referenced as `#note:<id>`).
+    ChildNote,
+}
+
+/// Build the note stub for a `note_in_repo` / `child_note` repo-session outcome.
+///
+/// The note is bound to the spawned repo session. When `parent_project_note_id`
+/// is `Some` (a `child_note` outcome with a parent project note in scope), the
+/// note is additionally attached to that parent so it is aggregated under it and
+/// excluded from the repo's visible timeline. When `None`, the note falls back to
+/// a plain detached note — identical to a `note_in_repo` outcome — rather than
+/// erroring; this is the safe behavior when a `child_note` is requested without a
+/// parent in scope (e.g. a non-project session).
+fn build_repo_note_stub(
+    branch_id: &str,
+    instructions: &str,
+    session_id: &str,
+    parent_project_note_id: Option<&str>,
+) -> crate::store::Note {
+    let mut note = crate::store::Note::new(branch_id, instructions, "").with_session(session_id);
+    if let Some(parent_id) = parent_project_note_id {
+        note = note.with_parent_project_note(parent_id);
+    }
+    note
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -59,9 +89,14 @@ struct StartRepoSessionParams {
     /// What the session should produce. Controls the prompt given to the agent and what
     /// artifact (if any) is created in the database.
     ///
-    /// - `"note_in_repo"`: Use this for generating notes that can be referred to again
-    ///   later by other sessions or by the user. Useful for architecture overviews, plans,
-    ///   research.
+    /// - `"child_note"`: Prefer this for research/planning spawned by this project
+    ///   session, so the work attaches to this project note and stays out of the repo's
+    ///   visible timeline. The returned `artifact.id` is the child note's id; reference
+    ///   it from the project note as `#note:<id>`. Useful for architecture overviews,
+    ///   plans, research, and reviews delegated from a project session.
+    /// - `"note_in_repo"`: A "detached" note that stands alone in the repo's visible
+    ///   timeline. Use this only when the note should stand alone in the repo rather than
+    ///   be aggregated under this project note.
     /// - `"commit"`: Use this to request code changes. Agent makes code changes and
     ///   creates a signed-off commit with a conventional commit message.
     /// - `"code_review"`: Use this to request an AI code review of the changes on the
@@ -509,6 +544,11 @@ struct ProjectToolsHandler {
     /// Repo sessions persist it when queued so queue drain uses the selection
     /// active when the parent requested the work.
     acp_config_selection: Option<AcpConfigSelection>,
+    /// Project note id of the parent project session, when this handler serves a
+    /// project session. Repo sessions started with `expected_outcome="child_note"`
+    /// attach their note to this parent so it is aggregated under it and hidden from
+    /// the repo timeline. `None` for handlers without a parent project note in scope.
+    parent_project_note_id: Option<String>,
     /// Cancellation token for the parent project session.
     /// Signalled when the user cancels the project session.
     cancel_token: CancellationToken,
@@ -525,6 +565,7 @@ impl ProjectToolsHandler {
         action_registry: Option<Arc<ActionRegistry>>,
         provider: Option<String>,
         acp_config_selection: Option<AcpConfigSelection>,
+        parent_project_note_id: Option<String>,
         cancel_token: CancellationToken,
     ) -> Self {
         Self {
@@ -537,6 +578,7 @@ impl ProjectToolsHandler {
             action_registry,
             provider,
             acp_config_selection,
+            parent_project_note_id,
             cancel_token,
         }
     }
@@ -545,7 +587,7 @@ impl ProjectToolsHandler {
 #[tool_router]
 impl ProjectToolsHandler {
     #[tool(
-        description = "Enqueue an agent session in one of the project's repositories and return immediately with an opaque `repo_session_id`. Use `expected_outcome=\"note_in_repo\"` for repo notes, `expected_outcome=\"commit\"` for code changes and a signed-off conventional commit, or `expected_outcome=\"code_review\"` for an AI code review of the changes on the repo's branch. The `repo` + `subpath` combination must exactly match an entry already in the project."
+        description = "Enqueue an agent session in one of the project's repositories and return immediately with an opaque `repo_session_id`. Set `expected_outcome`: prefer `\"child_note\"` for research/planning spawned by this project session (the note attaches to this project note and stays out of the repo's visible timeline), use `\"note_in_repo\"` for a detached note that should stand alone in the repo, `\"commit\"` for code changes and a signed-off conventional commit, or `\"code_review\"` for an AI code review of the changes on the repo's branch. The `repo` + `subpath` combination must exactly match an entry already in the project."
     )]
     async fn start_repo_session(
         &self,
@@ -619,11 +661,28 @@ impl ProjectToolsHandler {
 
         let (artifact_id, artifact_kind) = match p.expected_outcome {
             RepoSessionOutcome::NoteInRepo => {
-                let note = crate::store::Note::new(&target.branch.id, &p.instructions, "")
-                    .with_session(&session.id);
+                let note =
+                    build_repo_note_stub(&target.branch.id, &p.instructions, &session.id, None);
                 let note_id = note.id.clone();
                 if let Err(e) = self.store.create_note(&note) {
                     return format!("Error creating note stub: {e}");
+                }
+                (note_id, RepoArtifactKind::Note)
+            }
+            RepoSessionOutcome::ChildNote => {
+                // Attach the note to the parent project note so it is aggregated
+                // under it and hidden from the repo timeline. With no parent in
+                // scope (e.g. a non-project session), fall back to a plain
+                // detached note rather than erroring.
+                let note = build_repo_note_stub(
+                    &target.branch.id,
+                    &p.instructions,
+                    &session.id,
+                    self.parent_project_note_id.as_deref(),
+                );
+                let note_id = note.id.clone();
+                if let Err(e) = self.store.create_note(&note) {
+                    return format!("Error creating child note stub: {e}");
                 }
                 (note_id, RepoArtifactKind::Note)
             }
@@ -1113,6 +1172,7 @@ pub async fn start_project_mcp_server(
     action_registry: Option<Arc<ActionRegistry>>,
     provider: Option<String>,
     acp_config_selection: Option<AcpConfigSelection>,
+    parent_project_note_id: Option<String>,
     cancel_token: CancellationToken,
 ) -> Result<(u16, JoinHandle<()>), String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1132,6 +1192,7 @@ pub async fn start_project_mcp_server(
         action_registry,
         provider,
         acp_config_selection,
+        parent_project_note_id,
         cancel_token,
     );
     log::debug!(
@@ -1159,12 +1220,14 @@ pub async fn start_project_mcp_server(
 #[cfg(test)]
 mod tests {
     use super::{
-        comment_line_range, inherited_acp_config_selection, worktree_ready_reply,
-        ProjectToolsHandler, RepoArtifactKind, REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS,
+        build_repo_note_stub, comment_line_range, inherited_acp_config_selection,
+        worktree_ready_reply, ProjectToolsHandler, RepoArtifactKind,
+        REPO_SESSION_ACTIVITY_PREVIEW_MAX_CHARS,
     };
     use crate::git::Span;
     use crate::store::{
-        AcpConfigSelection, AcpConfigValueSelection, MessageRole, Session, SessionMessage,
+        AcpConfigSelection, AcpConfigValueSelection, Branch, MessageRole, Project, ProjectNote,
+        Session, SessionMessage, Store,
     };
     use std::path::Path;
 
@@ -1243,6 +1306,61 @@ mod tests {
             without_executor.contains("block/staged") && without_executor.contains("worktree"),
             "unexpected reply: {without_executor}"
         );
+    }
+
+    #[test]
+    fn child_note_stub_attaches_to_parent_and_hides_from_timeline() {
+        let store = Store::in_memory().unwrap();
+        let project = Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+        let parent = ProjectNote::new(&project.id, "Parent", "aggregated");
+        store.create_project_note(&parent).unwrap();
+
+        // A `child_note` outcome with a parent in scope attaches to that parent.
+        let note = build_repo_note_stub(
+            &branch.id,
+            "investigate the auth module",
+            "session-child",
+            Some(&parent.id),
+        );
+        assert_eq!(
+            note.parent_project_note_id.as_deref(),
+            Some(parent.id.as_str())
+        );
+        store.create_note(&note).unwrap();
+
+        // Returned by the dedicated parent-note query...
+        let children = store.list_child_notes(&parent.id).unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].id, note.id);
+        // ...but excluded from the repo's visible timeline.
+        assert!(store.list_notes_for_branch(&branch.id).unwrap().is_empty());
+        // Agent branch history still sees it, so `#note:<id>` citations resolve.
+        let history = store.list_all_notes_for_branch(&branch.id).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, note.id);
+    }
+
+    #[test]
+    fn child_note_stub_without_parent_is_detached() {
+        let store = Store::in_memory().unwrap();
+        let project = Project::new("test-owner/test-repo");
+        store.create_project(&project).unwrap();
+        let branch = Branch::new(&project.id, "feature", "main");
+        store.create_branch(&branch).unwrap();
+
+        // No parent in scope (e.g. a non-project session): fall back to a plain
+        // detached note that is visible in the timeline.
+        let note = build_repo_note_stub(&branch.id, "write a note", "session-detached", None);
+        assert!(note.parent_project_note_id.is_none());
+        store.create_note(&note).unwrap();
+
+        let timeline = store.list_notes_for_branch(&branch.id).unwrap();
+        assert_eq!(timeline.len(), 1);
+        assert_eq!(timeline[0].id, note.id);
+        assert!(store.list_child_notes(&note.id).unwrap().is_empty());
     }
 
     #[test]

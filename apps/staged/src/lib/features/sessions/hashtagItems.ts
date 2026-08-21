@@ -2,13 +2,26 @@ import type { BranchTimeline, HashtagItem, ProjectNote, Branch, ProjectRepo } fr
 import { getBranchTimeline, listProjectNotes } from '../../commands';
 import { branchTimelineReadyKey } from '../branches/branchTimelineReady';
 
-/** Regex matching `#type:id` hashtag tokens in plain text. Use with `new RegExp(source, 'g')` for stateful iteration. */
-export const HASHTAG_TOKEN_RE = /#(note|commit|review|project-note|image):([^\s]+)/g;
+/**
+ * Regex matching `#type:id` hashtag tokens in plain text. Use with
+ * `new RegExp(source, 'g')` for stateful iteration.
+ *
+ * The id is an allowlist of id characters — alphanumerics and `_`, with
+ * interior (never leading/trailing) `-` runs — rather than "anything up to
+ * whitespace minus a punctuation denylist". Every real id is a uuid or a hex
+ * sha, and notes are cited inline in prose (`… collected in #note:<id>.`), so
+ * any character outside that shape is the surrounding sentence, not the id.
+ * Unlike a trailing-punctuation denylist, this also keeps out Unicode
+ * punctuation that binds with no whitespace (`#note:<id>—still prose`, curly
+ * quotes, ellipses) at any position, not just token-final.
+ */
+export const HASHTAG_TOKEN_RE =
+  /#(note|commit|review|project-note|image):([A-Za-z0-9_](?:[A-Za-z0-9_-]*[A-Za-z0-9_])?)/g;
 
 /**
  * Incrementally joins editor content chunks into the raw `value` string,
  * inserting a space between a `#type:id` badge token and immediately
- * following non-whitespace text. Token ids match greedily up to whitespace
+ * following non-whitespace text. Token ids match greedily over id characters
  * (HASHTAG_TOKEN_RE), so `#note:1hello` would swallow the text into the id.
  */
 export function createExtractedValueBuilder() {
@@ -54,15 +67,6 @@ export const hashtagTypeIconSvg: Record<string, string> = {
     '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 13H8"/><path d="M16 13h-2"/><path d="M10 17H8"/><path d="M16 17h-2"/></svg>',
   image:
     '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></svg>',
-};
-
-/** CSS custom-property names for each hashtag type's foreground and background colors. */
-export const hashtagTypeColors: Record<string, { color: string; bg: string }> = {
-  note: { color: '--note-color', bg: '--note-bg' },
-  commit: { color: '--commit-color', bg: '--commit-bg' },
-  review: { color: '--review-color', bg: '--review-bg' },
-  'project-note': { color: '--note-color', bg: '--note-bg' },
-  image: { color: '--image-color', bg: '--image-bg' },
 };
 
 type SortableHashtagItem = HashtagItem & {
@@ -373,10 +377,45 @@ type RenderHashtagTokenOptions = {
   interactive?: boolean;
 };
 
+/** Resolve the label for a `#type:id` badge: the item title, else a fallback. */
+function hashtagBadgeLabel(type: string, id: string, item: HashtagItem | undefined): string {
+  if (item) return item.title;
+  return type === 'commit' && id.length > 12 ? id.slice(0, 8) + '…' : id;
+}
+
+/**
+ * Build the HTML for a single hashtag badge.
+ *
+ * Colours come from CSS classes (`.hashtag-badge.type-<kind>`) rather than
+ * inline `style`, so a badge keeps them in any context that strips `style`.
+ * The `data-hashtag-*` attributes let a delegated click handler navigate to the
+ * referenced item.
+ */
+export function renderHashtagBadge(
+  type: string,
+  id: string,
+  item: HashtagItem | undefined,
+  options: RenderHashtagTokenOptions = {}
+): string {
+  const { interactive = true } = options;
+  const targetType = item?.type ?? type;
+  const iconSvg = hashtagTypeIconSvg[targetType] ?? '';
+  const label = hashtagBadgeLabel(type, id, item);
+  const ref = `#${type}:${id}`;
+  const interactionAttributes = interactive
+    ? ` role="button" tabindex="0" data-hashtag-ref="${escapeHtml(ref)}"`
+    : '';
+  return (
+    `<span class="hashtag-badge type-${targetType} stable-raster stable-raster-glyphs"` +
+    `${interactionAttributes} data-hashtag-type="${escapeHtml(targetType)}" ` +
+    `data-hashtag-id="${escapeHtml(item?.id ?? id)}">${iconSvg} ${escapeHtml(label)}</span>`
+  );
+}
+
 /**
  * Replace `#type:id` tokens in plain text with inline badge HTML.
- * Plain-text segments are HTML-escaped; badge spans use CSS custom-property
- * colours from `hashtagTypeColors`.
+ * Plain-text segments are HTML-escaped; badge spans use CSS classes for their
+ * colours (see {@link renderHashtagBadge}).
  */
 export function renderHashtagTokens(
   text: string,
@@ -401,21 +440,10 @@ export function renderHashtagTokens(
 
     const type = match[1];
     const id = match[2];
-    const item = findHashtagItemInMap(itemsByKey, type, id);
-    const targetType = item?.type ?? type;
-    const iconSvg = hashtagTypeIconSvg[targetType] ?? '';
-    const colors = hashtagTypeColors[targetType] ?? { color: '--text-muted', bg: '--bg-secondary' };
-    const title = item
-      ? item.title
-      : type === 'commit' && id.length > 12
-        ? id.slice(0, 8) + '…'
-        : id;
-    const ref = `#${type}:${id}`;
-    const interactionAttributes = interactive
-      ? ` role="button" tabindex="0" data-hashtag-ref="${escapeHtml(ref)}"`
-      : '';
     parts.push(
-      `<span class="hashtag-badge stable-raster stable-raster-glyphs"${interactionAttributes} data-hashtag-type="${escapeHtml(targetType)}" data-hashtag-id="${escapeHtml(item?.id ?? id)}" style="background: var(${colors.bg}); color: var(${colors.color});">${iconSvg} ${escapeHtml(title)}</span>`
+      renderHashtagBadge(type, id, findHashtagItemInMap(itemsByKey, type, id), {
+        interactive,
+      })
     );
 
     lastIndex = match.index + match[0].length;

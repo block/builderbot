@@ -328,6 +328,7 @@ async fn generate_pikchr_source_inner<D: AgentDriver + ?Sized>(
                 cancel_token,
                 agent_session_id.as_deref(),
                 config_options,
+                None,
             )
             .await;
         writer_dyn.finalize().await;
@@ -559,6 +560,7 @@ mod tests {
             _cancel_token: &CancellationToken,
             agent_session_id: Option<&str>,
             config_options: &[acp_client::AcpSessionConfigOptionSelection],
+            _auth_selection: Option<&acp_client::AcpAuthenticationSelection>,
         ) -> Result<acp_client::AgentRunOutcome, String> {
             *self.calls.lock().unwrap() += 1;
             self.seen_session_ids
@@ -1162,6 +1164,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
             cancel_token: &CancellationToken,
             agent_session_id: Option<&str>,
             config_options: &[acp_client::AcpSessionConfigOptionSelection],
+            _auth_selection: Option<&acp_client::AcpAuthenticationSelection>,
         ) -> Result<acp_client::AgentRunOutcome, String> {
             self.store
                 .update_session_status(
@@ -1182,6 +1185,7 @@ agent: http=false, sse=false). Select a provider that supports MCP over HTTP/SSE
                     cancel_token,
                     agent_session_id,
                     config_options,
+                    None,
                 )
                 .await
         }

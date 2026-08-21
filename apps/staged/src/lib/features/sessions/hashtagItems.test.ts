@@ -66,6 +66,7 @@ function projectNote(overrides: Partial<ProjectNote> = {}): ProjectNote {
     completedAt: 0,
     suggestedNextCommitStep: null,
     suggestedNextNoteStep: null,
+    suggestedNextSteps: [],
     sessionStatus: null,
     completionReason: null,
     ...overrides,
@@ -126,6 +127,7 @@ describe('timelineToHashtagItems', () => {
           completedAt: 1000,
           suggestedNextCommitStep: null,
           suggestedNextNoteStep: null,
+          suggestedNextSteps: [],
         },
         {
           id: 'new-note',
@@ -139,6 +141,7 @@ describe('timelineToHashtagItems', () => {
           completedAt: 5000,
           suggestedNextCommitStep: null,
           suggestedNextNoteStep: null,
+          suggestedNextSteps: [],
         },
       ],
       commits: [

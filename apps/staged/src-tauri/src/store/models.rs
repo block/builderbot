@@ -865,6 +865,128 @@ pub struct AcpMessageMetadata {
 // Notes
 // =============================================================================
 
+/// A suggested follow-up action extracted from an AI-generated note.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum SuggestedNextStep {
+    #[serde(rename_all = "camelCase")]
+    Implementation {
+        prompt: String,
+        expected_multiple_commits: bool,
+    },
+    Note {
+        prompt: String,
+    },
+}
+
+impl SuggestedNextStep {
+    pub fn prompt(&self) -> &str {
+        match self {
+            Self::Implementation { prompt, .. } | Self::Note { prompt } => prompt,
+        }
+    }
+}
+
+/// Stored note fields read back for change detection:
+/// `(title, content, suggested_next_commit_step, suggested_next_note_step, suggested_next_steps)`.
+pub type StoredNoteFields = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+pub fn suggested_next_steps_from_storage(
+    json: Option<String>,
+    legacy_commit_step: Option<String>,
+    legacy_note_step: Option<String>,
+) -> Vec<SuggestedNextStep> {
+    if let Some(json) = json.filter(|s| !s.trim().is_empty()) {
+        match serde_json::from_str::<Vec<SuggestedNextStep>>(&json) {
+            Ok(steps) => return sanitize_suggested_next_steps(steps),
+            Err(e) => {
+                log::warn!("Failed to parse stored suggested next steps JSON: {e}");
+            }
+        }
+    }
+
+    legacy_suggested_next_steps(legacy_commit_step, legacy_note_step)
+}
+
+pub fn suggested_next_steps_to_storage(
+    steps: &[SuggestedNextStep],
+) -> Result<Option<String>, serde_json::Error> {
+    let steps = sanitize_suggested_next_steps(steps.to_vec());
+    if steps.is_empty() {
+        Ok(None)
+    } else {
+        serde_json::to_string(&steps).map(Some)
+    }
+}
+
+pub fn suggested_next_steps_legacy_commit_step(steps: &[SuggestedNextStep]) -> Option<&str> {
+    steps.iter().find_map(|step| match step {
+        SuggestedNextStep::Implementation { prompt, .. } if !prompt.trim().is_empty() => {
+            Some(prompt.as_str())
+        }
+        _ => None,
+    })
+}
+
+pub fn suggested_next_steps_legacy_note_step(steps: &[SuggestedNextStep]) -> Option<&str> {
+    steps.iter().find_map(|step| match step {
+        SuggestedNextStep::Note { prompt } if !prompt.trim().is_empty() => Some(prompt.as_str()),
+        _ => None,
+    })
+}
+
+pub fn legacy_suggested_next_steps(
+    legacy_commit_step: Option<String>,
+    legacy_note_step: Option<String>,
+) -> Vec<SuggestedNextStep> {
+    let mut steps = Vec::new();
+    if let Some(prompt) = non_empty_prompt(legacy_commit_step) {
+        steps.push(SuggestedNextStep::Implementation {
+            prompt,
+            expected_multiple_commits: false,
+        });
+    }
+    if let Some(prompt) = non_empty_prompt(legacy_note_step) {
+        steps.push(SuggestedNextStep::Note { prompt });
+    }
+    steps
+}
+
+pub fn sanitize_suggested_next_steps(steps: Vec<SuggestedNextStep>) -> Vec<SuggestedNextStep> {
+    steps
+        .into_iter()
+        .filter_map(|step| match step {
+            SuggestedNextStep::Implementation {
+                prompt,
+                expected_multiple_commits,
+            } => non_empty_prompt(Some(prompt)).map(|prompt| SuggestedNextStep::Implementation {
+                prompt,
+                expected_multiple_commits,
+            }),
+            SuggestedNextStep::Note { prompt } => {
+                non_empty_prompt(Some(prompt)).map(|prompt| SuggestedNextStep::Note { prompt })
+            }
+        })
+        .take(4)
+        .collect()
+}
+
+fn non_empty_prompt(prompt: Option<String>) -> Option<String> {
+    let prompt = prompt?;
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
 /// An AI-generated markdown document tied to a branch.
 ///
 /// Notes may be created empty (with a `session_id`) while the AI is still
@@ -887,6 +1009,8 @@ pub struct Note {
     pub suggested_next_commit_step: Option<String>,
     /// AI-suggested prompt for a follow-up note session.
     pub suggested_next_note_step: Option<String>,
+    /// Ordered AI-suggested follow-up actions.
+    pub suggested_next_steps: Vec<SuggestedNextStep>,
 }
 
 impl Note {
@@ -904,6 +1028,7 @@ impl Note {
             completed_at: if has_content { Some(now) } else { None },
             suggested_next_commit_step: None,
             suggested_next_note_step: None,
+            suggested_next_steps: Vec::new(),
         }
     }
 
@@ -939,6 +1064,8 @@ pub struct ProjectNote {
     pub suggested_next_commit_step: Option<String>,
     /// AI-suggested prompt for a follow-up note session.
     pub suggested_next_note_step: Option<String>,
+    /// Ordered AI-suggested follow-up actions.
+    pub suggested_next_steps: Vec<SuggestedNextStep>,
     /// Resolved session status (e.g. "running", "completed", "cancelled").
     /// Populated at query time via `resolve_session_status()`.
     #[serde(skip_deserializing)]
@@ -963,6 +1090,7 @@ impl ProjectNote {
             completed_at: if has_content { Some(now) } else { None },
             suggested_next_commit_step: None,
             suggested_next_note_step: None,
+            suggested_next_steps: Vec::new(),
             session_status: None,
             completion_reason: None,
         }

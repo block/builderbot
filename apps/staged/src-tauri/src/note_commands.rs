@@ -29,6 +29,7 @@ pub fn create_note(
         completed_at: note.completed_at,
         suggested_next_commit_step: None,
         suggested_next_note_step: None,
+        suggested_next_steps: Vec::new(),
     })
 }
 

@@ -6,6 +6,19 @@ use std::path::Path;
 use super::models::*;
 use super::Store;
 
+fn implementation_step(prompt: &str, expected_multiple_commits: bool) -> SuggestedNextStep {
+    SuggestedNextStep::Implementation {
+        prompt: prompt.to_string(),
+        expected_multiple_commits,
+    }
+}
+
+fn note_step(prompt: &str) -> SuggestedNextStep {
+    SuggestedNextStep::Note {
+        prompt: prompt.to_string(),
+    }
+}
+
 #[test]
 fn test_create_and_get_project() {
     let store = Store::in_memory().unwrap();
@@ -89,14 +102,14 @@ fn test_project_note_completion_is_write_once() {
     assert!(before.completed_at.is_none());
 
     store
-        .update_project_note_title_and_content(&note.id, "First", "Initial content", None, None)
+        .update_project_note_title_and_content(&note.id, "First", "Initial content", &[])
         .unwrap();
     let completed = store.get_project_note(&note.id).unwrap().unwrap();
     let first_completed_at = completed.completed_at.unwrap();
 
     std::thread::sleep(std::time::Duration::from_millis(2));
     store
-        .update_project_note_title_and_content(&note.id, "Second", "Updated content", None, None)
+        .update_project_note_title_and_content(&note.id, "Second", "Updated content", &[])
         .unwrap();
     let updated = store.get_project_note(&note.id).unwrap().unwrap();
 
@@ -118,8 +131,10 @@ fn test_update_project_note_title_and_content_is_noop_when_unchanged() {
             &note.id,
             "Title",
             "Body",
-            Some("commit-step"),
-            Some("note-step"),
+            &[
+                implementation_step("commit-step", false),
+                note_step("note-step"),
+            ],
         )
         .unwrap();
     let after_first = store.get_project_note(&note.id).unwrap().unwrap();
@@ -132,8 +147,10 @@ fn test_update_project_note_title_and_content_is_noop_when_unchanged() {
             &note.id,
             "Title",
             "Body",
-            Some("commit-step"),
-            Some("note-step"),
+            &[
+                implementation_step("commit-step", false),
+                note_step("note-step"),
+            ],
         )
         .unwrap();
     let after_second = store.get_project_note(&note.id).unwrap().unwrap();
@@ -147,8 +164,10 @@ fn test_update_project_note_title_and_content_is_noop_when_unchanged() {
             &note.id,
             "Title",
             "New body",
-            Some("commit-step"),
-            Some("note-step"),
+            &[
+                implementation_step("commit-step", false),
+                note_step("note-step"),
+            ],
         )
         .unwrap();
     let after_third = store.get_project_note(&note.id).unwrap().unwrap();
@@ -169,11 +188,11 @@ fn test_list_project_notes_orders_by_completion_time() {
     store.create_project_note(&newer).unwrap();
 
     store
-        .update_project_note_title_and_content(&newer.id, "Newer", "Completed first", None, None)
+        .update_project_note_title_and_content(&newer.id, "Newer", "Completed first", &[])
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(2));
     store
-        .update_project_note_title_and_content(&older.id, "Older", "Completed second", None, None)
+        .update_project_note_title_and_content(&older.id, "Older", "Completed second", &[])
         .unwrap();
 
     let notes = store.list_project_notes(&project.id).unwrap();
@@ -2157,11 +2176,11 @@ fn test_list_notes_for_branch_orders_by_completion_time() {
     store.create_note(&newer).unwrap();
 
     store
-        .update_note_title_and_content(&newer.id, "Newer", "Completed first", None, None)
+        .update_note_title_and_content(&newer.id, "Newer", "Completed first", &[])
         .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(2));
     store
-        .update_note_title_and_content(&older.id, "Older", "Completed second", None, None)
+        .update_note_title_and_content(&older.id, "Older", "Completed second", &[])
         .unwrap();
 
     let notes = store.list_notes_for_branch(&branch.id).unwrap();
@@ -2185,8 +2204,10 @@ fn test_update_note_title_and_content_is_noop_when_unchanged() {
             &note.id,
             "Title",
             "Body",
-            Some("commit-step"),
-            Some("note-step"),
+            &[
+                implementation_step("commit-step", false),
+                note_step("note-step"),
+            ],
         )
         .unwrap();
     let after_first = store.get_note(&note.id).unwrap().unwrap();
@@ -2199,8 +2220,10 @@ fn test_update_note_title_and_content_is_noop_when_unchanged() {
             &note.id,
             "Title",
             "Body",
-            Some("commit-step"),
-            Some("note-step"),
+            &[
+                implementation_step("commit-step", false),
+                note_step("note-step"),
+            ],
         )
         .unwrap();
     let after_second = store.get_note(&note.id).unwrap().unwrap();
@@ -2214,8 +2237,10 @@ fn test_update_note_title_and_content_is_noop_when_unchanged() {
             &note.id,
             "Title",
             "New body",
-            Some("commit-step"),
-            Some("note-step"),
+            &[
+                implementation_step("commit-step", false),
+                note_step("note-step"),
+            ],
         )
         .unwrap();
     let after_third = store.get_note(&note.id).unwrap().unwrap();

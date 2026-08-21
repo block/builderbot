@@ -49,6 +49,7 @@
     HashtagItem,
     NoteTimelineItem,
     ProjectRepo,
+    SuggestedNextStep,
     WorkspaceStatus,
   } from '../../types';
   import * as commands from '../../api/commands';
@@ -58,6 +59,7 @@
   import SessionModal from '../sessions/SessionModal.svelte';
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
+  import { suggestedNextStepsForNote } from '../notes/suggestedNextSteps';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
   import {
@@ -84,6 +86,8 @@
   import RemoteWorkspaceStatusView from './RemoteWorkspaceStatusView.svelte';
   import { branchTimelineReadyKey } from './branchTimelineReady';
   import { toast } from 'svelte-sonner';
+  import { sessionRegistry } from '../../stores/sessionRegistry.svelte';
+  import { projectStateStore } from '../../stores/projectState.svelte';
   import { aggregateProjectPrStatus } from '../../shared/utils';
   import { timelineToHashtagItems, projectNotesToHashtagItems } from '../sessions/hashtagItems';
   import { getPreferredAgent } from '../settings/preferences.svelte';
@@ -191,7 +195,7 @@
     sessionId?: string;
     noteUpdatedAt?: number;
     chatOpen?: boolean;
-    nextSteps?: { commitStep: string | null; noteStep: string | null } | null;
+    nextSteps?: SuggestedNextStep[] | null;
   };
   let timelineReviewDetailsById = $state<Record<string, TimelineReviewDetails>>({});
 
@@ -423,8 +427,7 @@
           id: string;
           title: string;
           timestamp: number;
-          suggestedNextCommitStep: string | null;
-          suggestedNextNoteStep: string | null;
+          suggestedNextSteps: SuggestedNextStep[];
         };
 
     const candidates: Candidate[] = [];
@@ -447,8 +450,7 @@
         id: note.id,
         title: note.title,
         timestamp: ts,
-        suggestedNextCommitStep: note.suggestedNextCommitStep,
-        suggestedNextNoteStep: note.suggestedNextNoteStep,
+        suggestedNextSteps: suggestedNextStepsForNote(note),
       });
     }
 
@@ -466,17 +468,19 @@
     all.sort((a, b) => b.timestamp - a.timestamp);
     const latest = all[0];
 
-    // If latest item is a note with suggested next steps, use them
-    if (
-      latest.kind === 'note' &&
-      (latest.suggestedNextCommitStep || latest.suggestedNextNoteStep)
-    ) {
+    // If latest item is a note with suggested next steps, use the first
+    // branch-routable suggestion for each draft mode.
+    if (latest.kind === 'note' && latest.suggestedNextSteps.length > 0) {
+      const commitStep = latest.suggestedNextSteps.find(
+        (step) => step.type === 'implementation' && !step.expectedMultipleCommits
+      );
+      const noteStep = latest.suggestedNextSteps.find((step) => step.type === 'note');
       const ref = `Re: #note:${latest.id}`;
       return {
-        commit: latest.suggestedNextCommitStep ?? '',
-        note: latest.suggestedNextNoteStep ?? '',
-        commitRef: latest.suggestedNextCommitStep ? ref : '',
-        noteRef: latest.suggestedNextNoteStep ? ref : '',
+        commit: commitStep?.prompt ?? '',
+        note: noteStep?.prompt ?? '',
+        commitRef: commitStep ? ref : '',
+        noteRef: noteStep ? ref : '',
       };
     }
 
@@ -511,18 +515,12 @@
 
   // Compute next-step suggestions for a note. Called once when the note modal
   // is opened so the result is static and doesn't cause DOM churn from polling.
-  function computeNoteNextSteps(
-    noteId: string
-  ): { commitStep: string | null; noteStep: string | null } | null {
+  function computeNoteNextSteps(noteId: string): SuggestedNextStep[] | null {
     if (!timeline) return null;
     const note = timeline.notes.find((n) => n.id === noteId);
     if (!note) return null;
-    if (!note.suggestedNextCommitStep && !note.suggestedNextNoteStep) return null;
-
-    return {
-      commitStep: note.suggestedNextCommitStep,
-      noteStep: note.suggestedNextNoteStep,
-    };
+    const steps = suggestedNextStepsForNote(note);
+    return steps.length > 0 ? steps : null;
   }
 
   // Commit diff modal (opened by clicking a commit in the timeline)
@@ -1034,6 +1032,41 @@
       noteUpdatedAt: note.updatedAt,
       nextSteps: computeNoteNextSteps(note.noteId),
     };
+  }
+
+  function withNoteReference(noteId: string | undefined, prompt: string): string {
+    return noteId ? `Re: #note:${noteId}\n${prompt}` : prompt;
+  }
+
+  async function startProjectFollowupSession(prompt: string) {
+    const provider = getPreferredAgent(agentState.providers) ?? undefined;
+    if (!provider) {
+      notifyError('Unable to start project session', 'No AI agent available.');
+      return;
+    }
+
+    try {
+      const response = await commands.startProjectSession(branch.projectId, prompt, provider);
+      sessionRegistry.register(response.sessionId, branch.projectId, 'note');
+      projectStateStore.addRunningSession(branch.projectId, response.sessionId);
+      window.dispatchEvent(new CustomEvent('project-notes-invalidated'));
+    } catch (e) {
+      notifyError('Unable to start project session', e);
+    }
+  }
+
+  function handleNoteNextStep(step: SuggestedNextStep) {
+    const noteId = openNote?.noteId;
+    const prompt = withNoteReference(noteId, step.prompt);
+    openNote = null;
+
+    if (step.type === 'implementation' && step.expectedMultipleCommits) {
+      void startProjectFollowupSession(prompt);
+      return;
+    }
+
+    const mode = step.type === 'note' ? 'note' : 'commit';
+    void sessionMgr.startOrQueueSession(mode, prompt);
   }
 
   async function handleReviewClick(reviewId: string) {
@@ -2128,11 +2161,7 @@
     onOpenSession={handleOpenInnerSession}
     onClose={() => (openNote = null)}
     onHashtagClick={handleHashtagClick}
-    onStartSession={(mode, prefill) => {
-      const noteRef = openNote?.noteId ? `Re: #note:${openNote.noteId}` : '';
-      openNote = null;
-      void sessionMgr.startOrQueueSession(mode, noteRef ? `${noteRef}\n${prefill}` : prefill);
-    }}
+    onStartSession={handleNoteNextStep}
   />
 {/if}
 

@@ -142,6 +142,17 @@ export interface CommitTimelineItem {
   isOwnCommit: boolean;
 }
 
+export type SuggestedNextStep =
+  | {
+      type: 'implementation';
+      prompt: string;
+      expectedMultipleCommits: boolean;
+    }
+  | {
+      type: 'note';
+      prompt: string;
+    };
+
 export interface NoteTimelineItem {
   id: string;
   title: string;
@@ -154,6 +165,7 @@ export interface NoteTimelineItem {
   completedAt: number | null;
   suggestedNextCommitStep: string | null;
   suggestedNextNoteStep: string | null;
+  suggestedNextSteps: SuggestedNextStep[];
 }
 
 /** A full branch note record, as returned by `get_branch_note_by_session`. */
@@ -168,6 +180,7 @@ export interface BranchNote {
   completedAt: number | null;
   suggestedNextCommitStep: string | null;
   suggestedNextNoteStep: string | null;
+  suggestedNextSteps: SuggestedNextStep[];
 }
 
 export interface ReviewTimelineItem {
@@ -326,6 +339,7 @@ export interface ProjectNote {
   completedAt: number | null;
   suggestedNextCommitStep: string | null;
   suggestedNextNoteStep: string | null;
+  suggestedNextSteps: SuggestedNextStep[];
   sessionStatus: string | null;
   completionReason: string | null;
 }

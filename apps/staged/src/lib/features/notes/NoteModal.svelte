@@ -11,6 +11,7 @@
   import Check from '@lucide/svelte/icons/check';
   import MessageCircle from '@lucide/svelte/icons/message-circle';
   import FileText from '@lucide/svelte/icons/file-text';
+  import GitCommitVertical from '@lucide/svelte/icons/git-commit-vertical';
   import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
   import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
   import * as Dialog from '$lib/components/ui/dialog';
@@ -37,10 +38,11 @@
   } from '../../shared/markdown/diagramViewer';
   import { loadPikchrRenderer, type PikchrRenderer } from '../../shared/markdown/pikchrRendering';
   import { noteMarkdownWithTitle, renderNoteMarkdown } from './noteMarkdown';
-  import type { HashtagItem, ProjectRepo, Session } from '../../types';
+  import type { HashtagItem, ProjectRepo, Session, SuggestedNextStep } from '../../types';
   import { findHashtagItemForReference, renderHashtagTokens } from '../sessions/hashtagItems';
   import ReferenceNavControls from '../references/ReferenceNavControls.svelte';
   import type { HashtagClickInfo, ReferenceNavState } from '../references/referenceHistory.svelte';
+  import { suggestedNextStepButtonLabel } from './suggestedNextSteps';
 
   interface Props {
     open: boolean;
@@ -60,9 +62,9 @@
     chatOpen?: boolean;
     onChatOpenChange?: (open: boolean) => void;
     /** Suggested next steps to show as action buttons at the bottom. */
-    nextSteps?: { commitStep: string | null; noteStep: string | null } | null;
+    nextSteps?: SuggestedNextStep[] | null;
     /** Called when the user clicks a next-step button. */
-    onStartSession?: (mode: 'commit' | 'note', prefill: string) => void;
+    onStartSession?: (step: SuggestedNextStep) => void;
     hashtagItems?: HashtagItem[];
     referenceNav?: ReferenceNavState;
     onHashtagClick?: (click: HashtagClickInfo) => void;
@@ -151,6 +153,7 @@
   let noteHasPikchr = $derived(
     extractMarkdownDiagramFences(noteMarkdown).some((diagram) => diagram.language === 'pikchr')
   );
+  let visibleNextSteps = $derived((nextSteps ?? []).filter((step) => step.prompt.trim()));
   let pikchrRenderer = $state<PikchrRenderer | null>(null);
   let pikchrRendererLoadKey = $derived(noteMarkdown);
   let pikchrRendererLoadFailedKey = $state<string | null>(null);
@@ -585,7 +588,7 @@
           {/if}
         </div>
 
-        {#if showChatInfo || (nextSteps && onStartSession && (nextSteps.noteStep || nextSteps.commitStep))}
+        {#if showChatInfo || (onStartSession && visibleNextSteps.length > 0)}
           <div class="next-steps">
             {#if showChatInfo}
               <div class="chat-info-row">
@@ -599,32 +602,26 @@
                 </Button>
               </div>
             {/if}
-            {#if nextSteps && onStartSession && nextSteps.noteStep}
+            {#each visibleNextSteps as step}
               <div class="next-step-row">
-                <span class="next-step-prompt">{nextSteps.noteStep}</span>
+                <span class="next-step-prompt">{step.prompt}</span>
                 <Button
                   variant="outline"
                   size="sm"
-                  class="h-auto shrink-0 rounded-md border-transparent bg-[var(--note-bg)] px-3 py-1 text-xs font-medium text-[var(--note-color)] shadow-none hover:border-transparent hover:bg-[var(--note-bg-emphasis)] hover:text-[var(--note-color)]"
-                  onclick={() => onStartSession('note', nextSteps!.noteStep!)}
+                  class={step.type === 'note'
+                    ? 'h-auto shrink-0 gap-1.5 rounded-md border-transparent bg-[var(--note-bg)] px-3 py-1 text-xs font-medium text-[var(--note-color)] shadow-none hover:border-transparent hover:bg-[var(--note-bg-emphasis)] hover:text-[var(--note-color)]'
+                    : 'h-auto shrink-0 gap-1.5 rounded-md border-transparent bg-[var(--commit-bg)] px-3 py-1 text-xs font-medium text-[var(--commit-color)] shadow-none hover:border-transparent hover:bg-[var(--commit-bg-emphasis)] hover:text-[var(--commit-color)]'}
+                  onclick={() => onStartSession?.(step)}
                 >
-                  Start note
+                  {#if step.type === 'note'}
+                    <FileText size={13} aria-hidden="true" />
+                  {:else}
+                    <GitCommitVertical size={13} aria-hidden="true" />
+                  {/if}
+                  {suggestedNextStepButtonLabel(step)}
                 </Button>
               </div>
-            {/if}
-            {#if nextSteps && onStartSession && nextSteps.commitStep}
-              <div class="next-step-row">
-                <span class="next-step-prompt">{nextSteps.commitStep}</span>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  class="h-auto shrink-0 rounded-md border-transparent bg-[var(--commit-bg)] px-3 py-1 text-xs font-medium text-[var(--commit-color)] shadow-none hover:border-transparent hover:bg-[var(--commit-bg-emphasis)] hover:text-[var(--commit-color)]"
-                  onclick={() => onStartSession('commit', nextSteps!.commitStep!)}
-                >
-                  Start commit
-                </Button>
-              </div>
-            {/if}
+            {/each}
           </div>
         {/if}
       </section>

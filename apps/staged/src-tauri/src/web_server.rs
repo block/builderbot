@@ -3760,6 +3760,17 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let report = crate::doctor::run_doctor_freshness().await;
             Ok(serde_json::to_value(report).unwrap())
         }
+        "start_doctor_login" => {
+            let check_id: String = arg(&args, "checkId")?;
+            crate::doctor::start_doctor_login(app_handle.clone(), check_id).await?;
+            Ok(Value::Null)
+        }
+        "send_doctor_login_code" => {
+            let check_id: String = arg(&args, "checkId")?;
+            let code: String = arg(&args, "code")?;
+            crate::doctor::send_doctor_login_code(check_id, code)?;
+            Ok(Value::Null)
+        }
         "run_doctor_fix" => {
             let check_id: String = arg(&args, "checkId")?;
             let fix_type: doctor::FixType = arg(&args, "fixType")?;

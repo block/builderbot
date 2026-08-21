@@ -28,10 +28,11 @@ pub use agent_client_protocol::schema::v1::{
 };
 pub use driver::{
     autoapprove_permission_decision, is_config_selection_unavailable_error,
-    is_missing_mcp_transport_error, strip_code_fences, AcpDriver, AcpEventMetadata,
-    AcpInitializeMetadata, AcpPermissionDecision, AcpPermissionOption, AcpPermissionOptionKind,
-    AcpPermissionRequest, AcpSessionConfigOptionSelection, AcpToolCallMetadata, AgentDriver,
-    AgentRunOutcome, BasicMessageWriter, MessageWriter, ReplayBoundary, Store,
+    is_missing_mcp_transport_error, strip_code_fences, AcpAuthenticationSelection, AcpDriver,
+    AcpEventMetadata, AcpInitializeMetadata, AcpPermissionDecision, AcpPermissionOption,
+    AcpPermissionOptionKind, AcpPermissionRequest, AcpSessionConfigOptionSelection,
+    AcpToolCallMetadata, AgentDriver, AgentRunOutcome, BasicMessageWriter, MessageWriter,
+    ReplayBoundary, Store,
 };
 pub use simple::{run_acp_prompt, run_acp_prompt_with_interpreter_env_snapshot};
 pub use types::{

@@ -20,6 +20,7 @@ pub use types::{AgentVersionInfo, CheckStatus, DoctorCheck, DoctorReport, FixTyp
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use agents::{
     bundled_version_probe_args, check_single_ai_agent, derive_update_command, lookup_fix_command,
@@ -673,6 +674,253 @@ struct FreshnessTarget {
     version_args: Option<&'static [&'static str]>,
 }
 
+/// Opt-in piped stdin for a fix subprocess. Create with [`FixStdin::pipe`];
+/// keep the [`FixStdinWriter`], put the `FixStdin` in
+/// [`ExecuteFixOptions::stdin`].
+///
+/// Single-use: the first execution claims the pipe, and any later execution
+/// handed the same `FixStdin` — or a clone of it, including one carried along by
+/// a cloned [`ExecuteFixOptions`] — fails with an error instead of spawning.
+/// Retrying a fix needs a fresh pipe.
+#[derive(Debug, Clone)]
+pub struct FixStdin {
+    state: Arc<Mutex<FixStdinState>>,
+}
+
+/// The pipe's whole life cycle: `Buffered` until the fix spawns, `Live` while it
+/// runs, then `Closed` — terminal, and reached when the fix ends, when the last
+/// writer drops, or when a write finds the read end gone. Holding the child's
+/// stdin handle here rather than in a thread of its own is what lets
+/// [`FixStdinWriter::send_line`] write through and report the real outcome.
+#[derive(Debug)]
+enum FixStdinState {
+    /// Before the fix spawns: lines the host queued, replayed at spawn.
+    /// `claimed` marks the execution that reserved this pipe, so a second one
+    /// is rejected before it spawns. `eof` records that every writer dropped
+    /// pre-spawn, so the replay is followed immediately by closing the pipe.
+    Buffered {
+        lines: Vec<String>,
+        eof: bool,
+        claimed: bool,
+    },
+    /// Fix running: writes go straight into the child's stdin.
+    Live(std::process::ChildStdin),
+    /// Fix finished, every writer gone, or a write hit a dead pipe.
+    Closed,
+}
+
+/// Rejection for an execution handed a `FixStdin` another one already claimed.
+const FIX_STDIN_REUSED: &str = "FixStdin already consumed by a previous fix execution; \
+     create a fresh pipe with FixStdin::pipe() for each run";
+
+/// Rejection for a line the pipe cannot deliver because it is closed.
+const FIX_STDIN_CLOSED: &str = "Fix is no longer accepting input";
+
+/// Locking the pipe state recovers from poisoning instead of propagating it: no
+/// invariant spans the lock (the state is a plain enum, and the only work done
+/// under it is a `Vec` push or a pipe write), while treating a poisoned lock as
+/// a failure would cost `send_line` its delivery guarantee and leak the child's
+/// stdin handle for the lifetime of the writer.
+fn lock_fix_stdin_state(state: &Mutex<FixStdinState>) -> std::sync::MutexGuard<'_, FixStdinState> {
+    state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+impl FixStdinState {
+    /// Queue or write `line` — with the trailing newline the caller doesn't
+    /// supply — according to the current state. A failed write latches `Closed`
+    /// so later sends fail without re-discovering the dead pipe.
+    fn send_line(&mut self, line: String) -> Result<(), String> {
+        match self {
+            FixStdinState::Buffered { lines, .. } => {
+                lines.push(line);
+                Ok(())
+            }
+            FixStdinState::Live(pipe) => {
+                use std::io::Write;
+                match pipe
+                    .write_all(format!("{line}\n").as_bytes())
+                    .and_then(|()| pipe.flush())
+                {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        *self = FixStdinState::Closed;
+                        Err(format!("{FIX_STDIN_CLOSED}: {e}"))
+                    }
+                }
+            }
+            FixStdinState::Closed => Err(FIX_STDIN_CLOSED.to_string()),
+        }
+    }
+}
+
+impl FixStdin {
+    /// Create a connected pair: a cloneable writer for the caller to keep and
+    /// the `FixStdin` to place in [`ExecuteFixOptions::stdin`]. Lines sent
+    /// before the fix subprocess spawns are queued and replayed once it does;
+    /// dropping every writer clone closes the child's stdin (EOF).
+    ///
+    /// Dropping the writers is the only way to say "no more input", and a fix
+    /// that reads *to EOF* rather than a fixed number of lines will not exit
+    /// until that happens — a host that leaves its input UI open pins the fix
+    /// until [`ExecuteFixOptions::timeout`] fires. Nothing else is at stake in
+    /// dropping them: the child's stdin handle lives with the fix and is
+    /// reclaimed when it ends, held writer or not.
+    pub fn pipe() -> (FixStdinWriter, FixStdin) {
+        let state = Arc::new(Mutex::new(FixStdinState::Buffered {
+            lines: Vec::new(),
+            eof: false,
+            claimed: false,
+        }));
+        (
+            FixStdinWriter {
+                inner: Arc::new(FixStdinWriterInner {
+                    state: state.clone(),
+                }),
+            },
+            FixStdin { state },
+        )
+    }
+
+    /// Reserve this pipe for a child about to be spawned. First caller wins;
+    /// `Err` on every later call (a clone already fed an execution), which the
+    /// caller surfaces instead of spawning a fix whose stdin is already dead.
+    fn claim(&self) -> Result<(), String> {
+        match &mut *lock_fix_stdin_state(&self.state) {
+            FixStdinState::Buffered { claimed, .. } if !*claimed => {
+                *claimed = true;
+                Ok(())
+            }
+            _ => Err(FIX_STDIN_REUSED.to_string()),
+        }
+    }
+
+    /// Hand the spawned child's stdin to the pipe, replay whatever the host
+    /// queued before the spawn, and go live.
+    ///
+    /// Only ever reached after a successful [`FixStdin::claim`], which is what
+    /// guarantees the state is still `Buffered`; any other state means another
+    /// execution owns the pipe, and dropping the handle — an immediate EOF for
+    /// this child — is the only safe reading of that. A replay write that fails
+    /// is not the fix's failure (a command is free to exit successfully without
+    /// reading its stdin), so it only latches `Closed`; the host hears about it
+    /// from its next `send_line`.
+    fn attach(&self, child_stdin: std::process::ChildStdin) {
+        let mut state = lock_fix_stdin_state(&self.state);
+        let FixStdinState::Buffered { lines, eof, .. } = &mut *state else {
+            return;
+        };
+        let queued = std::mem::take(lines);
+        let eof = *eof;
+        *state = FixStdinState::Live(child_stdin);
+        for line in queued {
+            if state.send_line(line).is_err() {
+                break;
+            }
+        }
+        if eof {
+            // Every writer was dropped before the spawn, so the queued lines
+            // above are all the input there will ever be and closing now is the
+            // EOF the fix is waiting for.
+            *state = FixStdinState::Closed;
+        }
+    }
+
+    /// The fix is over: close the pipe so every later send fails immediately.
+    /// A write hitting `EPIPE` cannot be the signal on its own — a backgrounded
+    /// grandchild that inherited the child's stdin keeps the read end open, and
+    /// writes into it go on succeeding long after the fix is gone.
+    fn close(&self) {
+        *lock_fix_stdin_state(&self.state) = FixStdinState::Closed;
+    }
+}
+
+/// Cloneable handle for feeding lines to a fix subprocess's stdin. Dropping
+/// every clone closes the fix's stdin (EOF).
+#[derive(Debug, Clone)]
+pub struct FixStdinWriter {
+    inner: Arc<FixStdinWriterInner>,
+}
+
+/// Shared by every [`FixStdinWriter`] clone so EOF is delivered exactly when
+/// the last one drops, which is what keeps the writer `Clone`.
+#[derive(Debug)]
+struct FixStdinWriterInner {
+    state: Arc<Mutex<FixStdinState>>,
+}
+
+impl Drop for FixStdinWriterInner {
+    fn drop(&mut self) {
+        match &mut *lock_fix_stdin_state(&self.state) {
+            // Pre-spawn the queued lines still have to reach the child first, so
+            // record the EOF for `attach` to deliver after the replay.
+            FixStdinState::Buffered { eof, .. } => *eof = true,
+            // Otherwise dropping the state's `ChildStdin` *is* the EOF.
+            state => *state = FixStdinState::Closed,
+        }
+    }
+}
+
+impl FixStdinWriter {
+    /// Write one line to the fix's stdin; a trailing `\n` is appended and the
+    /// pipe is flushed.
+    ///
+    /// `Ok` means the bytes were handed to the child's stdin pipe — not that the
+    /// fix read them, since a fix can exit with bytes still buffered. `Err`
+    /// means the line was *not* delivered: the fix has finished, its stdin is
+    /// closed, or this pipe was never attached to a spawned fix.
+    ///
+    /// Lines sent before the fix spawns are queued and replayed at spawn, so
+    /// they return `Ok` before any pipe exists; if the fix never spawns they are
+    /// dropped.
+    ///
+    /// Completion is signalled by the fix's own `Result`, never by `send_line`.
+    /// May block if the fix isn't reading and the pipe buffer fills, so a host
+    /// sending anything bulkier than a pasted code should call this off its
+    /// async runtime.
+    pub fn send_line(&self, line: impl Into<String>) -> Result<(), String> {
+        lock_fix_stdin_state(&self.inner.state).send_line(line.into())
+    }
+}
+
+/// Wall-clock bound on a single fix execution.
+///
+/// Fixes are install/auth/update actions, so the bound has to clear a
+/// cold-cache `npm install -g` behind a corporate proxy and a human doing SSO
+/// in a browser — orders of magnitude above the probe timeouts in
+/// [`crate::command`]. This is an enum rather than `Option<Duration>` because
+/// `None` reads as both "use the default" and "no timeout"; here every literal
+/// has to say which it means, and `Unbounded` stays reachable for a caller
+/// that genuinely wants the old forever-wait.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FixTimeout {
+    /// [`DEFAULT_FIX_TIMEOUT`].
+    #[default]
+    Standard,
+    /// A caller-chosen bound.
+    After(Duration),
+    /// No bound at all: the fix runs until it exits on its own.
+    Unbounded,
+}
+
+impl FixTimeout {
+    /// The wall-clock bound, or `None` for [`FixTimeout::Unbounded`].
+    fn duration(self) -> Option<Duration> {
+        match self {
+            FixTimeout::Standard => Some(DEFAULT_FIX_TIMEOUT),
+            FixTimeout::After(duration) => Some(duration),
+            FixTimeout::Unbounded => None,
+        }
+    }
+}
+
+/// Deadline applied by [`FixTimeout::Standard`]. Deliberately generous: it
+/// exists to stop a wedged fix from pinning a blocking worker and a process
+/// tree for the lifetime of the host, not to police slow-but-honest installs
+/// or a leisurely browser login.
+pub const DEFAULT_FIX_TIMEOUT: Duration = Duration::from_secs(600);
+
 /// Options for executing a doctor fix command.
 #[derive(Debug, Clone, Default)]
 pub struct ExecuteFixOptions {
@@ -682,11 +930,35 @@ pub struct ExecuteFixOptions {
     pub npm_registry: Option<String>,
     /// Optional caller-provided environment snapshot for the fix subprocess.
     pub env: Option<DoctorEnv>,
+    /// Opt-in piped stdin for the fix subprocess (see [`FixStdin::pipe`]).
+    /// `None` keeps the child inheriting the host process's stdin, so
+    /// terminal hosts can still run interactive fixes directly.
+    ///
+    /// A `FixStdin` feeds exactly one execution, so a cached options struct
+    /// must have this field refreshed (or be rebuilt) before a fix is retried;
+    /// reusing it fails the run.
+    pub stdin: Option<FixStdin>,
+    /// Wall-clock bound on the fix. Defaults to [`FixTimeout::Standard`].
+    pub timeout: FixTimeout,
 }
 
 impl ExecuteFixOptions {
     pub fn with_env_snapshot(mut self, vars: Vec<(String, String)>) -> Self {
         self.env = Some(DoctorEnv::new(vars));
+        self
+    }
+
+    /// Attach an opt-in stdin pipe (see [`FixStdin::pipe`]). The `FixStdin`
+    /// feeds exactly one execution: call this again with a fresh pipe for
+    /// every retry rather than reusing a built options struct.
+    pub fn with_stdin(mut self, stdin: FixStdin) -> Self {
+        self.stdin = Some(stdin);
+        self
+    }
+
+    /// Override the wall-clock bound on the fix (see [`FixTimeout`]).
+    pub fn with_timeout(mut self, timeout: FixTimeout) -> Self {
+        self.timeout = timeout;
         self
     }
 }
@@ -722,7 +994,7 @@ pub async fn execute_fix_with_options(
         ExecuteFixOptions {
             command_override,
             npm_registry: npm_registry.map(str::to_string),
-            env: None,
+            ..Default::default()
         },
     )
     .await
@@ -779,7 +1051,7 @@ where
         ExecuteFixOptions {
             command_override,
             npm_registry: npm_registry.map(str::to_string),
-            env: None,
+            ..Default::default()
         },
         on_line,
     )
@@ -813,21 +1085,24 @@ where
 
     // Fixes are intentionally not routed through the bounded probe runner:
     // these are user-triggered install/auth/update actions and can reasonably
-    // be interactive or long-running.
-    run_command_streaming(command, opts.env, on_line).await
+    // be interactive or long-running, so they get the far more generous
+    // `FixTimeout` bound instead of a probe timeout.
+    run_command_streaming(command, opts.env, opts.stdin, opts.timeout, on_line).await
 }
 
 /// Async wrapper that runs `run_command_streaming_blocking` on the blocking pool.
 pub(crate) async fn run_command_streaming<F>(
     command: String,
     env: Option<DoctorEnv>,
+    stdin: Option<FixStdin>,
+    timeout: FixTimeout,
     on_line: F,
 ) -> Result<(), String>
 where
     F: FnMut(&str) + Send + 'static,
 {
     tokio::task::spawn_blocking(move || {
-        run_command_streaming_blocking(&command, env.as_ref(), on_line)
+        run_command_streaming_blocking(&command, env.as_ref(), stdin, timeout, on_line)
     })
     .await
     .unwrap_or_else(|e| Err(format!("Task failed: {e}")))
@@ -1011,31 +1286,98 @@ pub(crate) fn execute_command_with_path_prefix_with_env(
     }
 }
 
+/// Closes the fix's stdin pipe when `run_command_streaming_blocking` leaves its
+/// body — normal return, error return, timeout, spawn failure, or a panic in
+/// `on_line`. Every path has to close it: a host that still holds a
+/// [`FixStdinWriter`] would otherwise keep getting `Ok` from `send_line` for a
+/// fix that is already over, and the child's stdin handle would live as long as
+/// that writer.
+struct FixStdinCloser<'a>(&'a FixStdin);
+
+impl Drop for FixStdinCloser<'_> {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
 /// Spawn `command` through a login shell, stream stdout/stderr lines to
-/// `on_line`, and return based on the process exit status. This path is
-/// deliberately unbounded: fix commands are user-triggered install/auth/update
-/// actions and may prompt or run package managers. Stderr lines are also
-/// accumulated so a non-zero exit can surface a useful error message (matching
-/// the non-streaming behavior of the previous `execute_command`).
+/// `on_line`, and return based on the process exit status. Bounded by
+/// `timeout`, which is generous rather than tight: fix commands are
+/// user-triggered install/auth/update actions and may prompt or run package
+/// managers. Stderr lines are also accumulated so a non-zero exit can surface a
+/// useful error message (matching the non-streaming behavior of the previous
+/// `execute_command`).
 fn run_command_streaming_blocking<F>(
     command: &str,
     env: Option<&DoctorEnv>,
+    stdin: Option<FixStdin>,
+    timeout: FixTimeout,
     mut on_line: F,
 ) -> Result<(), String>
 where
     F: FnMut(&str),
 {
     use std::io::{BufRead, BufReader};
+    use std::sync::mpsc::RecvTimeoutError;
 
-    let mut command = build_shell_command(command, &[], env);
-    command
+    use wait_timeout::ChildExt;
+
+    fn consume<F: FnMut(&str)>(msg: StreamLine, on_line: &mut F, stderr_accum: &mut String) {
+        match msg {
+            StreamLine::Stdout(s) => {
+                on_line(&s);
+            }
+            StreamLine::Stderr(s) => {
+                on_line(&s);
+                if !stderr_accum.is_empty() {
+                    stderr_accum.push('\n');
+                }
+                stderr_accum.push_str(&s);
+            }
+        }
+    }
+
+    // Claim the pipe before anything is launched: a `FixStdin` another execution
+    // already consumed can never deliver a line, so the child would block
+    // forever on a pipe nobody writes — the exact hang this option exists to
+    // fix. Always a caller bug, so surface it at the call site rather than
+    // spawning a doomed subprocess.
+    if let Some(fix_stdin) = &stdin {
+        fix_stdin.claim()?;
+    }
+
+    let mut shell_command = build_shell_command(command, &[], env);
+    shell_command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    command::configure_command(&mut command);
-    let mut child = command
+    // Opt-in only: without a `FixStdin` the child keeps inheriting the host
+    // process's stdin, so interactive fixes in terminal hosts are untouched.
+    if stdin.is_some() {
+        shell_command.stdin(std::process::Stdio::piped());
+        // Own the whole tree so a timeout can kill more than the login shell:
+        // `kill(-pid)` only reaches an `npm install` under `zsh -lc` if the
+        // shell leads its own group. Gated on piped stdin because a child in
+        // its own group that reads the controlling terminal gets SIGTTIN and
+        // stops — impossible here precisely because doctor owns its stdin, but
+        // a real regression for a terminal host on the inherited-stdin path.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            shell_command.process_group(0);
+        }
+    }
+    command::configure_command(&mut shell_command);
+
+    // Declared ahead of the spawn so a spawn failure closes the pipe too: the
+    // claim above is already spent, so the host must not keep getting `Ok` for a
+    // fix that never started.
+    let _stdin_closer = stdin.as_ref().map(FixStdinCloser);
+
+    let mut child = shell_command
         .spawn()
         .map_err(|e| format!("Failed to run command: {e}"))?;
 
+    let child_stdin = child.stdin.take();
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
 
@@ -1059,28 +1401,82 @@ where
         }
     });
 
-    let mut stderr_accum = String::new();
-    for msg in rx.iter() {
-        match msg {
-            StreamLine::Stdout(s) => {
-                on_line(&s);
-            }
-            StreamLine::Stderr(s) => {
-                on_line(&s);
-                if !stderr_accum.is_empty() {
-                    stderr_accum.push('\n');
-                }
-                stderr_accum.push_str(&s);
-            }
-        }
+    // Deliberately after the readers are running: the replay of pre-spawn lines
+    // writes inline on this thread, so a queue larger than the pipe buffer would
+    // deadlock against a child whose output nobody is draining yet.
+    if let (Some(fix_stdin), Some(child_stdin)) = (&stdin, child_stdin) {
+        fix_stdin.attach(child_stdin);
     }
 
-    let _ = stdout_thread.join();
-    let _ = stderr_thread.join();
+    let limit = timeout.duration();
+    let deadline = limit.map(|limit| Instant::now() + limit);
+    let mut stderr_accum = String::new();
+    let mut expired = false;
 
-    let status = child
-        .wait()
-        .map_err(|e| format!("Failed to wait for command: {e}"))?;
+    loop {
+        let msg = match deadline {
+            Some(deadline) => {
+                match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                    Ok(msg) => msg,
+                    Err(RecvTimeoutError::Timeout) => {
+                        expired = true;
+                        break;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            // `recv_timeout(Duration::MAX)` overflows instantly, so the
+            // unbounded case keeps the plain blocking receive.
+            None => match rx.recv() {
+                Ok(msg) => msg,
+                Err(_) => break,
+            },
+        };
+        consume(msg, &mut on_line, &mut stderr_accum);
+    }
+
+    let status = if expired {
+        None
+    } else {
+        // Both pipes hit EOF, so the readers are already done and joining is
+        // immediate. The process can still outlive its pipes, though, so the
+        // reap is bounded by the same deadline.
+        let _ = stdout_thread.join();
+        let _ = stderr_thread.join();
+        match deadline {
+            Some(deadline) => child
+                .wait_timeout(deadline.saturating_duration_since(Instant::now()))
+                .map_err(|e| format!("Failed to wait for command: {e}"))?,
+            None => Some(
+                child
+                    .wait()
+                    .map_err(|e| format!("Failed to wait for command: {e}"))?,
+            ),
+        }
+    };
+
+    let Some(status) = status else {
+        let limit = limit.expect("a deadline only exists when the fix is bounded");
+        // Anything the readers already queued is real output the user should
+        // see before the notice explaining why it stopped.
+        while let Ok(msg) = rx.try_recv() {
+            consume(msg, &mut on_line, &mut stderr_accum);
+        }
+        on_line(&format!(
+            "doctor: fix timed out after {} — terminating",
+            format_duration(limit)
+        ));
+        command::kill_child_process_group_or_child(&mut child);
+        let _ = child.wait();
+        // The reader threads are deliberately not joined: a descendant that
+        // escaped the process group can hold the inherited stdout open long
+        // after the fix is dead, and waiting on that is the hang this timeout
+        // exists to end. Dropping `rx` retires them at their next send.
+        return Err(format!(
+            "Fix timed out after {} without finishing: {command}",
+            format_duration(limit)
+        ));
+    };
 
     if status.success() {
         Ok(())
@@ -1100,7 +1496,7 @@ mod tests {
 
     use std::path::Path;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn timeout(label: &str, command: &str) -> CommandTimeout {
         CommandTimeout::new(label, command, Duration::from_secs(15))
@@ -1198,6 +1594,8 @@ mod tests {
         let result = run_command_streaming(
             "echo doctor-streaming-marker-hello && echo doctor-streaming-marker-world".to_string(),
             None,
+            None,
+            FixTimeout::Standard,
             move |line| {
                 lines_clone.lock().unwrap().push(line.to_string());
             },
@@ -1217,6 +1615,295 @@ mod tests {
                 .iter()
                 .any(|l| l == "doctor-streaming-marker-world"),
             "did not see 'world' marker; captured: {captured:?}",
+        );
+    }
+
+    /// A line sent through the `FixStdin` pipe must reach the child's stdin
+    /// and dropping the last writer must deliver EOF: `cat` echoes the line
+    /// and exits 0 only when its stdin closes. Sending before the child
+    /// spawns also exercises the pre-spawn buffering guarantee.
+    #[tokio::test]
+    async fn run_command_streaming_piped_stdin_round_trips_through_cat() {
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let (writer, stdin) = FixStdin::pipe();
+
+        writer.send_line("doctor-stdin-marker-echo").unwrap();
+        drop(writer);
+
+        let result = run_command_streaming(
+            "cat".to_string(),
+            None,
+            Some(stdin),
+            FixTimeout::Standard,
+            move |line| {
+                lines_clone.lock().unwrap().push(line.to_string());
+            },
+        )
+        .await;
+
+        assert!(result.is_ok(), "cat should exit 0 on EOF; got {result:?}");
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured.iter().any(|l| l == "doctor-stdin-marker-echo"),
+            "cat should echo the line written to its piped stdin; captured: {captured:?}",
+        );
+    }
+
+    /// The paste-an-auth-code shape: the command prompts by blocking on a line
+    /// read, and the caller feeds the answer through the writer while the fix is
+    /// running. Sending from inside `on_line` — on the fix's own thread, in
+    /// response to the prompt the fix printed — pins the send to a moment when
+    /// the pipe is provably live, so the `Ok` asserted here is the delivery
+    /// guarantee and not the pre-spawn queueing one.
+    #[tokio::test]
+    async fn run_command_streaming_piped_stdin_feeds_prompt_style_read() {
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let live_send: Arc<Mutex<Option<Result<(), String>>>> = Arc::new(Mutex::new(None));
+        let live_send_clone = live_send.clone();
+        let (writer, stdin) = FixStdin::pipe();
+
+        let result = run_command_streaming(
+            "echo doctor-stdin-prompt; read -r line && echo \"got-$line\"".to_string(),
+            None,
+            Some(stdin),
+            FixTimeout::Standard,
+            move |line| {
+                lines_clone.lock().unwrap().push(line.to_string());
+                if line == "doctor-stdin-prompt" {
+                    *live_send_clone.lock().unwrap() =
+                        Some(writer.send_line("doctor-stdin-auth-code"));
+                }
+            },
+        )
+        .await;
+
+        assert!(result.is_ok(), "read/echo should exit 0; got {result:?}");
+        let captured = lines.lock().unwrap().clone();
+        let sent = live_send
+            .lock()
+            .unwrap()
+            .take()
+            .expect("the fix's prompt line should have reached on_line");
+        assert!(
+            sent.is_ok(),
+            "a send while the fix is live should report delivery; got {sent:?}",
+        );
+        assert!(
+            captured.iter().any(|l| l == "got-doctor-stdin-auth-code"),
+            "prompt-style read should see the sent line; captured: {captured:?}",
+        );
+    }
+
+    /// A writer held across the fix's completion must not hang the run, and the
+    /// *first* send after it must fail: the runner closes the pipe as it returns,
+    /// so `Ok` never means "queued for a fix that is already over". That is the
+    /// berd#99 shape — the login subprocess dies, the user pastes the auth code
+    /// a beat later — and a host keying off `Ok` would otherwise wait forever
+    /// with nothing in the log to explain it.
+    #[tokio::test]
+    async fn run_command_streaming_piped_stdin_rejects_sends_once_the_fix_finishes() {
+        let (writer, stdin) = FixStdin::pipe();
+
+        let result = run_command_streaming(
+            "echo doctor-stdin-done".to_string(),
+            None,
+            Some(stdin),
+            FixTimeout::Standard,
+            |_| {},
+        )
+        .await;
+
+        assert!(result.is_ok(), "echo fix should complete; got {result:?}");
+        let err = writer
+            .send_line("late-line")
+            .expect_err("the first send after the fix finished should fail");
+        assert!(
+            err.contains("no longer accepting input"),
+            "error should say the input is closed; got {err:?}",
+        );
+    }
+
+    /// `EPIPE` alone can't carry "the fix is over": a backgrounded grandchild
+    /// inherits the child's stdin and keeps the read end open, so a write into a
+    /// finished fix's pipe still succeeds. Only the runner's explicit close on
+    /// the way out makes this send fail. The grandchild's stdout is redirected so
+    /// it doesn't also hold the reader threads open — this test is about stdin.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_streaming_piped_stdin_rejects_sends_when_a_grandchild_holds_the_pipe() {
+        let (writer, stdin) = FixStdin::pipe();
+
+        let result = run_command_streaming(
+            "sleep 2 >/dev/null 2>&1 & echo doctor-stdin-done".to_string(),
+            None,
+            Some(stdin),
+            FixTimeout::Standard,
+            |_| {},
+        )
+        .await;
+
+        assert!(result.is_ok(), "echo fix should complete; got {result:?}");
+        assert!(
+            writer.send_line("late-line").is_err(),
+            "a grandchild holding the read end must not make a dead fix look writable",
+        );
+    }
+
+    /// Reusing a `FixStdin` (or a clone) for a second execution must fail
+    /// loudly rather than hand the child an immediately-EOF'd stdin — the
+    /// receiver lives with the first run, so a second could only hang. The
+    /// second run must also never spawn: nothing reaches `on_line`.
+    #[tokio::test]
+    async fn run_command_streaming_piped_stdin_errors_when_reused() {
+        let (writer, stdin) = FixStdin::pipe();
+        let reused = stdin.clone();
+        writer.send_line("doctor-stdin-reuse-first").unwrap();
+        drop(writer);
+
+        let first = run_command_streaming(
+            "cat".to_string(),
+            None,
+            Some(stdin),
+            FixTimeout::Standard,
+            |_| {},
+        )
+        .await;
+        assert!(first.is_ok(), "first run should succeed; got {first:?}");
+
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let second = run_command_streaming(
+            "echo doctor-stdin-reuse-second".to_string(),
+            None,
+            Some(reused),
+            FixTimeout::Standard,
+            move |line| lines_clone.lock().unwrap().push(line.to_string()),
+        )
+        .await;
+
+        let err = second.expect_err("reusing a consumed FixStdin should fail");
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            err.contains("already consumed"),
+            "error should name the reuse; got {err:?}",
+        );
+        assert!(
+            captured.is_empty(),
+            "second run must not spawn; captured: {captured:?}",
+        );
+    }
+
+    /// The default bound must stay at fix scale, not probe scale. A fix is an
+    /// `npm install -g` behind a corporate proxy or a human doing SSO in a
+    /// browser; retuning this toward `DEFAULT_PROBE_TIMEOUT` would kill honest
+    /// work mid-flight.
+    #[test]
+    fn default_fix_timeout_stays_at_fix_scale() {
+        assert_eq!(DEFAULT_FIX_TIMEOUT, Duration::from_secs(600));
+        assert_eq!(ExecuteFixOptions::default().timeout, FixTimeout::Standard);
+        assert_eq!(FixTimeout::Standard.duration(), Some(DEFAULT_FIX_TIMEOUT));
+        assert_eq!(FixTimeout::Unbounded.duration(), None);
+        assert!(
+            DEFAULT_FIX_TIMEOUT >= DEFAULT_PROBE_TIMEOUT * 30,
+            "fix timeout must stay far above probe scale",
+        );
+    }
+
+    /// A fix that never finishes must return on its deadline instead of
+    /// pinning the blocking worker forever — the whole point of the bound.
+    #[tokio::test]
+    async fn run_command_streaming_returns_when_the_fix_outlives_its_timeout() {
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let lines_clone = lines.clone();
+        let started = Instant::now();
+
+        let result = run_command_streaming(
+            "sleep 60".to_string(),
+            None,
+            None,
+            FixTimeout::After(Duration::from_millis(100)),
+            move |line| lines_clone.lock().unwrap().push(line.to_string()),
+        )
+        .await;
+
+        let err = result.expect_err("a fix past its deadline should fail");
+        assert!(
+            err.contains("timed out") && err.contains("sleep 60"),
+            "error should name the timeout and the command; got {err:?}",
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout path waited for the fix instead of its deadline",
+        );
+        let captured = lines.lock().unwrap().clone();
+        assert!(
+            captured
+                .iter()
+                .any(|l| l.starts_with("doctor: fix timed out")),
+            "callers should see a notice line explaining the stop; captured: {captured:?}",
+        );
+    }
+
+    /// With piped stdin the shell leads its own process group, so the timeout
+    /// kill must take the whole tree — not just the login shell, leaving a
+    /// backgrounded installer running.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_streaming_timeout_kills_the_whole_process_tree() {
+        let tmp = unique_tmp_dir("fix-timeout-tree");
+        let marker = tmp.join("grandchild-ran");
+        let (_writer, stdin) = FixStdin::pipe();
+
+        let result = run_command_streaming(
+            format!("(sleep 2; touch {}) & sleep 60", marker.display()),
+            None,
+            Some(stdin),
+            FixTimeout::After(Duration::from_millis(300)),
+            |_| {},
+        )
+        .await;
+
+        assert!(result.is_err(), "timed-out fix should fail; got {result:?}");
+        // Past when the backgrounded grandchild would have written its marker
+        // had it survived the group kill.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let survived = marker.exists();
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(
+            !survived,
+            "backgrounded grandchild outlived the timeout kill",
+        );
+    }
+
+    /// A descendant that escaped the process group keeps the inherited
+    /// stdout/stderr open, so the reader threads never see EOF. The timeout
+    /// path must not join them — it must return on the deadline regardless
+    /// (the streaming twin of `command_runner_returns_when_escaped_descendant_
+    /// keeps_pipes_open`).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_command_streaming_timeout_returns_when_escaped_descendant_keeps_pipes_open() {
+        let started = Instant::now();
+
+        let result = run_command_streaming(
+            "perl -MPOSIX=setsid -e 'setsid(); sleep 5' & wait".to_string(),
+            None,
+            None,
+            FixTimeout::After(Duration::from_millis(250)),
+            |_| {},
+        )
+        .await;
+
+        let err = result.expect_err("a fix past its deadline should fail");
+        assert!(
+            err.contains("timed out"),
+            "error should name the timeout; got {err:?}",
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout path waited for the escaped descendant to close the pipes",
         );
     }
 
@@ -1620,8 +2307,8 @@ mod tests {
             FixType::UpdateMain,
             ExecuteFixOptions {
                 command_override: Some(script_name.to_string()),
-                npm_registry: None,
                 env: Some(env),
+                ..Default::default()
             },
             move |line| {
                 lines_clone.lock().unwrap().push(line.to_string());
@@ -1674,8 +2361,8 @@ mod tests {
             FixType::UpdateMain,
             ExecuteFixOptions {
                 command_override: Some(command.to_string()),
-                npm_registry: None,
                 env: Some(env),
+                ..Default::default()
             },
             move |line| {
                 lines_clone.lock().unwrap().push(line.to_string());

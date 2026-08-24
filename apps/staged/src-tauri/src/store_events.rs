@@ -258,6 +258,58 @@ mod tests {
         );
     }
 
+    /// One instance of every [`StoreChange`] variant.
+    ///
+    /// The `match` below is the point: it has no wildcard arm, so adding a
+    /// variant to `StoreChange` fails compilation here until the new variant
+    /// is added to this list — which forces
+    /// [`the_lag_flush_covers_every_change_variants_event`] to be reconciled
+    /// with [`lag_flush_events`] at the same time.
+    fn one_of_each_change() -> [StoreChange; 5] {
+        let all = [
+            StoreChange::Project { project_id: None },
+            StoreChange::Branch {
+                branch_id: "b".to_string(),
+                project_id: None,
+            },
+            StoreChange::Notes {
+                branch_id: None,
+                project_id: None,
+            },
+            StoreChange::Review {
+                review_id: "r".to_string(),
+                branch_id: None,
+            },
+            StoreChange::Repos { github_repo: None },
+        ];
+        for change in &all {
+            match change {
+                // New variant? Add it to `all` above and to `lag_flush_events`.
+                StoreChange::Project { .. }
+                | StoreChange::Branch { .. }
+                | StoreChange::Notes { .. }
+                | StoreChange::Review { .. }
+                | StoreChange::Repos { .. } => {}
+            }
+        }
+        all
+    }
+
+    /// Pins `lag_flush_events` to `event_for`: the recovery flush must emit
+    /// exactly the event names a real mutation can emit, or the surface behind
+    /// the missing one silently loses lag recovery — the staleness the flush
+    /// exists to prevent.
+    #[test]
+    fn the_lag_flush_covers_every_change_variants_event() {
+        let flushed: std::collections::BTreeSet<&str> =
+            lag_flush_events().iter().map(|(event, _)| *event).collect();
+        let emittable: std::collections::BTreeSet<&str> = one_of_each_change()
+            .iter()
+            .map(|change| event_for(change).0)
+            .collect();
+        assert_eq!(flushed, emittable);
+    }
+
     #[tokio::test(start_paused = true)]
     async fn lag_inside_the_window_discards_the_batch_accumulated_before_it() {
         let (tx, rx) = broadcast::channel(4);

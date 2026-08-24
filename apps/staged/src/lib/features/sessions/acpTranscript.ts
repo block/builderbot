@@ -278,7 +278,6 @@ export type PlanEntryStatus = 'pending' | 'in_progress' | 'completed' | 'failed'
 export interface PlanEntry {
   content: string;
   status: PlanEntryStatus;
-  priority: string | null;
 }
 
 /**
@@ -293,7 +292,7 @@ export function latestPlan(metadataMessages: SessionMessage[]): PlanEntry[] | nu
     .find((message) => message.acpEventKind === 'plan_update');
   if (!latest) return null;
   const rawEntries = arrayProp(latest.acpContent, 'entries');
-  if (!Array.isArray(rawEntries)) return null;
+  if (!rawEntries) return null;
 
   const entries = rawEntries
     .map((entry) => {
@@ -302,7 +301,6 @@ export function latestPlan(metadataMessages: SessionMessage[]): PlanEntry[] | nu
       return {
         content,
         status: normalizePlanEntryStatus(stringProp(entry, 'status')),
-        priority: stringProp(entry, 'priority'),
       };
     })
     .filter((entry): entry is PlanEntry => entry !== null);

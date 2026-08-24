@@ -718,8 +718,8 @@ describe('latestPlan', () => {
     ]);
 
     expect(plan).toEqual([
-      { content: 'Check UI', status: 'completed', priority: 'high' },
-      { content: 'Fix bug', status: 'in_progress', priority: null },
+      { content: 'Check UI', status: 'completed' },
+      { content: 'Fix bug', status: 'in_progress' },
     ]);
   });
 
@@ -766,9 +766,9 @@ describe('latestPlan', () => {
     ]);
 
     expect(plan).toEqual([
-      { content: 'Mystery step', status: 'pending', priority: null },
-      { content: 'Statusless step', status: 'pending', priority: null },
-      { content: 'Failed step', status: 'failed', priority: null },
+      { content: 'Mystery step', status: 'pending' },
+      { content: 'Statusless step', status: 'pending' },
+      { content: 'Failed step', status: 'failed' },
     ]);
   });
 });

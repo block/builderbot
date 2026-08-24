@@ -1737,9 +1737,13 @@
   bind:this={modalElement}
   class={`session-chat-pane ${compact ? 'compact' : ''} ${dragOver ? 'drag-over' : ''}`}
 >
-  <!-- Latest plan, pinned above the scrollable transcript -->
+  <!-- Latest plan, pinned above the scrollable transcript. Keyed on the
+       session so the expanded/collapsed toggle resets when this pane is
+       reused for a different session. -->
   {#if plan}
-    <PlanCard entries={plan} defaultExpanded={!viewport.isMobile && !compact} />
+    {#key session?.id}
+      <PlanCard entries={plan} defaultExpanded={!viewport.isMobile && !compact} />
+    {/key}
   {/if}
 
   <!-- Messages area -->

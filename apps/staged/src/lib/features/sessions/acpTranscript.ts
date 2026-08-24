@@ -87,7 +87,7 @@ interface TimelineEntry {
 const TOOL_EVENT_KINDS = new Set(['tool_call', 'tool_call_update']);
 /** Hidden metadata row announcing a `generate_pikchr` child session at start. */
 const PIKCHR_SESSION_STARTED_EVENT = 'pikchr_session_started';
-const VISIBLE_STANDALONE_EVENT_KINDS = new Set<AcpTranscriptEventKind>(['session_info_update']);
+const VISIBLE_STANDALONE_EVENT_KINDS = new Set<AcpTranscriptEventKind>();
 
 export function buildAcpTranscriptGroups(
   visibleMessages: SessionMessage[],

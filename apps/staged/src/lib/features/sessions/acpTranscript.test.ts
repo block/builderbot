@@ -111,6 +111,34 @@ describe('buildAcpTranscriptGroups', () => {
     expect(groups).toEqual([]);
   });
 
+  it('hides session-info updates from the transcript', () => {
+    const metadata = [
+      message({
+        id: 1,
+        role: 'assistant',
+        acpEventKind: 'session_info_update',
+        acpSessionInfo: {
+          title: 'Fix login flow',
+          updatedAt: '2026-08-24T09:30:00Z',
+          _meta: { provider: 'goose' },
+        },
+      }),
+      message({
+        id: 2,
+        role: 'assistant',
+        acpEventKind: 'session_info_update',
+        acpContent: {
+          title: 'Fix checkout flow',
+          updatedAt: '2026-08-24T09:31:00Z',
+          _meta: { provider: 'goose', revision: 2 },
+        },
+      }),
+    ];
+
+    const groups = buildAcpTranscriptGroups([], metadata);
+    expect(groups).toEqual([]);
+  });
+
   it('hides operational ACP metadata rows from the transcript', () => {
     const metadata = [
       message({

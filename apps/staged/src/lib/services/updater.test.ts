@@ -159,6 +159,80 @@ describe('deduplication', () => {
     expect(harness.adapters.checkForUpdate).toHaveBeenCalledTimes(2);
   });
 
+  it('resolves a coalesced checkNow() only after the queued run settles', async () => {
+    const harness = makeHarness();
+    let resolveCheck!: (u: UpdateHandle | null) => void;
+    harness.adapters.checkForUpdate.mockImplementation(
+      () => new Promise<UpdateHandle | null>((resolve) => (resolveCheck = resolve))
+    );
+    const service = makeService(harness);
+    service.start();
+    await flush();
+
+    let settled = false;
+    const manualCheck = service.checkNow().then(() => (settled = true));
+    await flush();
+    // Coalesced behind the in-flight startup check: not settled yet.
+    expect(settled).toBe(false);
+
+    // Startup check settles → queued run starts; still not settled.
+    resolveCheck(null);
+    await flush();
+    expect(settled).toBe(false);
+    expect(harness.adapters.checkForUpdate).toHaveBeenCalledTimes(2);
+
+    // Queued run settles → the manual promise resolves.
+    resolveCheck(null);
+    await manualCheck;
+    expect(settled).toBe(true);
+  });
+
+  it('a coalesced manual check bypasses prompt suppression in the queued run', async () => {
+    const harness = makeHarness();
+    const update = makeUpdate();
+    let resolveCheck!: (u: UpdateHandle | null) => void;
+    harness.adapters.checkForUpdate.mockImplementation(
+      () => new Promise<UpdateHandle | null>((resolve) => (resolveCheck = resolve))
+    );
+    harness.adapters.confirmInstall.mockResolvedValue(false);
+    const service = makeService(harness);
+    service.start();
+    await flush();
+
+    // Queue a manual check behind the in-flight startup check.
+    const manualCheck = service.checkNow();
+    await flush();
+
+    // Startup check finds the update and prompts (declined).
+    resolveCheck(update);
+    await flush();
+    expect(harness.adapters.confirmInstall).toHaveBeenCalledTimes(1);
+
+    // The queued run inherited the manual trigger, so it re-prompts.
+    resolveCheck(update);
+    await manualCheck;
+    expect(harness.adapters.confirmInstall).toHaveBeenCalledTimes(2);
+  });
+
+  it('settles a queued checkNow() promise when the service is disposed', async () => {
+    const harness = makeHarness();
+    let resolveCheck!: (u: UpdateHandle | null) => void;
+    harness.adapters.checkForUpdate.mockImplementation(
+      () => new Promise<UpdateHandle | null>((resolve) => (resolveCheck = resolve))
+    );
+    const service = makeService(harness);
+    service.start();
+    await flush();
+
+    const manualCheck = service.checkNow();
+    await flush();
+    service.dispose();
+    resolveCheck(null);
+    await expect(manualCheck).resolves.toBeUndefined();
+    // The queued run never executes after dispose.
+    expect(harness.adapters.checkForUpdate).toHaveBeenCalledTimes(1);
+  });
+
   it('does not start a new native check while a timed-out check is still settling', async () => {
     const harness = makeHarness();
     let resolveStale!: (u: UpdateHandle | null) => void;
@@ -250,7 +324,7 @@ describe('check outcomes', () => {
 // ── Prompt and install flow ────────────────────────────────────────────────
 
 describe('prompt and install flow', () => {
-  it('does not prompt twice for the same version in one session', async () => {
+  it('does not prompt twice for the same version across background checks', async () => {
     const harness = makeHarness();
     harness.adapters.checkForUpdate.mockResolvedValue(makeUpdate());
     const service = makeService(harness);
@@ -261,6 +335,41 @@ describe('prompt and install flow', () => {
     vi.advanceTimersByTime(UPDATER_CHECK_INTERVAL_MS);
     await flush();
     expect(harness.adapters.confirmInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-prompts a declined version on an explicit manual check', async () => {
+    const update = makeUpdate();
+    const harness = makeHarness();
+    harness.adapters.checkForUpdate.mockResolvedValue(update);
+    harness.adapters.confirmInstall.mockResolvedValueOnce(false).mockResolvedValue(true);
+    const service = makeService(harness);
+    service.start();
+    await flush();
+    // Declined at startup; a later background check stays suppressed.
+    expect(harness.adapters.confirmInstall).toHaveBeenCalledTimes(1);
+    expect(update.downloadAndInstall).not.toHaveBeenCalled();
+
+    // A manual check from Settings bypasses suppression and can install.
+    await service.checkNow();
+    expect(harness.adapters.confirmInstall).toHaveBeenCalledTimes(2);
+    expect(update.downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(harness.adapters.relaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps background checks suppressed after a declined manual re-prompt', async () => {
+    const harness = makeHarness();
+    harness.adapters.checkForUpdate.mockResolvedValue(makeUpdate());
+    harness.adapters.confirmInstall.mockResolvedValue(false);
+    const service = makeService(harness);
+    service.start();
+    await flush();
+    await service.checkNow();
+    expect(harness.adapters.confirmInstall).toHaveBeenCalledTimes(2);
+
+    // Background checks after the manual decline still do not re-prompt.
+    vi.advanceTimersByTime(UPDATER_CHECK_INTERVAL_MS);
+    await flush();
+    expect(harness.adapters.confirmInstall).toHaveBeenCalledTimes(2);
   });
 
   it('prompts again when a newer version appears', async () => {

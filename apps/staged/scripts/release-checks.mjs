@@ -143,7 +143,8 @@ export async function assertUrlReachable(
         redirect: 'follow',
         headers: { Range: 'bytes=0-0' },
       });
-      if (get.ok || get.status === 206) return;
+      // Response.ok covers 200–299, including 206 Partial Content.
+      if (get.ok) return;
       lastFailure = `HTTP ${head.status} (HEAD) / HTTP ${get.status} (GET)`;
     } catch (error) {
       lastFailure = error instanceof Error ? error.message : String(error);

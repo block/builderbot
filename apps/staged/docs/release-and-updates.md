@@ -76,8 +76,9 @@ Tauri's version comparison only offers versions newer than the running app; ther
 no downgrade or rollback path (recover a bad release by publishing a forward fix, or
 manually reinstalling an immutable versioned DMG). An update is downloaded and
 installed only after the user explicitly accepts the native confirmation dialog.
-Declining leaves the app fully usable, and the same version is not re-prompted
-within an app session.
+Declining leaves the app fully usable, and background checks do not re-prompt the
+same version within an app session. An explicit manual check from Settings always
+re-prompts, so a declined update can still be installed without restarting.
 
 ### 5. Failed checks never block the app
 

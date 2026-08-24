@@ -10,7 +10,9 @@
  *   - explicit manual checks (for a future Settings entry point);
  *   - in-flight run deduplication and timed-out/stale-result handling — a
  *     timed-out native check can never overlap a second native check;
- *   - per-session prompt suppression (the same version is prompted once);
+ *   - per-session prompt suppression for background checks (the same version
+ *     is prompted once); explicit manual checks always re-prompt so a user
+ *     who declined earlier can still install from Settings;
  *   - consent → download → install → relaunch orchestration;
  *   - structured `[updater]` logging;
  *   - cleanup on app teardown.
@@ -126,7 +128,13 @@ export interface UpdaterService {
   readonly available: boolean;
   /** Apply gating, run the startup check, and schedule periodic checks. */
   start(): void;
-  /** Explicit manual check (Settings). Resolves when the run settles. */
+  /**
+   * Explicit manual check (Settings). Resolves when the run settles. When a
+   * run is already in flight the request is coalesced into a single queued
+   * re-run and the returned promise resolves once that queued run settles.
+   * Manual checks re-prompt an available version even if it was already
+   * declined this session.
+   */
   checkNow(): Promise<void>;
   /** Cancel in-flight work and stop periodic checks. Safe to call twice. */
   dispose(): void;
@@ -209,34 +217,48 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
   let started = false;
   let cancelled = false;
   let intervalHandle: unknown = null;
-  // One updater run (check → prompt → install) at a time; a run requested
-  // while another is active (or a timed-out check is still settling) is
-  // coalesced into a single queued re-run.
+  // One updater run (check → prompt → install) at a time; runs requested
+  // while another is active (or a timed-out check is still settling) are
+  // coalesced into a single queued re-run. The queued run remembers whether
+  // any coalesced requester was manual (manual runs bypass prompt
+  // suppression) and resolves the promises of everyone awaiting it.
   let runInFlight = false;
-  let runQueued = false;
+  let queuedRun: { manual: boolean; promise: Promise<void>; resolve: () => void } | null = null;
   // A native check that lost the timeout race but has not settled yet. No new
   // native check may start until it settles; its late result is discarded.
   let staleCheckSettling = false;
-  // Prompt each offered version at most once per app session.
+  // Prompt each offered version at most once per app session for background
+  // checks; explicit manual checks always re-prompt.
   let lastPromptedUpdateVersion: string | null = null;
 
   function drainQueuedRun(): void {
-    if (!cancelled && runQueued && !runInFlight && !staleCheckSettling) {
-      runQueued = false;
-      void runUpdater('queued');
+    if (!cancelled && queuedRun && !runInFlight && !staleCheckSettling) {
+      const queued = queuedRun;
+      queuedRun = null;
+      void runUpdater('queued', { manual: queued.manual }).finally(queued.resolve);
     }
   }
 
-  async function runUpdater(trigger: UpdateCheckTrigger): Promise<void> {
+  async function runUpdater(
+    trigger: UpdateCheckTrigger,
+    options: { manual?: boolean } = {}
+  ): Promise<void> {
+    const manual = options.manual ?? trigger === 'manual';
     if (cancelled) return;
     if (runInFlight || staleCheckSettling) {
-      runQueued = true;
+      if (queuedRun) {
+        queuedRun.manual ||= manual;
+      } else {
+        let resolveQueued!: () => void;
+        const promise = new Promise<void>((resolve) => (resolveQueued = resolve));
+        queuedRun = { manual, promise, resolve: resolveQueued };
+      }
       adapters.log(
-        `[updater] ${trigger} check skipped because a previous run is still ${
+        `[updater] ${trigger} check queued because a previous run is still ${
           runInFlight ? 'active' : 'settling after a timeout'
         }`
       );
-      return;
+      return queuedRun.promise;
     }
 
     runInFlight = true;
@@ -290,7 +312,10 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
       state.availableVersion = update.version;
       state.releaseNotes = update.body ?? null;
 
-      if (lastPromptedUpdateVersion === update.version) {
+      // Background checks prompt each version at most once per session, but a
+      // manual check is an explicit request: always re-prompt so a user who
+      // declined earlier can still install without restarting the app.
+      if (!manual && lastPromptedUpdateVersion === update.version) {
         adapters.log(`[updater] update ${update.version} already prompted; skipping`);
         return;
       }
@@ -360,6 +385,11 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
     if (intervalHandle !== null) {
       adapters.clearInterval(intervalHandle);
       intervalHandle = null;
+    }
+    // A queued run will never execute after cancellation; settle its waiters.
+    if (queuedRun) {
+      queuedRun.resolve();
+      queuedRun = null;
     }
   }
 

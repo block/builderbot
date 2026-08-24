@@ -194,10 +194,11 @@ describe('assertUrlReachable', () => {
   });
 
   it('falls back to a ranged GET when HEAD is rejected', async () => {
+    // 206 Partial Content is within Response.ok's 200–299 range.
     const fetchImpl = vi
       .fn()
       .mockResolvedValueOnce({ ok: false, status: 403 })
-      .mockResolvedValueOnce({ ok: false, status: 206 });
+      .mockResolvedValueOnce({ ok: true, status: 206 });
     await expect(
       assertUrlReachable(ARCHIVE_URL, { fetchImpl, attempts: 1, delayMs: 0 })
     ).resolves.toBeUndefined();

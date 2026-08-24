@@ -202,7 +202,15 @@ async function main() {
   const latest = existsSync(latestPath)
     ? JSON.parse(readFileSync(latestPath, 'utf-8'))
     : buildStableLatest(signaturePath);
-  latest.version = version;
+  // The Tauri-generated feed version must already match the release version:
+  // a mismatch means the tag was bumped without rebuilding the bundle, and
+  // rewriting it here would advertise a version the archive does not contain.
+  if (latest.version !== version) {
+    throw new Error(
+      `latest.json version "${latest.version}" does not match release version "${version}". ` +
+        'The bundle was likely built from a different version; rebuild before publishing.'
+    );
+  }
   latest.pub_date = new Date().toISOString();
   const platformRecord = latest?.platforms?.[updaterPlatform];
   if (!platformRecord) {

@@ -290,10 +290,26 @@ describe('publish-updater-to-github-release.mjs', () => {
     expect(result.stderr).toContain('Platform "darwin-aarch64" missing in latest.json');
   });
 
-  it('rewrites the feed version and URL to the stable alias before validating', () => {
+  it('fails when the generated latest.json version does not match the release version', () => {
     setupUpdaterBundle({
       latestJson: {
         version: '0.0.1',
+        platforms: {
+          'darwin-aarch64': { signature: 'stale', url: 'https://example.com/old.tar.gz' },
+        },
+      },
+    });
+    const result = runScript('publish-updater-to-github-release.mjs', { env: dryEnv });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain(
+      `latest.json version "0.0.1" does not match release version "${VERSION}"`
+    );
+  });
+
+  it('rewrites the feed URL and signature to the stable alias before validating', () => {
+    setupUpdaterBundle({
+      latestJson: {
+        version: VERSION,
         platforms: {
           'darwin-aarch64': { signature: 'stale', url: 'https://example.com/old.tar.gz' },
         },

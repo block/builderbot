@@ -237,13 +237,14 @@
     {#if onAttachClipboard}
       <Button
         variant="outline"
+        size="icon"
         type="button"
-        class="gap-1.5 px-4 py-2 text-sm font-medium text-muted-foreground shadow-none hover:text-foreground max-[768px]:h-11 max-[768px]:justify-center"
+        class="size-9 text-muted-foreground shadow-none hover:text-foreground max-[768px]:size-11"
         title="Attach clipboard"
+        aria-label="Attach clipboard"
         onclick={() => onAttachClipboard?.()}
       >
         <ClipboardPaste size={14} />
-        <span>Attach clipboard</span>
       </Button>
     {/if}
   </div>
@@ -302,7 +303,8 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    flex-shrink: 0;
   }
 
   .snippet-chip {

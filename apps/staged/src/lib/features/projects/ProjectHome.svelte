@@ -502,7 +502,7 @@
   });
 
   $effect(() => {
-    if (!loading && selectedProjectId && projects.length > 0 && !selectedProject) {
+    if (projectsDataStore.loaded && !loading && selectedProjectId && !selectedProject) {
       goHome();
     }
   });

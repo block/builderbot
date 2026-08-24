@@ -6,7 +6,13 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { getWindowLabel, isTauri, getWindowSync, type UnlistenFn } from './lib/transport';
+  import {
+    getWindowLabel,
+    isTauri,
+    getWindowSync,
+    listenToEvent,
+    type UnlistenFn,
+  } from './lib/transport';
   import * as commands from './lib/api/commands';
   import TopBar from './lib/features/layout/TopBar.svelte';
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
@@ -67,8 +73,13 @@
   let unlistenCacheInvalidation: UnlistenFn | undefined;
   let unlistenPageLifecycle: (() => void) | undefined;
   let unlistenAcpToolsReconciled: UnlistenFn | undefined;
+  let unlistenStoreReset: UnlistenFn | undefined;
+  let unlistenUpdaterOwnerAvailable: UnlistenFn | undefined;
   let unregisterShortcuts: (() => void) | null = null;
   let stopUpdaterLoop: (() => void) | null = null;
+  let updaterStartPending = false;
+  let updaterStartQueued = false;
+  let destroyed = false;
   let storeIncompat = $state<StoreIncompatibility | null>(null);
   let resetting = $state(false);
   let storeError = $state<string | null>(null);
@@ -175,18 +186,24 @@
     }
   }
 
-  function startUpdaterLoop(): () => void {
+  async function startUpdaterLoop(): Promise<(() => void) | null> {
     const isTauriApp = isTauri;
     const windowLabel = getWindowLabel();
     void logUpdater(
       `[updater] gate check: enabled=${updaterEnabled} dev=${import.meta.env.DEV} isTauriApp=${isTauriApp} window=${windowLabel}`
     );
 
-    // Update prompts and relaunches are app-wide. Letting every webview run
-    // this loop produces duplicate prompts and competing installs.
-    if (!updaterEnabled || import.meta.env.DEV || !isTauriApp || windowLabel !== 'main') {
+    if (!updaterEnabled || import.meta.env.DEV || !isTauriApp) {
       void logUpdater('[updater] skipped because a gate condition was not met');
-      return () => {};
+      return null;
+    }
+
+    // Update prompts and relaunches are app-wide. The backend grants one live
+    // window ownership and releases it from the native Destroyed hook, allowing
+    // a surviving peer to take over even if frontend teardown never runs.
+    if (!(await commands.claimUpdaterOwnership())) {
+      void logUpdater('[updater] skipped because another window owns the updater loop');
+      return null;
     }
 
     let cancelled = false;
@@ -264,6 +281,35 @@
     };
   }
 
+  async function ensureUpdaterLoopStarted() {
+    if (destroyed || stopUpdaterLoop || updaterStartPending) return;
+    updaterStartPending = true;
+    try {
+      const stop = await startUpdaterLoop();
+      if (destroyed) stop?.();
+      else stopUpdaterLoop = stop;
+    } catch (error) {
+      await logUpdater(`[updater] failed to claim ownership: ${error}`);
+    } finally {
+      updaterStartPending = false;
+      if (updaterStartQueued) {
+        updaterStartQueued = false;
+        requestUpdaterLoopStart();
+      }
+    }
+  }
+
+  function requestUpdaterLoopStart() {
+    // An ownership-release event can cross an already-running claim that is
+    // about to lose to the old owner. Preserve that event and retry once the
+    // pending claim settles, or every window can end up ownerless.
+    if (updaterStartPending) {
+      updaterStartQueued = true;
+      return;
+    }
+    void ensureUpdaterLoopStarted();
+  }
+
   onMount(async () => {
     darkMode.init();
     // Wire up PR-polling interest hints (window focus + backend lifecycle events).
@@ -281,6 +327,14 @@
     // App-menu items, all nine registered and torn down as one. See
     // menuListener.ts for why they're window-scoped.
     unlistenMenu = listenForMenuEvents();
+    unlistenStoreReset = listenToEvent<void>('store-reset-completed', () => {
+      storeIncompat = null;
+      storeError = null;
+      resetting = false;
+    });
+    unlistenUpdaterOwnerAvailable = listenToEvent<void>('updater-owner-available', () => {
+      requestUpdaterLoopStart();
+    });
 
     // Global session-status listener — must live at App level so it works
     // regardless of which view the user is on. See sessionStatusListener.ts.
@@ -487,10 +541,11 @@
 
     // Window was created hidden — show it now that the theme is applied
     await getWindowSync().show();
-    stopUpdaterLoop = startUpdaterLoop();
+    requestUpdaterLoopStart();
   });
 
   onDestroy(() => {
+    destroyed = true;
     prPollingService.dispose();
     document.removeEventListener('keydown', handleKonamiKey);
     unregisterShortcuts?.();
@@ -499,6 +554,8 @@
     unlistenCacheInvalidation?.();
     unlistenPageLifecycle?.();
     unlistenAcpToolsReconciled?.();
+    unlistenStoreReset?.();
+    unlistenUpdaterOwnerAvailable?.();
     projectsDataStore.stopListeners();
     projectRunActionsStore.stopListening();
     stopUpdaterLoop?.();

@@ -1627,6 +1627,11 @@ export function takeWindowSeed(): Promise<string | null> {
   return invokeCommand('take_window_seed');
 }
 
+/** Claim process-wide ownership of the updater loop for the current window. */
+export function claimUpdaterOwnership(): Promise<boolean> {
+  return invokeCommand('claim_updater_ownership');
+}
+
 // =============================================================================
 // Images
 // =============================================================================

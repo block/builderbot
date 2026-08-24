@@ -7,7 +7,7 @@
 //! chrome — including `visible: false`, which lets the frontend show each window
 //! once the theme is applied, exactly like the main window.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
@@ -61,6 +61,49 @@ impl NewWindowState {
 impl Default for NewWindowState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Process-wide ownership of the frontend updater loop.
+///
+/// The updater UI still belongs to a webview, but exactly one live window may
+/// check, prompt, and install at a time. Ownership is released by the native
+/// `Destroyed` hook so a surviving peer can take over even when frontend
+/// teardown does not run.
+#[derive(Default)]
+pub struct UpdaterWindowState {
+    inner: Mutex<UpdaterWindowInner>,
+}
+
+#[derive(Default)]
+struct UpdaterWindowInner {
+    owner: Option<String>,
+    /// Window labels are never reused within a process. Remembering destroyed
+    /// ones rejects an IPC claim that was queued before destruction but did not
+    /// reach the backend until after the native hook ran.
+    destroyed: HashSet<String>,
+}
+
+impl UpdaterWindowState {
+    fn try_claim(&self, label: &str) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.owner.is_some() || inner.destroyed.contains(label) {
+            return false;
+        }
+        inner.owner = Some(label.to_string());
+        true
+    }
+
+    /// Record native destruction and release ownership if `label` held it.
+    /// Returns whether peers should be notified that ownership is available.
+    pub fn window_destroyed(&self, label: &str) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        inner.destroyed.insert(label.to_string());
+        if inner.owner.as_deref() != Some(label) {
+            return false;
+        }
+        inner.owner = None;
+        true
     }
 }
 
@@ -161,6 +204,15 @@ pub fn take_window_seed(
     state.seeds.lock().unwrap().remove(window.label())
 }
 
+/// Atomically claim ownership of the app-wide updater loop for this window.
+#[tauri::command]
+pub fn claim_updater_ownership(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, UpdaterWindowState>,
+) -> bool {
+    state.try_claim(window.label())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,6 +235,20 @@ mod tests {
 
     fn seeds_of(app: &tauri::App<tauri::test::MockRuntime>) -> HashMap<String, String> {
         app.state::<NewWindowState>().seeds.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn updater_ownership_transfers_only_after_the_owner_is_released() {
+        let state = UpdaterWindowState::default();
+
+        assert!(state.try_claim("main"));
+        assert!(!state.try_claim("win-2"));
+        assert!(!state.window_destroyed("win-2"));
+        assert!(!state.try_claim("win-2"));
+
+        assert!(state.window_destroyed("main"));
+        assert!(!state.try_claim("main"));
+        assert!(state.try_claim("win-3"));
     }
 
     /// The one fallible step after the seed insert must undo it: no window with

@@ -22,6 +22,16 @@ import {
   _evictIfNeeded,
 } from './cache';
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (err: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 beforeEach(async () => {
   mockInvoke.mockReset();
   await clearAllCache();
@@ -547,16 +557,6 @@ describe('invalidateCacheByArgs', () => {
 });
 
 describe('first-load race protection', () => {
-  function deferred<T>() {
-    let resolve!: (value: T) => void;
-    let reject!: (err: unknown) => void;
-    const promise = new Promise<T>((res, rej) => {
-      resolve = res;
-      reject = rej;
-    });
-    return { promise, resolve, reject };
-  }
-
   it('invalidateCacheByCommand blocks a cache write from an in-flight first-load fetch', async () => {
     const pending = deferred<string>();
     mockInvoke.mockReturnValueOnce(pending.promise);
@@ -679,6 +679,52 @@ describe('first-load race protection', () => {
 });
 
 describe('markAllStale', () => {
+  it('blocks a pre-gap first-load response from populating the cache', async () => {
+    const pending = deferred<string>();
+    mockInvoke.mockReturnValueOnce(pending.promise);
+
+    const inFlight = cachedCommand<string>('cmd', undefined, { ttl: 60_000 });
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
+
+    await markAllStale();
+    pending.resolve('pre-gap');
+    await expect(inFlight).resolves.toEqual({ data: 'pre-gap', revalidating: null });
+
+    mockInvoke.mockResolvedValueOnce('post-gap');
+    await expect(cachedCommand<string>('cmd', undefined, { ttl: 60_000 })).resolves.toEqual({
+      data: 'post-gap',
+      revalidating: null,
+    });
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+  });
+
+  it('blocks a pre-gap cachedInvoke response from populating the cache', async () => {
+    const pending = deferred<string>();
+    mockInvoke.mockReturnValueOnce(pending.promise);
+
+    const consume = async () => {
+      const results = [];
+      for await (const result of cachedInvoke<string>('cmd', undefined, { ttl: 60_000 })) {
+        results.push(result);
+      }
+      return results;
+    };
+    const inFlight = consume();
+    await vi.waitFor(() => expect(mockInvoke).toHaveBeenCalledTimes(1));
+
+    await markAllStale();
+    pending.resolve('pre-gap');
+    await expect(inFlight).resolves.toEqual([
+      { data: 'pre-gap', source: 'network', fetchedAt: expect.any(Number) },
+    ]);
+
+    mockInvoke.mockResolvedValueOnce('post-gap');
+    await expect(consume()).resolves.toEqual([
+      { data: 'post-gap', source: 'network', fetchedAt: expect.any(Number) },
+    ]);
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+  });
+
   it('yields stale cache first then revalidates from network', async () => {
     mockInvoke.mockResolvedValue('cached');
     await cachedCommand('cmd', undefined, { ttl: 60_000 });

@@ -149,6 +149,8 @@ class ProjectsDataStore {
   private prStatusFlushCancel: (() => void) | null = null;
   private pendingBranchChanges: BranchChangedEvent[] = [];
   private branchChangedFlushCancel: (() => void) | null = null;
+  private branchRefetchInFlight = new Set<string>();
+  private branchRefetchQueued = new Set<string>();
 
   // ── Reactive reads ──
 
@@ -891,6 +893,13 @@ class ProjectsDataStore {
   /** Refetch one project's branch list and apply it under the current load
    *  generation. */
   private async refetchProjectBranches(projectId: string): Promise<void> {
+    if (this.branchRefetchInFlight.has(projectId)) {
+      // The pending read may predate this change. Run one more fetch after it
+      // settles rather than racing two responses that can apply out of order.
+      this.branchRefetchQueued.add(projectId);
+      return;
+    }
+    this.branchRefetchInFlight.add(projectId);
     const generation = this.loadGeneration;
     try {
       const { data: branches, revalidating } = await commands.listBranchesForProject(projectId, {
@@ -911,6 +920,11 @@ class ProjectsDataStore {
       }
     } catch (e) {
       console.error(`[projectsData] Failed to refetch branches for project ${projectId}:`, e);
+    } finally {
+      this.branchRefetchInFlight.delete(projectId);
+      if (this.branchRefetchQueued.delete(projectId)) {
+        void this.refetchProjectBranches(projectId);
+      }
     }
   }
 }

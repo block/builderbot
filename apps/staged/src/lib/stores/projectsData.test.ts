@@ -894,6 +894,38 @@ describe('event listeners', () => {
     expect(listBranchesForProject).toHaveBeenCalledWith('p1', { force: true });
   });
 
+  it('queues a branch refetch when another change arrives during an in-flight read', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    await store.ensureProjectsHydrated();
+    store.startListeners();
+    listBranchesForProject.mockClear();
+
+    let resolveFirst!: (value: SwrResult<Branch[]>) => void;
+    listBranchesForProject.mockReturnValueOnce(
+      new Promise<SwrResult<Branch[]>>((resolve) => {
+        resolveFirst = resolve;
+      })
+    );
+
+    emit('branch-changed', { branchId: 'b1', projectId: 'p1' });
+    await vi.waitFor(() => expect(listBranchesForProject).toHaveBeenCalledTimes(1));
+
+    // This change may have committed after the first read began. It must queue
+    // a follow-up rather than race a second response against the first.
+    emit('branch-changed', { branchId: 'b1', projectId: 'p1' });
+    await tick();
+    expect(listBranchesForProject).toHaveBeenCalledTimes(1);
+
+    listBranchesForProject.mockResolvedValue(swr([branch({ branchName: 'fresh' })]));
+    resolveFirst(swr([branch({ branchName: 'stale' })]));
+
+    await vi.waitFor(() => expect(listBranchesForProject).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => {
+      expect(store.branchesByProject.get('p1')![0].branchName).toBe('fresh');
+    });
+  });
+
   it('falls back to projects holding the branch when branch-changed lacks a project', async () => {
     const store = await importStore();
     await store.ensureLoaded();

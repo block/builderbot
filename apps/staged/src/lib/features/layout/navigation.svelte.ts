@@ -59,12 +59,22 @@ function rootRoute(): DetailRoute {
   return { kind: 'projects' };
 }
 
+function initialProjectId(): string | null {
+  const label = getWindowLabel();
+  // localStorage is shared by Tauri webviews. Only `main` owns the persisted
+  // snapshot; a secondary window must start empty until it consumes its
+  // explicit backend seed. In web mode there is no label and the synchronous
+  // snapshot remains the cold-boot accelerator.
+  if (label && label !== 'main') return null;
+  return readSnapshot<string>(SNAPSHOT_KEYS.lastProject);
+}
+
 export const navigation = $state({
   activeView: 'workspace' as 'workspace' | 'settings',
-  // Web-only: seed synchronously from the localStorage mirror so <ProjectHome>
-  // can paint on the first frame of a cold iOS reload, before the async
-  // persistent store and `listProjects()` validation resolve (see initNavigation).
-  selectedProjectId: readSnapshot<string>(SNAPSHOT_KEYS.lastProject),
+  // Web and the first Tauri window seed synchronously from the localStorage
+  // mirror so <ProjectHome> can paint before the async persistent store and
+  // `listProjects()` validation resolve (see initNavigation).
+  selectedProjectId: initialProjectId(),
   showReposList: false,
   settingsSection: 'general' as SettingsSection,
   detailStack: [rootRoute()] as DetailRoute[],

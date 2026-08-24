@@ -551,6 +551,9 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             // Web clients are never opener-seeded; report "no seed".
             Ok(Value::Null)
         }
+        "claim_updater_ownership" => {
+            Err("claim_updater_ownership is not supported in web mode".to_string())
+        }
 
         // =====================================================================
         // Projects

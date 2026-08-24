@@ -6,6 +6,7 @@ let windowLabel: string | null;
 let setStoreValue: ReturnType<typeof vi.fn>;
 let writeSnapshot: ReturnType<typeof vi.fn>;
 let clearSnapshot: ReturnType<typeof vi.fn>;
+let snapshotProjectId: string | null;
 
 async function importNavigation() {
   return await import('./navigation.svelte');
@@ -21,6 +22,7 @@ beforeEach(() => {
   setStoreValue = vi.fn().mockResolvedValue(undefined);
   writeSnapshot = vi.fn();
   clearSnapshot = vi.fn();
+  snapshotProjectId = null;
 
   vi.doMock('../../transport', () => ({
     getWindowLabel: () => windowLabel,
@@ -31,7 +33,7 @@ beforeEach(() => {
   }));
   vi.doMock('../../shared/webSnapshot', () => ({
     SNAPSHOT_KEYS: { lastProject: 'staged:boot:last-project' },
-    readSnapshot: () => null,
+    readSnapshot: () => snapshotProjectId,
     writeSnapshot,
     clearSnapshot,
   }));
@@ -50,6 +52,29 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.resetAllMocks();
+});
+
+describe('initial project restore', () => {
+  it('restores the synchronous snapshot in the first window and web mode', async () => {
+    snapshotProjectId = 'persisted';
+    windowLabel = 'main';
+    let module = await importNavigation();
+    expect(module.navigation.selectedProjectId).toBe('persisted');
+
+    vi.resetModules();
+    windowLabel = null;
+    module = await importNavigation();
+    expect(module.navigation.selectedProjectId).toBe('persisted');
+  });
+
+  it('starts a secondary window empty instead of leaking the shared snapshot', async () => {
+    snapshotProjectId = 'persisted';
+    windowLabel = 'win-2';
+
+    const { navigation } = await importNavigation();
+
+    expect(navigation.selectedProjectId).toBeNull();
+  });
 });
 
 describe('persistLastProject', () => {

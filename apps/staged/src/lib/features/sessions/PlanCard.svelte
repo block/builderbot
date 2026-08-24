@@ -14,6 +14,7 @@
   import { slide } from 'svelte/transition';
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
   import CircleCheck from '@lucide/svelte/icons/circle-check';
+  import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Spinner from '../../shared/Spinner.svelte';
   import type { PlanEntry } from './acpTranscript';
 
@@ -46,7 +47,9 @@
     aria-expanded={expanded}
     onclick={() => (expanded = !expanded)}
   >
-    <span class="plan-caret" class:plan-caret-expanded={expanded}>›</span>
+    <span class="plan-caret" class:plan-caret-expanded={expanded}>
+      <ChevronRight size={12} />
+    </span>
     {#if overallStatus === 'in_progress'}
       <span class="plan-status-icon"><Spinner size={11} /></span>
     {:else if overallStatus === 'failed'}
@@ -109,22 +112,28 @@
   }
 
   .plan-caret {
-    display: inline-block;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     flex-shrink: 0;
     width: 8px;
+    height: 12px;
     color: var(--text-faint);
-    font-size: var(--size-xs);
-    line-height: 1;
+  }
+
+  .plan-caret :global(svg) {
     transition: transform 0.15s ease;
   }
 
-  .plan-caret-expanded {
+  .plan-caret-expanded :global(svg) {
     transform: rotate(90deg);
   }
 
   .plan-title {
     flex-shrink: 0;
     font-weight: 500;
+    line-height: 1;
+    transform: translateY(-0.5px);
   }
 
   .plan-progress {

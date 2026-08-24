@@ -72,8 +72,15 @@ export function confirmResetStore(): Promise<void> {
 // Projects
 // =============================================================================
 
-export function listProjects(): Promise<SwrResult<Project[]>> {
-  return cachedCommand('list_projects', undefined, { ttl: 5 * 60_000 });
+export interface ForceRefreshOptions {
+  force?: boolean;
+}
+
+export function listProjects(options: ForceRefreshOptions = {}): Promise<SwrResult<Project[]>> {
+  return cachedCommand('list_projects', undefined, {
+    ttl: 5 * 60_000,
+    bypassRead: options.force,
+  });
 }
 
 export async function createProject(
@@ -109,8 +116,18 @@ export async function deleteProject(id: string): Promise<void> {
   ]);
 }
 
-export function listProjectRepos(projectId: string): Promise<SwrResult<ProjectRepo[]>> {
-  return cachedCommand('list_project_repos', { projectId }, { ttl: 10 * 60_000 });
+export function listProjectRepos(
+  projectId: string,
+  options: ForceRefreshOptions = {}
+): Promise<SwrResult<ProjectRepo[]>> {
+  return cachedCommand(
+    'list_project_repos',
+    { projectId },
+    {
+      ttl: 10 * 60_000,
+      bypassRead: options.force,
+    }
+  );
 }
 
 export function listRecentRepos(limit?: number): Promise<RecentRepo[]> {
@@ -286,8 +303,18 @@ export function startProjectSession(
 // Branches
 // =============================================================================
 
-export function listBranchesForProject(projectId: string): Promise<SwrResult<Branch[]>> {
-  return cachedCommand('list_branches_for_project', { projectId }, { ttl: 2 * 60_000 });
+export function listBranchesForProject(
+  projectId: string,
+  options: ForceRefreshOptions = {}
+): Promise<SwrResult<Branch[]>> {
+  return cachedCommand(
+    'list_branches_for_project',
+    { projectId },
+    {
+      ttl: 2 * 60_000,
+      bypassRead: options.force,
+    }
+  );
 }
 
 /** Get a single branch by ID. */

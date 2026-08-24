@@ -10,10 +10,9 @@
  *
  * This is the cache leg only. The in-memory view stores subscribe to the
  * same feed themselves: projectsDataStore consumes project-changed,
- * branch-changed, and repos-changed for the project/branch/repo lists.
- * In web mode this leg is load-bearing for those stores too: their
- * event-driven refetches go through cachedCommand, so without the drop here
- * a fresh-by-TTL entry would answer the refetch with the pre-mutation data.
+ * branch-changed, and repos-changed for the project/branch/repo lists. Its
+ * event-driven refetches bypass cache reads, but this listener still protects
+ * shared IDB data for the next non-forced read in this tab or another tab.
  *
  * When the feed falls behind it emits every event with all ids null, which
  * these handlers read as "refetch the whole surface" — one broad
@@ -43,11 +42,8 @@ export function listenForCacheInvalidation(): UnlistenFn {
   );
 
   // Project changed (create / rename / delete / repo attach) → drop the
-  // project-list caches before projectsDataStore's own refetch runs. In web
-  // mode that refetch reads through cachedCommand (list_projects at a 5min
-  // TTL, list_project_repos at 10min during rehydration); without this drop
-  // a fresh-by-TTL entry would answer it with the pre-mutation data and the
-  // event would apply nothing. list_projects takes no args so the drop is
+  // project-list caches for future non-forced reads in this tab and any other
+  // tab sharing the same IDB store. list_projects takes no args so the drop is
   // command-wide; the repo lists scope to the named project when the payload
   // names one, widening only on the feed's lag recovery.
   unlisteners.push(

@@ -171,6 +171,27 @@ export async function cachedCommand<T>(
   const key = cacheKey(command, args);
   const store = getStore();
 
+  if (config.bypassRead) {
+    addInFlight(key);
+    const epochAtStart = getEpoch(key);
+    try {
+      const data = await invokeCommand<T>(command, args);
+      // Skip the cache write if the key was invalidated while we were fetching —
+      // writing would repopulate the cache with pre-mutation data.
+      if (getEpoch(key) === epochAtStart) {
+        await cacheSet(key, {
+          key,
+          data,
+          fetchedAt: Date.now(),
+          schemaVersion: CACHE_SCHEMA_VERSION,
+        } satisfies CacheEntry<T>);
+      }
+      return { data, revalidating: null };
+    } finally {
+      removeInFlight(key);
+    }
+  }
+
   const entry = await get<CacheEntry<T>>(key, store).catch(() => undefined);
   const isUsable = entry != null && entry.schemaVersion === CACHE_SCHEMA_VERSION;
   const isFresh = isUsable && !entry.stale && Date.now() - entry.fetchedAt < config.ttl;

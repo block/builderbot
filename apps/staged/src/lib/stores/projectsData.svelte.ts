@@ -134,6 +134,7 @@ class ProjectsDataStore {
   private initialLoad: Promise<void> | null = null;
   private revalidatePending = false;
   private revalidateQueued = false;
+  private revalidateQueuedForce = false;
   private backgroundHydrationCancel: (() => void) | null = null;
   /** In-flight per-project hydrations, so the foreground fetch, the idle drip
    *  and the grid's sweep share one request instead of racing three. */
@@ -320,9 +321,9 @@ class ProjectsDataStore {
     const generation = this.loadGeneration;
     try {
       const [projectsResult, branchesResult, reposResult] = await Promise.all([
-        commands.listProjects(),
-        commands.listBranchesForProject(projectId),
-        commands.listProjectRepos(projectId),
+        commands.listProjects({ force: true }),
+        commands.listBranchesForProject(projectId, { force: true }),
+        commands.listProjectRepos(projectId, { force: true }),
       ]);
       if (generation !== this.loadGeneration) return;
       this._projects = projectsResult.data;
@@ -366,26 +367,31 @@ class ProjectsDataStore {
     this._branchesByProject = next;
   }
 
-  private async revalidate(): Promise<void> {
+  private async revalidate({ force = false }: { force?: boolean } = {}): Promise<void> {
     if (this.revalidatePending) {
       // A change arrived while a reload was in flight; that reload may have
       // read the list before the write committed, so run once more after it.
+      // Preserve force across the queue: if any queued event says the backend
+      // changed, the follow-up fetch must not accept a cached answer.
       this.revalidateQueued = true;
+      this.revalidateQueuedForce ||= force;
       return;
     }
     this.revalidatePending = true;
     try {
-      await this.loadProjectsAndHydrate();
+      await this.loadProjectsAndHydrate({ force });
     } finally {
       this.revalidatePending = false;
       if (this.revalidateQueued) {
+        const queuedForce = this.revalidateQueuedForce;
         this.revalidateQueued = false;
-        void this.revalidate();
+        this.revalidateQueuedForce = false;
+        void this.revalidate({ force: queuedForce });
       }
     }
   }
 
-  private async loadProjectsAndHydrate(): Promise<void> {
+  private async loadProjectsAndHydrate({ force = false }: { force?: boolean } = {}): Promise<void> {
     const generation = ++this.loadGeneration;
     this.cancelBackgroundHydration();
     // Those promises are already no-ops under the new generation; drop them so
@@ -397,7 +403,7 @@ class ProjectsDataStore {
     this._error = null;
     await repoBadgeStore.loadAll();
     try {
-      const { data, revalidating } = await commands.listProjects();
+      const { data, revalidating } = await commands.listProjects({ force });
       if (generation !== this.loadGeneration) return;
       this.applyProjectList(data, generation);
       this._loaded = true;
@@ -725,7 +731,7 @@ class ProjectsDataStore {
     // generation bump discards any stale apply still in flight.
     this.unlisteners.push(
       listenToEvent<ProjectChangedEvent>('project-changed', () => {
-        void this.revalidate();
+        void this.revalidate({ force: true });
       })
     );
 
@@ -887,7 +893,9 @@ class ProjectsDataStore {
   private async refetchProjectBranches(projectId: string): Promise<void> {
     const generation = this.loadGeneration;
     try {
-      const { data: branches, revalidating } = await commands.listBranchesForProject(projectId);
+      const { data: branches, revalidating } = await commands.listBranchesForProject(projectId, {
+        force: true,
+      });
       this.applyProjectBranches(projectId, branches, generation);
       if (revalidating) {
         revalidating

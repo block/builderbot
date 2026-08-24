@@ -301,6 +301,76 @@ describe('cachedCommand', () => {
     mockInvoke.mockRejectedValue(new Error('offline'));
     await expect(cachedCommand('cmd', undefined, { ttl: 60_000 })).rejects.toThrow('offline');
   });
+
+  it('skips a fresh cache entry when bypassRead is set', async () => {
+    mockInvoke.mockResolvedValue('cached');
+    await cachedCommand('cmd', undefined, { ttl: 60_000 });
+
+    mockInvoke.mockResolvedValue('fresh');
+    const result = await cachedCommand<string>('cmd', undefined, {
+      ttl: 60_000,
+      bypassRead: true,
+    });
+
+    expect(result).toEqual({ data: 'fresh', revalidating: null });
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+  });
+
+  it('writes a bypassRead response back to IDB so later reads are warm', async () => {
+    mockInvoke.mockResolvedValue('cached');
+    await cachedCommand('cmd', undefined, { ttl: 60_000 });
+
+    mockInvoke.mockResolvedValue('fresh');
+    await cachedCommand('cmd', undefined, { ttl: 60_000, bypassRead: true });
+
+    mockInvoke.mockResolvedValue('should-not-be-used');
+    const result = await cachedCommand<string>('cmd', undefined, { ttl: 60_000 });
+
+    expect(result).toEqual({ data: 'fresh', revalidating: null });
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not fall back to cache when a bypassRead fetch fails', async () => {
+    mockInvoke.mockResolvedValue('cached');
+    await cachedCommand('cmd', undefined, { ttl: 60_000 });
+
+    mockInvoke.mockRejectedValue(new Error('offline'));
+
+    await expect(
+      cachedCommand('cmd', undefined, { ttl: 60_000, bypassRead: true })
+    ).rejects.toThrow('offline');
+  });
+
+  it('honors epoch invalidation during an in-flight bypassRead fetch', async () => {
+    mockInvoke.mockResolvedValue('cached');
+    await cachedCommand('cmd', undefined, { ttl: 60_000 });
+
+    let resolveNetwork!: (value: string) => void;
+    const pending = new Promise<string>((resolve) => {
+      resolveNetwork = resolve;
+    });
+    mockInvoke.mockReturnValueOnce(pending);
+
+    const inFlight = cachedCommand<string>('cmd', undefined, {
+      ttl: 60_000,
+      bypassRead: true,
+    });
+
+    // Let cachedCommand reach the network step.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await invalidateCache('cmd');
+
+    resolveNetwork('post-invalidate');
+    await expect(inFlight).resolves.toEqual({ data: 'post-invalidate', revalidating: null });
+
+    // The epoch bump should have suppressed the write — a subsequent read is a miss.
+    mockInvoke.mockResolvedValueOnce('fresh');
+    const result = await cachedCommand<string>('cmd', undefined, { ttl: 60_000 });
+
+    expect(result).toEqual({ data: 'fresh', revalidating: null });
+  });
 });
 
 describe('invalidateCache', () => {

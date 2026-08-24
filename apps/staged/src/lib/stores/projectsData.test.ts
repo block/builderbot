@@ -567,6 +567,9 @@ describe('refreshProject', () => {
     );
     await store.refreshProject('p1');
 
+    expect(listProjects).toHaveBeenLastCalledWith({ force: true });
+    expect(listBranchesForProject).toHaveBeenLastCalledWith('p1', { force: true });
+    expect(listProjectRepos).toHaveBeenLastCalledWith('p1', { force: true });
     expect(store.projects[0].name).toBe('Renamed');
     expect(store.branchesByProject.get('p1')).toHaveLength(2);
     expect(invalidateProjectBranchTimelines).toHaveBeenCalledWith(['b1', 'b2']);
@@ -740,6 +743,7 @@ describe('event listeners', () => {
       expect(store.branchesByProject.get('p1')![0].prState).toBe('OPEN');
     });
     expect(listBranchesForProject).toHaveBeenCalledTimes(1);
+    expect(listBranchesForProject).toHaveBeenCalledWith('p1', { force: true });
   });
 
   it('ignores non-commit sessions and un-hydrated projects', async () => {
@@ -791,6 +795,9 @@ describe('event listeners', () => {
     await vi.waitFor(() => {
       expect(store.branchesByProject.get('p1')).toHaveLength(2);
     });
+    expect(listProjects).toHaveBeenLastCalledWith({ force: true });
+    expect(listBranchesForProject).toHaveBeenLastCalledWith('p1', { force: true });
+    expect(listProjectRepos).toHaveBeenLastCalledWith('p1', { force: true });
     expect(store.projects[0].name).toBe('Renamed');
     expect(invalidateProjectBranchTimelines).toHaveBeenCalledWith(['b1', 'b2']);
   });
@@ -819,6 +826,7 @@ describe('event listeners', () => {
     await vi.waitFor(() => {
       expect(store.projects[0].name).toBe('Renamed');
     });
+    expect(listProjects).toHaveBeenLastCalledWith({ force: true });
   });
 
   it('registers a project created in another window on project-changed', async () => {
@@ -829,6 +837,40 @@ describe('event listeners', () => {
     listProjects.mockResolvedValue(swr([project(), project({ id: 'p2', name: 'Beta' })]));
     emit('project-changed', { projectId: 'p2' });
 
+    await vi.waitFor(() => {
+      expect(store.projects.map((p) => p.id)).toEqual(['p1', 'p2']);
+    });
+  });
+
+  it('preserves force for a project-changed refetch queued behind an in-flight reload', async () => {
+    const store = await importStore();
+    await store.ensureLoaded();
+    store.startListeners();
+
+    let resolveFirst!: (value: SwrResult<Project[]>) => void;
+    listProjects.mockReturnValueOnce(
+      new Promise<SwrResult<Project[]>>((resolve) => {
+        resolveFirst = resolve;
+      })
+    );
+
+    // Remount-time revalidation starts unforced.
+    void store.ensureLoaded();
+    await tick();
+    expect(listProjects).toHaveBeenLastCalledWith({ force: false });
+
+    // An event arriving while it is pending queues a forced follow-up.
+    emit('project-changed', { projectId: 'p2' });
+    await tick();
+    expect(listProjects).toHaveBeenCalledTimes(2);
+
+    listProjects.mockResolvedValue(swr([project(), project({ id: 'p2', name: 'Beta' })]));
+    resolveFirst(swr([project()]));
+
+    await vi.waitFor(() => {
+      expect(listProjects).toHaveBeenCalledTimes(3);
+    });
+    expect(listProjects).toHaveBeenLastCalledWith({ force: true });
     await vi.waitFor(() => {
       expect(store.projects.map((p) => p.id)).toEqual(['p1', 'p2']);
     });
@@ -849,6 +891,7 @@ describe('event listeners', () => {
       expect(store.branchesByProject.get('p1')![0].branchName).toBe('renamed');
     });
     expect(listBranchesForProject).toHaveBeenCalledTimes(1);
+    expect(listBranchesForProject).toHaveBeenCalledWith('p1', { force: true });
   });
 
   it('falls back to projects holding the branch when branch-changed lacks a project', async () => {
@@ -865,7 +908,7 @@ describe('event listeners', () => {
       expect(store.branchesByProject.get('p1')).toHaveLength(0);
     });
     expect(listBranchesForProject).toHaveBeenCalledTimes(1);
-    expect(listBranchesForProject).toHaveBeenCalledWith('p1');
+    expect(listBranchesForProject).toHaveBeenCalledWith('p1', { force: true });
   });
 
   it('refetches every hydrated project’s branches when branch-changed names none', async () => {
@@ -886,7 +929,7 @@ describe('event listeners', () => {
     emit('branch-changed', { branchId: null, projectId: null });
     await tick();
 
-    expect(listBranchesForProject.mock.calls.map(([projectId]) => projectId)).toEqual(['p1']);
+    expect(listBranchesForProject.mock.calls).toEqual([['p1', { force: true }]]);
   });
 
   it('skips branch-changed refetches for a known but un-hydrated project', async () => {
@@ -941,6 +984,7 @@ describe('event listeners', () => {
       expect(store.branchesByProject.get('p1')![0].branchName).toBe('renamed');
     });
     expect(listBranchesForProject).toHaveBeenCalledTimes(2);
+    expect(listBranchesForProject).toHaveBeenLastCalledWith('p1', { force: true });
   });
 
   it('skips branch-changed refetches for unknown or deleting projects', async () => {
@@ -1044,7 +1088,7 @@ describe('project-delete lifecycle', () => {
 
     expect(store.isProjectDeleting('p1')).toBe(false);
     expect(store.projects).toHaveLength(1);
-    expect(listBranchesForProject).toHaveBeenCalledWith('p1');
+    expect(listBranchesForProject).toHaveBeenCalledWith('p1', { force: true });
     await vi.waitFor(() => {
       expect(store.branchesByProject.get('p1')!.map((b) => b.id)).toEqual(['b1']);
     });

@@ -2,15 +2,18 @@
  * Event-driven cache invalidation listener.
  *
  * Listens for backend events (pr-status-changed and the store change feed's
- * branch-changed / notes-changed / review-changed) and invalidates the
- * corresponding caches so that stale data is never served after the backend
- * pushes an update. The store change feed publishes from every mutating
- * store method, so a write in any window (or the backend itself)
- * invalidates every window.
+ * project-changed / branch-changed / notes-changed / review-changed) and
+ * invalidates the corresponding caches so that stale data is never served
+ * after the backend pushes an update. The store change feed publishes from
+ * every mutating store method, so a write in any window (or the backend
+ * itself) invalidates every window.
  *
  * This is the cache leg only. The in-memory view stores subscribe to the
  * same feed themselves: projectsDataStore consumes project-changed,
  * branch-changed, and repos-changed for the project/branch/repo lists.
+ * In web mode this leg is load-bearing for those stores too: their
+ * event-driven refetches go through cachedCommand, so without the drop here
+ * a fresh-by-TTL entry would answer the refetch with the pre-mutation data.
  *
  * When the feed falls behind it emits every event with all ids null, which
  * these handlers read as "refetch the whole surface" — one broad
@@ -24,6 +27,7 @@ import type {
   BranchChangedEvent,
   NotesChangedEvent,
   PrStatusChangedEvent,
+  ProjectChangedEvent,
   ReviewChangedEvent,
   SessionStatusPayload,
 } from '../types';
@@ -35,6 +39,25 @@ export function listenForCacheInvalidation(): UnlistenFn {
   unlisteners.push(
     listenToEvent<PrStatusChangedEvent>('pr-status-changed', () => {
       invalidateCacheByCommand('list_branches_for_project');
+    })
+  );
+
+  // Project changed (create / rename / delete / repo attach) → drop the
+  // project-list caches before projectsDataStore's own refetch runs. In web
+  // mode that refetch reads through cachedCommand (list_projects at a 5min
+  // TTL, list_project_repos at 10min during rehydration); without this drop
+  // a fresh-by-TTL entry would answer it with the pre-mutation data and the
+  // event would apply nothing. list_projects takes no args so the drop is
+  // command-wide; the repo lists scope to the named project when the payload
+  // names one, widening only on the feed's lag recovery.
+  unlisteners.push(
+    listenToEvent<ProjectChangedEvent>('project-changed', (payload) => {
+      invalidateCacheByCommand('list_projects');
+      if (payload.projectId === null) {
+        invalidateCacheByCommand('list_project_repos');
+      } else {
+        invalidateCacheByArgs('list_project_repos', { projectId: payload.projectId });
+      }
     })
   );
 

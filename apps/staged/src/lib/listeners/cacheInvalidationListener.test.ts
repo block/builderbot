@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { BranchChangedEvent } from '../types';
+import type { BranchChangedEvent, ProjectChangedEvent } from '../types';
 
 /**
- * The branch-changed leg of the cache listener, including the store change
- * feed's lag recovery: a null branchId means the feed dropped changes it can
- * no longer name, so invalidation widens from one branch to all of them.
+ * The project-changed and branch-changed legs of the cache listener,
+ * including the store change feed's lag recovery: a null id means the feed
+ * dropped changes it can no longer name, so invalidation widens from one
+ * project/branch to all of them.
  */
 
 type EventCallback = (payload: unknown) => void;
@@ -15,6 +16,10 @@ let invalidateCacheByArgs: ReturnType<typeof vi.fn>;
 let invalidateCacheByCommand: ReturnType<typeof vi.fn>;
 let invalidateBranchTimeline: ReturnType<typeof vi.fn>;
 let invalidateAllBranchTimelines: ReturnType<typeof vi.fn>;
+
+function emitProjectChanged(payload: ProjectChangedEvent): void {
+  eventCallbacks.get('project-changed')?.(payload);
+}
 
 function emitBranchChanged(payload: BranchChangedEvent): void {
   eventCallbacks.get('branch-changed')?.(payload);
@@ -55,6 +60,30 @@ afterEach(() => {
   vi.doUnmock('../transport');
   vi.doUnmock('../cache');
   vi.doUnmock('../commands');
+});
+
+describe('project-changed cache invalidation', () => {
+  it('drops the project list and just the named project’s repo list', async () => {
+    await startListening();
+
+    emitProjectChanged({ projectId: 'p1' });
+
+    // list_projects takes no args, so the drop is command-wide either way.
+    expect(invalidateCacheByCommand.mock.calls).toEqual([['list_projects']]);
+    expect(invalidateCacheByArgs.mock.calls).toEqual([['list_project_repos', { projectId: 'p1' }]]);
+  });
+
+  it('widens the repo-list drop when the lag flush names no project', async () => {
+    await startListening();
+
+    emitProjectChanged({ projectId: null });
+
+    expect(invalidateCacheByCommand.mock.calls).toEqual([
+      ['list_projects'],
+      ['list_project_repos'],
+    ]);
+    expect(invalidateCacheByArgs).not.toHaveBeenCalled();
+  });
 });
 
 describe('branch-changed cache invalidation', () => {

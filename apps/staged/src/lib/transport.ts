@@ -199,6 +199,7 @@ interface WebSocketListener {
 }
 
 const WEB_SOCKET_HEARTBEAT_MS = 30_000;
+const WEB_SOCKET_EVENT_GAP = 'transport:event-gap';
 
 let ws: WebSocket | null = null;
 let wsListeners: WebSocketListener[] = [];
@@ -281,8 +282,13 @@ function revalidateAfterEventGap(): void {
   void import('./listeners/pageLifecycleListener')
     .then(({ revalidateAll }) => revalidateAll())
     .catch((e) => {
-      console.error('[transport] Failed to revalidate after reconnect:', e);
+      console.error('[transport] Failed to revalidate after event gap:', e);
     });
+}
+
+function recoverAfterEventGap(): void {
+  rehydrateBusyState();
+  revalidateAfterEventGap();
 }
 
 async function ensureWebSocket(): Promise<void> {
@@ -308,8 +314,8 @@ async function ensureWebSocket(): Promise<void> {
     wsConnecting = false;
     startHeartbeat();
     replayCurrentPrPollInterestHints();
-    rehydrateBusyState();
-    if (isReconnect) revalidateAfterEventGap();
+    if (isReconnect) recoverAfterEventGap();
+    else rehydrateBusyState();
     if (wsReconnectTimer) {
       clearTimeout(wsReconnectTimer);
       wsReconnectTimer = null;
@@ -319,6 +325,10 @@ async function ensureWebSocket(): Promise<void> {
   socket.onmessage = (messageEvent) => {
     try {
       const data = JSON.parse(messageEvent.data) as { event: string; payload: unknown };
+      if (data.event === WEB_SOCKET_EVENT_GAP) {
+        recoverAfterEventGap();
+        return;
+      }
       for (const listener of wsListeners) {
         if (listener.event === data.event) {
           listener.callback(data.payload);

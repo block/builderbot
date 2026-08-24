@@ -5,7 +5,7 @@ const CACHE_SCHEMA_VERSION = 1;
 const MAX_CACHE_ENTRIES = 200;
 
 /**
- * Tracks the last invalidation time per cache key. When a read starts, it
+ * Tracks the invalidation generation per cache key. When a read starts, it
  * captures the current epoch for that key. If the key is invalidated while
  * the network request is in flight, the epoch advances and the stale write
  * is skipped — preventing pre-mutation data from repopulating the cache.
@@ -17,7 +17,7 @@ function getEpoch(key: string): number {
 }
 
 function bumpEpoch(key: string): void {
-  invalidationEpochs.set(key, Date.now());
+  invalidationEpochs.set(key, getEpoch(key) + 1);
 }
 
 /**

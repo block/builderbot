@@ -6,7 +6,7 @@
 -->
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { isTauri, getWindowSync, type UnlistenFn } from './lib/transport';
+  import { getWindowLabel, isTauri, getWindowSync, type UnlistenFn } from './lib/transport';
   import * as commands from './lib/api/commands';
   import TopBar from './lib/features/layout/TopBar.svelte';
   import ProjectHome from './lib/features/projects/ProjectHome.svelte';
@@ -177,11 +177,14 @@
 
   function startUpdaterLoop(): () => void {
     const isTauriApp = isTauri;
+    const windowLabel = getWindowLabel();
     void logUpdater(
-      `[updater] gate check: enabled=${updaterEnabled} dev=${import.meta.env.DEV} isTauriApp=${isTauriApp}`
+      `[updater] gate check: enabled=${updaterEnabled} dev=${import.meta.env.DEV} isTauriApp=${isTauriApp} window=${windowLabel}`
     );
 
-    if (!updaterEnabled || import.meta.env.DEV || !isTauriApp) {
+    // Update prompts and relaunches are app-wide. Letting every webview run
+    // this loop produces duplicate prompts and competing installs.
+    if (!updaterEnabled || import.meta.env.DEV || !isTauriApp || windowLabel !== 'main') {
       void logUpdater('[updater] skipped because a gate condition was not met');
       return () => {};
     }

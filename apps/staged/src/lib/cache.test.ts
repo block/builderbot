@@ -582,6 +582,37 @@ describe('first-load race protection', () => {
     expect(results).toEqual([{ data: 'fresh', source: 'network', fetchedAt: expect.any(Number) }]);
   });
 
+  it('advances the epoch when consecutive invalidations share a timestamp', async () => {
+    const dateNow = vi.spyOn(Date, 'now').mockReturnValue(1_000);
+    try {
+      // Establish an existing epoch, then begin a fetch under it.
+      await invalidateCache('same_millisecond');
+      const pending = deferred<string>();
+      mockInvoke.mockReturnValueOnce(pending.promise);
+      const inFlight = cachedCommand<string>('same_millisecond', undefined, {
+        ttl: 60_000,
+        bypassRead: true,
+      });
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // Date.now() has not advanced. A timestamp-backed epoch would collide
+      // with the first invalidation and allow the stale response to be cached.
+      await invalidateCache('same_millisecond');
+      pending.resolve('pre-mutation');
+      await expect(inFlight).resolves.toEqual({ data: 'pre-mutation', revalidating: null });
+
+      mockInvoke.mockResolvedValueOnce('fresh');
+      const followUp = await cachedCommand<string>('same_millisecond', undefined, {
+        ttl: 60_000,
+      });
+      expect(followUp).toEqual({ data: 'fresh', revalidating: null });
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
   it('invalidateCacheByArgs blocks a cache write from an in-flight first-load fetch', async () => {
     const pending = deferred<string>();
     mockInvoke.mockReturnValueOnce(pending.promise);

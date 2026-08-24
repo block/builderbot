@@ -75,6 +75,24 @@ pub struct WebEvent {
     pub payload: String,
 }
 
+const EVENT_GAP_EVENT: &str = "transport:event-gap";
+
+fn serialize_web_event<S: serde::Serialize>(
+    event_name: &str,
+    payload: S,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&serde_json::json!({
+        "event": event_name,
+        "payload": payload,
+    }))
+}
+
+fn event_gap_payload() -> String {
+    // serde_json::Value cannot fail serialization.
+    serialize_web_event(EVENT_GAP_EVENT, Value::Null)
+        .expect("event-gap payload serialization should be infallible")
+}
+
 // =============================================================================
 // Event broadcast helper
 // =============================================================================
@@ -94,10 +112,7 @@ pub fn emit_to_all<S: serde::Serialize + Clone>(
     use tauri::{Emitter, Manager};
     let _ = app_handle.emit(event_name, payload.clone());
     if let Some(tx) = app_handle.try_state::<broadcast::Sender<WebEvent>>() {
-        if let Ok(json) = serde_json::to_string(&serde_json::json!({
-            "event": event_name,
-            "payload": payload,
-        })) {
+        if let Ok(json) = serialize_web_event(event_name, payload) {
             let _ = tx.send(WebEvent {
                 event_name: event_name.to_string(),
                 payload: json,
@@ -353,6 +368,13 @@ async fn handle_ws(mut socket: WebSocket, state: WebAppState, client_id: Option<
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         log::warn!("[web_server] WebSocket client lagged, dropped {n} events");
+                        if socket
+                            .send(Message::Text(event_gap_payload().into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -3776,8 +3798,8 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_ws_client_id, web_client_id};
-    use serde_json::json;
+    use super::{event_gap_payload, normalize_ws_client_id, web_client_id};
+    use serde_json::{json, Value};
     use std::collections::BTreeSet;
 
     #[test]
@@ -3818,6 +3840,17 @@ mod tests {
         assert!(web_client_id(&json!({ "clientId": "TAURI-main" })).is_ok());
         assert!(web_client_id(&json!({})).is_err());
         assert!(web_client_id(&json!({ "clientId": 7 })).is_err());
+    }
+
+    #[test]
+    fn event_gap_payload_requests_full_client_recovery() {
+        assert_eq!(
+            serde_json::from_str::<Value>(&event_gap_payload()).unwrap(),
+            json!({
+                "event": "transport:event-gap",
+                "payload": null,
+            })
+        );
     }
 
     #[test]

@@ -49,6 +49,7 @@ let sockets: MockWebSocket[];
 
 describe('web transport', () => {
   let hydrateActiveSessions: ReturnType<typeof vi.fn>;
+  let revalidateAll: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     vi.resetModules();
@@ -58,6 +59,8 @@ describe('web transport', () => {
     // can't compile, so it is mocked for every socket-opening test.
     hydrateActiveSessions = vi.fn().mockResolvedValue(undefined);
     vi.doMock('./listeners/sessionStatusListener', () => ({ hydrateActiveSessions }));
+    revalidateAll = vi.fn().mockResolvedValue(undefined);
+    vi.doMock('./listeners/pageLifecycleListener', () => ({ revalidateAll }));
   });
 
   afterEach(() => {
@@ -147,6 +150,7 @@ describe('web transport', () => {
     sockets[1].open();
     await vi.waitFor(() => expect(replayPrPollInterestHints).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(hydrateActiveSessions).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(revalidateAll).toHaveBeenCalledTimes(1));
 
     unlisten();
   });
@@ -154,11 +158,6 @@ describe('web transport', () => {
   it('revalidates every cached surface on reconnect but not on the first connect', async () => {
     vi.useFakeTimers();
     vi.stubGlobal('WebSocket', MockWebSocket);
-    // The revalidation reaches into the SWR cache and rune-based stores, so the
-    // module is mocked like the busy-state hydrator above.
-    const revalidateAll = vi.fn().mockResolvedValue(undefined);
-    vi.doMock('./listeners/pageLifecycleListener', () => ({ revalidateAll }));
-
     const { listenToEvent } = await import('./transport');
     const unlisten = listenToEvent('pr-refresh-state', vi.fn());
     await vi.waitFor(() => expect(sockets).toHaveLength(1));
@@ -175,6 +174,27 @@ describe('web transport', () => {
 
     sockets[1].open();
     await vi.waitFor(() => expect(revalidateAll).toHaveBeenCalledTimes(1));
+
+    unlisten();
+  });
+
+  it('recovers when the server reports dropped events without reconnecting', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('WebSocket', MockWebSocket);
+    const { listenToEvent } = await import('./transport');
+    const callback = vi.fn();
+    const unlisten = listenToEvent('project-changed', callback);
+    await vi.waitFor(() => expect(sockets).toHaveLength(1));
+
+    sockets[0].open();
+    await vi.waitFor(() => expect(hydrateActiveSessions).toHaveBeenCalledTimes(1));
+
+    sockets[0].emit({ event: 'transport:event-gap', payload: null });
+
+    await vi.waitFor(() => expect(hydrateActiveSessions).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(revalidateAll).toHaveBeenCalledTimes(1));
+    expect(callback).not.toHaveBeenCalled();
+    expect(sockets).toHaveLength(1);
 
     unlisten();
   });

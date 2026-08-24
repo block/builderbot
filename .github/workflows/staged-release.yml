@@ -70,9 +70,13 @@ jobs:
           pnpm install --frozen-lockfile
           cd apps/staged/src-tauri && cargo fetch
 
+      # STAGED_OFFICIAL_RELEASE makes the config generator fail closed if the
+      # updater key or endpoint is missing, instead of silently producing a
+      # release configuration without updater settings.
       - name: Build staged release config
         working-directory: apps/staged
         env:
+          STAGED_OFFICIAL_RELEASE: 'true'
           STAGED_UPDATER_PUBLIC_KEY: ${{ secrets.STAGED_UPDATER_PUBLIC_KEY }}
           STAGED_UPDATER_ENDPOINT: https://github.com/${{ github.repository }}/releases/download/staged-latest/latest.json
         run: pnpm run tauri:release:config

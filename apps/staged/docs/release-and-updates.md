@@ -53,6 +53,14 @@ configuration (`scripts/build-tauri-release-config.mjs` writes the gitignored
 workflow pins the endpoint to the fixed `staged-latest/latest.json` URL. Do not use
 GitHub's global `releases/latest` endpoint.
 
+The config generator validates both values: the endpoint must be an HTTPS,
+credential-free URL pointing at a `latest.json` feed, and the public key must be
+the single-line base64 value produced by `tauri signer generate`. Official release
+builds (the workflow sets `STAGED_OFFICIAL_RELEASE=true`) **fail closed** if either
+value is missing, rather than silently producing a release configuration without
+updater settings. Unofficial local builds may still generate a config without
+updater settings for testing.
+
 ### 3. The renderer cannot supply update URLs or keys
 
 The trust boundary lives in the native build configuration. The renderer's
@@ -165,3 +173,27 @@ The workflow publishes two kinds of assets:
   - `Staged.app.tar.gz`
   - `Staged.app.tar.gz.sig`
   - `Staged-latest-aarch64.dmg`
+
+## Publication validation
+
+The publication scripts (`scripts/publish-updater-to-github-release.mjs` and
+`scripts/publish-dmg-to-github-release.mjs`) share validation helpers in
+`scripts/release-checks.mjs` and enforce the stable contract before and after
+upload:
+
+- only the `stable` channel is accepted
+- the release version must be plain `X.Y.Z` and match the `staged/vX.Y.Z` tag
+- the updater archive and its `.sig` file must exist, with a nonempty signature
+- the generated `latest.json` is validated **before** anything is uploaded to the
+  alias: the feed version matches the released version, the `darwin-aarch64`
+  platform record is present, its signature is nonempty, and its URL points at the
+  stable alias archive over plain HTTPS
+- after upload, the alias release must contain `latest.json`, the archive, and the
+  signature (and the DMG releases their respective assets), and every published URL
+  must be reachable before the workflow reports success (set
+  `SKIP_REACHABILITY_CHECK=1` to skip the network probe)
+
+Set `DRY_RUN=1` to validate artifacts and print the `gh` commands without touching
+real releases. The release-script tests (`scripts/release-checks.test.ts` and
+`scripts/release-scripts.test.ts`) exercise these checks against dry-run fixtures
+and run as part of `pnpm test`.

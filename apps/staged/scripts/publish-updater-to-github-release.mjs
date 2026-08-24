@@ -1,3 +1,12 @@
+// Publishes the stable updater feed and archive to the rolling staged-latest
+// GitHub release alias. Enforces the stable update contract documented in
+// docs/release-and-updates.md before and after upload:
+//
+// - stable-only channel, X.Y.Z version matching the staged/vX.Y.Z tag
+// - archive and signature assets present with a nonempty signature
+// - latest.json contains a valid darwin-aarch64 entry pointing at the
+//   stable alias archive URL
+// - published alias assets are reachable before the workflow reports success
 import { execFileSync } from 'node:child_process';
 import {
   cpSync,
@@ -10,6 +19,13 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
+import {
+  assertStableChannel,
+  assertValidStableFeed,
+  assertValidVersion,
+  assertVersionTagMatchesVersion,
+  assertUrlsReachable,
+} from './release-checks.mjs';
 
 function readArg(name) {
   const exact = `--${name}`;
@@ -27,17 +43,16 @@ function readArg(name) {
 }
 
 const requestedChannel = (
-  readArg('channel') ?? process.env.STAGED_RELEASE_CHANNEL ?? 'stable'
+  readArg('channel') ??
+  process.env.STAGED_RELEASE_CHANNEL ??
+  'stable'
 ).toLowerCase();
-if (requestedChannel !== 'stable') {
-  throw new Error(
-    `Unsupported release channel "${requestedChannel}". Only "stable" is supported.`,
-  );
-}
+assertStableChannel(requestedChannel);
 
 const repo = process.env.GITHUB_REPOSITORY ?? 'block/builderbot';
 const tauriConfigPath = resolve(process.cwd(), 'src-tauri/tauri.conf.json');
 const version = process.env.VERSION ?? readVersionFromConfig();
+const versionTag = process.env.RELEASE_TAG ?? `staged/v${version}`;
 const latestTag = process.env.CHANNEL_LATEST_TAG ?? 'staged-latest';
 const latestReleaseTitle = process.env.LATEST_RELEASE_TITLE ?? 'Staged Stable Latest';
 const releaseTarget = process.env.RELEASE_TARGET;
@@ -46,6 +61,8 @@ const updaterPlatform = process.env.UPDATER_PLATFORM ?? 'darwin-aarch64';
 const updaterArchiveName = process.env.UPDATER_ARCHIVE_NAME;
 const productName = process.env.UPDATER_PRODUCT_NAME ?? 'Staged';
 const dryRun = process.env.DRY_RUN === 'true' || process.env.DRY_RUN === '1';
+const skipReachabilityCheck =
+  process.env.SKIP_REACHABILITY_CHECK === 'true' || process.env.SKIP_REACHABILITY_CHECK === '1';
 const defaultBundleDirs = [
   `src-tauri/target/${tauriTarget}/release/bundle/macos`,
   'src-tauri/target/release/bundle/macos',
@@ -54,9 +71,12 @@ const bundleDir = resolve(
   process.cwd(),
   process.env.UPDATER_BUNDLE_DIR ??
     defaultBundleDirs.find((dir) => existsSync(resolve(process.cwd(), dir))) ??
-    defaultBundleDirs[1],
+    defaultBundleDirs[1]
 );
 const latestPath = join(bundleDir, 'latest.json');
+
+assertValidVersion(version);
+assertVersionTagMatchesVersion(versionTag, version);
 
 function readVersionFromConfig() {
   const config = JSON.parse(readFileSync(tauriConfigPath, 'utf-8'));
@@ -112,7 +132,7 @@ function ensureRelease(tag, title) {
 function readReleaseAssets(tag) {
   const assetsRaw = runGh(
     ['release', 'view', tag, '--repo', repo, '--json', 'assets', '--jq', '.assets[].name'],
-    { encoding: 'utf-8' },
+    { encoding: 'utf-8' }
   );
   return assetsRaw
     .split('\n')
@@ -139,24 +159,30 @@ function resolveArchivePath() {
   }
   if (candidates.length === 0) {
     throw new Error(
-      `Could not find updater archive in ${bundleDir}. Expected ${canonicalArchiveName} or set UPDATER_ARCHIVE_NAME.`,
+      `Could not find updater archive in ${bundleDir}. Expected ${canonicalArchiveName} or set UPDATER_ARCHIVE_NAME.`
     );
   }
   throw new Error(
-    `Found multiple updater archives in ${bundleDir}: ${candidates.join(', ')}. Set UPDATER_ARCHIVE_NAME.`,
+    `Found multiple updater archives in ${bundleDir}: ${candidates.join(', ')}. Set UPDATER_ARCHIVE_NAME.`
   );
 }
 
-function buildStableLatest(signaturePath) {
-  const tauriConfig = JSON.parse(readFileSync(tauriConfigPath, 'utf-8'));
+function readSignature(signaturePath) {
   const signature = readFileSync(signaturePath, 'utf-8').trim();
+  if (!signature) {
+    throw new Error(`Updater signature file is empty: ${signaturePath}`);
+  }
+  return signature;
+}
+
+function buildStableLatest(signaturePath) {
   return {
-    version: tauriConfig.version,
-    notes: `Release v${tauriConfig.version}.`,
+    version,
+    notes: `Release v${version}.`,
     pub_date: new Date().toISOString(),
     platforms: {
       [updaterPlatform]: {
-        signature,
+        signature: readSignature(signaturePath),
         url: '',
       },
     },
@@ -167,7 +193,7 @@ function downloadUrl(name) {
   return `https://github.com/${repo}/releases/download/${latestTag}/${encodeURIComponent(name)}`;
 }
 
-function main() {
+async function main() {
   const archivePath = resolveArchivePath();
   const signaturePath = `${archivePath}.sig`;
   requirePath(archivePath);
@@ -182,14 +208,21 @@ function main() {
   if (!platformRecord) {
     const available = Object.keys(latest?.platforms ?? {});
     throw new Error(
-      `Platform "${updaterPlatform}" missing in latest.json. Available: ${available.join(', ') || '(none)'}`,
+      `Platform "${updaterPlatform}" missing in latest.json. Available: ${available.join(', ') || '(none)'}`
     );
   }
 
   const archiveName = basename(archivePath);
   const signatureName = basename(signaturePath);
-  platformRecord.signature = readFileSync(signaturePath, 'utf-8').trim();
+  platformRecord.signature = readSignature(signaturePath);
   platformRecord.url = downloadUrl(archiveName);
+
+  // Validate the generated feed before publishing anything to the alias.
+  assertValidStableFeed(latest, {
+    version,
+    platform: updaterPlatform,
+    expectedUrl: downloadUrl(archiveName),
+  });
 
   const stageDir = mkdtempSync(join(tmpdir(), 'staged-github-updater-'));
   const stagedLatestPath = join(stageDir, 'latest.json');
@@ -216,11 +249,12 @@ function main() {
     console.log(`- latest tag:      ${latestTag}`);
     console.log(`- updater archive: ${archiveName}`);
     console.log(`- updater endpoint: ${downloadUrl('latest.json')}`);
+    console.log('Feed validation passed (version, platform, signature, URL).');
 
     if (dryRun) {
       console.log('DRY_RUN enabled. Skipping upload.');
       console.log(
-        `gh release view ${latestTag} --repo ${repo} || gh release create ${latestTag} --repo ${repo} --title "${latestReleaseTitle}" --notes "Automated stable release placeholder."`,
+        `gh release view ${latestTag} --repo ${repo} || gh release create ${latestTag} --repo ${repo} --title "${latestReleaseTitle}" --notes "Automated stable release placeholder."`
       );
       console.log(`gh ${uploadArgs.join(' ')}`);
       return;
@@ -236,6 +270,18 @@ function main() {
       }
     }
 
+    if (skipReachabilityCheck) {
+      console.log('SKIP_REACHABILITY_CHECK enabled. Skipping published URL checks.');
+    } else {
+      const publishedUrls = [
+        downloadUrl('latest.json'),
+        downloadUrl(archiveName),
+        downloadUrl(signatureName),
+      ];
+      console.log('Verifying published stable alias assets are reachable...');
+      await assertUrlsReachable(publishedUrls);
+    }
+
     console.log('GitHub updater alias assets verified.');
     console.log(`Updater endpoint: ${downloadUrl('latest.json')}`);
   } finally {
@@ -243,4 +289,4 @@ function main() {
   }
 }
 
-main();
+await main();

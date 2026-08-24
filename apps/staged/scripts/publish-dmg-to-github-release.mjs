@@ -1,7 +1,22 @@
+// Publishes the signed DMG to the immutable staged/vX.Y.Z release and the
+// rolling staged-latest alias. Enforces the stable update contract documented
+// in docs/release-and-updates.md:
+//
+// - stable-only channel, X.Y.Z version matching the staged/vX.Y.Z tag
+// - the DMG artifact exists before any upload
+// - the versioned release keeps its immutable asset and the alias keeps
+//   Staged-latest-aarch64.dmg after publication
+// - published URLs are reachable before the workflow reports success
 import { execFileSync } from 'node:child_process';
 import { basename, join, resolve } from 'node:path';
 import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import {
+  assertStableChannel,
+  assertValidVersion,
+  assertVersionTagMatchesVersion,
+  assertUrlsReachable,
+} from './release-checks.mjs';
 
 function readArg(name) {
   const exact = `--${name}`;
@@ -19,13 +34,11 @@ function readArg(name) {
 }
 
 const requestedChannel = (
-  readArg('channel') ?? process.env.STAGED_RELEASE_CHANNEL ?? 'stable'
+  readArg('channel') ??
+  process.env.STAGED_RELEASE_CHANNEL ??
+  'stable'
 ).toLowerCase();
-if (requestedChannel !== 'stable') {
-  throw new Error(
-    `Unsupported release channel "${requestedChannel}". Only "stable" is supported.`,
-  );
-}
+assertStableChannel(requestedChannel);
 
 const repo = process.env.GITHUB_REPOSITORY ?? 'block/builderbot';
 const version = process.env.VERSION ?? readVersionFromConfig();
@@ -37,11 +50,16 @@ const latestReleaseTitle = process.env.LATEST_RELEASE_TITLE ?? 'Staged Stable La
 const dmgProductName = process.env.DMG_PRODUCT_NAME ?? 'Staged';
 const latestAssetName = process.env.LATEST_DMG_ASSET_NAME ?? 'Staged-latest-aarch64.dmg';
 const dryRun = process.env.DRY_RUN === 'true' || process.env.DRY_RUN === '1';
+const skipReachabilityCheck =
+  process.env.SKIP_REACHABILITY_CHECK === 'true' || process.env.SKIP_REACHABILITY_CHECK === '1';
+
+assertValidVersion(version);
+assertVersionTagMatchesVersion(versionTag, version);
 
 const dmgPath = resolve(
   process.cwd(),
   process.env.DMG_PATH ??
-    `src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/${dmgProductName}_${version}_aarch64.dmg`,
+    `src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/${dmgProductName}_${version}_aarch64.dmg`
 );
 
 function readVersionFromConfig() {
@@ -101,7 +119,7 @@ function ensureRelease(tag, { title, prerelease }) {
 function readReleaseAssets(tag) {
   const assetsRaw = runGh(
     ['release', 'view', tag, '--repo', repo, '--json', 'assets', '--jq', '.assets[].name'],
-    { encoding: 'utf-8' },
+    { encoding: 'utf-8' }
   );
   return assetsRaw
     .split('\n')
@@ -113,7 +131,7 @@ function versionedAssetUrl(tag, name) {
   return `https://github.com/${repo}/releases/download/${tag}/${encodeURIComponent(name)}`;
 }
 
-function main() {
+async function main() {
   if (!existsSync(dmgPath)) {
     throw new Error(`Missing DMG artifact: ${dmgPath}`);
   }
@@ -125,7 +143,15 @@ function main() {
   try {
     cpSync(dmgPath, latestAliasPath);
 
-    const uploadVersionedArgs = ['release', 'upload', versionTag, dmgPath, '--repo', repo, '--clobber'];
+    const uploadVersionedArgs = [
+      'release',
+      'upload',
+      versionTag,
+      dmgPath,
+      '--repo',
+      repo,
+      '--clobber',
+    ];
     const uploadLatestArgs = [
       'release',
       'upload',
@@ -147,7 +173,7 @@ function main() {
       console.log('DRY_RUN enabled. Skipping upload.');
       console.log(`gh release view ${quote(versionTag)} --repo ${quote(repo)}`);
       console.log(
-        `gh release view ${quote(latestTag)} --repo ${quote(repo)} || gh release create ${quote(latestTag)} --repo ${quote(repo)} --title ${quote(latestReleaseTitle)} --notes ${quote('Automated stable release placeholder.')}${releaseTarget ? ` --target ${quote(releaseTarget)}` : ''}`,
+        `gh release view ${quote(latestTag)} --repo ${quote(repo)} || gh release create ${quote(latestTag)} --repo ${quote(repo)} --title ${quote(latestReleaseTitle)} --notes ${quote('Automated stable release placeholder.')}${releaseTarget ? ` --target ${quote(releaseTarget)}` : ''}`
       );
       console.log(`gh ${uploadVersionedArgs.map(quote).join(' ')}`);
       console.log(`gh ${uploadLatestArgs.map(quote).join(' ')}`);
@@ -168,7 +194,19 @@ function main() {
       throw new Error(`Release ${versionTag} is missing versioned asset ${dmgName} after upload`);
     }
     if (!latestAssets.includes(latestAssetName)) {
-      throw new Error(`Release ${latestTag} is missing latest alias asset ${latestAssetName} after upload`);
+      throw new Error(
+        `Release ${latestTag} is missing latest alias asset ${latestAssetName} after upload`
+      );
+    }
+
+    if (skipReachabilityCheck) {
+      console.log('SKIP_REACHABILITY_CHECK enabled. Skipping published URL checks.');
+    } else {
+      console.log('Verifying published DMG assets are reachable...');
+      await assertUrlsReachable([
+        versionedAssetUrl(versionTag, dmgName),
+        versionedAssetUrl(latestTag, latestAssetName),
+      ]);
     }
 
     console.log('GitHub DMG assets verified.');
@@ -179,4 +217,4 @@ function main() {
   }
 }
 
-main();
+await main();

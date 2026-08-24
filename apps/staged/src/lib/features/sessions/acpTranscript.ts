@@ -87,10 +87,7 @@ interface TimelineEntry {
 const TOOL_EVENT_KINDS = new Set(['tool_call', 'tool_call_update']);
 /** Hidden metadata row announcing a `generate_pikchr` child session at start. */
 const PIKCHR_SESSION_STARTED_EVENT = 'pikchr_session_started';
-const VISIBLE_STANDALONE_EVENT_KINDS = new Set<AcpTranscriptEventKind>([
-  'plan_update',
-  'session_info_update',
-]);
+const VISIBLE_STANDALONE_EVENT_KINDS = new Set<AcpTranscriptEventKind>(['session_info_update']);
 
 export function buildAcpTranscriptGroups(
   visibleMessages: SessionMessage[],
@@ -274,6 +271,47 @@ export function latestAvailableCommands(metadataMessages: SessionMessage[]): Acp
       };
     })
     .filter((command): command is AcpCommand => command !== null);
+}
+
+export type PlanEntryStatus = 'pending' | 'in_progress' | 'completed' | 'failed';
+
+export interface PlanEntry {
+  content: string;
+  status: PlanEntryStatus;
+}
+
+/**
+ * The most recent plan snapshot from a session's ACP metadata rows, or `null`
+ * when no plan exists (or the latest plan has no entries). ACP plan updates
+ * carry complete snapshots, so latest-row-wins is correct for growth and
+ * replacement alike.
+ */
+export function latestPlan(metadataMessages: SessionMessage[]): PlanEntry[] | null {
+  const latest = [...metadataMessages]
+    .reverse()
+    .find((message) => message.acpEventKind === 'plan_update');
+  if (!latest) return null;
+  const rawEntries = arrayProp(latest.acpContent, 'entries');
+  if (!rawEntries) return null;
+
+  const entries = rawEntries
+    .map((entry) => {
+      const content = stringProp(entry, 'content');
+      if (!content) return null;
+      return {
+        content,
+        status: normalizePlanEntryStatus(stringProp(entry, 'status')),
+      };
+    })
+    .filter((entry): entry is PlanEntry => entry !== null);
+  return entries.length > 0 ? entries : null;
+}
+
+/** ACP's spec defines pending | in_progress | completed; `failed` is accepted
+ *  defensively and anything unknown normalizes to `pending`. */
+function normalizePlanEntryStatus(status: string | null): PlanEntryStatus {
+  if (status === 'in_progress' || status === 'completed' || status === 'failed') return status;
+  return 'pending';
 }
 
 export function formatJson(value: unknown): string {
@@ -540,7 +578,7 @@ function eventContent(row: SessionMessage): unknown {
 function eventTitle(kind: AcpTranscriptEventKind): string {
   switch (kind) {
     case 'plan_update':
-      return 'Plan';
+      return 'Plan'; // Unreachable in transcript rows; kept for kind exhaustiveness.
     case 'usage_update':
     case 'prompt_response':
       return 'Usage';

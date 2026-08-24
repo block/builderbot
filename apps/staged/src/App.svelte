@@ -133,6 +133,14 @@
     window.dispatchEvent(new CustomEvent('staged:new-project'));
   }
 
+  function requestNewWindow() {
+    // The new window inherits this window's selected project, mirroring the
+    // macOS menu path in menuListener.ts.
+    void commands.newWindow(navigation.selectedProjectId ?? null).catch((e) => {
+      console.error('Failed to open new window:', e);
+    });
+  }
+
   function navigateBack(): boolean {
     if (!navigation.canGoBack) return false;
     popDetailRoute();
@@ -340,12 +348,28 @@
         id: 'app-new-project',
         description: 'New project',
         category: 'app',
-        // ⇧⌘N — plain ⌘N is the native File ▸ New Window accelerator, which
-        // the menu consumes before the webview ever sees the keydown.
         keys: ['n'],
-        modifiers: { meta: true, shift: true },
+        modifiers: { meta: true },
         handler: requestNewProject,
       },
+      // New Window is Tauri-only (the web server rejects `new_window`). On
+      // macOS the native File ▸ New Window accelerator (⇧⌘N) consumes the
+      // keydown before the webview sees it and routes through the menu
+      // listener instead, so this binding is effectively for Windows/Linux,
+      // where the macOS-only menu — previously the sole caller of
+      // `newWindow` — doesn't exist.
+      ...(isTauri
+        ? [
+            {
+              id: 'app-new-window',
+              description: 'New window',
+              category: 'app' as const,
+              keys: ['n'],
+              modifiers: { meta: true, shift: true },
+              handler: requestNewWindow,
+            },
+          ]
+        : []),
       {
         id: 'app-go-back',
         description: 'Back',

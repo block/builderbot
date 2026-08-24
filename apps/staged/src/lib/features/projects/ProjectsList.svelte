@@ -323,10 +323,7 @@
 <TopBarPortal title="Projects" rightActions={rootTopBarActions} />
 
 {#snippet rootTopBarActions()}
-  <span
-    class="inline-flex"
-    title={viewport.showShortcutHints ? 'New project (⇧⌘N)' : 'New project'}
-  >
+  <span class="inline-flex" title={viewport.showShortcutHints ? 'New project (⌘N)' : 'New project'}>
     <Button
       variant="ghost"
       size="icon-xs"

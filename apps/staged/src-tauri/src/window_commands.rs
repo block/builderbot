@@ -235,7 +235,7 @@ mod tests {
     }
 
     /// [`new_window`] clones the conf's `main` window entry. Giving that entry an
-    /// explicit non-`main` label would turn every Cmd+N into a runtime error, so
+    /// explicit non-`main` label would turn every New Window into a runtime error, so
     /// catch it here instead. (An entry with no `label` parses as `main`.)
     #[test]
     fn conf_has_a_main_window_entry_for_new_window_to_clone() {

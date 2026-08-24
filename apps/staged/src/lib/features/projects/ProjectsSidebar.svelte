@@ -544,7 +544,7 @@
           <Button
             variant="ghost"
             class="group h-auto w-full justify-start gap-2.5 px-2.5 py-2 font-medium text-foreground hover:bg-[var(--projects-sidebar-hover-bg)] hover:text-foreground"
-            title={viewport.showShortcutHints ? 'New project (⇧⌘N)' : 'New project'}
+            title={viewport.showShortcutHints ? 'New project (⌘N)' : 'New project'}
             onclick={openNewProject}
           >
             <span

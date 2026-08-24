@@ -1851,12 +1851,15 @@ pub fn run() {
                     true,
                     Some("CmdOrCtrl+,"),
                 )?;
+                // ⇧⌘N, not plain ⌘N: the native accelerator consumes the
+                // keydown before the webview sees it, and ⌘N belongs to the
+                // frontend's New Project shortcut (`app-new-project`).
                 let new_window_item = MenuItem::with_id(
                     handle,
                     "new_window",
                     "New Window",
                     true,
-                    Some("CmdOrCtrl+N"),
+                    Some("CmdOrCtrl+Shift+N"),
                 )?;
                 let find_item =
                     MenuItem::with_id(handle, "find", "Find…", true, Some("CmdOrCtrl+F"))?;

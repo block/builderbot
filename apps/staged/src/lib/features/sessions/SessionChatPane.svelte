@@ -106,12 +106,15 @@
     groupRichToolsByVerb,
     isToolMetadataSettled,
     latestAvailableCommands,
+    latestPlan,
     stabilizeAcpTranscriptGroups,
     transcriptGroupKey,
     type AcpCommand,
     type AcpTranscriptEvent,
     type AcpTranscriptGroup,
   } from './acpTranscript';
+  import PlanCard from './PlanCard.svelte';
+  import { viewport } from '../../shared/viewport.svelte';
   import {
     displayRootKey,
     normalizeDisplayRoots,
@@ -256,6 +259,8 @@
    *  last group?" without re-running whenever the grouped array identity
    *  changes — deriveds cut propagation when the value is equal. */
   let lastGroupIndex = $derived(grouped.length - 1);
+  /** Latest ACP plan, pinned above the transcript rather than rendered in it. */
+  let plan = $derived.by(() => latestPlan(acpMetadataMessages));
   /** Pikchr sources of successful render_pikchr tool calls, shown inline as diagrams. */
   let pikchrToolSources = $derived(
     grouped.flatMap((group) =>
@@ -1624,10 +1629,6 @@
   }
 
   function acpEventSummary(event: AcpTranscriptEvent): string {
-    if (event.kind === 'plan_update') {
-      const entries = arrayProp(event.content, 'entries');
-      return entries.length === 1 ? '1 step' : `${entries.length} steps`;
-    }
     if (event.kind === 'available_commands_update') {
       const commands = arrayProp(event.content, 'availableCommands');
       return commands.length === 1 ? '1 command' : `${commands.length} commands`;
@@ -1637,10 +1638,6 @@
       return options.length === 1 ? '1 option' : `${options.length} options`;
     }
     return compactJsonSummary(event.content);
-  }
-
-  function planEntries(content: unknown): Record<string, unknown>[] {
-    return arrayProp(content, 'entries');
   }
 
   function configOptions(content: unknown): Record<string, unknown>[] {
@@ -1740,6 +1737,11 @@
   bind:this={modalElement}
   class={`session-chat-pane ${compact ? 'compact' : ''} ${dragOver ? 'drag-over' : ''}`}
 >
+  <!-- Latest plan, pinned above the scrollable transcript -->
+  {#if plan}
+    <PlanCard entries={plan} defaultExpanded={!viewport.isMobile && !compact} />
+  {/if}
+
   <!-- Messages area -->
   <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -1961,16 +1963,7 @@
                   </div>
                   {#if isExpanded}
                     <div class="acp-event-body" transition:slide={{ duration: SLIDE_DURATION }}>
-                      {#if event.kind === 'plan_update'}
-                        <div class="plan-list">
-                          {#each planEntries(event.content) as entry}
-                            <div class="plan-entry">
-                              <span class="plan-status">{stringProp(entry, 'status')}</span>
-                              <span>{stringProp(entry, 'content')}</span>
-                            </div>
-                          {/each}
-                        </div>
-                      {:else if event.kind === 'config_options_update'}
+                      {#if event.kind === 'config_options_update'}
                         <div class="config-list">
                           {#each configOptions(event.content) as option}
                             <label class="config-option">
@@ -2567,28 +2560,11 @@
     line-height: 1.5;
   }
 
-  .plan-list,
   .config-list,
   .command-list {
     display: flex;
     flex-direction: column;
     gap: 6px;
-  }
-
-  .plan-entry {
-    display: flex;
-    gap: 8px;
-    align-items: flex-start;
-    color: var(--text-muted);
-    line-height: 1.35;
-  }
-
-  .plan-status {
-    flex-shrink: 0;
-    min-width: 74px;
-    color: var(--text-faint);
-    font-size: calc(var(--size-xs) * 0.9);
-    text-transform: capitalize;
   }
 
   .config-option {

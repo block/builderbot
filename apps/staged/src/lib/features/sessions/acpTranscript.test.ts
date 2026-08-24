@@ -5,6 +5,7 @@ import {
   groupRichToolsByVerb,
   isToolMetadataSettled,
   latestAvailableCommands,
+  latestPlan,
   stabilizeAcpTranscriptGroups,
   type RichToolItem,
 } from './acpTranscript';
@@ -154,7 +155,7 @@ describe('buildAcpTranscriptGroups', () => {
     expect(groups).toEqual([]);
   });
 
-  it('continues surfacing plan metadata rows', () => {
+  it('filters plan metadata rows out of the transcript', () => {
     const groups = buildAcpTranscriptGroups(
       [],
       [
@@ -167,8 +168,7 @@ describe('buildAcpTranscriptGroups', () => {
       ]
     );
 
-    expect(groups).toHaveLength(1);
-    expect(groups[0].type).toBe('acp');
+    expect(groups).toEqual([]);
   });
 
   it('marks generate_pikchr tools and extracts the inner session id', () => {
@@ -691,6 +691,84 @@ describe('latestAvailableCommands', () => {
         description: 'Create a plan',
         inputHint: 'goal',
       },
+    ]);
+  });
+});
+
+describe('latestPlan', () => {
+  it('returns the newest plan when several plan_update rows exist', () => {
+    const plan = latestPlan([
+      message({
+        id: 1,
+        role: 'assistant',
+        acpEventKind: 'plan_update',
+        acpContent: { entries: [{ content: 'Old step', status: 'pending' }] },
+      }),
+      message({
+        id: 2,
+        role: 'assistant',
+        acpEventKind: 'plan_update',
+        acpContent: {
+          entries: [
+            { content: 'Check UI', status: 'completed', priority: 'high' },
+            { content: 'Fix bug', status: 'in_progress' },
+          ],
+        },
+      }),
+    ]);
+
+    expect(plan).toEqual([
+      { content: 'Check UI', status: 'completed', priority: 'high' },
+      { content: 'Fix bug', status: 'in_progress', priority: null },
+    ]);
+  });
+
+  it('returns null when there are no plan rows', () => {
+    const plan = latestPlan([
+      message({
+        id: 1,
+        role: 'assistant',
+        acpEventKind: 'available_commands_update',
+        acpContent: { availableCommands: [{ name: 'plan' }] },
+      }),
+    ]);
+
+    expect(plan).toBeNull();
+  });
+
+  it('returns null for an empty entries array', () => {
+    const plan = latestPlan([
+      message({
+        id: 1,
+        role: 'assistant',
+        acpEventKind: 'plan_update',
+        acpContent: { entries: [] },
+      }),
+    ]);
+
+    expect(plan).toBeNull();
+  });
+
+  it('normalizes unknown statuses to pending', () => {
+    const plan = latestPlan([
+      message({
+        id: 1,
+        role: 'assistant',
+        acpEventKind: 'plan_update',
+        acpContent: {
+          entries: [
+            { content: 'Mystery step', status: 'wat' },
+            { content: 'Statusless step' },
+            { content: 'Failed step', status: 'failed' },
+          ],
+        },
+      }),
+    ]);
+
+    expect(plan).toEqual([
+      { content: 'Mystery step', status: 'pending', priority: null },
+      { content: 'Statusless step', status: 'pending', priority: null },
+      { content: 'Failed step', status: 'failed', priority: null },
     ]);
   });
 });

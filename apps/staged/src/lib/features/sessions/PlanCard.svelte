@@ -14,6 +14,7 @@
   import { slide } from 'svelte/transition';
   import CircleAlert from '@lucide/svelte/icons/circle-alert';
   import CircleCheck from '@lucide/svelte/icons/circle-check';
+  import CircleDot from '@lucide/svelte/icons/circle-dot';
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Spinner from '../../shared/Spinner.svelte';
   import type { PlanEntry } from './acpTranscript';
@@ -31,12 +32,12 @@
   let expanded = $state(defaultExpanded);
 
   let completedCount = $derived(entries.filter((entry) => entry.status === 'completed').length);
-  let overallStatus = $derived.by((): PlanEntry['status'] | null => {
+  let overallStatus = $derived.by((): PlanEntry['status'] => {
     if (entries.some((entry) => entry.status === 'failed')) return 'failed';
     if (entries.some((entry) => entry.status === 'in_progress')) return 'in_progress';
     if (entries.length > 0 && entries.every((entry) => entry.status === 'completed'))
       return 'completed';
-    return null;
+    return 'pending';
   });
 </script>
 
@@ -50,13 +51,22 @@
     <span class="plan-caret" class:plan-caret-expanded={expanded}>
       <ChevronRight size={12} />
     </span>
-    {#if overallStatus === 'in_progress'}
-      <span class="plan-status-icon"><Spinner size={11} /></span>
-    {:else if overallStatus === 'failed'}
-      <span class="plan-status-icon status-danger"><CircleAlert size={11} /></span>
-    {:else if overallStatus === 'completed'}
-      <span class="plan-status-icon status-success"><CircleCheck size={11} /></span>
-    {/if}
+    <span
+      class="plan-status-icon"
+      class:status-running={overallStatus === 'in_progress'}
+      class:status-danger={overallStatus === 'failed'}
+      class:status-success={overallStatus === 'completed'}
+    >
+      {#if overallStatus === 'in_progress'}
+        <Spinner size={11} />
+      {:else if overallStatus === 'failed'}
+        <CircleAlert size={11} />
+      {:else if overallStatus === 'completed'}
+        <CircleCheck size={11} />
+      {:else}
+        <CircleDot size={11} />
+      {/if}
+    </span>
     <span class="plan-title">Plan</span>
     <span class="plan-progress">{completedCount}/{entries.length}</span>
   </button>
@@ -66,6 +76,7 @@
         <div class="plan-entry">
           <span
             class="plan-entry-icon"
+            class:status-running={entry.status === 'in_progress'}
             class:status-success={entry.status === 'completed'}
             class:status-danger={entry.status === 'failed'}
           >
@@ -75,6 +86,8 @@
               <CircleCheck size={11} />
             {:else if entry.status === 'failed'}
               <CircleAlert size={11} />
+            {:else}
+              <CircleDot size={11} />
             {/if}
           </span>
           <span class="plan-entry-text">{entry.content}</span>
@@ -151,6 +164,10 @@
     color: var(--text-faint);
   }
 
+  .status-running {
+    color: var(--ui-warning);
+  }
+
   .status-success {
     color: var(--ui-success, var(--ui-accent));
   }
@@ -165,6 +182,9 @@
     gap: 4px;
     margin-top: 4px;
     padding: 2px 0 4px;
+    max-height: min(240px, 40vh);
+    overflow-y: auto;
+    overscroll-behavior: contain;
   }
 
   .plan-entry {
@@ -182,5 +202,6 @@
 
   .plan-entry-text {
     min-width: 0;
+    overflow-wrap: anywhere;
   }
 </style>

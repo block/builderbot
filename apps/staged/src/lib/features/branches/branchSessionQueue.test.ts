@@ -3,16 +3,12 @@ import { shouldQueueBranchSession, type BranchSessionQueueTimeline } from './bra
 import type { BranchSessionType } from '../../types';
 
 function timeline(
-  sessions: Partial<Record<BranchSessionType, string | null>> = {},
-  autoReviewStatus: string | null = null
+  sessions: Partial<Record<BranchSessionType, string | null>> = {}
 ): BranchSessionQueueTimeline {
   return {
     commits: sessions.commit === undefined ? [] : [{ sessionStatus: sessions.commit }],
     notes: sessions.note === undefined ? [] : [{ sessionStatus: sessions.note }],
-    reviews: [
-      ...(sessions.review === undefined ? [] : [{ sessionStatus: sessions.review, isAuto: false }]),
-      ...(autoReviewStatus === null ? [] : [{ sessionStatus: autoReviewStatus, isAuto: true }]),
-    ],
+    reviews: sessions.review === undefined ? [] : [{ sessionStatus: sessions.review }],
   };
 }
 
@@ -60,17 +56,6 @@ describe('shouldQueueBranchSession', () => {
           })
         ).toBe(true);
       }
-    }
-  });
-
-  it('ignores auto reviews when deciding whether user work can start', () => {
-    for (const mode of ['commit', 'note', 'review'] satisfies BranchSessionType[]) {
-      expect(
-        shouldQueueBranchSession({
-          mode,
-          timeline: timeline({}, 'running'),
-        })
-      ).toBe(false);
     }
   });
 

@@ -331,7 +331,7 @@
     return (
       tl.commits.some((c) => isSessionActive(c.sessionStatus)) ||
       tl.notes.some((n) => isSessionActive(n.sessionStatus)) ||
-      tl.reviews.some((r) => !r.isAuto && isSessionActive(r.sessionStatus))
+      tl.reviews.some((r) => isSessionActive(r.sessionStatus))
     );
   }
   let commandPipelinePending = $state(false);
@@ -430,7 +430,6 @@
     const candidates: Candidate[] = [];
 
     for (const review of timeline.reviews) {
-      if (review.isAuto) continue;
       const ts = Math.floor((review.completedAt ?? review.createdAt) / 1000);
       candidates.push({
         kind: 'review',
@@ -560,9 +559,6 @@
     getIsRemote: () => isRemote,
     loadTimeline: (opts) => loadTimeline(opts),
     getTimeline: () => timeline,
-    setTimeline: (tl) => {
-      timeline = tl;
-    },
   });
 
   let requestedTimelineKey: string | null = null;
@@ -703,28 +699,10 @@
     const branchId = branch.id;
 
     const unlistenStatus = onSessionStatusChanged((payload) => {
-      const { sessionId: eventSessionId, status, branchId: eventBranchId, isAutoReview } = payload;
+      const { sessionId: eventSessionId, status, branchId: eventBranchId } = payload;
       if (status === 'completed' || status === 'error' || status === 'cancelled') {
-        // If this is the auto review session completing, just clear tracking
-        if (eventSessionId === sessionMgr.autoReviewSessionId) {
-          sessionMgr.autoReviewSessionId = null;
-          return;
-        }
-
         // Push/force-push session tracking lives in pushStateStore and is
         // cleared centrally by sessionStatusListener.handlePushCompletion.
-
-        // Skip normal completion handling for any auto review session
-        if (isAutoReview) {
-          return;
-        }
-
-        // Skip reload for the adopted auto-review session completing —
-        // the timeline was already updated optimistically during adoption.
-        if (eventSessionId === sessionMgr.adoptedSessionId) {
-          sessionMgr.adoptedSessionId = null;
-          return;
-        }
 
         // Only reload if this session belongs to our branch
         if (eventBranchId && eventBranchId !== branchId) return;
@@ -740,21 +718,12 @@
           prButton.handlePushSessionComplete(status);
         }
       } else if (status === 'running' && eventBranchId === branchId) {
-        // Track auto review sessions started by the backend
-        if (isAutoReview) {
-          sessionMgr.autoReviewSessionId = eventSessionId;
-          commands.findFreshAutoReview(branchId).then((review) => {
-            if (review) {
-              sessionMgr.autoReviewId = review.id;
-            }
-          });
-        }
         // Refresh the timeline so the pending note/commit stub appears immediately.
         // Skip if a session start is in-flight (pending item has no sessionId yet),
         // because startOrQueueSession will call loadTimeline after
         // it gets the sessionId — otherwise pruning can't match the pending item
         // and both the pending and real items briefly render simultaneously.
-        if (!isAutoReview && !sessionMgr.isSessionStartPending) {
+        if (!sessionMgr.isSessionStartPending) {
           loadTimeline();
         }
       }

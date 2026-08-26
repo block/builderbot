@@ -180,7 +180,6 @@ export interface ReviewTimelineItem {
   completionReason: string | null;
   title: string | null;
   commentCount: number;
-  isAuto: boolean;
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
@@ -531,7 +530,6 @@ export interface SessionStatusPayload {
   branchId?: string;
   projectId?: string;
   sessionType?: string;
-  isAutoReview?: boolean;
 }
 
 /**
@@ -546,7 +544,6 @@ export interface ActiveSessionInfo {
   branchId: string | null;
   sessionType: string | null;
   status: SessionStatus;
-  isAutoReview: boolean;
 }
 
 /**

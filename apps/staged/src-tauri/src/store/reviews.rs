@@ -12,8 +12,8 @@ impl Store {
     pub fn create_review(&self, review: &Review) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO reviews (id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at, completed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO reviews (id, branch_id, commit_sha, scope, session_id, title, created_at, updated_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 review.id,
                 review.branch_id,
@@ -21,7 +21,6 @@ impl Store {
                 review.scope.as_str(),
                 review.session_id,
                 review.title,
-                review.is_auto,
                 review.created_at,
                 review.updated_at,
                 review.completed_at,
@@ -50,9 +49,9 @@ impl Store {
         // when multiple reviews share the same (branch, commit, scope) triple.
         let existing: Option<Review> = conn
             .query_row(
-                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at, completed_at
+                "SELECT id, branch_id, commit_sha, scope, session_id, title, created_at, updated_at, completed_at
                  FROM reviews
-                 WHERE branch_id = ?1 AND commit_sha = ?2 AND scope = ?3 AND is_auto = 0
+                 WHERE branch_id = ?1 AND commit_sha = ?2 AND scope = ?3
                  ORDER BY created_at DESC LIMIT 1",
                 params![branch_id, commit_sha, scope.as_str()],
                 Self::row_to_review_header,
@@ -67,8 +66,8 @@ impl Store {
         // Create new
         let review = Review::new(branch_id, commit_sha, scope);
         conn.execute(
-            "INSERT INTO reviews (id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at, completed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO reviews (id, branch_id, commit_sha, scope, session_id, title, created_at, updated_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 review.id,
                 review.branch_id,
@@ -76,7 +75,6 @@ impl Store {
                 review.scope.as_str(),
                 review.session_id,
                 review.title,
-                review.is_auto,
                 review.created_at,
                 review.updated_at,
                 review.completed_at,
@@ -98,13 +96,11 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         // ORDER BY created_at DESC so we get the latest when multiple
         // reviews share the same (branch, commit, scope) triple.
-        // Exclude auto reviews — they are surfaced separately via
-        // find_fresh_auto_review and should not be returned here.
         let existing: Option<Review> = conn
             .query_row(
-                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at, completed_at
+                "SELECT id, branch_id, commit_sha, scope, session_id, title, created_at, updated_at, completed_at
                  FROM reviews
-                 WHERE branch_id = ?1 AND commit_sha = ?2 AND scope = ?3 AND is_auto = 0
+                 WHERE branch_id = ?1 AND commit_sha = ?2 AND scope = ?3
                  ORDER BY created_at DESC LIMIT 1",
                 params![branch_id, commit_sha, scope.as_str()],
                 Self::row_to_review_header,
@@ -125,7 +121,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let review = conn
             .query_row(
-                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at, completed_at
+                "SELECT id, branch_id, commit_sha, scope, session_id, title, created_at, updated_at, completed_at
                  FROM reviews WHERE id = ?1",
                 params![id],
                 Self::row_to_review_header,
@@ -145,7 +141,7 @@ impl Store {
     pub fn list_reviews_for_branch(&self, branch_id: &str) -> Result<Vec<Review>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at, completed_at
+            "SELECT id, branch_id, commit_sha, scope, session_id, title, created_at, updated_at, completed_at
              FROM reviews WHERE branch_id = ?1 ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map(params![branch_id], Self::row_to_review_header)?;
@@ -347,7 +343,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let review = conn
             .query_row(
-                "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at, completed_at
+                "SELECT id, branch_id, commit_sha, scope, session_id, title, created_at, updated_at, completed_at
                  FROM reviews WHERE session_id = ?1",
                 params![session_id],
                 Self::row_to_review_header,
@@ -380,7 +376,7 @@ impl Store {
     ) -> Result<Vec<Review>, StoreError> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, branch_id, commit_sha, scope, session_id, title, is_auto, created_at, updated_at, completed_at
+            "SELECT id, branch_id, commit_sha, scope, session_id, title, created_at, updated_at, completed_at
              FROM reviews
              WHERE branch_id = ?1 AND created_at >= ?2
              ORDER BY created_at ASC",
@@ -423,75 +419,6 @@ impl Store {
         Ok(())
     }
 
-    /// Update the `is_auto` flag on a review.
-    pub fn set_review_auto(&self, id: &str, is_auto: bool) -> Result<(), StoreError> {
-        let conn = self.conn.lock().unwrap();
-        let now = now_timestamp();
-        conn.execute(
-            "UPDATE reviews
-             SET is_auto = ?1,
-                 updated_at = ?2,
-                 completed_at = CASE
-                     WHEN is_auto = 1 AND ?1 = 0 AND completed_at IS NOT NULL THEN ?2
-                     ELSE completed_at
-                 END
-             WHERE id = ?3",
-            params![is_auto, now, id],
-        )?;
-        Ok(())
-    }
-
-    /// Find the most recent auto review for a branch, but only if it was
-    /// created after every commit on the branch.  This prevents stale auto
-    /// reviews (from before an amended commit or a new push) from being
-    /// adopted or surfaced.
-    ///
-    /// `git_latest_commit_ms` is the latest git committer timestamp
-    /// (converted to milliseconds) obtained from the full git log.  This
-    /// covers commits made outside the app that are absent from the
-    /// `commits` table.  The query takes the greater of this value and
-    /// `MAX(commits.updated_at)` so that both in-app and out-of-app
-    /// commits invalidate stale auto reviews.
-    pub fn find_fresh_auto_review(
-        &self,
-        branch_id: &str,
-        git_latest_commit_ms: i64,
-    ) -> Result<Option<Review>, StoreError> {
-        let conn = self.conn.lock().unwrap();
-        // LEFT JOIN sessions to fetch the provider in the same query,
-        // keeping the review row and session metadata consistent under a
-        // single lock acquisition.
-        let review: Option<Review> = conn
-            .query_row(
-                "SELECT r.id, r.branch_id, r.commit_sha, r.scope, r.session_id, r.title, r.is_auto, r.created_at, r.updated_at, r.completed_at,
-                        s.provider
-                 FROM reviews r
-                 LEFT JOIN sessions s ON s.id = r.session_id
-                 WHERE r.branch_id = ?1 AND r.is_auto = 1
-                   AND r.created_at >= MAX(
-                       ?2,
-                       COALESCE(
-                           (SELECT MAX(updated_at) FROM commits WHERE branch_id = ?1 AND sha IS NOT NULL),
-                           0))
-                 ORDER BY r.created_at DESC LIMIT 1",
-                params![branch_id, git_latest_commit_ms],
-                |row| {
-                    let mut r = Self::row_to_review_header(row)?;
-                    r.session_provider = row.get(10)?;
-                    Ok(r)
-                },
-            )
-            .optional()?;
-
-        match review {
-            Some(mut r) => {
-                Self::load_review_children(&conn, &mut r)?;
-                Ok(Some(r))
-            }
-            None => Ok(None),
-        }
-    }
-
     // =========================================================================
     // Internal helpers
     // =========================================================================
@@ -528,14 +455,12 @@ impl Store {
             scope: ReviewScope::parse(&scope_str).unwrap_or(ReviewScope::Commit),
             session_id: row.get(4)?,
             title: row.get(5)?,
-            is_auto: row.get(6)?,
             reviewed: Vec::new(),
             comments: Vec::new(),
             reference_files: Vec::new(),
-            created_at: row.get(7)?,
-            updated_at: row.get(8)?,
-            completed_at: row.get(9)?,
-            session_provider: None,
+            created_at: row.get(6)?,
+            updated_at: row.get(7)?,
+            completed_at: row.get(8)?,
         })
     }
 

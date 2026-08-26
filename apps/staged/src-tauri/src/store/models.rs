@@ -1217,8 +1217,6 @@ pub struct Review {
     pub session_id: Option<String>,
     /// AI-generated one-sentence title summarising the review's confidence.
     pub title: Option<String>,
-    /// Whether this review was automatically generated (not user-initiated).
-    pub is_auto: bool,
     /// Paths that have been marked as reviewed.
     pub reviewed: Vec<String>,
     /// Comments attached to specific locations.
@@ -1230,10 +1228,6 @@ pub struct Review {
     /// When the AI session finished producing this review.
     /// `None` while the session is still running.
     pub completed_at: Option<i64>,
-    /// The AI provider used by the session that created this review.
-    /// Only populated by `find_fresh_auto_review`; `None` elsewhere.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub session_provider: Option<String>,
 }
 
 impl Review {
@@ -1246,24 +1240,17 @@ impl Review {
             scope,
             session_id: None,
             title: None,
-            is_auto: false,
             reviewed: Vec::new(),
             comments: Vec::new(),
             reference_files: Vec::new(),
             created_at: now,
             updated_at: now,
             completed_at: None,
-            session_provider: None,
         }
     }
 
     pub fn with_session(mut self, session_id: &str) -> Self {
         self.session_id = Some(session_id.to_string());
-        self
-    }
-
-    pub fn with_auto(mut self) -> Self {
-        self.is_auto = true;
         self
     }
 }

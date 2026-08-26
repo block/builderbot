@@ -145,7 +145,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
         )
         .unwrap();
 
-    assert_eq!(version, 25);
+    assert_eq!(version, 26);
     assert_eq!(app_version, super::APP_VERSION);
     assert!(table_exists(&conn, "projects"));
     assert!(table_exists(&conn, "project_notes"));
@@ -163,6 +163,7 @@ fn test_store_bootstraps_fresh_database_with_baseline_migration() {
     assert!(column_exists(&conn, "sessions", "branch_id"));
     assert!(column_exists(&conn, "sessions", "completion_effects_at"));
     assert!(column_exists(&conn, "notes", "parent_project_note_id"));
+    assert!(!column_exists(&conn, "reviews", "is_auto"));
 
     let trigger_count: i64 = conn
         .query_row(
@@ -207,6 +208,11 @@ fn test_store_repairs_github_comment_tracking_user_version() {
             image_ids   TEXT DEFAULT NULL
         );
         CREATE TABLE notes (id TEXT PRIMARY KEY);
+        -- Only the table/column the 0026 auto-review cleanup targets.
+        CREATE TABLE reviews (
+            id       TEXT PRIMARY KEY,
+            is_auto  INTEGER NOT NULL DEFAULT 0
+        );
         CREATE TABLE repo_badges (
             github_repo TEXT NOT NULL,
             subpath     TEXT NOT NULL DEFAULT '',
@@ -239,7 +245,7 @@ fn test_store_repairs_github_comment_tracking_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 25);
+    assert_eq!(version, 26);
     assert!(column_exists(&conn, "sessions", "pipeline"));
     assert!(column_exists(&conn, "sessions", "acp_config_selection"));
     assert!(column_exists(&conn, "sessions", "acp_title"));
@@ -282,6 +288,11 @@ fn test_store_repairs_pipeline_user_version() {
             image_ids   TEXT DEFAULT NULL
         );
         CREATE TABLE notes (id TEXT PRIMARY KEY);
+        -- Only the table/column the 0026 auto-review cleanup targets.
+        CREATE TABLE reviews (
+            id       TEXT PRIMARY KEY,
+            is_auto  INTEGER NOT NULL DEFAULT 0
+        );
         CREATE TABLE repo_badges (
             github_repo TEXT NOT NULL,
             subpath     TEXT NOT NULL DEFAULT '',
@@ -309,7 +320,7 @@ fn test_store_repairs_pipeline_user_version() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 25);
+    assert_eq!(version, 26);
     assert!(column_exists(&conn, "comments", "github_comment_id"));
     assert!(column_exists(&conn, "comments", "github_comment_type"));
     assert!(column_exists(&conn, "comments", "github_comment_stale"));
@@ -357,6 +368,11 @@ fn test_completion_effects_migration_backfills_finished_pipeline_sessions() {
         );
         -- Only the table the 0025 column add targets.
         CREATE TABLE notes (id TEXT PRIMARY KEY);
+        -- Only the table/column the 0026 auto-review cleanup targets.
+        CREATE TABLE reviews (
+            id       TEXT PRIMARY KEY,
+            is_auto  INTEGER NOT NULL DEFAULT 0
+        );
         ",
     )
     .unwrap();
@@ -369,7 +385,7 @@ fn test_completion_effects_migration_backfills_finished_pipeline_sessions() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 25);
+    assert_eq!(version, 26);
     assert!(column_exists(&conn, "sessions", "completion_effects_at"));
 
     let marker = |id: &str| -> Option<i64> {
@@ -388,6 +404,54 @@ fn test_completion_effects_migration_backfills_finished_pipeline_sessions() {
     assert_eq!(marker("error-pipeline"), None);
     // Plain AI sessions never had completion side effects to begin with.
     assert_eq!(marker("completed-ai"), None);
+
+    cleanup_db(&path);
+}
+
+#[test]
+fn test_auto_review_removal_migration_deletes_auto_reviews_and_drops_flag() {
+    let path = temp_db_path("auto-review-removal");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "
+        PRAGMA user_version = 25;
+        CREATE TABLE app_metadata (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            app_version TEXT NOT NULL
+        );
+        INSERT INTO app_metadata (id, app_version) VALUES (1, '0.2.9');
+        CREATE TABLE reviews (
+            id       TEXT PRIMARY KEY,
+            is_auto  INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO reviews (id, is_auto) VALUES
+            ('user-review', 0),
+            ('auto-review', 1);
+        ",
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = Store::new(&path).unwrap();
+    drop(store);
+
+    let conn = Connection::open(&path).unwrap();
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 26);
+    assert!(!column_exists(&conn, "reviews", "is_auto"));
+
+    // Reviews the removed auto-review feature created in the background are
+    // deleted; user-initiated (and adopted, is_auto = 0) reviews survive.
+    let ids: Vec<String> = conn
+        .prepare("SELECT id FROM reviews")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert_eq!(ids, vec!["user-review".to_string()]);
 
     cleanup_db(&path);
 }
@@ -413,6 +477,11 @@ fn test_detecting_pid_migration_clears_orphaned_detection_flags() {
             ('idle',   0);
         -- Only the table the 0025 column add targets.
         CREATE TABLE notes (id TEXT PRIMARY KEY);
+        -- Only the table/column the 0026 auto-review cleanup targets.
+        CREATE TABLE reviews (
+            id       TEXT PRIMARY KEY,
+            is_auto  INTEGER NOT NULL DEFAULT 0
+        );
         ",
     )
     .unwrap();
@@ -425,7 +494,7 @@ fn test_detecting_pid_migration_clears_orphaned_detection_flags() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 25);
+    assert_eq!(version, 26);
     assert!(column_exists(&conn, "action_contexts", "detecting_pid"));
 
     // No shipped build ever cleared the flag from outside the process that set

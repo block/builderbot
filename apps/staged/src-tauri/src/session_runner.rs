@@ -129,10 +129,6 @@ pub struct SessionStatusEvent {
     pub branch_id: Option<String>,
     pub project_id: Option<String>,
     pub session_type: Option<String>,
-    /// When `true`, the session belongs to an automatically triggered review
-    /// (not user-initiated). The frontend uses this to suppress UI for auto reviews.
-    #[serde(default)]
-    pub is_auto_review: bool,
 }
 
 // =============================================================================
@@ -374,8 +370,6 @@ pub struct SessionConfig {
     pub image_ids: Vec<String>,
     /// Queued follow-up row that produced this run, if any.
     pub queued_message_id: Option<String>,
-    /// Branch with a commit waiting for auto-review once queued follow-ups drain.
-    pub pending_auto_review_branch_id: Option<String>,
     /// Selected ACP config values to apply after session setup and before the
     /// prompt. Command handlers also store successful selections on the session
     /// row so queued and resumed sessions use their own selection.
@@ -835,8 +829,7 @@ pub fn start_session(
 
         // Run post-completion hooks before transitioning status.
         // These detect artifacts produced by the session (commits, notes).
-        // Returns the branch_id when a new commit was detected.
-        let committed_branch_id = if completed_successfully {
+        if completed_successfully {
             run_post_completion_hooks(
                 &config.session_id,
                 &config.working_dir,
@@ -847,10 +840,8 @@ pub fn start_session(
                     .as_deref()
                     .and_then(|dir| dir.to_str()),
                 &store_for_status,
-            )
-        } else {
-            None
-        };
+            );
+        }
 
         let status_enum = SessionStatus::parse(new_status).unwrap();
         let transitioned = store_for_status
@@ -891,11 +882,6 @@ pub fn start_session(
 
         if transitioned {
             let branch_id = config.branch_id.clone();
-            let auto_review_branch_id = auto_review_branch_id_for_terminal_state(
-                committed_branch_id.clone(),
-                config.pending_auto_review_branch_id.clone(),
-                completed_successfully,
-            );
             let should_drain_queued_message = completed_successfully;
             let session_id_for_follow_up = session_id_for_status.clone();
             let action_executor_for_follow_up = config
@@ -912,7 +898,6 @@ pub fn start_session(
                 let registry_for_follow_up = Arc::clone(&registry);
                 let app_handle_for_follow_up = app_handle.clone();
                 tauri::async_runtime::spawn(async move {
-                    let mut queued_message_blocks_auto_review = false;
                     if should_drain_queued_message {
                         match crate::session_commands::drain_queued_message_for_session(
                             Arc::clone(&store_for_follow_up),
@@ -921,19 +906,16 @@ pub fn start_session(
                             Arc::clone(&action_registry_for_follow_up),
                             app_handle_for_follow_up.clone(),
                             session_id_for_follow_up.clone(),
-                            auto_review_branch_id.clone(),
                         )
                         .await
                         {
                             Ok(true) => {
-                                queued_message_blocks_auto_review = true;
                                 log::info!(
                                     "Drained queued follow-up message for session {session_id_for_follow_up}"
                                 );
                             }
                             Ok(false) => {}
                             Err(e) => {
-                                queued_message_blocks_auto_review = true;
                                 log::error!(
                                     "Failed to drain queued follow-up message for session {session_id_for_follow_up}: {e}"
                                 );
@@ -953,52 +935,6 @@ pub fn start_session(
                         {
                             Ok(true) => {
                                 log::info!("Drained next queued session for branch {branch_id}");
-                            }
-                            Ok(false) if !queued_message_blocks_auto_review => {
-                                // Check if auto-review is enabled in user preferences
-                                let auto_review_enabled = crate::preferences_store_path_buf()
-                                    .and_then(|path| std::fs::read_to_string(&path).ok())
-                                    .and_then(|contents| {
-                                        serde_json::from_str::<serde_json::Value>(&contents).ok()
-                                    })
-                                    .and_then(|json| {
-                                        json.get("auto-start-code-reviews")?
-                                            .as_str()
-                                            .map(String::from)
-                                    })
-                                    .map(|mode| mode != "never")
-                                    .unwrap_or_else(crate::blox::is_sq_available);
-
-                                if let Some(auto_review_branch_id) =
-                                    auto_review_branch_id.filter(|_| auto_review_enabled)
-                                {
-                                    // Pass None so trigger_auto_review resolves
-                                    // the user's current preferred agent at
-                                    // trigger time, rather than reusing the
-                                    // (possibly stale) commit session provider.
-                                    match crate::session_commands::trigger_auto_review(
-                                        store_for_follow_up,
-                                        registry_for_follow_up,
-                                        app_handle_for_follow_up,
-                                        auto_review_branch_id.clone(),
-                                        None,
-                                    )
-                                    .await
-                                    {
-                                        Ok(resp) => {
-                                            log::info!(
-                                                "Auto review triggered for branch {auto_review_branch_id}: session={}, review={}",
-                                                resp.session_id,
-                                                resp.artifact_id,
-                                            );
-                                        }
-                                        Err(e) => {
-                                            log::error!(
-                                                "Failed to trigger auto review for branch {auto_review_branch_id}: {e}"
-                                            );
-                                        }
-                                    }
-                                }
                             }
                             Ok(false) => {}
                             Err(e) => {
@@ -1286,7 +1222,6 @@ pub fn start_pipeline_session(
                     remote_working_dir: config.remote_working_dir.clone(),
                     image_ids: vec![],
                     queued_message_id: None,
-                    pending_auto_review_branch_id: None,
                     acp_config_selection: None,
                     branch_id: config.branch_id.clone(),
                     project_id: config.project_id.clone(),
@@ -1721,7 +1656,6 @@ fn drain_queued_after_pipeline_terminal(
                 Arc::new(ActionRegistry::new()),
                 app_handle.clone(),
                 session_id.clone(),
-                None,
             )
             .await
             {
@@ -2488,8 +2422,7 @@ pub(crate) fn is_process_alive(pid: u32) -> bool {
 /// - **Notes**: If an empty note is linked to this session, parse the
 ///   assistant's last message for content after the first `---`.
 ///
-/// Returns the `branch_id` when a new commit was successfully detected,
-/// so the caller can trigger follow-up work (e.g. auto review).
+/// Returns the `branch_id` when a new commit was successfully detected.
 fn run_post_completion_hooks(
     session_id: &str,
     working_dir: &std::path::Path,
@@ -2524,8 +2457,8 @@ fn run_post_completion_hooks(
                     // with the rebase still stopped on a conflict, HEAD is
                     // detached on a partially applied commit — a SHA `git
                     // rebase --abort` erases — so nothing may claim it: not
-                    // the pending row, not an amend, and no auto-review via
-                    // `committed_branch_id`. Skip the whole arm; the rows
+                    // the pending row, not an amend, and no post-completion
+                    // hooks via `committed_branch_id`. Skip the whole arm; the rows
                     // self-resolve on a later turn, because resumed sessions
                     // re-capture `pre_head_sha` and land back here once HEAD
                     // is attached again (after `--continue` finishes or
@@ -2824,18 +2757,6 @@ fn terminal_state_completed_successfully(
 ) -> bool {
     status == SessionStatus::Completed.as_str()
         && *completion_reason == CompletionReason::TurnComplete
-}
-
-fn auto_review_branch_id_for_terminal_state(
-    committed_branch_id: Option<String>,
-    pending_auto_review_branch_id: Option<String>,
-    completed_successfully: bool,
-) -> Option<String> {
-    committed_branch_id.or_else(|| {
-        completed_successfully
-            .then_some(pending_auto_review_branch_id)
-            .flatten()
-    })
 }
 
 /// Extract note content from a single assistant message.
@@ -3307,7 +3228,6 @@ fn emit_status(
         branch_id,
         project_id,
         session_type: None,
-        is_auto_review: false,
     };
     crate::web_server::emit_to_all(app_handle, "session-status-changed", &event);
 }
@@ -3331,7 +3251,6 @@ pub fn emit_session_running(
         branch_id: Some(branch_id.to_string()),
         project_id: Some(project_id.to_string()),
         session_type: Some(session_type.to_string()),
-        is_auto_review: false,
     };
     crate::web_server::emit_to_all(app_handle, "session-status-changed", &event);
 }
@@ -3351,34 +3270,6 @@ mod tests {
             image_ids: vec![],
             acp: Default::default(),
         }
-    }
-
-    #[test]
-    fn terminal_auto_review_reuses_pending_branch_only_after_successful_turn() {
-        assert_eq!(
-            auto_review_branch_id_for_terminal_state(
-                None,
-                Some("branch-pending".to_string()),
-                true,
-            ),
-            Some("branch-pending".to_string())
-        );
-        assert_eq!(
-            auto_review_branch_id_for_terminal_state(
-                None,
-                Some("branch-pending".to_string()),
-                false,
-            ),
-            None
-        );
-        assert_eq!(
-            auto_review_branch_id_for_terminal_state(
-                Some("branch-commit".to_string()),
-                Some("branch-pending".to_string()),
-                false,
-            ),
-            Some("branch-commit".to_string())
-        );
     }
 
     #[test]
@@ -4211,7 +4102,7 @@ mod tests {
 
     /// End the handoff turn with the rebase still stopped on the conflict.
     /// Returns the hooks' `committed_branch_id`, which must be `None` — a
-    /// mid-rebase state must not trigger the auto-review follow-up.
+    /// mid-rebase state must not be claimed as a completed commit.
     fn end_turn_mid_rebase(fixture: &ConflictedRebase) -> Option<String> {
         run_post_completion_hooks(
             &fixture.rebase_session_id,

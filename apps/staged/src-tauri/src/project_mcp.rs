@@ -628,22 +628,6 @@ impl ProjectToolsHandler {
             self.provider.clone()
         };
 
-        // An in-flight auto review of the same branch would duplicate a requested
-        // review, and is invalidated by a commit (which triggers a fresh auto review
-        // once it lands), so cancel it first — same as user-initiated sessions.
-        if matches!(
-            p.expected_outcome,
-            RepoSessionOutcome::CodeReview | RepoSessionOutcome::Commit
-        ) {
-            if let Err(e) = crate::session_commands::cancel_in_flight_auto_review_for_branch(
-                &self.store,
-                &self.registry,
-                &target.branch.id,
-            ) {
-                return format!("Error cancelling in-flight auto review: {e}");
-            }
-        }
-
         let mut session = crate::store::Session::new_queued(&p.instructions);
         if let Some(ref provider) = session_provider {
             session = session.with_provider(provider);
@@ -852,7 +836,6 @@ impl ProjectToolsHandler {
                         branch_id: Some(branch_id.clone()),
                         project_id: Some(self.project_id.clone()),
                         session_type: None,
-                        is_auto_review: false,
                     },
                 );
                 let _ = crate::session_commands::drain_queued_sessions_for_branch(
@@ -1035,7 +1018,7 @@ impl ProjectToolsHandler {
             })
             .await;
 
-            let worktree_path = match worktree_result {
+            match worktree_result {
                 Ok(Ok(path)) => {
                     log::debug!("[project_mcp] add_project_repo: worktree ready at {}", path);
                     // Notify UI that the worktree is ready so branch state updates
@@ -1044,7 +1027,6 @@ impl ProjectToolsHandler {
                         "project-setup-progress",
                         self.project_id.clone(),
                     );
-                    path
                 }
                 Ok(Err(e)) => {
                     log::warn!(
@@ -1063,15 +1045,13 @@ impl ProjectToolsHandler {
                         "Added repository {github_repo} to project (worktree task error: {e})"
                     );
                 }
-            };
+            }
 
             // Prerun waits out any in-flight action detection and then runs
             // each setup action to completion — minutes, against an MCP
             // client's request timeout. Nothing in the reply derives from it,
-            // so the whole tail is detached, in one task so the auto-review
-            // still follows the setup actions. Structurally this is now the
-            // Tauri `add_project_repo` command's spawned setup task. Note that
-            // the reply therefore also lands before the auto-review is queued.
+            // so the whole tail is detached. Structurally this is now the
+            // Tauri `add_project_repo` command's spawned setup task.
             let store = Arc::clone(&self.store);
             let app_handle = self.app_handle.clone();
             let project_id = self.project_id.clone();
@@ -1105,16 +1085,6 @@ impl ProjectToolsHandler {
                         "[project_mcp] add_project_repo: no action executor available, skipping prerun actions"
                     );
                 }
-
-                // If the repo already has commits on this branch, kick off
-                // an automatic code review so the user gets immediate feedback.
-                crate::maybe_trigger_auto_review_for_new_repo(
-                    &store,
-                    &app_handle,
-                    &branch_id,
-                    Some(&worktree_path),
-                )
-                .await;
             });
 
             // The reply is the agent's whole account of what just happened, so

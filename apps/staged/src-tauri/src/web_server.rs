@@ -1844,7 +1844,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .get_branch(&branch_id)
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-            let is_first_start = branch.workspace_status == Some(store::WorkspaceStatus::Starting);
 
             let project = store
                 .get_project(&branch.project_id)
@@ -1900,20 +1899,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                                 &store::WorkspaceStatus::Running,
                             )
                             .map_err(|e| e.to_string())?;
-                        if is_first_start {
-                            let store_bg = Arc::clone(&store);
-                            let app_handle_bg = app_handle.clone();
-                            let branch_id_bg = branch_id.clone();
-                            tokio::spawn(async move {
-                                crate::maybe_trigger_auto_review_for_new_repo(
-                                    &store_bg,
-                                    &app_handle_bg,
-                                    &branch_id_bg,
-                                    None,
-                                )
-                                .await;
-                            });
-                        }
                         return Ok(Value::Null);
                     }
                 }
@@ -1980,21 +1965,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                             branch.branch_name,
                             ws_name
                         );
-                    }
-
-                    if is_first_start {
-                        let store_bg = Arc::clone(&store);
-                        let app_handle_bg = app_handle.clone();
-                        let branch_id_bg = branch_id.clone();
-                        tokio::spawn(async move {
-                            crate::maybe_trigger_auto_review_for_new_repo(
-                                &store_bg,
-                                &app_handle_bg,
-                                &branch_id_bg,
-                                None,
-                            )
-                            .await;
-                        });
                     }
                     Ok(Value::Null)
                 }
@@ -2945,7 +2915,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     remote_working_dir: None,
                     image_ids: vec![],
                     queued_message_id: None,
-                    pending_auto_review_branch_id: None,
                     acp_config_selection,
                     branch_id: None,
                     project_id: None,
@@ -3101,7 +3070,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     branch_id: event_branch_id,
                     project_id: event_project_id.or(mcp_project_id.clone()),
                     session_type,
-                    is_auto_review: false,
                 },
             );
 
@@ -3142,7 +3110,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     remote_working_dir,
                     image_ids: image_ids.unwrap_or_default(),
                     queued_message_id: None,
-                    pending_auto_review_branch_id: None,
                     acp_config_selection: effective_acp_config_selection,
                     branch_id: config_branch_id,
                     project_id: config_project_id,
@@ -3315,7 +3282,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                     remote_working_dir: None,
                     image_ids: image_ids.unwrap_or_default(),
                     queued_message_id: None,
-                    pending_auto_review_branch_id: None,
                     acp_config_selection,
                     branch_id: None,
                     project_id: Some(project_id),
@@ -3352,7 +3318,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
 
             let result = session_commands::queue_branch_session_for_store(
                 store,
-                Arc::clone(session_registry),
                 branch_id,
                 prompt,
                 session_type,
@@ -3394,28 +3359,6 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
                 .map_err(|e| e.to_string())?;
             Ok(Value::Null)
         }
-        "find_fresh_auto_review" => {
-            let store = get_store(store_mutex)?;
-            let branch_id: String = arg(&args, "branchId")?;
-            let review = tauri::async_runtime::spawn_blocking(move || {
-                store
-                    .find_fresh_auto_review(&branch_id, 0)
-                    .map_err(|e| e.to_string())
-            })
-            .await
-            .map_err(|e| e.to_string())??;
-            Ok(serde_json::to_value(review).unwrap())
-        }
-        "set_review_auto" => {
-            let store = get_store(store_mutex)?;
-            let review_id: String = arg(&args, "reviewId")?;
-            let is_auto: bool = arg(&args, "isAuto")?;
-            store
-                .set_review_auto(&review_id, is_auto)
-                .map_err(|e| e.to_string())?;
-            Ok(Value::Null)
-        }
-
         // =====================================================================
         // PRs
         // =====================================================================

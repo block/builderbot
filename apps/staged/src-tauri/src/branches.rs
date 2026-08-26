@@ -1525,7 +1525,6 @@ pub async fn create_remote_branch(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn start_workspace(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    app_handle: AppHandle,
     branch_id: String,
 ) -> Result<(), String> {
     let store = get_store(&store)?;
@@ -1534,12 +1533,6 @@ pub async fn start_workspace(
         .get_branch(&branch_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-
-    // Track whether this is the first workspace start (Starting → Running)
-    // vs a restart (Stopped → Running). We only trigger auto-review on the
-    // first start so that existing branches don't get a spurious review
-    // every time the workspace restarts.
-    let is_first_start = branch.workspace_status == Some(store::WorkspaceStatus::Starting);
 
     let project = store
         .get_project(&branch.project_id)
@@ -1594,23 +1587,6 @@ pub async fn start_workspace(
                 store
                     .update_branch_workspace_status(&branch_id, &store::WorkspaceStatus::Running)
                     .map_err(|e| e.to_string())?;
-
-                // Trigger auto-review for the newly cloned secondary repo
-                // if this is the first start for this branch.
-                if is_first_start {
-                    let store_bg = Arc::clone(&store);
-                    let app_handle_bg = app_handle.clone();
-                    let branch_id_bg = branch_id.clone();
-                    tauri::async_runtime::spawn(async move {
-                        crate::maybe_trigger_auto_review_for_new_repo(
-                            &store_bg,
-                            &app_handle_bg,
-                            &branch_id_bg,
-                            None,
-                        )
-                        .await;
-                    });
-                }
 
                 return Ok(());
             }
@@ -1694,24 +1670,6 @@ pub async fn start_workspace(
                     branch.branch_name,
                     ws_name
                 );
-            }
-
-            // If this is the first workspace start for a new branch, check
-            // whether the branch already has commits (e.g. from an existing
-            // PR) and kick off an automatic code review.
-            if is_first_start {
-                let store_bg = Arc::clone(&store);
-                let app_handle_bg = app_handle.clone();
-                let branch_id_bg = branch_id.clone();
-                tauri::async_runtime::spawn(async move {
-                    crate::maybe_trigger_auto_review_for_new_repo(
-                        &store_bg,
-                        &app_handle_bg,
-                        &branch_id_bg,
-                        None,
-                    )
-                    .await;
-                });
             }
 
             Ok(())

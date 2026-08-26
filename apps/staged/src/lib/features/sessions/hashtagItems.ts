@@ -265,7 +265,6 @@ function timelineToSortableHashtagItems(
   }
 
   for (const review of timeline.reviews) {
-    if (review.isAuto) continue;
     if (review.completedAt == null) continue;
     const title = review.title || review.commitSha.slice(0, 7);
     items.push({

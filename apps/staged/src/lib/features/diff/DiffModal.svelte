@@ -58,7 +58,7 @@
     Span,
   } from '../../types';
   import type { DiffScope } from '../../commands';
-  import { findFreshAutoReview, getSession } from '../../commands';
+  import { getSession } from '../../commands';
   import * as commands from '../../api/commands';
   import { startOrQueueBranchSessionWithPending } from '../branches/branchSessionLaunch.svelte';
   import { buildBranchHashtagItems } from '../sessions/hashtagItems';
@@ -199,7 +199,7 @@
   let showContextDropdown = $state(false);
   /** Whether a context switch is currently in-flight (disables the dropdown). */
   let switchingContext = $state(false);
-  /** Tracks the active auto-review reload promise so it can be ignored on stale switches. */
+  /** Bumped per context switch so async steps from a stale switch are ignored. */
   let contextSwitchGeneration = 0;
 
   function reviewableScope(): 'branch' | 'commit' {
@@ -241,10 +241,6 @@
       activeAfterLabel = newCommitSha?.slice(0, 7) ?? 'head';
     }
 
-    // Always stop polling on any context switch — will restart below if needed
-    stopAutoReviewPolling();
-    autoReviewComments = [];
-
     // Reset review state — the $effect will recreate it once the new commitSha resolves
     reviewHandle = null;
 
@@ -258,25 +254,6 @@
       // Bail if a newer context switch started while we were loading
       if (thisGeneration !== contextSwitchGeneration) return;
       switchingContext = false;
-    }
-
-    // If switching to branch scope, reload auto-review annotations.
-    // Guard each async step against stale generations so a rapid switch
-    // doesn't start polling for an already-abandoned context.
-    if (newScope === 'branch') {
-      loadAutoReviewAnnotations().then((review) => {
-        if (thisGeneration !== contextSwitchGeneration) return;
-        if (review?.sessionId) {
-          getSession(review.sessionId)
-            .then((session) => {
-              if (thisGeneration !== contextSwitchGeneration) return;
-              if (session?.status === 'running') {
-                startAutoReviewPolling(review.sessionId!);
-              }
-            })
-            .catch((e) => console.warn('Failed to check auto-review session status:', e));
-        }
-      });
     }
   }
 
@@ -384,73 +361,8 @@
   // Annotation reveal state (hold A to reveal)
   let annotationsRevealed = $state(false);
 
-  // Auto review state (branch-scope only)
-  let autoReviewComments = $state<Comment[]>([]);
-  let autoReviewPollTimer: ReturnType<typeof setInterval> | null = null;
-
-  async function loadAutoReviewAnnotations() {
-    try {
-      const review = await findFreshAutoReview(branchId);
-      if (!review) {
-        autoReviewComments = [];
-        return review;
-      }
-      autoReviewComments = review.comments.filter((c) => c.commentType === 'information');
-      return review;
-    } catch (e) {
-      console.error('Failed to load auto review annotations:', e);
-      autoReviewComments = [];
-      return null;
-    }
-  }
-
-  function startAutoReviewPolling(sessionId: string) {
-    stopAutoReviewPolling();
-    autoReviewPollTimer = setInterval(async () => {
-      const review = await loadAutoReviewAnnotations();
-      // Check if session is still running; if not, stop polling
-      if (!review?.sessionId) {
-        stopAutoReviewPolling();
-        return;
-      }
-      try {
-        const session = await getSession(sessionId);
-        if (!session || session.status !== 'running') {
-          stopAutoReviewPolling();
-        }
-      } catch {
-        stopAutoReviewPolling();
-      }
-    }, 4000);
-  }
-
-  function stopAutoReviewPolling() {
-    if (autoReviewPollTimer !== null) {
-      clearInterval(autoReviewPollTimer);
-      autoReviewPollTimer = null;
-    }
-  }
-
-  // Load auto review annotations for branch-scope diffs (no specific reviewId)
-  // svelte-ignore state_referenced_locally
-  if (activeScope === 'branch' && !reviewId) {
-    loadAutoReviewAnnotations().then((review) => {
-      if (review?.sessionId) {
-        // Check if the session is still running to start polling
-        getSession(review.sessionId)
-          .then((session) => {
-            if (session?.status === 'running') {
-              startAutoReviewPolling(review.sessionId!);
-            }
-          })
-          .catch((e) => console.warn('Failed to check auto-review session status:', e));
-      }
-    });
-  }
-
   onDestroy(() => {
     flushCommentEditorsOnDestroy();
-    stopAutoReviewPolling();
   });
 
   // ==========================================================================
@@ -971,8 +883,8 @@
     }
   });
 
-  // Keep linked-session statuses live while the modal is open. Mirrors the
-  // auto-review polling precedent, but event-driven via the shared listener.
+  // Keep linked-session statuses live while the modal is open, event-driven
+  // via the shared listener.
   $effect(() => {
     const linkedSessionIds = new Set<string>();
     for (const comment of allComments) {
@@ -988,10 +900,9 @@
     return () => unlisten();
   });
 
-  /** Convert "information" comments to SmartDiffAnnotation for the overlay system.
-   *  Merges annotations from both the user's review and the latest auto review. */
-  let currentAnnotations = $derived<SmartDiffAnnotation[]>([
-    ...allComments
+  /** Convert "information" comments to SmartDiffAnnotation for the overlay system. */
+  let currentAnnotations = $derived<SmartDiffAnnotation[]>(
+    allComments
       .filter((c) => c.commentType === 'information')
       .map((c) => ({
         id: c.id,
@@ -999,15 +910,8 @@
         after_span: { start: c.span.start, end: c.span.end },
         content: c.content,
         category: 'explanation' as const,
-      })),
-    ...autoReviewComments.map((c) => ({
-      id: c.id,
-      file_path: c.path,
-      after_span: { start: c.span.start, end: c.span.end },
-      content: c.content,
-      category: 'explanation' as const,
-    })),
-  ]);
+      }))
+  );
 
   let fileEntries = $derived(
     buildFileEntries(

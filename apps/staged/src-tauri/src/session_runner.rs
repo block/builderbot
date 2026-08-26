@@ -2421,8 +2421,6 @@ pub(crate) fn is_process_alive(pid: u32) -> bool {
 ///   For remote workspaces, HEAD is checked via `blox ws_exec`.
 /// - **Notes**: If an empty note is linked to this session, parse the
 ///   assistant's last message for content after the first `---`.
-///
-/// Returns the `branch_id` when a new commit was successfully detected.
 fn run_post_completion_hooks(
     session_id: &str,
     working_dir: &std::path::Path,
@@ -2430,9 +2428,7 @@ fn run_post_completion_hooks(
     workspace_name: Option<&str>,
     remote_working_dir: Option<&str>,
     store: &Arc<Store>,
-) -> Option<String> {
-    let mut committed_branch_id: Option<String> = None;
-
+) {
     // --- Commit detection ---
     if let Some(pre_sha) = pre_head_sha {
         // Look for any commit linked to this session — not just pending (sha IS NULL)
@@ -2457,15 +2453,15 @@ fn run_post_completion_hooks(
                     // with the rebase still stopped on a conflict, HEAD is
                     // detached on a partially applied commit — a SHA `git
                     // rebase --abort` erases — so nothing may claim it: not
-                    // the pending row, not an amend, and no post-completion
-                    // hooks via `committed_branch_id`. Skip the whole arm; the rows
-                    // self-resolve on a later turn, because resumed sessions
-                    // re-capture `pre_head_sha` and land back here once HEAD
-                    // is attached again (after `--continue` finishes or
-                    // `--abort` restores, reassociation plus the duplicate-SHA
-                    // branch of `complete_pending_commit_sha` settle every
-                    // row), while a turn that never comes leaves the pending
-                    // row `sha IS NULL` — an ordinary failed commit attempt.
+                    // the pending row, not an amend, and no diff cache keyed
+                    // on it. Skip the whole arm; the rows self-resolve on a
+                    // later turn, because resumed sessions re-capture
+                    // `pre_head_sha` and land back here once HEAD is attached
+                    // again (after `--continue` finishes or `--abort`
+                    // restores, reassociation plus the duplicate-SHA branch of
+                    // `complete_pending_commit_sha` settle every row), while a
+                    // turn that never comes leaves the pending row
+                    // `sha IS NULL` — an ordinary failed commit attempt.
                     //
                     // Asking is the same call that does the work: the rebase
                     // rewrote SHAs just the same as the no-AI path, and
@@ -2529,8 +2525,6 @@ fn run_post_completion_hooks(
                         };
 
                         if recorded {
-                            committed_branch_id = Some(commit.branch_id.clone());
-
                             // Spawn background diff caching for remote branches.
                             if let Some(ws_name) = workspace_name {
                                 let commit_shas: Vec<String> = store
@@ -2747,8 +2741,6 @@ fn run_post_completion_hooks(
             }
         }
     }
-
-    committed_branch_id
 }
 
 fn terminal_state_completed_successfully(
@@ -4101,9 +4093,7 @@ mod tests {
     }
 
     /// End the handoff turn with the rebase still stopped on the conflict.
-    /// Returns the hooks' `committed_branch_id`, which must be `None` — a
-    /// mid-rebase state must not be claimed as a completed commit.
-    fn end_turn_mid_rebase(fixture: &ConflictedRebase) -> Option<String> {
+    fn end_turn_mid_rebase(fixture: &ConflictedRebase) {
         run_post_completion_hooks(
             &fixture.rebase_session_id,
             fixture.repo.path(),
@@ -4111,7 +4101,22 @@ mod tests {
             None,
             None,
             &fixture.store,
-        )
+        );
+    }
+
+    /// A mid-rebase state must not be claimed as a completed commit: the
+    /// rebase session's pending row has to come out of the turn still
+    /// `sha IS NULL`.
+    fn assert_pending_unclaimed(fixture: &ConflictedRebase) {
+        let pending = fixture
+            .store
+            .get_commit(&fixture.pending_id)
+            .unwrap()
+            .unwrap();
+        assert!(
+            pending.sha.is_none(),
+            "the pending row must not claim the detached mid-rebase SHA"
+        );
     }
 
     fn assert_untouched(fixture: &ConflictedRebase) {
@@ -4155,18 +4160,10 @@ mod tests {
     fn rebase_stopped_on_a_conflict_leaves_the_rows_alone() {
         let fixture = conflicted_rebase();
 
-        assert!(end_turn_mid_rebase(&fixture).is_none());
+        end_turn_mid_rebase(&fixture);
 
         assert_untouched(&fixture);
-        let pending = fixture
-            .store
-            .get_commit(&fixture.pending_id)
-            .unwrap()
-            .unwrap();
-        assert!(
-            pending.sha.is_none(),
-            "the pending row must not claim the detached mid-rebase SHA"
-        );
+        assert_pending_unclaimed(&fixture);
     }
 
     /// The deferred pending row resolves on the next turn: the resumed session
@@ -4177,7 +4174,8 @@ mod tests {
     #[test]
     fn rebase_resumed_and_finished_resolves_the_deferred_pending_row() {
         let fixture = conflicted_rebase();
-        assert!(end_turn_mid_rebase(&fixture).is_none());
+        end_turn_mid_rebase(&fixture);
+        assert_pending_unclaimed(&fixture);
 
         let repo = &fixture.repo;
         let detached_head = repo.run_git(&["rev-parse", "HEAD"]).trim().to_string();
@@ -4227,7 +4225,8 @@ mod tests {
     #[test]
     fn rebase_resumed_and_aborted_drops_the_deferred_pending_row() {
         let fixture = conflicted_rebase();
-        assert!(end_turn_mid_rebase(&fixture).is_none());
+        end_turn_mid_rebase(&fixture);
+        assert_pending_unclaimed(&fixture);
 
         let repo = &fixture.repo;
         let detached_head = repo.run_git(&["rev-parse", "HEAD"]).trim().to_string();

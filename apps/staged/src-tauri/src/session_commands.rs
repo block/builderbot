@@ -1871,7 +1871,6 @@ impl BranchSessionScheduleKind {
 struct BranchSessionSchedule {
     kind: BranchSessionScheduleKind,
     review_id: Option<String>,
-    blocks_queue: bool,
 }
 
 fn can_start_with_active_branch_sessions(
@@ -1893,7 +1892,6 @@ fn note_session_schedule() -> BranchSessionSchedule {
     BranchSessionSchedule {
         kind: BranchSessionScheduleKind::Note,
         review_id: None,
-        blocks_queue: true,
     }
 }
 
@@ -1901,17 +1899,15 @@ fn review_session_schedule(review: &store::Review) -> BranchSessionSchedule {
     BranchSessionSchedule {
         kind: BranchSessionScheduleKind::Review,
         review_id: Some(review.id.clone()),
-        blocks_queue: true,
     }
 }
 
 /// Schedule for the kinds that take the branch exclusively (commit sessions and
-/// command pipelines): they always block the queue and carry no review.
+/// command pipelines): they carry no review.
 fn exclusive_session_schedule(kind: BranchSessionScheduleKind) -> BranchSessionSchedule {
     BranchSessionSchedule {
         kind,
         review_id: None,
-        blocks_queue: true,
     }
 }
 
@@ -2012,9 +2008,7 @@ fn running_branch_session_kinds(
     for session in running {
         if let Some(schedule) = resolve_branch_session_schedule(store, branch_id, &session, false)?
         {
-            if schedule.blocks_queue {
-                active.insert(schedule.kind);
-            }
+            active.insert(schedule.kind);
         }
     }
     Ok(active)
@@ -2034,16 +2028,14 @@ pub(crate) fn branch_session_launch_lock_for(branch_id: &str) -> Arc<Mutex<()>> 
     )
 }
 
-fn has_queued_user_branch_session(store: &Store, branch_id: &str) -> Result<bool, String> {
+fn has_queued_branch_session(store: &Store, branch_id: &str) -> Result<bool, String> {
     let queued = store
         .get_queued_sessions_for_branch(branch_id)
         .map_err(|e| e.to_string())?;
 
     for session in queued {
-        if let Some(schedule) = resolve_branch_session_schedule(store, branch_id, &session, true)? {
-            if schedule.blocks_queue {
-                return Ok(true);
-            }
+        if resolve_branch_session_schedule(store, branch_id, &session, true)?.is_some() {
+            return Ok(true);
         }
     }
 
@@ -2079,7 +2071,7 @@ fn should_queue_branch_session_start(
         return Ok(true);
     }
 
-    if has_queued_user_branch_session(store, branch_id)? {
+    if has_queued_branch_session(store, branch_id)? {
         return Ok(true);
     }
 
@@ -2102,9 +2094,7 @@ fn drainable_session_ids_for_active_set(
         }
 
         drainable.push(session_id.clone());
-        if schedule.blocks_queue {
-            active.insert(schedule.kind);
-        }
+        active.insert(schedule.kind);
     }
     drainable
 }
@@ -3000,9 +2990,7 @@ pub async fn drain_queued_sessions_for_branch(
 
         if started {
             started_any = true;
-            if schedule.blocks_queue {
-                active.insert(schedule.kind);
-            }
+            active.insert(schedule.kind);
         } else {
             active = running_branch_session_kinds(&store, &branch_id)?;
         }
@@ -4551,32 +4539,6 @@ fn shell_quote_arg(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-/// Assemble the full prompt from action instructions + branch context + user prompt.
-///
-/// [`build_full_prompt_with_pikchr_reference`] with the default pikchr
-/// grammar reference and no pikchr tools — production callers thread those
-/// through explicitly, so this convenience wrapper is test-only.
-#[cfg(test)]
-pub(crate) fn build_full_prompt(
-    user_prompt: &str,
-    project_information: &str,
-    branch_context: &str,
-    session_type: &BranchSessionType,
-    launch_context: Option<&BranchSessionLaunchContext>,
-    base_branch: Option<&str>,
-) -> String {
-    build_full_prompt_with_pikchr_reference(
-        user_prompt,
-        project_information,
-        branch_context,
-        session_type,
-        launch_context,
-        base_branch,
-        PIKCHR_GRAMMAR_URL,
-        false,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn build_full_prompt_with_pikchr_reference(
     user_prompt: &str,
@@ -4835,6 +4797,29 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
+    /// Calls [`build_full_prompt_with_pikchr_reference`] with the default pikchr
+    /// grammar reference and no pikchr tools. Production callers thread both
+    /// through explicitly; only these tests want the defaults.
+    fn build_full_prompt(
+        user_prompt: &str,
+        project_information: &str,
+        branch_context: &str,
+        session_type: &BranchSessionType,
+        launch_context: Option<&BranchSessionLaunchContext>,
+        base_branch: Option<&str>,
+    ) -> String {
+        build_full_prompt_with_pikchr_reference(
+            user_prompt,
+            project_information,
+            branch_context,
+            session_type,
+            launch_context,
+            base_branch,
+            PIKCHR_GRAMMAR_URL,
+            false,
+        )
+    }
+
     fn setup_branch_store() -> (Arc<Store>, store::Branch) {
         let store = Arc::new(Store::in_memory().unwrap());
         let project = store::Project::new("test-owner/test-repo");
@@ -5034,7 +5019,6 @@ mod tests {
         BranchSessionSchedule {
             kind,
             review_id: None,
-            blocks_queue: true,
         }
     }
 

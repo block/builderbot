@@ -42,6 +42,7 @@
   } from './liveSessionHints';
   import { isEmptyFailedReview } from './reviewState';
   import { standaloneQueuedPullRowCopy } from './queuedPullRow';
+  import { canStartQueuedSessions } from './queuedSessionStart';
   import { failedArtifactSubtitle } from './sessionFailureCopy';
   import { stripXmlTags } from '../sessions/sessionModalHelpers';
 
@@ -329,6 +330,20 @@
     }
     return false;
   });
+
+  /** A git action of the branch's own is running, holding the worktree or the queue. */
+  let gitActionRunning = $derived(
+    pushingOrigin ||
+      forcePushingOrigin ||
+      pullingOrigin ||
+      resettingToOrigin ||
+      discardingWorktreeChanges
+  );
+
+  /** Whether Start on a queued row would do anything — see `canStartQueuedSessions`. */
+  let queuedStartAvailable = $derived(
+    canStartQueuedSessions({ hasActiveSession, gitActionRunning })
+  );
 
   let hasActiveCommitSession = $derived.by(() => {
     for (const commit of timeline.commits) {
@@ -1073,7 +1088,7 @@
             onDeleteClick={!isDeletable(item) || item.deleteDisabledReason
               ? undefined
               : (opts) => handleDeleteClick(item, opts)}
-            onStartClick={item.type.startsWith('queued-') && !hasActiveSession
+            onStartClick={item.type.startsWith('queued-') && queuedStartAvailable
               ? onStartQueued
               : undefined}
             onResumeClick={isResumable(item) && onResumeClick && item.sessionId && !hasActiveSession
@@ -1158,7 +1173,7 @@
             onDeleteClick={!isDeletable(item) || item.deleteDisabledReason
               ? undefined
               : (opts) => handleDeleteClick(item, opts)}
-            onStartClick={item.type.startsWith('queued-') && !hasActiveSession
+            onStartClick={item.type.startsWith('queued-') && queuedStartAvailable
               ? onStartQueued
               : undefined}
             onResumeClick={isResumable(item) && onResumeClick && item.sessionId && !hasActiveSession

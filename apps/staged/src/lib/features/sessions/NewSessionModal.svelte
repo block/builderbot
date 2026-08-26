@@ -136,7 +136,7 @@
       !submitDisabledReason &&
       (isReview || !!prompt.trim() || textSnippets.length > 0)
   );
-  let submitLabel = $derived(currentWillQueue ? 'Queue' : isProjectNote ? 'New' : 'Start');
+  let submitLabel = $derived(currentWillQueue ? 'Queue' : 'Start');
   const footerControlClass =
     'h-9 gap-1.5 rounded-md border border-[var(--border-muted)] bg-[var(--bg-primary)] px-4 py-2 text-sm font-medium text-muted-foreground shadow-none transition-colors hover:bg-[var(--bg-hover)] hover:text-foreground max-[768px]:h-11 max-[768px]:justify-center';
 

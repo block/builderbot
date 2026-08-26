@@ -446,7 +446,12 @@
     const reviewId = reviewHandle?.state.review?.id ?? activeReviewId;
     const reviewRef = reviewId ? `Re: #review:${reviewId}\n` : '';
     const tail = mode === 'note' ? 'Plan a fix for this' : 'Fix this';
-    return `${reviewRef}Code review comment:\n> ${comment.path} ${formatLineRange(comment.span)}\n> ${comment.content}\n\n${tail}`;
+    // Quote every line (blank ones too) so multi-line comments stay one blockquote.
+    const quotedContent = comment.content
+      .split('\n')
+      .map((line) => (line ? `> ${line}` : '>'))
+      .join('\n');
+    return `${reviewRef}Code review comment:\n> ${comment.path} ${formatLineRange(comment.span)}\n${quotedContent}\n\n${tail}`;
   }
 
   async function launchSessionDirectly(comment: Comment, mode: BranchSessionType) {

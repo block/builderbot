@@ -177,6 +177,9 @@ importers:
       '@milkdown/crepe':
         specifier: ^7.22.1
         version: 7.22.1(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(typescript@6.0.3)
+      '@milkdown/kit':
+        specifier: ^7.22.1
+        version: 7.22.1(@codemirror/language@6.12.4)(@codemirror/state@6.7.1)(@codemirror/view@6.43.9)(typescript@6.0.3)
       '@tauri-apps/api':
         specifier: ^2.11.1
         version: 2.11.1

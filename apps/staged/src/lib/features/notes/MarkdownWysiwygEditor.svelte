@@ -53,8 +53,9 @@
 
     (async () => {
       try {
-        const [{ Crepe }] = await Promise.all([
+        const [{ Crepe }, { wysiwygPlugins }] = await Promise.all([
           import('@milkdown/crepe'),
+          import('./wysiwygPlugins'),
           import('@milkdown/crepe/theme/common/style.css'),
         ]);
         if (disposed) return;
@@ -78,9 +79,15 @@
             // Placeholder, and Cursor (drop / gap cursors).
           },
           featureConfigs: {
-            [Crepe.Feature.Placeholder]: { text: initialPlaceholder },
+            // 'doc': only an empty document shows the placeholder. The default
+            // 'block' mode redraws it on every empty line the cursor visits.
+            [Crepe.Feature.Placeholder]: { text: initialPlaceholder, mode: 'doc' },
           },
         });
+
+        // Written-note behaviours on top of Crepe: `[ ]` checkboxes outside
+        // lists, and the first line held as the title H1.
+        editor.editor.use(wysiwygPlugins);
 
         editor.on((listener) => {
           listener.markdownUpdated((_ctx, markdown) => onChange?.(markdown));

@@ -124,7 +124,7 @@
         <MarkdownWysiwygEditor
           bind:this={editor}
           value={initialMarkdown}
-          placeholder="Write your note — the first heading becomes its title."
+          placeholder="Write your note — the first line becomes its title."
           onChange={(next) => (markdown = next)}
         />
       {/key}

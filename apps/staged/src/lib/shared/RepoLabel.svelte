@@ -10,6 +10,8 @@
     githubRepo="block/mark" subpath="ui" → "block/mark/" muted + "ui" primary
 -->
 <script lang="ts">
+  import { repoEmphasis } from './repoLabel';
+
   interface Props {
     githubRepo: string;
     subpath?: string | null;
@@ -27,13 +29,8 @@
     return idx >= 0 ? githubRepo.slice(0, idx + 1) : '';
   });
 
-  let emphasis = $derived.by(() => {
-    if (subpath) {
-      return subpath;
-    }
-    const idx = githubRepo.lastIndexOf('/');
-    return idx >= 0 ? githubRepo.slice(idx + 1) : githubRepo;
-  });
+  // Shared with the per-window title so the two can't drift; see repoLabel.ts.
+  let emphasis = $derived(repoEmphasis({ repo: githubRepo, subpath }));
 
   let fullLabel = $derived(subpath ? `${githubRepo}/${subpath}` : githubRepo);
 </script>

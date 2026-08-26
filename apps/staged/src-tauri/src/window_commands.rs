@@ -319,4 +319,35 @@ mod tests {
              new_window has nothing to clone: {windows:?}"
         );
     }
+
+    /// Per-window titles (`windowTitle.ts`) call `setTitle`, which is *not* in
+    /// tauri's `core:window` default permission set — that set is getters only
+    /// (`allow-title` is there, `allow-set-title` is not). Dropping the grant
+    /// fails at runtime, not at build time: every title update rejects and the
+    /// Window menu silently keeps saying "Staged" in every window. The `win-*`
+    /// glob has to survive too, or only the first window gets titled.
+    #[test]
+    fn capabilities_grant_set_title_to_every_window() {
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+
+        let permissions = capability["permissions"]
+            .as_array()
+            .expect("capabilities/default.json has a permissions array");
+        assert!(
+            permissions
+                .iter()
+                .any(|p| p == "core:window:allow-set-title"),
+            "core:window:allow-set-title is missing; window titles will fail at \
+             runtime: {permissions:?}"
+        );
+
+        let windows = capability["windows"]
+            .as_array()
+            .expect("capabilities/default.json has a windows array");
+        assert!(
+            windows.iter().any(|w| w == "win-*"),
+            "the capability no longer covers secondary `win-N` windows: {windows:?}"
+        );
+    }
 }

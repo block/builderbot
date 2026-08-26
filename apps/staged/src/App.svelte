@@ -51,6 +51,8 @@
     triggerShortcut,
   } from './lib/features/keyboard/shortcuts';
   import { runSearchShortcut } from './lib/features/keyboard/searchTargets';
+  import { applyWindowTitle, formatWindowTitle } from './lib/features/layout/windowTitle';
+  import { projectFiltersStore } from './lib/features/projects/projectFilters.svelte';
   import { projectStateStore } from './lib/stores/projectState.svelte';
   import { projectsDataStore } from './lib/stores/projectsData.svelte';
   import { projectRunActionsStore } from './lib/stores/projectRunActions.svelte';
@@ -92,6 +94,16 @@
   // =========================================================================
   $effect(() => {
     prPollingService.setSelectedProject(navigation.selectedProjectId);
+  });
+
+  // =========================================================================
+  // Per-window title — each window names itself after what it is filtered to,
+  // so the macOS Window menu can tell windows apart instead of listing
+  // "Staged" three times. The filter store is per-webview, so this is already
+  // window-local; see windowTitle.ts for the format and the IPC guards.
+  // =========================================================================
+  $effect(() => {
+    void applyWindowTitle(formatWindowTitle(projectFiltersStore.activeFilters));
   });
 
   // Refresh git state (TTL-gated) for the selected project's branches when the

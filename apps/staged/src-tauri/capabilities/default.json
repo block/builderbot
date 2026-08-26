@@ -13,6 +13,7 @@
     "window-state:default",
     "store:default",
     "core:window:allow-set-badge-count",
+    "core:window:allow-set-title",
     "dialog:default",
     "process:allow-restart",
     "updater:default",

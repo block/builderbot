@@ -399,6 +399,7 @@ interface WindowHandle {
   close(): Promise<void>;
   startDragging(): Promise<void>;
   setBadgeCount(count: number | undefined): Promise<void>;
+  setTitle(title: string): Promise<void>;
 }
 
 const noopWindow: WindowHandle = {
@@ -408,6 +409,11 @@ const noopWindow: WindowHandle = {
   },
   startDragging: async () => {},
   setBadgeCount: async () => {},
+  // Not a no-op in web mode: the browser tab is the window list, so the title
+  // is a real affordance there. index.html ships the same default title.
+  setTitle: async (title: string) => {
+    if (typeof document !== 'undefined') document.title = title;
+  },
 };
 
 /**
@@ -446,6 +452,10 @@ export function getWindowSync(): WindowHandle {
     setBadgeCount: async (count: number | undefined) => {
       const { getCurrentWindow } = await import('@tauri-apps/api/window');
       return getCurrentWindow().setBadgeCount(count);
+    },
+    setTitle: async (title: string) => {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      return getCurrentWindow().setTitle(title);
     },
   };
 }

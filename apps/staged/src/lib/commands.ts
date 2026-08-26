@@ -1100,13 +1100,34 @@ export function drainQueuedSessions(branchId: string): Promise<boolean> {
 // Timeline item deletion
 // =============================================================================
 
-/** Create a standalone note (no session) for a branch. */
+/**
+ * Create a standalone note (no session) for a branch.
+ *
+ * `subtype` is `'written'` when the user authored the note in the editor
+ * dialog; the drag-drop and save-action-output paths leave it unset.
+ */
 export function createNote(
   branchId: string,
   title: string,
+  content: string,
+  subtype: import('./types').NoteSubtype = null
+): Promise<import('./types').NoteTimelineItem> {
+  return invokeCommand('create_note', { branchId, title, content, subtype });
+}
+
+/**
+ * Save an edit to a user-authored ("written") note. Rejects notes an agent
+ * session produced — their content belongs to that session.
+ *
+ * Callers invalidate the branch timeline themselves (see `ActionOutputModal`);
+ * the note id alone doesn't identify which timeline to refresh.
+ */
+export function updateNote(
+  noteId: string,
+  title: string,
   content: string
-): Promise<{ id: string; title: string; content: string; createdAt: number; updatedAt: number }> {
-  return invokeCommand('create_note', { branchId, title, content });
+): Promise<import('./types').NoteTimelineItem> {
+  return invokeCommand('update_note', { noteId, title, content });
 }
 
 /** Delete a note and optionally its linked session. */

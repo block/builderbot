@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { noteMarkdownWithTitle, renderNoteMarkdown } from './noteMarkdown';
+import {
+  UNTITLED_NOTE_TITLE,
+  noteMarkdownWithTitle,
+  renderNoteMarkdown,
+  splitNoteMarkdown,
+} from './noteMarkdown';
 
 describe('noteMarkdownWithTitle', () => {
   it('prepends the note title as a markdown H1', () => {
@@ -21,6 +26,46 @@ describe('noteMarkdownWithTitle', () => {
 
   it('leaves untitled note content unchanged', () => {
     expect(noteMarkdownWithTitle('', 'Body text.')).toBe('Body text.');
+  });
+});
+
+describe('splitNoteMarkdown', () => {
+  it('takes the leading H1 as the title and the rest as the body', () => {
+    expect(splitNoteMarkdown('# Release plan\n\nShip on Friday.')).toEqual({
+      title: 'Release plan',
+      body: 'Ship on Friday.',
+    });
+  });
+
+  it('handles a note that is only a title', () => {
+    expect(splitNoteMarkdown('# Release plan')).toEqual({ title: 'Release plan', body: '' });
+  });
+
+  it('round-trips with noteMarkdownWithTitle', () => {
+    const { title, body } = splitNoteMarkdown('# Release plan\n\nShip on Friday.');
+
+    expect(noteMarkdownWithTitle(title, body)).toBe('# Release plan\n\nShip on Friday.');
+  });
+
+  it('falls back to the first non-empty line when there is no H1', () => {
+    expect(splitNoteMarkdown('\n\nJust a thought.\n\nMore.')).toEqual({
+      title: 'Just a thought.',
+      body: '\n\nJust a thought.\n\nMore.',
+    });
+  });
+
+  it('strips heading markers from the fallback title', () => {
+    expect(splitNoteMarkdown('## Overview\n\nDetails.').title).toBe('Overview');
+  });
+
+  it('clips a long fallback title', () => {
+    const long = 'x'.repeat(120);
+
+    expect(splitNoteMarkdown(long).title).toBe(`${'x'.repeat(80)}…`);
+  });
+
+  it('names a note with nothing usable in it', () => {
+    expect(splitNoteMarkdown('   \n\n  ').title).toBe(UNTITLED_NOTE_TITLE);
   });
 });
 

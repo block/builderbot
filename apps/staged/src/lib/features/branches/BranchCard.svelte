@@ -51,6 +51,7 @@
     ProjectRepo,
     WorkspaceStatus,
   } from '../../types';
+  import { WRITTEN_NOTE_SUBTYPE } from '../../types';
   import * as commands from '../../api/commands';
   import BranchTimeline from '../timeline/BranchTimeline.svelte';
   import ImageViewerModal from '../timeline/ImageViewerModal.svelte';
@@ -58,6 +59,7 @@
   import SessionModal from '../sessions/SessionModal.svelte';
   import NewSessionModal from '../sessions/NewSessionModal.svelte';
   import NoteModal from '../notes/NoteModal.svelte';
+  import WriteNoteModal from '../notes/WriteNoteModal.svelte';
   import * as AlertDialog from '$lib/components/ui/alert-dialog';
   import { Button } from '$lib/components/ui/button';
   import {
@@ -529,6 +531,12 @@
   // Note modal (opened by clicking a note in the timeline)
   let openNote = $state<OpenNoteState | null>(null);
 
+  // Write-note editor. `null` while closed; `{ note: null }` for a new note,
+  // `{ note }` when editing an existing user-written one.
+  let openWriteNote = $state<{
+    note: { id: string; title: string; content: string } | null;
+  } | null>(null);
+
   // Image viewer modal (opened by clicking an image in the timeline)
   let viewImageId = $state<string | null>(null);
   let viewImageFilename = $state<string>('');
@@ -998,6 +1006,14 @@
   }
 
   function handleNoteClick(note: NoteClickInfo) {
+    // The user wrote this one, so clicking it reopens the editor rather than
+    // the read-only viewer.
+    if (note.subtype === WRITTEN_NOTE_SUBTYPE) {
+      openWriteNote = {
+        note: { id: note.noteId, title: note.title, content: note.content },
+      };
+      return;
+    }
     openNote = {
       noteId: note.noteId,
       title: note.title,
@@ -1006,6 +1022,17 @@
       noteUpdatedAt: note.updatedAt,
       nextSteps: computeNoteNextSteps(note.noteId),
     };
+  }
+
+  async function handleSaveWrittenNote(draft: { title: string; content: string }) {
+    const existing = openWriteNote?.note;
+    if (existing) {
+      await commands.updateNote(existing.id, draft.title, draft.content);
+    } else {
+      await commands.createNote(branch.id, draft.title, draft.content, WRITTEN_NOTE_SUBTYPE);
+    }
+    commands.invalidateBranchTimeline(branch.id);
+    await loadTimeline();
   }
 
   async function handleReviewClick(reviewId: string) {
@@ -1994,6 +2021,7 @@
               onNewReview={hasCodeChanges || sessionMgr.hasCommitSessionInProgress
                 ? (e) => sessionMgr.openNewSession('review', e)
                 : undefined}
+              onWriteNote={() => (openWriteNote = { note: null })}
               onPullOrigin={handlePullOrigin}
               onPushOrigin={handlePushOrigin}
               onOpenPushSession={pushSessionId && pushSessionId !== '__pending__'
@@ -2105,6 +2133,15 @@
       openNote = null;
       void sessionMgr.startOrQueueSession(mode, noteRef ? `${noteRef}\n${prefill}` : prefill);
     }}
+  />
+{/if}
+
+{#if openWriteNote}
+  <WriteNoteModal
+    open={true}
+    note={openWriteNote.note}
+    onSave={handleSaveWrittenNote}
+    onClose={() => (openWriteNote = null)}
   />
 {/if}
 

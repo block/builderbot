@@ -24,23 +24,14 @@ pub(crate) fn note_to_timeline_item(store: &Store, note: Note) -> NoteTimelineIt
         completed_at: note.completed_at,
         suggested_next_commit_step: note.suggested_next_commit_step,
         suggested_next_note_step: note.suggested_next_note_step,
+        subtype: note.subtype,
     }
 }
 
-/// Create a standalone note (no session) for a branch.
-#[tauri::command(rename_all = "camelCase")]
-pub fn create_note(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    branch_id: String,
-    title: String,
-    content: String,
-) -> Result<NoteTimelineItem, String> {
-    let store = crate::get_store(&store)?;
-    let mut note = crate::store::models::Note::new(&branch_id, &title, &content);
-    store
-        .create_note_with_unique_title(&mut note)
-        .map_err(|e| e.to_string())?;
-    Ok(NoteTimelineItem {
+/// Build the timeline item for a note that has no session by construction, so
+/// there is no session status to resolve. Shared with the web-server dispatch.
+pub(crate) fn standalone_note_to_timeline_item(note: Note) -> NoteTimelineItem {
+    NoteTimelineItem {
         id: note.id,
         title: note.title,
         content: note.content,
@@ -52,7 +43,47 @@ pub fn create_note(
         completed_at: note.completed_at,
         suggested_next_commit_step: None,
         suggested_next_note_step: None,
-    })
+        subtype: note.subtype,
+    }
+}
+
+/// Create a standalone note (no session) for a branch.
+///
+/// `subtype` is `"written"` when the user authored the note in the editor
+/// dialog; the drag-drop and save-action-output paths leave it unset.
+#[tauri::command(rename_all = "camelCase")]
+pub fn create_note(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    branch_id: String,
+    title: String,
+    content: String,
+    subtype: Option<String>,
+) -> Result<NoteTimelineItem, String> {
+    let store = crate::get_store(&store)?;
+    let mut note = crate::store::models::Note::new(&branch_id, &title, &content);
+    note.subtype = subtype;
+    store
+        .create_note_with_unique_title(&mut note)
+        .map_err(|e| e.to_string())?;
+    Ok(standalone_note_to_timeline_item(note))
+}
+
+/// Save an edit to a user-authored ("written") note.
+///
+/// Rejects notes an agent session produced — their content is owned by that
+/// session and would be overwritten on its next turn.
+#[tauri::command(rename_all = "camelCase")]
+pub fn update_note(
+    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
+    note_id: String,
+    title: String,
+    content: String,
+) -> Result<NoteTimelineItem, String> {
+    let store = crate::get_store(&store)?;
+    let note = store
+        .update_written_note(&note_id, &title, &content)
+        .map_err(|e| e.to_string())?;
+    Ok(standalone_note_to_timeline_item(note))
 }
 
 /// Delete a note and optionally its linked session.

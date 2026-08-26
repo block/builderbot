@@ -2447,23 +2447,24 @@ async fn dispatch(command: &str, args: Value, state: &WebAppState) -> Result<Val
             let branch_id: String = arg(&args, "branchId")?;
             let title: String = arg(&args, "title")?;
             let content: String = arg(&args, "content")?;
+            let subtype: Option<String> = opt_arg(&args, "subtype")?;
             let mut note = crate::store::models::Note::new(&branch_id, &title, &content);
+            note.subtype = subtype;
             store
                 .create_note_with_unique_title(&mut note)
                 .map_err(|e| e.to_string())?;
-            let item = crate::NoteTimelineItem {
-                id: note.id,
-                title: note.title,
-                content: note.content,
-                session_id: None,
-                session_status: None,
-                completion_reason: None,
-                created_at: note.created_at,
-                updated_at: note.updated_at,
-                completed_at: note.completed_at,
-                suggested_next_commit_step: None,
-                suggested_next_note_step: None,
-            };
+            let item = crate::note_commands::standalone_note_to_timeline_item(note);
+            Ok(serde_json::to_value(item).unwrap())
+        }
+        "update_note" => {
+            let store = get_store(store_mutex)?;
+            let note_id: String = arg(&args, "noteId")?;
+            let title: String = arg(&args, "title")?;
+            let content: String = arg(&args, "content")?;
+            let note = store
+                .update_written_note(&note_id, &title, &content)
+                .map_err(|e| e.to_string())?;
+            let item = crate::note_commands::standalone_note_to_timeline_item(note);
             Ok(serde_json::to_value(item).unwrap())
         }
         "delete_note" => {

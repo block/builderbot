@@ -4,14 +4,10 @@ type TimelineSessionItem = {
   sessionStatus: string | null;
 };
 
-type TimelineReviewSessionItem = TimelineSessionItem & {
-  isAuto: boolean;
-};
-
 export interface BranchSessionQueueTimeline {
   commits: TimelineSessionItem[];
   notes: TimelineSessionItem[];
-  reviews: TimelineReviewSessionItem[];
+  reviews: TimelineSessionItem[];
 }
 
 export interface BranchSessionQueueOptions {
@@ -33,7 +29,7 @@ export function hasQueuedBranchSession(timeline: BranchSessionQueueTimeline): bo
   return (
     timeline.commits.some((commit) => isQueued(commit.sessionStatus)) ||
     timeline.notes.some((note) => isQueued(note.sessionStatus)) ||
-    timeline.reviews.some((review) => !review.isAuto && isQueued(review.sessionStatus))
+    timeline.reviews.some((review) => isQueued(review.sessionStatus))
   );
 }
 
@@ -46,7 +42,7 @@ function runningBranchSessionTypes(timeline: BranchSessionQueueTimeline): Set<Br
   if (timeline.notes.some((note) => isRunning(note.sessionStatus))) {
     running.add('note');
   }
-  if (timeline.reviews.some((review) => !review.isAuto && isRunning(review.sessionStatus))) {
+  if (timeline.reviews.some((review) => isRunning(review.sessionStatus))) {
     running.add('review');
   }
 

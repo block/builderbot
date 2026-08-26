@@ -1240,20 +1240,6 @@ export function removeReferenceFile(reviewId: string, path: string): Promise<voi
 }
 
 // =============================================================================
-// Auto review
-// =============================================================================
-
-/** Find an auto review created after all commits on a branch. */
-export function findFreshAutoReview(branchId: string): Promise<Review | null> {
-  return invokeCommand('find_fresh_auto_review', { branchId });
-}
-
-/** Mark or unmark a review as auto-generated. */
-export function setReviewAuto(reviewId: string, isAuto: boolean): Promise<void> {
-  return invokeCommand('set_review_auto', { reviewId, isAuto });
-}
-
-// =============================================================================
 // Git helpers
 // =============================================================================
 

@@ -2938,49 +2938,6 @@ fn test_set_comment_session_round_trips() {
 }
 
 #[test]
-fn test_set_review_auto_restamps_completed_at_when_made_visible() {
-    let store = Store::in_memory().unwrap();
-    let project = Project::new("test-owner/test-repo");
-    store.create_project(&project).unwrap();
-    let branch = Branch::new(&project.id, "feature", "main");
-    store.create_branch(&branch).unwrap();
-
-    let review = Review::new(&branch.id, "abc123", ReviewScope::Branch).with_auto();
-    store.create_review(&review).unwrap();
-    store
-        .update_review_title(&review.id, "Auto review")
-        .unwrap();
-
-    let auto_review = store.get_review(&review.id).unwrap().unwrap();
-    let original_completed_at = auto_review.completed_at.unwrap();
-
-    std::thread::sleep(std::time::Duration::from_millis(2));
-    store.set_review_auto(&review.id, false).unwrap();
-
-    let visible_review = store.get_review(&review.id).unwrap().unwrap();
-    assert!(!visible_review.is_auto);
-    assert!(visible_review.completed_at.unwrap() > original_completed_at);
-}
-
-#[test]
-fn test_set_review_auto_leaves_incomplete_review_uncompleted() {
-    let store = Store::in_memory().unwrap();
-    let project = Project::new("test-owner/test-repo");
-    store.create_project(&project).unwrap();
-    let branch = Branch::new(&project.id, "feature", "main");
-    store.create_branch(&branch).unwrap();
-
-    let review = Review::new(&branch.id, "abc123", ReviewScope::Branch).with_auto();
-    store.create_review(&review).unwrap();
-
-    store.set_review_auto(&review.id, false).unwrap();
-
-    let visible_review = store.get_review(&review.id).unwrap().unwrap();
-    assert!(!visible_review.is_auto);
-    assert!(visible_review.completed_at.is_none());
-}
-
-#[test]
 fn test_list_reviews_for_branch() {
     let store = Store::in_memory().unwrap();
     let project = Project::new("test-owner/test-repo");

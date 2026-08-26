@@ -4,7 +4,6 @@
   import Info from '@lucide/svelte/icons/info';
   import Check from '@lucide/svelte/icons/check';
   import ChevronDown from '@lucide/svelte/icons/chevron-down';
-  import * as Select from '$lib/components/ui/select';
   import * as Popover from '$lib/components/ui/popover';
   import * as ToggleGroup from '$lib/components/ui/toggle-group';
   import { Input } from '$lib/components/ui/input';
@@ -15,19 +14,12 @@
     getAvailableSyntaxThemes,
     selectDiffTheme,
     setMode,
-    setAutoReviewMode,
     setBranchPrefix,
     loadAllThemePreviewColors,
     isLightTheme,
     type AppMode,
-    type AutoReviewMode,
     type ThemePreviewColors,
   } from './preferences.svelte';
-
-  const autoReviewOptions: { value: AutoReviewMode; label: string }[] = [
-    { value: 'never', label: 'Never' },
-    { value: 'after-changes', label: 'After changes' },
-  ];
 
   const modeOptions: { value: AppMode; label: string }[] = [
     { value: 'light', label: 'Light' },
@@ -158,34 +150,6 @@
       <p class="field-description">
         <Info size={12} />
         Syntax highlighting and colors for the diff viewer only.
-      </p>
-    </div>
-
-    <div class="field">
-      <Label for="auto-review-select" class="text-foreground text-sm font-semibold"
-        >Auto start code reviews</Label
-      >
-      <Select.Root
-        type="single"
-        value={preferences.autoReviewMode}
-        onValueChange={(v) => setAutoReviewMode(v as AutoReviewMode)}
-      >
-        <Select.Trigger id="auto-review-select" class="w-full max-w-[320px]">
-          {autoReviewOptions.find((o) => o.value === preferences.autoReviewMode)?.label ?? ''}
-        </Select.Trigger>
-        <Select.Content>
-          {#each autoReviewOptions as opt (opt.value)}
-            <Select.Item value={opt.value} label={opt.label}>{opt.label}</Select.Item>
-          {/each}
-        </Select.Content>
-      </Select.Root>
-      <p class="field-description">
-        <Info size={12} />
-        {#if preferences.autoReviewMode === 'after-changes'}
-          A code review will automatically start after each commit session completes.
-        {:else}
-          Code reviews will only start when you manually request them.
-        {/if}
       </p>
     </div>
 

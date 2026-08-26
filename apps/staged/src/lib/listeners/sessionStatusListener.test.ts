@@ -190,7 +190,6 @@ describe('sessionStatusListener busy-state hydration', () => {
         branchId: 'branch-1',
         sessionType: 'commit',
         status: 'running',
-        isAutoReview: false,
       },
       {
         sessionId: 'queued-1',
@@ -198,7 +197,6 @@ describe('sessionStatusListener busy-state hydration', () => {
         branchId: 'branch-1',
         sessionType: 'commit',
         status: 'queued',
-        isAutoReview: false,
       },
       {
         sessionId: 'unresolved-1',
@@ -206,15 +204,6 @@ describe('sessionStatusListener busy-state hydration', () => {
         branchId: null,
         sessionType: 'pr',
         status: 'running',
-        isAutoReview: false,
-      },
-      {
-        sessionId: 'auto-review-1',
-        projectId: 'project-2',
-        branchId: 'branch-2',
-        sessionType: 'review',
-        status: 'running',
-        isAutoReview: true,
       },
       {
         sessionId: 'untyped-1',
@@ -222,7 +211,6 @@ describe('sessionStatusListener busy-state hydration', () => {
         branchId: null,
         sessionType: null,
         status: 'running',
-        isAutoReview: false,
       },
     ]);
 
@@ -257,7 +245,6 @@ describe('sessionStatusListener busy-state hydration', () => {
         branchId: null,
         sessionType: 'other',
         status: 'running',
-        isAutoReview: false,
       },
     ]);
 
@@ -345,7 +332,6 @@ describe('sessionStatusListener busy-state hydration', () => {
           branchId: 'branch-1',
           sessionType: 'commit',
           status: 'running',
-          isAutoReview: false,
         },
       ];
     });
@@ -387,7 +373,6 @@ describe('sessionStatusListener busy-state hydration', () => {
         branchId: 'branch-1',
         sessionType: 'commit',
         status: 'running',
-        isAutoReview: false,
       },
     ]);
     await hydrateActiveSessions();

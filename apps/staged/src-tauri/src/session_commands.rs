@@ -903,7 +903,6 @@ pub struct ActiveSessionInfo {
     pub branch_id: Option<String>,
     pub session_type: Option<String>,
     pub status: String,
-    pub is_auto_review: bool,
 }
 
 /// Project one session to branch/project context and session type.
@@ -963,7 +962,6 @@ fn project_active_session(store: &Store, session: &store::Session) -> ActiveSess
         branch_id,
         session_type,
         status: session.status.as_str().to_string(),
-        is_auto_review: linked_review.map(|review| review.is_auto).unwrap_or(false),
     }
 }
 
@@ -1105,7 +1103,6 @@ pub async fn start_session(
             remote_working_dir: None,
             image_ids: vec![],
             queued_message_id: None,
-            pending_auto_review_branch_id: None,
             acp_config_selection,
             branch_id: None,
             project_id: None,
@@ -1156,7 +1153,6 @@ pub async fn resume_session(
         branch_id,
         acp_config_selection,
         None,
-        None,
     )
     .await
 }
@@ -1174,7 +1170,6 @@ pub(crate) async fn resume_session_for_store(
     branch_id: Option<String>,
     acp_config_selection: Option<store::AcpConfigSelection>,
     queued_message_id: Option<String>,
-    pending_auto_review_branch_id: Option<String>,
 ) -> Result<(), String> {
     let session = store
         .get_session(&session_id)
@@ -1323,7 +1318,6 @@ pub(crate) async fn resume_session_for_store(
             branch_id: event_branch_id,
             project_id: event_project_id.or(mcp_project_id.clone()),
             session_type,
-            is_auto_review: false,
         },
     );
 
@@ -1364,7 +1358,6 @@ pub(crate) async fn resume_session_for_store(
             remote_working_dir,
             image_ids: image_ids.unwrap_or_default(),
             queued_message_id,
-            pending_auto_review_branch_id,
             acp_config_selection: effective_acp_config_selection,
             branch_id: config_branch_id,
             project_id: config_project_id,
@@ -1467,7 +1460,6 @@ pub(crate) async fn send_queued_session_message_for_store(
         message.branch_id.clone(),
         None,
         Some(message.id.clone()),
-        None,
     )
     .await;
 
@@ -1486,7 +1478,6 @@ pub(crate) async fn drain_queued_message_for_session(
     action_registry: Arc<ActionRegistry>,
     app_handle: tauri::AppHandle,
     session_id: String,
-    pending_auto_review_branch_id: Option<String>,
 ) -> Result<bool, String> {
     let Some(message) = store
         .claim_oldest_queued_session_message(&session_id)
@@ -1507,7 +1498,6 @@ pub(crate) async fn drain_queued_message_for_session(
         message.branch_id.clone(),
         None,
         Some(message.id.clone()),
-        pending_auto_review_branch_id,
     )
     .await;
 
@@ -1649,7 +1639,6 @@ pub fn cancel_session(
                         branch_id,
                         project_id,
                         session_type: None,
-                        is_auto_review: false,
                     },
                 );
             }
@@ -1882,7 +1871,6 @@ impl BranchSessionScheduleKind {
 struct BranchSessionSchedule {
     kind: BranchSessionScheduleKind,
     review_id: Option<String>,
-    blocks_queue: bool,
 }
 
 fn can_start_with_active_branch_sessions(
@@ -1904,7 +1892,6 @@ fn note_session_schedule() -> BranchSessionSchedule {
     BranchSessionSchedule {
         kind: BranchSessionScheduleKind::Note,
         review_id: None,
-        blocks_queue: true,
     }
 }
 
@@ -1912,17 +1899,15 @@ fn review_session_schedule(review: &store::Review) -> BranchSessionSchedule {
     BranchSessionSchedule {
         kind: BranchSessionScheduleKind::Review,
         review_id: Some(review.id.clone()),
-        blocks_queue: !review.is_auto,
     }
 }
 
 /// Schedule for the kinds that take the branch exclusively (commit sessions and
-/// command pipelines): they always block the queue and carry no review.
+/// command pipelines): they carry no review.
 fn exclusive_session_schedule(kind: BranchSessionScheduleKind) -> BranchSessionSchedule {
     BranchSessionSchedule {
         kind,
         review_id: None,
-        blocks_queue: true,
     }
 }
 
@@ -2023,9 +2008,7 @@ fn running_branch_session_kinds(
     for session in running {
         if let Some(schedule) = resolve_branch_session_schedule(store, branch_id, &session, false)?
         {
-            if schedule.blocks_queue {
-                active.insert(schedule.kind);
-            }
+            active.insert(schedule.kind);
         }
     }
     Ok(active)
@@ -2045,16 +2028,14 @@ pub(crate) fn branch_session_launch_lock_for(branch_id: &str) -> Arc<Mutex<()>> 
     )
 }
 
-fn has_queued_user_branch_session(store: &Store, branch_id: &str) -> Result<bool, String> {
+fn has_queued_branch_session(store: &Store, branch_id: &str) -> Result<bool, String> {
     let queued = store
         .get_queued_sessions_for_branch(branch_id)
         .map_err(|e| e.to_string())?;
 
     for session in queued {
-        if let Some(schedule) = resolve_branch_session_schedule(store, branch_id, &session, true)? {
-            if schedule.blocks_queue {
-                return Ok(true);
-            }
+        if resolve_branch_session_schedule(store, branch_id, &session, true)?.is_some() {
+            return Ok(true);
         }
     }
 
@@ -2090,7 +2071,7 @@ fn should_queue_branch_session_start(
         return Ok(true);
     }
 
-    if has_queued_user_branch_session(store, branch_id)? {
+    if has_queued_branch_session(store, branch_id)? {
         return Ok(true);
     }
 
@@ -2113,9 +2094,7 @@ fn drainable_session_ids_for_active_set(
         }
 
         drainable.push(session_id.clone());
-        if schedule.blocks_queue {
-            active.insert(schedule.kind);
-        }
+        active.insert(schedule.kind);
     }
     drainable
 }
@@ -2339,7 +2318,6 @@ pub async fn start_project_session(
             remote_working_dir: None,
             image_ids: image_ids.unwrap_or_default(),
             queued_message_id: None,
-            pending_auto_review_branch_id: None,
             acp_config_selection,
             branch_id: None,
             project_id: Some(project_id),
@@ -2737,7 +2715,6 @@ fn launch_running_branch_session(
             remote_working_dir: prepared.remote_working_dir,
             image_ids,
             queued_message_id: None,
-            pending_auto_review_branch_id: None,
             acp_config_selection: acp_config_selection_for_session_start(&created.session),
             branch_id: Some(branch_id),
             project_id: Some(project_id),
@@ -2770,13 +2747,6 @@ pub async fn start_or_queue_branch_session_for_store(
     acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<BranchSessionResponse, String> {
     let image_ids = image_ids.unwrap_or_default();
-
-    if matches!(
-        session_type,
-        BranchSessionType::Commit | BranchSessionType::Review
-    ) {
-        cancel_in_flight_auto_review_for_branch(&store, &registry, &branch_id)?;
-    }
 
     let provider = resolve_branch_session_provider(&store, &branch_id, &session_type, provider)?;
     let launch_lock = branch_session_launch_lock_for(&branch_id);
@@ -2831,7 +2801,6 @@ pub async fn start_or_queue_branch_session_for_store(
 #[allow(clippy::too_many_arguments)]
 pub fn queue_branch_session_for_store(
     store: Arc<Store>,
-    registry: Arc<session_runner::SessionRegistry>,
     branch_id: String,
     prompt: String,
     session_type: BranchSessionType,
@@ -2841,13 +2810,6 @@ pub fn queue_branch_session_for_store(
     acp_config_selection: Option<store::AcpConfigSelection>,
 ) -> Result<BranchSessionResponse, String> {
     let image_ids = image_ids.unwrap_or_default();
-
-    if matches!(
-        session_type,
-        BranchSessionType::Commit | BranchSessionType::Review
-    ) {
-        cancel_in_flight_auto_review_for_branch(&store, &registry, &branch_id)?;
-    }
 
     let provider = resolve_branch_session_provider(&store, &branch_id, &session_type, provider)?;
     let launch_lock = branch_session_launch_lock_for(&branch_id);
@@ -2941,7 +2903,6 @@ pub async fn start_or_queue_branch_session(
 #[allow(clippy::too_many_arguments)]
 pub fn queue_branch_session(
     store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    registry: tauri::State<'_, Arc<session_runner::SessionRegistry>>,
     branch_id: String,
     prompt: String,
     session_type: BranchSessionType,
@@ -2953,7 +2914,6 @@ pub fn queue_branch_session(
     let store = get_store(&store)?;
     queue_branch_session_for_store(
         store,
-        Arc::clone(&registry),
         branch_id,
         prompt,
         session_type,
@@ -3030,9 +2990,7 @@ pub async fn drain_queued_sessions_for_branch(
 
         if started {
             started_any = true;
-            if schedule.blocks_queue {
-                active.insert(schedule.kind);
-            }
+            active.insert(schedule.kind);
         } else {
             active = running_branch_session_kinds(&store, &branch_id)?;
         }
@@ -3257,7 +3215,6 @@ async fn start_queued_session_for_branch(
             branch_id: Some(branch_id.clone()),
             project_id: Some(branch.project_id.clone()),
             session_type: Some(session_type_str.to_string()),
-            is_auto_review: false,
         },
     );
 
@@ -3277,7 +3234,6 @@ async fn start_queued_session_for_branch(
             remote_working_dir,
             image_ids,
             queued_message_id: None,
-            pending_auto_review_branch_id: None,
             acp_config_selection: acp_config_selection_for_session_start(&session),
             branch_id: Some(branch_id),
             project_id: Some(branch.project_id.clone()),
@@ -3296,7 +3252,7 @@ async fn start_queued_session_for_branch(
 }
 
 // =============================================================================
-// Auto review commands
+// Review provider resolution
 // =============================================================================
 
 /// Agents known to be available on remote Blox workstations.
@@ -3499,312 +3455,6 @@ fn resolve_inherited_provider_from_ids(
         }
         Err(e) => Err(e),
     }
-}
-
-/// Core logic for starting an automatic review for a branch.
-///
-/// Creates a review with `is_auto = true`, starts a session, and emits
-/// `session-status-changed` with `isAutoReview: true` so the frontend
-/// can track it.
-///
-/// When `provider` is `None`, resolves the user's current preferred agent
-/// from persisted preferences so that auto-reviews match what the user
-/// would get if they clicked "Review" manually.
-///
-/// This is called both from the Tauri command and from the session runner
-/// when a commit session completes.
-pub async fn trigger_auto_review(
-    store: Arc<Store>,
-    registry: Arc<session_runner::SessionRegistry>,
-    app_handle: tauri::AppHandle,
-    branch_id: String,
-    provider: Option<String>,
-) -> Result<BranchSessionResponse, String> {
-    // Resolve branch → project
-    let branch = store
-        .get_branch(&branch_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Branch not found: {branch_id}"))?;
-
-    let project = store
-        .get_project(&branch.project_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Project not found: {}", branch.project_id))?;
-
-    let is_remote = branch.workspace_name.is_some();
-
-    // Resolve the provider before inserting session/review rows. Auto reviews
-    // should only create agent-backed records when the provider is concrete.
-    let provider_was_explicit = provider.is_some();
-    let provider = resolve_review_provider(provider, is_remote).map_err(|e| {
-        log::warn!("[auto_review] no provider available for branch {branch_id}: {e}");
-        e
-    })?;
-    if !provider_was_explicit {
-        log::info!("[auto_review] resolved preferred provider: {provider}");
-    }
-
-    // Resolve working directory and branch context.
-    let (working_dir, branch_context) = if is_remote {
-        let fallback_dir = resolve_branch_repo_slug(&store, &project, &branch)
-            .and_then(|repo| crate::paths::repos_dir().map(|d| d.join(repo)))
-            .unwrap_or_else(|| PathBuf::from("/tmp"));
-        let workspace_name = branch.workspace_name.as_deref().unwrap().to_string();
-        let base_branch = branch.base_branch.clone();
-        let store_for_context = Arc::clone(&store);
-        let branch_id_for_context = branch_id.clone();
-        let project_id_for_context = branch.project_id.clone();
-        let remote_context = tauri::async_runtime::spawn_blocking(move || {
-            build_remote_branch_context(
-                &workspace_name,
-                &base_branch,
-                &store_for_context,
-                &branch_id_for_context,
-                &project_id_for_context,
-                RemotePikchrGrammarStaging::NotNeeded,
-            )
-        })
-        .await
-        .map_err(|e| format!("Failed to build remote branch context: {e}"))?;
-        (fallback_dir, remote_context.branch_context)
-    } else {
-        let workdir = store
-            .get_workdir_for_branch(&branch_id)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("No worktree for branch: {branch_id}"))?;
-
-        let mut worktree_path = PathBuf::from(&workdir.path);
-        let effective_subpath = if let Some(repo_id) = branch.project_repo_id.as_deref() {
-            store
-                .get_project_repo(repo_id)
-                .ok()
-                .flatten()
-                .and_then(|repo| repo.subpath)
-        } else {
-            project.subpath.clone()
-        };
-        if let Some(ref subpath) = effective_subpath {
-            worktree_path = worktree_path.join(subpath);
-        }
-
-        let ctx = build_branch_context(
-            &worktree_path,
-            &branch.base_branch,
-            &store,
-            &branch_id,
-            &branch.project_id,
-        );
-        (worktree_path, ctx)
-    };
-
-    // Get the current tip SHA for the review anchor
-    let tip_sha = review_tip_sha(&store, &branch, &working_dir).await?;
-
-    // Build the full prompt (reuse Review prompt)
-    let prompt = "Review the latest changes on this branch.".to_string();
-    let project_information = build_project_context(&store, &project, &branch);
-    let full_prompt = build_full_prompt(
-        &prompt,
-        &project_information,
-        &branch_context,
-        &BranchSessionType::Review,
-        None,
-        Some(&branch.base_branch),
-    );
-
-    // Create the session
-    let session = store::Session::new_running(&full_prompt, &working_dir).with_provider(&provider);
-    store.create_session(&session).map_err(|e| e.to_string())?;
-
-    // Create auto review
-    let review = store::Review::new(&branch_id, &tip_sha, store::ReviewScope::Branch)
-        .with_session(&session.id)
-        .with_auto();
-    store.create_review(&review).map_err(|e| e.to_string())?;
-
-    // Emit session-status-changed with isAutoReview: true
-    crate::web_server::emit_to_all(
-        &app_handle,
-        "session-status-changed",
-        session_runner::SessionStatusEvent {
-            session_id: session.id.clone(),
-            status: "running".to_string(),
-            error_message: None,
-            completion_reason: None,
-            branch_id: Some(branch_id.clone()),
-            project_id: Some(branch.project_id.clone()),
-            session_type: Some("review".to_string()),
-            is_auto_review: true,
-        },
-    );
-
-    // Resolve the remote working dir for remote branches
-    let remote_working_dir = if is_remote {
-        let ws_name = branch.workspace_name.as_deref().unwrap().to_string();
-        let store_for_resolve = Arc::clone(&store);
-        let branch_for_resolve = branch.clone();
-        match tauri::async_runtime::spawn_blocking(move || {
-            crate::branches::resolve_branch_workspace_subpath(
-                &store_for_resolve,
-                &branch_for_resolve,
-            )
-            .ok()
-            .flatten()
-            .and_then(|subpath| {
-                crate::branches::resolve_workspace_repo_path(&ws_name, &subpath).ok()
-            })
-        })
-        .await
-        {
-            Ok(Some(path)) => Some(PathBuf::from(path)),
-            _ => None,
-        }
-    } else {
-        None
-    };
-
-    session_runner::start_session(
-        SessionConfig {
-            session_id: session.id.clone(),
-            prompt: full_prompt,
-            working_dir,
-            agent_session_id: None,
-            pre_head_sha: None,
-            provider: Some(provider),
-            workspace_name: branch.workspace_name.clone(),
-            extra_env: vec![],
-            mcp_project_id: None,
-            action_executor: None,
-            action_registry: None,
-            remote_working_dir,
-            image_ids: vec![],
-            queued_message_id: None,
-            pending_auto_review_branch_id: None,
-            acp_config_selection: None,
-            branch_id: Some(branch_id.clone()),
-            project_id: Some(branch.project_id.clone()),
-            // Auto-review sessions don't write notes.
-            expose_pikchr_tools: false,
-            parent_project_note_id: None,
-        },
-        store,
-        app_handle,
-        Arc::clone(&registry),
-    )?;
-
-    Ok(BranchSessionResponse {
-        session_id: session.id,
-        artifact_id: review.id,
-        session_status: BranchSessionLaunchStatus::Running,
-    })
-}
-
-/// Resolve the latest git committer timestamp (in milliseconds) for a
-/// branch by querying the actual git log.  This covers commits made
-/// outside the app that are absent from the `commits` table.
-///
-/// Returns `0` when the branch has no worktree, no commits, or when the
-/// git query fails — callers fall back to the DB-only comparison in that
-/// case.
-fn latest_git_commit_ms(store: &Arc<Store>, branch_id: &str) -> i64 {
-    let branch = match store.get_branch(branch_id) {
-        Ok(Some(b)) => b,
-        _ => return 0,
-    };
-    let workdir = match store.get_workdir_for_branch(branch_id) {
-        Ok(Some(w)) => w,
-        _ => return 0,
-    };
-    let worktree_path = std::path::Path::new(&workdir.path);
-    if !worktree_path.exists() {
-        return 0;
-    }
-    let base_ref = git::origin_ref_for_branch(&branch.base_branch);
-    let commits = match git::get_commits_since_base(worktree_path, &base_ref) {
-        Ok(c) => c,
-        Err(_) => return 0,
-    };
-    // `timestamp` is committer time, not the author time the timeline sorts
-    // on: a rebase *should* read as new activity here. In seconds, so convert
-    // to milliseconds.
-    commits.iter().map(|c| c.timestamp).max().unwrap_or(0) * 1000
-}
-
-pub(crate) fn cancel_in_flight_auto_review_for_branch(
-    store: &Arc<Store>,
-    registry: &session_runner::SessionRegistry,
-    branch_id: &str,
-) -> Result<bool, String> {
-    let git_ts = latest_git_commit_ms(store, branch_id);
-    let Some(review) = store
-        .find_fresh_auto_review(branch_id, git_ts)
-        .map_err(|e| e.to_string())?
-    else {
-        return Ok(false);
-    };
-
-    let Some(session_id) = review.session_id.as_deref() else {
-        return Ok(false);
-    };
-
-    let Some(session) = store.get_session(session_id).map_err(|e| e.to_string())? else {
-        return Ok(false);
-    };
-
-    if !matches!(
-        session.status,
-        store::SessionStatus::Running | store::SessionStatus::Queued
-    ) {
-        return Ok(false);
-    }
-
-    registry.cancel(session_id);
-    let cancelled = store
-        .transition_from_active(
-            session_id,
-            store::SessionStatus::Cancelled,
-            None,
-            Some(&store::CompletionReason::Interrupted),
-        )
-        .map_err(|e| e.to_string())?;
-    if !cancelled {
-        let current = store.get_session(session_id).map_err(|e| e.to_string())?;
-        return match current.map(|session| session.status) {
-            None | Some(store::SessionStatus::Cancelled) => Ok(true),
-            _ => Ok(false),
-        };
-    }
-
-    Ok(true)
-}
-
-/// Find an auto review created after all commits on a branch.
-#[tauri::command(rename_all = "camelCase")]
-pub async fn find_fresh_auto_review(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    branch_id: String,
-) -> Result<Option<store::Review>, String> {
-    let store = get_store(&store)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let git_ts = latest_git_commit_ms(&store, &branch_id);
-        store
-            .find_fresh_auto_review(&branch_id, git_ts)
-            .map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// Update the `is_auto` flag on a review.
-#[tauri::command(rename_all = "camelCase")]
-pub fn set_review_auto(
-    store: tauri::State<'_, Mutex<Option<Arc<Store>>>>,
-    review_id: String,
-    is_auto: bool,
-) -> Result<(), String> {
-    get_store(&store)?
-        .set_review_auto(&review_id, is_auto)
-        .map_err(|e| e.to_string())
 }
 
 // =============================================================================
@@ -4767,9 +4417,6 @@ fn review_timeline_entries(
 
     let mut entries = Vec::new();
     for review in &reviews {
-        if review.is_auto {
-            continue;
-        }
         // Hide reviews whose originating commit is no longer on the branch,
         // mirroring the branch card timeline so the agent never sees a review
         // the user can't see in the UI.
@@ -4890,27 +4537,6 @@ fn image_timeline_entries(
 
 fn shell_quote_arg(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-/// Assemble the full prompt from action instructions + branch context + user prompt.
-pub(crate) fn build_full_prompt(
-    user_prompt: &str,
-    project_information: &str,
-    branch_context: &str,
-    session_type: &BranchSessionType,
-    launch_context: Option<&BranchSessionLaunchContext>,
-    base_branch: Option<&str>,
-) -> String {
-    build_full_prompt_with_pikchr_reference(
-        user_prompt,
-        project_information,
-        branch_context,
-        session_type,
-        launch_context,
-        base_branch,
-        PIKCHR_GRAMMAR_URL,
-        false,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -5171,6 +4797,29 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
+    /// Calls [`build_full_prompt_with_pikchr_reference`] with the default pikchr
+    /// grammar reference and no pikchr tools. Production callers thread both
+    /// through explicitly; only these tests want the defaults.
+    fn build_full_prompt(
+        user_prompt: &str,
+        project_information: &str,
+        branch_context: &str,
+        session_type: &BranchSessionType,
+        launch_context: Option<&BranchSessionLaunchContext>,
+        base_branch: Option<&str>,
+    ) -> String {
+        build_full_prompt_with_pikchr_reference(
+            user_prompt,
+            project_information,
+            branch_context,
+            session_type,
+            launch_context,
+            base_branch,
+            PIKCHR_GRAMMAR_URL,
+            false,
+        )
+    }
+
     fn setup_branch_store() -> (Arc<Store>, store::Branch) {
         let store = Arc::new(Store::in_memory().unwrap());
         let project = store::Project::new("test-owner/test-repo");
@@ -5283,35 +4932,6 @@ mod tests {
         );
     }
 
-    fn create_auto_review(
-        store: &Arc<Store>,
-        branch_id: &str,
-        status: store::SessionStatus,
-    ) -> (store::Session, store::Review) {
-        let session = match status {
-            store::SessionStatus::Running => {
-                store::Session::new_running("auto review", Path::new("/tmp"))
-            }
-            store::SessionStatus::Queued => store::Session::new_queued("auto review"),
-            store::SessionStatus::Completed => {
-                store::Session::new_running("auto review", Path::new("/tmp"))
-            }
-            other => panic!("unsupported auto review test status: {}", other.as_str()),
-        };
-        store.create_session(&session).unwrap();
-        if status != store::SessionStatus::Running && status != store::SessionStatus::Queued {
-            store
-                .update_session_status(&session.id, status, None, None)
-                .unwrap();
-        }
-
-        let review = store::Review::new(branch_id, "abc123", store::ReviewScope::Branch)
-            .with_session(&session.id)
-            .with_auto();
-        store.create_review(&review).unwrap();
-        (session, review)
-    }
-
     fn create_session_with_status(
         store: &Arc<Store>,
         prompt: &str,
@@ -5399,7 +5019,6 @@ mod tests {
         BranchSessionSchedule {
             kind,
             review_id: None,
-            blocks_queue: true,
         }
     }
 
@@ -5500,7 +5119,6 @@ mod tests {
         );
         assert_eq!(commit_info.session_type.as_deref(), Some("commit"));
         assert_eq!(commit_info.status, "running");
-        assert!(!commit_info.is_auto_review);
 
         let note_info = info_for(&note_session.id);
         assert_eq!(note_info.session_type.as_deref(), Some("note"));
@@ -5508,20 +5126,6 @@ mod tests {
 
         let review_info = info_for(&review_session.id);
         assert_eq!(review_info.session_type.as_deref(), Some("review"));
-        assert!(!review_info.is_auto_review);
-    }
-
-    #[test]
-    fn active_sessions_snapshot_marks_auto_reviews() {
-        let (store, branch) = setup_branch_store();
-        let (session, _review) =
-            create_auto_review(&store, &branch.id, store::SessionStatus::Running);
-
-        let snapshot = get_active_sessions_impl(&store).unwrap();
-        assert_eq!(snapshot.len(), 1);
-        assert_eq!(snapshot[0].session_id, session.id);
-        assert_eq!(snapshot[0].session_type.as_deref(), Some("review"));
-        assert!(snapshot[0].is_auto_review);
     }
 
     #[test]
@@ -5613,7 +5217,6 @@ mod tests {
             Some(branch.project_id.as_str())
         );
         assert_eq!(snapshot[0].session_type.as_deref(), Some("pr"));
-        assert!(!snapshot[0].is_auto_review);
     }
 
     #[test]
@@ -5913,41 +5516,8 @@ mod tests {
     }
 
     #[test]
-    fn running_auto_review_does_not_block_queued_user_sessions() {
-        let (store, branch) = setup_branch_store();
-        create_auto_review(&store, &branch.id, store::SessionStatus::Running);
-
-        let active = running_branch_session_kinds(&store, &branch.id).unwrap();
-
-        assert!(active.is_empty());
-        for kind in [
-            BranchSessionScheduleKind::Note,
-            BranchSessionScheduleKind::Review,
-            BranchSessionScheduleKind::Commit,
-        ] {
-            assert!(can_start_with_active_branch_sessions(kind, &active));
-        }
-    }
-
-    #[test]
-    fn branch_start_decision_ignores_auto_review_barriers() {
-        let (store, branch) = setup_branch_store_with_workdir();
-        create_auto_review(&store, &branch.id, store::SessionStatus::Running);
-        create_auto_review(&store, &branch.id, store::SessionStatus::Queued);
-
-        for session_type in [
-            BranchSessionType::Note,
-            BranchSessionType::Review,
-            BranchSessionType::Commit,
-        ] {
-            assert!(!should_queue_branch_session_start(&store, &branch.id, &session_type).unwrap());
-        }
-    }
-
-    #[test]
     fn explicit_queue_response_reports_queued_status_and_stores_acp_config_selection() {
         let (store, branch) = setup_branch_store();
-        let registry = Arc::new(session_runner::SessionRegistry::new());
         let selection = store::AcpConfigSelection {
             model: Some(store::AcpConfigValueSelection {
                 config_id: "model".to_string(),
@@ -5963,7 +5533,6 @@ mod tests {
 
         let response = queue_branch_session_for_store(
             Arc::clone(&store),
-            registry,
             branch.id.clone(),
             "capture a note".to_string(),
             BranchSessionType::Note,
@@ -7381,57 +6950,6 @@ mod tests {
         assert!(!temp_content.contains("information should be hidden"));
 
         let _ = std::fs::remove_file(&temp_path);
-    }
-
-    #[test]
-    fn cancel_in_flight_auto_review_cancels_running_review() {
-        let (store, branch) = setup_branch_store();
-        let (session, review) =
-            create_auto_review(&store, &branch.id, store::SessionStatus::Running);
-        let registry = session_runner::SessionRegistry::new();
-
-        let cancelled =
-            cancel_in_flight_auto_review_for_branch(&store, &registry, &branch.id).unwrap();
-
-        assert!(cancelled);
-        // Session transitions to Cancelled but both records survive for potential adoption
-        let session = store.get_session(&session.id).unwrap().unwrap();
-        assert_eq!(session.status, store::SessionStatus::Cancelled);
-        assert!(store.get_review(&review.id).unwrap().is_some());
-    }
-
-    #[test]
-    fn cancel_in_flight_auto_review_cancels_queued_review() {
-        let (store, branch) = setup_branch_store();
-        let (session, review) =
-            create_auto_review(&store, &branch.id, store::SessionStatus::Queued);
-        let registry = session_runner::SessionRegistry::new();
-
-        let cancelled =
-            cancel_in_flight_auto_review_for_branch(&store, &registry, &branch.id).unwrap();
-
-        assert!(cancelled);
-        // Session transitions to Cancelled but both records survive for potential adoption
-        let session = store.get_session(&session.id).unwrap().unwrap();
-        assert_eq!(session.status, store::SessionStatus::Cancelled);
-        assert!(store.get_review(&review.id).unwrap().is_some());
-    }
-
-    #[test]
-    fn cancel_in_flight_auto_review_leaves_completed_review_available_for_adoption() {
-        let (store, branch) = setup_branch_store();
-        let (session, review) =
-            create_auto_review(&store, &branch.id, store::SessionStatus::Completed);
-        let registry = session_runner::SessionRegistry::new();
-
-        let cancelled =
-            cancel_in_flight_auto_review_for_branch(&store, &registry, &branch.id).unwrap();
-
-        assert!(!cancelled);
-        let session = store.get_session(&session.id).unwrap().unwrap();
-        assert_eq!(session.status, store::SessionStatus::Completed);
-        let review = store.get_review(&review.id).unwrap().unwrap();
-        assert!(review.is_auto);
     }
 
     #[test]

@@ -68,7 +68,6 @@ const ACP_CONFIG_PREFS_STORE_KEY = 'acp-config-prefs';
  * sync with the Rust `DIAGRAM_SUBSESSION_CONFIG_KEY`.
  */
 const DIAGRAM_SUBSESSION_CONFIG_STORE_KEY = 'diagram-subsession-config';
-const AUTO_REVIEW_STORE_KEY = 'auto-start-code-reviews';
 /** Prefix applied to branch names inferred from project names (backend-read). */
 const BRANCH_PREFIX_STORE_KEY = 'branch-prefix';
 /** Maximum number of recent agents to remember. */
@@ -79,8 +78,6 @@ const DEFAULT_DIFF_THEME: SyntaxThemeName = 'laserwave';
 /** App chrome appearance mode. `system` follows `prefers-color-scheme`. */
 export type AppMode = 'light' | 'dark' | 'system';
 const DEFAULT_APP_MODE: AppMode = 'system';
-
-export type AutoReviewMode = 'never' | 'after-changes';
 
 function normalizeSize(size: number): number {
   return Math.min(SIZE_MAX, Math.max(SIZE_MIN, Math.round(size)));
@@ -166,8 +163,6 @@ export const preferences = $state({
    * the store file.
    */
   diagramSubsessionConfig: null as DiagramSubsessionConfig | null,
-  /** Whether auto code reviews are triggered after commits */
-  autoReviewMode: 'after-changes' as AutoReviewMode,
   /**
    * Prefix for branch names generated from project names (e.g. when adding a
    * repo without picking a branch). Joined with a `/` unless it already ends
@@ -245,12 +240,6 @@ function ensureSystemModeListener() {
   });
 }
 
-async function loadSqAvailabilityForDefault(): Promise<boolean> {
-  // Keep preferences from taking a static dependency on the sq state module.
-  const { ensureSqAvailabilityLoaded } = await import('./sq.svelte');
-  return ensureSqAvailabilityLoaded();
-}
-
 // =============================================================================
 // Initialization
 // =============================================================================
@@ -283,9 +272,9 @@ export async function initPreferences(): Promise<void> {
   applyChromeTheme();
 
   // Unblock the UI as soon as size + chrome theme are applied. Everything below
-  // (diff/Shiki theme, recent agents, auto-review) only feeds the diff viewer and
-  // settings, not the first paint of the project view — so gating the whole app
-  // on it just lengthens the staged reveal on resume. Loading continues below.
+  // (diff/Shiki theme, recent agents) only feeds the diff viewer and settings,
+  // not the first paint of the project view — so gating the whole app on it
+  // just lengthens the staged reveal on resume. Loading continues below.
   preferences.loaded = true;
 
   // Load diff theme (migrating from the legacy combined `syntax-theme` key).
@@ -336,14 +325,6 @@ export async function initPreferences(): Promise<void> {
     preferences.diagramSubsessionConfig = savedDiagramConfig;
   }
 
-  // Load auto-review mode
-  const savedAutoReview = await getStoreValue<AutoReviewMode>(AUTO_REVIEW_STORE_KEY);
-  if (savedAutoReview === 'never' || savedAutoReview === 'after-changes') {
-    preferences.autoReviewMode = savedAutoReview;
-  } else {
-    preferences.autoReviewMode = (await loadSqAvailabilityForDefault()) ? 'after-changes' : 'never';
-  }
-
   // Load branch prefix
   const savedBranchPrefix = await getStoreValue<string>(BRANCH_PREFIX_STORE_KEY);
   if (typeof savedBranchPrefix === 'string') {
@@ -384,15 +365,6 @@ export async function selectDiffTheme(name: string): Promise<void> {
   preferences.diffTheme = name;
   await setStoreValue(DIFF_THEME_STORE_KEY, name);
   applyDiffTheme();
-}
-
-// =============================================================================
-// Auto Review Actions
-// =============================================================================
-
-export function setAutoReviewMode(mode: AutoReviewMode): void {
-  preferences.autoReviewMode = mode;
-  setStoreValue(AUTO_REVIEW_STORE_KEY, mode);
 }
 
 // =============================================================================

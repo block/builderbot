@@ -90,13 +90,9 @@ async function handleSessionStatusChanged(payload: SessionStatusPayload): Promis
     branchId: eventBranchId,
     projectId: eventProjectId,
     sessionType,
-    isAutoReview,
   } = payload;
 
-  // Auto review sessions are handled by BranchCard — don't register them
-  // here so they don't cause the project list spinner. When the user
-  // adopts an auto review, BranchCard registers the session at that point.
-  if (status === 'running' && eventProjectId && !isAutoReview) {
+  if (status === 'running' && eventProjectId) {
     sessionRegistry.register(
       sessionId,
       eventProjectId,
@@ -140,10 +136,9 @@ async function handleSessionStatusChanged(payload: SessionStatusPayload): Promis
  * stuck spinner after a missed terminal event. Per-session metadata prefers
  * what the client already knows: launch sites register pipeline (pr/push)
  * sessions with their real branch/project, which the snapshot cannot resolve
- * (they link no artifact), and BranchCard registers adopted auto reviews.
- * Snapshot entries the client has never seen are applied with the same
- * gating as the live `running` event: running, resolved project, not an
- * auto review. Queued sessions register when their own running event
+ * (they link no artifact). Snapshot entries the client has never seen are
+ * applied with the same gating as the live `running` event: running, with a
+ * resolved project. Queued sessions register when their own running event
  * arrives. Unread state is per-device UX state and is left untouched.
  *
  * Swept sessions that a workflow store is still rendering as in-progress are
@@ -186,7 +181,7 @@ export async function hydrateActiveSessions(): Promise<void> {
 
     for (const session of active) {
       if (session.status !== 'running') continue;
-      if (!session.projectId || session.isAutoReview) continue;
+      if (!session.projectId) continue;
       if (sessionRegistry.getMetadata(session.sessionId)) continue;
       if ((terminalWhileFetching.get(session.sessionId) ?? 0) >= fetchStartedAt) continue;
       sessionRegistry.register(

@@ -33,7 +33,6 @@ function createReview(overrides: Partial<Review> = {}): Review {
     createdAt: 1,
     updatedAt: 1,
     completedAt: null,
-    sessionProvider: null,
     ...overrides,
   };
 }

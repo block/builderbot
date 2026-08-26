@@ -1475,7 +1475,7 @@ fn convert_comment(
 /// apart on GitHub. Human-authored comments are posted verbatim.
 pub fn github_single_comment_body(comment: &Comment) -> String {
     if comment.author == crate::store::CommentAuthor::Agent {
-        format!("{}\n\n🤖", comment.content)
+        format!("{}\n🤖", comment.content)
     } else {
         comment.content.clone()
     }
@@ -3335,7 +3335,7 @@ mod tests {
         let comment = Comment::new("src/lib.rs", crate::git::Span::new(4, 5), "Looks good")
             .with_author(crate::store::CommentAuthor::Agent);
 
-        assert_eq!(github_single_comment_body(&comment), "Looks good\n\n🤖");
+        assert_eq!(github_single_comment_body(&comment), "Looks good\n🤖");
     }
 
     #[test]

@@ -141,13 +141,18 @@ impl Store {
     pub fn delete_project_repo(&self, repo_id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         // Resolved before the row disappears, published only if the delete lands.
+        // A no-op delete would otherwise publish `project_id: None`, which the
+        // frontend reads as its widest tier: drop every cached project-repo list
+        // and refetch in every window.
         let project_id = Self::lookup_id(
             &conn,
             "SELECT project_id FROM project_repos WHERE id = ?1",
             repo_id,
         );
-        conn.execute("DELETE FROM project_repos WHERE id = ?1", params![repo_id])?;
-        self.publish(StoreChange::Project { project_id });
+        let rows = conn.execute("DELETE FROM project_repos WHERE id = ?1", params![repo_id])?;
+        if rows > 0 {
+            self.publish(StoreChange::Project { project_id });
+        }
         Ok(())
     }
 

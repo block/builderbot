@@ -346,12 +346,17 @@ impl Store {
     pub fn delete_branch(&self, id: &str) -> Result<(), StoreError> {
         let conn = self.conn.lock().unwrap();
         // Resolved before the row disappears, published only if the delete lands.
+        // A no-op delete (two windows racing to remove the same branch) would
+        // otherwise publish `project_id: None`, which the frontend reads as its
+        // widest tier: drop every cached branch list and refetch in every window.
         let project_id = Self::branch_project_id(&conn, id);
-        conn.execute("DELETE FROM branches WHERE id = ?1", params![id])?;
-        self.publish(StoreChange::Branch {
-            branch_id: id.to_string(),
-            project_id,
-        });
+        let rows = conn.execute("DELETE FROM branches WHERE id = ?1", params![id])?;
+        if rows > 0 {
+            self.publish(StoreChange::Branch {
+                branch_id: id.to_string(),
+                project_id,
+            });
+        }
         Ok(())
     }
 

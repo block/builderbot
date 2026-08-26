@@ -3259,3 +3259,44 @@ fn change_feed_workspace_status_by_name_publishes_only_for_moved_branches() {
         );
     }
 }
+
+#[test]
+fn change_feed_deletes_publish_only_when_a_row_is_removed() {
+    let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+    let store = Store::in_memory().unwrap().with_change_sender(tx);
+
+    let project = Project::new("test-owner/test-repo");
+    store.create_project(&project).unwrap();
+    let branch = Branch::new(&project.id, "feature", "main");
+    store.create_branch(&branch).unwrap();
+    let repo = ProjectRepo::new(&project.id, "test-owner/test-repo", "main", None).primary();
+    store.create_project_repo(&repo).unwrap();
+    while rx.try_recv().is_ok() {}
+
+    // The delete that lands carries the enrichment resolved before the row went.
+    store.delete_branch(&branch.id).unwrap();
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        super::StoreChange::Branch {
+            branch_id: branch.id.clone(),
+            project_id: Some(project.id.clone()),
+        }
+    );
+
+    // Two windows racing to delete the same branch: the loser matches no row.
+    // Publishing here would carry `project_id: None`, the frontend's widest
+    // tier — every cached branch list dropped and refetched in every window.
+    store.delete_branch(&branch.id).unwrap();
+    assert!(rx.try_recv().is_err());
+
+    store.delete_project_repo(&repo.id).unwrap();
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        super::StoreChange::Project {
+            project_id: Some(project.id.clone()),
+        }
+    );
+
+    store.delete_project_repo(&repo.id).unwrap();
+    assert!(rx.try_recv().is_err());
+}

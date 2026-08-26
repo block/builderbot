@@ -225,6 +225,25 @@ describe('tauri window label', () => {
     expect(consoleError).not.toHaveBeenCalled();
   });
 
+  it('reads the internals path the installed @tauri-apps/api reads', async () => {
+    // The reshape tripwire. getWindowLabel() goes through the private
+    // internals rather than getCurrentWindow() because the label has to be
+    // available synchronously at module-init time, so an upgrade that moves
+    // the label would otherwise surface only at runtime, in a user's second
+    // window. getCurrentWindow() reads the same globals off the same shape,
+    // so pointing the real (unmocked) package at the stub below fails here —
+    // in CI, on the bump — instead. `skip: true` keeps it IPC-free.
+    vi.stubGlobal('__TAURI__', {});
+    vi.stubGlobal('__TAURI_INTERNALS__', { metadata: { currentWindow: { label: 'win-2' } } });
+
+    const { getWindowLabel } = await import('./transport');
+    const { getCurrentWindow } = await import('@tauri-apps/api/window');
+
+    expect(getCurrentWindow().label).toBe('win-2');
+    expect(getWindowLabel()).toBe(getCurrentWindow().label);
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
   it('reports reshaped internals once, naming the label the official API sees', async () => {
     vi.stubGlobal('__TAURI__', {});
     // The shape a Tauri upgrade might move the label to.

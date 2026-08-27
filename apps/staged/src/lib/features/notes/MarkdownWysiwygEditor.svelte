@@ -82,6 +82,13 @@
             // 'doc': only an empty document shows the placeholder. The default
             // 'block' mode redraws it on every empty line the cursor visits.
             [Crepe.Feature.Placeholder]: { text: initialPlaceholder, mode: 'doc' },
+            // The Cursor feature bundles drop/gap cursors — which we want —
+            // with a virtual caret that hides the real one (`caret-color:
+            // transparent`) and redraws it as a 2px div blinking on a fixed
+            // CSS keyframe. That ignores the platform caret: its width, its
+            // blink rate, the accent colour, and the reduce-motion setting.
+            // Keep the drop and gap cursors; let the OS draw the caret.
+            [Crepe.Feature.Cursor]: { virtual: false },
           },
         });
 
